@@ -9,7 +9,7 @@ _Durable knowledge for every agent session: architecture, conventions, decisions
   planner/worker/reflection loop, and a `runAgent()` wrapper around the SDK `query()`. Prompts live inline.
 - `github.mjs`: the gh CLI wrapper. Every project gets a private repo, and pushes go to `origin`.
 - `public/`: a vanilla JS SPA (app.js ~2.4k lines, marked + dompurify), a login page and a PWA manifest.
-- `bin/term-attach.sh`: the ttyd terminal attach helper.
+- `bin/term-attach.sh`: the ttyd terminal attach helper. Live setup: ttyd on 127.0.0.1:7682 behind Caddy at `/shell/` (not `/term/`, despite a server.mjs comment); systemd units claude-web, claude-shell, claude-tmux.
 - `data/` (gitignored): auth.json, convos.json, metrics, logs, and the orchestrator DB and run logs.
 
 ## Conventions

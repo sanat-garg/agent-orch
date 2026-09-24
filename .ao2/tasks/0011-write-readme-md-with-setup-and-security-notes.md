@@ -12,3 +12,7 @@ Create README.md at the repo root for github.com/sanat-garg/agent-orch. Read ser
 ## Done when
 
 README.md exists and lists every env var found by `grep -ho 'process.env.[A-Z_]*' *.mjs | sort -u`
+
+## Result — done (check passed) (2026-09-24 23:33)
+
+AO2-STATUS: done — README lists all four env vars; terminals documented at /shell/

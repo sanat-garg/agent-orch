@@ -2130,7 +2130,7 @@ function renderDrawer(fromLive = false) {
   } else if (said.length) {
     for (const text of said.slice(-5)) {
       const div = el('div', 'dr-said');
-      div.innerHTML = md(text.replace(/^\s*AO2-STATUS:\s*(done|continue)\s*[—:-]*\s*/im, '✓ '));
+      div.innerHTML = md(text.replace(/^\s*(?:AGENT-ORCH|AO2)-STATUS:\s*(done|continue)\s*[—:-]*\s*/im, '✓ '));
       s3.append(div);
     }
   } else {
@@ -2234,7 +2234,7 @@ function renderOutput(container, runs, isRunning) {
       if (e.k === 'text') {
         group = null;
         const div = el('div', 'out-text');
-        div.innerHTML = md(e.text.replace(/^\s*AO2-STATUS:\s*(done|continue)\s*[—:-]*\s*/im, '✓ '));
+        div.innerHTML = md(e.text.replace(/^\s*(?:AGENT-ORCH|AO2)-STATUS:\s*(done|continue)\s*[—:-]*\s*/im, '✓ '));
         container.append(div);
       } else if (e.k === 'tool') {
         if (!group) {

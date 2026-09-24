@@ -69,3 +69,7 @@ Command: grep -rniE 'claude[ -]web' public server.mjs github.mjs package.json RE
 ## 2026-09-24 23:47 — #20 Rebrand all user-visible names to agent-orch [done (check passed)]
 
 Check exits 0 under bash; "exit 1" was stale output
+
+## 2026-09-24 23:48 — #21 Rename AO2 protocol markers and DB file to agent-orch [done (check passed)]
+
+New fence, status and DB names in place; old names still accepted; tests pass

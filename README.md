@@ -127,7 +127,7 @@ All runtime state lives in `data/` (or `CW_DATA_DIR`). Files are written with mo
 | `convos.json` | the chat list (title, folder, mode, model, Claude session id) |
 | `logs/<id>.jsonl` | the transcript of each chat |
 | `metrics/` | raw and per-minute server metrics |
-| `orchestrator/ao2.db` | the orchestrator SQLite database (projects, tasks, runs, events, usage limits) |
+| `orchestrator/agent-orch.db` | the orchestrator SQLite database (migrated from `ao2.db` on start) (projects, tasks, runs, events, usage limits) |
 | `orchestrator/runs/` | per-run agent logs |
 | `orchestrator/bin/` | `python`/`pip` shims |
 

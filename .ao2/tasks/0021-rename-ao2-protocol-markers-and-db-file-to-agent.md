@@ -13,3 +13,7 @@ In orchestrator.mjs (and public/app.js where it strips the status line), rename 
 ## Done when
 
 `grep -n 'AO2' orchestrator.mjs` shows only backward-compat regex matches and `npm test` passes with the new fence/status/DB-migration tests
+
+## Result — done (check passed) (2026-09-24 23:48)
+
+AO2-STATUS: done — New fence, status and DB names in place; old names still accepted; tests pass

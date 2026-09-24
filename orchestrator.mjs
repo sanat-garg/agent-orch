@@ -1,4 +1,4 @@
-// Orchestrator Mode: AO2's agent orchestrator running inside Claude Web.
+// Orchestrator Mode: agent-orch's agent orchestrator running inside Claude Web.
 //
 //   planner    your chat in Orchestrator Mode. Reads the project, keeps .ao2/BRIEF.md and CONTEXT.md
 //              current, and turns what you want into small, chained, verifiable tasks.
@@ -60,11 +60,11 @@ const URGENCIES = ['urgent', 'normal', 'background'];
 const PREEMPT_MARGIN = 20;
 const PREEMPT_MIN_RUNTIME = 60;
 
-// ---------------------------------------------------------------- prompts (from AO2)
+// ---------------------------------------------------------------- prompts (from agent-orch)
 
 const TASKS_FORMAT = `Emit work as a fenced block exactly like this (strict JSON inside, no comments):
 
-\`\`\`ao2-tasks
+\`\`\`agent-orch-tasks
 {"project": {"priority": 50, "mode": "build"},
  "tasks": [
    {"title": "Short imperative title",
@@ -100,7 +100,7 @@ const TASKS_FORMAT = `Emit work as a fenced block exactly like this (strict JSON
 \`project.priority\` (0–100, default 50) ranks this whole project against the others, and \`project.mode\`
 is "build" (has an end) or "maintain" (ongoing upkeep). Only include \`project\` when it should change.`;
 
-const PLANNER_SYSTEM = `You are the planning mind of an agent orchestrator (AO2) running inside the owner's Claude Web.
+const PLANNER_SYSTEM = `You are the planning mind of an agent orchestrator (agent-orch) running inside the owner's Claude Web.
 You talk with the owner, understand exactly what they want, and turn it into small, well-specified steps
 for autonomous Claude Code agents that run around the clock within the owner's plan usage limits.
 
@@ -122,7 +122,7 @@ How to behave:
 
 ${TASKS_FORMAT}`;
 
-const WORKER_SYSTEM = `You are an autonomous senior engineer working for an agent orchestrator (AO2). No human is watching
+const WORKER_SYSTEM = `You are an autonomous senior engineer working for an agent orchestrator (agent-orch). No human is watching
 this session: never ask questions or wait for confirmation — make sound decisions and record notable ones.
 Begin by reading .ao2/BRIEF.md and .ao2/CONTEXT.md in the project root.
 
@@ -138,26 +138,26 @@ few lines of genuinely durable fact to .ao2/CONTEXT.md — not a running log. Pr
 line over appending a new one. Do not create git commits — the orchestrator commits after you finish.
 
 Your final message is exactly one line and nothing else:
-  AO2-STATUS: done — <max 10 words on what is now true>
-  AO2-STATUS: continue — <max 10 words on what remains>
+  AGENT-ORCH-STATUS: done — <max 10 words on what is now true>
+  AGENT-ORCH-STATUS: continue — <max 10 words on what remains>
 Do not summarise the changes or list the files you touched — the diff, the commit, and JOURNAL.md already
 record that. Use \`continue\` if the task is genuinely unfinished (including when you ran out of room); the
 orchestrator will give the rest back to you in a new session. Never write \`done\` for work you could not verify.`;
 
 const REFLECT_ASK = 'Look at this project and improve it — find the most valuable next steps and queue them.';
 
-const REFLECT_SYSTEM = `You are the reflective mind of an agent orchestrator (AO2). The work queue for this project is empty, and
+const REFLECT_SYSTEM = `You are the reflective mind of an agent orchestrator (agent-orch). The work queue for this project is empty, and
 your job is to decide what would most improve the project next — thinking like its owner, a demanding
 product lead, and a senior engineer at once. Do NOT modify source code in this session; you may only
 update files in .ao2/.`;
 
 const RESUME = 'You were interrupted before finishing (usage limit, timeout, or a restart). Continue the same task ' +
   'from where you left off: check the current state of the files first and do not redo completed work. ' +
-  'Finish with just the AO2-STATUS line as instructed.';
+  'Finish with just the AGENT-ORCH-STATUS line as instructed.';
 
 const CONTINUE = 'Your previous session on this task reported it was not finished yet. Continue it now: check what ' +
   "is already in place, finish the remaining part, verify it against 'Done when', and end with just " +
-  'the AO2-STATUS line.';
+  'the AGENT-ORCH-STATUS line.';
 
 const CONTEXT_COMPACTION = `.ao2/CONTEXT.md is over its size budget — every session pays to read it in full, and it has grown past
 what's durable. Before anything else, rewrite it down to only what a fresh session genuinely needs to know:
@@ -171,17 +171,17 @@ function retryAfterFailure(attempt, outcome, detail) {
     `Captured output from the previous attempt:\n${detail}\n\n`;
   text += ['max_turns', 'timeout'].includes(outcome)
     ? "That kind of ending usually means the work was in progress, not broken. Do the smallest remaining piece " +
-      "toward 'Done when' and end with AO2-STATUS: continue rather than re-attempting everything."
+      "toward 'Done when' and end with AGENT-ORCH-STATUS: continue rather than re-attempting everything."
     : 'Fix the actual root cause of that error, then verify it yourself before claiming done.';
   return text + " Check the current state of the files first — don't redo work that's already correct. " +
-    'Finish with just the AO2-STATUS line as instructed.';
+    'Finish with just the AGENT-ORCH-STATUS line as instructed.';
 }
 
 function verifyFailedPrompt(command, output) {
-  return 'Your previous session reported AO2-STATUS: done, but the orchestrator does not trust that self-report — it ran ' +
+  return 'Your previous session reported AGENT-ORCH-STATUS: done, but the orchestrator does not trust that self-report — it ran ' +
     `the 'Done when' check itself, and the check failed:\n\nCommand:\n  ${command}\n\nOutput:\n${output}\n\n` +
     'Fix the actual underlying cause so this command genuinely passes. Do not weaken, skip, or delete the check ' +
-    'itself to make it pass. Re-run the command yourself before claiming done again, then end with just the AO2-STATUS line.';
+    'itself to make it pass. Re-run the command yourself before claiming done again, then end with just the AGENT-ORCH-STATUS line.';
 }
 
 const stamp = (sec) => {
@@ -206,7 +206,7 @@ function formatQueue(rows) {
 }
 
 function plannerTurnPrompt(project, rows, text, environment) {
-  return `[AO2 context] Project: ${project.name} at ${project.path}\n` +
+  return `[agent-orch context] Project: ${project.name} at ${project.path}\n` +
     `Project priority: ${project.priority}/100 · mode: ${project.mode}\n` +
     `Now: ${nowText()} (use this to turn 'tomorrow', 'by Friday' into real deadlines)\n` +
     `${environment}\n` +
@@ -290,12 +290,12 @@ then the tasks block.
 ${TASKS_FORMAT}`;
 }
 
-// ---------------------------------------------------------------- parsing helpers (from AO2 context.py / verify.py)
+// ---------------------------------------------------------------- parsing helpers (from agent-orch context.py / verify.py)
 
-const TASKS_BLOCK_RE = /```ao2-tasks\s*\n([\s\S]*?)\n```/g;
-const STATUS_RE = /^\s*AO2-STATUS:\s*(done|continue)\b[\s—:-]*(.*)$/gim;
+const TASKS_BLOCK_RE = /```(?:agent-orch|ao2)-tasks\s*\n([\s\S]*?)\n```/g;
+const STATUS_RE = /^\s*(?:AGENT-ORCH|AO2)-STATUS:\s*(done|continue)\b[\s—:-]*(.*)$/gim;
 
-function parseStatus(text) {
+export function parseStatus(text) {
   const matches = [...String(text || '').matchAll(STATUS_RE)];
   if (!matches.length) return ['done', ''];
   const m = matches[matches.length - 1];
@@ -303,10 +303,19 @@ function parseStatus(text) {
 }
 
 // Removes the tasks block from text meant for the owner (also an unfinished one mid-stream).
-function stripTasksBlock(text) {
+export function stripTasksBlock(text) {
   const s = String(text || '');
-  const i = s.indexOf('```ao2-tasks');
+  const i = s.search(/```(?:agent-orch|ao2)-tasks/);
   return (i >= 0 ? s.slice(0, i) : s).trim();
+}
+
+// The DB was called ao2.db; move it (and its WAL/SHM sidecars) to agent-orch.db once.
+export function migrateDbFile(dir) {
+  const from = path.join(dir, 'ao2.db'), to = path.join(dir, 'agent-orch.db');
+  if (!fs.existsSync(from) || fs.existsSync(to)) return false;
+  for (const ext of ['-wal', '-shm']) if (fs.existsSync(from + ext)) fs.renameSync(from + ext, to + ext);
+  fs.renameSync(from, to);
+  return true;
 }
 
 function clamp(v, lo, hi, dflt) {
@@ -314,7 +323,7 @@ function clamp(v, lo, hi, dflt) {
   return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : dflt;
 }
 
-function extractTasks(text) {
+export function extractTasks(text) {
   const all = [...String(text || '').matchAll(TASKS_BLOCK_RE)];
   if (!all.length) return [stripTasksBlock(text), null];
   const m = all[all.length - 1];
@@ -460,7 +469,7 @@ function detectEnvironment(shimDir, basePath) {
   return { have, missing };
 }
 
-// ---------------------------------------------------------------- pacing (from AO2 budget.py)
+// ---------------------------------------------------------------- pacing (from agent-orch budget.py)
 
 const WEEK = 7 * 86400, FIVE_H = 5 * 3600, STALE = 15 * 60;
 const hrs = (s) => (s >= 3600 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 60)}m`);
@@ -630,7 +639,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     (envInfo.missing.length ? `; not installed — ${envInfo.missing.join(', ')}` : '') +
     '. This is a disposable server with full access: run any command, and install whatever a task needs ' +
     '(passwordless `sudo apt-get install -y …`, npm, pip). Prefer checks that use installed tools.';
-  const db = new DatabaseSync(path.join(dir, 'ao2.db'));
+  migrateDbFile(dir);
+  const db = new DatabaseSync(path.join(dir, 'agent-orch.db'));
   db.exec('PRAGMA journal_mode=WAL');
   db.exec(SCHEMA);
 
@@ -768,7 +778,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
   const lastRunOutcome = (taskId) => q1('SELECT outcome FROM runs WHERE task_id=:t AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1', { t: taskId })?.outcome || null;
 
-  // ---- warm session reuse (AO2 sessions.py): a new task may continue a recent, healthy session
+  // ---- warm session reuse (agent-orch sessions.py): a new task may continue a recent, healthy session
   function recordSessionUse(res, projectId, taskId) {
     if (!res.sessionId) return;
     const t = now();
@@ -1066,8 +1076,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         if (e?.type === 'content_block_delta' && e.delta?.type === 'text_delta') {
           acc += e.delta.text;
           if (hidden) return;
-          const cut = acc.indexOf('```ao2');
-          if (cut >= 0) { hidden = true; return; }
+          if (/```(?:agent-orch|ao2)/.test(acc)) { hidden = true; return; }
           // Hold back a trailing backtick run in case it's the start of the tasks block.
           emitChat(convoId, { t: 'delta', text: e.delta.text }, { persist: false });
         }
@@ -1158,7 +1167,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return { res, ids };
   }
 
-  // ---- the scheduler (AO2's daemon, as timers inside this process)
+  // ---- the scheduler (agent-orch's daemon, as timers inside this process)
   let ticking = false;
   async function tick() {
     if (ticking || !leader.ok) return;
@@ -1338,7 +1347,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const [status, note] = parseStatus(res.text);
     if (status === 'continue' && task.continuations < CFG.maxContinuations) {
       recordResult(project.path, task, `in progress (${task.continuations + 1})`, res.text);
-      gitCommit(project.path, `AO2 #${tid} (in progress): ${task.title}`);
+      gitCommit(project.path, `agent-orch #${tid} (in progress): ${task.title}`);
       requeueIfRunning(tid, { continuations: task.continuations + 1, session_id: res.sessionId || task.session_id, result: res.text });
       return logEvent(`↻ #${tid} not finished yet: ${note.slice(0, 160) || 'continuing'}`, { projectId: project.id, taskId: tid });
     }
@@ -1361,7 +1370,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       else checked = ' (check passed)';
     }
     recordResult(project.path, task, `done${checked}`, res.text);
-    const sha = gitCommit(project.path, `AO2 #${tid}: ${task.title}`);
+    const sha = gitCommit(project.path, `agent-orch #${tid}: ${task.title}`);
     if (!updateTask(tid, { status: 'done', finished_at: now(), result: res.text, session_id: res.sessionId, verify_output: null, commit_sha: sha || null }, true)) return;
     logEvent(`✔ #${tid} done${checked}: ${task.title}${sha ? ` (commit ${sha})` : ''}`, { projectId: project.id, taskId: tid });
   }
@@ -1373,7 +1382,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       return fail(task, project, 'verification', `\`${command}\` still failing after ${CFG.maxContinuations} sessions:\n${output.slice(-1500)}`);
     }
     recordResult(project.path, task, `verify failed (${task.continuations + 1})`, `Command: ${command}\n\n${output}`);
-    gitCommit(project.path, `AO2 #${tid} (in progress): ${task.title}`);
+    gitCommit(project.path, `agent-orch #${tid} (in progress): ${task.title}`);
     requeueIfRunning(tid, { continuations: task.continuations + 1, session_id: res.sessionId || task.session_id, result: res.text, verify_output: output });
     logEvent(`↻ #${tid} done-when check failed: ${command}\n${output.slice(0, 300)}`, { projectId: project.id, taskId: tid });
   }
@@ -1383,7 +1392,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (!updateTask(tid, { status: 'failed', attempts: task.attempts + 1, finished_at: now(), result: detail }, true)) return;
     if (task.kind === 'work') {
       recordResult(project.path, task, `failed (${outcome})`, detail);
-      gitCommit(project.path, `AO2 #${tid} failed: ${task.title} (partial work)`);
+      gitCommit(project.path, `agent-orch #${tid} failed: ${task.title} (partial work)`);
     }
     const blocked = cascadeBlock(tid, 'failed', `${blockedPrefix(tid)}(${outcome})`);
     logEvent(`✖ #${tid} failed (${outcome}): ${String(detail).slice(0, 200)}${blocked.length ? `; blocked ${blocked.map((b) => `#${b}`).join(', ')}` : ''}`,
@@ -1399,7 +1408,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const cooldown = ids.length ? 0 : reflectCooldown(decision(), streak);
     updateProject(project.id, { next_reflect_at: now() + cooldown });
     updateTask(task.id, { status: 'done', finished_at: now(), result: (clean || '').slice(0, 4000) }, true);
-    gitCommit(project.path, `AO2: roadmap update (reflection #${task.id})`);
+    gitCommit(project.path, `agent-orch: roadmap update (reflection #${task.id})`);
     const summary = (clean || '').trim();
     if (project.convo_id && convoExists(project.convo_id)) {
       if (summary) emitChat(project.convo_id, { t: 'text', text: summary });

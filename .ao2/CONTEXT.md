@@ -5,7 +5,7 @@ _Durable knowledge for every agent session: architecture, conventions, decisions
 ## Architecture
 - `server.mjs` (~1.2k lines): a node:http server plus `ws`. It handles login/sessions (cookie `cw_session`)
   and chat via `query()` from @anthropic-ai/claude-agent-sdk, and serves `public/`. PORT defaults to 3000.
-- `orchestrator.mjs` (~1.6k lines): AO2. It uses a node:sqlite DB at data/orchestrator/ao2.db, a
+- `orchestrator.mjs` (~1.6k lines): AO2. It uses a node:sqlite DB at data/orchestrator/agent-orch.db (renamed from ao2.db on start), a
   planner/worker/reflection loop, and a `runAgent()` wrapper around the SDK `query()`. Prompts live inline.
 - `github.mjs`: the gh CLI wrapper. Every project gets a private repo, and pushes go to `origin`.
 - `public/`: a vanilla JS SPA (app.js ~2.4k lines, marked + dompurify), a login page and a PWA manifest.

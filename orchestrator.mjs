@@ -408,6 +408,13 @@ function extractCommand(doneWhen) {
   if (!cand || />|\brm\s|\bsudo\b|\bgit\s+push\b|\bcurl\b/.test(cand)) return null;
   if ((cand.match(/;/g) || []).length + (cand.match(/&&/g) || []).length > 1) return null;
   if (!RUNNERS.some((r) => cand.startsWith(r)) && !/^(test|ls|grep|cat|git)\b/.test(cand)) return null;
+  // "`grep …` prints nothing": grep exits 1 when clean, so pass only on exit 1 (matches → 0, errors → 2 still fail).
+  if (/^grep\b/.test(cand) && !/[;&|]/.test(cand)) {
+    const after = doneWhen.slice(doneWhen.indexOf(cand) + cand.length).replace(/^[`\s]+/, '');
+    if (/^(prints|outputs|returns|shows|produces|finds|gives)\s+(nothing|no\s+(output|match|matches|results|hits|lines))\b/i.test(after)) {
+      return `${cand}; test $? -eq 1`;
+    }
+  }
   return cand;
 }
 

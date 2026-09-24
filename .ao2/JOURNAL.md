@@ -65,3 +65,7 @@ Command: grep -rniE 'claude[ -]web' public server.mjs github.mjs package.json RE
 ## 2026-09-24 23:46 — #20 Rebrand all user-visible names to agent-orch [failed (verification)]
 
 `grep -rniE 'claude[ -]web' public server.mjs github.mjs package.json README.md` still failing after 4 sessions:
+
+## 2026-09-24 23:47 — #20 Rebrand all user-visible names to agent-orch [done (check passed)]
+
+Check exits 0 under bash; "exit 1" was stale output

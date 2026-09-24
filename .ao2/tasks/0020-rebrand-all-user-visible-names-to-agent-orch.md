@@ -69,3 +69,7 @@ exit 1
 
 `grep -rniE 'claude[ -]web' public server.mjs github.mjs package.json README.md` still failing after 4 sessions:
 exit 1
+
+## Result — done (check passed) (2026-09-24 23:47)
+
+AO2-STATUS: done — Check exits 0 under bash; "exit 1" was stale output

@@ -116,6 +116,15 @@ For terminals to survive restarts of the web app, also run a `tmux -D` server as
 `sudo systemctl daemon-reload && sudo systemctl enable --now agent-orch agent-orch-shell agent-orch-tmux caddy`. The metrics
 panel checks service status with `systemctl is-active agent-orch agent-orch-shell caddy`.
 
+### Moving an old `claude-web` install
+
+Installs that predate the rename live in `/home/ubuntu/claude-web` and run the units `claude-web`, `claude-shell` and
+`claude-tmux`. To move one, run `bin/rename-install.sh` once as `ubuntu` (it needs sudo). The script stops the app and moves the directory to
+`/home/ubuntu/agent-orch`. It rewrites the units as `agent-orch*`, then updates the old path in the orchestrator DB
+(project path and name, run log paths) and in `data/convos.json`. It also renames `~/.claude/projects/-home-ubuntu-claude-web` so chats
+can still resume. Finally it starts the new units and prints their status. It is safe to re-run. Start with `--dry-run` to print every
+action without doing it. Because it restarts the app, don't run it from inside an agent-orch chat or terminal.
+
 ## data/
 
 All runtime state lives in `data/` (or `CW_DATA_DIR`). Files are written with mode `0600`.

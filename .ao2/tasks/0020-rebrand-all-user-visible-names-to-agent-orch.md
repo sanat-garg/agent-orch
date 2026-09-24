@@ -29,3 +29,9 @@ exit 1
 ## Result — in progress (3) (2026-09-24 23:39)
 
 AO2-STATUS: continue — Check can't pass as written: bare grep exits 1 when clean (AUDIT #16)
+
+## Result — verify failed (4) (2026-09-24 23:39)
+
+Command: grep -rniE 'claude[ -]web' public server.mjs github.mjs package.json README.md
+
+exit 1

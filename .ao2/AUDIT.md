@@ -18,6 +18,7 @@ a same-origin request. Caddy's `reverse_proxy` overwrites `X-Forwarded-For`, so 
   `URIError: URI malformed at parseCookies`. Anyone on the internet can take the app down with one request.
 - **Fix:** Wrap the decode in try/catch and skip bad parts. Also wrap the body of the request handler in try/catch
   that returns a 500, so any later throw can't kill the process. Add a regression case to test/server.test.mjs.
+- **Fixed** (task #14): `parseCookies` now skips undecodable parts, and the HTTP and upgrade handlers are wrapped (500 / socket destroy). A regression test covers both paths.
 
 ### 2. [high] A second instance on the same data dir steals and double-runs the live orchestrator's tasks (orchestrator.mjs:1556)
 - **What:** At startup the orchestrator runs `UPDATE tasks SET status='queued' WHERE status='running'` and starts its

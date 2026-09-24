@@ -12,3 +12,7 @@ Fix AUDIT.md item #1 in /home/ubuntu/claude-web. `parseCookies` in server.mjs (~
 ## Done when
 
 `npm test` passes and includes a test that sends `Cookie: cw_session=%E0%A4%A` and then gets a successful follow-up request
+
+## Result — done (check passed) (2026-09-24 23:37)
+
+AO2-STATUS: done — malformed cookies no longer crash the server; regression test passes

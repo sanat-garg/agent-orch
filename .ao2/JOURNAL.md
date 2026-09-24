@@ -13,3 +13,7 @@ README lists all four env vars; terminals documented at /shell/
 ## 2026-09-24 23:36 — #12 Audit server, orchestrator and UI for bugs into .ao2/AUDIT.md [done]
 
 AUDIT.md lists 15 ranked, verified bugs with fixes
+
+## 2026-09-24 23:37 — #14 Fix malformed-cookie server crash (AUDIT #1) [done (check passed)]
+
+malformed cookies no longer crash the server; regression test passes

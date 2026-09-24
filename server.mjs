@@ -80,7 +80,8 @@ function parseCookies(req) {
   const out = {};
   for (const part of (req.headers.cookie || '').split(';')) {
     const i = part.indexOf('=');
-    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    if (i <= 0) continue;
+    try { out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim()); } catch {} // skip malformed %-escapes
   }
   return out;
 }
@@ -927,7 +928,15 @@ function readBody(req) {
 
 const PUBLIC_PATHS = new Set(['/login', '/login.css', '/icon.svg', '/manifest.webmanifest']);
 
+// Last-resort guard: a throw in a handler must answer 500, not take the process down.
 const server = http.createServer(async (req, res) => {
+  try { await handleRequest(req, res); } catch (e) {
+    console.error('request error', req.method, req.url, e);
+    if (!res.headersSent) { res.writeHead(500); res.end('Internal error'); } else res.destroy();
+  }
+});
+
+async function handleRequest(req, res) {
   const url = new URL(req.url, 'http://x');
   const p = url.pathname;
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -1103,11 +1112,17 @@ const server = http.createServer(async (req, res) => {
   }
 
   res.writeHead(404); res.end('Not found');
-});
+}
 
 // ---------- WebSocket ----------
 const wss = new WebSocketServer({ noServer: true });
 server.on('upgrade', (req, socket, head) => {
+  try { handleUpgrade(req, socket, head); } catch (e) {
+    console.error('upgrade error', req.url, e);
+    socket.destroy();
+  }
+});
+function handleUpgrade(req, socket, head) {
   const p = new URL(req.url, 'http://x').pathname;
   // Caddy's forward_auth copies the terminal's WebSocket upgrade headers onto its auth check,
   // so the check arrives here instead of the normal request handler.
@@ -1121,7 +1136,7 @@ server.on('upgrade', (req, socket, head) => {
     return socket.destroy();
   }
   wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
-});
+}
 
 wss.on('connection', (ws, req) => {
   allClients.add(ws);

@@ -80,3 +80,23 @@ test('login rejects a wrong password and accepts the right one', async () => {
   assert.equal(home.status, 200);
   await home.arrayBuffer();
 });
+
+test('a malformed cookie does not crash the server (AUDIT #1)', async () => {
+  const bad = await get('/api/status', { cookie: 'cw_session=%E0%A4%A' });
+  assert.equal(bad.status, 401);
+  await bad.arrayBuffer();
+  // The WebSocket upgrade path parses cookies too; fetch can't send upgrade headers, so use a raw socket.
+  const reply = await new Promise((resolve) => {
+    const s = net.connect(Number(new URL(base).port), '127.0.0.1', () => s.write('GET /ws HTTP/1.1\r\nHost: x\r\nCookie: cw_session=%E0%A4%A\r\n'
+      + 'Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n'));
+    let buf = '';
+    s.on('data', (d) => { buf += d; });
+    s.on('close', () => resolve(buf));
+    s.on('error', () => {});
+  });
+  assert.match(reply, /^HTTP\/1\.1 401/);
+  assert.equal(child.exitCode, null);
+  const ok = await get('/login');
+  assert.equal(ok.status, 200);
+  await ok.arrayBuffer();
+});

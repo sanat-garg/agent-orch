@@ -9,3 +9,7 @@ npm test runs 4 passing server smoke tests
 ## 2026-09-24 23:33 — #11 Write README.md with setup and security notes [done (check passed)]
 
 README lists all four env vars; terminals documented at /shell/
+
+## 2026-09-24 23:36 — #12 Audit server, orchestrator and UI for bugs into .ao2/AUDIT.md [done]
+
+AUDIT.md lists 15 ranked, verified bugs with fixes

@@ -64,3 +64,8 @@ exit 1
 Command: grep -rniE 'claude[ -]web' public server.mjs github.mjs package.json README.md
 
 exit 1
+
+## Result — failed (verification) (2026-09-24 23:46)
+
+`grep -rniE 'claude[ -]web' public server.mjs github.mjs package.json README.md` still failing after 4 sessions:
+exit 1

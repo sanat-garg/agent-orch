@@ -11,7 +11,7 @@ meant for a single owner on their own server.
   Claude Code session, verify it against that check, and commit the result to git. A reflector queues
   follow-up work when a project's queue is empty. A governor paces the work against the 5-hour and weekly
   plan usage limits, and sleeps until a limit resets. State is kept in SQLite (`node:sqlite`), and each
-  project's memory is kept in `<project>/.ao2/`.
+  project's memory is kept in `<project>/.agent-orch/`.
 - **GitHub sync** (`github.mjs`) uses the `gh` CLI. Each project gets a private repo, and finished work
   is committed and pushed to `origin`.
 

@@ -13,3 +13,7 @@ Rename the per-project memory directory from .ao2/ to .agent-orch/ everywhere: o
 ## Done when
 
 `grep -rn '\.ao2' --include=*.mjs --include=*.js --include=*.md . | grep -v node_modules | grep -v test/` prints only the migration code, `.agent-orch/BRIEF.md` exists in the repo, and `npm test` passes
+
+## Result — done (check passed) (2026-09-24 23:49)
+
+AO2-STATUS: done — memory dir is .agent-orch with auto-migration, tests pass

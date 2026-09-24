@@ -1,6 +1,6 @@
 // Orchestrator Mode: agent-orch's agent orchestrator running inside Claude Web.
 //
-//   planner    your chat in Orchestrator Mode. Reads the project, keeps .ao2/BRIEF.md and CONTEXT.md
+//   planner    your chat in Orchestrator Mode. Reads the project, keeps .agent-orch/BRIEF.md and CONTEXT.md
 //              current, and turns what you want into small, chained, verifiable tasks.
 //   workers    one fresh Claude Code session per task, several at once. Each does exactly one task,
 //              is checked against its "Done when" command, and is committed to git.
@@ -9,7 +9,7 @@
 //
 // Everything runs on the Claude subscription through the Claude Code SDK. A governor sleeps until
 // usage limits reset and resumes the same session; pacing decides how hard to push from the
-// 5-hour and weekly usage. State lives in SQLite; each project's memory lives in <project>/.ao2/.
+// 5-hour and weekly usage. State lives in SQLite; each project's memory lives in <project>/.agent-orch/.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -48,9 +48,11 @@ const CFG = {
   ],
 };
 
+const MEM_DIR = '.agent-orch'; // per-project memory dir
+
 const PLANNER_TOOLS = [
   'Read', 'Glob', 'Grep', 'TodoWrite', 'WebSearch', 'WebFetch',
-  'Write(.ao2/**)', 'Edit(.ao2/**)', 'MultiEdit(.ao2/**)',
+  'Write(.agent-orch/**)', 'Edit(.agent-orch/**)', 'MultiEdit(.agent-orch/**)',
   'Bash(git log:*)', 'Bash(git status:*)', 'Bash(git diff:*)', 'Bash(ls:*)', 'Bash(wc:*)',
 ];
 
@@ -87,7 +89,7 @@ const TASKS_FORMAT = `Emit work as a fenced block exactly like this (strict JSON
   existing task id. A task only starts once the one it points at has finished. Use it liberally —
   later steps must not begin until the step they build on is actually done.
 - Each task is run by a FRESH Claude Code session with no memory of this conversation. It will read
-  .ao2/BRIEF.md and .ao2/CONTEXT.md, so put durable context there and keep each prompt self-contained.
+  .agent-orch/BRIEF.md and .agent-orch/CONTEXT.md, so put durable context there and keep each prompt self-contained.
 - Never repeat work that is already queued, running, or done.
 
 **Urgency decides what runs first, so set it honestly:**
@@ -112,8 +114,8 @@ How to behave:
   If something is a routine judgment call, decide, and state the assumption.
 - Catch urgency: if the owner mentions a deadline, an assignment, a demo or anything time-bound, set it
   as a real deadline and mark those tasks urgent. Ongoing upkeep is background work.
-- Keep the project memory current: write/refresh .ao2/BRIEF.md (vision, goals, constraints, definition
-  of done) and .ao2/CONTEXT.md (architecture, conventions, decisions). Only write inside .ao2/; code changes
+- Keep the project memory current: write/refresh .agent-orch/BRIEF.md (vision, goals, constraints, definition
+  of done) and .agent-orch/CONTEXT.md (architecture, conventions, decisions). Only write inside .agent-orch/; code changes
   are the workers' job, so queue them as tasks rather than making them yourself.
 - Queue a small first chain of steps as soon as the intent is clear — you don't need the whole plan up
   front, and you can add the next steps after these finish. Reply in one or two lines: why this chain,
@@ -124,17 +126,17 @@ ${TASKS_FORMAT}`;
 
 const WORKER_SYSTEM = `You are an autonomous senior engineer working for an agent orchestrator (agent-orch). No human is watching
 this session: never ask questions or wait for confirmation — make sound decisions and record notable ones.
-Begin by reading .ao2/BRIEF.md and .ao2/CONTEXT.md in the project root.
+Begin by reading .agent-orch/BRIEF.md and .agent-orch/CONTEXT.md in the project root.
 
 Do exactly the one task you are given — not the next one, not a bigger version of it. Resist scope creep:
 anything you notice but were not asked to do stays out of this change — the reflector picks up real gaps
-on its own; note it in .ao2/CONTEXT.md only if it's a durable fact worth remembering.
+on its own; note it in .agent-orch/CONTEXT.md only if it's a durable fact worth remembering.
 
 Before you claim to be finished, actually verify it: run the command, the test, or the check named in
 "Done when". Do not assume it works because the code looks right.
 
 If you learn something future sessions must know (architecture, conventions, gotchas), add at most a
-few lines of genuinely durable fact to .ao2/CONTEXT.md — not a running log. Prefer editing an existing
+few lines of genuinely durable fact to .agent-orch/CONTEXT.md — not a running log. Prefer editing an existing
 line over appending a new one. Do not create git commits — the orchestrator commits after you finish.
 
 Your final message is exactly one line and nothing else:
@@ -149,7 +151,7 @@ const REFLECT_ASK = 'Look at this project and improve it — find the most valua
 const REFLECT_SYSTEM = `You are the reflective mind of an agent orchestrator (agent-orch). The work queue for this project is empty, and
 your job is to decide what would most improve the project next — thinking like its owner, a demanding
 product lead, and a senior engineer at once. Do NOT modify source code in this session; you may only
-update files in .ao2/.`;
+update files in .agent-orch/.`;
 
 const RESUME = 'You were interrupted before finishing (usage limit, timeout, or a restart). Continue the same task ' +
   'from where you left off: check the current state of the files first and do not redo completed work. ' +
@@ -159,10 +161,10 @@ const CONTINUE = 'Your previous session on this task reported it was not finishe
   "is already in place, finish the remaining part, verify it against 'Done when', and end with just " +
   'the AGENT-ORCH-STATUS line.';
 
-const CONTEXT_COMPACTION = `.ao2/CONTEXT.md is over its size budget — every session pays to read it in full, and it has grown past
+const CONTEXT_COMPACTION = `.agent-orch/CONTEXT.md is over its size budget — every session pays to read it in full, and it has grown past
 what's durable. Before anything else, rewrite it down to only what a fresh session genuinely needs to know:
 architecture, conventions, decisions, gotchas. Delete anything that reads like a changelog, restates what the
-code already plainly says, or narrates finished work — that history belongs in .ao2/JOURNAL.md.`;
+code already plainly says, or narrates finished work — that history belongs in .agent-orch/JOURNAL.md.`;
 
 function retryAfterFailure(attempt, outcome, detail) {
   const label = { max_turns: 'ran out of turns', timeout: 'timed out', error: 'errored' }[outcome] || outcome;
@@ -264,10 +266,10 @@ Project priority: ${project.priority}/100 · mode: ${project.mode}
 Now: ${nowText()}
 ${environment}
 ${overage ? `\n${CONTEXT_COMPACTION}\n` : ''}
-Read .ao2/BRIEF.md, .ao2/CONTEXT.md and .ao2/ROADMAP.md, then inspect the actual code. Where cheap, run the
+Read .agent-orch/BRIEF.md, .agent-orch/CONTEXT.md and .agent-orch/ROADMAP.md, then inspect the actual code. Where cheap, run the
 build/tests/linters to find real problems rather than guessing.
 
-Recently completed work (tail of .ao2/JOURNAL.md):
+Recently completed work (tail of .agent-orch/JOURNAL.md):
 ${journalTail || '(nothing yet)'}
 
 Recent task history:
@@ -278,7 +280,7 @@ build/tests, bugs), gaps versus the brief's goals and definition of done, user-f
 reliability and error handling, security, performance, test coverage, documentation, and code health.
 
 Then:
-1. Rewrite .ao2/ROADMAP.md: a brief honest assessment, the prioritized next steps, and later ideas.
+1. Rewrite .agent-orch/ROADMAP.md: a brief honest assessment, the prioritized next steps, and later ideas.
 2. Queue the next 1–5 steps as small, separately verifiable tasks (chain them with \`after\`). Prefer
    finishing and hardening what exists over new scope unless the brief asks for it. If the project truly
    meets its brief and nothing valuable remains, return an empty task list rather than inventing busywork.
@@ -315,6 +317,37 @@ export function migrateDbFile(dir) {
   if (!fs.existsSync(from) || fs.existsSync(to)) return false;
   for (const ext of ['-wal', '-shm']) if (fs.existsSync(from + ext)) fs.renameSync(from + ext, to + ext);
   fs.renameSync(from, to);
+  return true;
+}
+
+const TEMPLATES = {
+  'BRIEF.md': '# Project Brief\n\n_Maintained by the orchestrator\'s planner from conversations with the owner._\n\n## Vision\n\n(not yet defined)\n\n## Goals\n\n## Constraints & Preferences\n\n## Definition of Done\n',
+  'CONTEXT.md': '# Project Context\n\n_Durable knowledge for every agent session: architecture, conventions, decisions, gotchas._\n\n## Architecture\n\n## Conventions\n\n## Decisions\n\n## Gotchas\n',
+  'ROADMAP.md': '# Roadmap\n\n_Maintained by the orchestrator\'s reflection loop._\n\n## Assessment\n\n## Next\n\n## Ideas / Later\n',
+  'JOURNAL.md': '# Journal\n\n_Append-only record of completed work, written by the orchestrator._\n',
+};
+
+// The memory dir was called .ao2/; move it to .agent-orch/ once. If an old server recreated .ao2/ after the
+// move, merge it in: missing entries move over, new JOURNAL.md entries are appended, a file that extends
+// its counterpart replaces it, and untouched templates are dropped. Real conflicts stay in .ao2/.
+export function migrateMemDir(p) {
+  const from = path.join(p, '.ao2'), to = path.join(p, MEM_DIR);
+  if (!fs.existsSync(from)) return false;
+  if (!fs.existsSync(to)) { fs.renameSync(from, to); return true; }
+  const merge = (a, b) => {
+    for (const name of fs.readdirSync(a)) {
+      const fa = path.join(a, name), fb = path.join(b, name);
+      if (!fs.existsSync(fb)) { fs.renameSync(fa, fb); continue; }
+      if (fs.statSync(fa).isDirectory()) { if (fs.statSync(fb).isDirectory()) merge(fa, fb); continue; }
+      const ta = fs.readFileSync(fa, 'utf8'), tb = fs.readFileSync(fb, 'utf8'), top = a === from;
+      if (top && name === 'JOURNAL.md') { const i = ta.indexOf('\n## '); if (i >= 0) fs.appendFileSync(fb, ta.slice(i)); }
+      else if (ta.startsWith(tb)) fs.writeFileSync(fb, ta);
+      else if (!tb.startsWith(ta) && !(top && ta === TEMPLATES[name])) continue;
+      fs.rmSync(fa);
+    }
+    if (!fs.readdirSync(a).length) fs.rmdirSync(a);
+  };
+  merge(from, to);
   return true;
 }
 
@@ -979,23 +1012,18 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return res;
   }
 
-  // ---- project memory (.ao2/)
-  const TEMPLATES = {
-    'BRIEF.md': '# Project Brief\n\n_Maintained by the orchestrator\'s planner from conversations with the owner._\n\n## Vision\n\n(not yet defined)\n\n## Goals\n\n## Constraints & Preferences\n\n## Definition of Done\n',
-    'CONTEXT.md': '# Project Context\n\n_Durable knowledge for every agent session: architecture, conventions, decisions, gotchas._\n\n## Architecture\n\n## Conventions\n\n## Decisions\n\n## Gotchas\n',
-    'ROADMAP.md': '# Roadmap\n\n_Maintained by the orchestrator\'s reflection loop._\n\n## Assessment\n\n## Next\n\n## Ideas / Later\n',
-    'JOURNAL.md': '# Journal\n\n_Append-only record of completed work, written by the orchestrator._\n',
-  };
-  const ao2Dir = (p) => path.join(p, '.ao2');
+  // ---- project memory (.agent-orch/)
+  const memDir = (p) => path.join(p, MEM_DIR);
   function initProject(p) {
-    fs.mkdirSync(path.join(ao2Dir(p), 'tasks'), { recursive: true });
+    try { migrateMemDir(p); } catch (e) { console.error('[orch] memory dir migration failed:', p, e.message); }
+    fs.mkdirSync(path.join(memDir(p), 'tasks'), { recursive: true });
     for (const [name, body] of Object.entries(TEMPLATES)) {
-      const f = path.join(ao2Dir(p), name);
+      const f = path.join(memDir(p), name);
       if (!fs.existsSync(f)) fs.writeFileSync(f, body);
     }
   }
   const slug = (t) => (t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48).replace(/-+$/, '') || 'task');
-  const taskFile = (p, task) => path.join(ao2Dir(p), 'tasks', `${String(task.id).padStart(4, '0')}-${slug(task.title)}.md`);
+  const taskFile = (p, task) => path.join(memDir(p), 'tasks', `${String(task.id).padStart(4, '0')}-${slug(task.title)}.md`);
   function writeTaskSpec(p, task) {
     initProject(p);
     const f = taskFile(p, task);
@@ -1012,14 +1040,14 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     fs.appendFileSync(taskFile(p, task), `\n## Result — ${status} (${stamp()})\n\n${String(text || '').trim() || '(no report)'}\n`);
     if (task.kind === 'work') {
       const summary = parseStatus(text)[1] || (String(text || '').split('\n').find((l) => l.trim()) || '(no report)').slice(0, 200);
-      fs.appendFileSync(path.join(ao2Dir(p), 'JOURNAL.md'), `\n## ${stamp()} — #${task.id} ${task.title} [${status}]\n\n${summary}\n`);
+      fs.appendFileSync(path.join(memDir(p), 'JOURNAL.md'), `\n## ${stamp()} — #${task.id} ${task.title} [${status}]\n\n${summary}\n`);
     }
   }
   function recentJournal(p) {
-    try { return fs.readFileSync(path.join(ao2Dir(p), 'JOURNAL.md'), 'utf8').slice(-4000); } catch { return ''; }
+    try { return fs.readFileSync(path.join(memDir(p), 'JOURNAL.md'), 'utf8').slice(-4000); } catch { return ''; }
   }
   function contextOverage(p) {
-    try { const s = fs.statSync(path.join(ao2Dir(p), 'CONTEXT.md')).size; return s > CFG.contextBudgetBytes ? s - CFG.contextBudgetBytes : null; } catch { return null; }
+    try { const s = fs.statSync(path.join(memDir(p), 'CONTEXT.md')).size; return s > CFG.contextBudgetBytes ? s - CFG.contextBudgetBytes : null; } catch { return null; }
   }
   const GIT_ID = ['-c', 'user.name=Claude Web Orchestrator', '-c', 'user.email=orchestrator@claude-web.local'];
   function git(p, args) { return execFileSync('git', args, { cwd: p, encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'pipe'] }); }
@@ -1613,7 +1641,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         summary: t.status === 'done' ? parseStatus(t.result)[1] || null : String(t.result || '').slice(0, 160) }));
   }
   function readMemory(p) {
-    const read = (f) => { try { return fs.readFileSync(path.join(ao2Dir(p), f), 'utf8').slice(0, 6000); } catch { return ''; } };
+    try { migrateMemDir(p); } catch {}
+    const read = (f) => { try { return fs.readFileSync(path.join(memDir(p), f), 'utf8').slice(0, 6000); } catch { return ''; } };
     return { brief: read('BRIEF.md'), context: read('CONTEXT.md') };
   }
 

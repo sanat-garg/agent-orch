@@ -817,7 +817,7 @@ async function sendUserMessage(convo, text) {
   }
   if (convo.mode === 'orchestrator') return orchestratorTurn(convo, text);
   // Orchestrator-style context control: a session that has grown past the limit is retired, and the next
-  // message starts a fresh one carrying the project memory (.ao2/) and a recap of the recent chat.
+  // message starts a fresh one carrying the project memory (.agent-orch/) and a recap of the recent chat.
   let prompt = text;
   if (convo.sessionId && (convo.ctxTokens || 0) > CHAT_CONTEXT_LIMIT) {
     runtimes.get(convo.id)?.q.close();
@@ -856,17 +856,17 @@ function chatRecap(cid, budget = 6000) {
 function chatSystemAppend(convo) {
   orch.initMemory(convo.cwd);
   const mem = orch.readMemory(convo.cwd);
-  return `This project keeps durable memory in .ao2/, shared with the project's orchestrator:
-- .ao2/BRIEF.md: what the project is, its goals and definition of done
-- .ao2/CONTEXT.md: architecture, conventions, decisions, gotchas
-When you learn a durable fact a future session needs, update .ao2/CONTEXT.md in a line or two (edit existing lines; it is not a log).
+  return `This project keeps durable memory in .agent-orch/, shared with the project's orchestrator:
+- .agent-orch/BRIEF.md: what the project is, its goals and definition of done
+- .agent-orch/CONTEXT.md: architecture, conventions, decisions, gotchas
+When you learn a durable fact a future session needs, update .agent-orch/CONTEXT.md in a line or two (edit existing lines; it is not a log).
 After each of your replies, changes are committed and pushed to the project's GitHub repo automatically, so don't run git commit or git push yourself.
 This is the owner's disposable server and you have full access: run any command without asking, and install whatever you need (passwordless sudo, e.g. \`sudo apt-get install -y …\`, plus npm and pip).
 
-Current .ao2/BRIEF.md:
+Current .agent-orch/BRIEF.md:
 ${mem.brief || '(empty)'}
 
-Current .ao2/CONTEXT.md:
+Current .agent-orch/CONTEXT.md:
 ${mem.context || '(empty)'}`;
 }
 

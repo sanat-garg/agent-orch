@@ -12,7 +12,7 @@ import { createOrchestrator } from './orchestrator.mjs';
 import { createGitHub } from './github.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-const DATA = path.join(ROOT, 'data');
+const DATA = process.env.CW_DATA_DIR ? path.resolve(process.env.CW_DATA_DIR) : path.join(ROOT, 'data');
 const LOGS = path.join(DATA, 'logs');
 const PUBLIC = path.join(ROOT, 'public');
 const HOME = os.homedir();

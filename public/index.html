@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#1f1e1c">
+<title>Claude Web</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div class="app" id="app" data-view="chat">
+  <aside class="sidebar" id="sidebar">
+    <div class="side-head">
+      <img src="/icon.svg" width="24" height="24" alt="">
+      <span class="side-title">Claude Web</span>
+      <button class="icon-btn only-mobile" id="closeSidebar" aria-label="Close sidebar">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <button class="new-chat" id="newChat">
+      <svg viewBox="0 0 24 24" width="18" height="18"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      New project
+    </button>
+    <nav class="convo-list" id="convoList" aria-label="Chats"></nav>
+    <div class="mini-stats">
+      <button class="ms-server" id="miniStats" aria-haspopup="dialog" title="Open server details">
+        <span class="ms-head">
+          <span class="live-dot" id="miniLive"></span>
+          <span class="ms-title" id="hostName">Oracle VM</span>
+          <span class="ms-open">Details<svg viewBox="0 0 24 24" width="12" height="12"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></span>
+        </span>
+        <span class="ms-row"><span>CPU</span><span class="ms-bar"><i id="miniCpuBar"></i></span><span class="ms-val" id="miniCpu">–</span></span>
+        <span class="ms-row"><span>RAM</span><span class="ms-bar"><i id="miniMemBar"></i></span><span class="ms-val" id="miniMem">–</span></span>
+      </button>
+      <div class="ms-usage">
+        <div class="ms-head">
+          <span class="ms-title" id="usageTitle">Claude usage</span>
+          <span class="ms-age" id="usAge"></span>
+          <button class="ms-refresh" id="usRefresh" aria-label="Refresh Claude usage limits" title="Refresh limits">
+            <svg viewBox="0 0 24 24" width="13" height="13"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+        <div class="ms-row" id="usSessionRow"><span>5-hour</span><span class="ms-bar"><i id="usSessionBar"></i></span><span class="ms-val" id="usSession">–</span></div>
+        <div class="ms-row" id="usWeeklyRow"><span>Weekly</span><span class="ms-bar"><i id="usWeeklyBar"></i></span><span class="ms-val" id="usWeekly">–</span></div>
+        <div class="ms-note" id="usNote">Checking plan limits…</div>
+      </div>
+    </div>
+    <div class="side-foot">
+      <span class="dot" id="connDot" title="Connecting"></span>
+      <span class="host" id="connText">Connecting…</span>
+      <button class="link-btn" id="logout">Sign out</button>
+    </div>
+  </aside>
+  <div class="scrim" id="scrim"></div>
+
+  <main class="main">
+    <header class="topbar">
+      <button class="icon-btn only-mobile" id="openSidebar" aria-label="Open sidebar">
+        <svg viewBox="0 0 24 24" width="22" height="22"><path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+      <div class="top-title">
+        <span id="title">New chat</span>
+        <span class="cwd" id="cwdLabel"></span>
+        <a class="repo-link" id="repoLink" target="_blank" rel="noopener" hidden>
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.89 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.56-1.11-4.56-4.95 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.5 9.5 0 0 1 5 0c1.91-1.3 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.85-2.34 4.7-4.57 4.94.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0 0 12 2z"/></svg>
+          <span id="repoText">GitHub</span>
+        </a>
+      </div>
+      <div class="seg" role="tablist" aria-label="View">
+        <button role="tab" data-view="chat" aria-selected="true">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path d="M4 5h16v11H9l-5 4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+          <span>Chat</span>
+        </button>
+        <button role="tab" data-view="term" aria-selected="false">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path d="M5 7l5 5-5 5M12 17h7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>Terminal</span>
+        </button>
+      </div>
+    </header>
+
+    <div class="banner" id="loginBanner" hidden>
+      <span><strong>Claude Code isn't signed in on this server yet.</strong> Open a terminal, run <code>claude</code> and sign in once. Chat works after that.</span>
+      <button class="btn small" id="bannerTerm">Open Terminal</button>
+    </div>
+
+    <section class="chat" id="chatView">
+      <div class="scroller" id="scroller">
+        <div class="messages" id="messages"></div>
+        <div class="working" id="working" hidden>
+          <span class="spark"></span><span id="workingText">Working…</span>
+          <span class="esc-hint">esc to interrupt</span>
+        </div>
+      </div>
+      <button class="jump" id="jump" hidden aria-label="Scroll to latest">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path d="M12 5v14M6 13l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+
+      <div class="orch-bar" id="orchBar" hidden>
+        <span class="ob-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="16" height="16"><circle cx="12" cy="12" r="3" fill="currentColor"/><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-dasharray="3 3"/></svg>
+        </span>
+        <span class="ob-title">Orchestrator</span>
+        <span class="ob-status" id="obStatus"></span>
+        <span class="ob-counts" id="obCounts"></span>
+        <div class="pop-wrap">
+          <button type="button" class="chip" id="obSettingsBtn" aria-haspopup="true">
+            <svg viewBox="0 0 24 24" width="14" height="14"><path d="M4 7h10M18 7h2M4 17h2M10 17h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="7" r="2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="8" cy="17" r="2" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+            <span>Settings</span>
+          </button>
+          <div class="popover ob-pop" id="obPop" hidden>
+            <label class="ob-opt">
+              <span><strong>Keep improving</strong><small>When the queue is empty, look at the project and queue the next most valuable steps.</small></span>
+              <input type="checkbox" id="obPerpetual">
+            </label>
+            <label class="ob-opt">
+              <span><strong>Project priority</strong><small>How this project ranks against your other orchestrated projects.</small></span>
+              <select id="obPriority"><option value="25">Low</option><option value="50">Normal</option><option value="80">High</option></select>
+            </label>
+          </div>
+        </div>
+        <button type="button" class="chip" id="obPause">Pause</button>
+      </div>
+      <form class="composer" id="composer">
+        <div class="box">
+          <textarea id="input" rows="1" placeholder="Ask Claude to build something…" autocomplete="off" spellcheck="true"></textarea>
+          <div class="controls">
+            <div class="left">
+              <button type="button" class="chip project-chip" id="folderBtn" aria-haspopup="dialog">
+                <svg viewBox="0 0 24 24" width="15" height="15"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+                <span id="folderLabel">New project</span>
+                <svg class="caret" viewBox="0 0 24 24" width="12" height="12"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+              </button>
+              <label class="chip select-chip" id="modeChip" title="Permission mode (Shift+Tab to cycle)">
+                <select id="mode" aria-label="Permission mode">
+                  <option value="bypassPermissions">Full access</option>
+                  <option value="acceptEdits">Auto-accept edits</option>
+                  <option value="default">Ask before acting</option>
+                  <option value="plan">Plan mode</option>
+                  <option value="orchestrator">Orchestrator Mode</option>
+                </select>
+              </label>
+              <label class="chip select-chip" title="Model">
+                <select id="model" aria-label="Model">
+                  <option value="">Default model</option>
+                  <option value="opus">Opus</option>
+                  <option value="sonnet">Sonnet</option>
+                  <option value="haiku">Haiku</option>
+                </select>
+              </label>
+            </div>
+            <button type="submit" class="send" id="send" aria-label="Send">
+              <svg class="i-send" viewBox="0 0 24 24" width="18" height="18"><path d="M12 19V5M5 12l7-7 7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <svg class="i-stop" viewBox="0 0 24 24" width="14" height="14"><rect x="4" y="4" width="16" height="16" rx="3" fill="currentColor"/></svg>
+            </button>
+          </div>
+        </div>
+      </form>
+    </section>
+
+    <section class="term" id="termView" hidden>
+      <div class="term-tabs" id="termTabs" role="tablist" aria-label="Terminals">
+        <button type="button" class="term-add" id="termAdd" title="New terminal" aria-label="New terminal">
+          <svg viewBox="0 0 24 24" width="15" height="15"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+        <div class="term-layout" id="termLayout" role="group" aria-label="Terminal layout">
+          <button type="button" data-layout="tabs" title="One at a time" aria-label="One at a time">
+            <svg viewBox="0 0 24 24" width="15" height="15"><rect x="4" y="5" width="16" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+          </button>
+          <button type="button" data-layout="split" title="Side by side" aria-label="Side by side">
+            <svg viewBox="0 0 24 24" width="15" height="15"><rect x="4" y="5" width="16" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 5v14" stroke="currentColor" stroke-width="1.8"/></svg>
+          </button>
+          <button type="button" data-layout="stack" title="Stacked (one above the other)" aria-label="Stacked">
+            <svg viewBox="0 0 24 24" width="15" height="15"><rect x="4" y="5" width="16" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M4 12h16" stroke="currentColor" stroke-width="1.8"/></svg>
+          </button>
+          <button type="button" data-layout="grid" title="Grid" aria-label="Grid">
+            <svg viewBox="0 0 24 24" width="15" height="15"><rect x="4" y="5" width="16" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 5v14M4 12h16" stroke="currentColor" stroke-width="1.8"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="term-frames" id="termFrames"></div>
+      <div class="term-bar">
+        <span id="termNote">bash in <code>~/workspace</code> · keeps running if you close the tab</span>
+        <button class="link-btn" id="termReload">Reconnect</button>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<div class="drawer-scrim" id="drawerScrim" hidden></div>
+<aside class="drawer" id="taskDrawer" hidden aria-labelledby="drTitle">
+  <div class="dr-head">
+    <span class="tc-glyph" id="drGlyph"></span>
+    <div class="dr-headtext">
+      <div class="dr-kicker" id="drKicker"></div>
+      <h2 id="drTitle"></h2>
+    </div>
+    <button class="icon-btn" id="drClose" aria-label="Close task details">
+      <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+  <div class="dr-body" id="drBody"></div>
+</aside>
+
+<div class="modal" id="pickerModal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-panel picker" role="dialog" aria-modal="true" aria-labelledby="pickerTitle">
+    <div class="m-head">
+      <div><h2 id="pickerTitle">Choose a project</h2></div>
+      <button class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="pk-body">
+      <p class="pk-note" id="pickerNote" hidden></p>
+
+      <div class="gh-row" id="ghRow"></div>
+
+      <!-- Projects mode: one box searches existing projects and names a new one -->
+      <div id="pkProjects">
+        <div class="pk-search">
+          <svg viewBox="0 0 24 24" width="16" height="16"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="M20 20l-4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <input id="pkSearch" placeholder="Search, or type a name for a new project" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="pk-list" id="pkList" role="listbox" aria-label="Projects"></div>
+        <button class="link-btn pk-browse" id="pkBrowseBtn">Browse other folders…</button>
+      </div>
+
+      <!-- Browse mode -->
+      <div id="pkBrowse" hidden>
+        <div class="pk-crumbs" id="pkCrumbs"></div>
+        <div class="pk-list" id="pkBrowseList"></div>
+        <div class="pk-foot">
+          <button class="link-btn" id="pkBack">← Back to projects</button>
+          <button class="btn primary" id="pkUseHere">Use this folder</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="awayModal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-panel away" role="dialog" aria-modal="true" aria-labelledby="awayTitle">
+    <div class="m-head">
+      <div>
+        <h2 id="awayTitle">While you were away</h2>
+        <p class="m-sub" id="awaySub"></p>
+      </div>
+      <button class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="aw-body" id="awayBody"></div>
+  </div>
+</div>
+
+<div class="modal" id="serverModal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="mDevice">
+    <div class="m-head">
+      <div>
+        <h2 id="mDevice">Oracle VM</h2>
+        <p class="m-sub" id="mSub">Loading…</p>
+      </div>
+      <span class="live-pill" id="livePill" role="status" aria-live="off">
+        <span class="live-dot"></span><span id="liveText">Connecting…</span>
+      </span>
+      <button class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="m-body">
+      <div class="range-row">
+        <span>Charts show</span>
+        <div class="range-picker" id="rangePicker" role="group" aria-label="Chart time range">
+          <button data-range="15m">15m</button><button data-range="1h">1h</button><button data-range="6h">6h</button><button data-range="24h">24h</button><button data-range="7d">7d</button><button data-range="all">All</button>
+        </div>
+      </div>
+      <div class="m-grid" id="mGrid"></div>
+      <div class="m-card m-top">
+        <h3>Top processes</h3>
+        <table class="m-table" id="mTop"><thead><tr><th>Process</th><th class="num">CPU</th><th class="num">Memory</th></tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<template id="emptyTpl">
+  <div class="empty">
+    <img src="/icon.svg" width="48" height="48" alt="">
+    <h2>What should we build?</h2>
+    <div class="project-line">
+      <span>Project</span>
+      <button type="button" class="project-pick" data-open-picker>
+        <svg viewBox="0 0 24 24" width="16" height="16"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+        <span class="pp-name">New project</span>
+        <svg viewBox="0 0 24 24" width="12" height="12"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="recent-projects"></div>
+  </div>
+</template>
+
+<script src="/vendor/marked.js"></script>
+<script src="/vendor/purify.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

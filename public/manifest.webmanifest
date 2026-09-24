@@ -1,0 +1,9 @@
+{
+  "name": "Claude Web",
+  "short_name": "Claude",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1f1e1c",
+  "theme_color": "#1f1e1c",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}

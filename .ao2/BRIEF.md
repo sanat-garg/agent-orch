@@ -14,6 +14,10 @@ limits get used around the clock.
 2. Find and fix existing bugs and gaps in the server, orchestrator and UI.
 3. Add high-value usability features and polish the overall experience.
 
+4. Naming (owner, 2026-09-24): the product is called **agent-orch** everywhere: UI, titles, docs, prompts,
+   code identifiers, the memory dir, the DB file, systemd units and the install directory. No user-visible
+   "Claude Web", "claude-web" or "AO2" should remain. ("Claude Code" is the real product name of the CLI, so it stays.)
+
 ## Constraints & Preferences
 - Chat and agents must run on the Claude subscription, never on API credits (see API_ENV stripping in
   server.mjs). Never weaken that.

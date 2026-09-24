@@ -28,3 +28,6 @@ _Durable knowledge for every agent session: architecture, conventions, decisions
 ## Gotchas
 - Editing server.mjs or orchestrator.mjs doesn't affect the running app until the owner restarts it.
 - Don't commit macOS `._*` files (they're gitignored).
+- Test instances MUST set `CW_DATA_DIR=$(mktemp -d)`. Without it, a second server on the live data/ requeues and
+  double-runs the live orchestrator's running tasks and rewrites convos/sessions (AUDIT #2).
+- .ao2/AUDIT.md is the bug backlog. When you fix an item, mark it `**Fixed**` there with a one-line note.

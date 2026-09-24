@@ -12,3 +12,7 @@ In public/app.js, the task detail drawer is built in the function around lines 2
 ## Done when
 
 In public/app.js, section('Instructions it was given') is appended to body before the What happened section, which is before section('Done when'), and neither is inside the dr-more details; `node --check public/app.js && npm test` passes
+
+## Result — done (check passed) (2026-09-24 23:38)
+
+AO2-STATUS: done — Drawer now shows instructions, what happened, then done-when

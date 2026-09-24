@@ -2111,13 +2111,11 @@ function renderDrawer(fromLive = false) {
   if (O.err) top.append(el('div', 'dr-err', O.err));
   body.append(top);
 
-  // 2. What "done" means for it.
-  if (t.kind === 'work' && d.task.done_when) {
-    const s = section('Done when');
-    const txt = el('div', 'dr-text md');
-    txt.innerHTML = md(d.task.done_when);
-    s.append(txt);
-    body.append(s);
+  // 2. The instructions it was given.
+  if (t.kind === 'work') {
+    const c = section('Instructions it was given');
+    c.append(el('pre', 'dr-pre', d.task.prompt));
+    body.append(c);
   }
 
   // 3. What happened, in the agent's own words (commands live under Details).
@@ -2145,7 +2143,16 @@ function renderDrawer(fromLive = false) {
   }
   body.append(s3);
 
-  // 4. Everything else, folded away.
+  // 4. What "done" means for it.
+  if (t.kind === 'work' && d.task.done_when) {
+    const s = section('Done when');
+    const txt = el('div', 'dr-text md');
+    txt.innerHTML = md(d.task.done_when);
+    s.append(txt);
+    body.append(s);
+  }
+
+  // 5. Everything else, folded away.
   const more = el('details', 'dr-more');
   more.open = moreOpen;
   more.append(el('summary', '', 'Details'));
@@ -2186,11 +2193,6 @@ function renderDrawer(fromLive = false) {
       f.append(clear);
     }
     c.append(f);
-    more.append(c);
-  }
-  if (t.kind === 'work') {
-    const c = section('Instructions it was given');
-    c.append(el('pre', 'dr-pre', d.task.prompt));
     more.append(c);
   }
   if (d.events.length) {

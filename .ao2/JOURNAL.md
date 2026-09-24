@@ -17,3 +17,7 @@ AUDIT.md lists 15 ranked, verified bugs with fixes
 ## 2026-09-24 23:37 — #14 Fix malformed-cookie server crash (AUDIT #1) [done (check passed)]
 
 malformed cookies no longer crash the server; regression test passes
+
+## 2026-09-24 23:38 — #19 Task drawer: show instructions first, then what happened, then done-when [done (check passed)]
+
+Drawer now shows instructions, what happened, then done-when

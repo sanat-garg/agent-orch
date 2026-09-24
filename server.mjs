@@ -10,6 +10,7 @@ import { WebSocketServer } from 'ws';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createOrchestrator } from './orchestrator.mjs';
 import { createGitHub } from './github.mjs';
+import { ownsRuntime, retireRuntime } from './runtimes.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -700,12 +701,14 @@ function startRuntime(convo) {
 
   (async () => {
     try {
-      for await (const m of rt.q) handleMessage(convo, rt, m);
-      emit(convo.id, { t: 'error', text: 'Claude session ended. Send a message to resume it.' });
+      for await (const m of rt.q) if (!rt.retired) handleMessage(convo, rt, m);
+      if (ownsRuntime(runtimes, convo.id, rt)) emit(convo.id, { t: 'error', text: 'Claude session ended. Send a message to resume it.' });
     } catch (err) {
-      emit(convo.id, { t: 'error', text: String(err?.message || err) });
+      if (ownsRuntime(runtimes, convo.id, rt)) emit(convo.id, { t: 'error', text: String(err?.message || err) });
     } finally {
       for (const [pid, p] of rt.pending) p.resolve({ behavior: 'deny', message: 'Session closed' });
+      // A retired runtime's slot may already hold its replacement: leave it and its busy state alone.
+      if (!ownsRuntime(runtimes, convo.id, rt)) return;
       runtimes.delete(convo.id);
       broadcast(convo.id, { t: 'busy', busy: false });
       broadcastConvos();
@@ -820,8 +823,7 @@ async function sendUserMessage(convo, text) {
   // message starts a fresh one carrying the project memory (.agent-orch/) and a recap of the recent chat.
   let prompt = text;
   if (convo.sessionId && (convo.ctxTokens || 0) > CHAT_CONTEXT_LIMIT) {
-    runtimes.get(convo.id)?.q.close();
-    runtimes.delete(convo.id);
+    retireRuntime(runtimes, convo.id);
     const recap = chatRecap(convo.id);
     convo.sessionId = null;
     convo.ctxTokens = 0;
@@ -1035,7 +1037,7 @@ async function handleRequest(req, res) {
     const c = findConvo(m[1]);
     if (!c) return json(res, 404, { error: 'No such chat' });
     if (req.method === 'DELETE') {
-      runtimes.get(c.id)?.q.close();
+      retireRuntime(runtimes, c.id);
       orch.abortPlan(c.id);
       orch.detachConvo(c.id); // its project's background work pauses; the folder and tasks are kept
       convos = convos.filter((x) => x.id !== c.id);

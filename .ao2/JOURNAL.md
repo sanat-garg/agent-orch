@@ -13,3 +13,7 @@ bin/rename-install.sh ready; dry-run and sandbox re-runs pass
 ## 2026-09-24 23:51 — #16 Add orchestrator lock file against double instances (AUDIT #2) [done (check passed)]
 
 Rename already committed; grep and all 12 tests pass
+
+## 2026-09-24 23:52 — #17 Fix chat context rollover orphaning the new runtime (AUDIT #3) [verify failed (1)]
+
+Command: grep -n "runtimes.get(convo.id) === rt" server.mjs

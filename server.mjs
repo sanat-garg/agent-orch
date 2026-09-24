@@ -1,4 +1,4 @@
-// Claude Web: login + chat UI for Claude Code, with the ttyd terminal proxied by Caddy at /term/.
+// agent-orch: login + chat UI for Claude Code, with the ttyd terminal proxied by Caddy at /term/.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -482,7 +482,7 @@ async function slowMetrics() {
   if (Date.now() - slowCache.at < 1900) return slowCache;
   const [ps, svc] = await Promise.all([
     run('ps', ['-eo', 'pid,comm,%cpu,rss', '--sort=-%cpu', '--no-headers']),
-    run('systemctl', ['is-active', 'claude-web', 'claude-term', 'caddy']),
+    run('systemctl', ['is-active', 'agent-orch', 'agent-orch-shell', 'caddy']),
   ]);
   slowCache.top = ps.trim().split('\n').slice(0, 8).map((l) => {
     const [pid, comm, cpu, rss] = l.trim().split(/\s+/);
@@ -547,7 +547,7 @@ function emit(cid, ev) {
   broadcast(cid, stamped);
 }
 
-// ---------- Orchestrator Mode (AO2) ----------
+// ---------- Orchestrator Mode (agent-orch) ----------
 const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
   query,
   claudeBin: CLAUDE_BIN,
@@ -809,7 +809,7 @@ async function sendUserMessage(convo, text) {
     return;
   }
   if (convo.mode === 'orchestrator') return orchestratorTurn(convo, text);
-  // AO2-style context control: a session that has grown past the limit is retired, and the next
+  // Orchestrator-style context control: a session that has grown past the limit is retired, and the next
   // message starts a fresh one carrying the project memory (.ao2/) and a recap of the recent chat.
   let prompt = text;
   if (convo.sessionId && (convo.ctxTokens || 0) > CHAT_CONTEXT_LIMIT) {
@@ -1248,5 +1248,5 @@ if (process.argv[2] === 'set-password') {
   console.log('Password updated. Everyone has been signed out.');
   process.exit(0);
 } else {
-  server.listen(PORT, '127.0.0.1', () => console.log(`Claude Web on 127.0.0.1:${PORT}`));
+  server.listen(PORT, '127.0.0.1', () => console.log(`agent-orch on 127.0.0.1:${PORT}`));
 }

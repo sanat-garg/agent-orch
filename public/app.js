@@ -481,7 +481,7 @@ function updateHeader() {
   if ($('app').dataset.view !== 'chat') { $('repoLink').hidden = true; return; }
   $('title').textContent = currentTitle();
   $('cwdLabel').textContent = currentCwdLabel();
-  document.title = `${currentTitle()} · Claude Web`;
+  document.title = `${currentTitle()} · agent-orch`;
   renderRepoLink();
 }
 function renderRepoLink() {

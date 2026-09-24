@@ -1,6 +1,6 @@
 {
-  "name": "Claude Web",
-  "short_name": "Claude",
+  "name": "agent-orch",
+  "short_name": "agent-orch",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#1f1e1c",

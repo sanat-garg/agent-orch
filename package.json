@@ -1,7 +1,7 @@
 {
   "name": "agent-orch",
   "version": "1.0.0",
-  "description": "Claude Web: self-hosted, login-protected web UI for Claude Code with the AO2 agent orchestrator",
+  "description": "agent-orch: self-hosted, login-protected web UI for Claude Code with an agent orchestrator",
   "main": "server.mjs",
   "scripts": {
     "test": "node --test 'test/**/*.test.mjs'"

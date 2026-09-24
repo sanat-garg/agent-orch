@@ -13,3 +13,9 @@ The product is now named 'agent-orch' (see .ao2/BRIEF.md, goal 4). Replace user-
 ## Done when
 
 `grep -rniE 'claude[ -]web' public server.mjs github.mjs package.json README.md` prints nothing and `npm test` passes
+
+## Result — verify failed (1) (2026-09-24 23:38)
+
+Command: grep -rniE 'claude[ -]web' public server.mjs github.mjs package.json README.md
+
+exit 1

@@ -1,12 +1,12 @@
-# Claude Web + AO2
+# agent-orch
 
 A self-hosted, login-protected web UI for [Claude Code](https://docs.claude.com/en/docs/claude-code),
 meant for a single owner on their own server.
 
-- **Claude Web** (`server.mjs`) runs chat sessions through Claude Code using
+- **The server** (`server.mjs`) runs chat sessions through Claude Code using
   `@anthropic-ai/claude-agent-sdk`. It also provides a folder browser, live server metrics, and browser
   terminals (tmux sessions shown through ttyd).
-- **AO2** (`orchestrator.mjs`) is the agent orchestrator behind a chat's "Orchestrator" mode. A planner
+- **The orchestrator** (`orchestrator.mjs`) is the agent orchestrator behind a chat's "Orchestrator" mode. A planner
   breaks your goals into small tasks, each with a "Done when" check. Workers run each task in a fresh
   Claude Code session, verify it against that check, and commit the result to git. A reflector queues
   follow-up work when a project's queue is empty. A governor paces the work against the 5-hour and weekly
@@ -19,7 +19,7 @@ This is plain Node ESM. There is no build step and no framework.
 
 ## Requirements
 
-- **Node.js 22+**. AO2 uses the built-in `node:sqlite`.
+- **Node.js 22+**. The orchestrator uses the built-in `node:sqlite`.
 - **Claude Code CLI** at `~/.local/bin/claude`, signed in with a Claude subscription (`claude`, then
   `/login`). The server uses this path directly.
 - **tmux**. Browser terminals and the GitHub sign-in flow run in tmux sessions.
@@ -31,8 +31,8 @@ This is plain Node ESM. There is no build step and no framework.
 ## Setup
 
 ```sh
-git clone https://github.com/sanat-garg/agent-orch.git ~/claude-web
-cd ~/claude-web
+git clone https://github.com/sanat-garg/agent-orch.git ~/agent-orch
+cd ~/agent-orch
 npm install
 node server.mjs set-password '<password, 8+ chars>'   # writes data/auth.json and signs everyone out
 PORT=3000 node server.mjs                               # listens on 127.0.0.1:3000
@@ -48,7 +48,7 @@ the data directory on startup. Run `npm test` to start a throwaway server on a f
 | `PORT` | `3000` | HTTP port. The server binds to `127.0.0.1` only. |
 | `CW_DATA_DIR` | `./data` | Where all state lives, for both the server and the orchestrator. |
 | `CW_DEVICE_NAME` | `Oracle VM` | The name shown for this machine in the UI. |
-| `PATH` | inherited | Passed to Claude Code and agents. AO2 prepends `data/orchestrator/bin`, which holds `python`/`pip` shims pointing to `python3`/`pip3` when only those exist. |
+| `PATH` | inherited | Passed to Claude Code and agents. The orchestrator prepends `data/orchestrator/bin`, which holds `python`/`pip` shims pointing to `python3`/`pip3` when only those exist. |
 
 The server also passes its whole environment on to Claude Code, **except** the variables listed under
 Security, which it removes.
@@ -80,16 +80,16 @@ automatically.
 
 ### Running as systemd services
 
-`/etc/systemd/system/claude-web.service`:
+`/etc/systemd/system/agent-orch.service`:
 
 ```ini
 [Unit]
-Description=Claude Web (login + chat UI)
+Description=agent-orch (login + chat UI)
 After=network-online.target
 
 [Service]
 User=ubuntu
-WorkingDirectory=/home/ubuntu/claude-web
+WorkingDirectory=/home/ubuntu/agent-orch
 Environment=PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=PORT=3000
 ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning server.mjs
@@ -100,7 +100,7 @@ RestartSec=2
 WantedBy=multi-user.target
 ```
 
-A matching ttyd unit, bound to loopback and serving under `/shell`:
+`/etc/systemd/system/agent-orch-shell.service`, a matching ttyd unit bound to loopback and serving under `/shell`:
 
 ```ini
 [Service]
@@ -108,13 +108,13 @@ User=ubuntu
 WorkingDirectory=/home/ubuntu/workspace
 Environment=PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=TERM=xterm-256color
-ExecStart=/usr/bin/ttyd -W -O -a -b /shell -i 127.0.0.1 -p 7682 /home/ubuntu/claude-web/bin/term-attach.sh
+ExecStart=/usr/bin/ttyd -W -O -a -b /shell -i 127.0.0.1 -p 7682 /home/ubuntu/agent-orch/bin/term-attach.sh
 Restart=always
 ```
 
-For terminals to survive restarts of the web app, also run a `tmux -D` server as its own unit. Then run
-`sudo systemctl daemon-reload && sudo systemctl enable --now claude-web <ttyd unit> caddy`. The metrics
-panel checks service status with `systemctl is-active claude-web claude-term caddy`.
+For terminals to survive restarts of the web app, also run a `tmux -D` server as its own unit, `agent-orch-tmux.service`. Then run
+`sudo systemctl daemon-reload && sudo systemctl enable --now agent-orch agent-orch-shell agent-orch-tmux caddy`. The metrics
+panel checks service status with `systemctl is-active agent-orch agent-orch-shell caddy`.
 
 ## data/
 
@@ -127,7 +127,7 @@ All runtime state lives in `data/` (or `CW_DATA_DIR`). Files are written with mo
 | `convos.json` | the chat list (title, folder, mode, model, Claude session id) |
 | `logs/<id>.jsonl` | the transcript of each chat |
 | `metrics/` | raw and per-minute server metrics |
-| `orchestrator/ao2.db` | the AO2 SQLite database (projects, tasks, runs, events, usage limits) |
+| `orchestrator/ao2.db` | the orchestrator SQLite database (projects, tasks, runs, events, usage limits) |
 | `orchestrator/runs/` | per-run agent logs |
 | `orchestrator/bin/` | `python`/`pip` shims |
 
@@ -143,7 +143,7 @@ the repo was restarted with fresh history.
   `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`) from the environment it passes on. If a chat
   session still reports an API-key auth source (`apiKeySource`), the session is stopped with an error.
   Don't weaken this.
-- **Agents run with `bypassPermissions`.** AO2 workers, the planner and the reflector run with
+- **Agents run with `bypassPermissions`.** Orchestrator workers, the planner and the reflector run with
   `permissionMode: 'bypassPermissions'` and `allowDangerouslySkipPermissions: true`. They get no
   permission prompts, and no tool is refused, including edits to this app's own code. Roles are enforced
   by prompt instructions only. New chats also default to `bypassPermissions`. Run this only on a
@@ -155,5 +155,5 @@ the repo was restarted with fresh history.
 - **Loopback only.** The app listens on `127.0.0.1`, and ttyd should too. The client IP used for lockout
   comes from `X-Forwarded-For`, which is trusted because only Caddy should reach the port. Don't expose
   port 3000 or 7682 directly.
-- **GitHub.** Repos that AO2 creates are private, and each gets a `.gitignore` that excludes `.env*`,
+- **GitHub.** Repos that the orchestrator creates are private, and each gets a `.gitignore` that excludes `.env*`,
   keys and build output.

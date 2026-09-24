@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 
-const GIT_ID = ['-c', 'user.name=Claude Web', '-c', 'user.email=claude-web@users.noreply.github.com'];
+const GIT_ID = ['-c', 'user.name=agent-orch', '-c', 'user.email=agent-orch@users.noreply.github.com'];
 
 // Keeps secrets and build output out of every repo this creates.
 const GITIGNORE = [

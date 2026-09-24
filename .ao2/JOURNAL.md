@@ -9,3 +9,7 @@ memory dir is .agent-orch with auto-migration, tests pass
 ## 2026-09-24 23:51 — #23 Write one-shot script to move install to ~/agent-orch [done]
 
 bin/rename-install.sh ready; dry-run and sandbox re-runs pass
+
+## 2026-09-24 23:51 — #16 Add orchestrator lock file against double instances (AUDIT #2) [done (check passed)]
+
+Rename already committed; grep and all 12 tests pass

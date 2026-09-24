@@ -571,11 +571,33 @@ const EFFECTIVE_SQL = `(t.priority + (p.priority - 50) / 2 +
 
 // ---------------------------------------------------------------- the orchestrator
 
+// Exclusive per-data-dir lock holding our PID. A lock whose PID is dead (or our own) is stale and taken over.
+function takeLock(file) {
+  for (let i = 0; i < 3; i++) {
+    try {
+      const fd = fs.openSync(file, 'wx');
+      fs.writeSync(fd, String(process.pid));
+      fs.closeSync(fd);
+      process.on('exit', () => { try { if (fs.readFileSync(file, 'utf8').trim() === String(process.pid)) fs.rmSync(file); } catch {} });
+      return { ok: true };
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+    }
+    const pid = Number.parseInt(fs.readFileSync(file, 'utf8'), 10);
+    if (pid > 0 && pid !== process.pid) {
+      try { process.kill(pid, 0); return { ok: false, pid }; } catch (e) { if (e.code === 'EPERM') return { ok: false, pid }; }
+    }
+    fs.rmSync(file, { force: true }); // stale
+  }
+  return { ok: false, pid: 'unknown' };
+}
+
 export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLimits, onSubscription, emitChat, broadcast, convoExists, refreshUsage,
   onCommit = () => {}, projectReady = () => true }) {
   const dir = path.join(dataDir, 'orchestrator');
   const runsDir = path.join(dir, 'runs');
   fs.mkdirSync(runsDir, { recursive: true });
+  const leader = takeLock(path.join(dir, 'lock'));
 
   // Agents and checks get `python`/`pip` as aliases for python3/pip3 when only the latter exist,
   // without touching anything system-wide.
@@ -1132,7 +1154,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // ---- the scheduler (AO2's daemon, as timers inside this process)
   let ticking = false;
   async function tick() {
-    if (ticking) return;
+    if (ticking || !leader.ok) return;
     ticking = true;
     try {
       if (kvGet('paused_all') === '1') return;
@@ -1552,14 +1574,19 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     runSubs.get(taskId).add(ws);
   }
 
-  // ---- start
-  const orphans = run("UPDATE tasks SET status='queued' WHERE status='running'").changes;
-  run("UPDATE runs SET outcome='error', finished_at=:t WHERE finished_at IS NULL", { t: now() });
-  if (orphans) logEvent(`requeued ${orphans} interrupted task(s) after a restart`);
-  setInterval(tick, CFG.pollMs);
-  setTimeout(tick, 5000);
-  // A limit that has passed: capacity is back, so refresh usage for pacing.
-  setInterval(() => { if (!blockedUntil() && kvGet('blocked_until', '0') !== '0') { kvSet('blocked_until', 0); pushState(); refreshUsage?.(); } }, 15000);
+  // ---- start (only the lock holder schedules; a second instance on the same data dir stays inert)
+  if (leader.ok) {
+    const orphans = run("UPDATE tasks SET status='queued' WHERE status='running'").changes;
+    run("UPDATE runs SET outcome='error', finished_at=:t WHERE finished_at IS NULL", { t: now() });
+    if (orphans) logEvent(`requeued ${orphans} interrupted task(s) after a restart`);
+    setInterval(tick, CFG.pollMs);
+    setTimeout(tick, 5000);
+    // A limit that has passed: capacity is back, so refresh usage for pacing.
+    setInterval(() => { if (!blockedUntil() && kvGet('blocked_until', '0') !== '0') { kvSet('blocked_until', 0); pushState(); refreshUsage?.(); } }, 15000);
+  } else {
+    console.warn(`[orchestrator] WARNING: data dir is locked by live process ${leader.pid} (${path.join(dir, 'lock')}); ` +
+      'not requeueing or scheduling tasks in this instance');
+  }
 
   // Work that finished after `since` (epoch seconds), newest first, for "while you were away".
   function finishedSince(since) {

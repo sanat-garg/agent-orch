@@ -49,3 +49,7 @@ fire-and-forget rejections now logged; backstop handler added; AUDIT #4 Fixed
 ## 2026-09-24 23:45 — #20 Rebrand all user-visible names to agent-orch [verify failed (1)]
 
 Command: grep -rniE 'claude[ -]web' public server.mjs github.mjs package.json README.md
+
+## 2026-09-24 23:45 — #20 Rebrand all user-visible names to agent-orch [verify failed (2)]
+
+Command: grep -rniE 'claude[ -]web' public server.mjs github.mjs package.json README.md

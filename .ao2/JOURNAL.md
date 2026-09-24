@@ -25,3 +25,7 @@ Drawer now shows instructions, what happened, then done-when
 ## 2026-09-24 23:38 — #20 Rebrand all user-visible names to agent-orch [verify failed (1)]
 
 Command: grep -rniE 'claude[ -]web' public server.mjs github.mjs package.json README.md
+
+## 2026-09-24 23:38 — #20 Rebrand all user-visible names to agent-orch [verify failed (2)]
+
+Command: grep -rniE 'claude[ -]web' public server.mjs github.mjs package.json README.md

@@ -26,6 +26,7 @@ _Durable knowledge for every agent session: architecture, conventions, decisions
   agents can work on this repo.
 
 ## Gotchas
+- "Done when" checks asserting absence must use `! grep …`: grep exits 1 on no matches, so a bare `grep` check fails exactly when the code is clean.
 - Editing server.mjs or orchestrator.mjs doesn't affect the running app until the owner restarts it.
 - Don't commit macOS `._*` files (they're gitignored).
 - Test instances MUST set `CW_DATA_DIR=$(mktemp -d)`. Without it, a second server on the live data/ requeues and

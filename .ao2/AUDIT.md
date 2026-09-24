@@ -128,3 +128,11 @@ a same-origin request. Caddy's `reverse_proxy` overwrites `X-Forwarded-For`, so 
   `systemctl is-active claude-term` → inactive, `claude-shell` → active). The comment at server.mjs:1 also says
   `/term/`, but Caddy serves `/shell/`.
 - **Fix:** Check `claude-shell` (and maybe `claude-tmux`) and correct the comment.
+
+### 16. [medium] The verifier drops the prose around the check command (orchestrator.mjs:393)
+- **What:** `extractCommand` runs only the first backticked command from "Done when" and ignores the words
+  around it. So "`grep …` prints nothing and `npm test` passes" becomes a bare `grep`, which exits 1 when
+  nothing matches. The check fails exactly when the work is correct (task #20 kept failing this way), and
+  `npm test` never runs.
+- **Fix:** Have the planner write absence checks as one command (`! grep … && npm test`), and/or make
+  `extractCommand` join every backticked command in the text with `&&`.

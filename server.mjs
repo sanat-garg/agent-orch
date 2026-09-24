@@ -11,6 +11,9 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createOrchestrator } from './orchestrator.mjs';
 import { createGitHub } from './github.mjs';
 
+// Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
+process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
+
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DATA = process.env.CW_DATA_DIR ? path.resolve(process.env.CW_DATA_DIR) : path.join(ROOT, 'data');
 const LOGS = path.join(DATA, 'logs');
@@ -225,7 +228,7 @@ function refreshClaudeAuth() {
   });
 }
 const onSubscription = () => claudeAuth.loggedIn && claudeAuth.authMethod === 'claude.ai';
-setInterval(refreshClaudeAuth, 5 * 60e3);
+setInterval(() => refreshClaudeAuth().catch((e) => console.error('[auth] refresh failed', e)), 5 * 60e3);
 
 // ---------- server metrics ----------
 const readText = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } };
@@ -461,10 +464,10 @@ async function refreshUsage(liveQuery) {
 }
 function refreshUsageSoon(liveQuery) {
   clearTimeout(usageTimer);
-  usageTimer = setTimeout(() => refreshUsage(liveQuery), 1500);
+  usageTimer = setTimeout(() => refreshUsage(liveQuery).catch((e) => console.error('[usage] refresh failed', e)), 1500);
 }
-refreshClaudeAuth().then(() => refreshUsage());
-setInterval(() => refreshUsage(), 3 * 60e3);
+refreshClaudeAuth().then(() => refreshUsage()).catch((e) => console.error('[usage] refresh failed', e));
+setInterval(() => refreshUsage().catch((e) => console.error('[usage] refresh failed', e)), 3 * 60e3);
 
 let instance = null;
 fetch('http://169.254.169.254/opc/v2/instance/', { headers: { Authorization: 'Bearer Oracle' }, signal: AbortSignal.timeout(3000) })
@@ -565,8 +568,8 @@ const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
   emitChat: (cid, ev, { persist = true } = {}) => (persist ? emit(cid, ev) : broadcast(cid, ev)),
   broadcast: (msg) => { for (const ws of allClients) send(ws, msg); },
   convoExists: (cid) => !!findConvo(cid),
-  refreshUsage: () => refreshUsage(),
-  onCommit: (dir) => syncGit(dir),
+  refreshUsage: () => refreshUsage().catch((e) => console.error('[usage] refresh failed', e)),
+  onCommit: (dir) => syncGit(dir).catch((e) => console.error('[github] sync failed', dir, e)),
   projectReady: (dir) => gh.status().linked && !!convos.find((c) => c.cwd === dir)?.repo,
 });
 
@@ -595,14 +598,17 @@ async function syncGit(dir, message) {
 }
 // Anything that couldn't be pushed (offline, GitHub down, not linked yet) is retried.
 setInterval(async () => {
-  if (!gh.status().linked && !(await gh.refresh()).linked) return;
-  for (const c of convos) {
-    if (!fs.existsSync(c.cwd)) continue;
-    if (!c.repo) await setupRepo(c);
-    else if (c.git?.error || (await gh.unpushed(c.cwd)) > 0) await syncGit(c.cwd);
-  }
+  try {
+    if (!gh.status().linked && !(await gh.refresh()).linked) return;
+    for (const c of convos) {
+      if (!fs.existsSync(c.cwd)) continue;
+      if (!c.repo) await setupRepo(c);
+      else if (c.git?.error || (await gh.unpushed(c.cwd)) > 0) await syncGit(c.cwd);
+    }
+  } catch (e) { console.error('[github] retry failed', e); }
 }, 3 * 60e3);
-gh.refresh().then((s) => console.log(`[github] ${s.linked ? `linked as ${s.login}` : 'not linked'}`));
+gh.refresh().then((s) => console.log(`[github] ${s.linked ? `linked as ${s.login}` : 'not linked'}`))
+  .catch((e) => console.error('[github] refresh failed', e));
 
 // Messages sent while the planner is still replying wait and go together as the next turn,
 // so two turns never run on the same planner session at once.
@@ -704,7 +710,7 @@ function startRuntime(convo) {
       broadcast(convo.id, { t: 'busy', busy: false });
       broadcastConvos();
     }
-  })();
+  })().catch((e) => console.error('[chat] runtime loop failed', convo.id, e));
 
   runtimes.set(convo.id, rt);
   return rt;
@@ -778,7 +784,8 @@ function handleMessage(convo, rt, m) {
       broadcast(cid, { t: 'busy', busy: false });
       broadcastConvos();
       // GitHub protocol: whatever this reply changed is committed and pushed.
-      syncGit(convo.cwd, `Chat: ${String(rt.lastUserText || 'update').replace(/\s+/g, ' ').slice(0, 72)}`);
+      syncGit(convo.cwd, `Chat: ${String(rt.lastUserText || 'update').replace(/\s+/g, ' ').slice(0, 72)}`)
+        .catch((e) => console.error('[github] sync failed', convo.cwd, e));
       break;
   }
 }
@@ -1019,7 +1026,7 @@ async function handleRequest(req, res) {
       convos.unshift(c);
       saveConvos();
       broadcastConvos();
-      setupRepo(c);
+      setupRepo(c).catch((e) => console.error('[github] setup failed', c.cwd, e));
       return json(res, 200, c);
     } catch (e) { return json(res, 400, { error: e.message }); }
   }
@@ -1160,7 +1167,7 @@ wss.on('connection', (ws, req) => {
       return;
     }
     if (msg.t === 'usage_refresh') {
-      refreshUsage();
+      refreshUsage().catch((e) => console.error('[usage] refresh failed', e));
       return;
     }
     const convo = msg.cid && findConvo(msg.cid);

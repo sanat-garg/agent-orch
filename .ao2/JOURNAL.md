@@ -41,3 +41,7 @@ Command: grep -rniE 'claude[ -]web' public server.mjs github.mjs package.json RE
 ## 2026-09-24 23:39 — #20 Rebrand all user-visible names to agent-orch [failed (verification)]
 
 `grep -rniE 'claude[ -]web' public server.mjs github.mjs package.json README.md` still failing after 4 sessions:
+
+## 2026-09-24 23:40 — #15 Catch unhandled rejections from fire-and-forget calls (AUDIT #4) [done (check passed)]
+
+fire-and-forget rejections now logged; backstop handler added; AUDIT #4 Fixed

@@ -50,6 +50,7 @@ a same-origin request. Caddy's `reverse_proxy` overwrites `X-Forwarded-For`, so 
   `process.on('unhandledRejection')` fallback.
 - **Fix:** Add `.catch((e) => console.error(...))` to these call sites and wrap the interval body in try/catch.
   Consider a logging `unhandledRejection` handler as a backstop.
+- **Fixed** (task #15): `syncGit`/`setupRepo`/`refreshUsage`/`refreshClaudeAuth`/chat-loop fire-and-forget calls now `.catch` and log, the GitHub retry interval body is in try/catch, and a logging `process.on('unhandledRejection')` backstop is installed.
 
 ### 5. [med] The "Answer owner's message" plan task can run at the same time as a live chat planner turn (orchestrator.mjs:1212, :1121)
 - **What:** Plan-kind tasks call `plannerRun`, which resumes `project.chat_session_id`, but `planTurn` doesn't mark

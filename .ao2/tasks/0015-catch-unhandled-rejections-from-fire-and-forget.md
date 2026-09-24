@@ -13,3 +13,7 @@ Fix AUDIT.md item #4 in /home/ubuntu/claude-web/server.mjs. `syncGit(...)` is ca
 ## Done when
 
 `grep -n "unhandledRejection" server.mjs` finds a handler, `npm test` passes, and AUDIT.md marks #4 Fixed
+
+## Result — done (check passed) (2026-09-24 23:40)
+
+AO2-STATUS: done — fire-and-forget rejections now logged; backstop handler added; AUDIT #4 Fixed

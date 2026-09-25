@@ -384,7 +384,14 @@ export function extractTasks(text) {
   try { payload = JSON.parse(m[1]); } catch { return [stripTasksBlock(text), null]; }
   if (Array.isArray(payload)) payload = { tasks: payload };
   const clean = (text.slice(0, m.index) + text.slice(m.index + m[0].length)).trim();
-  const tasks = [];
+  const tasks = [], dropped = [];
+  // An explicit agent paired with another agent's model keeps the agent; the model is stripped with a reason.
+  const fitModel = (agent, model, what) => {
+    const fam = foreignModel(agent, model);
+    if (!fam) return model;
+    dropped.push(`${what}: dropped model ${model} (belongs to ${fam}) for agent ${agent}`);
+    return null;
+  };
   for (const t of payload.tasks || []) {
     if (!t || typeof t !== 'object' || !t.title || !t.prompt) continue;
     const u = String(t.urgency || 'normal').toLowerCase();
@@ -399,6 +406,8 @@ export function extractTasks(text) {
       agent: normalizeAgent(t.agent),
       model: t.model ? String(t.model).trim().slice(0, 100) || null : null,
     });
+    const last = tasks[tasks.length - 1];
+    last.model = fitModel(last.agent, last.model, `task '${last.title}'`);
   }
   const routes = [];
   for (const r of Array.isArray(payload.routes) ? payload.routes : []) {
@@ -409,8 +418,10 @@ export function extractTasks(text) {
       continue;
     }
     const match = String(r.match || '').trim().toLowerCase().slice(0, 100);
-    const agent = normalizeAgent(r.agent), model = r.model ? String(r.model).trim().slice(0, 100) || null : null;
-    if (!match || (!agent && !model)) continue;
+    const agent = normalizeAgent(r.agent);
+    if (!match) continue;
+    const model = fitModel(agent, r.model ? String(r.model).trim().slice(0, 100) || null : null, `route '${match}'`);
+    if (!agent && !model) continue;
     routes.push({ match, agent, model, scope: String(r.scope || '').toLowerCase() === 'global' ? 'global' : 'project',
       note: r.note ? String(r.note).slice(0, 300) : null });
   }
@@ -422,7 +433,7 @@ export function extractTasks(text) {
     if (mode === 'build' || mode === 'maintain') project.mode = mode;
     if (!Object.keys(project).length) project = null;
   }
-  return [clean, { tasks, project, routes }];
+  return [clean, { tasks, project, routes, dropped }];
 }
 
 // ---- routing: which agent/model runs a task
@@ -433,7 +444,17 @@ export function normalizeAgent(name) {
   const id = AGENT_ALIASES[String(name || '').trim().toLowerCase()];
   return id && AGENTS[id] ? id : null;
 }
-const agentForModel = (model) => (model ? Object.keys(AGENTS).find((id) => AGENTS[id].models?.includes(model)) || null : null);
+// The agent a model belongs to: its AGENTS[*].models list, else its family by name; null if unknown.
+const MODEL_FAMILIES = [[/^(gpt|o\d|codex)/i, 'codex'], [/^gemini/i, 'antigravity'], [/^(claude|opus|sonnet|haiku)/i, 'claude']];
+function agentForModel(model) {
+  if (!model) return null;
+  const listed = Object.keys(AGENTS).find((id) => AGENTS[id].models?.includes(model));
+  if (listed) return listed;
+  const fam = MODEL_FAMILIES.find(([re]) => re.test(String(model).trim()))?.[1];
+  return fam && AGENTS[fam] ? fam : null;
+}
+// An explicit agent paired with another agent's model keeps the agent and drops the model (null when they fit).
+const foreignModel = (agent, model) => { const fam = agentForModel(model); return agent && fam && fam !== agent ? fam : null; };
 
 // A route's `match` hits a task whose kind equals it or whose title contains it as a word (plural-tolerant:
 // 'tests' matches "Add a test" and 'refactor' matches "Refactors").
@@ -451,9 +472,12 @@ export function routeMatches(match, task) {
 // logged in falls back to Claude; `fellBack` names it and `reason` says why, so the caller can log it.
 // isAvailable(id) returns true, or false / a reason string.
 export function resolveRoute(task, project, routes = [], isAvailable = agentStatus) {
+  // A model from another agent's family is dropped (`dropped` names it) in favour of the agent's default.
   const pick = (agent, model, source) => {
-    agent = normalizeAgent(agent) || agentForModel(model) || 'claude';
-    return { agent, model: model || (agent === 'claude' ? project?.model || null : null), source };
+    const named = normalizeAgent(agent), dropped = foreignModel(named, model) ? model : null;
+    if (dropped) model = null;
+    agent = named || agentForModel(model) || 'claude';
+    return { agent, model: model || (agent === 'claude' ? project?.model || null : null), source, ...(dropped && { dropped }) };
   };
   let r;
   if (task.agent || task.model) r = pick(task.agent, task.model, 'task');
@@ -465,9 +489,15 @@ export function resolveRoute(task, project, routes = [], isAvailable = agentStat
       : { agent: 'claude', model: project?.model || null, source: 'default' };
   }
   const ok = r.agent === 'claude' || isAvailable(r.agent);
-  if (ok !== true) return { agent: 'claude', model: project?.model || null, source: r.source, fellBack: r.agent, reason: typeof ok === 'string' ? ok : 'not available' };
+  // The fallback always runs Claude's default model, never the unavailable agent's (e.g. gemini-2.5-pro).
+  if (ok !== true) return { agent: 'claude', model: project?.model || null, source: r.source, fellBack: r.agent, reason: typeof ok === 'string' ? ok : 'not available',
+    ...(r.dropped && { dropped: r.dropped }) };
   return r;
 }
+
+// tasks.route_note: why the run didn't use the agent/model its route asked for (null when it did).
+export const routeNote = (r) => [r.dropped && `model ${r.dropped} is not a ${r.fellBack || r.agent} model, used the default`,
+  r.fellBack && `${r.fellBack} ${r.reason}, ran on Claude`].filter(Boolean).join('; ') || null;
 
 // Accepts an epoch (seconds), an ISO timestamp, or everyday phrasing ("tomorrow 6pm", "in 3 days").
 function parseDeadline(value, base = new Date()) {
@@ -1167,6 +1197,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   };
   function routeFor(task, project) {
     const r = resolveRoute(task, project, listRoutes(project.id), agentAvailable);
+    if (r.dropped) logEvent(`model ${r.dropped} is not a ${r.fellBack || r.agent} model; #${task.id || task.kind} uses the agent's default model`, { level: 'warn', projectId: project.id, taskId: task.id || null });
     if (r.fellBack) logEvent(`${r.fellBack} ${/^not /.test(r.reason) ? 'is ' : ''}${r.reason}; #${task.id || task.kind} runs on Claude instead`, { level: 'warn', projectId: project.id, taskId: task.id || null });
     return r;
   }
@@ -1183,6 +1214,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   function queuePayload(project, payload, source) {
     if (!payload) return [];
     if (payload.project) updateProject(project.id, payload.project);
+    for (const d of payload.dropped || []) logEvent(`${source} ${d}`, { level: 'warn', projectId: project.id });
     for (const r of payload.routes || []) applyRoute(project, r);
     const ids = [], batch = [];
     for (const t of payload.tasks) {
@@ -1457,7 +1489,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       else prompt = RESUME;
     }
     const { runId, logPath } = startRun(task.id, task.kind, route.agent);
-    updateTask(task.id, { ran_agent: route.agent, ran_model: route.model || null, route_note: route.fellBack ? `${route.fellBack} ${route.reason}, ran on Claude` : null });
+    updateTask(task.id, { ran_agent: route.agent, ran_model: route.model || null, route_note: routeNote(route) });
     const r = running.get(task.id);
     if (r) r.runId = runId;
     const res = await runAgent({

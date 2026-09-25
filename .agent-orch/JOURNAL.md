@@ -241,3 +241,7 @@ Non-Claude usage limits now block only that agent
 ## 2026-09-25 08:53 — #61 Drop stale codex/agy sessions and retry once without resume (AUDIT #19) [done (check passed)]
 
 Dead codex/agy sessions are now dropped and the turn retried fresh
+
+## 2026-09-25 08:58 — #62 Infer route agent from model family and drop mismatched models (AUDIT #20) [done (check passed)]
+
+Routes infer agents from model family and drop mismatched models

@@ -7,7 +7,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
-import { resolveRoute, routeMatches, normalizeAgent, extractTasks } from '../orchestrator.mjs';
+import { resolveRoute, routeMatches, normalizeAgent, extractTasks, routeNote } from '../orchestrator.mjs';
 import { agentStatus, clearLoginCache } from '../agents.mjs';
 
 const project = { id: 1, model: 'sonnet' };
@@ -51,6 +51,36 @@ test('explicit task fields win over routes', () => {
 test('routes match a task kind; a model-only route keeps Claude', () => {
   assert.deepEqual(resolveRoute({ id: 2, kind: 'reflect', title: 'Reflect: what else should be done?' }, project, routes, all),
     { agent: 'claude', model: 'opus', source: 'global', routeId: 5 });
+});
+
+test('a model not in any list implies its agent by family; a foreign model is dropped', () => {
+  const gem = [{ id: 7, project_id: null, match: 'ui', agent: null, model: 'gemini-2.5-pro' }];
+  assert.deepEqual(resolveRoute(task('Polish the UI'), project, gem, all),
+    { agent: 'antigravity', model: 'gemini-2.5-pro', source: 'global', routeId: 7 });
+  // With antigravity unavailable, Claude runs its own default, never gemini-2.5-pro.
+  const r = resolveRoute(task('Polish the UI'), project, gem, (id) => id !== 'antigravity');
+  assert.deepEqual(r, { agent: 'claude', model: 'sonnet', source: 'global', fellBack: 'antigravity', reason: 'not available' });
+  assert.equal(resolveRoute(task('x', { model: 'o3' }), project, [], all).agent, 'codex');
+  assert.equal(resolveRoute(task('x', { model: 'claude-sonnet-4' }), project, [], all).agent, 'claude');
+  // codex + opus → codex on its default model, noted.
+  const m = resolveRoute(task('x', { agent: 'codex', model: 'opus' }), project, [], all);
+  assert.deepEqual(m, { agent: 'codex', model: null, source: 'task', dropped: 'opus' });
+  assert.equal(routeNote(m), 'model opus is not a codex model, used the default');
+  assert.equal(routeNote({ agent: 'claude', fellBack: 'codex', reason: 'not installed' }), 'codex not installed, ran on Claude');
+  assert.equal(routeNote({ agent: 'claude', model: 'sonnet' }), null);
+  assert.deepEqual(resolveRoute(task('x', { agent: 'claude', model: 'gemini-2.5-pro' }), project, [], all),
+    { agent: 'claude', model: 'sonnet', source: 'task', dropped: 'gemini-2.5-pro' });
+});
+
+test('extractTasks strips a model that belongs to another agent, with a reason', () => {
+  const block = { tasks: [{ title: 'T', prompt: 'p', agent: 'codex', model: 'opus' }],
+    routes: [{ match: 'ui', agent: 'codex', model: 'gemini-2.5-pro' }, { match: 'docs', model: 'gemini-2.5-pro' }] };
+  const [, payload] = extractTasks(`\`\`\`agent-orch-tasks\n${JSON.stringify(block)}\n\`\`\``);
+  assert.equal(payload.tasks[0].agent, 'codex');
+  assert.equal(payload.tasks[0].model, null);
+  assert.deepEqual(payload.routes.map((r) => [r.match, r.agent, r.model]), [['ui', 'codex', null], ['docs', null, 'gemini-2.5-pro']]);
+  assert.equal(payload.dropped.length, 2);
+  assert.match(payload.dropped[1], /route 'ui': dropped model gemini-2.5-pro \(belongs to antigravity\) for agent codex/);
 });
 
 test('an unavailable agent falls back to Claude and says which', () => {

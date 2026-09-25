@@ -13,3 +13,7 @@ Fix AUDIT #20 in .agent-orch/AUDIT.md (read it first). In orchestrator.mjs, `age
 ## Done when
 
 `node --test test/routing.test.mjs` passes and `npm test` passes
+
+## Result — done (check passed) (2026-09-25 08:58)
+
+AGENT-ORCH-STATUS: done — Routes infer agents from model family and drop mismatched models

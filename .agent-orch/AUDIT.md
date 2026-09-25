@@ -202,6 +202,7 @@ tasks during a chat turn); `applyRoute` upsert/delete; chat delete mid-turn (`em
 - **Fix:** Infer the agent from the model's family (`/^(gpt|o\d|codex)/` → codex, `/^gemini/` → antigravity,
   `/^(claude|opus|sonnet|haiku)/` → claude) when it isn't listed, and drop a model that clearly belongs to another
   agent (log it); have `parseTasksBlock` reject such routes too.
+- **Fixed** (task #62): `agentForModel` falls back to the model family (gpt/o\d/codex, gemini, claude/opus/sonnet/haiku); `resolveRoute` drops a foreign model for an explicit agent (`dropped`, logged, in route_note), the Claude fallback always uses project.model, and `extractTasks` strips such models from tasks/routes (`payload.dropped`, logged by `queuePayload`).
 
 ### 21. [low] CLI adapters leave background processes running after a normal exit (agents.mjs:222-232)
 - **What:** `spawnJsonl` only kills the process group on abort or `stopOn`. When codex/agy exits normally, anything

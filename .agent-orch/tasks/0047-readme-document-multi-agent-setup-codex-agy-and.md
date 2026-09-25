@@ -13,3 +13,7 @@ README.md has no mention of the multi-agent feature (brief goal 5). Add a '## Co
 ## Done when
 
 `grep -q '^## Coding agents' README.md && grep -q 'codex login' README.md && grep -qi 'route' README.md`
+
+## Result — done (2026-09-25 04:03)
+
+AGENT-ORCH-STATUS: done — README documents coding agents, logins, billing guards, routing, fallback

@@ -125,6 +125,53 @@ Installs that predate the rename live in `/home/ubuntu/claude-web` and run the u
 can still resume. Finally it starts the new units and prints their status. It is safe to re-run. Start with `--dry-run` to print every
 action without doing it. Because it restarts the app, don't run it from inside an agent-orch chat or terminal.
 
+## Coding agents
+
+Chats and orchestrator tasks can run on three coding agent CLIs. The adapters live in `agents.mjs`, and
+research notes on each CLI are in `.agent-orch/AGENTS.md`.
+
+| Agent | Binary | Install | Subscription login (once, over SSH or `/shell/`) |
+|---|---|---|---|
+| Claude Code (default) | `~/.local/bin/claude` | see Requirements | `claude`, then `/login` |
+| OpenAI Codex CLI | `codex` on `PATH` | `sudo npm i -g @openai/codex` | `codex login --device-auth`, then open the URL and enter the code. You may first need to enable device code authorization for Codex in ChatGPT's security settings. `codex login status` should say "Logged in using ChatGPT". |
+| Google Antigravity CLI | `~/.local/bin/agy` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | run `agy` with no arguments, open the Google OAuth URL it prints, sign in, and paste the code back |
+
+**Subscription only, never API keys.** Each adapter removes its billing variables from the environment
+before starting the CLI:
+
+- Claude: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK|VERTEX|FOUNDRY`.
+- Codex: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_ORG_ID`, `OPENAI_ORGANIZATION`, `OPENAI_PROJECT_ID`,
+  `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `CODEX_AUTH`, `CODEX_HOME` and every `AZURE_OPENAI_*`. Every run also
+  passes `-c forced_login_method="chatgpt"`, and an API-key login counts as logged out.
+- Antigravity: `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_GEMINI_BASE_URL`, `GOOGLE_GENAI_USE_VERTEXAI|ENTERPRISE|GCA`,
+  `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_CLOUD_PROJECT(_ID)`, `GOOGLE_CLOUD_LOCATION`, `AGY_ADC_AUTH` and
+  `AGY_BUSINESS_PAYGO_TIER`. A run is refused if `~/.gemini/antigravity-cli/settings.json` sets
+  `"modelProvider": "gemini"` (API-key mode).
+
+**Chat picker.** The model menu in a chat is grouped by agent (fed by `GET /api/agents`). Pick an agent's
+default model or a specific one. Groups for agents that aren't installed or logged in are disabled and show
+why, including the login command. Non-Claude chats run one headless CLI turn per message and resume the
+agent's own session. They have no permission prompts. Orchestrator mode always plans on Claude.
+
+**Routing rules.** Tell the planner in chat, for example "use codex for tests" or "use gemini-3.8-flash-high
+for UI work". It saves a rule with a `match` (a task kind, `work`, `reflect` or `plan`, or a keyword in the
+task title), an agent and/or model, and a scope: this project (default) or all projects. A new rule with the
+same match and scope replaces the old one. For each task the orchestrator picks, in order:
+
+1. the task's own agent/model, if the planner set one;
+2. the first matching project route;
+3. the first matching global route;
+4. Claude on the project's model.
+
+The planner itself always runs on Claude (a `plan` route only changes its model). Rules are listed in the
+orchestrator bar under **Settings → Routing rules**, each with a **Delete** button. You can also ask the
+planner to remove one.
+
+**Fallback.** If the picked agent isn't installed or isn't logged in, the task runs on Claude instead and the
+reason is logged. The Routing rules list marks such a rule "not logged in, falls back to Claude" (or "not
+installed"). Login status is checked at most once a minute, so after signing in it can take a minute to be
+picked up. Each task shows the agent and model its latest run used.
+
 ## data/
 
 All runtime state lives in `data/` (or `CW_DATA_DIR`). Files are written with mode `0600`.

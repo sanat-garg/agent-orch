@@ -173,3 +173,7 @@ runCheck now honours task cancellation and kills its process group
 ## 2026-09-25 04:02 — #46 Planner-busy guard so plan tasks and chat planner turns never overlap (AUDIT #5) [done (check passed)]
 
 Plan tasks and chat planner turns no longer overlap; test added
+
+## 2026-09-25 04:03 — #47 README: document multi-agent setup (Codex, agy) and routing rules [done]
+
+README documents coding agents, logins, billing guards, routing, fallback

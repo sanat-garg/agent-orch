@@ -179,6 +179,32 @@ reason is logged. The Routing rules list marks such a rule "not logged in, falls
 installed"). Login status is checked at most once a minute, so after signing in it can take a minute to be
 picked up. Each task shows the agent and model its latest run used.
 
+## Screenshots
+
+`bin/shot.mjs` screenshots a page with Playwright's Chromium (`playwright-core` is pinned to the version
+whose Chromium build is cached in `~/.cache/ms-playwright`; run `npx playwright-core install chromium` if it
+is missing):
+
+```sh
+node ~/agent-orch/bin/shot.mjs <url> [out.png] [--full] [--width=1280] [--height=800] [--mobile] [--wait=ms] [--cookie=name=value]
+```
+
+Without `out.png` it saves to `.agent-orch/shots/<timestamp>-<slug>.png` in the current directory and prints
+the path. Every image an agent saves under a project's `.agent-orch/shots/` shows up in that chat or task,
+and the worker and chat prompts tell agents to take before/after shots whenever a change is visual.
+
+To shoot agent-orch's own logged-in pages, start a test server with a temp data dir and mint a session
+in it (never point this at the live `data/`):
+
+```sh
+export CW_DATA_DIR=$(mktemp -d) TOKEN=$(openssl rand -hex 32)
+echo "{\"$TOKEN\":{\"exp\":9999999999999,\"remember\":true}}" > $CW_DATA_DIR/sessions.json
+PORT=3999 node server.mjs &
+CW_SHOT_COOKIE=$TOKEN node bin/shot.mjs http://127.0.0.1:3999/
+```
+
+`CW_SHOT_COOKIE` takes `name=value`, or a bare token meaning `cw_session=<token>`.
+
 ## data/
 
 All runtime state lives in `data/` (or `CW_DATA_DIR`). The JSON state files (`auth.json`, `sessions.json`,

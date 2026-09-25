@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { WebSocketServer } from 'ws';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { createOrchestrator, parseJsonl } from './orchestrator.mjs';
+import { createOrchestrator, parseJsonl, SHOT_HINT } from './orchestrator.mjs';
 import { createGitHub } from './github.mjs';
 import { retireRuntime, chatIdle, whenIdle } from './runtimes.mjs';
 import { AGENTS, runAgentCli, clearLoginCache, isMissingSession } from './agents.mjs';
@@ -987,6 +987,7 @@ function chatSystemAppend(convo) {
 When you learn a durable fact a future session needs, update .agent-orch/CONTEXT.md in a line or two (edit existing lines; it is not a log).
 After each of your replies, changes are committed and pushed to the project's GitHub repo automatically, so don't run git commit or git push yourself.
 This is the owner's disposable server and you have full access: run any command without asking, and install whatever you need (passwordless sudo, e.g. \`sudo apt-get install -y …\`, plus npm and pip).
+${SHOT_HINT}
 
 Current .agent-orch/BRIEF.md:
 ${mem.brief || '(empty)'}

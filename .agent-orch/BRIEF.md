@@ -24,6 +24,18 @@ limits get used around the clock.
    records that as routing rules. Each task then runs on the agent and model its rule picks. Every agent must use
    the owner's subscription login (ChatGPT / Google account), never a paid API key, just like Claude.
 
+6. Mobile-first PWA (owner, 2026-09-25): agent-orch saved to the iPhone home screen must feel like a native app,
+   good enough that the owner prefers it to desktop. Follow Apple's HIG via the apple-design skill
+   (~/.claude/skills/apple-design/SKILL.md and references/): safe areas, standalone display, 44pt touch targets,
+   keyboard-aware composer, sheets instead of popovers, and smooth performance on iOS Safari.
+7. Honest data: model selectors list only the models each CLI actually reports, never hardcoded guesses. Each
+   agent's rate limits are fully independent: one agent's limit never blocks or mislabels another's.
+8. Delegation policy (owner, 2026-09-25): a queued task may be delegated to another agent/model that still has
+   usage available and whose Artificial Analysis metrics (Coding Index, Agentic Index, Terminal-Bench, SciCode,
+   etc.) are comparable. Reflection-generated tasks: delegation is allowed automatically. Tasks from the owner's
+   chat: delegate only if that chat message was sent with "Auto Delegate" chosen in the model selector. If the
+   owner picked a specific model (e.g. Opus), never swap it for a "comparable" one.
+
 ## Constraints & Preferences
 - Chat and agents must run on the Claude subscription, never on API credits (see API_ENV stripping in
   server.mjs). Never weaken that.

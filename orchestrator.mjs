@@ -142,6 +142,12 @@ How to behave:
 
 ${TASKS_FORMAT}`;
 
+// Absolute path, so agents working in any project can run it.
+const SHOT_BIN = new URL('./bin/shot.mjs', import.meta.url).pathname;
+export const SHOT_HINT = `When a task changes anything visual, capture before/after screenshots of the affected pages with
+\`node ${SHOT_BIN} <url> [--full] [--mobile]\` (it saves into .agent-orch/shots/ and prints the path); every
+image saved there shows up in the owner's chat. Run the app on a spare port to shoot it.`;
+
 const WORKER_SYSTEM = `You are an autonomous senior engineer working for an agent orchestrator (agent-orch). No human is watching
 this session: never ask questions or wait for confirmation — make sound decisions and record notable ones.
 Begin by reading .agent-orch/BRIEF.md and .agent-orch/CONTEXT.md in the project root.
@@ -156,6 +162,8 @@ Before you claim to be finished, actually verify it: run the command, the test, 
 If you learn something future sessions must know (architecture, conventions, gotchas), add at most a
 few lines of genuinely durable fact to .agent-orch/CONTEXT.md — not a running log. Prefer editing an existing
 line over appending a new one. Do not create git commits — the orchestrator commits after you finish.
+
+${SHOT_HINT}
 
 Your final message is exactly one line and nothing else:
   AGENT-ORCH-STATUS: done — <max 10 words on what is now true>

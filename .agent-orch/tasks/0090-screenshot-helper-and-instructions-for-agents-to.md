@@ -13,3 +13,7 @@ Make screenshots easy and automatic for agents. 1) Add bin/shot.mjs: `node bin/s
 ## Done when
 
 `node bin/shot.mjs http://127.0.0.1:<test-port>/login /tmp/shot-check.png` exits 0 and /tmp/shot-check.png is a valid PNG (`file /tmp/shot-check.png` says PNG image data), and `npm test` passes
+
+## Result — done (2026-09-25 13:24)
+
+AGENT-ORCH-STATUS: done — bin/shot.mjs captures PNGs; prompts and README updated

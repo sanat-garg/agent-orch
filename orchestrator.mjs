@@ -597,6 +597,24 @@ function detectEnvironment(shimDir, basePath) {
   return { have, missing };
 }
 
+// ---------------------------------------------------------------- usage-limit reset
+
+// When the current usage limit really resets (epoch s), for display. Most specific first: the rejected limit's
+// own row (limit_type = blocked_reason), then the latest reset among exhausted windows (SDK 'rejected' rows and
+// /usage windows at 100%), then blocked_until minus the buffer if it came from a reported reset. Otherwise only
+// the backoff retry time is known: { at: blockedUntil, known: false }.
+export function limitReset(limits, { reason, blockedUntil, known, bufferSec = 0, t }) {
+  const live = (limits || []).filter((l) => l.resets_at && l.resets_at > t);
+  const own = live.find((l) => l.limit_type === reason);
+  if (own) return { at: own.resets_at, known: true };
+  const hit = live.filter((l) => l.status === 'rejected' || l.utilization >= 1);
+  if (hit.length) return { at: Math.max(...hit.map((l) => l.resets_at)), known: true };
+  if (known) return { at: blockedUntil - bufferSec, known: true };
+  return { at: blockedUntil, known: false };
+}
+// Server-side time for log lines: includes the date and timezone, since the viewer may be elsewhere.
+const fmtAt = (sec) => new Date(sec * 1000).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
+
 // ---------------------------------------------------------------- pacing (from agent-orch budget.py)
 
 const WEEK = 7 * 86400, FIVE_H = 5 * 3600, STALE = 15 * 60;
@@ -974,8 +992,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         kvSet('unknown_limit_streak', streak + 1);
       }
       kvSet('blocked_until', resetsAt + CFG.resetBufferSec);
+      kvSet('blocked_known', res.resetsAt ? 1 : 0);
       kvSet('blocked_reason', res.limitType || 'usage limit');
-      logEvent(`usage limit reached (${res.limitType || 'unknown'}); resuming at ${new Date((resetsAt + CFG.resetBufferSec) * 1000).toLocaleTimeString()}`, { level: 'warn' });
+      logEvent(`usage limit reached (${res.limitType || 'unknown'}); ${res.resetsAt ? 'resuming' : 'reset time unknown, retrying'} at ${fmtAt(resetsAt + CFG.resetBufferSec)}`, { level: 'warn' });
       pushState();
     } else if (res.outcome === 'ok') {
       kvSet('unknown_limit_streak', 0);
@@ -1233,7 +1252,12 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const blocked = blockedUntil();
     if (blocked) {
       deferMessage(project.id, text);
-      emitChat(convo.id, { t: 'notice', text: `Saved. You're at your usage limit until ${new Date(blocked * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}; the orchestrator answers then.` });
+      syncUsageLimits();
+      const r = limitReset(limitsRows(), { reason: kvGet('blocked_reason'), blockedUntil: blocked, known: kvGet('blocked_known', '0') === '1', bufferSec: CFG.resetBufferSec, t: now() });
+      // The browser replaces {until} with `until` in its own timezone.
+      emitChat(convo.id, { t: 'notice', until: r.at, untilKnown: r.known, text: r.known
+        ? "Saved. You're at your usage limit until {until}; the orchestrator answers then."
+        : "Saved. You're at your usage limit; the reset time isn't known yet. Retrying around {until}." });
       return;
     }
     const ac = new AbortController();
@@ -1446,11 +1470,12 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (res.outcome === 'rate_limited') {
       requeueIfRunning(tid, { session_id: res.sessionId || task.session_id });
       const u = blockedUntil();
-      return logEvent(`⏸ #${tid} hit the ${res.limitType || 'usage'} limit; resumes ${u ? new Date(u * 1000).toLocaleTimeString() : 'soon'}`, { level: 'warn', projectId: pid, taskId: tid });
+      return logEvent(`⏸ #${tid} hit the ${res.limitType || 'usage'} limit; resumes ${u ? fmtAt(u) : 'soon'}`, { level: 'warn', projectId: pid, taskId: tid });
     }
     if (res.outcome === 'auth_error') {
       requeueIfRunning(tid);
       kvSet('blocked_until', now() + 600);
+      kvSet('blocked_known', 0);
       kvSet('blocked_reason', 'Claude Code is not signed in');
       pushState();
       return logEvent('Claude Code is not authenticated; rechecking every 10 min', { level: 'error', projectId: pid, taskId: tid });

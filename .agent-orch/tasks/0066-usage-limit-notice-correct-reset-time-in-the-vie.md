@@ -12,3 +12,7 @@ Bug: when the owner sends a chat message while rate-limited, orchestrator.mjs pl
 ## Done when
 
 `npm test` passes with tests for reset selection, and `! grep -n "toLocaleTimeString" orchestrator.mjs` finds no user-facing server-side time formatting in the limit notice
+
+## Result — done (check passed) (2026-09-25 08:26)
+
+AGENT-ORCH-STATUS: done — Usage-limit notices show the real reset in the viewer's timezone; tests pass

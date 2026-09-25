@@ -875,7 +875,7 @@ async function agentChatTurn(convo, text) {
     }
     if (res.sessionId) convo.agentSession = { agent, id: res.sessionId };
     if (res.outcome === 'auth_error') emit(cid, { t: 'error', text: `${a.label} is not signed in on this server. Sign in from the Terminal: ${a.login}` });
-    else if (res.outcome === 'rate_limited') emit(cid, { t: 'error', text: `${a.label} hit its usage limit${res.resetsAt ? `; it resets ${new Date(res.resetsAt * 1000).toLocaleString()}` : ''}.` });
+    else if (res.outcome === 'rate_limited') emit(cid, { t: 'error', text: `${a.label} hit its usage limit${res.resetsAt ? '; it resets {until}' : ''}.`, ...(res.resetsAt && { until: res.resetsAt, untilKnown: true }) });
     else if (res.outcome === 'aborted') emit(cid, { t: 'notice', text: 'Interrupted' });
     else if (res.outcome !== 'ok') emit(cid, { t: 'error', text: `${a.label} failed: ${String(res.text || res.stderr || res.outcome).trim().slice(-600)}` });
     emit(cid, { t: 'result', ok: res.outcome === 'ok', text: res.outcome === 'ok' ? '' : res.outcome, ms: Date.now() - started, turns: res.numTurns });

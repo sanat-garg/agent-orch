@@ -213,3 +213,7 @@ Update banner with Restart-when-idle button added; tests pass
 ## 2026-09-25 08:23 — #65 Header repo link: derive from the real git remote, not cached convo.repo [done (check passed)]
 
 Repo link now comes from git origin; tests pass
+
+## 2026-09-25 08:26 — #66 Usage-limit notice: correct reset time in the viewer's timezone [done (check passed)]
+
+Usage-limit notices show the real reset in the viewer's timezone; tests pass

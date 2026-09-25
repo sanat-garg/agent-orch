@@ -26,6 +26,8 @@ _Durable knowledge for every agent session: architecture, conventions, decisions
   Orchestrator scheduling tests (planner-guard, scheduling, drain) run createOrchestrator in a child process with a fake `query`
   and rows inserted via node:sqlite before the first tick (5 s); a five_hour limit at 95% from `getLimits` forces one slot.
 
+- User-visible times: chat notice/error events carry `until` (epoch s) and a `{until}` token in `text`; app.js `withUntil` formats it in the browser's timezone. Don't format times on the server (UTC) except in log lines (`fmtAt`: date+tz). `limitReset()` picks the displayed reset (kv `blocked_known` = reset was reported, not a backoff guess).
+
 ## Decisions
 - 2026-09-24: The repo moved to sanat-garg/agent-orch with a fresh single-commit history, because the old
   history contained data/auth.json. The old history is kept locally only, on branch `backup/pre-agent-orch`.

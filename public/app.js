@@ -754,11 +754,11 @@ function renderEvent(ev, replay) {
     }
     case 'error':
       endLive();
-      add(el('div', 'notice error', ev.text));
+      add(el('div', 'notice error', withUntil(ev)));
       break;
     case 'notice':
       endLive();
-      add(el('div', 'notice', ev.text));
+      add(el('div', 'notice', withUntil(ev)));
       break;
     case 'text_end':
       // The planner's reply was only a tasks block: drop the empty streaming bubble.
@@ -1759,6 +1759,10 @@ function fmtResetAt(iso) {
   const day = t.toDateString() === new Date().toDateString() ? '' : `${t.toLocaleDateString([], { weekday: 'short' })} `;
   const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600), m = Math.floor((secs % 3600) / 60);
   return `${day}${clock} · in ${d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`}`;
+}
+// A notice's {until} (epoch s from the server) in this browser's timezone: "Fri 1:50 PM (in 5h 30m)".
+function withUntil(ev) {
+  return ev.until ? ev.text.replace('{until}', fmtResetAt(ev.until * 1000).replace(/^(.+) · (.+)$/, '$1 ($2)')) : ev.text;
 }
 function renderUsage(fresh = false) {
   const u = M.usage;

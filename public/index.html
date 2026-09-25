@@ -24,14 +24,6 @@
       New project
     </button>
     <nav class="convo-list" id="convoList" aria-label="Chats"></nav>
-    <section class="conns" id="conns" aria-labelledby="connsTitle">
-      <button type="button" class="cn-head" id="connsToggle" aria-expanded="true" aria-controls="connsList">
-        <span class="ms-title" id="connsTitle">Connections</span>
-        <span class="cn-sum" id="connsSum"></span>
-        <svg class="caret" viewBox="0 0 24 24" width="12" height="12"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
-      </button>
-      <div class="cn-list" id="connsList"></div>
-    </section>
     <div class="mini-stats">
       <button class="ms-server" id="miniStats" aria-haspopup="dialog" title="Open server details">
         <span class="ms-head">
@@ -55,9 +47,11 @@
         <div class="ms-note" id="usNote">Checking plan limits…</div>
       </div>
     </div>
-    <div class="side-foot">
-      <span class="dot" id="connDot" title="Connecting"></span>
-      <span class="host" id="connText">Connecting…</span>
+    <div class="side-foot-row">
+      <button type="button" class="side-foot" id="connFoot" aria-haspopup="dialog" title="Open connections">
+        <span class="dot" id="connDot"></span>
+        <span class="host" id="connText">Connecting…</span>
+      </button>
       <button class="link-btn" id="logout">Sign out</button>
     </div>
   </aside>
@@ -268,6 +262,25 @@
       </button>
     </div>
     <div class="aw-body" id="awayBody"></div>
+  </div>
+</div>
+
+<div class="modal" id="connsModal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-panel conns" role="dialog" aria-modal="true" aria-labelledby="connsTitle">
+    <div class="m-head">
+      <div>
+        <h2 id="connsTitle">Connections</h2>
+        <p class="m-sub">The server link and the agents this app signs in to.</p>
+      </div>
+      <button class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="cn-body">
+      <div class="cn-row cn-app" id="connsApp"></div>
+      <div class="cn-list" id="connsList"></div>
+    </div>
   </div>
 </div>
 

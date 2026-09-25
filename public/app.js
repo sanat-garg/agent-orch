@@ -1087,7 +1087,7 @@ $('model').addEventListener('change', () => {
 // ---------- agent + model picker (options come from the server's agent registry) ----------
 let AGENT_LIST = [];
 const MODEL_NAMES = { opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku' };
-const CONNECT_PICK = '__connect'; // the picker's last option: opens the sidebar's Connections panel
+const CONNECT_PICK = '__connect'; // the picker's last option: opens the Connections window
 const pickVal = ({ agent, model }) => `${agent || 'claude'}|${model || ''}`;
 const parsePick = (v) => (v.includes('|') ? { agent: v.slice(0, v.indexOf('|')), model: v.slice(v.indexOf('|') + 1) } : { agent: 'claude', model: v });
 const shortLabel = (agent) => (AGENT_LIST.find((a) => a.id === agent)?.label || agent).replace(/ (Code|CLI)$/, '');
@@ -1107,7 +1107,7 @@ function renderAgentPicker() {
   sel.textContent = '';
   for (const a of AGENT_LIST) {
     const g = document.createElement('optgroup');
-    g.label = !a.available ? `${a.label} (not installed)` : a.loggedIn === false ? `${a.label} (sign in: Connections in the sidebar)` : a.label;
+    g.label = !a.available ? `${a.label} (not installed)` : a.loggedIn === false ? `${a.label} (sign in via Connections)` : a.label;
     g.disabled = !(a.available && a.loggedIn !== false);
     const def = el('option', '', `${a.label} · default model`);
     def.value = pickVal({ agent: a.id });
@@ -1333,14 +1333,14 @@ async function renderRecentProjects() {
 }
 
 // ---------- WebSocket ----------
-let retry = 0;
+let retry = 0; // failed attempts since the last open: 0 before the first open reads as "Connecting…"
+const CONN = { list: [], sig: '', drafts: {}, sent: {}, dismissed: {}, justDone: {}, lastFocus: null };
 function connect() {
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
   state.ws = ws;
   ws.onopen = () => {
     retry = 0;
-    $('connDot').className = 'dot on';
-    $('connText').textContent = 'Connected';
+    renderConnFoot();
     send({ t: 'open', cid: state.cid });
     pollUpdates();
     refreshConnections();
@@ -1348,13 +1348,12 @@ function connect() {
     if (O.drawer) { send({ t: 'owatch', taskId: O.drawer, on: true }); loadDetail(); }
   };
   ws.onclose = (e) => {
-    $('connDot').className = 'dot off';
-    $('connText').textContent = 'Reconnecting…';
     updateLive();
     if (e.code === 4001) { location.href = '/login'; return; }
     // A failed upgrade usually means the login expired; check before retrying.
     fetch('/api/status').then((r) => { if (r.status === 401) location.href = '/login'; }).catch(() => {});
     setTimeout(connect, Math.min(1000 * 2 ** retry++, 15000));
+    renderConnFoot();
   };
   ws.onmessage = (m) => onServer(JSON.parse(m.data));
 }
@@ -2027,6 +2026,7 @@ function onOrch(msg) {
 
 // ----- the status bar above the chat
 function renderOrchBar() {
+  renderConnFoot(); // routing rules decide whether a signed-out agent warrants the footer's warning
   const on = $('mode').value === 'orchestrator';
   $('orchBar').hidden = !on;
   if (!on) return;
@@ -2137,7 +2137,7 @@ function closeTask() {
 $('drClose').addEventListener('click', closeTask);
 $('drawerScrim').addEventListener('click', closeTask);
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && O.drawer && $('pickerModal').hidden && $('serverModal').hidden && !e.target.closest?.('.dr-due')) {
+  if (e.key === 'Escape' && O.drawer && $('pickerModal').hidden && $('serverModal').hidden && $('connsModal').hidden && !e.target.closest?.('.dr-due')) {
     e.stopImmediatePropagation();
     closeTask();
   }
@@ -2476,7 +2476,6 @@ async function linkGitHub() {
 }
 
 // ---------- Connections (agent CLI and GitHub sign-ins; the server runs each CLI's login in tmux) ----------
-const CONN = { list: [], sig: '', drafts: {}, sent: {}, dismissed: {}, justDone: {}, collapsed: store.get('cw.connsCollapsed') === '1' };
 const CONN_ICONS = {
   claude: '<path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6L5.6 18.4" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>',
   codex: '<path d="M12 2.8l8 4.6v9.2l-8 4.6-8-4.6V7.4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M9 10l2.5 2L9 14M13 14.5h3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
@@ -2502,7 +2501,6 @@ function applyConnections(list) {
       CONN.justDone[c.id] = true;
       setTimeout(() => { delete CONN.justDone[c.id]; renderConnections(true); }, 6000);
     }
-    if (c.login?.state === 'waiting' && CONN.collapsed) setConnsCollapsed(false);
     if (p && (p.signedIn !== c.signedIn || p.installed !== c.installed)) {
       if (c.id === 'github') refreshGitHub().then(() => { if (!$('pickerModal').hidden) renderGhRow(); });
       else agentsChanged = true;
@@ -2512,24 +2510,63 @@ function applyConnections(list) {
   if (agentsChanged) api('/api/agents').then((d) => { AGENT_LIST = d.agents || []; renderAgentPicker(); }).catch(() => {});
   renderConnections();
 }
-function setConnsCollapsed(v) {
-  CONN.collapsed = v;
-  store.set('cw.connsCollapsed', v ? '1' : '0');
-  $('conns').classList.toggle('collapsed', v);
-  $('connsToggle').setAttribute('aria-expanded', String(!v));
+// The sidebar footer: server link plus a compact sign-in summary; warns when a routed agent is signed out.
+function routedAgents() {
+  const ids = new Set();
+  for (const r of O.project?.routes || []) {
+    const id = r.agent || AGENT_LIST.find((a) => a.models.includes(r.model))?.id;
+    if (id && id !== 'claude') ids.add(id);
+  }
+  return ids;
 }
-$('connsToggle').addEventListener('click', () => setConnsCollapsed(!CONN.collapsed));
-setConnsCollapsed(CONN.collapsed);
-// From the model picker and routing hints: bring the panel into view (opening the sidebar on mobile).
+function renderConnFoot() {
+  const live = state.ws?.readyState === 1, list = CONN.list, routed = routedAgents();
+  const out = list.filter((c) => routed.has(c.id) && !c.signedIn);
+  const n = list.filter((c) => c.signedIn).length;
+  const text = !live ? (retry ? 'Offline · reconnecting…' : 'Connecting…') : list.length ? `Connected · ${n}/${list.length} signed in` : 'Connected';
+  const cls = !live ? (retry ? 'off' : '') : out.length ? 'warn' : 'on';
+  $('connDot').className = `dot ${cls}`;
+  $('connText').textContent = text;
+  $('connFoot').classList.toggle('warn', live && out.length > 0);
+  $('connFoot').title = out.length ? `Routing rules use ${out.map((c) => c.label).join(', ')}, which ${out.length > 1 ? 'are' : 'is'} signed out` : 'Open connections';
+  const app = $('connsApp');
+  app.textContent = '';
+  const main = el('div', 'cn-main');
+  const info = el('div', 'cn-info');
+  info.append(el('span', 'cn-label', 'agent-orch server'));
+  const st = el('span', 'cn-status');
+  st.append(el('span', `dot ${!live && retry ? 'off' : live ? 'on' : ''}`), el('span', 'cn-st', `${live ? 'Live' : retry ? 'Offline, reconnecting…' : 'Connecting…'} · ${location.host}`));
+  info.append(st);
+  const icon = el('span');
+  icon.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><rect x="4" y="13" width="16" height="7" rx="2" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
+  main.append(icon.firstChild, info);
+  app.append(main);
+}
+// The footer, the model picker's "sign in" option and routing hints open this window (optionally at one agent).
 function openConnections(id) {
-  $('app').classList.add('side-open');
-  setConnsCollapsed(false);
-  const row = (id && $('conns').querySelector(`[data-conn="${id}"]`)) || $('conns');
-  row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  closeSidebar();
+  if ($('connsModal').hidden) CONN.lastFocus = document.activeElement;
+  $('connsModal').hidden = false;
+  renderConnFoot();
+  renderConnections(true);
+  refreshConnections();
+  $('connsModal').querySelector('[data-close].icon-btn').focus();
+  const row = id && $('connsList').querySelector(`[data-conn="${id}"]`);
+  if (!row) return;
+  row.scrollIntoView({ block: 'nearest' });
   row.classList.remove('flash');
   void row.offsetWidth;
   row.classList.add('flash');
 }
+function closeConnections() {
+  $('connsModal').hidden = true;
+  CONN.lastFocus?.focus?.();
+}
+$('connFoot').addEventListener('click', () => openConnections());
+$('connsModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeConnections(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('connsModal').hidden) { e.stopImmediatePropagation(); closeConnections(); }
+}, true);
 async function connAction(c, action, body) {
   try {
     const r = await api(`/api/connections/${c.id}/${action}`, 'POST', body);
@@ -2633,7 +2670,7 @@ function renderConnections(force) {
   CONN.sig = sig;
   const box = $('connsList'), focused = document.activeElement?.dataset?.connInput;
   box.textContent = '';
-  $('connsSum').textContent = list.length ? `${list.filter((c) => c.signedIn).length}/${list.length}` : '';
+  renderConnFoot();
   for (const c of list) {
     const row = el('div', 'cn-row');
     row.dataset.conn = c.id;

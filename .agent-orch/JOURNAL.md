@@ -289,3 +289,7 @@ HEAD boots cleanly on copied live data; PREFLIGHT verdict OK
 ## 2026-09-25 09:38 — #83 Static UI smoke test: app.js parses and every $('id') exists in index.html [done (check passed)]
 
 UI static smoke test added; it and npm test pass
+
+## 2026-09-25 10:14 — #85 Merge Connections into the sidebar footer and open it as a modal [done (check passed)]
+
+Connections now open as a modal from the sidebar footer button

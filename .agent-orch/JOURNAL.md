@@ -405,3 +405,7 @@ Mobile queue fits and scrolls at all three widths
 ## 2026-09-25 20:45 — #132 Fix missing Artificial Analysis data in Auto Delegate fallback popup [done]
 
 Free-tier metrics reach popup; distinct data states pass regression.
+
+## 2026-09-25 20:51 — #133 Simplify Auto Delegate fallback popup UI [done]
+
+Compact fallback popup verified at desktop and 375 pixels.

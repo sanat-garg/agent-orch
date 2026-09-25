@@ -44,3 +44,4 @@ _Durable knowledge for every agent session: architecture, conventions, decisions
 - `CW_NO_ORCHESTRATOR=1` (preflight on a copy of data/): DB migrated and read APIs served; no lock, orphan requeue, tick loop or git retry push. Still use a spare port and a copied `CW_DATA_DIR`.
 - `migrateMemDir()` renames a legacy `.ao2/` into `.agent-orch/`.
 - Don't commit macOS `._*` files.
+- Auto Delegate popup (#133): read-only starting model + ordered preview (saved order remains authoritative), one native details disclosure for supplied scores/technical reasons, Connections/Retry recovery actions. No fallback editor in this view; selection, persistence and ranking APIs are unchanged. Browser fixture/check and evidence: `.agent-orch/delegate-popup-{fixture,browser-check}.mjs`, `DELEGATE-POPUP-CHECK.md`.

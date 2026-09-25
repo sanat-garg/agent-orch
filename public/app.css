@@ -1157,3 +1157,19 @@ button.dg-row:disabled { opacity: .6; cursor: progress; }
 .toast { position: fixed; left: 50%; bottom: max(24px, calc(env(safe-area-inset-bottom) + 12px)); transform: translateX(-50%); z-index: 90;
   max-width: min(92vw, 480px); padding: 10px 14px; border-radius: 10px; background: var(--text); color: var(--bg); font-size: 13.5px;
   box-shadow: 0 8px 24px rgba(0,0,0,.25); animation: fade .15s ease; }
+
+/* Auto Delegate: compact order first, one optional score disclosure. */
+#apBody, .ap-pop .m-head > div { min-width: 0; overflow-wrap: anywhere; }
+.ap-ranked { margin: 0; padding-left: 24px; }
+.ap-ranked li { padding-left: 4px; }
+.ap-ranked li::marker { color: var(--muted); font-size: 13px; }
+.ap-compact-row { padding: 8px 0; min-width: 0; }
+.ap-compact-row .dg-why { margin: 3px 0 0; }
+.ap-ranked li + li { border-top: 1px solid var(--border); }
+.ap-details { margin-top: 14px; border-top: 1px solid var(--border); }
+.ap-details summary { min-height: 44px; padding: 12px 0; cursor: pointer; font-size: 13px; font-weight: 600; }
+.ap-score-row { padding: 10px 0; border-top: 1px solid var(--border); }
+.ap-details .ap-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.ap-action { min-height: 44px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--raised); color: var(--fg); cursor: pointer; font: inherit; }
+.ap-pop .icon-btn { min-width: 44px; min-height: 44px; flex: none; }
+.ap-details summary:focus-visible, .ap-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

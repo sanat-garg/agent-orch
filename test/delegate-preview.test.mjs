@@ -210,6 +210,8 @@ ${functions}
       window.renderData=d=>{AP.data=d;renderAutoPreview();};
     ` });
     await page.evaluate((d) => window.renderData(d), d);
+    assert.equal(await page.locator('details').getAttribute('open'), null);
+    await page.locator('summary').click();
     assert.match(await page.locator('#apBody').innerText(), /50.0/);
     assert.match(await page.locator('#apBody').innerText(), /No metrics available for this model/);
     assert.ok((await page.locator('.v').allTextContents()).includes('—'));

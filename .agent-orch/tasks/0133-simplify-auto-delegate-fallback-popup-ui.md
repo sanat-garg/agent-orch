@@ -13,3 +13,7 @@ Simplify the existing Auto Delegate fallback popup after the data fix. Read repo
 ## Done when
 
 .agent-orch/DELEGATE-POPUP-CHECK.md contains browser evidence at desktop and 375-pixel widths showing the compact ranked list, expandable real score details, actionable unavailable-data state and no horizontal overflow.
+
+## Result — done (2026-09-25 20:51)
+
+AGENT-ORCH-STATUS: done — Compact fallback popup verified at desktop and 375 pixels.

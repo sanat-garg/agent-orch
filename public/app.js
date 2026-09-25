@@ -1368,7 +1368,7 @@ function fitPick() {
 document.fonts?.ready.then(fitPick);
 // Auto Delegate preview (GET /api/delegate/preview), next to the picker only while Auto Delegate is chosen: the start
 // model and the comparable models most likely used after it, each with a status dot. A specific model shows nothing.
-// When the convo has curated fallbacks, the popover lets the owner edit them: add, remove, reorder, reset to automatic.
+// The popup previews saved order or automatic ranking; score details are optional.
 const AP = { data: null, key: '', seq: 0, timer: 0, lastFocus: null, addOpen: false, search: '', drag: null, saving: false, error: '' };
 const AP_ST = { available: 'available', near: 'near limit', limited: 'limited', unavailable: 'unavailable' };
 function apStatusText(r) {
@@ -1557,116 +1557,85 @@ $('apModal').addEventListener('touchmove', (e) => { if (AP.drag?.started) e.prev
 
 function renderAutoPreview() {
   const body = $('apBody'), d = AP.data;
+  const expanded = body.querySelector('details')?.open || false;
   body.textContent = '';
-  if (!d) { $('apSub').textContent = ''; $('apTitle').textContent = 'Auto Delegate'; body.append(el('div', 'out-live', AP.error || 'Loading…')); return; }
+  $('apTitle').textContent = 'Auto Delegate';
+  $('apSub').textContent = 'When usage runs out, queued tasks may use a fallback.';
+  const action = (label, fn) => {
+    const button = el('button', 'ap-action', label);
+    button.type = 'button'; button.addEventListener('click', fn); body.append(button);
+  };
+  if (!d) {
+    body.append(el('p', 'dg-why', AP.error || 'Loading fallback list…'));
+    if (AP.error) action('Retry', loadAutoPreview);
+    return;
+  }
   const isCurated = d.fallbacks != null;
-  $('apTitle').textContent = isCurated ? 'Your list' : 'Automatic';
-  $('apSub').textContent = isCurated
-    ? `Starts on ${apName(d.start)}. When it runs out of usage, tasks move to the next model in your list.`
-    : `Starts on ${apName(d.start)}. When it runs out of usage, queued tasks may move to a comparable model.`;
-
-  const dataMessage = d.data_status === 'loading' ? 'Loading Artificial Analysis metrics…'
-    : d.data_status === 'unconfigured' ? 'Connect Artificial Analysis in Connections to load model metrics.'
-    : d.data_status === 'error' ? `${d.data_error || 'Artificial Analysis could not load metrics'}. Check Artificial Analysis in Connections.`
-    : '';
+  const dataMessage = d.data_status === 'loading' ? 'Loading Artificial Analysis metrics… This updates automatically.'
+    : d.data_status === 'unconfigured' ? 'Connect Artificial Analysis to compare models.'
+    : d.data_status === 'error' ? 'Could not refresh metrics. Check Artificial Analysis in Connections.' : '';
   if (dataMessage) body.append(el('p', 'dg-why', dataMessage));
-  if (d.stale) body.append(el('p', 'dg-why', 'Showing cached metrics; the latest refresh is unavailable.'));
-
-  // --- Start model ---
-  body.append(apModelRow(d.start, 'Start'));
-
-  // --- Current fallbacks (curated) or automatic candidates ---
-  if (isCurated) {
-    if (d.candidates.length) {
-      body.append(el('h3', 'dg-group', 'Fallbacks'));
-      const listEl = el('div', 'ap-fb-list');
-      d.candidates.forEach((r, i) => {
-        const row = apEditableRow(r, i, d.candidates.length);
-        listEl.append(row);
-      });
-      body.append(listEl);
-    } else {
-      body.append(el('p', 'dg-why ap-empty', 'No fallbacks added yet. Add one below or reset to automatic.'));
-    }
-    // "+ Add fallback" button
-    const addBtn = el('button', 'ap-add-btn', '+ Add fallback');
-    addBtn.type = 'button';
-    addBtn.addEventListener('click', () => { AP.addOpen = !AP.addOpen; AP.search = ''; renderAutoPreview(); });
-    body.append(addBtn);
-    // Add panel (searchable model list)
-    if (AP.addOpen) body.append(renderApAddPanel(d));
-    // Suggested section: automatic top picks not yet in the curated list.
-    const sugFiltered = (d.suggested || []).filter((s) => !(d.fallbacks || []).some((f) => f.agent === s.agent && f.model === s.model));
-    if (sugFiltered.length) {
-      body.append(el('h3', 'dg-group', 'Suggested'));
-      for (const s of sugFiltered) {
-        const srow = apModelRow(s, null, true);
-        const add = el('button', 'ap-sug-add', '+ Add');
-        add.type = 'button';
-        add.addEventListener('click', () => apAddFallback(s.agent, s.model));
-        srow.querySelector('.dg-head').append(add);
-        body.append(srow);
-      }
-    }
-    // Reset to automatic
-    const reset = el('button', 'ap-reset-btn', 'Reset to automatic');
-    reset.type = 'button';
-    reset.addEventListener('click', () => {
-      if (AP._confirmReset) { apResetFallbacks(); AP._confirmReset = false; return; }
-      AP._confirmReset = true;
-      reset.textContent = 'Tap again to confirm';
-      reset.classList.add('confirm');
-      setTimeout(() => { AP._confirmReset = false; if (!$('apModal').hidden) renderAutoPreview(); }, 3000);
+  if (d.stale) body.append(el('p', 'dg-why', 'Showing cached scores.'));
+  if (d.data_status === 'unconfigured' || d.data_status === 'error') {
+    action('Open Connections', () => { closeAutoPreview(); openConnections('aa'); });
+  }
+  body.append(el('h3', 'dg-group', 'Starting model'), apModelRow(d.start, null, true));
+  body.append(el('h3', 'dg-group', isCurated ? 'Saved fallback order' : 'Ranked fallbacks'));
+  if (d.candidates.length) {
+    const list = el('ol', 'ap-ranked');
+    d.candidates.forEach((r) => {
+      const item = el('li'); item.append(apModelRow(r)); list.append(item);
     });
-    body.append(reset);
+    body.append(list);
   } else {
-    // Automatic mode: show candidates as before.
-    if (d.candidates.length) {
-      body.append(el('h3', 'dg-group', 'Likely fallbacks'));
-      d.candidates.forEach((r, i) => body.append(apModelRow(r, `${i + 1}`)));
-    } else if (!dataMessage) body.append(el('p', 'dg-why', d.start.score == null ? 'No metrics for the start model, so nothing is comparable to it.' : 'No comparable model on another signed-in agent.'));
-    // "Customise" button to switch to curated mode (starts with the current automatic candidates).
-    if (state.cid) {
-      const cust = el('button', 'ap-add-btn', 'Customise fallback list');
-      cust.type = 'button';
-      cust.addEventListener('click', () => {
-        const initial = (d.candidates || []).map((c) => ({ agent: c.agent, model: c.model }));
-        apSaveFallbacks(initial);
-      });
-      body.append(cust);
-    }
+    body.append(el('p', 'dg-why', isCurated ? 'No fallbacks saved. Tasks wait for the starting model.'
+      : dataMessage ? 'Fallback comparison is unavailable.'
+      : d.start.score == null ? 'No comparable scores for the starting model. Choose a specific model to continue.'
+      : 'No comparable fallback available. Tasks wait for usage to reset.'));
   }
-  // Attribution
-  const src = el('p', 'dg-src');
-  src.append(d.source === 'artificialanalysis' ? 'Metrics from Artificial Analysis' : 'Metrics entered manually (.agent-orch/model-metrics.json)',
-    ` · ranked for ${d.category} work`);
-  if (d.attribution?.url) {
-    const a = el('a', '', d.attribution.text);
-    a.href = d.attribution.url; a.target = '_blank'; a.rel = 'noopener';
-    src.append(' · ', a);
-  }
-  body.append(src);
-}
-// A read-only model row with status dot and key metrics.
-function apModelRow(r, head, compact) {
-  const box = el('div', `dg-row ap-row${r.status === 'available' || r.status === 'near' ? '' : ' limited'}`);
-  const h = el('div', 'dg-head');
-  const st = el('span', `ap-e st-${r.status || 'available'}`);
-  st.append(el('span', 'ap-dot'), el('span', '', r.status ? apStatusText(r) : ''));
-  h.append(el('span', 'dg-name', `${head ? head + '. ' : ''}${shortLabel(r.agent)} · ${apName(r)}`), st);
-  box.append(h);
-  if (!compact) {
-    const g = el('div', 'dg-metrics ap-metrics');
-    for (const [label, read, fmt] of DG_METRICS.slice(0, 3)) {
+  const details = el('details', 'ap-details'); details.open = expanded;
+  details.append(el('summary', '', 'Scores and ranking details'));
+  details.append(el('p', 'dg-why', isCurated ? 'Uses your saved order; scores do not change it.'
+    : `Ranked for ${d.category} work by score similarity; unavailable models follow available models.`));
+  if (d.data_error) details.append(el('p', 'dg-why', d.data_error));
+  for (const r of [d.start, ...d.candidates]) {
+    const row = el('div', 'ap-score-row');
+    row.append(el('div', 'dg-name', apName(r)));
+    const grid = el('div', 'dg-metrics ap-metrics');
+    const fields = [...DG_METRICS, ['Intelligence Index', m => m.intelligence_index, v => v.toFixed(1)]];
+    let present = false;
+    for (const [label, read, fmt] of fields) {
       const v = r.metrics && dgNum(read(r.metrics));
+      if (v != null) present = true;
       const cell = el('div', 'dg-m');
-      cell.append(el('span', 'k', label), el('span', 'v', v == null ? '—' : fmt(v)));
-      g.append(cell);
+      cell.append(el('span', 'k', label), el('span', 'v', v == null ? '—' : fmt(v))); grid.append(cell);
     }
-    box.append(g);
+    if (present) row.append(grid);
+    else row.append(el('p', 'dg-why', 'No metrics available for this model.'));
+    if (r.reason) row.append(el('p', 'dg-why', r.reason));
+    details.append(row);
   }
-  if (!r.metrics && AP.data?.data_status === 'ready') box.append(el('p', 'dg-why', 'No metrics available for this model.'));
-  if (r.reason && !compact) box.append(el('div', 'dg-why', r.reason));
+  details.append(el('p', 'dg-why', '— means the provider did not supply that score.'));
+  body.append(details);
+  if (d.source === 'artificialanalysis' || d.source === 'manual') {
+    const src = el('p', 'dg-src', d.source === 'artificialanalysis' ? 'Score source: Artificial Analysis' : 'Score source: manual data');
+    if (d.attribution?.url) {
+      const link = el('a', '', d.attribution.text);
+      link.href = d.attribution.url; link.target = '_blank'; link.rel = 'noopener'; src.append(' · ', link);
+    }
+    body.append(src);
+  }
+}
+// One explanation per row; numeric comparisons belong in the shared disclosure.
+function apModelRow(r, head, start = false) {
+  const box = el('div', 'ap-compact-row');
+  box.append(el('div', 'dg-name', `${shortLabel(r.agent)} · ${apName(r)}`));
+  const why = r.status && r.status !== 'available' ? apStatusText(r)
+    : start ? 'Available to start'
+    : AP.data?.fallbacks != null ? 'Available · uses your saved order'
+    : r.score != null ? 'Available · comparable score'
+    : 'Comparison unavailable';
+  box.append(el('p', 'dg-why', why));
   return box;
 }
 // An editable fallback row: drag handle, name, status, metrics, up/down buttons, remove.

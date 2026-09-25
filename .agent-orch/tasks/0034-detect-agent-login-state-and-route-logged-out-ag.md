@@ -13,3 +13,7 @@ In agents.mjs each adapter's available() only checks the binary is on PATH. code
 ## Done when
 
 `grep -q loggedIn agents.mjs && grep -q loggedIn server.mjs && npm test`
+
+## Result — done (2026-09-25 03:46)
+
+AGENT-ORCH-STATUS: done — Logged-out agents now fall back to Claude; the /api/agents response includes loggedIn

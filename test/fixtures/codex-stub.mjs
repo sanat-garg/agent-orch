@@ -1,8 +1,15 @@
 #!/usr/bin/env node
 // Stand-in for `codex exec --json`: prints recorded JSONL events and never touches the network.
 // CODEX_STUB=ok|limit|hang picks the script; CODEX_STUB_LOG, if set, receives {argv, env, cwd} as JSON.
+// `login status` answers like the real CLI: logged in unless CODEX_STUB_LOGIN=out.
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
+
+if (process.argv[2] === 'login' && process.argv[3] === 'status') {
+  if (process.env.CODEX_STUB_LOGIN === 'out') { process.stderr.write('Not logged in\n'); process.exit(1); }
+  process.stderr.write('Logged in using ChatGPT\n');
+  process.exit(0);
+}
 
 if (process.env.CODEX_STUB_LOG) fs.writeFileSync(process.env.CODEX_STUB_LOG, JSON.stringify({ argv: process.argv.slice(2), env: process.env, cwd: process.cwd() }));
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');

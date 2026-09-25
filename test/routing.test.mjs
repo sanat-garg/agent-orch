@@ -6,7 +6,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
 import { resolveRoute, routeMatches, normalizeAgent, extractTasks } from '../orchestrator.mjs';
+import { agentStatus, clearLoginCache } from '../agents.mjs';
 
 const project = { id: 1, model: 'sonnet' };
 const all = () => true;
@@ -53,7 +55,31 @@ test('routes match a task kind; a model-only route keeps Claude', () => {
 
 test('an unavailable agent falls back to Claude and says which', () => {
   const r = resolveRoute(task('Add tests'), project, routes, (id) => id !== 'codex');
-  assert.deepEqual(r, { agent: 'claude', model: 'sonnet', source: 'project', fellBack: 'codex' });
+  assert.deepEqual(r, { agent: 'claude', model: 'sonnet', source: 'project', fellBack: 'codex', reason: 'not available' });
+});
+
+test('a logged-out agent falls back to Claude like an unavailable one', (t) => {
+  // `codex` on PATH is the stub, which answers `codex login status` per CODEX_STUB_LOGIN.
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-bin-'));
+  fs.symlinkSync(fileURLToPath(new URL('./fixtures/codex-stub.mjs', import.meta.url)), path.join(bin, 'codex'));
+  const saved = { PATH: process.env.PATH, CODEX_STUB_LOGIN: process.env.CODEX_STUB_LOGIN };
+  t.after(() => { Object.assign(process.env, saved); if (saved.CODEX_STUB_LOGIN == null) delete process.env.CODEX_STUB_LOGIN; clearLoginCache(); fs.rmSync(bin, { recursive: true, force: true }); });
+  process.env.PATH = `${bin}:${process.env.PATH}`;
+  process.env.CODEX_STUB_LOGIN = 'out';
+  clearLoginCache();
+  assert.equal(agentStatus('codex'), 'not logged in');
+  assert.deepEqual(resolveRoute(task('Add tests'), project, routes),
+    { agent: 'claude', model: 'sonnet', source: 'project', fellBack: 'codex', reason: 'not logged in' });
+  // The result is cached, so logging in shows up only after the cache expires (here: is cleared).
+  delete process.env.CODEX_STUB_LOGIN;
+  assert.equal(agentStatus('codex'), 'not logged in');
+  clearLoginCache();
+  assert.equal(agentStatus('codex'), true);
+  assert.deepEqual(resolveRoute(task('Add tests'), project, routes), { agent: 'codex', model: 'gpt-5-codex', source: 'project', routeId: 1 });
+  // Not on PATH at all.
+  process.env.PATH = saved.PATH.split(':').filter((d) => !fs.existsSync(path.join(d, 'codex'))).join(':');
+  clearLoginCache();
+  assert.equal(agentStatus('codex'), 'not installed');
 });
 
 test('routeMatches matches words, plurals and kinds, not substrings', () => {

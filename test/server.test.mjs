@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PASSWORD = 'smoke-test-password';
-let child, base, dataDir;
+let child, base, dataDir, binDir;
 
 const freePort = () => new Promise((resolve, reject) => {
   const s = net.createServer().listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); });
@@ -23,10 +23,13 @@ before(async () => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-test-'));
   const salt = crypto.randomBytes(16).toString('hex');
   fs.writeFileSync(path.join(dataDir, 'auth.json'), JSON.stringify({ salt, hash: crypto.scryptSync(PASSWORD, salt, 64).toString('hex') }));
+  // A logged-out `codex` on PATH (the stub answers `codex login status` with "Not logged in").
+  binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-bin-'));
+  fs.symlinkSync(path.join(ROOT, 'test/fixtures/codex-stub.mjs'), path.join(binDir, 'codex'));
   const port = await freePort();
   assert.notEqual(port, 3000);
   base = `http://127.0.0.1:${port}`;
-  child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: { ...process.env, PORT: String(port), CW_DATA_DIR: dataDir }, stdio: ['ignore', 'pipe', 'pipe'] });
+  child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, CODEX_STUB_LOGIN: 'out', PORT: String(port), CW_DATA_DIR: dataDir }, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`server did not start:\n${out}`)), 20000);
@@ -40,6 +43,7 @@ before(async () => {
 after(() => {
   child?.kill('SIGKILL');
   if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
+  if (binDir) fs.rmSync(binDir, { recursive: true, force: true });
 });
 
 test('GET / without a session redirects to the login page', async () => {
@@ -117,4 +121,8 @@ test('GET /api/agents lists the agent registry, including claude', async () => {
   assert.equal(typeof claude.available, 'boolean');
   assert.ok(claude.models.includes('opus'));
   for (const a of agents) assert.ok(a.login, `${a.id} has a login hint`);
+  for (const a of agents) assert.equal(typeof a.loggedIn, 'boolean', `${a.id} reports loggedIn`);
+  const codex = agents.find((a) => a.id === 'codex');
+  assert.equal(codex.available, true);
+  assert.equal(codex.loggedIn, false);
 });

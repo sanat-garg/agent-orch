@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 
 const HOME = os.homedir();
@@ -15,6 +15,26 @@ const HOME = os.homedir();
 function onPath(bin, env = process.env) {
   if (path.isAbsolute(bin)) return fs.existsSync(bin);
   try { execFileSync('bash', ['-c', `command -v ${bin}`], { env: { PATH: env.PATH || '/usr/bin:/bin' }, stdio: 'ignore' }); return true; } catch { return false; }
+}
+// Login checks are cached for LOGIN_TTL per adapter (and PATH/bin), so a caller never blocks for more than one
+// probe (a spawn capped at 5 s) a minute. `loggedIn()` is sync-readable: true | false.
+const LOGIN_TTL = 60_000;
+const loginCache = new Map();
+function cachedLogin(a, check) {
+  const key = `${a.bin}\0${process.env.PATH}`, hit = loginCache.get(a.id);
+  if (hit && hit.key === key && Date.now() - hit.at < LOGIN_TTL) return hit.value;
+  let value = false;
+  try { value = !!check(); } catch {}
+  loginCache.set(a.id, { key, at: Date.now(), value });
+  return value;
+}
+export const clearLoginCache = () => loginCache.clear();
+// true when the agent can run; otherwise why not ('not installed' | 'not logged in').
+export function agentStatus(id) {
+  const a = AGENTS[id];
+  if (!a) return 'unknown agent';
+  if (!a.available()) return 'not installed';
+  return a.loggedIn() ? true : 'not logged in';
 }
 export const stripEnv = (env, filter) => Object.fromEntries(Object.entries(env).filter(([k]) => !filter.test(k)));
 
@@ -135,6 +155,7 @@ const CLAUDE = {
   label: 'Claude Code',
   bin: path.join(HOME, '.local/bin/claude'),
   available() { return onPath(this.bin); },
+  loggedIn() { return cachedLogin(this, () => fs.existsSync(path.join(HOME, '.claude/.credentials.json'))); },
   login: 'claude, then /login',
   models: ['opus', 'sonnet', 'haiku', 'claude-opus-5-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001'],
   envFilter: /^(ANTHROPIC_(API_KEY|AUTH_TOKEN|BASE_URL)|CLAUDE_CODE_USE_(BEDROCK|VERTEX|FOUNDRY))$/,
@@ -292,6 +313,15 @@ const CODEX = {
   label: 'Codex CLI',
   bin: 'codex',
   available() { return onPath(this.bin); },
+  // `codex login status` prints "Logged in using ChatGPT" (exit 0) or "Not logged in" (exit 1). An API-key login
+  // would bill API credits, so it counts as logged out.
+  loggedIn() {
+    return cachedLogin(this, () => {
+      const r = spawnSync(this.bin, ['login', 'status'], { env: stripEnv(process.env, this.envFilter), encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] });
+      const out = `${r.stdout || ''}\n${r.stderr || ''}`;
+      return r.status === 0 && /logged in/i.test(out) && !/not logged in|api key/i.test(out);
+    });
+  },
   login: 'codex login --device-auth',
   models: ['gpt-5-codex', 'gpt-5'],
   envFilter: /^(OPENAI_(API_KEY|BASE_URL|ORG_ID|ORGANIZATION|PROJECT_ID)|CODEX_(API_KEY|ACCESS_TOKEN|AUTH|HOME)|AZURE_OPENAI_.*)$/,
@@ -397,6 +427,13 @@ const ANTIGRAVITY = {
   label: 'Antigravity CLI',
   bin: path.join(HOME, '.local/bin/agy'),
   available() { return onPath(this.bin); },
+  // With no keyring on this VM agy keeps its OAuth token in a file under ~/.gemini/antigravity-cli/ (see
+  // .agent-orch/AGENTS.md; the exact name is unconfirmed), so look for a token/credential file there.
+  credsDir: path.join(HOME, '.gemini/antigravity-cli'),
+  loggedIn() {
+    return cachedLogin(this, () => fs.readdirSync(this.credsDir, { withFileTypes: true })
+      .some((f) => f.isFile() && /token|cred|oauth/i.test(f.name) && fs.statSync(path.join(this.credsDir, f.name)).size > 0));
+  },
   login: 'agy (once, interactively)',
   models: ['gemini-3.8-flash-high'],
   envFilter: /^(GEMINI_API_KEY|GOOGLE_(API_KEY|GEMINI_BASE_URL|GENAI_USE_VERTEXAI|GENAI_USE_ENTERPRISE|GENAI_USE_GCA|APPLICATION_CREDENTIALS|CLOUD_PROJECT(_ID)?|CLOUD_LOCATION)|AGY_(ADC_AUTH|BUSINESS_PAYGO_TIER))$/,

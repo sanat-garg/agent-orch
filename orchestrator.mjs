@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
-import { AGENTS, runAgentCli, toolInputSummary } from './agents.mjs';
+import { AGENTS, agentStatus, runAgentCli, toolInputSummary } from './agents.mjs';
 
 // ---------------------------------------------------------------- config
 
@@ -443,9 +443,10 @@ export function routeMatches(match, task) {
 }
 
 // Resolution order: the task's own agent/model, the first matching project route, the first matching
-// global route, then the project default (Claude on project.model). An agent that isn't available
-// falls back to Claude; `fellBack` names it so the caller can log it.
-export function resolveRoute(task, project, routes = [], isAvailable = (id) => AGENTS[id]?.available()) {
+// global route, then the project default (Claude on project.model). An agent that isn't installed or
+// logged in falls back to Claude; `fellBack` names it and `reason` says why, so the caller can log it.
+// isAvailable(id) returns true, or false / a reason string.
+export function resolveRoute(task, project, routes = [], isAvailable = agentStatus) {
   const pick = (agent, model, source) => {
     agent = normalizeAgent(agent) || agentForModel(model) || 'claude';
     return { agent, model: model || (agent === 'claude' ? project?.model || null : null), source };
@@ -459,7 +460,8 @@ export function resolveRoute(task, project, routes = [], isAvailable = (id) => A
     r = route ? { ...pick(route.agent, route.model, route.project_id == null ? 'global' : 'project'), routeId: route.id }
       : { agent: 'claude', model: project?.model || null, source: 'default' };
   }
-  if (r.agent !== 'claude' && !isAvailable(r.agent)) return { agent: 'claude', model: project?.model || null, source: r.source, fellBack: r.agent };
+  const ok = r.agent === 'claude' || isAvailable(r.agent);
+  if (ok !== true) return { agent: 'claude', model: project?.model || null, source: r.source, fellBack: r.agent, reason: typeof ok === 'string' ? ok : 'not available' };
   return r;
 }
 
@@ -1102,11 +1104,14 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   const pushRoutes = () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); };
   function routeFor(task, project) {
     const r = resolveRoute(task, project, listRoutes(project.id));
-    if (r.fellBack) logEvent(`${r.fellBack} is not available; #${task.id || task.kind} runs on Claude instead`, { level: 'warn', projectId: project.id, taskId: task.id || null });
+    if (r.fellBack) logEvent(`${r.fellBack} is ${r.reason}; #${task.id || task.kind} runs on Claude instead`, { level: 'warn', projectId: project.id, taskId: task.id || null });
     return r;
   }
   function routesText(projectId) {
-    const agents = Object.values(AGENTS).map((a) => `  - ${a.id} (${a.label})${a.available() ? '' : ' [NOT INSTALLED: falls back to Claude]'}: models ${a.models.join(', ')}`);
+    const agents = Object.values(AGENTS).map((a) => {
+      const st = a.id === 'claude' || agentStatus(a.id);
+      return `  - ${a.id} (${a.label})${st === true ? '' : ` [${st.toUpperCase()}: falls back to Claude]`}: models ${a.models.join(', ')}`;
+    });
     const routes = listRoutes(projectId).map((r) => `  #${r.id} [${r.project_id == null ? 'global' : 'project'}] '${r.match}' → ${[r.agent, r.model].filter(Boolean).join(' / ')}${r.note ? ` (${r.note})` : ''}`);
     return `Coding agents:\n${agents.join('\n')}\nRouting rules:\n${routes.join('\n') || '  (none: everything runs on Claude with the chat model)'}`;
   }

@@ -129,3 +129,7 @@ Claude Web strings removed; AUDIT #2 and #15 marked fixed
 ## 2026-09-25 03:44 — #33 Verifier runs every command-like backticked snippet in Done when (AUDIT #16) [done]
 
 Verifier now runs all command-like Done-when snippets, joined with &&
+
+## 2026-09-25 03:46 — #34 Detect agent login state and route logged-out agents to Claude [done]
+
+Logged-out agents now fall back to Claude; the /api/agents response includes loggedIn

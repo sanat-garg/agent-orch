@@ -1158,7 +1158,7 @@ async function handleRequest(req, res) {
     return json(res, r.error ? 400 : 200, r);
   }
   if (p === '/api/agents') {
-    return json(res, 200, { agents: Object.values(AGENTS).map((a) => ({ id: a.id, label: a.label, available: !!a.available(), models: a.models, login: a.login })) });
+    return json(res, 200, { agents: Object.values(AGENTS).map((a) => ({ id: a.id, label: a.label, available: !!a.available(), loggedIn: !!a.available() && a.loggedIn(), models: a.models, login: a.login })) });
   }
   if (p === '/api/projects') {
     const list = listFolders(WORKSPACE).map((f) => {

@@ -12,3 +12,7 @@ Add test/ui-static.test.mjs (node:test, no new dependencies). It should: (1) rea
 ## Done when
 
 `node --test test/ui-static.test.mjs` passes and `npm test` passes
+
+## Result — done (check passed) (2026-09-25 09:38)
+
+AGENT-ORCH-STATUS: done — UI static smoke test added; it and npm test pass

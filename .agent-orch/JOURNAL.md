@@ -285,3 +285,7 @@ CW_NO_ORCHESTRATOR=1 boots inert, tested; all 117 tests pass
 ## 2026-09-25 09:35 — #81 Preflight HEAD against a copy of the live data dir and write .agent-orch/PREFLIGHT.md [done (check passed)]
 
 HEAD boots cleanly on copied live data; PREFLIGHT verdict OK
+
+## 2026-09-25 09:38 — #83 Static UI smoke test: app.js parses and every $('id') exists in index.html [done (check passed)]
+
+UI static smoke test added; it and npm test pass

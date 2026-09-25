@@ -1,5 +1,7 @@
 # Audit: server, orchestrator, GitHub wrapper, UI
 
+**Status (2026-09-25, task #48):** 16 of 16 items fixed, 0 deferred.
+
 _Task #12, 2026-09-24. Items were open when audited; a `- **Fixed** (task #N)` line marks one resolved since. Each item was verified by reading the code; #1 was also reproduced
 against a throwaway instance (`PORT=3999 CW_DATA_DIR=$(mktemp -d)`). The items are ranked by value. Each fix
 is sized to fit one 15–45 minute task._

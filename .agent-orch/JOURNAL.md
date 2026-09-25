@@ -177,3 +177,7 @@ Plan tasks and chat planner turns no longer overlap; test added
 ## 2026-09-25 04:03 — #47 README: document multi-agent setup (Codex, agy) and routing rules [done]
 
 README documents coding agents, logins, billing guards, routing, fallback
+
+## 2026-09-25 04:04 — #48 Close out the Definition of Done: every AUDIT item Fixed or Deferred, README verified [done (check passed)]
+
+All 16 AUDIT items fixed, README checked against live setup

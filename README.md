@@ -39,7 +39,12 @@ PORT=3000 node server.mjs                               # listens on 127.0.0.1:3
 ```
 
 The server creates `~/workspace` (the default project folder, and the terminals' working directory) and
-the data directory on startup. Run `npm test` to start a throwaway server on a free port and check login.
+the data directory on startup. Run `npm test` to run the smoke suite (`node --test`), which starts throwaway servers
+on free ports with a temporary `CW_DATA_DIR`.
+
+This checkout is the live app. To try a change by hand, start a second instance with its own data dir, e.g.
+`PORT=3999 CW_DATA_DIR=$(mktemp -d) node server.mjs`. Without `CW_DATA_DIR` it would share the live `data/`; the
+orchestrator's lock file stops it from scheduling tasks there, but it would still rewrite chats and sessions.
 
 ### Environment variables
 
@@ -48,6 +53,7 @@ the data directory on startup. Run `npm test` to start a throwaway server on a f
 | `PORT` | `3000` | HTTP port. The server binds to `127.0.0.1` only. |
 | `CW_DATA_DIR` | `./data` | Where all state lives, for both the server and the orchestrator. |
 | `CW_DEVICE_NAME` | `Oracle VM` | The name shown for this machine in the UI. |
+| `CW_WS_KEEPALIVE_MS` | `30000` | How often open WebSockets are pinged and their login session re-checked (expired or revoked sessions are closed). |
 | `PATH` | inherited | Passed to Claude Code and agents. The orchestrator prepends `data/orchestrator/bin`, which holds `python`/`pip` shims pointing to `python3`/`pip3` when only those exist. |
 
 The server also passes its whole environment on to Claude Code, **except** the variables listed under
@@ -174,17 +180,19 @@ picked up. Each task shows the agent and model its latest run used.
 
 ## data/
 
-All runtime state lives in `data/` (or `CW_DATA_DIR`). Files are written with mode `0600`.
+All runtime state lives in `data/` (or `CW_DATA_DIR`). The JSON state files (`auth.json`, `sessions.json`,
+`convos.json`) are written with mode `0600`; keep `data/` itself at `0700`.
 
 | Path | Contents |
 |---|---|
 | `auth.json` | scrypt salt and hash of the login password |
 | `sessions.json` | active login session tokens |
-| `convos.json` | the chat list (title, folder, mode, model, Claude session id) |
+| `convos.json` | the chat list (title, folder, mode, agent, model, agent session id) |
 | `logs/<id>.jsonl` | the transcript of each chat |
-| `metrics/` | raw and per-minute server metrics |
+| `metrics/` | `raw.jsonl` and `minutes.jsonl` server metrics |
 | `orchestrator/agent-orch.db` | the orchestrator SQLite database (migrated from `ao2.db` on start) (projects, tasks, runs, events, usage limits) |
 | `orchestrator/runs/` | per-run agent logs |
+| `orchestrator/lock` | PID of the process that runs the orchestrator; a second instance on the same dir won't schedule tasks |
 | `orchestrator/bin/` | `python`/`pip` shims |
 
 `data/` is in `.gitignore` and must never be committed. It contains the password hash, live session

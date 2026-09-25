@@ -275,6 +275,25 @@ test('antigravity: resume passes --conversation; non-autonomous drops the skip-p
   assert.deepEqual(JSON.parse(fs.readFileSync(log, 'utf8')).argv, ['-p', 'more', '--output-format', 'stream-json', '--print-timeout', '0', '--conversation', 'abc']);
 });
 
+test('antigravity: view_file retains AbsolutePath and the original tool error', () => {
+  // Parameter spelling observed in run 136 and the live read-only reproduction.
+  const update = (state, extra = {}) => ({ event: 'step_update', step_update: {
+    step_index: 2, state, step_type: 'tool', tool_name: 'view_file',
+    tool_info: { name: 'view_file', parameters: { AbsolutePath: '/workspace/package.json' }, ...extra },
+  } });
+  const st = { text: new Map(), started: new Set() };
+  assert.deepEqual([...AGENTS.antigravity.events(update('ACTIVE'), st)], [
+    { k: 'tool', id: '2', name: 'view_file', input: { file_path: '/workspace/package.json' } },
+  ]);
+  assert.deepEqual([...AGENTS.antigravity.events(update('DONE', { output: '20 lines, 487 bytes' }), st)], [
+    { k: 'tool_result', id: '2', text: '20 lines, 487 bytes', isError: false, lines: 1 },
+  ]);
+  // Synthetic missing-file control, not a claim that the owner's file read failed.
+  assert.deepEqual([...AGENTS.antigravity.events(update('ERROR', { error: 'no such file' }), st)], [
+    { k: 'tool_result', id: '2', text: 'no such file', isError: true, lines: 1 },
+  ]);
+});
+
 test('antigravity: resuming a missing conversation is errorCode no_session', async () => {
   const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'more', cwd: tmp(), resume: '9', settingsPath: noSettings,
     env: { PATH: process.env.PATH, AGY_STUB: 'nosession' } });

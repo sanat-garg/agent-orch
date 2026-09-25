@@ -38,6 +38,7 @@ _Durable knowledge for every agent session: architecture, conventions, decisions
 - 2026-09-25: A task's `after` link is for TRUE prerequisites only, meaning the task needs that task's output. Never chain tasks just to serialise work on the same files: cancelling a task cascades to everything after it (on 2026-09-25, cancelling #101 took out the unrelated tasks #102-107).
 
 ## Gotchas
+- Antigravity #134: native `view_file` uses `AbsolutePath`; snake-casing alone drops it from `toolInputSummary`, so `agyTool` maps it to `file_path`. Run 136's native file reads succeeded; its scheduler conflict, command cancellation and provider 429 are separate. Evidence/remaining verification: `ANTIGRAVITY-TOOLS.md`.
 - This checkout IS the live app. Never restart/kill it or call `POST /api/restart-when-idle` on port 3000 (body `{cancel:true}` cancels a drain). Test instances MUST use another port and `CW_DATA_DIR=$(mktemp -d)`, or they double-run live tasks.
 - Edits to server/orchestrator only go live on restart. The UI banner offers "Restart when idle" (drain, exit 0, systemd restarts). A failing "Done when" check may be the running process's stale code (e.g. `extractCommand`), not the task.
 - The verifier (`extractCommand`) runs every command-like backtick snippet in "Done when", joined with ` && `. Commands containing `>` (incl. `2>&1`) or `curl` are refused. Absence checks must use `! grep …`.

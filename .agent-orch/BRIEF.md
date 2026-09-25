@@ -9,6 +9,7 @@ an agent orchestrator that plans work and runs autonomous Claude Code tasks so t
 limits get used around the clock.
 
 ## Goals (current push, set 2026-09-24)
+Antigravity reliability (owner, #134): diagnose reported file-tool failures from session evidence, preserve tool paths and errors, and regression-test the smallest supported adapter fix without changing Claude/Codex permissions. A successful read must be distinguished from provider quota exhaustion; live orchestrated acceptance belongs to #135.
 Immediate goals (owner, tasks #132–133): restore missing Artificial Analysis data in the Auto Delegate fallback popup with honest loading, unconfigured, provider-error and unavailable-metric states. Then simplify the popup to the starting model and a compact ordered fallback list, with scores and technical explanations behind one optional details disclosure; preserve ranking and saved per-chat choices. Task #132 fixes the data path only; #133 owns the simplification.
 1. Repo hygiene: the GitHub repo is github.com/sanat-garg/agent-orch (private; `origin`). No secrets or
    runtime data are tracked, and a README explains setup.

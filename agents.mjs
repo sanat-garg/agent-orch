@@ -442,6 +442,7 @@ const snakeKeys = (o = {}) => Object.fromEntries(Object.entries(o).map(([k, v]) 
 function agyTool(u) {
   const name = u.tool_name || u.tool_info?.name || 'tool', p = u.tool_info?.parameters || {};
   if (name === 'run_command') return { name: 'Bash', input: { command: p.CommandLine ?? p.command ?? '' } };
+  if (name === 'view_file' && p.AbsolutePath != null) return { name, input: toolInputSummary(name, { file_path: p.AbsolutePath }) };
   return { name, input: toolInputSummary(name, snakeKeys(p)) };
 }
 

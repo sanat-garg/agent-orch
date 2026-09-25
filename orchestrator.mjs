@@ -774,8 +774,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   db.exec('PRAGMA journal_mode=WAL');
   db.exec(SCHEMA);
   // Columns added after release: tasks.agent/model (explicit per-task routing), tasks.ran_agent/ran_model (what its
-  // latest run used, for the UI badge), runs.agent (who made the session).
-  for (const [table, col] of [['tasks', 'agent'], ['tasks', 'model'], ['tasks', 'ran_agent'], ['tasks', 'ran_model'], ['runs', 'agent']]) {
+  // latest run used, for the UI badge), tasks.route_note (why that run fell back to Claude), runs.agent (who made the session).
+  for (const [table, col] of [['tasks', 'agent'], ['tasks', 'model'], ['tasks', 'ran_agent'], ['tasks', 'ran_model'], ['tasks', 'route_note'], ['runs', 'agent']]) {
     if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} TEXT`);
   }
 
@@ -1407,7 +1407,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       else prompt = RESUME;
     }
     const { runId, logPath } = startRun(task.id, task.kind, route.agent);
-    updateTask(task.id, { ran_agent: route.agent, ran_model: route.model || null });
+    updateTask(task.id, { ran_agent: route.agent, ran_model: route.model || null, route_note: route.fellBack ? `${route.fellBack} ${route.reason}, ran on Claude` : null });
     const r = running.get(task.id);
     if (r) r.runId = runId;
     const res = await runAgent({
@@ -1643,7 +1643,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       priority: t.priority, deadline: t.deadline, depends_on: t.depends_on, attempts: t.attempts,
       continuations: t.continuations, not_before: t.not_before, source: t.source, created_at: t.created_at,
       started_at: t.started_at, finished_at: t.finished_at, commit_sha: t.commit_sha,
-      agent: t.agent, model: t.model, ran_agent: t.ran_agent, ran_model: t.ran_model, has_verify_failure: t.verify_output != null,
+      agent: t.agent, model: t.model, ran_agent: t.ran_agent, ran_model: t.ran_model, route_note: t.route_note ?? null, has_verify_failure: t.verify_output != null,
       summary: t.status === 'done' ? parseStatus(t.result)[1] || null : t.status === 'failed' || t.status === 'cancelled' ? String(t.result || '').slice(0, 200) : null,
     };
   }

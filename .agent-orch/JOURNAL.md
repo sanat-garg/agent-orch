@@ -189,3 +189,7 @@ decide() exported, 13 pacing tests pass, npm test green
 ## 2026-09-25 04:10 — #51 Test orchestrator task scheduling: ordering, deps, cascade, blocked_until [done (check passed)]
 
 scheduling tests added; npm test passes, all 73 tests
+
+## 2026-09-25 04:12 — #52 Show route fallback reason on the task's agent badge [done (check passed)]
+
+fallback reason stored in route_note and shown on badge

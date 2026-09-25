@@ -1118,6 +1118,7 @@ function agentBadge(t) {
   if (!agent && !model) return null;
   const b = el('span', 'tc-tag agent', [agent || 'claude', model].filter(Boolean).join(' · '));
   b.title = t.ran_agent ? 'Agent and model it ran on' : 'Agent and model it will run on';
+  if (t.route_note) { b.classList.add('warn'); b.title += ` — ${t.route_note}`; }
   return b;
 }
 

@@ -13,3 +13,7 @@ In /home/ubuntu/agent-orch, resolveRoute (orchestrator.mjs ~453) returns {fellBa
 ## Done when
 
 `npm test` passes, and `grep -n route_note orchestrator.mjs public/app.js` shows the column set in orchestrator.mjs and rendered in app.js
+
+## Result — done (check passed) (2026-09-25 04:12)
+
+AGENT-ORCH-STATUS: done — fallback reason stored in route_note and shown on badge

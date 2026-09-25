@@ -156,12 +156,50 @@ test('createOrchestrator adds agent/model columns and the routes table to an exi
     execFileSync(process.execPath, ['--input-type=module', '-e', script, dataDir], { stdio: 'ignore' });
     const db = new DatabaseSync(file);
     const cols = (t) => db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name);
-    assert.ok(['agent', 'model', 'ran_agent', 'ran_model'].every((c) => cols('tasks').includes(c)));
+    assert.ok(['agent', 'model', 'ran_agent', 'ran_model', 'route_note'].every((c) => cols('tasks').includes(c)));
     assert.ok(cols('runs').includes('agent'));
     assert.deepEqual(cols('routes'), ['id', 'project_id', 'match', 'agent', 'model', 'note', 'created_at']);
     assert.equal(db.prepare('SELECT title, agent FROM tasks').get().agent, null);
     db.close();
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('a task routed to a missing agent runs on Claude and its view carries route_note', { timeout: 60000 }, () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-note-')), proj = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-note-p-'));
+  try {
+    const script = `import { createOrchestrator } from ${JSON.stringify(new URL('../orchestrator.mjs', import.meta.url).href)};
+      import { clearLoginCache } from ${JSON.stringify(new URL('../agents.mjs', import.meta.url).href)};
+      import { DatabaseSync } from 'node:sqlite';
+      import path from 'node:path';
+      const [dataDir, proj] = process.argv.slice(1);
+      clearLoginCache();
+      const query = () => (async function* () {
+        yield { type: 'result', subtype: 'success', result: 'AGENT-ORCH-STATUS: done — ok', session_id: 's', num_turns: 1 };
+      })();
+      const o = createOrchestrator({ query, dataDir, claudeEnv: {}, getLimits: () => [], onSubscription: () => true,
+        broadcast() {}, emitChat() {}, convoExists: () => false });
+      const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
+      const pid = Number(db.prepare("INSERT INTO projects(path,name,priority,status,perpetual,created_at) VALUES(?,'p',50,'active',0,0)").run(proj).lastInsertRowid);
+      const ins = (title, agent) => Number(db.prepare('INSERT INTO tasks(project_id,title,prompt,agent,created_at) VALUES(?,?,?,?,0)').run(pid, title, title, agent).lastInsertRowid);
+      const a = ins('Add tests', 'codex'), b = ins('Plain', null);
+      const until = async (f) => { for (let i = 0; i < 300 && !f(); i++) await new Promise((r) => setTimeout(r, 100)); };
+      await until(() => !db.prepare("SELECT 1 FROM tasks WHERE status IN ('queued','running')").get());
+      console.log(JSON.stringify([a, b].map((id) => o.taskDetail(id).task)));
+      process.exit(0);`;
+    // A PATH without codex, so the codex route falls back.
+    const PATH = process.env.PATH.split(':').filter((d) => !fs.existsSync(path.join(d, 'codex'))).join(':');
+    const out = execFileSync(process.execPath, ['--input-type=module', '-e', script, dataDir, proj],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, PATH } });
+    const [a, b] = JSON.parse(out.trim().split('\n').pop());
+    assert.equal(a.status, 'done');
+    assert.equal(a.ran_agent, 'claude');
+    assert.equal(a.route_note, 'codex not installed, ran on Claude');
+    assert.equal(b.ran_agent, 'claude');
+    assert.equal(b.route_note, null);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+    fs.rmSync(proj, { recursive: true, force: true });
   }
 });

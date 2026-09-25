@@ -1278,6 +1278,7 @@ function agentBadge(t) {
   const b = el('span', 'tc-tag agent', [agent || 'claude', model].filter(Boolean).join(' · '));
   b.title = t.ran_agent ? 'Agent and model it ran on' : 'Agent and model it will run on';
   if (t.route_note) { b.classList.add('warn'); b.title += ` — ${t.route_note}`; }
+  if (t.delegated_from) { b.textContent = `↪ ${b.textContent}`; b.title += ` — delegated from ${t.delegated_from}${t.delegated_reason ? `: ${t.delegated_reason}` : ''}`; }
   return b;
 }
 

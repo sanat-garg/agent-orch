@@ -77,6 +77,12 @@ export function createUsageLog(dataDir, { now = Date.now } = {}) {
       if (last && last.pct === r.pct && last.resetsAt === r.resetsAt && now() - last.t < DEDUPE_MS) return null;
       return append(r);
     },
+    // The latest reading of each of an agent's plan windows whose reset (if known) is still ahead: [{window, pct, resetsAt}].
+    current(agent) {
+      const out = [];
+      for (const r of load().windows.values()) if (r.agent === agent && (r.resetsAt == null || r.resetsAt * 1000 > now())) out.push({ window: r.window, pct: r.pct, resetsAt: r.resetsAt });
+      return out;
+    },
     // An adapter's res.windows ([{window, pct, resetsAt}], e.g. codex '5h'/'weekly', agy 'gemini-5h').
     windows(agent, list) { return (list || []).map((w) => this.window(agent, w.window, w.pct, w.resetsAt)).filter(Boolean); },
     tokens(agent, usage, source, ref) {

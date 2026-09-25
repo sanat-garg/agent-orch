@@ -19,6 +19,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { AGENTS, agentStatus, isMissingSession, modelCatalog, modelNames, runAgentCli, toolInputSummary } from './agents.mjs';
 import { mediaCollector } from './media.mjs';
 import { createUsageLog } from './usage.mjs';
+import { CATEGORIES, DELEGATE_CFG, createDelegator, eligible as delegationEligible } from './delegate.mjs';
 
 // ---------------------------------------------------------------- config
 
@@ -39,6 +40,7 @@ const CFG = {
   sessionMaxContextTokens: 120000,
   sessionMaxTasks: 6,
   contextBudgetBytes: 8000,
+  delegate: { ...DELEGATE_CFG }, // comparable = score ≥ minRatio × original's or within rankWindow ranks; maxWindowPct
   // Tools a worker may use without full autonomy. Anything else is refused, never prompted.
   // File changes are limited to the project folder (./** is relative to the session's cwd).
   safeTools: [
@@ -80,7 +82,8 @@ const TASKS_FORMAT = `Emit work as a fenced block exactly like this (strict JSON
     "deadline": "2026-09-19T18:00 or null",
     "after": 0,
     "agent": "optional: claude | codex | antigravity",
-    "model": "optional model id"}
+    "model": "optional model id",
+    "category": "optional: coding | agentic | scientific | general (which model metrics matter if it is delegated)"}
  ],
  "routes": [{"match": "tests", "agent": "codex", "model": null, "scope": "project"}, {"remove": 3}]}
 \`\`\`
@@ -119,6 +122,8 @@ When the owner states a lasting preference ("use codex for writing tests", "use 
 UI work"), save it in \`routes\`: \`agent\` and/or \`model\`, \`scope\` "project" (default) or "global" (every
 project), optional \`note\`. A new route with the same match and scope replaces the old one; \`{"remove": id}\`
 deletes one. A \`plan\` route may only pick a Claude model. Unavailable agents fall back to Claude.
+While a task's agent is at its usage limit, reflection tasks may be delegated to a comparable model with usage left;
+the owner's chat tasks only when the message was sent with Auto Delegate, never when the owner picked a model.
 A block may contain only \`routes\` (with \`"tasks": []\`).`;
 
 const PLANNER_SYSTEM = `You are the planning mind of an agent orchestrator (agent-orch) running on the owner's server.
@@ -415,6 +420,7 @@ export function extractTasks(text) {
       priority: t.priority != null ? clamp(t.priority, 1, 90, null) : null,
       agent: normalizeAgent(t.agent),
       model: t.model ? String(t.model).trim().slice(0, 100) || null : null,
+      category: CATEGORIES.includes(String(t.category || '').toLowerCase()) ? String(t.category).toLowerCase() : null,
     });
     const last = tasks[tasks.length - 1];
     last.model = fitModel(last.agent, last.model, `task '${last.title}'`);
@@ -802,7 +808,7 @@ function takeLock(file) {
 }
 
 export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLimits, onSubscription, emitChat, broadcast, convoExists, refreshUsage,
-  onCommit = () => {}, projectReady = () => true, disabled = false, usageLog = createUsageLog(dataDir) }) {
+  onCommit = () => {}, projectReady = () => true, disabled = false, usageLog = createUsageLog(dataDir), modelMetrics = () => null }) {
   const dir = path.join(dataDir, 'orchestrator');
   const runsDir = path.join(dir, 'runs');
   fs.mkdirSync(runsDir, { recursive: true });
@@ -841,6 +847,17 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // latest run used, for the UI badge), tasks.route_note (why that run fell back to Claude), runs.agent (who made the session).
   for (const [table, col] of [['tasks', 'agent'], ['tasks', 'model'], ['tasks', 'ran_agent'], ['tasks', 'ran_model'], ['tasks', 'route_note'], ['runs', 'agent']]) {
     if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} TEXT`);
+  }
+  // Delegation (delegate.mjs): tasks.origin ('reflection' | 'chat' | null), tasks.auto_delegate (the chat message was sent
+  // with Auto Delegate), tasks.pinned_model (the model the owner picked for it), tasks.category (planner-provided),
+  // tasks.delegated_from ("agent/model" it was moved off) and tasks.delegated_reason. Existing rows get an origin from source.
+  if (!db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === 'origin')) {
+    db.exec('ALTER TABLE tasks ADD COLUMN origin TEXT');
+    db.exec("UPDATE tasks SET origin=CASE source WHEN 'reflection' THEN 'reflection' WHEN 'planner' THEN 'chat' END");
+  }
+  if (!db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === 'auto_delegate')) db.exec('ALTER TABLE tasks ADD COLUMN auto_delegate INTEGER NOT NULL DEFAULT 0');
+  for (const col of ['pinned_model', 'category', 'delegated_from', 'delegated_reason']) {
+    if (!db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === col)) db.exec(`ALTER TABLE tasks ADD COLUMN ${col} TEXT`);
   }
 
   const q1 = (sql, p = {}) => db.prepare(sql).get(p);
@@ -885,15 +902,17 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return eff;
   }
 
-  function addTask(projectId, { title, prompt, kind = 'work', source = 'user', priority = null, urgency = 'normal', deadline = null, dependsOn = null, doneWhen = null, agent = null, model = null }) {
+  function addTask(projectId, { title, prompt, kind = 'work', source = 'user', priority = null, urgency = 'normal', deadline = null, dependsOn = null, doneWhen = null, agent = null, model = null,
+    origin = source === 'reflection' ? 'reflection' : null, autoDelegate = false, pinnedModel = null, category = null }) {
     deadline = parseDeadline(deadline);
     if (priority == null) {
       priority = kind === 'plan' ? PRIORITY.plan : kind === 'reflect' ? PRIORITY.reflect
         : urgency !== 'normal' && URGENCY[urgency] ? URGENCY[urgency] : PRIORITY[source] ?? 50;
     }
-    const r = run(`INSERT INTO tasks(project_id,kind,title,prompt,priority,urgency,deadline,depends_on,done_when,source,agent,model,created_at)
-      VALUES(:p,:k,:ti,:pr,:pri,:u,:d,:dep,:dw,:s,:ag,:mo,:c)`,
-      { p: projectId, k: kind, ti: title, pr: prompt, pri: priority, u: urgency, d: deadline, dep: dependsOn, dw: doneWhen, s: source, ag: agent, mo: model, c: now() });
+    const r = run(`INSERT INTO tasks(project_id,kind,title,prompt,priority,urgency,deadline,depends_on,done_when,source,agent,model,origin,auto_delegate,pinned_model,category,created_at)
+      VALUES(:p,:k,:ti,:pr,:pri,:u,:d,:dep,:dw,:s,:ag,:mo,:or,:ad,:pm,:cat,:c)`,
+      { p: projectId, k: kind, ti: title, pr: prompt, pri: priority, u: urgency, d: deadline, dep: dependsOn, dw: doneWhen, s: source, ag: agent, mo: model,
+        or: origin, ad: autoDelegate ? 1 : 0, pm: pinnedModel, cat: category, c: now() });
     const id = Number(r.lastInsertRowid);
     pushTask(id);
     return id;
@@ -928,8 +947,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     // Mandatory GitHub protocol: a project's work only starts once its repo exists.
     // A plan task waits while the owner's chat turn holds the planner session (AUDIT #5).
     // A task whose agent is at its usage limit waits; others (e.g. codex-routed while Claude is limited) still run.
-    const row = runnable(allowed, true, 25).find((r) => !(r.kind === 'plan' && planningProjects.has(r.project_id)) && projectReady(getProject(r.project_id)?.path)
-      && !waitsForLimit(r));
+    // A waiting task that may be delegated moves to a comparable model with usage left (delegate.mjs) and runs now.
+    const rows = runnable(allowed, true, 25).filter((r) => !(r.kind === 'plan' && planningProjects.has(r.project_id)) && projectReady(getProject(r.project_id)?.path));
+    const row = rows.find((r) => !waitsForLimit(r)) || rows.find((r) => delegate(r) && !waitsForLimit(getTask(r.id)));
     if (!row) return null;
     run("UPDATE tasks SET status='running', started_at=:t WHERE id=:id", { t: now(), id: row.id });
     pushTask(row.id);
@@ -1252,6 +1272,36 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (r.fellBack) logEvent(`${r.fellBack} ${/^not /.test(r.reason) ? 'is ' : ''}${r.reason}; #${task.id || task.kind} runs on Claude instead`, { level: 'warn', projectId: project.id, taskId: task.id || null });
     return r;
   }
+  // ---- delegation: a task whose agent is limited moves to the top comparable candidate, if policy allows
+  const delegator = createDelegator({
+    agents: () => Object.keys(AGENTS),
+    connected: (id) => (id === 'claude' ? onSubscription() : agentAvailable(id) === true),
+    blockedUntil: (id) => blockedUntilFor(id),
+    windows: (id) => usageLog.current?.(id) || [],
+    models: (id) => modelCatalog(id).models || [],
+    metrics: modelMetrics,
+    cfg: CFG.delegate,
+  });
+  // The model the task asked for, before any fallback (a blocked codex route falls back onto Claude and waits there).
+  const intendedRoute = (task, project) => resolveRoute(task, project, listRoutes(project.id), () => true);
+  function candidates(task) {
+    const project = getProject(task.project_id);
+    return delegator.candidates(task, intendedRoute(task, project));
+  }
+  const delegateTried = new Map(); // task id -> last attempt (s): a task with no candidate is rechecked once a minute
+  function delegate(task) {
+    if (!delegationEligible(task) || now() - (delegateTried.get(task.id) || 0) < 60) return false;
+    delegateTried.set(task.id, now());
+    const project = getProject(task.project_id);
+    const from = intendedRoute(task, project);
+    const { original, candidates: list } = delegator.candidates(task, from);
+    const top = list[0];
+    if (!top) return false;
+    const fromName = `${from.agent}/${original?.model || from.model || 'default'}`;
+    updateTask(task.id, { agent: top.agent, model: top.model, session_id: null, delegated_from: task.delegated_from || fromName, delegated_reason: top.reason });
+    logEvent(`#${task.id} delegated from ${fromName} (at its usage limit) to ${top.agent}/${top.model}: ${top.reason}`, { projectId: task.project_id, taskId: task.id });
+    return true;
+  }
   function routesText(projectId) {
     const agents = Object.values(AGENTS).map((a) => {
       const st = a.id === 'claude' || agentStatus(a.id);
@@ -1263,7 +1313,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
 
   // ---- queueing a planner/reflector reply
-  function queuePayload(project, payload, source) {
+  // origin: {origin, autoDelegate, pinnedModel} for every task in the payload (the chat message's delegation policy).
+  function queuePayload(project, payload, source, origin = {}) {
     if (!payload) return [];
     if (payload.project) updateProject(project.id, payload.project);
     for (const d of payload.dropped || []) logEvent(`${source} ${d}`, { level: 'warn', projectId: project.id });
@@ -1274,7 +1325,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       if (dup) { logEvent(`skipped duplicate: ${t.title} (already #${dup.id})`, { projectId: project.id }); batch.push(dup.id); continue; }
       let dependsOn = resolveAfter(t.after, batch);
       if (dependsOn != null && !getTask(dependsOn)) dependsOn = null;
-      const id = addTask(project.id, { title: t.title, prompt: t.prompt, kind: 'work', source, priority: t.priority, urgency: t.urgency, deadline: t.deadline, dependsOn, doneWhen: t.done_when, agent: t.agent, model: t.model });
+      const id = addTask(project.id, { title: t.title, prompt: t.prompt, kind: 'work', source, priority: t.priority, urgency: t.urgency, deadline: t.deadline, dependsOn, doneWhen: t.done_when, agent: t.agent, model: t.model,
+        category: t.category, ...origin });
       writeTaskSpec(project.path, getTask(id));
       ids.push(id);
       batch.push(id);
@@ -1390,7 +1442,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const ac = new AbortController();
     planAborts.set(convo.id, ac);
     planningProjects.set(project.id, 'chat');
-    try { await plannerRun(project, text, convo.id, ac.signal, true, { agent, model }); }
+    // The message's delegation policy: Auto Delegate allows it; a model the owner picked (convo.model) pins it.
+    const origin = { origin: 'chat', autoDelegate: !!opts.autoDelegate, pinnedModel: opts.autoDelegate ? null : convo.model || null };
+    try { await plannerRun(project, text, convo.id, ac.signal, true, { agent, model, origin }); }
     finally { planAborts.delete(convo.id); planningProjects.delete(project.id); }
   }
   const abortPlan = (convoId) => planAborts.get(convoId)?.abort();
@@ -1400,7 +1454,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   const plannerSession = (project, agent) => (agent === 'claude' ? project.chat_session_id : kvGet(`planner_session:${project.id}:${agent}`) || null);
   const setPlannerSession = (project, agent, id) => (agent === 'claude' ? updateProject(project.id, { chat_session_id: id }) : kvSet(`planner_session:${project.id}:${agent}`, id || ''));
 
-  async function plannerRun(project, text, convoId, signal, fromChat = false, { agent = 'claude', model = null } = {}) {
+  async function plannerRun(project, text, convoId, signal, fromChat = false, { agent = 'claude', model = null, origin = { origin: 'chat' } } = {}) {
     const prompt = plannerTurnPrompt(project, listTasks(project.id, 25), text, `${ENVIRONMENT}\n${routesText(project.id)}`);
     // Claude streams SDK messages into the chat, so a 'plan' route can only change the Claude planner's model.
     // Other agents show their tool calls as they happen and the reply at the end.
@@ -1435,7 +1489,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       return { res, ids: [] };
     }
     const [, payload] = extractTasks(res.text);
-    const ids = queuePayload(getProject(project.id), payload, 'planner');
+    const ids = queuePayload(getProject(project.id), payload, 'planner', origin);
     if (convoId && ids.length) emitChat(convoId, { t: 'tasks', ids, source: 'planner' });
     return { res, ids };
   }
@@ -1834,7 +1888,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       priority: t.priority, deadline: t.deadline, depends_on: t.depends_on, attempts: t.attempts,
       continuations: t.continuations, not_before: t.not_before, source: t.source, created_at: t.created_at,
       started_at: t.started_at, finished_at: t.finished_at, commit_sha: t.commit_sha,
-      agent: t.agent, model: t.model, ran_agent: t.ran_agent, ran_model: t.ran_model, route_note: t.route_note ?? null, has_verify_failure: t.verify_output != null,
+      agent: t.agent, model: t.model, ran_agent: t.ran_agent, ran_model: t.ran_model, route_note: t.route_note ?? null,
+      origin: t.origin ?? null, auto_delegate: !!t.auto_delegate, delegated_from: t.delegated_from ?? null, delegated_reason: t.delegated_reason ?? null, has_verify_failure: t.verify_output != null,
       // The agent a queued task would run on now: the UI shows it waiting only while that agent is limited (state.blocks).
       runs_on: t.status === 'queued' ? agentFor(t, getProject(t.project_id)) : null,
       summary: t.status === 'done' ? parseStatus(t.result)[1] || null : t.status === 'failed' || t.status === 'cancelled' ? String(t.result || '').slice(0, 200) : null,
@@ -1955,7 +2010,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   return {
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
-    planTurn, abortPlan, taskAction, projectAction, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
+    planTurn, abortPlan, candidates, eligible: delegationEligible, taskAction, projectAction, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
     drain, undrain, chatPlanning, stateView, limitResetFor, recordLimit: recordGovernor, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     unwatch: (ws) => { for (const set of runSubs.values()) set.delete(ws); },
   };

@@ -606,6 +606,8 @@ const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
   onCommit: (dir) => syncGit(dir).catch((e) => console.error('[github] sync failed', dir, e)),
   projectReady: (dir) => gh.status().linked && !!convos.find((c) => c.cwd === dir)?.repo,
   disabled: NO_ORCH,
+  // Delegation ranks models on the /api/models/metrics view (aaStore is created below; called lazily).
+  modelMetrics: () => aaStore.view(),
 });
 
 // ---------- GitHub protocol ----------

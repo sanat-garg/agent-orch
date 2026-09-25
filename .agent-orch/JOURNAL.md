@@ -357,3 +357,7 @@ restarted server's check passes; this prompt's failure predates restart
 ## 2026-09-25 18:25 — #108 Artificial Analysis client: API key in Connections, cached model metrics [done (check passed)]
 
 AA key storage, cached metrics, model mapping, /api/models/metrics, tests pass
+
+## 2026-09-25 18:33 — #109 Delegation engine: rank comparable models with available usage for a task [done (check passed)]
+
+delegate.mjs ranks models and moves eligible tasks; tests pass

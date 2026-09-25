@@ -13,3 +13,7 @@ Build delegate.mjs, used by the orchestrator. candidates(task) returns the model
 ## Done when
 
 `npm test` passes with delegate.mjs policy-matrix and ranking tests
+
+## Result — done (check passed) (2026-09-25 18:33)
+
+AGENT-ORCH-STATUS: done — delegate.mjs ranks models and moves eligible tasks; tests pass

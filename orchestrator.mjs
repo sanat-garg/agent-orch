@@ -313,6 +313,9 @@ ${TASKS_FORMAT}`;
 const TASKS_BLOCK_RE = /```(?:agent-orch|ao2)-tasks\s*\n([\s\S]*?)\n```/g;
 const STATUS_RE = /^\s*(?:AGENT-ORCH|AO2)-STATUS:\s*(done|continue)\b[\s—:-]*(.*)$/gim;
 
+// Parses JSONL text, skipping blank and corrupt lines (e.g. a partial write from a killed process).
+export const parseJsonl = (text) => text.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+
 export function parseStatus(text) {
   const matches = [...String(text || '').matchAll(STATUS_RE)];
   if (!matches.length) return ['done', ''];
@@ -1646,7 +1649,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const runs = qa('SELECT * FROM runs WHERE task_id=:t ORDER BY id', { t: id }).map((r) => {
       let entries = [];
       try {
-        entries = fs.readFileSync(r.log_path, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((e) => e.k !== 'start' && e.k !== 'end');
+        entries = parseJsonl(fs.readFileSync(r.log_path, 'utf8')).filter((e) => e.k !== 'start' && e.k !== 'end');
       } catch {}
       if (entries.length > 1500) entries = entries.slice(-1500);
       return { id: r.id, outcome: r.outcome, started_at: r.started_at, finished_at: r.finished_at, turns: r.num_turns, output_tokens: r.output_tokens, entries };

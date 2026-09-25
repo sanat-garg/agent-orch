@@ -13,3 +13,7 @@ Fix AUDIT #13 in /home/ubuntu/agent-orch. `readLog` in server.mjs (around line 1
 ## Done when
 
 `grep -rq 'corrupt line' test` and `npm test` passes
+
+## Result — done (check passed) (2026-09-25 03:52)
+
+AGENT-ORCH-STATUS: done — Corrupt JSONL lines are skipped; chat and task logs still load

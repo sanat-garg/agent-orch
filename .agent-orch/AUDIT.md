@@ -124,6 +124,7 @@ a same-origin request. Caddy's `reverse_proxy` overwrites `X-Forwarded-For`, so 
   example a partial write when the process was killed) returns `[]`. The chat then opens empty, and `chatRecap`
   loses all its context.
 - **Fix:** Parse each line in its own try and skip bad lines, as `loadSeries` does (server.mjs:303).
+- **Fixed** (task #40): `parseJsonl` (exported from orchestrator.mjs) skips bad lines; `readLog`, `taskDetail` and `loadSeries` use it; test/jsonl.test.mjs covers it.
 
 ### 14. [low] An oversized request body hangs the request forever (server.mjs:920-925)
 - **What:** `readBody` calls `req.destroy()` once the body passes 1 MB, but it never resolves or rejects. The

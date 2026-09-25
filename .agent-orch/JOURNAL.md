@@ -149,3 +149,7 @@ WebSockets for removed or expired sessions now close with 4001
 ## 2026-09-25 03:52 — #39 Deleting a chat mid-plan stops queued planner turns (AUDIT #6) [done (check passed)]
 
 Deleting a chat mid-plan now drops its queued planner turns
+
+## 2026-09-25 03:52 — #40 Skip corrupt JSONL lines instead of blanking chat and task logs (AUDIT #13) [done (check passed)]
+
+Corrupt JSONL lines are skipped; chat and task logs still load

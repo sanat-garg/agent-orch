@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { WebSocketServer } from 'ws';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { createOrchestrator } from './orchestrator.mjs';
+import { createOrchestrator, parseJsonl } from './orchestrator.mjs';
 import { createGitHub } from './github.mjs';
 import { retireRuntime } from './runtimes.mjs';
 import { AGENTS, runAgentCli } from './agents.mjs';
@@ -162,7 +162,7 @@ const logPath = (id) => path.join(LOGS, `${id}.jsonl`);
 function appendLog(id, ev) { fs.appendFileSync(logPath(id), JSON.stringify(ev) + '\n'); }
 function readLog(id) {
   try {
-    return fs.readFileSync(logPath(id), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    return parseJsonl(fs.readFileSync(logPath(id), 'utf8'));
   } catch { return []; }
 }
 function publicConvo(c) {
@@ -311,8 +311,7 @@ const MINUTE_FILE = path.join(METRICS_DIR, 'minutes.jsonl');
 
 function loadSeries(file, keepMs) {
   const cutoff = Date.now() - keepMs;
-  return readText(file).split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } })
-    .filter((s) => s && s.t > cutoff);
+  return parseJsonl(readText(file)).filter((s) => s.t > cutoff);
 }
 function rewriteSeries(file, rows) {
   fs.writeFileSync(file + '.tmp', rows.map((r) => JSON.stringify(r)).join('\n') + (rows.length ? '\n' : ''));

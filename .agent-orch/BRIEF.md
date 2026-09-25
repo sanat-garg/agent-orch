@@ -3,8 +3,8 @@
 _Maintained by the orchestrator's planner from conversations with the owner._
 
 ## Vision
-Claude Web: a self-hosted web UI for Claude Code on this arm64 Oracle VM. It has a login-protected chat UI
-that drives Claude Code through the Agent SDK, a browser terminal (ttyd proxied by Caddy at /term/), and AO2,
+agent-orch: a self-hosted web UI for Claude Code on this arm64 Oracle VM. It has a login-protected chat UI
+that drives Claude Code through the Agent SDK, a browser terminal (ttyd proxied by Caddy at /shell/), and
 an agent orchestrator that plans work and runs autonomous Claude Code tasks so the owner's plan usage
 limits get used around the clock.
 

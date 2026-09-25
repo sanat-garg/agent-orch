@@ -12,3 +12,7 @@ Let the owner curate the Auto Delegate fallbacks. 1) Storage: each chat (convo i
 ## Done when
 
 `npm test` passes with curated-fallback tests (order, skip unavailable, empty list, null=auto, validation)
+
+## Result — done (check passed) (2026-09-25 19:59)
+
+AGENT-ORCH-STATUS: done — curated per-chat fallbacks stored, snapshotted, honoured; npm test passes

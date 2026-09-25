@@ -103,6 +103,32 @@ export function rankCandidates({ current, entries = [], available = [], category
   return { category, original: { ...current, label: origName, score: r1(o.score), metrics: o.used }, candidates };
 }
 
+// Owner-curated fallbacks (a chat's `fallbacks`, snapshotted into tasks.fallbacks as JSON): [{agent, model}] in the
+// owner's order, or null = automatic ranking. An empty array is curated too: nothing to delegate to.
+export function parseFallbacks(v) {
+  if (v == null || v === '') return null;
+  let a = v;
+  if (typeof v === 'string') { try { a = JSON.parse(v); } catch { return null; } }
+  return Array.isArray(a) ? a.filter((f) => f && typeof f.agent === 'string' && typeof f.model === 'string').map(({ agent, model }) => ({ agent, model })) : null;
+}
+// The owner chose these, so the comparable threshold doesn't apply: every listed model (but the current one) that
+// `usable` accepts, in the owner's order. Score/metrics against the current model are for display only (null without
+// metrics); rank is the 1-based position in the owner's list.
+export function curatedCandidates({ current, list = [], entries = [], usable = () => true, category = 'general', cfg = DELEGATE_CFG }) {
+  const scored = rankCandidates({ current, entries, available: list, category, cfg: { ...cfg, minRatio: -Infinity, rankWindow: Infinity } });
+  const key = (x) => `${x.agent}/${x.model}`;
+  const byKey = new Map(scored.candidates.map((c) => [key(c), c]));
+  const seen = new Set([key(current)]), candidates = [];
+  list.forEach((f, i) => {
+    if (seen.has(key(f)) || !usable(f)) return;
+    seen.add(key(f));
+    const c = byKey.get(key(f));
+    candidates.push({ agent: f.agent, model: f.model, label: c?.label || entries.find((e) => key(e) === key(f))?.label || f.model, score: c?.score ?? null, ratio: c?.ratio ?? null,
+      rank: i + 1, metrics: c?.metrics || null, reason: `owner's fallback #${i + 1}${c ? `; ${c.reason}` : ''}` });
+  });
+  return { category: scored.category, original: scored.original, candidates, curated: true };
+}
+
 // Live wiring. agents() → ids; connected(id) → bool (installed, signed in, on the subscription);
 // blockedUntil(id) → epoch s | 0; windows(id) → [{window, pct}] current plan windows; models(id) → [{id, default?}];
 // metrics() → aa view ({entries}). A window reading can't say which models it covers, so any window ≥ maxWindowPct
@@ -116,6 +142,11 @@ export function createDelegator({ agents, connected, blockedUntil, windows = () 
     const cur = { agent: current.agent, model: current.model || defaultModel(current.agent) };
     let view = null;
     try { view = metrics(); } catch {}
+    const list = parseFallbacks(task.fallbacks);
+    if (list) {
+      const ok = new Set(available().map((m) => `${m.agent}/${m.model}`));
+      return curatedCandidates({ current: cur, list, entries: view?.entries || [], usable: (f) => ok.has(`${f.agent}/${f.model}`), category: taskCategory(task), cfg });
+    }
     return rankCandidates({ current: cur, entries: view?.entries || [], available: available(), category: taskCategory(task), cfg });
   }
   return { eligible, candidates, hasUsage, available };
@@ -124,18 +155,27 @@ export function createDelegator({ agents, connected, blockedUntil, windows = () 
 // Auto Delegate preview (the composer summary): the start model plus the comparable models most likely used after it.
 // all: [{agent, model, label}] every model of a connected agent, limited or not; usage(agent) → {status, until?, note?}
 // where status is available | near | limited | unavailable. Limited candidates stay listed (the UI greys them) but rank
-// after every usable one. → {category, start, candidates: [≤limit rankCandidates rows + usage + full metrics]}
-export function previewDelegation({ current, entries = [], all = [], usage, category = 'coding', limit = 3, cfg = DELEGATE_CFG }) {
+// after every usable one. → {category, start, fallbacks, candidates: [≤limit rankCandidates rows + usage + full metrics], suggested}
+// With a curated `fallbacks` list, candidates are that whole list in the owner's order, each with its usage (a model
+// that isn't listed for a connected agent is unavailable); `suggested` is always the automatic top `limit`.
+export function previewDelegation({ current, entries = [], all = [], usage, category = 'coding', limit = 3, fallbacks = null, cfg = DELEGATE_CFG }) {
   const ranked = rankCandidates({ current, entries, available: all, category, cfg });
   const full = (a, m) => entries.find((e) => e.agent === a && e.model === m)?.metrics || null;
   const usable = (s) => s === 'available' || s === 'near';
   const rows = ranked.candidates.map((c, i) => ({ ...c, i, used: c.metrics, metrics: full(c.agent, c.model), ...usage(c.agent) }));
   rows.sort((a, b) => usable(b.status) - usable(a.status) || a.i - b.i);
-  const label = all.find((m) => m.agent === current.agent && m.model === current.model)?.label
-    || entries.find((e) => e.agent === current.agent && e.model === current.model)?.label || current.model;
+  const labelOf = (a, m) => all.find((x) => x.agent === a && x.model === m)?.label || entries.find((e) => e.agent === a && e.model === m)?.label || m;
+  const suggested = rows.slice(0, limit).map(({ i, similarity, ...r }) => r);
+  const list = parseFallbacks(fallbacks);
+  const curated = list && curatedCandidates({ current, list, entries, category, cfg }).candidates.map((c) => {
+    const u = usage(c.agent);
+    const listed = all.some((m) => m.agent === c.agent && m.model === c.model);
+    return { ...c, label: labelOf(c.agent, c.model), used: c.metrics, metrics: full(c.agent, c.model),
+      ...(listed || u.status === 'unavailable' ? u : { status: 'unavailable', until: null, note: 'model not listed' }) };
+  });
   return {
     category: ranked.category,
-    start: { ...current, label, score: ranked.original?.score ?? null, metrics: full(current.agent, current.model), ...usage(current.agent) },
-    candidates: rows.slice(0, limit).map(({ i, similarity, ...r }) => r),
+    start: { ...current, label: labelOf(current.agent, current.model), score: ranked.original?.score ?? null, metrics: full(current.agent, current.model), ...usage(current.agent) },
+    fallbacks: list, candidates: curated || suggested, suggested,
   };
 }

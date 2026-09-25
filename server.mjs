@@ -172,7 +172,7 @@ function readLog(id) {
 }
 function publicConvo(c) {
   const rt = runtimes.get(c.id);
-  return { ...c, busy: !!rt?.busy || planning.has(c.id) || agentTurns.has(c.id) };
+  return { ...c, fallbacks: c.fallbacks ?? null, busy: !!rt?.busy || planning.has(c.id) || agentTurns.has(c.id) };
 }
 const planning = new Set(); // convo ids with an orchestrator planner turn in progress
 const agentTurns = new Map(); // convo id -> AbortController of a running non-Claude chat turn
@@ -1277,6 +1277,31 @@ async function handleRequest(req, res) {
       return json(res, 200, c);
     }
   }
+  // Auto Delegate fallbacks the owner curates for a chat: {fallbacks: [{agent, model}] | null}. null = automatic ranking;
+  // an array (even empty) is used as-is, in order. Every entry must be a discovered model of a known agent.
+  const cf = p.match(/^\/api\/convos\/([\w-]+)\/fallbacks$/);
+  if (cf && req.method === 'PUT') {
+    const c = findConvo(cf[1]);
+    if (!c) return json(res, 404, { error: 'No such chat' });
+    const body = await readBody(req);
+    const v = body.fallbacks;
+    if (v !== null && !Array.isArray(v)) return json(res, 400, { error: 'fallbacks must be an array of {agent, model} or null' });
+    let list = null;
+    if (v) {
+      if (v.length > 20) return json(res, 400, { error: 'At most 20 fallbacks' });
+      list = [];
+      for (const f of v) {
+        const agent = f?.agent, model = f?.model;
+        if (typeof agent !== 'string' || !AGENTS[agent]) return json(res, 400, { error: `Unknown agent: ${agent}` });
+        if (typeof model !== 'string' || !(modelCatalog(agent).models || []).some((m) => m.id === model)) return json(res, 400, { error: `Unknown ${agent} model: ${model}` });
+        if (!list.some((x) => x.agent === agent && x.model === model)) list.push({ agent, model });
+      }
+    }
+    c.fallbacks = list;
+    saveConvos();
+    broadcastConvos();
+    return json(res, 200, publicConvo(c));
+  }
   if (p === '/api/github' && req.method === 'GET') {
     const s = Date.now() - gh.status().checkedAt > 15000 ? await gh.refresh() : gh.status();
     return json(res, 200, s);
@@ -1319,9 +1344,12 @@ async function handleRequest(req, res) {
     return d ? json(res, 200, d) : json(res, 404, { error: 'No such task' });
   }
   // Auto Delegate preview for the composer: ?agent=&model=&category= (default coding) → start model + top 3 candidates.
+  // ?convo=<id> with a curated fallback list: candidates are that list (with usage + metrics); `suggested` = automatic top 3.
   if (p === '/api/delegate/preview' && req.method === 'GET') {
     const q = url.searchParams;
-    const v = orch.delegatePreview({ agent: q.get('agent') || 'claude', model: q.get('model') || null, category: q.get('category') || 'coding' });
+    const convo = q.get('convo') ? findConvo(q.get('convo')) : null;
+    if (q.get('convo') && !convo) return json(res, 404, { error: 'No such chat' });
+    const v = orch.delegatePreview({ agent: q.get('agent') || 'claude', model: q.get('model') || null, category: q.get('category') || 'coding', fallbacks: convo?.fallbacks ?? null });
     return v ? json(res, 200, v) : json(res, 400, { error: 'Unknown agent' });
   }
   // Manual delegation: GET lists the options (delegate.mjs ranking + usage status), POST {agent, model} reassigns a queued task.

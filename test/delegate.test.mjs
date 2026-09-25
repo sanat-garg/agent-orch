@@ -8,7 +8,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { eligible, taskCategory, rankCandidates, createDelegator, weightedScore, previewDelegation } from '../delegate.mjs';
+import { eligible, taskCategory, rankCandidates, createDelegator, weightedScore, previewDelegation, parseFallbacks } from '../delegate.mjs';
 
 test('policy matrix: reflect / chat+auto / chat+pinned / chat default', () => {
   assert.equal(eligible({ kind: 'work', origin: 'reflection' }), true);
@@ -105,6 +105,50 @@ test('preview: start model plus top 3; a limited agent\'s models are marked and 
   assert.equal(previewDelegation({ current: { agent: 'claude', model: 'opus' }, entries, all, usage, limit: 1 }).candidates.length, 1);
 });
 
+test('curated fallbacks: owner order, no comparable threshold, unavailable skipped, empty never delegates, null = auto', () => {
+  const models = { claude: [{ id: 'opus', default: true }], codex: [{ id: 'gpt-a' }, { id: 'gpt-b' }, { id: 'gpt-mini' }], antigravity: [{ id: 'gemini-x' }, { id: 'gemini-none' }] };
+  const mk = (over = {}) => createDelegator({ agents: () => Object.keys(models), models: (id) => models[id], metrics: () => ({ entries }),
+    connected: () => true, blockedUntil: (id) => (id === 'claude' ? 123 : 0), windows: () => [], ...over });
+  const cur = { agent: 'claude', model: 'opus' };
+  const fb = (...ms) => JSON.stringify(ms.map((m) => ({ agent: entries.find((e) => e.model === m)?.agent || 'codex', model: m })));
+  const task = (fallbacks) => ({ title: 'Fix the parser bug', prompt: 'code', fallbacks });
+  // Owner order wins, even for gpt-mini (16 vs 56: far from comparable) and gemini-none (no metrics); the current model is skipped.
+  let r = mk().candidates(task(fb('gpt-mini', 'opus', 'gemini-none', 'gpt-a')), cur);
+  assert.deepEqual(r.candidates.map((c) => c.model), ['gpt-mini', 'gemini-none', 'gpt-a']);
+  assert.equal(r.curated, true);
+  assert.deepEqual([r.candidates[0].score, r.candidates[0].rank], [16, 1]);
+  assert.match(r.candidates[0].reason, /^owner's fallback #1; coding: 16 vs Opus 56/);
+  assert.deepEqual([r.candidates[1].score, r.candidates[1].metrics, r.candidates[1].reason], [null, null, "owner's fallback #3"]);
+  // An unavailable curated model is skipped: codex at ≥90%, a model the agent no longer lists, a disconnected agent.
+  r = mk({ windows: (id) => (id === 'codex' ? [{ window: '5h', pct: 95 }] : []) }).candidates(task(fb('gpt-mini', 'gemini-x', 'gpt-a')), cur);
+  assert.deepEqual(r.candidates.map((c) => [c.model, c.rank]), [['gemini-x', 2]]);
+  r = mk({ connected: (id) => id !== 'antigravity' }).candidates(task(JSON.stringify([{ agent: 'codex', model: 'gone' }, { agent: 'antigravity', model: 'gemini-x' }, { agent: 'codex', model: 'gpt-b' }])), cur);
+  assert.deepEqual(r.candidates.map((c) => c.model), ['gpt-b']);
+  // Empty list: curated, nothing to delegate to (the task waits for its start model).
+  r = mk().candidates(task('[]'), cur);
+  assert.deepEqual([r.curated, r.candidates.length], [true, 0]);
+  // null (or missing): the automatic comparable ranking.
+  for (const f of [null, undefined]) assert.deepEqual(mk().candidates(task(f), cur).candidates.map((c) => c.model), ['gpt-a', 'gpt-b', 'gemini-x']);
+  assert.equal(parseFallbacks('not json'), null);
+  assert.deepEqual(parseFallbacks([{ agent: 'codex', model: 'gpt-a', x: 1 }, { agent: 'codex' }]), [{ agent: 'codex', model: 'gpt-a' }]);
+});
+
+test('preview with curated fallbacks: the whole list in order with usage; suggested = automatic top 3', () => {
+  const all = avail('opus', 'gpt-a', 'gpt-b', 'gpt-mini', 'gemini-x').map((m) => ({ ...m, label: entries.find((e) => e.model === m.model).label }));
+  const usage = (a) => (a === 'codex' ? { status: 'limited', until: 999, note: 'usage limit' } : { status: 'available', until: null, note: null });
+  const fallbacks = [{ agent: 'codex', model: 'gpt-mini' }, { agent: 'antigravity', model: 'gemini-x' }, { agent: 'antigravity', model: 'gone' }];
+  const r = previewDelegation({ current: { agent: 'claude', model: 'opus' }, entries, all, usage, fallbacks });
+  assert.deepEqual(r.fallbacks, fallbacks);
+  assert.deepEqual(r.candidates.map((c) => [c.model, c.label, c.status]), [['gpt-mini', 'GPT mini', 'limited'], ['gemini-x', 'Gemini X', 'available'], ['gone', 'gone', 'unavailable']]);
+  assert.equal(r.candidates[0].metrics.coding_index, 20);
+  assert.equal(r.candidates[2].note, 'model not listed');
+  assert.deepEqual(r.suggested.map((c) => c.model), ['gemini-x', 'gpt-a', 'gpt-b']);
+  const auto = previewDelegation({ current: { agent: 'claude', model: 'opus' }, entries, all, usage });
+  assert.equal(auto.fallbacks, null);
+  assert.deepEqual(auto.candidates, auto.suggested);
+  assert.deepEqual(previewDelegation({ current: { agent: 'claude', model: 'opus' }, entries, all, usage, fallbacks: [] }).candidates, []);
+});
+
 // ---- orchestrator integration: a child process (createOrchestrator starts timers) with Claude blocked.
 const fixture = (f) => fileURLToPath(new URL(`./fixtures/${f}`, import.meta.url));
 test('a waiting reflection task moves to the top candidate; chat default and pinned tasks keep waiting', { timeout: 60000 }, async () => {
@@ -131,12 +175,13 @@ test('a waiting reflection task moves to the top candidate; chat default and pin
       const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
       db.prepare('INSERT OR REPLACE INTO kv(key,value) VALUES(?,?)').run('blocked_until', String(Date.now() / 1000 + 3600));
       const pid = (n) => { const p = path.join(root, n); fs.mkdirSync(p); return Number(db.prepare("INSERT INTO projects(path,name,status,perpetual,created_at) VALUES(?,?,'active',0,0)").run(p, n).lastInsertRowid); };
-      const task = (n, origin, auto, pinned) => Number(db.prepare('INSERT INTO tasks(project_id,title,prompt,origin,auto_delegate,pinned_model,created_at) VALUES(?,?,?,?,?,?,0)')
-        .run(pid(n), 'Fix the parser bug', 'code', origin, auto, pinned).lastInsertRowid);
-      const ids = { reflect: task('a', 'reflection', 0, null), auto: task('b', 'chat', 1, null), pinned: task('c', 'chat', 0, 'opus'), plain: task('d', 'chat', 0, null) };
+      const task = (n, origin, auto, pinned, fallbacks = null) => Number(db.prepare('INSERT INTO tasks(project_id,title,prompt,origin,auto_delegate,pinned_model,fallbacks,created_at) VALUES(?,?,?,?,?,?,?,0)')
+        .run(pid(n), 'Fix the parser bug', 'code', origin, auto, pinned, fallbacks).lastInsertRowid);
+      const ids = { reflect: task('a', 'reflection', 0, null), auto: task('b', 'chat', 1, null), pinned: task('c', 'chat', 0, 'opus'), plain: task('d', 'chat', 0, null),
+        curated: task('e', 'chat', 1, null, JSON.stringify([{ agent: 'codex', model: 'gpt-mini' }])), empty: task('f', 'chat', 1, null, '[]') };
       const get = (id) => db.prepare('SELECT * FROM tasks WHERE id=?').get(id);
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-      for (let i = 0; i < 300 && !(get(ids.reflect).status === 'done' && get(ids.auto).status === 'done'); i++) await sleep(100);
+      for (let i = 0; i < 300 && !['reflect', 'auto', 'curated'].every((k) => get(ids[k]).status === 'done'); i++) await sleep(100);
       await sleep(3500);
       const out = Object.fromEntries(Object.entries(ids).map(([k, id]) => { const t = get(id); return [k, { status: t.status, agent: t.agent, model: t.model, from: t.delegated_from, reason: t.delegated_reason, view: o.taskDetail(id).task.delegated_from }]; }));
       out.claude = claude;
@@ -151,9 +196,12 @@ test('a waiting reflection task moves to the top candidate; chat default and pin
       assert.deepEqual([r[k].agent, r[k].model, r[k].from, r[k].view], ['codex', 'gpt-a', 'claude/opus', 'claude/opus']);
       assert.match(r[k].reason, /^coding: 54 vs Opus 56/);
     }
-    for (const k of ['pinned', 'plain']) assert.deepEqual([r[k].status, r[k].agent, r[k].from], ['queued', null, null]);
+    // The chat's curated list is used as-is (gpt-mini is far from comparable); an empty list never delegates.
+    assert.deepEqual([r.curated.status, r.curated.agent, r.curated.model, r.curated.from], ['done', 'codex', 'gpt-mini', 'claude/opus']);
+    assert.match(r.curated.reason, /^owner's fallback #1/);
+    for (const k of ['pinned', 'plain', 'empty']) assert.deepEqual([r[k].status, r[k].agent, r[k].from], ['queued', null, null]);
     assert.equal(r.claude, 0);
-    assert.equal(r.events.length, 2);
+    assert.equal(r.events.length, 3);
   } finally {
     for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
   }

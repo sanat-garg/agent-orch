@@ -20,6 +20,7 @@ const AA = { pagination: { page: 1, total_pages: 1, has_more: false }, data: [
   { id: 'a2', name: 'GPT-6 Sol', slug: 'gpt-6-sol', model_creator: { name: 'OpenAI' }, evaluations: ev(66, 56, 60, 0.54) },
   { id: 'a3', name: 'Gemini 3.1 Pro', slug: 'gemini-3-1-pro', model_creator: { name: 'Google' }, evaluations: ev(58, 49, 62, 0.495) },
 ] };
+const CID = 'chat-1';
 let child, base, dataDir, home, aaStub, cookie;
 
 const freePort = () => new Promise((resolve, reject) => {
@@ -31,6 +32,7 @@ before(async () => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-prev-'));
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-prev-home-'));
   const salt = crypto.randomBytes(16).toString('hex');
+  fs.writeFileSync(path.join(dataDir, 'convos.json'), JSON.stringify([{ id: CID, title: 'p', cwd: path.join(dataDir, 'no-such-project'), mode: 'orchestrator', model: '', createdAt: 1, updatedAt: 1, fullAccess: true }]));
   fs.writeFileSync(path.join(dataDir, 'auth.json'), JSON.stringify({ salt, hash: crypto.scryptSync(PASSWORD, salt, 64).toString('hex') }));
   const bin = path.join(home, '.local/bin');
   fs.mkdirSync(bin, { recursive: true });
@@ -106,4 +108,41 @@ test('preview: start model plus comparable candidates; a limited agent is marked
   assert.equal(body.candidates[1].until, until);
 
   assert.equal((await get('/api/delegate/preview?agent=nope')).status, 400);
+});
+
+const put = async (p, body) => { const r = await fetch(base + p, { method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) }); return { status: r.status, body: JSON.parse(await r.text()) }; };
+
+test('PUT /api/convos/:id/fallbacks: validated against the discovered models; the convo payload and ?convo= preview carry it', { timeout: 60000 }, async () => {
+  await preview('agent=codex&model=gpt-5.5'); // models discovered
+  const unauth = await fetch(base + `/api/convos/${CID}/fallbacks`, { method: 'PUT', body: '{"fallbacks":null}' });
+  assert.equal(unauth.status, 401);
+  await unauth.arrayBuffer();
+  for (const bad of [[{ agent: 'nope', model: 'gpt-5.5' }], [{ agent: 'codex', model: 'gpt-9000' }], [{ agent: 'antigravity', model: 'gpt-5.5' }], [{ agent: 'codex' }], 'codex', undefined]) {
+    const r = await put(`/api/convos/${CID}/fallbacks`, { fallbacks: bad });
+    assert.equal(r.status, 400, JSON.stringify(bad));
+  }
+  assert.equal((await put('/api/convos/nope/fallbacks', { fallbacks: null })).status, 404);
+  assert.equal((await get('/api/convos')).body.find((c) => c.id === CID).fallbacks, null, 'automatic by default');
+
+  const list = [{ agent: 'codex', model: 'gpt-6-sol' }, { agent: 'antigravity', model: 'gemini-3.1-pro-high' }, { agent: 'codex', model: 'gpt-6-sol' }];
+  let r = await put(`/api/convos/${CID}/fallbacks`, { fallbacks: list });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.fallbacks, list.slice(0, 2), 'duplicates dropped, order kept');
+  assert.deepEqual((await get('/api/convos')).body.find((c) => c.id === CID).fallbacks, list.slice(0, 2));
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dataDir, 'convos.json'), 'utf8'))[0].fallbacks, list.slice(0, 2));
+
+  // Preview for the chat: the curated list in the owner's order (codex is limited by the earlier test), plus the automatic suggestion.
+  ({ body: r } = await get(`/api/delegate/preview?agent=codex&model=gpt-5.5&convo=${CID}`));
+  assert.deepEqual(r.fallbacks, list.slice(0, 2));
+  assert.deepEqual(r.candidates.map((c) => [c.model, c.status]), [['gpt-6-sol', 'limited'], ['gemini-3.1-pro-high', 'available']]);
+  assert.equal(r.candidates[1].metrics.agentic_index, 62);
+  assert.deepEqual(r.suggested.map((c) => c.model), ['gemini-3.1-pro-high', 'gpt-6-sol']);
+  assert.equal((await get('/api/delegate/preview?agent=codex&convo=nope')).status, 404);
+
+  assert.deepEqual((await put(`/api/convos/${CID}/fallbacks`, { fallbacks: [] })).body.fallbacks, []);
+  assert.deepEqual((await get(`/api/delegate/preview?agent=codex&model=gpt-5.5&convo=${CID}`)).body.candidates, []);
+  assert.equal((await put(`/api/convos/${CID}/fallbacks`, { fallbacks: null })).body.fallbacks, null);
+  ({ body: r } = await get(`/api/delegate/preview?agent=codex&model=gpt-5.5&convo=${CID}`));
+  assert.equal(r.fallbacks, null);
+  assert.deepEqual(r.candidates, r.suggested);
 });

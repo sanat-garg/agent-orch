@@ -393,3 +393,7 @@ Pinned chip removed; Auto Delegate preview now live and tested
 ## 2026-09-25 19:52 — #126 Queue window: wider, indented dependents, new waiting/limited glyphs [done (check passed)]
 
 queue is wider, shows dependents as a tree, has new glyphs
+
+## 2026-09-25 19:59 — #129 Backend: owner-defined fallback list per chat for Auto Delegate [done (check passed)]
+
+curated per-chat fallbacks stored, snapshotted, honoured; npm test passes

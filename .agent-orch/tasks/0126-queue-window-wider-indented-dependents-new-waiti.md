@@ -12,3 +12,7 @@ Polish the Queue modal (public/index.html #queueModal ~line 293, list styles .q-
 ## Done when
 
 `node --check public/app.js && npm test` passes, `! grep -nE "tc-glyph\.(waiting|limited)::before \{[^}]*(dashed|dotted)" public/app.css`, and a desktop queue screenshot in .agent-orch/shots/ shows indented dependents
+
+## Result — done (check passed) (2026-09-25 19:52)
+
+AGENT-ORCH-STATUS: done — queue is wider, shows dependents as a tree, has new glyphs

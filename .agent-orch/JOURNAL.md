@@ -389,3 +389,7 @@ model picker sizes to its selected name, clamped and ellipsized
 ## 2026-09-25 19:45 — #125 Composer: drop the Pinned chip; Auto Delegate shows the start model plus likely fallbacks [done (check passed)]
 
 Pinned chip removed; Auto Delegate preview now live and tested
+
+## 2026-09-25 19:52 — #126 Queue window: wider, indented dependents, new waiting/limited glyphs [done (check passed)]
+
+queue is wider, shows dependents as a tree, has new glyphs

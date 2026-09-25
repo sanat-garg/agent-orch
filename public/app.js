@@ -2731,7 +2731,7 @@ function fillCard(b, id) {
   }
   const s = taskState(t);
   b.querySelector('.tc-glyph').className = `tc-glyph ${s.cls}`;
-  title.textContent = displayTitle(t);
+  title.textContent = title.title = displayTitle(t);
   sub.textContent = '';
   sub.append(el('span', 'id', `#${t.id}`));
   // A queued task with a prerequisite shows which one ('after #N'), so the queue's dependencies are visible.
@@ -3350,6 +3350,26 @@ const Q = { press: null, drag: null, busy: false, lastFocus: null, noClick: fals
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
 const queuedTasks = () => [...O.tasks.values()].filter((t) => t.status === 'queued' && t.project_id === O.project?.id)
   .sort((a, b) => (a.position ?? Infinity) - (b.position ?? Infinity) || a.id - b.id);
+// The queue as a tree: each task whose depends_on is also queued sits right under it (siblings in queue order).
+// Returns [{t, depth, parent}] in display order.
+function queueTree(queued) {
+  const ids = new Set(queued.map((t) => t.id)), kids = new Map(), out = [], seen = new Set();
+  const parentOf = (t) => (t.depends_on != null && t.depends_on !== t.id && ids.has(t.depends_on) ? t.depends_on : null);
+  for (const t of queued) {
+    const p = parentOf(t);
+    if (!kids.has(p)) kids.set(p, []);
+    kids.get(p).push(t);
+  }
+  const walk = (t, depth, parent) => {
+    if (seen.has(t.id)) return;
+    seen.add(t.id);
+    out.push({ t, depth, parent });
+    for (const k of kids.get(t.id) || []) walk(k, depth + 1, t.id);
+  };
+  for (const t of kids.get(null) || []) walk(t, 0, null);
+  for (const t of queued) walk(t, 0, null); // a depends_on cycle: show what's left flat
+  return out;
+}
 let toastTimer;
 function toast(msg) {
   const t = $('toast');
@@ -3395,10 +3415,29 @@ function renderQueue() {
   if (!queued.length) body.append(el('p', 'muted', 'Nothing queued.'));
   const list = el('div', 'q-list');
   list.id = 'qList';
-  for (const t of queued) list.append(queueCard(t.id, queued.length > 1));
+  for (const { t, depth, parent } of queueTree(queued)) {
+    const b = queueCard(t.id, queued.length > 1);
+    if (parent != null) {
+      b.classList.add('q-child');
+      b.dataset.parent = parent;
+      b.style.marginLeft = `${Math.min(depth, 3) * 16}px`;
+    }
+    list.append(b);
+  }
   body.append(list);
+  qLines();
   if (focused) body.querySelector(`.tcard[data-task="${focused}"]`)?.focus({ preventScroll: true });
 }
+// Each dependent's connector reaches up to its parent card's bottom edge (titles wrap, so measure).
+function qLines() {
+  const list = $('qList');
+  if (!list || $('queueModal').hidden) return;
+  for (const c of list.querySelectorAll('.q-child')) {
+    const p = list.querySelector(`.tcard[data-task="${c.dataset.parent}"]`);
+    if (p) c.style.setProperty('--q-up', `${c.offsetTop - (p.offsetTop + p.offsetHeight)}px`);
+  }
+}
+new ResizeObserver(() => { if (!Q.drag) qLines(); }).observe($('qBody'));
 function queueCard(id, movable) {
   const b = taskCard(id);
   b.addEventListener('click', () => closeQueue(false)); // taskCard's own handler opens the drawer
@@ -3437,8 +3476,20 @@ function qContext(id) {
       if (i >= 0 && i + 1 > minSlot) { minSlot = i + 1; blocker = up; }
     }
   }
-  return { cards, block, rest, slot, minSlot, blocker, ups };
+  // Drop slots follow the tree: the block goes between its siblings' subtrees (same parent), never inside another.
+  const parent = block[0]?.dataset.parent ?? null, under = (c, anc) => {
+    for (let x = c; x; x = x.dataset.parent && rest.find((r) => r.dataset.task === x.dataset.parent)) if (x === anc) return true;
+    return false;
+  };
+  const sibs = rest.filter((c) => (c.dataset.parent ?? null) === parent);
+  const slots = sibs.map((c) => rest.indexOf(c));
+  const last = sibs[sibs.length - 1];
+  if (last) slots.push(rest.findLastIndex((c) => under(c, last)) + 1);
+  if (!slots.includes(slot)) slots.push(slot);
+  slots.sort((a, b) => a - b);
+  return { cards, block, rest, slot, minSlot, blocker, ups, slots };
 }
+const nearestSlot = (slots, want) => slots.reduce((a, b) => (Math.abs(b - want) < Math.abs(a - want) ? b : a));
 const qTops = () => new Map([...$('qBody').querySelectorAll('.tcard[data-task]')].map((c) => [c.dataset.task, c.getBoundingClientRect().top]));
 // FLIP: cards slide from where they were (`before`: id → top) to where the re-render put them.
 function qFlip(before) {
@@ -3507,6 +3558,7 @@ function startDrag(p) {
   p.card.classList.remove('q-pressing');
   const ctx = qContext(p.id);
   if (!ctx.rest.length) { cancelPress(); return toast(`#${p.id}'s dependents move with it, so there's nothing to reorder it against`); }
+  if (ctx.slots.length < 2) { cancelPress(); return toast(`#${p.id} has no sibling to reorder against: it stays under #${ctx.block[0].dataset.parent}`); }
   navigator.vibrate?.(10);
   const list = $('qList'), rect = p.card.getBoundingClientRect(), before = qTops();
   const ghost = el('div', 'q-ghost');
@@ -3522,7 +3574,7 @@ function startDrag(p) {
   ghost.append(stack, meta);
   ghost.style.width = `${rect.width}px`;
   document.body.append(ghost);
-  const d = Q.drag = { ...p, ...ctx, list, ghost, hint, x: p.x, y: p.y, offX: p.x - rect.left, offY: p.y - rect.top, h: rect.height,
+  const d = Q.drag = { ...p, ...ctx, list, ghost, hint, x: p.x, y: p.y, left: rect.left, offY: p.y - rect.top, h: rect.height,
     gap: rect.height + (parseFloat(getComputedStyle(list).rowGap) || 0), raf: 0 };
   for (const c of d.block) c.classList.add('q-hide');
   list.classList.add('dragging');
@@ -3557,9 +3609,9 @@ function qShift(d) {
 function dragMove() {
   const d = Q.drag;
   if (!d) return;
-  d.ghost.style.transform = `translate3d(${d.x - d.offX}px, ${d.y - d.offY}px, 0)`;
+  d.ghost.style.transform = `translate3d(${d.left}px, ${d.y - d.offY}px, 0)`; // keeps its indent: it only moves among its siblings
   const gy = d.y - d.offY + d.h / 2 - d.list.getBoundingClientRect().top;
-  const slot = d.geo.filter((g, k) => g.top + g.h / 2 + (k >= d.slot ? d.gap : 0) < gy).length;
+  const slot = nearestSlot(d.slots, d.geo.filter((g, k) => g.top + g.h / 2 + (k >= d.slot ? d.gap : 0) < gy).length);
   if (slot !== d.slot) { d.slot = slot; qShift(d); }
   const bad = d.slot < d.minSlot;
   d.ghost.classList.toggle('invalid', bad);
@@ -3603,8 +3655,8 @@ $('qBody').addEventListener('keydown', (e) => {
   e.preventDefault();
   if (Q.busy || Q.drag) return;
   const id = Number(card.dataset.task), ctx = qContext(id);
-  const slot = ctx.slot + (e.key === 'ArrowUp' ? -1 : 1);
-  if (slot < 0 || slot > ctx.rest.length) return;
+  const slot = ctx.slots[ctx.slots.indexOf(ctx.slot) + (e.key === 'ArrowUp' ? -1 : 1)];
+  if (slot == null) return;
   if (slot < ctx.minSlot) return toast(`#${id} needs #${ctx.blocker} first`);
   qMove(id, ctx, slot);
 });

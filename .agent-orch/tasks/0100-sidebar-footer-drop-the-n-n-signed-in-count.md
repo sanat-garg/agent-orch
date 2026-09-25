@@ -31,3 +31,9 @@ bash: -c: line 1: unexpected EOF while looking for matching `"'
 Command: ! grep -nE "signed in\
 
 bash: -c: line 1: unexpected EOF while looking for matching `"'
+
+## Result — verify failed (4) (2026-09-25 14:30)
+
+Command: ! grep -nE "signed in\
+
+bash: -c: line 1: unexpected EOF while looking for matching `"'

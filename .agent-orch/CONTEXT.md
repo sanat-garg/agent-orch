@@ -34,7 +34,7 @@ _Durable knowledge for every agent session: architecture, conventions, decisions
 
 ## Gotchas
 - This checkout IS the live app. Never restart/kill it or call `POST /api/restart-when-idle` on port 3000 (body `{cancel:true}` cancels a drain). Test instances MUST use another port and `CW_DATA_DIR=$(mktemp -d)`, or they double-run live tasks.
-- Edits to server/orchestrator only go live on restart. The UI banner offers "Restart when idle" (drain, exit 0, systemd restarts).
+- Edits to server/orchestrator only go live on restart. The UI banner offers "Restart when idle" (drain, exit 0, systemd restarts). A failing "Done when" check may be the running process's stale code (e.g. `extractCommand`), not the task.
 - The verifier (`extractCommand`) runs every command-like backtick snippet in "Done when", joined with ` && `. Commands containing `>` (incl. `2>&1`) or `curl` are refused. Absence checks must use `! grep …`.
 - `CW_NO_ORCHESTRATOR=1` (preflight on a copy of data/): DB migrated and read APIs served; no lock, orphan requeue, tick loop or git retry push. Still use a spare port and a copied `CW_DATA_DIR`.
 - `migrateMemDir()` renames a legacy `.ao2/` into `.agent-orch/`.

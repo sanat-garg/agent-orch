@@ -23,3 +23,6 @@ data/
 
 # macOS resource-fork junk
 ._*
+
+# Agent screenshots (stored in data/media/)
+.agent-orch/shots/

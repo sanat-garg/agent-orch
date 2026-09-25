@@ -13,6 +13,7 @@ import { createGitHub } from './github.mjs';
 import { retireRuntime, chatIdle, whenIdle } from './runtimes.mjs';
 import { AGENTS, runAgentCli, clearLoginCache, isMissingSession } from './agents.mjs';
 import { createConnections, SPECS, codexAccount, onPath } from './connections.mjs';
+import { mediaCollector, MEDIA_ID_RE, MEDIA_TYPES, toolResultImages } from './media.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -816,6 +817,9 @@ function handleMessage(convo, rt, m) {
         for (const b of content) {
           if (b.type === 'tool_result') {
             emit(cid, { t: 'tool_result', id: b.tool_use_id, text: clip(toolResultText(b.content)), isError: !!b.is_error });
+            rt.media ||= mediaCollector(DATA, convo.cwd);
+            for (const img of toolResultImages(b.content)) { const ev = rt.media.image(img); if (ev) emit(cid, { t: 'image', ...ev, tool: b.tool_use_id }); }
+            emitShots(cid, rt.media);
           }
         }
       }
@@ -826,6 +830,7 @@ function handleMessage(convo, rt, m) {
       break;
     case 'result':
       rt.busy = false;
+      if (rt.media) emitShots(cid, rt.media);
       refreshUsageSoon(rt.q);
       emit(cid, {
         t: 'result',
@@ -845,6 +850,9 @@ function handleMessage(convo, rt, m) {
       break;
   }
 }
+
+// Screenshots the agent saved under .agent-orch/shots/ since the turn started (or the last check).
+function emitShots(cid, media) { for (const img of media.shots()) emit(cid, { t: 'image', ...img }); }
 
 function authHint(code) {
   if (code === 'authentication_failed') {
@@ -875,6 +883,7 @@ async function agentChatTurn(convo, text) {
     agentTurns.set(cid, ac);
     broadcastConvos();
     const started = Date.now();
+    const media = mediaCollector(DATA, convo.cwd);
     const turn = async (resume) => {
       try {
         return await runAgentCli({
@@ -883,7 +892,8 @@ async function agentChatTurn(convo, text) {
           onEvent: (e) => {
             if (e.k === 'text') emit(cid, { t: 'text', text: e.text });
             else if (e.k === 'tool') emit(cid, { t: 'tool_use', id: e.id, name: e.name, input: e.input });
-            else if (e.k === 'tool_result') emit(cid, { t: 'tool_result', id: e.id, text: clip(e.text || ''), isError: !!e.isError });
+            else if (e.k === 'tool_result') { emit(cid, { t: 'tool_result', id: e.id, text: clip(e.text || ''), isError: !!e.isError }); emitShots(cid, media); }
+            else if (e.k === 'image') { const img = media.image(e); if (img) emit(cid, { t: 'image', ...img, tool: e.tool }); }
           },
         });
       } catch (e) {
@@ -899,6 +909,7 @@ async function agentChatTurn(convo, text) {
       res = await turn(null);
     }
     if (res.sessionId) convo.agentSession = { agent, id: res.sessionId };
+    emitShots(cid, media);
     if (res.outcome === 'auth_error') emit(cid, { t: 'error', text: `${a.label} is not signed in on this server. ${a.login}.` });
     else if (res.outcome === 'rate_limited') emit(cid, { t: 'error', text: `${a.label} hit its usage limit${res.resetsAt ? '; it resets {until}' : ''}.`, ...(res.resetsAt && { until: res.resetsAt, untilKnown: true }) });
     else if (res.outcome === 'aborted') emit(cid, { t: 'notice', text: 'Interrupted' });
@@ -943,6 +954,7 @@ async function sendUserMessage(convo, text) {
   }
   const rt = runtimes.get(convo.id) || startRuntime(convo);
   rt.lastUserText = text;
+  if (!rt.busy || !rt.media) rt.media = mediaCollector(DATA, convo.cwd); // a queued message keeps the running turn's snapshot
   convo.updatedAt = Date.now();
   saveConvos();
   emit(convo.id, { t: 'user', text });
@@ -1279,6 +1291,16 @@ async function handleRequest(req, res) {
       : action === 'cancel' ? await connections.cancel(id) : await connections.logout(id, await readBody(req));
     const { status, ...body } = r;
     return json(res, status, body);
+  }
+  if (p.startsWith('/api/media/') && req.method === 'GET') {
+    const id = p.slice('/api/media/'.length);
+    if (!MEDIA_ID_RE.test(id)) return json(res, 400, { error: 'Bad media id' });
+    return fs.readFile(path.join(DATA, 'media', id), (err, buf) => {
+      if (err) return json(res, 404, { error: 'Not found' });
+      res.writeHead(200, { 'Content-Type': MEDIA_TYPES[id.split('.')[1]], 'Content-Length': buf.length,
+        'Cache-Control': 'private, max-age=31536000, immutable', 'Content-Security-Policy': "default-src 'none'; sandbox" });
+      res.end(buf);
+    });
   }
   if (p === '/api/agents') {
     return json(res, 200, { agents: Object.values(AGENTS).map((a) => ({ id: a.id, label: a.label, available: !!a.available(), loggedIn: !!a.available() && a.loggedIn(), models: a.models, login: a.login })) });

@@ -297,3 +297,7 @@ Connections now open as a modal from the sidebar footer button
 ## 2026-09-25 10:18 — #86 Click-to-copy for terminal commands shown in chat [done (check passed)]
 
 Shell commands, code blocks and inline commands now copy on click
+
+## 2026-09-25 10:24 — #88 Capture screenshots from agent runs and serve them via /api/media [done (check passed)]
+
+Screenshots are stored and served at /api/media; tests pass

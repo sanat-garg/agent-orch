@@ -1,5 +1,6 @@
 // Pluggable coding-agent layer. Each adapter runs one headless agent turn and reports NORMALISED events:
 //   {k:'text',text}  {k:'tool',name,input}  {k:'tool_result',text,isError}  {k:'result',usage}  {k:'limit',resetsAt}
+//   {k:'image',tool,mediaType,data} (raw base64 from a tool result; callers store it via media.mjs and log {k:'image',id,name})
 // (adapters may add fields such as a tool id). Adapters: claude (Agent SDK), codex (`codex exec --json`),
 // antigravity (`agy -p --output-format stream-json`). Every adapter strips its `envFilter` vars from the env so
 // billing stays on the owner's subscription login, never an API key. See .agent-orch/AGENTS.md.
@@ -9,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process';
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
+import { toolResultImages } from './media.mjs';
 
 const HOME = os.homedir();
 
@@ -97,6 +99,7 @@ function* claudeEvents(m) {
       const lines = text.split('\n').length;
       if (text.length > 6000) text = text.slice(0, 6000) + '\n…';
       yield { k: 'tool_result', id: b.tool_use_id, text, isError: !!b.is_error, lines };
+      for (const img of toolResultImages(b.content)) yield { k: 'image', tool: b.tool_use_id, ...img };
     }
   } else if (m.type === 'rate_limit_event' && m.rate_limit_info?.status === 'rejected') {
     const r = m.rate_limit_info.resetsAt;

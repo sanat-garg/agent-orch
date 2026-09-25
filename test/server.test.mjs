@@ -246,3 +246,37 @@ test('the served app wires the "Restart when idle" banner to its endpoint', asyn
   assert.match(await js.text(), /\/api\/restart-when-idle/);
   assert.match(await (await get('/', { cookie })).text(), /id="updateBanner"/);
 });
+
+test('GET /api/media/:id serves stored images to signed-in users only, with strict ids', async () => {
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');
+  const id = `${crypto.createHash('sha256').update(png).digest('hex')}.png`;
+  fs.mkdirSync(path.join(dataDir, 'media'), { recursive: true });
+  fs.writeFileSync(path.join(dataDir, 'media', id), png);
+  const unauth = await get(`/api/media/${id}`);
+  assert.equal(unauth.status, 401);
+  await unauth.arrayBuffer();
+  const ok = await fetch(base + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: PASSWORD }) });
+  const cookie = ok.headers.get('set-cookie').split(';')[0];
+  await ok.arrayBuffer();
+  const r = await get(`/api/media/${id}`, { cookie });
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('content-type'), 'image/png');
+  assert.match(r.headers.get('cache-control'), /max-age=31536000/);
+  assert.deepEqual(Buffer.from(await r.arrayBuffer()), png);
+  const missing = await get(`/api/media/${'0'.repeat(64)}.png`, { cookie });
+  assert.equal(missing.status, 404);
+  await missing.arrayBuffer();
+  for (const bad of [id.toUpperCase(), `${id.slice(0, -4)}.svg`, 'abc.png', `${id}x`, `..%2F..%2Fauth.json`, `..%2fsessions.json`, `%2e%2e%2F${id}`]) {
+    const b = await get(`/api/media/${bad}`, { cookie });
+    assert.equal(b.status, 400, bad);
+    await b.arrayBuffer();
+  }
+  // A literal '../' (sent raw; fetch would normalise it) never reaches the data dir.
+  const raw = await new Promise((resolve, reject) => {
+    http.get({ host: '127.0.0.1', port: Number(new URL(base).port), path: '/api/media/../../auth.json', headers: { cookie } }, (res) => {
+      let body = ''; res.on('data', (d) => { body += d; }); res.on('end', () => resolve({ status: res.statusCode, body }));
+    }).on('error', reject);
+  });
+  assert.notEqual(raw.status, 200);
+  assert.doesNotMatch(raw.body, /salt|hash/);
+});

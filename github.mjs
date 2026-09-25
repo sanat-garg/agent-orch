@@ -7,11 +7,13 @@ import { execFile } from 'node:child_process';
 
 const GIT_ID = ['-c', 'user.name=agent-orch', '-c', 'user.email=agent-orch@users.noreply.github.com'];
 
+const SHOTS_RULE = '.agent-orch/shots/';
 // Keeps secrets and build output out of every repo this creates.
 const GITIGNORE = [
   '# Secrets never leave this machine', '.env', '.env.*', '!.env.example', '*.pem', '*.key',
   '', '# Dependencies and build output', 'node_modules/', '.venv/', 'venv/', '__pycache__/', '*.pyc',
   'dist/', 'build/', '.next/', 'coverage/', '*.log', '.DS_Store',
+  '', '# Agent screenshots (shown in chat from agent-orch\'s media store)', SHOTS_RULE,
 ];
 
 const run = (cmd, args, opts = {}) => new Promise((resolve) => {
@@ -36,6 +38,10 @@ export function createGitHub({ env, log }) {
     if (!fs.existsSync(path.join(dir, '.git'))) await run('git', ['init', '-q', '-b', 'main'], opts(dir));
     const gi = path.join(dir, '.gitignore');
     if (!fs.existsSync(gi)) fs.writeFileSync(gi, GITIGNORE.join('\n') + '\n');
+    else { // older projects: add the screenshots rule before anything commits them
+      const cur = fs.readFileSync(gi, 'utf8');
+      if (!cur.split('\n').some((l) => l.trim() === SHOTS_RULE)) fs.appendFileSync(gi, `${cur.endsWith('\n') || !cur ? '' : '\n'}${SHOTS_RULE}\n`);
+    }
     if (!(await run('git', ['rev-parse', '--verify', 'HEAD'], opts(dir))).ok) {
       await run('git', ['add', '-A'], opts(dir));
       await run('git', [...GIT_ID, 'commit', '-q', '--allow-empty', '-m', 'Project created'], opts(dir));

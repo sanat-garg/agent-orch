@@ -17,6 +17,7 @@ import { spawn, execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { AGENTS, agentStatus, isMissingSession, runAgentCli, toolInputSummary } from './agents.mjs';
+import { mediaCollector } from './media.mjs';
 
 // ---------------------------------------------------------------- config
 
@@ -1074,11 +1075,19 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       }
     };
     if (taskId) writeEntry({ k: 'start', at: now(), resumed: !!resume, agent, model: model || null });
+    // Screenshots: tool-result images, plus new/changed files in .agent-orch/shots/ after each tool result and at the end.
+    const media = taskId ? mediaCollector(dataDir, cwd) : null;
+    const writeShots = () => { for (const img of media.shots()) writeEntry({ k: 'image', ...img }); };
     let res;
     try {
       res = await runAgentCli({
         agent, model, prompt, cwd, resume, systemAppend: append, autonomous, signal: ac.signal,
-        onEvent: taskId ? (e) => { const l = logEntryOf(e); if (l) writeEntry(l); } : null,
+        onEvent: taskId ? (e) => {
+          if (e.k === 'image') { const img = media.image(e); if (img) writeEntry({ k: 'image', ...img, tool: e.tool }); return; }
+          const l = logEntryOf(e);
+          if (l) writeEntry(l);
+          if (e.k === 'tool_result') writeShots();
+        } : null,
         query, bin: agent === 'claude' ? claudeBin : undefined, env: agentEnv, partial, onMessage,
       });
     } finally {
@@ -1086,6 +1095,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       signal?.removeEventListener('abort', onAbort);
     }
     if (stopped) res.outcome = stopped;
+    if (taskId) writeShots();
     if (taskId) writeEntry({ k: 'end', at: now(), outcome: res.outcome, turns: res.numTurns });
     log?.end();
     return res;
@@ -1235,6 +1245,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // ---- chat → planner (streams into the chat like a normal Claude reply)
   function chatStreamer(convoId) {
     let acc = '', hidden = false;
+    const media = mediaCollector(dataDir, null);
     return (m) => {
       if (m.type === 'stream_event' && !m.parent_tool_use_id) {
         const e = m.event;
@@ -1257,7 +1268,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
           } else if (b.type === 'tool_use') emitChat(convoId, { t: 'tool_use', id: b.id, name: b.name, input: toolInputSummary(b.name, b.input) });
         }
       } else if (m.type === 'user' && Array.isArray(m.message?.content)) {
-        for (const e of AGENTS.claude.events(m)) if (e.k === 'tool_result') emitChat(convoId, { t: 'tool_result', id: e.id, text: e.text, isError: e.isError });
+        for (const e of AGENTS.claude.events(m)) {
+          if (e.k === 'tool_result') emitChat(convoId, { t: 'tool_result', id: e.id, text: e.text, isError: e.isError });
+          else if (e.k === 'image') { const img = media.image(e); if (img) emitChat(convoId, { t: 'image', ...img, tool: e.tool }); }
+        }
       }
     };
   }

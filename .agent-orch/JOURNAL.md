@@ -277,3 +277,7 @@ Restart waits for busy chat work, and restarts can be cancelled
 ## 2026-09-25 09:26 — #78 Past usage-limit notices show an absolute time, not 'now' (AUDIT #26) [done (check passed)]
 
 Past limit notices now show an absolute time; tests pass
+
+## 2026-09-25 09:33 — #80 Add CW_NO_ORCHESTRATOR=1 to boot the server without running the orchestrator [done (check passed)]
+
+CW_NO_ORCHESTRATOR=1 boots inert, tested; all 117 tests pass

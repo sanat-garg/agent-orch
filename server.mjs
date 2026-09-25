@@ -571,6 +571,8 @@ function emit(cid, ev) {
 }
 
 // ---------- Orchestrator Mode (agent-orch) ----------
+// CW_NO_ORCHESTRATOR=1 (preflight against a copy of real data): the DB is opened and migrated, but nothing runs or pushes.
+const NO_ORCH = process.env.CW_NO_ORCHESTRATOR === '1';
 const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
   query,
   claudeBin: CLAUDE_BIN,
@@ -591,6 +593,7 @@ const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
   refreshUsage: () => refreshUsage().catch((e) => console.error('[usage] refresh failed', e)),
   onCommit: (dir) => syncGit(dir).catch((e) => console.error('[github] sync failed', dir, e)),
   projectReady: (dir) => gh.status().linked && !!convos.find((c) => c.cwd === dir)?.repo,
+  disabled: NO_ORCH,
 });
 
 // ---------- GitHub protocol ----------
@@ -647,7 +650,7 @@ async function syncGit(dir, message) {
   broadcastConvos();
 }
 // Anything that couldn't be pushed (offline, GitHub down, not linked yet) is retried.
-setInterval(async () => {
+if (!NO_ORCH) setInterval(async () => {
   try {
     if (!gh.status().linked && !(await gh.refresh()).linked) return;
     for (const c of convos) {

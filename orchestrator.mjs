@@ -787,11 +787,12 @@ function takeLock(file) {
 }
 
 export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLimits, onSubscription, emitChat, broadcast, convoExists, refreshUsage,
-  onCommit = () => {}, projectReady = () => true }) {
+  onCommit = () => {}, projectReady = () => true, disabled = false }) {
   const dir = path.join(dataDir, 'orchestrator');
   const runsDir = path.join(dir, 'runs');
   fs.mkdirSync(runsDir, { recursive: true });
-  const leader = takeLock(path.join(dir, 'lock'));
+  // disabled (CW_NO_ORCHESTRATOR=1): migrate and serve views, but never lock, requeue or schedule.
+  const leader = disabled ? { ok: false } : takeLock(path.join(dir, 'lock'));
 
   // Agents and checks get `python`/`pip` as aliases for python3/pip3 when only the latter exist,
   // without touching anything system-wide.
@@ -1822,7 +1823,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
 
   // ---- start (only the lock holder schedules; a second instance on the same data dir stays inert)
-  if (leader.ok) {
+  if (disabled) {
+    console.log('[orchestrator] disabled (CW_NO_ORCHESTRATOR=1): not requeueing or scheduling tasks');
+  } else if (leader.ok) {
     const orphans = run("UPDATE tasks SET status='queued' WHERE status='running'").changes;
     run("UPDATE runs SET outcome='error', finished_at=:t WHERE finished_at IS NULL", { t: now() });
     if (orphans) logEvent(`requeued ${orphans} interrupted task(s) after a restart`);

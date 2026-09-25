@@ -54,6 +54,7 @@ orchestrator's lock file stops it from scheduling tasks there, but it would stil
 | `CW_DATA_DIR` | `./data` | Where all state lives, for both the server and the orchestrator. |
 | `CW_DEVICE_NAME` | `Oracle VM` | The name shown for this machine in the UI. |
 | `CW_WS_KEEPALIVE_MS` | `30000` | How often open WebSockets are pinged and their login session re-checked (expired or revoked sessions are closed). |
+| `CW_NO_ORCHESTRATOR` | unset | `1` boots without the orchestrator: the DB is opened and migrated and the UI can read tasks, but no task is claimed, requeued or scheduled, the background git push retry is off, and the data-dir lock is not taken. For preflights against a copy of real data. |
 | `PATH` | inherited | Passed to Claude Code and agents. The orchestrator prepends `data/orchestrator/bin`, which holds `python`/`pip` shims pointing to `python3`/`pip3` when only those exist. |
 
 The server also passes its whole environment on to Claude Code, **except** the variables listed under

@@ -16,3 +16,7 @@ Test: add a test in test/ (follow test/server.test.mjs: spawn server.mjs on a fr
 ## Done when
 
 `npm test` passes, including a new test that boots with CW_NO_ORCHESTRATOR=1 and asserts that a queued and a running task keep their status
+
+## Result — done (check passed) (2026-09-25 09:33)
+
+AGENT-ORCH-STATUS: done — CW_NO_ORCHESTRATOR=1 boots inert, tested; all 117 tests pass

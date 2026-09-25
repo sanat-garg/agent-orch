@@ -13,3 +13,7 @@ In the sidebar, the usage card (index.html ~line 37, .ms-usage with #usageTitle/
 ## Done when
 
 `node --check public/app.js && npm test` passes, index.html has a #usageModal .modal, and clicking .ms-usage opens it (the handler wires .ms-usage to #usageModal in app.js)
+
+## Result — done (check passed) (2026-09-25 13:50)
+
+AGENT-ORCH-STATUS: done — Usage card opens per-agent charts modal; npm test passes

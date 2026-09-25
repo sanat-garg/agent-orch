@@ -34,9 +34,9 @@
         <span class="ms-row"><span>CPU</span><span class="ms-bar"><i id="miniCpuBar"></i></span><span class="ms-val" id="miniCpu">–</span></span>
         <span class="ms-row"><span>RAM</span><span class="ms-bar"><i id="miniMemBar"></i></span><span class="ms-val" id="miniMem">–</span></span>
       </button>
-      <div class="ms-usage">
+      <div class="ms-usage" id="usageCard" role="button" tabindex="0" aria-haspopup="dialog" title="Open usage over time">
         <div class="ms-head">
-          <span class="ms-title" id="usageTitle">Claude usage</span>
+          <span class="ms-title" id="usageTitle">Usage</span>
           <span class="ms-age" id="usAge"></span>
           <button class="ms-refresh" id="usRefresh" aria-label="Refresh Claude usage limits" title="Refresh limits">
             <svg viewBox="0 0 24 24" width="13" height="13"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -337,6 +337,30 @@
         <h3>Top processes</h3>
         <table class="m-table" id="mTop"><thead><tr><th>Process</th><th class="num">CPU</th><th class="num">Memory</th></tr></thead><tbody></tbody></table>
       </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="usageModal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-panel usage" role="dialog" aria-modal="true" aria-labelledby="usageHead">
+    <div class="m-head">
+      <div>
+        <h2 id="usageHead">Usage</h2>
+        <p class="m-sub" id="usageSub">Loading…</p>
+      </div>
+      <button class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="m-body">
+      <div class="range-row">
+        <span>Charts show</span>
+        <div class="range-picker" id="usageRange" role="group" aria-label="Usage time range">
+          <button data-range="24h">24h</button><button data-range="7d">7d</button><button data-range="30d">30d</button>
+        </div>
+      </div>
+      <div class="ug-list" id="usageBody"></div>
     </div>
   </div>
 </div>

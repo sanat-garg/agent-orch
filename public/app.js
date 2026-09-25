@@ -1916,7 +1916,7 @@ function withUntil(ev) {
 function renderUsage(fresh = false) {
   const u = M.usage;
   const planName = u?.plan ? `Claude ${u.plan[0].toUpperCase()}${u.plan.slice(1)}` : 'Claude';
-  blurSwap($('usageTitle'), `${planName} usage`);
+  $('usageCard').title = `${planName} limits · open usage over time`;
   const show = (key, w) => {
     if (w) tween($(`us${key}`), w.pct, fmtPct, fresh);
     else blurSwap($(`us${key}`), '–');
@@ -2041,6 +2041,343 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !$('serverModal').hidden) { e.stopImmediatePropagation(); closeServer(); }
 }, true);
 setInterval(() => { if (M.usage) renderUsage(); }, 30e3); // keep the "in 2h 9m" countdowns current
+
+// ---------- usage window ----------
+// Per-agent plan windows, tokens and limit hits over time (GET /api/usage/history, see usage.mjs).
+const U = { range: { '24h': 1, '7d': 1, '30d': 1 }[store.get('cw.urange')] ? store.get('cw.urange') : '24h', data: null, err: '', at: 0, timer: null, lastFocus: null, draws: [] };
+const USAGE_AGENTS = ['claude', 'codex', 'antigravity'];
+const WIN_NAMES = { five_hour: '5-hour', seven_day: 'Weekly', '5h': '5-hour', weekly: 'Weekly' };
+const SERIES = ['var(--accent)', 'var(--chart-2)', 'var(--chart-3)', 'var(--faint)'];
+const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+// claude five_hour/seven_day_opus, codex 5h/weekly, agy gemini-5h/3p-weekly.
+function winLabel(w) {
+  if (WIN_NAMES[w]) return WIN_NAMES[w];
+  let m = w.match(/^seven_day_(.+)$/);
+  if (m) return `Weekly ${cap(m[1].replace(/_/g, ' '))}`;
+  m = w.match(/^(.+)-(5h|weekly)$/);
+  if (m) return `${cap(m[1])} ${WIN_NAMES[m[2]].toLowerCase()}`;
+  return cap(w.replace(/_/g, ' '));
+}
+const winRank = (w) => (/(^|-)5h$|five_hour/.test(w) ? 0 : /(^|-)weekly$|^seven_day$/.test(w) ? 1 : 2);
+const byWin = (a, b) => winRank(a) - winRank(b) || a.localeCompare(b);
+const fmtTok = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(n >= 1e4 ? 0 : 1)}k` : String(Math.round(n)));
+// Browser-local: "3:10 PM" today, "Tue 3:10 PM" within a week, else "Sep 20 3:10 PM".
+function fmtWhen(ms, now = Date.now()) {
+  const t = new Date(ms), clock = t.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  if (t.toDateString() === new Date(now).toDateString()) return clock;
+  if (Math.abs(ms - now) < 6 * 864e5) return `${t.toLocaleDateString([], { weekday: 'short' })} ${clock}`;
+  return `${t.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${clock}`;
+}
+const agentLabel = (id) => AGENT_LIST.find((a) => a.id === id)?.label || CONN.list.find((c) => c.id === id)?.label || cap(id);
+
+// Current reading per window: "5-hour 42% · resets 3:10 PM".
+function usageChips(a) {
+  const box = el('div', 'ug-chips'), now = Date.now();
+  if (a.status.blocked) {
+    box.append(el('span', 'ug-chip crit', `Limit hit · ${a.status.resetsAt ? `until ${fmtWhen(a.status.resetsAt * 1000)}` : 'reset time unknown'}`));
+  }
+  for (const w of Object.keys(a.status.windows).sort(byWin)) {
+    const s = a.status.windows[w], reset = s.resetsAt ? s.resetsAt * 1000 : null;
+    const c = el('span', `ug-chip ${reset && reset <= now ? '' : level(s.pct)[0]}`,
+      reset && reset <= now ? `${winLabel(w)} · reset ${fmtWhen(reset)}` : `${winLabel(w)} ${Math.round(s.pct)}% · ${reset ? `resets ${fmtWhen(reset)}` : 'reset time unknown'}`);
+    c.title = `Read ${fmtWhen(s.t)}`;
+    box.append(c);
+  }
+  return box;
+}
+
+// Chart plumbing shared with the server window's sparkline: .sline svg, crosshair, point and tooltip.
+function usageChart(host, cls, extra) {
+  host.className = `sline ug-chart ${cls}`;
+  host.innerHTML = `<svg aria-hidden="true"><line class="base"/>${extra}<line class="cross" hidden/><g class="pts"></g></svg><div class="tip" hidden></div>`;
+  const svg = host.querySelector('svg'), tip = host.querySelector('.tip');
+  const label = el('div', 'sline-label');
+  const [lFrom, lStat, lNow] = [el('span', '', RANGE_AGO[U.range] || `${U.range} ago`), el('span', 'stat'), el('span', '', 'now')];
+  label.append(lFrom, lStat, lNow);
+  host.after(label);
+  const ns = (tag, attrs) => {
+    const n = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+    return n;
+  };
+  const showTip = (text, cx, w) => {
+    tip.hidden = !text;
+    tip.textContent = text || '';
+    const half = Math.min(tip.offsetWidth, w) / 2;
+    tip.style.left = `${Math.max(half, Math.min(w - half, cx))}px`;
+  };
+  const cross = svg.querySelector('.cross');
+  const setCross = (cx, h) => {
+    if (cx == null) { cross.setAttribute('hidden', ''); return; }
+    cross.removeAttribute('hidden');
+    cross.setAttribute('x1', cx); cross.setAttribute('x2', cx); cross.setAttribute('y1', 0); cross.setAttribute('y2', h);
+  };
+  const c = { svg, tip, lStat, ns, showTip, setCross, hoverX: null, draw: () => {} };
+  const move = (e) => { c.hoverX = e.clientX - host.getBoundingClientRect().left; c.draw(); };
+  host.addEventListener('pointermove', move);
+  host.addEventListener('pointerdown', move);
+  host.addEventListener('pointerleave', (e) => { if (e.pointerType === 'touch') return; c.hoverX = null; c.draw(); }); // a tap's tooltip stays
+  U.draws.push(() => c.draw());
+  return c;
+}
+
+// Window % over time: stepped lines (a reading holds until the next one, and drops to 0 at its reset),
+// a dashed 100% line and a marker at every reset.
+function usageLineChart(host, wins, from, to) {
+  const c = usageChart(host, 'ug-line', '<line class="cap"/><g class="resets"></g><g class="lines"></g>');
+  const names = Object.keys(wins).sort(byWin);
+  const series = names.map((n) => wins[n]);
+  const resets = new Map(); // ms -> window names
+  for (const [i, pts] of series.entries()) for (const p of pts) {
+    const r = p.resetsAt * 1000;
+    if (p.resetsAt && r > from && r <= to && r > p.t) resets.set(r, [...new Set([...(resets.get(r) || []), names[i]])]);
+  }
+  const valueAt = (pts, t) => {
+    let p = null;
+    for (const q of pts) { if (q.t <= t) p = q; else break; }
+    if (!p) return null;
+    return p.resetsAt && p.resetsAt * 1000 <= t ? 0 : p.pct;
+  };
+  const peaks = series.flat().map((p) => p.pct);
+  c.lStat.textContent = names.map((n, i) => `${winLabel(n)} peak ${Math.round(Math.max(...series[i].map((p) => p.pct)))}%`).join(' · ');
+  c.draw = () => {
+    const w = host.clientWidth, h = host.clientHeight;
+    if (!w) return;
+    const { svg, ns } = c;
+    svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    const top = Math.max(110, Math.max(0, ...peaks) * 1.05);
+    const x = (t) => ((t - from) / Math.max(1, to - from)) * w;
+    const y = (v) => h - 1 - (Math.min(v, top) / top) * (h - 4);
+    const base = svg.querySelector('.base'), capL = svg.querySelector('.cap');
+    for (const [k, v] of Object.entries({ x1: 0, x2: w, y1: h - 0.5, y2: h - 0.5 })) base.setAttribute(k, v);
+    for (const [k, v] of Object.entries({ x1: 0, x2: w, y1: y(100), y2: y(100) })) capL.setAttribute(k, v);
+    const rg = svg.querySelector('.resets'), lg = svg.querySelector('.lines'), pg = svg.querySelector('.pts');
+    rg.replaceChildren(); lg.replaceChildren(); pg.replaceChildren();
+    // Many resets (5-hour windows over days) become short ticks on the baseline so they don't hide the lines.
+    const dense = resets.size * 14 > w;
+    for (const r of resets.keys()) {
+      rg.append(dense ? ns('line', { class: 'reset tick', x1: x(r), x2: x(r), y1: h - 6, y2: h })
+        : ns('line', { class: 'reset', x1: x(r), x2: x(r), y1: 4, y2: h }), ns('circle', { class: 'reset-dot', cx: x(r), cy: dense ? h - 1 : 4, r: dense ? 1.5 : 2.5 }));
+    }
+    series.forEach((pts, i) => {
+      if (!pts.length) return;
+      let d = '', prev = 0;
+      pts.forEach((p, k) => {
+        d += k ? `L${x(p.t).toFixed(1)},${y(prev).toFixed(1)}L${x(p.t).toFixed(1)},${y(p.pct).toFixed(1)}` : `M${x(p.t).toFixed(1)},${y(p.pct).toFixed(1)}`;
+        prev = p.pct;
+        const next = k + 1 < pts.length ? pts[k + 1].t : to, r = p.resetsAt * 1000;
+        if (p.resetsAt && r > p.t && r < next) { d += `L${x(r).toFixed(1)},${y(prev).toFixed(1)}L${x(r).toFixed(1)},${y(0).toFixed(1)}`; prev = 0; }
+        if (k + 1 === pts.length) d += `L${x(to).toFixed(1)},${y(prev).toFixed(1)}`;
+      });
+      lg.append(ns('path', { class: 'line', d, style: `stroke:${SERIES[i % SERIES.length]}` }));
+    });
+    if (c.hoverX == null) { c.setCross(null); c.showTip(''); return; }
+    // Snap to the nearest reading or reset.
+    const tHover = from + (c.hoverX / w) * (to - from);
+    let t = null, isReset = false;
+    for (const p of series.flat()) if (t == null || Math.abs(p.t - tHover) < Math.abs(t - tHover)) t = p.t;
+    for (const r of resets.keys()) if (t == null || Math.abs(r - tHover) < Math.abs(t - tHover)) { t = r; isReset = true; }
+    if (t == null) return;
+    const cx = x(t);
+    c.setCross(cx, h);
+    const parts = [];
+    series.forEach((pts, i) => {
+      const v = valueAt(pts, t);
+      if (v == null) return;
+      pg.append(ns('circle', { class: 'pt', cx, cy: y(v), r: 4, style: `fill:${SERIES[i % SERIES.length]}` }));
+      parts.push(`${winLabel(names[i])} ${Math.round(v)}%`);
+    });
+    if (isReset) parts.unshift(`${resets.get(t).map(winLabel).join(', ')} reset`);
+    c.showTip(`${parts.join(' · ')} · ${fmtWhen(t)}`, cx, w);
+  };
+}
+
+// Tokens per bucket, stacked: input (uncached) under output.
+function usageBarChart(host, buckets, bucketMs, from, to) {
+  const c = usageChart(host, 'ug-bars', '<g class="bars"></g>');
+  const sum = (k) => buckets.reduce((a, b) => a + b[k], 0);
+  c.lStat.textContent = `in ${fmtTok(sum('input'))} · out ${fmtTok(sum('output'))}`;
+  const daily = bucketMs >= 864e5;
+  const when = (t) => daily ? new Date(t).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })
+    : `${fmtWhen(t)}–${new Date(t + bucketMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+  c.draw = () => {
+    const w = host.clientWidth, h = host.clientHeight;
+    if (!w) return;
+    const { svg, ns } = c;
+    svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    const base = svg.querySelector('.base');
+    for (const [k, v] of Object.entries({ x1: 0, x2: w, y1: h - 0.5, y2: h - 0.5 })) base.setAttribute(k, v);
+    const top = Math.max(1, ...buckets.map((b) => b.input + b.output)) * 1.08;
+    const x = (t) => ((t - from) / Math.max(1, to - from)) * w;
+    const bw = Math.max(1, (bucketMs / Math.max(1, to - from)) * w);
+    const gap = Math.min(3, bw * 0.2);
+    const hx = c.hoverX;
+    const hi = hx == null ? -1 : buckets.findIndex((b) => hx >= x(b.t) && hx < x(b.t) + bw);
+    const g = svg.querySelector('.bars');
+    g.replaceChildren();
+    buckets.forEach((b, i) => {
+      const x0 = Math.max(0, x(b.t)) + gap / 2, x1 = Math.min(w, x(b.t) + bw) - gap / 2;
+      if (x1 <= x0) return;
+      const hIn = (b.input / top) * (h - 2), hOut = (b.output / top) * (h - 2);
+      const dim = hi >= 0 && hi !== i ? ' dim' : '';
+      if (hIn) g.append(ns('rect', { class: `in${dim}`, x: x0, width: x1 - x0, y: h - 1 - hIn, height: hIn }));
+      if (hOut) g.append(ns('rect', { class: `out${dim}`, x: x0, width: x1 - x0, y: h - 1 - hIn - hOut, height: hOut }));
+    });
+    const pg = svg.querySelector('.pts');
+    pg.replaceChildren();
+    if (hi < 0) { c.showTip(''); return; }
+    const b = buckets[hi];
+    c.showTip(`${when(b.t)} · in ${fmtTok(b.input)} · out ${fmtTok(b.output)}${b.cached ? ` · cached ${fmtTok(b.cached)}` : ''} · ${b.turns} ${b.turns === 1 ? 'turn' : 'turns'}`,
+      x(b.t) + bw / 2, w);
+  };
+}
+
+// Limit hits (newest first), each with when it cleared.
+function usageLimits(a) {
+  const rows = [];
+  let open = null;
+  for (const e of a.limits) {
+    if (e.status === 'hit') { if (open) rows.push({ hit: open }); open = e; }
+    else { rows.push({ hit: open, cleared: e }); open = null; }
+  }
+  if (open) rows.push({ hit: open, still: a.status.blocked });
+  if (!rows.length) return el('p', 'na', 'No limits hit in this range.');
+  const ul = el('ul', 'm-list ug-limits');
+  for (const r of rows.reverse()) {
+    const li = el('li');
+    const win = (r.hit || r.cleared).window;
+    li.append(el('span', 'k', `${r.hit ? `Hit ${fmtWhen(r.hit.t)}` : 'Hit before this range'}${win ? ` · ${winLabel(win)}` : ''}`));
+    const reset = r.hit?.resetsAt ? ` · resets ${fmtWhen(r.hit.resetsAt * 1000)}` : '';
+    li.append(el('span', `v${r.still ? ' crit' : ''}`, r.cleared
+      ? `Cleared ${fmtWhen(r.cleared.t)}${r.hit ? ` · after ${fmtDur((r.cleared.t - r.hit.t) / 1000)}` : ''}`
+      : r.still ? `Still limited${reset}` : `No clear recorded${reset}`));
+    ul.append(li);
+  }
+  return ul;
+}
+
+function usageSection(id, a, conn, d) {
+  const sec = el('section', 'm-card ug-agent');
+  sec.dataset.agent = id;
+  const head = el('div', 'tile-top');
+  head.append(el('h3', '', agentLabel(id)));
+  const signedOut = conn && !conn.signedIn;
+  if (signedOut) head.append(el('span', 'status warn', 'Not connected'));
+  else if (a?.status.blocked) head.append(el('span', 'status crit', 'Limited'));
+  else if (a) head.append(el('span', 'status', 'Connected'));
+  sec.append(head);
+  if (signedOut) {
+    const p = el('p', 'na ug-conn', `${agentLabel(id)} isn't signed in on this server. `);
+    const go = el('button', 'ug-link', 'Open Connections');
+    go.type = 'button';
+    go.onclick = () => { closeUsage(false); openConnections(id); };
+    p.append(go);
+    sec.append(p);
+  }
+  if (!a) return sec;
+  sec.append(usageChips(a));
+  const grid = el('div', 'ug-grid');
+  const col = (title) => { const c = el('div', 'ug-col'); c.append(el('h4', '', title)); grid.append(c); return c; };
+  const lc = col('Plan windows');
+  const names = Object.keys(a.windows).sort(byWin);
+  if (names.some((n) => a.windows[n].length)) {
+    const legend = el('div', 'ug-legend');
+    names.forEach((n, i) => { const s = el('span', '', winLabel(n)); s.style.setProperty('--c', SERIES[i % SERIES.length]); legend.append(s); });
+    lc.append(legend);
+    const host = el('div');
+    lc.append(host);
+    usageLineChart(host, a.windows, d.from, d.to);
+  } else lc.append(el('p', 'na', 'No window readings in this range.'));
+  const bc = col(d.bucketMs >= 864e5 ? 'Tokens per day' : 'Tokens per hour');
+  if (a.tokens.some((b) => b.input || b.output)) {
+    const legend = el('div', 'ug-legend');
+    for (const [k, t] of [['in', 'Input'], ['out', 'Output']]) { const s = el('span', k, t); legend.append(s); }
+    bc.append(legend);
+    const host = el('div');
+    bc.append(host);
+    usageBarChart(host, a.tokens, d.bucketMs, d.from, d.to);
+  } else bc.append(el('p', 'na', 'No tokens recorded in this range.'));
+  sec.append(grid, el('h4', '', 'Limit hits'), usageLimits(a));
+  return sec;
+}
+
+function renderUsageModal() {
+  if ($('usageModal').hidden) return;
+  document.querySelectorAll('#usageRange button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.range === U.range)));
+  const d = U.data;
+  $('usageSub').textContent = U.err ? `Couldn't load usage: ${U.err}` : !d ? 'Loading…'
+    : `Plan windows, tokens and limit hits per agent · updated ${fmtWhen(U.at)}`;
+  if (!d) return;
+  U.draws = [];
+  const body = $('usageBody');
+  const ids = [...USAGE_AGENTS, ...Object.keys(d.agents).filter((id) => !USAGE_AGENTS.includes(id))];
+  const secs = [];
+  for (const id of ids) {
+    const a = d.agents[id];
+    const has = a && (Object.keys(a.status.windows).length || a.limits.length || a.status.blocked || a.tokens.some((b) => b.turns));
+    const conn = CONN.list.find((c) => c.id === id);
+    // Hidden when there is nothing to show, unless it's signed out (then it says so, with a way to sign in).
+    if (!has && !(conn?.installed && !conn.signedIn)) continue;
+    secs.push(usageSection(id, has ? a : null, conn, d));
+  }
+  if (!secs.length) {
+    const empty = el('div', 'm-card ug-empty');
+    empty.append(el('h3', '', 'No usage recorded yet'), el('p', 'na', 'Readings appear after the first chat reply or task run, and Claude plan limits are checked every few minutes.'));
+    secs.push(empty);
+  }
+  body.replaceChildren(...secs);
+  U.draws.forEach((fn) => fn());
+}
+async function loadUsageHistory() {
+  const range = U.range;
+  try {
+    const d = await api(`/api/usage/history?range=${range}`);
+    if (range !== U.range) return;
+    U.data = d; U.err = ''; U.at = Date.now();
+  } catch (e) { U.err = e.message; }
+  renderUsageModal();
+}
+function openUsage() {
+  closeSidebar();
+  if ($('usageModal').hidden) U.lastFocus = document.activeElement;
+  $('usageModal').hidden = false;
+  renderUsageModal();
+  loadUsageHistory();
+  if (!CONN.list.length) refreshConnections().then(renderUsageModal);
+  clearInterval(U.timer);
+  U.timer = setInterval(loadUsageHistory, 60e3); // live refresh while open
+  $('usageModal').querySelector('[data-close].icon-btn').focus();
+}
+function closeUsage(restoreFocus = true) {
+  $('usageModal').hidden = true;
+  clearInterval(U.timer);
+  if (restoreFocus) U.lastFocus?.focus?.();
+}
+$('usageRange').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-range]');
+  if (!b || b.dataset.range === U.range) return;
+  U.range = b.dataset.range;
+  store.set('cw.urange', U.range);
+  U.data = null;
+  renderUsageModal();
+  loadUsageHistory();
+});
+// The sidebar usage card opens the window; its refresh button only refreshes.
+const usageCard = document.querySelector('.ms-usage');
+usageCard.addEventListener('click', (e) => { if (!e.target.closest('#usRefresh')) openUsage(); });
+usageCard.addEventListener('keydown', (e) => {
+  if (e.target !== usageCard || (e.key !== 'Enter' && e.key !== ' ')) return;
+  e.preventDefault();
+  openUsage();
+});
+$('usageModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeUsage(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('usageModal').hidden) { e.stopImmediatePropagation(); closeUsage(); }
+}, true);
+{
+  let t;
+  addEventListener('resize', () => { clearTimeout(t); t = setTimeout(() => { if (!$('usageModal').hidden) U.draws.forEach((d) => d()); }, 100); });
+}
 
 // ---------- Orchestrator Mode ----------
 // Tasks live on the server; the chat shows them as cards and the drawer shows one in full.
@@ -2270,7 +2607,7 @@ function closeTask() {
 $('drClose').addEventListener('click', closeTask);
 $('drawerScrim').addEventListener('click', closeTask);
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && O.drawer && $('pickerModal').hidden && $('serverModal').hidden && $('connsModal').hidden && !e.target.closest?.('.dr-due')) {
+  if (e.key === 'Escape' && O.drawer && $('pickerModal').hidden && $('serverModal').hidden && $('connsModal').hidden && $('usageModal').hidden && !e.target.closest?.('.dr-due')) {
     e.stopImmediatePropagation();
     closeTask();
   }
@@ -2654,6 +2991,7 @@ function applyConnections(list) {
   // Sign-in state feeds the model picker's disabled groups and the routing-rule hints.
   if (agentsChanged) api('/api/agents').then((d) => { AGENT_LIST = d.agents || []; renderAgentPicker(); }).catch(() => {});
   renderConnections();
+  renderUsageModal();
 }
 // The sidebar footer: server link plus a compact sign-in summary; warns when a routed agent is signed out.
 function routedAgents() {

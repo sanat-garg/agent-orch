@@ -317,3 +317,7 @@ Usage history store and /api/usage/history endpoint built, tests passing
 ## 2026-09-25 13:40 — #93 Feed Codex and Antigravity rate-limit windows into usage history [done (check passed)]
 
 Codex and agy usage windows now recorded; npm test passes
+
+## 2026-09-25 13:50 — #94 Usage modal: click the usage card to see limits over time per agent [done (check passed)]
+
+Usage card opens per-agent charts modal; npm test passes

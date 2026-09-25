@@ -51,3 +51,16 @@ test('screenshots render as /api/media images in chat and in the task drawer', (
   assert.match(appJs, /shotGrid\(shots\.slice\(-4\)\)/, "drawer 'What happened' shows the latest 4");
   assert.match(indexHtml, /id="lightbox"/);
 });
+
+test('the sidebar usage card opens the Usage modal with per-agent charts', () => {
+  assert.match(indexHtml, /<div class="modal" id="usageModal" hidden>/);
+  assert.match(indexHtml, /class="ms-usage"[^>]*role="button"[^>]*tabindex="0"/, 'usage card is keyboard reachable');
+  assert.match(indexHtml, /id="usageTitle">Usage</);
+  assert.match(indexHtml, /id="usageRange"[^]*?data-range="24h"[^]*?data-range="7d"[^]*?data-range="30d"/);
+  assert.match(appJs, /const usageCard = document\.querySelector\('\.ms-usage'\)/);
+  assert.match(appJs, /usageCard\.addEventListener\('click', \(e\) => \{ if \(!e\.target\.closest\('#usRefresh'\)\) openUsage\(\); \}\)/, 'refresh button does not open the modal');
+  assert.match(appJs, /e\.key !== 'Enter' && e\.key !== ' '/, 'Enter/Space open it');
+  assert.match(appJs, /api\(`\/api\/usage\/history\?range=\$\{range\}`\)/);
+  assert.match(appJs, /U\.timer = setInterval\(loadUsageHistory, 60e3\)/, 'live refresh while open');
+  assert.match(appJs, /openConnections\(id\)/);
+});

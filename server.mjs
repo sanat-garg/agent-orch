@@ -13,6 +13,7 @@ import { createGitHub } from './github.mjs';
 import { retireRuntime, chatIdle, whenIdle } from './runtimes.mjs';
 import { AGENTS, runAgentCli, clearLoginCache, isMissingSession, modelCatalog } from './agents.mjs';
 import { createModelStore } from './models.mjs';
+import { createAAStore } from './aa.mjs';
 import { createConnections, SPECS, codexAccount, agyAccount, onPath } from './connections.mjs';
 import { mediaCollector, MEDIA_ID_RE, MEDIA_TYPES, toolResultImages } from './media.mjs';
 import { createUsageLog, RANGES as USAGE_RANGES } from './usage.mjs';
@@ -615,6 +616,10 @@ const gh = createGitHub({ env: CLAUDE_ENV, log: (m) => console.log(`[github] ${m
 const modelStore = createModelStore({ file: path.join(DATA, 'models.json'), log: (m) => console.log(`[models] ${m}`),
   onChange: () => { for (const ws of allClients) send(ws, { t: 'models' }); } });
 modelStore.start().catch((e) => console.error('[models] discovery failed', e));
+// Artificial Analysis metrics for those models (aa.mjs); falls back to .agent-orch/model-metrics.json without a key.
+const aaStore = createAAStore({ dataDir: DATA, metaDir: path.join(ROOT, '.agent-orch'), base: process.env.CW_AA_BASE || undefined, log: (m) => console.log(`[aa] ${m}`),
+  catalog: () => Object.fromEntries(Object.keys(AGENTS).map((id) => [id, modelCatalog(id).models || []])) });
+aaStore.start().catch((e) => console.error('[aa] refresh failed', e));
 // A sign-in or sign-out re-checks the login and rediscovers that agent's models (in the background).
 const signInChanged = (id) => () => { clearLoginCache(); modelStore.refresh([id]).catch(() => {}); };
 const agentEntry = (a, extra = {}) => ({ id: a.id, label: a.label, installed: () => a.available(), signedIn: () => a.loggedIn(), envFilter: a.envFilter, afterChange: signInChanged(a.id), ...extra });
@@ -1329,6 +1334,15 @@ async function handleRequest(req, res) {
     const { status, ...body } = r;
     return json(res, status, body);
   }
+  // The Artificial Analysis key: write-only; GET answers only whether one is configured.
+  if (p === '/api/aa/key') {
+    if (req.method === 'GET') return json(res, 200, aaStore.status());
+    if (req.method === 'POST') {
+      try { return json(res, 200, await aaStore.setKey((await readBody(req)).key)); } catch (e) { if (e.status !== 400) throw e; return json(res, 400, { error: e.message }); }
+    }
+    if (req.method === 'DELETE') return json(res, 200, aaStore.removeKey());
+  }
+  if (p === '/api/models/metrics' && req.method === 'GET') return json(res, 200, aaStore.view());
   if (p.startsWith('/api/media/') && req.method === 'GET') {
     const id = p.slice('/api/media/'.length);
     if (!MEDIA_ID_RE.test(id)) return json(res, 400, { error: 'Bad media id' });

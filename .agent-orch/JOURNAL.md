@@ -353,3 +353,7 @@ Command: ! grep -nE "signed in\
 ## 2026-09-25 14:34 — #100 Sidebar footer: drop the 'N/N signed in' count [done (check passed)]
 
 restarted server's check passes; this prompt's failure predates restart
+
+## 2026-09-25 18:25 — #108 Artificial Analysis client: API key in Connections, cached model metrics [done (check passed)]
+
+AA key storage, cached metrics, model mapping, /api/models/metrics, tests pass

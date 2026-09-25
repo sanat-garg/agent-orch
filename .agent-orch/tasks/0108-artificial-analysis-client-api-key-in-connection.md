@@ -13,3 +13,7 @@ Integrate the Artificial Analysis data API (docs: https://artificialanalysis.ai/
 ## Done when
 
 `npm test` passes with aa.mjs fixture tests for parsing and CLI-model mapping, and GET /api/models/metrics returns entries with a source field
+
+## Result — done (check passed) (2026-09-25 18:25)
+
+AGENT-ORCH-STATUS: done — AA key storage, cached metrics, model mapping, /api/models/metrics, tests pass

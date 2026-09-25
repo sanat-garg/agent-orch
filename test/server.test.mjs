@@ -13,7 +13,8 @@ import WebSocket from 'ws';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PASSWORD = 'smoke-test-password';
-let child, base, dataDir, binDir;
+let child, base, dataDir, binDir, aaStub;
+const aaHits = [];
 
 const freePort = () => new Promise((resolve, reject) => {
   const s = net.createServer().listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); });
@@ -28,10 +29,18 @@ before(async () => {
   // A logged-out `codex` on PATH (the stub answers `codex login status` with "Not logged in").
   binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-bin-'));
   fs.symlinkSync(path.join(ROOT, 'test/fixtures/codex-stub.mjs'), path.join(binDir, 'codex'));
+  // A local stand-in for the Artificial Analysis API (CW_AA_BASE), serving the recorded fixture pages.
+  aaStub = http.createServer((req, res) => {
+    aaHits.push({ url: req.url, key: req.headers['x-api-key'] });
+    const page = new URL(req.url, 'http://x').searchParams.get('page');
+    res.writeHead(200, { 'content-type': 'application/json', 'x-ratelimit-remaining': '90' });
+    res.end(fs.readFileSync(path.join(ROOT, `test/fixtures/aa-models-p${page}.json`)));
+  });
+  await new Promise((r) => aaStub.listen(0, '127.0.0.1', r));
   const port = await freePort();
   assert.notEqual(port, 3000);
   base = `http://127.0.0.1:${port}`;
-  child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, CODEX_STUB_LOGIN: 'out', CW_WS_KEEPALIVE_MS: '200', PORT: String(port), CW_DATA_DIR: dataDir }, stdio: ['ignore', 'pipe', 'pipe'] });
+  child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, CODEX_STUB_LOGIN: 'out', CW_WS_KEEPALIVE_MS: '200', AA_API_KEY: '', CW_AA_BASE: `http://127.0.0.1:${aaStub.address().port}`, PORT: String(port), CW_DATA_DIR: dataDir }, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`server did not start:\n${out}`)), 20000);
@@ -44,6 +53,7 @@ before(async () => {
 
 after(() => {
   child?.kill('SIGKILL');
+  aaStub?.close();
   if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
   if (binDir) fs.rmSync(binDir, { recursive: true, force: true });
 });
@@ -331,4 +341,46 @@ test('GET /api/usage/history is login-protected and returns per-agent series', a
   const bad = await get('/api/usage/history?range=1y', { cookie });
   assert.equal(bad.status, 400);
   await bad.arrayBuffer();
+});
+
+test('GET /api/models/metrics: manual without a key, Artificial Analysis once a key is saved; the key never comes back', async () => {
+  for (const [m, p] of [['GET', '/api/models/metrics'], ['GET', '/api/aa/key'], ['POST', '/api/aa/key'], ['DELETE', '/api/aa/key']]) {
+    const r = await fetch(base + p, { method: m });
+    assert.equal(r.status, 401, `${m} ${p}`);
+    await r.arrayBuffer();
+  }
+  const ok = await fetch(base + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: PASSWORD }) });
+  const cookie = ok.headers.get('set-cookie').split(';')[0];
+  await ok.arrayBuffer();
+  const call = async (m, p, body) => {
+    const r = await fetch(base + p, { method: m, headers: { cookie, 'content-type': 'application/json' }, body: body && JSON.stringify(body) });
+    return { status: r.status, text: await r.text() };
+  };
+  let r = await call('GET', '/api/models/metrics');
+  assert.equal(r.status, 200);
+  let v = JSON.parse(r.text);
+  assert.equal(v.source, 'manual');
+  assert.ok(v.attribution.url.includes('artificialanalysis.ai'));
+  assert.ok(Array.isArray(v.entries));
+  assert.ok(v.entries.every((e) => e.source === 'manual' && 'fetched_at' in e));
+  assert.equal(JSON.parse((await call('GET', '/api/aa/key')).text).configured, false);
+  assert.equal(aaHits.length, 0, 'no request without a key');
+
+  assert.equal((await call('POST', '/api/aa/key', { key: '' })).status, 400);
+  r = await call('POST', '/api/aa/key', { key: 'test-aa-key-123' });
+  assert.equal(r.status, 200);
+  assert.ok(!r.text.includes('test-aa-key-123'));
+  assert.deepEqual(JSON.parse(r.text).configured, true);
+  assert.equal(aaHits[0].key, 'test-aa-key-123');
+  assert.equal(fs.statSync(path.join(dataDir, 'secrets.json')).mode & 0o777, 0o600);
+  r = await call('GET', '/api/models/metrics');
+  v = JSON.parse(r.text);
+  assert.equal(v.source, 'artificialanalysis');
+  assert.ok(v.fetched_at > 0);
+  assert.ok(v.entries.every((e) => e.source === 'artificialanalysis'));
+  assert.ok(!r.text.includes('test-aa-key-123'));
+
+  r = await call('DELETE', '/api/aa/key');
+  assert.equal(JSON.parse(r.text).configured, false);
+  assert.equal(JSON.parse((await call('GET', '/api/models/metrics')).text).source, 'manual');
 });

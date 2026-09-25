@@ -3052,6 +3052,7 @@ function openConnections(id) {
   renderConnFoot();
   renderConnections(true);
   refreshConnections();
+  refreshAA();
   $('connsModal').querySelector('[data-close].icon-btn').focus();
   const row = id && $('connsList').querySelector(`[data-conn="${id}"]`);
   if (!row) return;
@@ -3203,6 +3204,71 @@ function renderConnections(force) {
     box.append(row);
   }
   if (focused) box.querySelector(`[data-conn-input="${focused}"]`)?.focus();
+}
+
+// The Artificial Analysis API key (model metrics). Write-only: the server answers only whether one is configured.
+const AA = { status: null, draft: '' };
+async function refreshAA() {
+  try { AA.status = await api('/api/aa/key'); } catch {}
+  renderAA();
+}
+function renderAA() {
+  const box = $('connsData'), s = AA.status;
+  box.textContent = '';
+  if (!s) return;
+  const row = el('div', 'cn-row');
+  row.dataset.conn = 'aa';
+  const main = el('div', 'cn-main'), info = el('div', 'cn-info');
+  const [dot, text] = !s.configured ? ['warn', 'No API key · using the manual metrics table']
+    : s.error ? ['warn', s.error]
+    : ['on', `${s.from === 'env' ? 'Key from AA_API_KEY' : 'Key saved'}${s.count ? ` · ${s.count} models, updated ${relTime(s.fetched_at)}` : ''}`];
+  const st = el('span', 'cn-status');
+  st.append(el('span', `dot ${dot}`), el('span', 'cn-st', text));
+  st.title = text;
+  info.append(el('span', 'cn-label', 'Artificial Analysis'), st);
+  const icon = el('span');
+  icon.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M5 20V13M12 20V5M19 20v-9" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
+  main.append(icon.firstChild, info);
+  if (s.configured && s.from === 'file') {
+    const b = el('button', 'btn small cn-btn', 'Remove');
+    b.type = 'button';
+    b.onclick = async () => {
+      if (!confirm('Remove the Artificial Analysis API key from this server?')) return;
+      try { AA.status = await api('/api/aa/key', 'DELETE'); } catch (e) { alert(e.message); }
+      renderAA();
+    };
+    main.append(b);
+  }
+  row.append(main);
+  if (!s.configured) {
+    const f = el('form', 'cn-paste cn-aa');
+    const inp = el('input');
+    inp.type = 'password';
+    inp.placeholder = 'API key';
+    inp.autocomplete = 'off';
+    inp.setAttribute('aria-label', 'Artificial Analysis API key');
+    inp.value = AA.draft;
+    inp.oninput = () => { AA.draft = inp.value; };
+    const go = el('button', 'btn small primary', 'Save');
+    f.append(inp, go);
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      if (!inp.value.trim()) return inp.focus();
+      go.disabled = true;
+      go.textContent = 'Checking…';
+      try { AA.status = await api('/api/aa/key', 'POST', { key: inp.value.trim() }); AA.draft = ''; } catch (err) { alert(err.message); }
+      renderAA();
+    };
+    row.append(f);
+  }
+  const by = el('div', 'cn-step muted cn-by');
+  const a = el('a', '', s.attribution?.text || 'Model metrics by Artificial Analysis');
+  a.href = s.attribution?.url || 'https://artificialanalysis.ai';
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  by.append(a, document.createTextNode(' ↗'));
+  row.append(by);
+  box.append(row);
 }
 
 // ---------- while you were away ----------

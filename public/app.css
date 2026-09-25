@@ -456,6 +456,9 @@ code, pre, kbd { font-family: var(--mono); }
 .cn-paste { display: flex; gap: 6px; }
 .cn-paste input { flex: 1; min-width: 0; height: 28px; padding: 0 7px; border-radius: 7px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; font-family: var(--mono); font-size: 12px; }
 .cn-paste input:focus { outline: 2px solid var(--focus); border-color: var(--accent); }
+.cn-aa { margin: 6px 0 2px; }
+.cn-by { margin-top: 3px; }
+.cn-by a { color: inherit; }
 .cn-err { margin: 0; color: var(--danger); font-size: 12px; word-break: break-word; }
 .cn-acts { display: flex; justify-content: flex-end; align-items: center; gap: 6px; }
 .cn-acts .link-btn { font-size: 12px; padding: 3px 6px; }

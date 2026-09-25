@@ -217,3 +217,7 @@ Repo link now comes from git origin; tests pass
 ## 2026-09-25 08:26 — #66 Usage-limit notice: correct reset time in the viewer's timezone [done (check passed)]
 
 Usage-limit notices show the real reset in the viewer's timezone; tests pass
+
+## 2026-09-25 08:32 — #67 Server: tmux-driven sign-in sessions for agent CLIs (codex first) [done (check passed)]
+
+Web sign-in backend for codex/GitHub via tmux; tests pass

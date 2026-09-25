@@ -11,7 +11,8 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createOrchestrator, parseJsonl } from './orchestrator.mjs';
 import { createGitHub } from './github.mjs';
 import { retireRuntime } from './runtimes.mjs';
-import { AGENTS, runAgentCli } from './agents.mjs';
+import { AGENTS, runAgentCli, clearLoginCache } from './agents.mjs';
+import { createConnections, SPECS, codexAccount, onPath } from './connections.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -595,6 +596,19 @@ const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
 // ---------- GitHub protocol ----------
 // Every project is a private GitHub repo; every finished task and chat reply is pushed.
 const gh = createGitHub({ env: CLAUDE_ENV, log: (m) => console.log(`[github] ${m}`) });
+// ---------- Sign-in connections (agent CLIs + GitHub), driven from the web UI ----------
+const agentEntry = (a, extra = {}) => ({ id: a.id, label: a.label, installed: () => a.available(), signedIn: () => a.loggedIn(), envFilter: a.envFilter, ...extra });
+const connections = createConnections({
+  entries: [
+    agentEntry(AGENTS.claude),
+    agentEntry(AGENTS.codex, { spec: SPECS.codex, account: () => codexAccount(), afterChange: () => clearLoginCache() }),
+    agentEntry(AGENTS.antigravity),
+    { id: 'github', label: 'GitHub', installed: () => onPath('gh'), signedIn: () => gh.status().linked, account: () => gh.status().login,
+      spec: SPECS.github, afterChange: () => gh.refresh() },
+  ],
+  onChange: (list) => { for (const ws of allClients) send(ws, { t: 'connections', connections: list }); },
+});
+
 // convo.repo mirrors the folder's real `origin` (a stale copy survives repo moves); cleared when there is none.
 async function refreshRepo(convo) {
   if (!fs.existsSync(convo.cwd)) return false;
@@ -1226,6 +1240,19 @@ async function handleRequest(req, res) {
   if (op && req.method === 'POST') {
     const r = orch.projectAction(Number(op[1]), await readBody(req));
     return json(res, r.error ? 400 : 200, r);
+  }
+  if (p === '/api/connections' && req.method === 'GET') {
+    if (Date.now() - gh.status().checkedAt > 15000) await gh.refresh();
+    return json(res, 200, { connections: connections.list() });
+  }
+  const cn = p.match(/^\/api\/connections\/([\w-]+)\/(start|code|cancel|logout)$/);
+  if (cn && req.method === 'POST') {
+    const [, id, action] = cn;
+    const r = action === 'start' ? await connections.start(id)
+      : action === 'code' ? await connections.submitCode(id, (await readBody(req)).code)
+      : action === 'cancel' ? await connections.cancel(id) : await connections.logout(id);
+    const { status, ...body } = r;
+    return json(res, status, body);
   }
   if (p === '/api/agents') {
     return json(res, 200, { agents: Object.values(AGENTS).map((a) => ({ id: a.id, label: a.label, available: !!a.available(), loggedIn: !!a.available() && a.loggedIn(), models: a.models, login: a.login })) });

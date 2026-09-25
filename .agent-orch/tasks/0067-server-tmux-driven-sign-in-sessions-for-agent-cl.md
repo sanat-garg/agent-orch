@@ -12,3 +12,7 @@ Build the backend for signing in to agent CLIs from the web UI instead of the te
 ## Done when
 
 `npm test` passes with connections.mjs parsing tests, and GET /api/connections on a test server returns entries for claude, codex, agy and github with installed/signedIn fields
+
+## Result — done (check passed) (2026-09-25 08:32)
+
+AGENT-ORCH-STATUS: done — Web sign-in backend for codex/GitHub via tmux; tests pass

@@ -177,6 +177,36 @@ test('GET /api/agents lists the agent registry, including claude', async () => {
   assert.equal(codex.loggedIn, false);
 });
 
+test('GET /api/connections lists claude, codex, antigravity and github; actions are login-protected', async () => {
+  const unauth = await get('/api/connections');
+  assert.equal(unauth.status, 401);
+  await unauth.arrayBuffer();
+  const ok = await fetch(base + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: PASSWORD }) });
+  const cookie = ok.headers.get('set-cookie').split(';')[0];
+  await ok.arrayBuffer();
+  const r = await get('/api/connections', { cookie });
+  assert.equal(r.status, 200);
+  const { connections } = await r.json();
+  assert.deepEqual(connections.map((c) => c.id), ['claude', 'codex', 'antigravity', 'github']);
+  for (const c of connections) {
+    assert.equal(typeof c.installed, 'boolean', `${c.id} reports installed`);
+    assert.equal(typeof c.signedIn, 'boolean', `${c.id} reports signedIn`);
+    assert.equal(c.login, null, `${c.id} has no login in progress`);
+  }
+  const codex = connections.find((c) => c.id === 'codex');
+  assert.deepEqual([codex.installed, codex.signedIn, codex.canLogin, codex.canLogout], [true, false, true, true]);
+  const post = (p, headers = {}) => fetch(base + p, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: '{}' });
+  const anon = await post('/api/connections/codex/cancel');
+  assert.equal(anon.status, 401);
+  await anon.arrayBuffer();
+  const nope = await post('/api/connections/claude/start', { cookie });
+  assert.equal(nope.status, 400); // no web sign-in spec for Claude yet, and no tmux session is started
+  await nope.arrayBuffer();
+  const code = await post('/api/connections/codex/code', { cookie });
+  assert.equal(code.status, 409); // no sign-in in progress
+  await code.arrayBuffer();
+});
+
 test('WebSockets of removed or expired sessions close with 4001 (AUDIT #9)', async () => {
   const login = async () => {
     const r = await fetch(base + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: PASSWORD }) });

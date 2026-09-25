@@ -3,29 +3,27 @@
 _Maintained by the orchestrator's reflection loop._
 
 ## Assessment
-_2026-09-25 (reflect #31)._ `npm test` passes 41/41. The rename (goal 4) is almost finished, but "Claude Web" is still
-in orchestrator.mjs: the header, PLANNER_SYSTEM (which every planner session sees) and the git commit identity. The
-multi-agent work (goal 5) is wired end to end: adapters, routing and UI. It has one real gap: an agent counts as
-"available" when its binary is on PATH. Codex is installed but not logged in, so a "use codex for X" route would
-send tasks into auth failures instead of falling back to Claude.
-AUDIT: #1, #3, #4 and #7 are marked fixed. #2 (lock file, task #16) and #15 (unit name, fixed by the rename) are
-fixed in code but not marked. #16 (the verifier runs only the first backticked command) is still open and has already
-cost task #20 eight failed verifications. #5, #6 and #8–#14 are open. The DoD needs each one fixed or explicitly deferred.
+_2026-09-25 (reflect #37)._ `npm test` passes 48/48. All five tasks from reflect #31 landed. The rename (goal 4) is done.
+Multi-agent routing (goal 5) now falls back to Claude when an agent isn't logged in. The UI still doesn't use this:
+the chat picker enables an agent group when `available` (on PATH) is true and ignores `loggedIn`, so a logged-out
+Codex looks usable, and its chat turns fail on auth.
+AUDIT: #1–#4, #7, #8 and #14–#16 are fixed. Still open: #5, #6, #9, #10, #11, #12 and #13. I checked each open item
+against the current code. #6 is only half-covered: the interrupt path clears `planQueue`, but the DELETE handler
+(server.mjs ~1126) doesn't. The DoD needs every AUDIT item fixed or explicitly deferred, so closing them is the main job.
 
 ## Next (queued)
-1. Remove the remaining "Claude Web" strings and mark AUDIT #2 and #15 fixed.
-2. AUDIT #16: make the verifier run every command-like backticked snippet in "Done when", with unit tests.
-3. Agent login detection: `loggedIn()` per adapter, exposed on /api/agents. Routing treats a logged-out agent as unavailable.
-4. AUDIT #8: close the parallel-request login lockout bypass, with a regression test.
-5. AUDIT #14: an oversized request body gets a 413 instead of hanging, with a regression test.
+1. AUDIT #9: the WS keepalive calls `syncSessions()` and closes expired or revoked sessions with 4001.
+2. AUDIT #6: DELETE clears `planQueue`, and `orchestratorTurn` stops when the convo is gone.
+3. AUDIT #13: parse JSONL line by line in `readLog` and `taskDetail`, skipping corrupt lines.
+4. UI: the agent picker and routes list show "not logged in" (with the login command) based on `loggedIn`.
+5. AUDIT #10: make orchestrator git commits async so they don't block the event loop.
 
 ## After that (not queued yet)
-- UI: show "not logged in, run `codex login --device-auth`" in the agent picker and routes list (uses #3's field).
-- AUDIT #9: expired sessions keep their WebSocket. #13: per-line JSONL parsing.
-- AUDIT #6: deleting a chat mid-plan. #5: planner concurrency and duplicate plan tasks.
-- AUDIT #10: async git in the orchestrator. #11: cancel the runCheck process group. #12: ensureRepo dedupe.
-- A real end-to-end run on codex/agy once the owner logs them in (owner action: `codex login --device-auth`, `agy`).
-- Close out the DoD: every AUDIT.md item marked Fixed or Deferred.
+- AUDIT #11: pass the abort signal to `runCheck` and kill the process group on abort/close.
+- AUDIT #12: per-dir inflight dedupe in `gh.ensureRepo`.
+- AUDIT #5: a per-project planner-busy guard shared by chat `planTurn` and plan tasks, and dedupe of rate-limit plan tasks.
+- Close out the DoD: every AUDIT.md item marked Fixed or Deferred, and README checked against the current setup.
+- A real end-to-end run on codex/agy once the owner logs in (owner action: `codex login --device-auth`, `agy`).
 
 ## Ideas / Later (goal 3: usability)
 - Unit tests for orchestrator scheduling (with the SDK stubbed).

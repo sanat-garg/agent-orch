@@ -13,3 +13,7 @@ Fix AUDIT #18 in .agent-orch/AUDIT.md (read it first). In orchestrator.mjs, `rec
 ## Done when
 
 `npm test` passes and `! grep -q 'A non-Claude rate limit still sets the global' .agent-orch/CONTEXT.md`
+
+## Result — done (check passed) (2026-09-25 08:50)
+
+AGENT-ORCH-STATUS: done — Non-Claude usage limits now block only that agent

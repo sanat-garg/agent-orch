@@ -434,7 +434,8 @@ async function runAntigravity({ model, prompt, cwd, resume, systemAppend, signal
   const hay = `${errMsg}\n${res.stderr}`;
   if (!res.text || result?.status !== 'SUCCESS') res.text = errMsg || res.stderr.trim();
   if (stopped || AGY_AUTH_RE.test(hay) && !AGY_LIMIT_RE.test(errMsg)) { res.outcome = 'auth_error'; res.errorCode = 'authentication_failed'; }
-  else if (AGY_LIMIT_RE.test(hay)) { res.outcome = 'rate_limited'; res.errorCode = 'rate_limit'; res.resetsAt = codexResetsAt(hay); }
+  // Only the result's error decides a limit: a failed run's stderr log may mention 'quota' in passing.
+  else if (AGY_LIMIT_RE.test(errMsg)) { res.outcome = 'rate_limited'; res.errorCode = 'rate_limit'; res.resetsAt = codexResetsAt(errMsg); }
   else res.outcome = 'error';
   return res;
 }

@@ -977,28 +977,36 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const u = parseFloat(kvGet('blocked_until', '0')) || 0;
     return u > now() ? u : null;
   }
-  function recordGovernor(res) {
+  // Only a Claude limit sets the global block; a codex/agy limit sets kv blocked_until:<agent>, and while that is in
+  // the future routeFor sends the agent's tasks to Claude. An ok run clears only its own agent's block.
+  function recordGovernor(res, agent = 'claude') {
     // Status and reset time only: pacing takes utilization from the verified /usage reading,
     // whose scale is known, rather than from these live events.
     for (const l of res.limits || []) { // only the Claude adapter reports these
       upsertLimit(l.rateLimitType || 'unknown', l.status || 'allowed', l.resetsAt ? Number(l.resetsAt) : null, null);
     }
+    const own = agent === 'claude' ? '' : `:${agent}`;
     if (res.outcome === 'rate_limited') {
       let resetsAt = res.resetsAt;
-      if (resetsAt) kvSet('unknown_limit_streak', 0);
+      if (resetsAt) kvSet(`unknown_limit_streak${own}`, 0);
       else {
-        const streak = parseInt(kvGet('unknown_limit_streak', '0'), 10) || 0;
+        const streak = parseInt(kvGet(`unknown_limit_streak${own}`, '0'), 10) || 0;
         resetsAt = now() + CFG.unknownResetBackoffSec[Math.min(streak, CFG.unknownResetBackoffSec.length - 1)];
-        kvSet('unknown_limit_streak', streak + 1);
+        kvSet(`unknown_limit_streak${own}`, streak + 1);
       }
-      kvSet('blocked_until', resetsAt + CFG.resetBufferSec);
+      kvSet(`blocked_until${own}`, resetsAt + CFG.resetBufferSec);
+      if (own) {
+        logEvent(`${AGENTS[agent]?.label || agent} usage limit reached; its tasks run on Claude until ${fmtAt(resetsAt + CFG.resetBufferSec)}`, { level: 'warn' });
+        return pushState();
+      }
       kvSet('blocked_known', res.resetsAt ? 1 : 0);
       kvSet('blocked_reason', res.limitType || 'usage limit');
       logEvent(`usage limit reached (${res.limitType || 'unknown'}); ${res.resetsAt ? 'resuming' : 'reset time unknown, retrying'} at ${fmtAt(resetsAt + CFG.resetBufferSec)}`, { level: 'warn' });
       pushState();
     } else if (res.outcome === 'ok') {
-      kvSet('unknown_limit_streak', 0);
-      if (blockedUntil()) { kvSet('blocked_until', 0); pushState(); }
+      kvSet(`unknown_limit_streak${own}`, 0);
+      if (own) { if (kvGet(`blocked_until${own}`, '0') !== '0') kvSet(`blocked_until${own}`, 0); }
+      else if (blockedUntil()) { kvSet('blocked_until', 0); pushState(); }
     }
   }
 
@@ -1149,8 +1157,14 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
   // A global route shows in every project's view.
   const pushRoutes = () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); };
-  // A non-Claude auth_error marks just that agent unusable for 10 min (kv agent_auth_failed:<id>), so its routes fall back to Claude.
-  const agentAvailable = (id) => (parseFloat(kvGet(`agent_auth_failed:${id}`, '0')) || 0) > now() ? 'sign-in failed' : agentStatus(id);
+  // A non-Claude auth_error marks just that agent unusable for 10 min (kv agent_auth_failed:<id>), and a non-Claude
+  // usage limit until its reset (kv blocked_until:<id>), so its routes fall back to Claude.
+  const kvTime = (k) => parseFloat(kvGet(k, '0')) || 0;
+  const agentAvailable = (id) => {
+    if (kvTime(`agent_auth_failed:${id}`) > now()) return 'sign-in failed';
+    const u = kvTime(`blocked_until:${id}`);
+    return u > now() ? `usage limit until ${fmtAt(u)}` : agentStatus(id);
+  };
   function routeFor(task, project) {
     const r = resolveRoute(task, project, listRoutes(project.id), agentAvailable);
     if (r.fellBack) logEvent(`${r.fellBack} ${/^not /.test(r.reason) ? 'is ' : ''}${r.reason}; #${task.id || task.kind} runs on Claude instead`, { level: 'warn', projectId: project.id, taskId: task.id || null });
@@ -1460,7 +1474,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
 
   async function handle(task, project, res, signal) {
-    if (task.kind !== 'plan') recordGovernor(res);
+    if (task.kind !== 'plan') recordGovernor(res, task.ran_agent || 'claude');
     const tid = task.id, pid = project.id;
     if (task.status !== 'running') return; // cancelled while it ran
     if (res.outcome === 'ok') {
@@ -1471,6 +1485,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     }
     if (res.outcome === 'rate_limited') {
       requeueIfRunning(tid, { session_id: res.sessionId || task.session_id });
+      if (task.ran_agent && task.ran_agent !== 'claude') return logEvent(`#${tid} hit the ${AGENTS[task.ran_agent]?.label || task.ran_agent} usage limit; retrying on Claude`, { level: 'warn', projectId: pid, taskId: tid });
       const u = blockedUntil();
       return logEvent(`⏸ #${tid} hit the ${res.limitType || 'usage'} limit; resumes ${u ? fmtAt(u) : 'soon'}`, { level: 'warn', projectId: pid, taskId: tid });
     }

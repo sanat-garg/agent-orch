@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Stand-in for `agy -p … --output-format stream-json`: prints recorded NDJSON events and never touches the network.
-// AGY_STUB=ok|limit|auth|hang picks the script; AGY_STUB_LOG, if set, receives {argv, env, cwd} as JSON.
+// AGY_STUB=ok|limit|quota-log|auth|hang picks the script; AGY_STUB_LOG, if set, receives {argv, env, cwd} as JSON.
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 
@@ -36,6 +36,11 @@ if (mode === 'auth') {
     const error = 'RESOURCE_EXHAUSTED: You have exhausted your quota. Try again at 2030-01-01T00:00:00Z.';
     process.stderr.write(`Error: ${error}\n`);
     out({ event: 'result', result: { conversation_id: cid, status: 'ERROR', error, duration_seconds: 0.4, num_turns: 0 } });
+    process.exitCode = 1;
+  } else if (mode === 'quota-log') {
+    // A plain failure whose log mentions quota: not a usage limit.
+    process.stderr.write('checking quota project settings...\n');
+    out({ event: 'result', result: { conversation_id: cid, status: 'ERROR', error: 'tool run_command failed: exit status 2', duration_seconds: 0.4, num_turns: 1 } });
     process.exitCode = 1;
   } else if (mode === 'hang') {
     // A grandchild in the same process group: aborting must kill it too.

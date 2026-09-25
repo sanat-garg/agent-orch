@@ -181,6 +181,7 @@ tasks during a chat turn); `applyRoute` upsert/delete; chat delete mid-turn (`em
 - **Fix:** Keep a per-agent block (kv `blocked_until:<agent>`): `resolveRoute` falls back to Claude (or `claimNext`
   defers only tasks routed to that agent) while it is set; only Claude limits set the global block. Test
   `AGY_LIMIT_RE` against `result.error` only, not stderr.
+- **Fixed** (task #60): only a Claude limit sets the global `blocked_until`; a codex/agy limit sets kv `blocked_until:<agent>` (reset + buffer, or the unknown-reset backoff) and `routeFor` sends that agent's tasks to Claude ('usage limit until …'); an ok run clears only its own agent's block. agy limits are read from `result.error` only (tests in test/routing.test.mjs and test/agents.test.mjs).
 
 ### 19. [med] A stale codex/agy session is resumed forever (server.mjs:847, orchestrator.mjs:1418)
 - **What:** Resume recovery only looks for Claude's `no conversation found`. Real codex prints

@@ -214,6 +214,13 @@ test('antigravity: a RESOURCE_EXHAUSTED result is rate_limited with resetsAt', a
   assert.deepEqual(events, [{ k: 'limit', resetsAt: reset }]);
 });
 
+test('antigravity: stderr mentioning quota does not make a failed run a limit', async () => {
+  const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'hi', cwd: tmp(), settingsPath: noSettings,
+    env: { PATH: process.env.PATH, AGY_STUB: 'quota-log' } });
+  assert.equal(res.outcome, 'error');
+  assert.equal(res.resetsAt, null);
+});
+
 test('antigravity: a signed-out CLI waiting on OAuth is killed at once as auth_error', async () => {
   const t0 = Date.now();
   const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'hi', cwd: tmp(), settingsPath: noSettings, env: { PATH: process.env.PATH, AGY_STUB: 'auth' } });

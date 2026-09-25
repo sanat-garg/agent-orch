@@ -233,3 +233,7 @@ sidebar Connections panel added; browser flow verified and tests pass
 ## 2026-09-25 08:47 — #59 Non-Claude auth failure blocks only that agent, not the whole orchestrator (AUDIT #17) [done (check passed)]
 
 non-Claude auth failures now fall back to Claude; tests pass
+
+## 2026-09-25 08:50 — #60 Per-agent rate-limit blocks; tighten agy limit detection (AUDIT #18) [done (check passed)]
+
+Non-Claude usage limits now block only that agent

@@ -1318,6 +1318,12 @@ async function handleRequest(req, res) {
     const d = orch.taskDetail(id);
     return d ? json(res, 200, d) : json(res, 404, { error: 'No such task' });
   }
+  // Auto Delegate preview for the composer: ?agent=&model=&category= (default coding) → start model + top 3 candidates.
+  if (p === '/api/delegate/preview' && req.method === 'GET') {
+    const q = url.searchParams;
+    const v = orch.delegatePreview({ agent: q.get('agent') || 'claude', model: q.get('model') || null, category: q.get('category') || 'coding' });
+    return v ? json(res, 200, v) : json(res, 400, { error: 'Unknown agent' });
+  }
   // Manual delegation: GET lists the options (delegate.mjs ranking + usage status), POST {agent, model} reassigns a queued task.
   const od = p.match(/^\/api\/orch\/tasks\/(\d+)\/delegate$/);
   if (od) {

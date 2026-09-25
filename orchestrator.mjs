@@ -19,7 +19,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { AGENTS, agentStatus, isMissingSession, modelCatalog, modelNames, runAgentCli, toolInputSummary } from './agents.mjs';
 import { mediaCollector } from './media.mjs';
 import { createUsageLog } from './usage.mjs';
-import { CATEGORIES, DELEGATE_CFG, createDelegator, eligible as delegationEligible, rankCandidates, taskCategory } from './delegate.mjs';
+import { CATEGORIES, DELEGATE_CFG, createDelegator, eligible as delegationEligible, previewDelegation, rankCandidates, taskCategory } from './delegate.mjs';
 
 // ---------------------------------------------------------------- config
 
@@ -1436,6 +1436,32 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       current: { ...current, label: all.find((m) => m.agent === current.agent && m.model === current.model)?.label || current.model, score: ranked.original?.score ?? null,
         metrics: metricsOf(current.agent, current.model), ...agentUsage(current.agent) }, candidates: rows };
   }
+  // Auto Delegate preview for the composer (GET /api/delegate/preview): the chat's start model plus the top comparable
+  // candidates, each with its agent's usage status. Near = a plan window at ≥75%; limited agents rank last.
+  function previewUsage(agent) {
+    const connected = agent === 'claude' ? onSubscription() : agentStatus(agent) === true;
+    if (!connected) return { status: 'unavailable', until: null, note: agent === 'claude' ? 'not on the subscription' : 'not signed in' };
+    if (kvTime(`agent_auth_failed:${agent}`) > now()) return { status: 'unavailable', until: null, note: 'sign-in failed' };
+    const until = blockedUntilFor(agent);
+    if (until) return { status: 'limited', until, note: kvGet(limitKey('blocked_reason', agent)) || 'usage limit' };
+    const ws = (usageLog.current?.(agent) || []).filter((w) => Number.isFinite(Number(w.pct))).sort((a, b) => b.pct - a.pct);
+    const w = ws[0];
+    if (w && w.pct >= CFG.delegate.maxWindowPct) return { status: 'limited', until: w.resetsAt || null, note: `${w.window} window at ${Math.round(w.pct)}%` };
+    if (w && w.pct >= 75) return { status: 'near', until: w.resetsAt || null, note: `${w.window} window at ${Math.round(w.pct)}%` };
+    return { status: 'available', until: null, note: null };
+  }
+  function delegatePreview({ agent, model, category } = {}) {
+    agent = agent || 'claude';
+    if (agent !== 'claude' && !AGENTS[agent]) return null;
+    let view = null;
+    try { view = modelMetrics(); } catch {}
+    const connected = Object.keys(AGENTS).filter((a) => previewUsage(a).status !== 'unavailable');
+    const all = connected.flatMap((a) => (modelCatalog(a).models || []).map((m) => ({ agent: a, model: m.id, label: m.label || m.id })));
+    const ms = modelCatalog(agent).models || [];
+    const current = { agent, model: model || (ms.find((m) => m.default) || ms[0])?.id || null };
+    const r = previewDelegation({ current, entries: view?.entries || [], all, usage: previewUsage, category: CATEGORIES.includes(category) ? category : 'coding', cfg: CFG.delegate });
+    return { ...r, source: view?.source || 'manual', fetched_at: view?.fetched_at ?? null, attribution: view?.attribution || null };
+  }
   function delegateTask(id, { agent, model } = {}) {
     const task = getTask(id);
     if (!task) return { error: 'No such task', status: 404 };
@@ -2197,7 +2223,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   return {
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
-    planTurn, abortPlan, candidates, eligible: delegationEligible, delegateOptions, delegateTask, taskAction, moveTask, changeMessage, projectAction, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
+    planTurn, abortPlan, candidates, eligible: delegationEligible, delegateOptions, delegatePreview, delegateTask, taskAction, moveTask, changeMessage, projectAction, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
     drain, undrain, chatPlanning, stateView, limitResetFor, recordLimit: recordGovernor, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     unwatch: (ws) => { for (const set of runSubs.values()) set.delete(ws); },
   };

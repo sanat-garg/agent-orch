@@ -161,7 +161,7 @@
                   <option value="claude|">Claude Code</option>
                 </select>
               </label>
-              <span class="pick-chip" id="pickChip" aria-live="polite"></span>
+              <button type="button" class="ap-chip" id="apChip" hidden aria-haspopup="dialog" aria-controls="apModal"></button>
             </div>
             <button type="submit" class="send" id="send" aria-label="Send">
               <svg class="i-send" viewBox="0 0 24 24" width="18" height="18"><path d="M12 19V5M5 12l7-7 7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -308,6 +308,23 @@
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<div class="modal sheet ap-pop" id="apModal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-panel ap" role="dialog" aria-modal="true" aria-labelledby="apTitle">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <div class="m-head">
+      <div>
+        <h2 id="apTitle">Auto Delegate</h2>
+        <p class="m-sub" id="apSub"></p>
+      </div>
+      <button class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="m-body" id="apBody"></div>
+  </div>
+</div>
 
 <div class="modal sheet" id="delegModal" hidden>
   <div class="modal-backdrop" data-close></div>

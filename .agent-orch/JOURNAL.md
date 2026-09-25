@@ -385,3 +385,7 @@ Queue sheet drag-reorders tasks with dependents via the move API
 ## 2026-09-25 19:33 — #124 Composer model selector: width fits the selected model name [done (check passed)]
 
 model picker sizes to its selected name, clamped and ellipsized
+
+## 2026-09-25 19:45 — #125 Composer: drop the Pinned chip; Auto Delegate shows the start model plus likely fallbacks [done (check passed)]
+
+Pinned chip removed; Auto Delegate preview now live and tested

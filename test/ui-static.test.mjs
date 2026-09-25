@@ -70,7 +70,10 @@ test("the model picker renders 'Auto Delegate' first and each message carries th
   const body = fn.slice(0, fn.indexOf('\n}\n'));
   assert.match(body, /el\('option', '', 'Auto Delegate'\)[\s\S]*?value = AUTO_PICK;[\s\S]*?sel\.append\(auto\);[\s\S]*for \(const a of AGENT_LIST\)/);
   assert.match(appJs, /send\(\{ t: 'send', cid: state\.cid, text, autoDelegate: autoPick\(\) \}\)/);
-  assert.match(indexHtml, /id="pickChip"/);
+  assert.match(indexHtml, /id="apChip"/);
+  assert.match(indexHtml, /class="modal sheet ap-pop" id="apModal"/);
+  assert.match(appJs, /api\(`\/api\/delegate\/preview\?agent=/);
+  assert.doesNotMatch(appJs, /Pinned:/);
   assert.match(appJs, /\/api\/orch\/tasks\/\$\{[^}]+\}\/delegate/);
   assert.match(appJs, /'Delegate…'/);
 });

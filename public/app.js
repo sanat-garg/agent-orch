@@ -1363,17 +1363,120 @@ function fitPick() {
   sel.title = text;
 }
 document.fonts?.ready.then(fitPick);
-// The composer chip: "Auto" or the model this chat's tasks are pinned to.
+// Auto Delegate preview (GET /api/delegate/preview), next to the picker only while Auto Delegate is chosen: the start
+// model and the comparable models most likely used after it, each with a status dot. A specific model shows nothing.
+const AP = { data: null, key: '', seq: 0, timer: 0, lastFocus: null };
+const AP_ST = { available: 'available', near: 'near limit', limited: 'limited', unavailable: 'unavailable' };
+function apStatusText(r) {
+  const base = r.status === 'limited' && r.until ? `limited until ${fmtUntil(r.until)}` : AP_ST[r.status] || r.status;
+  return r.note && r.status !== 'available' ? `${base} (${r.note})` : base;
+}
+const apName = (r) => r.label || (r.model ? modelLabel(r.agent, r.model) : shortLabel(r.agent));
 function renderPickChip() {
   fitPick();
-  const c = $('pickChip');
+  const c = $('apChip');
   if (!c) return;
+  if (!autoPick()) { c.hidden = true; AP.key = ''; AP.data = null; if (!$('apModal').hidden) closeAutoPreview(); return; }
   const { agent, model } = parsePick($('model').dataset.prev || 'claude|');
-  const auto = autoPick();
-  c.classList.toggle('auto', auto);
-  c.textContent = auto ? 'Auto' : model ? modelLabel(agent, model) : shortLabel(agent);
-  c.title = auto ? `Auto Delegate: queued tasks may move to a comparable model with usage left (starts on ${model ? modelLabel(agent, model) : shortLabel(agent)})`
-    : 'Pinned: tasks from this chat stay on this model';
+  const key = `${agent}|${model}`;
+  if (AP.key !== key) { AP.key = key; AP.data = null; }
+  c.hidden = false;
+  renderApChip();
+  loadAutoPreview();
+}
+function loadAutoPreview() {
+  if (!AP.key) return;
+  const [agent, model] = AP.key.split('|'), seq = ++AP.seq;
+  api(`/api/delegate/preview?agent=${encodeURIComponent(agent)}&model=${encodeURIComponent(model)}&category=coding`).then((d) => {
+    if (seq !== AP.seq) return;
+    AP.data = d;
+    renderApChip();
+    if (!$('apModal').hidden) renderAutoPreview();
+  }).catch(() => {});
+}
+// Limits changed (WS 'ostate'): refetch, coalescing bursts.
+function refreshAutoPreview() {
+  clearTimeout(AP.timer);
+  if (AP.key) AP.timer = setTimeout(loadAutoPreview, 400);
+}
+function renderApChip() {
+  const c = $('apChip'), d = AP.data;
+  c.textContent = '';
+  const [agent, model] = AP.key.split('|');
+  const list = d ? [d.start, ...d.candidates] : [{ agent, model, status: null }];
+  const full = el('span', 'ap-full'), short = el('span', 'ap-short');
+  list.forEach((r, i) => {
+    if (i) full.append(el('span', 'ap-arrow', '→'));
+    const e = el('span', `ap-e${r.status ? ` st-${r.status}` : ''}`);
+    e.append(el('span', 'ap-dot'), el('span', 'ap-n', apName(r)));
+    if (r.status) e.title = `${apName(r)}: ${apStatusText(r)}`;
+    full.append(e);
+  });
+  const s0 = list[0];
+  short.append(el('span', `ap-e${s0.status ? ` st-${s0.status}` : ''}`), el('span', 'ap-more', list.length > 1 ? `+${list.length - 1}` : ''));
+  short.firstChild.append(el('span', 'ap-dot'), el('span', 'ap-n', apName(s0)));
+  c.append(full, short);
+  c.title = `Auto Delegate: starts on ${list.map((r) => `${apName(r)}${r.status ? ` (${apStatusText(r)})` : ''}`).join(', then ')}. Details…`;
+  c.setAttribute('aria-label', c.title);
+}
+function openAutoPreview() {
+  const m = $('apModal');
+  if (m.hidden) AP.lastFocus = document.activeElement;
+  m.hidden = false;
+  // Desktop: a small popover above the chip; mobile (≤800px): the .modal.sheet bottom sheet.
+  const panel = m.querySelector('.modal-panel');
+  if (matchMedia('(min-width: 801px)').matches) {
+    const r = $('apChip').getBoundingClientRect(), w = Math.min(400, innerWidth - 24);
+    panel.style.left = `${Math.max(12, Math.min(r.left, innerWidth - w - 12))}px`;
+    panel.style.bottom = `${innerHeight - r.top + 8}px`;
+  } else panel.style.left = panel.style.bottom = '';
+  renderAutoPreview();
+  loadAutoPreview();
+  m.querySelector('[data-close].icon-btn').focus();
+}
+function closeAutoPreview() {
+  $('apModal').hidden = true;
+  AP.lastFocus?.focus?.();
+}
+$('apChip').addEventListener('click', openAutoPreview);
+$('apModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeAutoPreview(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('apModal').hidden) { e.stopImmediatePropagation(); closeAutoPreview(); } }, true);
+function renderAutoPreview() {
+  const body = $('apBody'), d = AP.data;
+  body.textContent = '';
+  if (!d) { $('apSub').textContent = ''; body.append(el('div', 'out-live', 'Loading…')); return; }
+  $('apSub').textContent = `Starts on ${apName(d.start)}. When it runs out of usage, queued tasks may move to a comparable model.`;
+  const row = (r, head) => {
+    const box = el('div', `dg-row ap-row${r.status === 'available' || r.status === 'near' ? '' : ' limited'}`);
+    const h = el('div', 'dg-head');
+    const st = el('span', `ap-e st-${r.status}`);
+    st.append(el('span', 'ap-dot'), el('span', '', apStatusText(r)));
+    h.append(el('span', 'dg-name', `${head}${r.agent} · ${apName(r)}`), st);
+    const g = el('div', 'dg-metrics ap-metrics');
+    for (const [label, read, fmt] of DG_METRICS.slice(0, 3)) {
+      const v = r.metrics && dgNum(read(r.metrics));
+      const cell = el('div', 'dg-m');
+      cell.append(el('span', 'k', label), el('span', 'v', v == null ? '—' : fmt(v)));
+      g.append(cell);
+    }
+    box.append(h, g);
+    if (r.reason) box.append(el('div', 'dg-why', r.reason));
+    return box;
+  };
+  body.append(row(d.start, 'Start: '));
+  if (d.candidates.length) {
+    body.append(el('h3', 'dg-group', 'Likely fallbacks'));
+    d.candidates.forEach((r, i) => body.append(row(r, `${i + 1}. `)));
+  } else body.append(el('p', 'dg-why', d.start.score == null ? 'No metrics for the start model, so nothing is comparable to it.' : 'No comparable model on another signed-in agent.'));
+  const src = el('p', 'dg-src');
+  src.append(d.source === 'artificialanalysis' ? 'Metrics from Artificial Analysis' : 'Metrics entered manually (.agent-orch/model-metrics.json)',
+    ` · ranked for ${d.category} work`);
+  if (d.attribution?.url) {
+    const a = el('a', '', d.attribution.text);
+    a.href = d.attribution.url; a.target = '_blank'; a.rel = 'noopener';
+    src.append(' · ', a);
+  }
+  body.append(src);
 }
 const pickVal = ({ agent, model }) => `${agent || 'claude'}|${model || ''}`;
 const parsePick = (v) => (v.includes('|') ? { agent: v.slice(0, v.indexOf('|')), model: v.slice(v.indexOf('|') + 1) } : { agent: 'claude', model: v });
@@ -2684,6 +2787,7 @@ function onOrch(msg) {
     }
   } else if (msg.t === 'ostate') {
     O.state = msg.state;
+    refreshAutoPreview();
     renderOrchBar();
     renderUpdateBanner();
     refreshAllCards();

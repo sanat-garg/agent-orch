@@ -8,7 +8,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { eligible, taskCategory, rankCandidates, createDelegator, weightedScore } from '../delegate.mjs';
+import { eligible, taskCategory, rankCandidates, createDelegator, weightedScore, previewDelegation } from '../delegate.mjs';
 
 test('policy matrix: reflect / chat+auto / chat+pinned / chat default', () => {
   assert.equal(eligible({ kind: 'work', origin: 'reflection' }), true);
@@ -88,6 +88,21 @@ test('delegator: blocked, disconnected and ≥90% windows exclude an agent; defa
   assert.deepEqual(r.candidates.map((c) => c.model), ['gemini-x']);
   r = mk({ connected: (id) => id !== 'antigravity', windows: (id) => (id === 'codex' ? [{ window: '5h', pct: 89 }] : []) }).candidates(task, { agent: 'claude', model: 'opus' });
   assert.deepEqual(r.candidates.map((c) => c.model), ['gpt-a', 'gpt-b']);
+});
+
+test('preview: start model plus top 3; a limited agent\'s models are marked and ranked after usable ones', () => {
+  const all = avail('opus', 'haiku', 'gpt-a', 'gpt-b', 'gpt-mini', 'gemini-x').map((m) => ({ ...m, label: entries.find((e) => e.model === m.model).label }));
+  const usage = (a) => (a === 'codex' ? { status: 'limited', until: 999, note: 'usage limit' } : a === 'antigravity' ? { status: 'near', until: null, note: '5h window at 80%' } : { status: 'available', until: null, note: null });
+  const r = previewDelegation({ current: { agent: 'claude', model: 'opus' }, entries, all, usage });
+  assert.equal(r.category, 'coding');
+  assert.deepEqual([r.start.label, r.start.score, r.start.status, r.start.metrics.agentic_index], ['Opus', 56, 'available', 65]);
+  // By similarity: gpt-a, gpt-b, gemini-x; codex is limited, so gemini-x (near, still usable) comes first.
+  assert.deepEqual(r.candidates.map((c) => [c.model, c.status]), [['gemini-x', 'near'], ['gpt-a', 'limited'], ['gpt-b', 'limited']]);
+  assert.equal(r.candidates[1].until, 999);
+  assert.equal(r.candidates[1].note, 'usage limit');
+  assert.match(r.candidates[1].reason, /^coding: 54 vs Opus 56/);
+  assert.equal(r.candidates[0].metrics.benchmarks.terminalbench_hard, 0.35);
+  assert.equal(previewDelegation({ current: { agent: 'claude', model: 'opus' }, entries, all, usage, limit: 1 }).candidates.length, 1);
 });
 
 // ---- orchestrator integration: a child process (createOrchestrator starts timers) with Claude blocked.

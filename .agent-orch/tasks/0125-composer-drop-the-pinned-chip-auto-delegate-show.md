@@ -12,3 +12,7 @@ In public/app.js the composer chip (~lines 1366-1400, the function that renders 
 ## Done when
 
 `npm test` passes with a /api/delegate/preview test, and `! grep -n "Pinned:" public/app.js` finds no pinned label
+
+## Result — done (check passed) (2026-09-25 19:45)
+
+AGENT-ORCH-STATUS: done — Pinned chip removed; Auto Delegate preview now live and tested

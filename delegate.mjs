@@ -120,3 +120,22 @@ export function createDelegator({ agents, connected, blockedUntil, windows = () 
   }
   return { eligible, candidates, hasUsage, available };
 }
+
+// Auto Delegate preview (the composer summary): the start model plus the comparable models most likely used after it.
+// all: [{agent, model, label}] every model of a connected agent, limited or not; usage(agent) → {status, until?, note?}
+// where status is available | near | limited | unavailable. Limited candidates stay listed (the UI greys them) but rank
+// after every usable one. → {category, start, candidates: [≤limit rankCandidates rows + usage + full metrics]}
+export function previewDelegation({ current, entries = [], all = [], usage, category = 'coding', limit = 3, cfg = DELEGATE_CFG }) {
+  const ranked = rankCandidates({ current, entries, available: all, category, cfg });
+  const full = (a, m) => entries.find((e) => e.agent === a && e.model === m)?.metrics || null;
+  const usable = (s) => s === 'available' || s === 'near';
+  const rows = ranked.candidates.map((c, i) => ({ ...c, i, used: c.metrics, metrics: full(c.agent, c.model), ...usage(c.agent) }));
+  rows.sort((a, b) => usable(b.status) - usable(a.status) || a.i - b.i);
+  const label = all.find((m) => m.agent === current.agent && m.model === current.model)?.label
+    || entries.find((e) => e.agent === current.agent && e.model === current.model)?.label || current.model;
+  return {
+    category: ranked.category,
+    start: { ...current, label, score: ranked.original?.score ?? null, metrics: full(current.agent, current.model), ...usage(current.agent) },
+    candidates: rows.slice(0, limit).map(({ i, similarity, ...r }) => r),
+  };
+}

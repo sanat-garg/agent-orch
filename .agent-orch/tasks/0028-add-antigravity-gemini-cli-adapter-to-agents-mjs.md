@@ -13,3 +13,7 @@ Add the Google agent adapter to agents.mjs (id 'antigravity' if .agent-orch/AGEN
 ## Done when
 
 `npm test` passes with a Google-agent adapter test using a stub binary
+
+## Result — done (check passed) (2026-09-25 03:34)
+
+AGENT-ORCH-STATUS: done — Antigravity adapter added; stub-binary tests pass in npm test

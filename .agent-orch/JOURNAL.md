@@ -109,3 +109,7 @@ agents.mjs has a Claude adapter that runAgent calls through; tests pass
 ## 2026-09-25 03:32 — #27 Add Codex CLI adapter to agents.mjs [done (check passed)]
 
 codex adapter added; stub-binary tests pass under npm test
+
+## 2026-09-25 03:34 — #28 Add Antigravity/Gemini CLI adapter to agents.mjs [done (check passed)]
+
+Antigravity adapter added; stub-binary tests pass in npm test

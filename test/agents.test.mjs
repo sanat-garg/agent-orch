@@ -1,4 +1,4 @@
-// agents.mjs: the adapter registry and each adapter's event normalisation (claude via a fake SDK stream, codex via a stub binary).
+// agents.mjs: the adapter registry and each adapter's event normalisation (claude via a fake SDK stream, codex and antigravity via stub binaries).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -152,6 +152,89 @@ test('codex: abort kills the process group and ends with outcome aborted', async
   const p = runAgentCli({ agent: 'codex', bin: STUB, prompt: 'hi', cwd: dir, signal: ac.signal, env: { PATH: process.env.PATH, CODEX_STUB: 'hang', CODEX_STUB_PIDS: pids },
     onEvent: (e) => { if (e.k === 'tool') ac.abort(); } });
   const res = await p;
+  assert.equal(res.outcome, 'aborted');
+  const g = Number(fs.readFileSync(pids, 'utf8'));
+  for (let i = 0; i < 50 && alive(g); i++) await new Promise((r) => setTimeout(r, 20));
+  assert.ok(!alive(g), 'grandchild survived the abort');
+});
+
+// ---- antigravity: runs test/fixtures/agy-stub.mjs, which prints recorded `agy --output-format stream-json` events.
+
+const AGY = fileURLToPath(new URL('./fixtures/agy-stub.mjs', import.meta.url));
+const noSettings = '/nonexistent/agy-settings.json';
+
+test('antigravity: NDJSON events become normalised text/tool/result events; API vars are stripped', async () => {
+  const dir = tmp(), log = path.join(dir, 'log.json'), events = [];
+  const res = await runAgentCli({
+    agent: 'antigravity', bin: AGY, model: 'gemini-3.8-flash-high', prompt: 'say hello', systemAppend: 'extra', cwd: dir, settingsPath: noSettings,
+    env: { PATH: process.env.PATH, AGY_STUB: 'ok', AGY_STUB_LOG: log, GEMINI_API_KEY: 'g', GOOGLE_API_KEY: 'k', GOOGLE_GENAI_USE_VERTEXAI: '1',
+      GOOGLE_APPLICATION_CREDENTIALS: '/c.json', GOOGLE_CLOUD_PROJECT: 'p', AGY_ADC_AUTH: '1' },
+    onEvent: (e) => events.push(e),
+  });
+  assert.deepEqual(events.map(({ lines, ...e }) => e), [
+    { k: 'text', text: 'Sure, looking' },
+    { k: 'tool', id: '2', name: 'Bash', input: { command: 'echo hello' } },
+    { k: 'tool_result', id: '2', text: 'hello\n', isError: false },
+    { k: 'tool', id: '3', name: 'view_file', input: { file_path: '/x/a.js' } },
+    { k: 'tool_result', id: '3', text: 'no such file', isError: true },
+    { k: 'text', text: 'hello' },
+    { k: 'result', usage: { input_tokens: 10418, output_tokens: 589, thinking_tokens: 551, cache_read_tokens: 8113, total_tokens: 11007 } },
+  ]);
+  assert.equal(res.outcome, 'ok');
+  assert.equal(res.text, 'hello');
+  assert.equal(res.sessionId, '3f0c9a2e-agy');
+  assert.equal(res.numTurns, 1);
+  assert.equal(res.usage.total_tokens, 11007);
+  const seen = JSON.parse(fs.readFileSync(log, 'utf8'));
+  assert.equal(fs.realpathSync(seen.cwd), fs.realpathSync(dir));
+  assert.deepEqual(seen.argv, ['-p', 'extra\n\nsay hello', '--output-format', 'stream-json', '--print-timeout', '0',
+    '--model', 'gemini-3.8-flash-high', '--dangerously-skip-permissions']);
+  // Billing stays on the Google account login: API-key / Vertex / ADC vars never reach the CLI.
+  for (const k of ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_GENAI_USE_VERTEXAI', 'GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_CLOUD_PROJECT', 'AGY_ADC_AUTH']) assert.ok(!(k in seen.env), k);
+  assert.equal(seen.env.AGY_STUB, 'ok');
+});
+
+test('antigravity: resume passes --conversation; non-autonomous drops the skip-permissions flag', async () => {
+  const dir = tmp(), log = path.join(dir, 'log.json');
+  const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'more', cwd: dir, resume: 'abc', autonomous: false, settingsPath: noSettings,
+    env: { PATH: process.env.PATH, AGY_STUB: 'ok', AGY_STUB_LOG: log } });
+  assert.equal(res.outcome, 'ok');
+  assert.deepEqual(JSON.parse(fs.readFileSync(log, 'utf8')).argv, ['-p', 'more', '--output-format', 'stream-json', '--print-timeout', '0', '--conversation', 'abc']);
+});
+
+test('antigravity: a RESOURCE_EXHAUSTED result is rate_limited with resetsAt', async () => {
+  const events = [];
+  const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'hi', cwd: tmp(), settingsPath: noSettings,
+    env: { PATH: process.env.PATH, AGY_STUB: 'limit' }, onEvent: (e) => events.push(e) });
+  const reset = Date.parse('2030-01-01T00:00:00Z') / 1000;
+  assert.equal(res.outcome, 'rate_limited');
+  assert.equal(res.errorCode, 'rate_limit');
+  assert.equal(res.resetsAt, reset);
+  assert.match(res.text, /RESOURCE_EXHAUSTED/);
+  assert.deepEqual(events, [{ k: 'limit', resetsAt: reset }]);
+});
+
+test('antigravity: a signed-out CLI waiting on OAuth is killed at once as auth_error', async () => {
+  const t0 = Date.now();
+  const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'hi', cwd: tmp(), settingsPath: noSettings, env: { PATH: process.env.PATH, AGY_STUB: 'auth' } });
+  assert.equal(res.outcome, 'auth_error');
+  assert.equal(res.errorCode, 'authentication_failed');
+  assert.ok(Date.now() - t0 < 5000);
+});
+
+test('antigravity: API-key mode in settings.json is refused without spawning', async () => {
+  const dir = tmp(), settingsPath = path.join(dir, 'settings.json'), log = path.join(dir, 'log.json');
+  fs.writeFileSync(settingsPath, JSON.stringify({ modelProvider: 'gemini' }));
+  const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'hi', cwd: dir, settingsPath, env: { PATH: process.env.PATH, AGY_STUB: 'ok', AGY_STUB_LOG: log } });
+  assert.equal(res.outcome, 'auth_error');
+  assert.match(res.text, /API-key mode/);
+  assert.ok(!fs.existsSync(log));
+});
+
+test('antigravity: abort kills the process group and ends with outcome aborted', async () => {
+  const dir = tmp(), pids = path.join(dir, 'pids'), ac = new AbortController();
+  const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'hi', cwd: dir, signal: ac.signal, settingsPath: noSettings,
+    env: { PATH: process.env.PATH, AGY_STUB: 'hang', AGY_STUB_PIDS: pids }, onEvent: (e) => { if (e.k === 'tool') ac.abort(); } });
   assert.equal(res.outcome, 'aborted');
   const g = Number(fs.readFileSync(pids, 'utf8'));
   for (let i = 0; i < 50 && alive(g); i++) await new Promise((r) => setTimeout(r, 20));

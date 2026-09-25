@@ -1,6 +1,7 @@
 // Pluggable coding-agent layer. Each adapter runs one headless agent turn and reports NORMALISED events:
 //   {k:'text',text}  {k:'tool',name,input}  {k:'tool_result',text,isError}  {k:'result',usage}  {k:'limit',resetsAt}
-// (adapters may add fields such as a tool id). Adapters: claude (Agent SDK), codex (`codex exec --json`). Every adapter strips its `envFilter` vars from the env so
+// (adapters may add fields such as a tool id). Adapters: claude (Agent SDK), codex (`codex exec --json`),
+// antigravity (`agy -p --output-format stream-json`). Every adapter strips its `envFilter` vars from the env so
 // billing stays on the owner's subscription login, never an API key. See .agent-orch/AGENTS.md.
 
 import fs from 'node:fs';
@@ -164,6 +165,52 @@ export function codexResetsAt(msg, now = new Date()) {
 
 const clip = (t) => (t.length > 6000 ? t.slice(0, 6000) + '\n…' : t);
 
+// Spawns a CLI that prints one JSON object per stdout line and feeds each to `handle`; stderr is kept (last 4k) in
+// res.stderr. detached: the CLI gets its own process group, so an abort also kills the commands it spawned. If
+// `stopOn` matches stderr, the run is killed too (and `stopped` is true), e.g. a CLI blocking on an auth prompt.
+async function spawnJsonl({ bin, args, cwd, env, signal, res, handle, stopOn }) {
+  let aborted = false, stopped = false, killTimer;
+  const child = spawn(bin, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  const killGroup = (sig) => { try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch {} } };
+  const kill = () => {
+    killGroup('SIGTERM');
+    killTimer ??= setTimeout(() => killGroup('SIGKILL'), 5000);
+    killTimer.unref?.();
+  };
+  const onAbort = () => { aborted = true; kill(); };
+  if (signal) { if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true }); }
+  child.stderr.on('data', (d) => {
+    res.stderr = (res.stderr + d).slice(-4000);
+    if (stopOn && !stopped && stopOn.test(res.stderr)) { stopped = true; kill(); }
+  });
+  let buf = '';
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (d) => {
+    buf += d;
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, i).trim();
+      buf = buf.slice(i + 1);
+      if (!line) continue;
+      let m;
+      try { m = JSON.parse(line); } catch { continue; }
+      handle(m);
+    }
+  });
+  let exitCode = null;
+  try {
+    exitCode = await new Promise((resolve) => {
+      child.on('error', (e) => { res.stderr += `\n${e?.message || e}`; resolve(null); });
+      child.on('close', (code) => resolve(code));
+    });
+    if (buf.trim()) { try { handle(JSON.parse(buf)); } catch {} }
+  } finally {
+    clearTimeout(killTimer);
+    signal?.removeEventListener('abort', onAbort);
+  }
+  return { aborted, stopped, exitCode };
+}
+
 function codexTool(it) {
   switch (it.type) {
     case 'command_execution': return { name: 'Bash', input: { command: it.command } };
@@ -211,20 +258,8 @@ async function runCodex({ model, prompt, cwd, resume, systemAppend, signal, onEv
   const text = systemAppend ? `${systemAppend}\n\n${prompt}` : prompt;
   args.push('--', ...(resume ? [resume] : []), text);
 
-  let aborted = false, completed = false, failMsg = '', lastError = '', exitCode = null, killTimer;
+  let completed = false, failMsg = '', lastError = '';
   const started = new Set();
-  // detached: the CLI gets its own process group, so an abort also kills the commands it spawned.
-  const child = spawn(bin || CODEX.bin, args, { cwd, env: stripEnv(env, CODEX.envFilter), stdio: ['ignore', 'pipe', 'pipe'], detached: true });
-  const killGroup = (sig) => { try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch {} } };
-  const onAbort = () => {
-    aborted = true;
-    killGroup('SIGTERM');
-    killTimer = setTimeout(() => killGroup('SIGKILL'), 5000);
-    killTimer.unref?.();
-  };
-  if (signal) { if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true }); }
-  child.stderr.on('data', (d) => { res.stderr = (res.stderr + d).slice(-4000); });
-
   const handle = (m) => {
     if (m.type === 'thread.started' && m.thread_id) res.sessionId = m.thread_id;
     else if (m.type === 'item.completed' && m.item?.type === 'agent_message' && m.item.text?.trim()) res.text = m.item.text;
@@ -235,30 +270,7 @@ async function runCodex({ model, prompt, cwd, resume, systemAppend, signal, onEv
     if (onEvent) for (const e of codexEvents(m, started)) { try { onEvent(e); } catch {} }
     try { onMessage?.(m); } catch {}
   };
-  let buf = '';
-  child.stdout.setEncoding('utf8');
-  child.stdout.on('data', (d) => {
-    buf += d;
-    let i;
-    while ((i = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, i).trim();
-      buf = buf.slice(i + 1);
-      if (!line) continue;
-      let m;
-      try { m = JSON.parse(line); } catch { continue; }
-      handle(m);
-    }
-  });
-  try {
-    exitCode = await new Promise((resolve) => {
-      child.on('error', (e) => { res.stderr += `\n${e?.message || e}`; resolve(null); });
-      child.on('close', (code) => resolve(code));
-    });
-    if (buf.trim()) { try { handle(JSON.parse(buf)); } catch {} }
-  } finally {
-    clearTimeout(killTimer);
-    signal?.removeEventListener('abort', onAbort);
-  }
+  const { aborted, exitCode } = await spawnJsonl({ bin: bin || CODEX.bin, args, cwd, env: stripEnv(env, CODEX.envFilter), signal, res, handle });
 
   if (aborted) { res.outcome = 'aborted'; return res; }
   const errMsg = failMsg || (!completed ? lastError : '');
@@ -285,7 +297,111 @@ const CODEX = {
   run: runCodex,
 };
 
-export const AGENTS = { claude: CLAUDE, codex: CODEX };
+// ---------------------------------------------------------------- antigravity (Google Antigravity CLI, `agy -p … --output-format stream-json`)
+
+const AGY_LIMIT_RE = /RESOURCE_EXHAUSTED|quota|rate.?limit|\b429\b|exhausted/i;
+const AGY_AUTH_RE = /waiting for authentication|sign in|accounts\.google\.com\/o\/oauth2|authorization code|not logged in|unauthenticated|\b401\b/i;
+// agy -p doesn't fail when signed out: it prints an OAuth URL on stderr and blocks ~60 s. Kill it on sight.
+const AGY_AUTH_PROMPT_RE = /waiting for authentication|paste the authorization code|accounts\.google\.com\/o\/oauth2/i;
+const AGY_DONE = new Set(['DONE', 'ERROR', 'FAILED', 'CANCELED', 'CANCELLED', 'INTERRUPTED']);
+
+const snakeKeys = (o = {}) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase(), v]));
+function agyTool(u) {
+  const name = u.tool_name || u.tool_info?.name || 'tool', p = u.tool_info?.parameters || {};
+  if (name === 'run_command') return { name: 'Bash', input: { command: p.CommandLine ?? p.command ?? '' } };
+  return { name, input: toolInputSummary(name, snakeKeys(p)) };
+}
+
+// NDJSON event -> normalised events. `st` carries the text_delta buffers (per step) and the announced tool steps
+// across calls; a step's text is emitted once the step is DONE, another step starts, or the result arrives.
+function* agyEvents(m, st = { text: new Map(), started: new Set() }) {
+  const flush = function* (keep) {
+    for (const [i, t] of st.text) if (i !== keep) { st.text.delete(i); if (t.trim()) yield { k: 'text', text: t }; }
+  };
+  if (m.event === 'step_update' && m.step_update) {
+    const u = m.step_update, i = u.step_index;
+    yield* flush(i);
+    if (u.step_type === 'agent_response') {
+      if (u.text_delta) st.text.set(i, (st.text.get(i) || '') + u.text_delta);
+      if (AGY_DONE.has(u.state)) yield* flush();
+    } else if (u.step_type === 'tool') {
+      if (!st.started.has(i)) { st.started.add(i); yield { k: 'tool', id: String(i), ...agyTool(u) }; }
+      if (!AGY_DONE.has(u.state)) return;
+      const ti = u.tool_info || {};
+      const out = ti.output ?? ti.error ?? '';
+      const text = typeof out === 'string' ? out : JSON.stringify(out);
+      yield { k: 'tool_result', id: String(i), text: clip(text), isError: u.state !== 'DONE' || !!ti.error, lines: text.split('\n').length };
+    }
+  } else if (m.event === 'result' && m.result) {
+    yield* flush();
+    const r = m.result;
+    if (r.status === 'SUCCESS') yield { k: 'result', usage: r.usage || {} };
+    else if (AGY_LIMIT_RE.test(r.error || '')) yield { k: 'limit', resetsAt: codexResetsAt(r.error) };
+  }
+}
+
+// Extra options: bin, env, autonomous (default true: --dangerously-skip-permissions approves every tool, like
+// Claude's bypassPermissions; false leaves agy's headless policy), settingsPath (agy's settings.json, checked for
+// API-key mode), onMessage (raw NDJSON events). agy has no system-prompt append flag, so systemAppend is prepended.
+async function runAntigravity({ model, prompt, cwd, resume, systemAppend, signal, onEvent, bin, env = process.env, autonomous = true, onMessage,
+  settingsPath = path.join(HOME, '.gemini/antigravity-cli/settings.json') }) {
+  const res = { outcome: 'error', text: '', sessionId: resume || null, usage: {}, numTurns: 0, resetsAt: null, limitType: null, stderr: '', errorCode: null };
+  // `"modelProvider": "gemini"` switches agy to GEMINI_API_KEY billing; refuse rather than spend API credits.
+  let settings = {};
+  try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch {}
+  if (settings?.modelProvider === 'gemini') {
+    Object.assign(res, { outcome: 'auth_error', errorCode: 'authentication_failed',
+      text: `agy is set to API-key mode (modelProvider "gemini" in ${settingsPath}); remove it to use the Google account login.` });
+    return res;
+  }
+  const text = systemAppend ? `${systemAppend}\n\n${prompt}` : prompt;
+  const args = ['-p', text, '--output-format', 'stream-json', '--print-timeout', '0'];
+  if (model) args.push('--model', model);
+  if (autonomous) args.push('--dangerously-skip-permissions');
+  if (resume) args.push('--conversation', resume);
+
+  let result = null;
+  const st = { text: new Map(), started: new Set() };
+  const handle = (m) => {
+    const id = m.conversation_id || m.step_update?.conversation_id || m.result?.conversation_id;
+    if (id) res.sessionId = id;
+    if (m.event === 'result' && m.result) { result = m.result; res.usage = result.usage || {}; res.numTurns = result.num_turns || 0; }
+    for (const e of agyEvents(m, st)) {
+      if (e.k === 'text') res.text = e.text;
+      if (onEvent) { try { onEvent(e); } catch {} }
+    }
+    try { onMessage?.(m); } catch {}
+  };
+  const { aborted, stopped, exitCode } = await spawnJsonl({ bin: bin || ANTIGRAVITY.bin, args, cwd, env: stripEnv(env, ANTIGRAVITY.envFilter),
+    signal, res, handle, stopOn: AGY_AUTH_PROMPT_RE });
+
+  if (aborted) { res.outcome = 'aborted'; return res; }
+  if (result?.status === 'SUCCESS' && exitCode === 0 && !stopped) {
+    if (result.response) res.text = result.response;
+    res.outcome = 'ok';
+    return res;
+  }
+  const errMsg = result?.error || (result ? `agy ended with status ${result.status}` : '');
+  const hay = `${errMsg}\n${res.stderr}`;
+  if (!res.text || result?.status !== 'SUCCESS') res.text = errMsg || res.stderr.trim();
+  if (stopped || AGY_AUTH_RE.test(hay) && !AGY_LIMIT_RE.test(errMsg)) { res.outcome = 'auth_error'; res.errorCode = 'authentication_failed'; }
+  else if (AGY_LIMIT_RE.test(hay)) { res.outcome = 'rate_limited'; res.errorCode = 'rate_limit'; res.resetsAt = codexResetsAt(hay); }
+  else res.outcome = 'error';
+  return res;
+}
+
+const ANTIGRAVITY = {
+  id: 'antigravity',
+  label: 'Antigravity CLI',
+  bin: path.join(HOME, '.local/bin/agy'),
+  available() { return onPath(this.bin); },
+  models: ['gemini-3.8-flash-high'],
+  envFilter: /^(GEMINI_API_KEY|GOOGLE_(API_KEY|GEMINI_BASE_URL|GENAI_USE_VERTEXAI|GENAI_USE_ENTERPRISE|GENAI_USE_GCA|APPLICATION_CREDENTIALS|CLOUD_PROJECT(_ID)?|CLOUD_LOCATION)|AGY_(ADC_AUTH|BUSINESS_PAYGO_TIER))$/,
+  events: agyEvents,
+  run: runAntigravity,
+};
+
+export const AGENTS = { claude: CLAUDE, codex: CODEX, antigravity: ANTIGRAVITY };
 
 // Runs one turn on `agent` (default 'claude'). Returns at least {outcome, text, sessionId, usage, resetsAt, errorCode};
 // outcome is ok | aborted | rate_limited | auth_error | max_turns | error.

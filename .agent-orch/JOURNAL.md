@@ -253,3 +253,7 @@ CLI runs now kill leftover process-group members; AUDIT #21 fixed
 ## 2026-09-25 09:06 — #71 Audit round 3: sign-in connections, drain/restart-when-idle, limit notices [done (check passed)]
 
 AUDIT.md now has Round 3 with bugs #22-26
+
+## 2026-09-25 09:07 — #72 Remove tracked .ao2/ leftovers from git [done (check passed)]
+
+Stale .ao2/ removed from git; npm test passes

@@ -12,3 +12,7 @@ The project memory dir was renamed from .ao2/ to .agent-orch/ (migrateMemDir() i
 ## Done when
 
 `test -z "$(git ls-files .ao2)"` and `test ! -e .ao2`
+
+## Result — done (check passed) (2026-09-25 09:07)
+
+AGENT-ORCH-STATUS: done — Stale .ao2/ removed from git; npm test passes

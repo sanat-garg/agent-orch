@@ -413,3 +413,7 @@ Compact fallback popup verified at desktop and 375 pixels.
 ## 2026-09-25 20:55 — #134 Diagnose and fix Antigravity file tool failures [in progress (1)]
 
 Diagnostic fix verified; reported file-execution failure remains unreproduced
+
+## 2026-09-25 23:26 — #136 Add cached LiveBench scores for delegation [done]
+
+LiveBench adapter fetches official livebench.ai results; tests pass

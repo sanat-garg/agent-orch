@@ -3,45 +3,33 @@
 _Durable knowledge for every agent session: architecture, conventions, decisions, gotchas._
 
 ## Architecture
-- `server.mjs` (~1.2k lines): a node:http server plus `ws`. It handles login/sessions (cookie `cw_session`)
-  and chat via `query()` from @anthropic-ai/claude-agent-sdk, and serves `public/`. PORT defaults to 3000.
-- `orchestrator.mjs` (~1.6k lines): AO2. It uses a node:sqlite DB at data/orchestrator/agent-orch.db (renamed from ao2.db on start), a
-  planner/worker/reflection loop, and a `runAgent()` wrapper around the SDK `query()`. Prompts live inline.
-- `agents.mjs`: the coding-agent adapter registry (`AGENTS`, `runAgentCli`), emitting normalised events (text/tool/tool_result/result/limit). Adapters: 'claude' (SDK query), 'codex' (`codex exec --json`) and 'antigravity' (`~/.local/bin/agy -p --output-format stream-json`; kills a run that blocks on the OAuth prompt, refuses `modelProvider:"gemini"` API-key mode). CLI adapters share `spawnJsonl` (detached, kills the process group on abort and after exit); tests use stub binaries in test/fixtures/; orchestrator `runAgent` wraps it and adds timeout and the task-run log (tool_result is logged as k:'result').
-- Routing (orchestrator.mjs): `resolveRoute` picks a task's agent/model: its own `agent`/`model` columns, then the first matching project route, then a global one (`routes` table, project_id NULL), then Claude on project.model (a model-only route infers its agent from the model's list or family; an explicit agent + another agent's model drops the model → `dropped`, route_note, and `extractTasks` strips it too); an agent that is not installed or not logged in (`agentStatus` in agents.mjs: `available()` = on PATH, `loggedIn()` = `codex login status` / `agy models` (exit 0, no "sign in") / `claude auth status --json` (loggedIn + authMethod claude.ai only), sync, cached 60 s, `clearLoginCache()` for tests) falls back to Claude with a logged reason; GET /api/agents reports `loggedIn`. Planner/reflector save routes via the tasks block's `routes`. The planner itself always runs on Claude (a plan route only changes its model). `runs.agent` records who made a session, so a session only resumes on the same agent; a dead one (`isMissingSession`: errorCode `no_session` or Claude's text) is dropped and retried fresh; warm-session reuse is Claude-only. Only a Claude rate limit sets the global `blocked_until`; a non-Claude one sets kv `blocked_until:<agent>` (routeFor reports 'usage limit until …' and falls back to Claude; an ok run clears only its own agent's block), and a non-Claude auth_error instead sets kv `agent_auth_failed:<agent>` (now+600), which `routeFor`'s availability check reports as 'sign-in failed' (Claude auth failures still set `blocked_until`). `tasks.ran_agent/ran_model` record what the latest run used (UI badge), `tasks.route_note` why it fell back to Claude (warn badge + tooltip); project views carry `routes`, deleted via projectAction `{removeRoute}`.
-- Chat agents: `convo.agent` (default claude) + `convo.model`, set by WS `set_model {agent, model}`; GET /api/agents feeds the picker (values `agent|model`). Non-Claude chats run one `runAgentCli` turn per message (`agentChatTurn` in server.mjs, resume via `convo.agentSession`), no persistent runtime or permission prompts; Orchestrator Mode still plans on Claude.
-- Planner guard: `planningProjects` (project id -> 'chat'|'task') ensures only one `--resume` of `chat_session_id` runs at a time; claimNext skips plan tasks during a chat turn, and `planTurn` during a plan task saves the message via `deferMessage` (the one place that queues "Answer owner's message" plan tasks, deduped).
-- `connections.mjs`: web sign-in. Runs a CLI's login in tmux on socket `-L agent-orch-login` (session `login-<id>`), scrapes `capture-pane` with per-agent `SPECS` (codex device-auth, gh --web, `claude auth login --claudeai` + pasted code, `agy` TUI: auto-picks Google OAuth, rejoins the hard-wrapped URL, `liveSuccessRe`/`liveFailRe` since it never exits, plus the entry's async `probe()` = `agy models`), appends a `__AO_EXIT:<code>` marker to detect the end, 10 min timeout. server.mjs: GET /api/connections (ids claude, codex, antigravity, github; ids match AGENTS keys), POST /api/connections/:id/{start,code,cancel,logout} (Claude logout returns 409 `needsConfirm` + `logoutWarning` unless the body has `confirm: true`; the UI must show that warning; never call it with confirm in tests); changes broadcast as WS `{t:'connections'}`. UI: the sidebar `#conns` panel (app.js `CONN`/`applyConnections`/`openConnections(id)`); the model picker's last option (`CONNECT_PICK`) and routing-rule hints open it.
-- `runtimes.mjs`: chat runtime ownership. To replace or close a chat's runtime, use `retireRuntime`, not `q.close()` plus `runtimes.delete`. A runtime loop touches the map only while `runtimes.get(convo.id) === rt`.
-- `github.mjs`: the gh CLI wrapper. Every project gets a private repo, and pushes go to `origin`. `convo.repo` is only a cache of `gh.remoteOf(cwd)`: server.mjs `refreshRepo` re-derives it before listening, in setupRepo and on project re-attach (cleared if there is no origin).
-- `public/`: a vanilla JS SPA (app.js ~2.4k lines, marked + dompurify), a login page and a PWA manifest.
-- `.agent-orch/AGENTS.md`: research notes on the Codex, Antigravity (`agy`) and Gemini CLIs (install, subscription login, headless flags, stream formats, billing env vars to strip), for the agents.mjs adapters.
-- `bin/term-attach.sh`: the ttyd terminal attach helper. Live setup: ttyd on 127.0.0.1:7682 behind Caddy at `/shell/`; systemd units agent-orch, agent-orch-shell, agent-orch-tmux (renamed 2026-09-25 by bin/rename-install.sh; the install dir moved from ~/claude-web to ~/agent-orch).
-- `data/` (gitignored): auth.json, convos.json, metrics, logs, and the orchestrator DB and run logs.
+- `server.mjs`: node:http + `ws`. Login/sessions (cookie `cw_session`), chat via the Agent SDK `query()`, serves `public/`. PORT defaults to 3000.
+- `orchestrator.mjs`: node:sqlite DB at data/orchestrator/agent-orch.db; planner/worker/reflection loop; `runAgent()` wraps the adapters and adds timeout + the task-run log. Prompts live inline.
+- `agents.mjs`: adapter registry (`AGENTS`, `runAgentCli`) emitting normalised events (text/tool/tool_result/result/limit). Adapters: `claude` (SDK), `codex` (`codex exec --json`), `antigravity` (`~/.local/bin/agy -p --output-format stream-json`; refuses Gemini API-key mode). CLI adapters share `spawnJsonl` (detached process group, killed on abort and after exit). `agentStatus` (on PATH + logged in, cached 60 s) gates routing. `isMissingSession` detects dead resumes.
+- Routing (`resolveRoute`): task's own agent/model → project route → global route → Claude on project.model. A model-only route infers the agent from the model family; a foreign model on an explicit agent is dropped. Unavailable/unsigned/limited agents fall back to Claude with `tasks.route_note` (UI badge). Planner always runs on Claude. Sessions resume only on the agent that made them (`runs.agent`).
+- Limits: only a Claude limit/auth failure sets the global kv `blocked_until`; non-Claude ones set `blocked_until:<agent>` / `agent_auth_failed:<agent>` and only reroute that agent.
+- Chat agents: `convo.agent` + `convo.model` (WS `set_model`). Non-Claude chats run one `runAgentCli` turn per message (`agentChatTurn`, resume via `convo.agentSession`).
+- Planner guard: `planningProjects` ensures only one `--resume` of a project's planner session at a time; chat messages during a plan task go through `deferMessage`.
+- `connections.mjs`: web sign-in. Runs each CLI's login in tmux (socket `-L agent-orch-login`), scrapes the pane with per-agent `SPECS`, detects the end via an `__AO_EXIT:<code>` marker (agy never exits: `liveSuccessRe`/`liveFailRe`). API: GET /api/connections, POST /api/connections/:id/{start,code,cancel,logout}; WS `{t:'connections'}`. Claude logout needs `confirm: true` — never send that in tests. UI: sidebar `#conns` panel.
+- `runtimes.mjs`: chat runtime ownership — always use `retireRuntime`, never `q.close()` + `runtimes.delete`.
+- `github.mjs`: gh wrapper; every project gets a private repo, pushes go to `origin`. `convo.repo` is just a cache of `gh.remoteOf(cwd)`.
+- `public/`: vanilla JS SPA (app.js, marked + dompurify), login page, PWA manifest.
+- `.agent-orch/AGENTS.md`: research notes on the Codex/agy/Gemini CLIs (flags, stream formats, billing env vars to strip).
+- Live setup: systemd units agent-orch, agent-orch-shell (ttyd on 127.0.0.1:7682, Caddy at `/shell/`), agent-orch-tmux. `data/` (gitignored) holds auth, convos, metrics, logs, the DB and run logs.
 
 ## Conventions
-- ESM `.mjs`, no build step, no framework. Match the existing terse style and comment density.
-- Tests: use Node's built-in `node --test` (no extra test deps). `npm test` runs `test/**/*.test.mjs` (Node 22 won't take a
-  bare `test/` dir). test/server.test.mjs spawns server.mjs on a free port with `CW_DATA_DIR` set to a temp dir
-  (CW_DATA_DIR overrides data/ for the server and the orchestrator).
-  Orchestrator scheduling tests (planner-guard, scheduling, drain) run createOrchestrator in a child process with a fake `query`
-  and rows inserted via node:sqlite before the first tick (5 s); a five_hour limit at 95% from `getLimits` forces one slot.
-
-- User-visible times: chat notice/error events carry `until` (epoch s) and a `{until}` token in `text`; app.js `withUntil` formats it in the browser's timezone. Don't format times on the server (UTC) except in log lines (`fmtAt`: date+tz). `limitReset()` picks the displayed reset (kv `blocked_known` = reset was reported, not a backoff guess).
+- ESM `.mjs`, no build step, no framework, minimal deps. Match the terse style and comment density.
+- Tests: `node --test`; `npm test` runs `test/**/*.test.mjs`. Server tests spawn server.mjs on a free port with `CW_DATA_DIR` set to a temp dir. Orchestrator scheduling tests run `createOrchestrator` in a child process with a fake `query`; CLI adapters are tested with stub binaries in test/fixtures/.
+- User-visible times: events carry `until` (epoch s) and a `{until}` token; app.js `withUntil` formats in the browser's timezone. Don't format times on the server except in log lines.
+- .agent-orch/AUDIT.md is the bug backlog. When you fix an item, mark it `**Fixed**` with a one-line note.
 
 ## Decisions
-- 2026-09-24: The repo moved to sanat-garg/agent-orch with a fresh single-commit history, because the old
-  history contained data/auth.json. The old history is kept locally only, on branch `backup/pre-agent-orch`.
-  Never push that branch.
-- 2026-09-24: The owner removed the self-protection deny rules (DENY_TOOLS) from orchestrator.mjs so that
-  agents can work on this repo.
+- 2026-09-24: repo moved to github.com/sanat-garg/agent-orch with fresh history (old history leaked data/auth.json). Local branch `backup/pre-agent-orch` — never push it.
+- 2026-09-24: the owner removed DENY_TOOLS so agents can work on this repo.
 
 ## Gotchas
-- The verifier (`extractCommand`) runs every command-like single-backtick snippet in "Done when", joined with ` && ` (a triple-backtick block wins if present); snippets like `server.mjs` are ignored. Commands containing `>` (incl. `2>&1`) or `curl` are refused, so such checks never run.
-- "Done when" checks asserting absence must use `! grep …`: grep exits 1 on no matches, so a bare `grep` check fails exactly when the code is clean.
-- Editing server.mjs or orchestrator.mjs doesn't affect the running app until it restarts. `POST /api/restart-when-idle` drains the orchestrator then exits 0 (systemd restarts it); /api/status reports `restartPending`/`commitsSinceBoot`. The UI's #updateBanner (app.js `upd`) shows when commitsSinceBoot > 0 (dismiss hides it until the count grows) and reads 'Restarting…' while restartPending or orchestrator `draining`. Never call it on port 3000 from a task.
-- Project memory lives in `.agent-orch/` (formerly `.ao2/`). `migrateMemDir()` renames it on init/read, and merges a `.ao2/` that a pre-restart server recreated, so a stray `.ao2/` in a commit is expected until restart.
-- Don't commit macOS `._*` files (they're gitignored).
-- Test instances MUST set `CW_DATA_DIR=$(mktemp -d)`. Without it, a second server on the live data/ requeues and
-  double-runs the live orchestrator's running tasks and rewrites convos/sessions (AUDIT #2).
-- .agent-orch/AUDIT.md is the bug backlog. When you fix an item, mark it `**Fixed**` there with a one-line note.
+- This checkout IS the live app. Never restart/kill it or call `POST /api/restart-when-idle` on port 3000. Test instances MUST use another port and `CW_DATA_DIR=$(mktemp -d)`, or they double-run live tasks.
+- Edits to server/orchestrator only go live on restart. The UI banner offers "Restart when idle" (drain, exit 0, systemd restarts).
+- The verifier (`extractCommand`) runs every command-like backtick snippet in "Done when", joined with ` && `. Commands containing `>` (incl. `2>&1`) or `curl` are refused. Absence checks must use `! grep …`.
+- `migrateMemDir()` renames a legacy `.ao2/` into `.agent-orch/`.
+- Don't commit macOS `._*` files.

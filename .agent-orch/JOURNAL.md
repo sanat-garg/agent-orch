@@ -381,3 +381,7 @@ manual queue reorder API added; all 172 tests pass
 ## 2026-09-25 19:25 — #115 Drag-and-drop task cards in the queue, moving dependents with them [done (check passed)]
 
 Queue sheet drag-reorders tasks with dependents via the move API
+
+## 2026-09-25 19:33 — #124 Composer model selector: width fits the selected model name [done (check passed)]
+
+model picker sizes to its selected name, clamped and ellipsized

@@ -349,6 +349,9 @@ code, pre, kbd { font-family: var(--mono); }
   background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
   background-position: right 13px center, right 9px center; background-size: 4px 4px; background-repeat: no-repeat;
 }
+/* The model picker sizes to its selected label (app.js fitPick), clamped here. */
+#modelChip { max-width: min(50vw, 320px); min-width: 0; overflow: hidden; }
+#modelChip select { max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .select-chip select option { color: var(--text); background: var(--panel); }
 #modeChip[data-mode="acceptEdits"] { color: var(--ok); border-color: currentColor; }
 #modeChip[data-mode="plan"] { color: var(--accent); border-color: currentColor; }
@@ -962,6 +965,7 @@ details.dr-more[open] > summary { margin-bottom: 12px; }
 @media (max-width: 420px) {
   .seg button span { display: none; }
   .chip { max-width: 150px; }
+  #modelChip { max-width: 60vw; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0s !important; transition: none !important; }

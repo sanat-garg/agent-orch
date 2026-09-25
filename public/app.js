@@ -1317,7 +1317,7 @@ function changeMode(mode) {
 $('mode').addEventListener('change', () => changeMode($('mode').value));
 $('model').addEventListener('change', () => {
   const v = $('model').value;
-  if (v === CONNECT_PICK) { $('model').value = autoPick() ? AUTO_PICK : $('model').dataset.prev || 'claude|'; openConnections(); return; }
+  if (v === CONNECT_PICK) { $('model').value = autoPick() ? AUTO_PICK : $('model').dataset.prev || 'claude|'; fitPick(); openConnections(); return; }
   if (v === AUTO_PICK) { setAutoPick(true); return; }
   setAutoPick(false);
   $('model').dataset.prev = v;
@@ -1343,8 +1343,29 @@ function setAutoPick(on) {
   sel.value = on ? AUTO_PICK : sel.dataset.prev || 'claude|';
   renderPickChip();
 }
+// Size the model picker to its selected option's text (a native <select> is as wide as its longest option);
+// CSS clamps it and ellipsizes, the title keeps the full name.
+let fitSpan;
+function fitPick() {
+  const sel = $('model'), text = sel.selectedOptions[0]?.text || '';
+  const cs = getComputedStyle(sel);
+  if (!fitSpan) {
+    fitSpan = el('span');
+    fitSpan.setAttribute('aria-hidden', 'true');
+    fitSpan.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;left:-9999px;top:0';
+    document.body.append(fitSpan);
+  }
+  fitSpan.style.font = cs.font;
+  fitSpan.style.letterSpacing = cs.letterSpacing;
+  fitSpan.textContent = text;
+  const pad = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight); // right padding holds the chevron
+  sel.style.width = Math.ceil(fitSpan.getBoundingClientRect().width + pad + 2) + 'px';
+  sel.title = text;
+}
+document.fonts?.ready.then(fitPick);
 // The composer chip: "Auto" or the model this chat's tasks are pinned to.
 function renderPickChip() {
+  fitPick();
   const c = $('pickChip');
   if (!c) return;
   const { agent, model } = parsePick($('model').dataset.prev || 'claude|');

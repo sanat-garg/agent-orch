@@ -12,3 +12,7 @@ In the chat composer, the agent/model selector box is fixed-width and small, so 
 ## Done when
 
 `node --check public/app.js && npm test` passes, and a 390px mobile screenshot in .agent-orch/shots/ shows a long model name without overflow
+
+## Result — done (check passed) (2026-09-25 19:33)
+
+AGENT-ORCH-STATUS: done — model picker sizes to its selected name, clamped and ellipsized

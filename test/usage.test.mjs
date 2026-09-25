@@ -87,6 +87,25 @@ test('tokens bucket per hour/day and window series downsample to 300 points', ()
   assert.equal(downsample(pts.slice(0, 5)).length, 5);
 });
 
+test('6h range buckets tokens per 15 minutes', () => {
+  const at = Date.UTC(2026, 8, 25, 12, 40);
+  const recs = [
+    { t: at - 5 * 60e3, agent: 'claude', kind: 'tokens', input: 3, output: 1, cached: 0 }, // 12:35
+    { t: at - 12 * 60e3, agent: 'claude', kind: 'tokens', input: 4, output: 0, cached: 0 }, // 12:28
+    { t: at - 5 * H, agent: 'claude', kind: 'tokens', input: 9, output: 0, cached: 0 }, // 07:40
+    { t: at - 7 * H, agent: 'claude', kind: 'tokens', input: 100, output: 0, cached: 0 }, // outside 6h
+  ];
+  const h = usageHistory(recs, '6h', at);
+  assert.deepEqual([h.range, h.bucketMs, h.from], ['6h', 15 * 60e3, at - 6 * H]);
+  const b = h.agents.claude.tokens;
+  assert.equal(b.length, 25);
+  assert.ok(b.every((x, i) => i === 0 || x.t - b[i - 1].t === 15 * 60e3));
+  assert.deepEqual(b.at(-1), { t: Date.UTC(2026, 8, 25, 12, 30), input: 3, output: 1, cached: 0, turns: 1 });
+  assert.equal(b.at(-2).input, 4);
+  assert.equal(b.find((x) => x.t === Date.UTC(2026, 8, 25, 7, 30)).input, 9);
+  assert.equal(b.reduce((s, x) => s + x.input, 0), 16);
+});
+
 test('usageHistory groups by agent with limit events and current status', () => {
   const at = Date.UTC(2026, 8, 25, 12);
   const s = at / 1000;

@@ -338,6 +338,8 @@ test('GET /api/usage/history is login-protected and returns per-agent series', a
   assert.equal(h.agents.codex.tokens.reduce((s, b) => s + b.input, 0), 10);
   assert.equal(h.agents.codex.limits[0].status, 'hit');
   assert.equal(h.agents.codex.status.blocked, true);
+  const six = await (await get('/api/usage/history?range=6h', { cookie })).json();
+  assert.deepEqual([six.range, six.bucketMs, six.agents.codex.tokens.length], ['6h', 15 * 60e3, 25]);
   const bad = await get('/api/usage/history?range=1y', { cookie });
   assert.equal(bad.status, 400);
   await bad.arrayBuffer();

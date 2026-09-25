@@ -12,7 +12,7 @@ import path from 'node:path';
 export const KEEP_MS = 30 * 86400e3;
 export const DEDUPE_MS = 5 * 60e3;
 export const MAX_POINTS = 300;
-export const RANGES = { '24h': { ms: 86400e3, bucket: 3600e3 }, '7d': { ms: 7 * 86400e3, bucket: 86400e3 }, '30d': { ms: 30 * 86400e3, bucket: 86400e3 } };
+export const RANGES = { '6h': { ms: 6 * 3600e3, bucket: 15 * 60e3 }, '24h': { ms: 86400e3, bucket: 3600e3 }, '7d': { ms: 7 * 86400e3, bucket: 86400e3 }, '30d': { ms: 30 * 86400e3, bucket: 86400e3 } };
 
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 // Epoch seconds from an ISO string, epoch s or epoch ms.

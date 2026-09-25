@@ -12,3 +12,7 @@ Add a 'Last 6h' range to the usage modal. In usage.mjs, add RANGES['6h'] = { ms:
 ## Done when
 
 `npm test` passes with a 6h bucketing test, and GET /api/usage/history?range=6h returns 15-minute buckets
+
+## Result — done (check passed) (2026-09-25 18:59)
+
+AGENT-ORCH-STATUS: done — Usage modal offers 6h range with 15-minute token buckets

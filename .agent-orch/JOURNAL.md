@@ -369,3 +369,7 @@ Auto Delegate picker option and manual Delegate sheet with endpoint tests
 ## 2026-09-25 18:52 — #112 Edit or retract saved chat messages before the orchestrator reads them [done (check passed)]
 
 saved messages editable/retractable while pending; 409 after consume, tests pass
+
+## 2026-09-25 18:59 — #113 Usage modal: add a 6h range [done (check passed)]
+
+Usage modal offers 6h range with 15-minute token buckets

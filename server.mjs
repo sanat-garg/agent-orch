@@ -1220,7 +1220,7 @@ async function handleRequest(req, res) {
   }
   if (p === '/api/usage/history') {
     const range = url.searchParams.get('range') || '24h';
-    if (!USAGE_RANGES[range]) return json(res, 400, { error: 'range must be 24h, 7d or 30d' });
+    if (!USAGE_RANGES[range]) return json(res, 400, { error: 'range must be 6h, 24h, 7d or 30d' });
     return json(res, 200, usageLog.history(range));
   }
   if (p === '/api/metrics') {

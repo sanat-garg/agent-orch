@@ -2203,7 +2203,7 @@ setInterval(() => { if (M.usage) renderUsage(); }, 30e3); // keep the "in 2h 9m"
 
 // ---------- usage window ----------
 // Per-agent plan windows, tokens and limit hits over time (GET /api/usage/history, see usage.mjs).
-const U = { range: { '24h': 1, '7d': 1, '30d': 1 }[store.get('cw.urange')] ? store.get('cw.urange') : '24h', data: null, err: '', at: 0, timer: null, lastFocus: null, draws: [] };
+const U = { range: { '6h': 1, '24h': 1, '7d': 1, '30d': 1 }[store.get('cw.urange')] ? store.get('cw.urange') : '24h', data: null, err: '', at: 0, timer: null, lastFocus: null, draws: [] };
 const USAGE_AGENTS = ['claude', 'codex', 'antigravity'];
 const WIN_NAMES = { five_hour: '5-hour', seven_day: 'Weekly', '5h': '5-hour', weekly: 'Weekly' };
 const SERIES = ['var(--accent)', 'var(--chart-2)', 'var(--chart-3)', 'var(--faint)'];
@@ -2251,7 +2251,7 @@ function usageChart(host, cls, extra) {
   host.innerHTML = `<svg aria-hidden="true"><line class="base"/>${extra}<line class="cross" hidden/><g class="pts"></g></svg><div class="tip" hidden></div>`;
   const svg = host.querySelector('svg'), tip = host.querySelector('.tip');
   const label = el('div', 'sline-label');
-  const [lFrom, lStat, lNow] = [el('span', '', RANGE_AGO[U.range] || `${U.range} ago`), el('span', 'stat'), el('span', '', 'now')];
+  const [lFrom, lStat, lNow] = [el('span', '', U.data?.range === '6h' ? fmtWhen(U.data.from) : RANGE_AGO[U.range] || `${U.range} ago`), el('span', 'stat'), el('span', '', 'now')];
   label.append(lFrom, lStat, lNow);
   host.after(label);
   const ns = (tag, attrs) => {
@@ -2447,7 +2447,7 @@ function usageSection(id, a, conn, d) {
     lc.append(host);
     usageLineChart(host, a.windows, d.from, d.to);
   } else lc.append(el('p', 'na', 'No window readings in this range.'));
-  const bc = col(d.bucketMs >= 864e5 ? 'Tokens per day' : 'Tokens per hour');
+  const bc = col(d.bucketMs >= 864e5 ? 'Tokens per day' : d.bucketMs < 3600e3 ? 'Tokens per 15 min' : 'Tokens per hour');
   if (a.tokens.some((b) => b.input || b.output)) {
     const legend = el('div', 'ug-legend');
     for (const [k, t] of [['in', 'Input'], ['out', 'Output']]) { const s = el('span', k, t); legend.append(s); }

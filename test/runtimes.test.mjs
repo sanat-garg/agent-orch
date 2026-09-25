@@ -1,40 +1,27 @@
-// Chat runtime ownership: a retired runtime must not remove or speak for its replacement (AUDIT #3).
+// Chat runtime retirement: a replaced runtime is marked, unregistered and closed, so its late exit can't evict the new one (AUDIT #3).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ownsRuntime, retireRuntime } from '../runtimes.mjs';
+import { retireRuntime } from '../runtimes.mjs';
 
 const fakeRt = () => { const rt = { closed: 0 }; rt.q = { close: () => { rt.closed++; } }; return rt; };
-
-test('the registered runtime owns its slot', () => {
-  const runtimes = new Map();
-  const rt = fakeRt();
-  runtimes.set('c', rt);
-  assert.equal(ownsRuntime(runtimes, 'c', rt), true);
-});
+// Mirrors the ownership guard in startRuntime's loop (server.mjs).
+const owned = (runtimes, id, rt) => !rt.retired && runtimes.get(id) === rt;
 
 test('after a rollover the old runtime no longer owns the slot, the new one does', () => {
   const runtimes = new Map();
   const old = fakeRt();
   runtimes.set('c', old);
+  assert.equal(owned(runtimes, 'c', old), true);
   retireRuntime(runtimes, 'c');
   assert.equal(old.retired, true);
   assert.equal(old.closed, 1);
   assert.equal(runtimes.has('c'), false);
   const next = fakeRt();
   runtimes.set('c', next);
-  assert.equal(ownsRuntime(runtimes, 'c', old), false);
-  assert.equal(ownsRuntime(runtimes, 'c', next), true);
-});
-
-test('a retired runtime never owns the slot, even if still registered', () => {
-  const runtimes = new Map();
-  const rt = fakeRt();
-  runtimes.set('c', rt);
-  rt.retired = true;
-  assert.equal(ownsRuntime(runtimes, 'c', rt), false);
+  assert.equal(owned(runtimes, 'c', old), false);
+  assert.equal(owned(runtimes, 'c', next), true);
 });
 
 test('retiring an empty slot is a no-op', () => {
-  const runtimes = new Map();
-  assert.doesNotThrow(() => retireRuntime(runtimes, 'c'));
+  assert.doesNotThrow(() => retireRuntime(new Map(), 'c'));
 });

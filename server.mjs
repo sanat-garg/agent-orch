@@ -10,7 +10,7 @@ import { WebSocketServer } from 'ws';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createOrchestrator } from './orchestrator.mjs';
 import { createGitHub } from './github.mjs';
-import { ownsRuntime, retireRuntime } from './runtimes.mjs';
+import { retireRuntime } from './runtimes.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -699,16 +699,17 @@ function startRuntime(convo) {
     },
   });
 
+  // A retired runtime's slot may already hold its replacement, which it must not delete or speak for (AUDIT #3).
+  const owned = () => !rt.retired && runtimes.get(convo.id) === rt;
   (async () => {
     try {
       for await (const m of rt.q) if (!rt.retired) handleMessage(convo, rt, m);
-      if (ownsRuntime(runtimes, convo.id, rt)) emit(convo.id, { t: 'error', text: 'Claude session ended. Send a message to resume it.' });
+      if (owned()) emit(convo.id, { t: 'error', text: 'Claude session ended. Send a message to resume it.' });
     } catch (err) {
-      if (ownsRuntime(runtimes, convo.id, rt)) emit(convo.id, { t: 'error', text: String(err?.message || err) });
+      if (owned()) emit(convo.id, { t: 'error', text: String(err?.message || err) });
     } finally {
       for (const [pid, p] of rt.pending) p.resolve({ behavior: 'deny', message: 'Session closed' });
-      // A retired runtime's slot may already hold its replacement: leave it and its busy state alone.
-      if (!ownsRuntime(runtimes, convo.id, rt)) return;
+      if (!owned()) return;
       runtimes.delete(convo.id);
       broadcast(convo.id, { t: 'busy', busy: false });
       broadcastConvos();

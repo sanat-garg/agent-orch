@@ -7,10 +7,10 @@ _Durable knowledge for every agent session: architecture, conventions, decisions
   and chat via `query()` from @anthropic-ai/claude-agent-sdk, and serves `public/`. PORT defaults to 3000.
 - `orchestrator.mjs` (~1.6k lines): AO2. It uses a node:sqlite DB at data/orchestrator/agent-orch.db (renamed from ao2.db on start), a
   planner/worker/reflection loop, and a `runAgent()` wrapper around the SDK `query()`. Prompts live inline.
-- `runtimes.mjs`: chat runtime ownership. To replace or close a chat's runtime, use `retireRuntime`, not `q.close()` plus `runtimes.delete`. A loop acts on the map only while `ownsRuntime` holds.
+- `runtimes.mjs`: chat runtime ownership. To replace or close a chat's runtime, use `retireRuntime`, not `q.close()` plus `runtimes.delete`. A runtime loop touches the map only while `runtimes.get(convo.id) === rt`.
 - `github.mjs`: the gh CLI wrapper. Every project gets a private repo, and pushes go to `origin`.
 - `public/`: a vanilla JS SPA (app.js ~2.4k lines, marked + dompurify), a login page and a PWA manifest.
-- `bin/term-attach.sh`: the ttyd terminal attach helper. Live setup: ttyd on 127.0.0.1:7682 behind Caddy at `/shell/` (not `/term/`, despite a server.mjs comment); systemd units claude-web, claude-shell, claude-tmux.
+- `bin/term-attach.sh`: the ttyd terminal attach helper. Live setup: ttyd on 127.0.0.1:7682 behind Caddy at `/shell/` (not `/term/`, despite a server.mjs comment); systemd units agent-orch, agent-orch-shell, agent-orch-tmux (renamed 2026-09-25 by bin/rename-install.sh; the install dir moved from ~/claude-web to ~/agent-orch).
 - `data/` (gitignored): auth.json, convos.json, metrics, logs, and the orchestrator DB and run logs.
 
 ## Conventions

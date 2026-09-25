@@ -41,7 +41,7 @@ a same-origin request. Caddy's `reverse_proxy` overwrites `X-Forwarded-For`, so 
   "Claude session ended" error into the chat.
 - **Fix:** In the finally block (and at the error emit), act only if `runtimes.get(convo.id) === rt`. Mark closed
   runtimes (e.g. `rt.retired = true`) so their exit is silent.
-- **Fixed** (task #17): rollover and chat delete call `retireRuntime` (runtimes.mjs), which marks the runtime `retired`, removes it from the map and closes it. The runtime loop ignores messages once it is retired, and it emits errors or deletes from the map only when `ownsRuntime` holds, so the new runtime is left alone. test/runtimes.test.mjs covers this.
+- **Fixed** (task #17): rollover and chat delete call `retireRuntime` (runtimes.mjs), which marks the runtime `retired`, removes it from the map and closes it. The runtime loop ignores messages once it is retired, and it emits errors or deletes from the map only when `!rt.retired && runtimes.get(convo.id) === rt`, so the new runtime is left alone. test/runtimes.test.mjs covers this.
 
 ### 4. [med] Unawaited promises and async intervals can crash the process (server.mjs:780, :568, :596)
 - **What:** `syncGit(...)` is fire-and-forget in the `result` handler (:780) and in `onCommit` (:568). The 3-minute

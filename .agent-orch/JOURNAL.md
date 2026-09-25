@@ -341,3 +341,7 @@ Command: ! grep -nE "signed in\
 ## 2026-09-25 14:25 — #100 Sidebar footer: drop the 'N/N signed in' count [verify failed (2)]
 
 Command: ! grep -nE "signed in\
+
+## 2026-09-25 14:27 — #100 Sidebar footer: drop the 'N/N signed in' count [verify failed (3)]
+
+Command: ! grep -nE "signed in\

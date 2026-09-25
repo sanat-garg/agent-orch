@@ -563,7 +563,8 @@ export function extractCommand(doneWhen) {
   if (!doneWhen) return null;
   const triple = doneWhen.match(/```(?:\w+\n)?([\s\S]*?)```/);
   if (triple) return checkCommand(triple[1], doneWhen);
-  const singles = [...doneWhen.matchAll(/`([^`\n]+)`/g)].map((m) => m[1].trim().replace(/^\$\s+/, '')).filter(looksLikeCommand);
+  // A backslash-escaped backtick (\`) stays inside the snippet: it's a literal backtick for the shell.
+  const singles = [...doneWhen.matchAll(/`((?:\\.|[^`\\\n])+)`/g)].map((m) => m[1].trim().replace(/^\$\s+/, '')).filter(looksLikeCommand);
   if (singles.length) {
     // Every command-like snippet must be safe; dropping one silently would weaken the check.
     const cmds = singles.map((c) => checkCommand(c, doneWhen));

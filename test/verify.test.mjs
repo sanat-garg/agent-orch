@@ -24,3 +24,8 @@ test('extractCommand refuses when any command snippet is unsafe', () => {
   assert.equal(extractCommand('`npm test` and `node x.mjs > out`'), null);
   assert.equal(extractCommand('`curl -s localhost` and `npm test`'), null);
 });
+
+test('extractCommand keeps a backslash-escaped backtick inside the snippet', () => {
+  assert.equal(extractCommand('`! grep -nE "signed in\\`|x" a.js` finds nothing, and `node --check a.js && npm test` passes'),
+    '! grep -nE "signed in\\`|x" a.js && node --check a.js && npm test');
+});

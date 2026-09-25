@@ -1215,6 +1215,7 @@ $('model').addEventListener('change', () => {
   $('model').dataset.prev = v;
   if (state.cid) send({ t: 'set_model', cid: state.cid, ...parsePick(v) });
   else { state.draftModel = v; store.set('cw.model', v); }
+  renderConnFoot();
 });
 
 // ---------- agent + model picker (options come from the server's agent registry) ----------
@@ -1533,6 +1534,7 @@ function onServer(msg) {
       setBusy(msg.busy);
       setModeUI(msg.mode || 'default');
       setPick(pickVal(msg));
+      renderConnFoot();
       input.value = store.get('cw.draft.' + state.cid) || '';
       autosize();
       updateSendButton();
@@ -1554,6 +1556,7 @@ function onServer(msg) {
       break;
     case 'model':
       setPick(pickVal(msg));
+      renderConnFoot();
       break;
     case 'init':
       break;
@@ -3009,25 +3012,25 @@ function applyConnections(list) {
   renderConnections();
   renderUsageModal();
 }
-// The sidebar footer: server link plus a compact sign-in summary; warns when a routed agent is signed out.
-function routedAgents() {
-  const ids = new Set();
+// The sidebar footer: connection status, plus a warning when an agent in use (chat or routing rules) is signed out.
+function usedAgents() {
+  const ids = new Set([parsePick($('model').dataset.prev || $('model').value || '').agent]);
   for (const r of O.project?.routes || []) {
     const id = r.agent || AGENT_LIST.find((a) => a.models.some((m) => m.id === r.model || m.resolved === r.model))?.id;
-    if (id && id !== 'claude') ids.add(id);
+    if (id) ids.add(id);
   }
   return ids;
 }
 function renderConnFoot() {
-  const live = state.ws?.readyState === 1, list = CONN.list, routed = routedAgents();
-  const out = list.filter((c) => routed.has(c.id) && !c.signedIn);
-  const n = list.filter((c) => c.signedIn).length;
-  const text = !live ? (retry ? 'Offline · reconnecting…' : 'Connecting…') : list.length ? `Connected · ${n}/${list.length} signed in` : 'Connected';
+  const live = state.ws?.readyState === 1, used = usedAgents();
+  const out = CONN.list.filter((c) => used.has(c.id) && c.id !== 'github' && !c.signedIn);
+  const text = !live ? (retry ? 'Offline · reconnecting…' : 'Connecting…')
+    : out.length ? `Connected · ${out.map((c) => c.label.replace(/ (Code|CLI)$/, '')).join(', ')} signed out` : 'Connected';
   const cls = !live ? (retry ? 'off' : '') : out.length ? 'warn' : 'on';
   $('connDot').className = `dot ${cls}`;
   $('connText').textContent = text;
   $('connFoot').classList.toggle('warn', live && out.length > 0);
-  $('connFoot').title = out.length ? `Routing rules use ${out.map((c) => c.label).join(', ')}, which ${out.length > 1 ? 'are' : 'is'} signed out` : 'Open connections';
+  $('connFoot').title = out.length ? `${out.map((c) => c.label).join(', ')} ${out.length > 1 ? 'are' : 'is'} in use but signed out` : 'Open connections';
   const app = $('connsApp');
   app.textContent = '';
   const main = el('div', 'cn-main');

@@ -333,3 +333,7 @@ Model lists now come from each CLI; tests pass
 ## 2026-09-25 14:22 — #99 Antigravity connection: show signed-in email and a Disconnect button [done (check passed)]
 
 Antigravity shows its signed-in email and can be disconnected
+
+## 2026-09-25 14:25 — #100 Sidebar footer: drop the 'N/N signed in' count [verify failed (1)]
+
+Command: ! grep -nE "signed in\

@@ -13,3 +13,9 @@ In the sidebar footer connection button (public/app.js, where the footer text is
 ## Done when
 
 `! grep -nE "signed in\`|/\$\{.*\} signed in" public/app.js` finds no N/N count, and `node --check public/app.js && npm test` passes
+
+## Result — verify failed (1) (2026-09-25 14:25)
+
+Command: ! grep -nE "signed in\
+
+bash: -c: line 1: unexpected EOF while looking for matching `"'

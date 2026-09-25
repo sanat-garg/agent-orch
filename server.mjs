@@ -923,6 +923,7 @@ async function agentChatTurn(convo, text) {
     if (res.sessionId) convo.agentSession = { agent, id: res.sessionId };
     emitShots(cid, media);
     usageLog.tokens(agent, res.usage, 'chat', cid);
+    usageLog.windows(agent, res.windows);
     if (res.outcome === 'rate_limited') usageLog.limitHit(agent, res.resetsAt, res.limitType || undefined);
     else if (res.outcome === 'ok') usageLog.limitCleared(agent);
     if (res.outcome === 'auth_error') emit(cid, { t: 'error', text: `${a.label} is not signed in on this server. ${a.login}.` });

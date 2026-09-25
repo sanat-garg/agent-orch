@@ -1,6 +1,7 @@
 // Pluggable coding-agent layer. Each adapter runs one headless agent turn and reports NORMALISED events:
 //   {k:'text',text}  {k:'tool',name,input}  {k:'tool_result',text,isError}  {k:'result',usage}  {k:'limit',resetsAt}
 //   {k:'image',tool,mediaType,data} (raw base64 from a tool result; callers store it via media.mjs and log {k:'image',id,name})
+//   {k:'windows',windows:[{window,pct,resetsAt}]} (plan-window readings, pct used; codex and agy also leave the latest in res.windows)
 // (adapters may add fields such as a tool id). Adapters: claude (Agent SDK), codex (`codex exec --json`),
 // antigravity (`agy -p --output-format stream-json`). Every adapter strips its `envFilter` vars from the env so
 // billing stays on the owner's subscription login, never an API key. See .agent-orch/AGENTS.md.
@@ -205,6 +206,53 @@ export function codexResetsAt(msg, now = new Date()) {
   return Math.floor(t / 1000);
 }
 
+// A Codex rate_limits snapshot ({primary, secondary: {used_percent, window_minutes, resets_at | resets_in_seconds}})
+// -> window points; 300 min is '5h', 10080 min 'weekly', other lengths '<n>h' / '<n>m'.
+export function codexWindows(rl, now = Date.now()) {
+  const out = [];
+  for (const w of [rl?.primary, rl?.secondary]) {
+    if (!w || w.used_percent == null) continue;
+    const min = Number(w.window_minutes) || 0;
+    const window = min === 300 ? '5h' : min === 10080 ? 'weekly' : min % 60 === 0 && min ? `${min / 60}h` : `${min}m`;
+    const resetsAt = w.resets_at != null ? Number(w.resets_at)
+      : w.resets_in_seconds != null ? Math.round(now / 1000 + Number(w.resets_in_seconds)) : null;
+    out.push({ window, pct: Number(w.used_percent), resetsAt });
+  }
+  return out;
+}
+// rate_limits of a token_count event: bare, a rollout `event_msg` payload, or a protocol `{msg}` envelope.
+const codexRateLimits = (m) => [m, m?.payload, m?.msg].find((x) => x?.type === 'token_count' && x.rate_limits)?.rate_limits || null;
+
+// `codex exec --json` (0.157) doesn't stream rate limits, but the thread's rollout file
+// (<codexHome>/sessions/YYYY/MM/DD/rollout-…-<thread id>.jsonl) records a token_count snapshot per turn. Returns
+// the windows of the latest snapshot written since `since` (epoch ms), searching the newest 14 day dirs.
+export function codexRolloutWindows(threadId, since = 0, codexHome = path.join(HOME, '.codex')) {
+  if (!threadId) return null;
+  const desc = (d) => { try { return fs.readdirSync(d).filter((n) => /^\d+$/.test(n)).sort().reverse(); } catch { return []; } };
+  const root = path.join(codexHome, 'sessions');
+  let file = null, days = 0;
+  search: for (const y of desc(root)) for (const mo of desc(path.join(root, y))) for (const d of desc(path.join(root, y, mo))) {
+    if (days++ >= 14) break search;
+    const dir = path.join(root, y, mo, d);
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch {}
+    const hit = names.find((n) => n.endsWith(`-${threadId}.jsonl`));
+    if (hit) { file = path.join(dir, hit); break search; }
+  }
+  if (!file) return null;
+  let text = '';
+  try { text = fs.readFileSync(file, 'utf8'); } catch { return null; }
+  let latest = null;
+  for (const line of text.split('\n')) {
+    if (!line.includes('rate_limits')) continue;
+    try {
+      const m = JSON.parse(line), rl = codexRateLimits(m), t = Date.parse(m.timestamp);
+      if (rl && !(t < since)) latest = codexWindows(rl, Number.isFinite(t) ? t : Date.now());
+    } catch {}
+  }
+  return latest?.length ? latest : null;
+}
+
 const clip = (t) => (t.length > 6000 ? t.slice(0, 6000) + '\n…' : t);
 
 // Spawns a CLI that prints one JSON object per stdout line and feeds each to `handle`; stderr is kept (last 4k) in
@@ -284,17 +332,22 @@ function* codexEvents(m, started = new Set()) {
     }
     yield { k: 'tool_result', id: it.id, text: clip(text), isError, lines: text.split('\n').length };
   } else if (m.type === 'turn.completed') yield { k: 'result', usage: m.usage || {} };
-  else if (m.type === 'turn.failed' || m.type === 'error') {
+  else if (codexRateLimits(m)) {
+    const windows = codexWindows(codexRateLimits(m));
+    if (windows.length) yield { k: 'windows', windows };
+  } else if (m.type === 'turn.failed' || m.type === 'error') {
     const msg = m.error?.message || m.message || '';
     if (CODEX_LIMIT_RE.test(msg) && (m.type === 'turn.failed' || /usage limit/i.test(msg))) yield { k: 'limit', resetsAt: codexResetsAt(msg) };
   }
 }
 
 // Extra options: bin, env, autonomous (default true: no approvals and no sandbox, like Claude's bypassPermissions;
-// false keeps the workspace-write sandbox), onMessage (raw JSONL events). Codex has no system-prompt append flag,
-// so systemAppend is prepended to the prompt.
-async function runCodex({ model, prompt, cwd, resume, systemAppend, signal, onEvent, bin, env = process.env, autonomous = true, onMessage }) {
-  const res = { outcome: 'error', text: '', sessionId: resume || null, usage: {}, numTurns: 0, resetsAt: null, limitType: null, stderr: '', errorCode: null };
+// false keeps the workspace-write sandbox), onMessage (raw JSONL events), codexHome (where the rollouts with the
+// rate-limit snapshots are; CODEX_HOME is stripped, so the CLI always uses ~/.codex). Codex has no system-prompt
+// append flag, so systemAppend is prepended to the prompt.
+async function runCodex({ model, prompt, cwd, resume, systemAppend, signal, onEvent, bin, env = process.env, autonomous = true, onMessage, codexHome }) {
+  const res = { outcome: 'error', text: '', sessionId: resume || null, usage: {}, numTurns: 0, resetsAt: null, limitType: null, stderr: '', errorCode: null, windows: null };
+  const startedAt = Date.now();
   const args = ['exec', ...(resume ? ['resume'] : []), '--json', '--skip-git-repo-check', '-c', 'forced_login_method="chatgpt"'];
   if (model) args.push('-m', model);
   if (autonomous) args.push('--dangerously-bypass-approvals-and-sandbox');
@@ -311,12 +364,19 @@ async function runCodex({ model, prompt, cwd, resume, systemAppend, signal, onEv
     else if (m.type === 'turn.completed') { completed = true; res.usage = m.usage || {}; }
     else if (m.type === 'turn.failed') failMsg = m.error?.message || 'turn failed';
     else if (m.type === 'error') lastError = m.message || '';
-    if (onEvent) for (const e of codexEvents(m, started)) { try { onEvent(e); } catch {} }
+    for (const e of codexEvents(m, started)) {
+      if (e.k === 'windows') res.windows = e.windows;
+      if (onEvent) { try { onEvent(e); } catch {} }
+    }
     try { onMessage?.(m); } catch {}
   };
   const { aborted, exitCode } = await spawnJsonl({ bin: bin || CODEX.bin, args, cwd, env: stripEnv(env, CODEX.envFilter), signal, res, handle });
 
   if (aborted) { res.outcome = 'aborted'; return res; }
+  if (!res.windows) {
+    res.windows = codexRolloutWindows(res.sessionId, startedAt - 5000, codexHome);
+    if (res.windows && onEvent) { try { onEvent({ k: 'windows', windows: res.windows }); } catch {} }
+  }
   const errMsg = failMsg || (!completed ? lastError : '');
   if (completed && !failMsg && exitCode === 0) { res.outcome = 'ok'; return res; }
   const hay = `${errMsg}\n${res.stderr}`;
@@ -325,6 +385,8 @@ async function runCodex({ model, prompt, cwd, resume, systemAppend, signal, onEv
     res.outcome = 'rate_limited';
     res.errorCode = 'rate_limit';
     res.resetsAt = codexResetsAt(hay);
+    const full = (res.windows || []).filter((w) => w.pct >= 100).sort((a, b) => (b.resetsAt || 0) - (a.resetsAt || 0))[0];
+    if (full) { res.limitType = full.window; res.resetsAt ??= full.resetsAt; }
   } else if (CODEX_AUTH_RE.test(hay)) { res.outcome = 'auth_error'; res.errorCode = 'authentication_failed'; }
   else {
     res.outcome = 'error';
@@ -370,6 +432,19 @@ function agyTool(u) {
   return { name, input: toolInputSummary(name, snakeKeys(p)) };
 }
 
+// `agy -p /usage` data ({groups:[{name, buckets:[{id, window, remaining_fraction, reset_time}]}]}) -> window points.
+// Each model group has its own 5h and weekly limit, so the window is the bucket id ('gemini-5h', '3p-weekly').
+export function agyWindows(data) {
+  const out = [];
+  for (const g of data?.groups || []) for (const b of g.buckets || []) {
+    if (b.remaining_fraction == null) continue;
+    const window = b.id || `${String(g.name || 'models').toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${b.window}`;
+    out.push({ window, pct: Math.round((1 - Number(b.remaining_fraction)) * 1e4) / 100, resetsAt: b.reset_time ? Math.round(Date.parse(b.reset_time) / 1000) || null : null });
+  }
+  return out;
+}
+const agyUsageData = (m) => { const c = m.command || m.result?.command; return c?.name === 'usage' || c?.name === 'quota' ? c.data : null; };
+
 // NDJSON event -> normalised events. `st` carries the text_delta buffers (per step) and the announced tool steps
 // across calls; a step's text is emitted once the step is DONE, another step starts, or the result arrives.
 function* agyEvents(m, st = { text: new Map(), started: new Set() }) {
@@ -390,6 +465,9 @@ function* agyEvents(m, st = { text: new Map(), started: new Set() }) {
       const text = typeof out === 'string' ? out : JSON.stringify(out);
       yield { k: 'tool_result', id: String(i), text: clip(text), isError: u.state !== 'DONE' || !!ti.error, lines: text.split('\n').length };
     }
+  } else if (m.event === 'command_result' && agyUsageData(m)) {
+    const windows = agyWindows(agyUsageData(m));
+    if (windows.length) yield { k: 'windows', windows };
   } else if (m.event === 'result' && m.result) {
     yield* flush();
     const r = m.result;
@@ -398,12 +476,24 @@ function* agyEvents(m, st = { text: new Map(), started: new Set() }) {
   }
 }
 
+// The plan windows from `agy -p /usage --output-format stream-json` (a local command: no model call, no tokens);
+// null if it fails or takes over 20 s.
+export async function agyUsage({ bin, env = process.env, cwd = HOME } = {}) {
+  const res = { stderr: '' };
+  let windows = null;
+  const handle = (m) => { if (m.event === 'command_result' && agyUsageData(m)) windows = agyWindows(agyUsageData(m)); };
+  await spawnJsonl({ bin: bin || ANTIGRAVITY.bin, args: ['-p', '/usage', '--output-format', 'stream-json', '--print-timeout', '0'], cwd,
+    env: stripEnv(env, ANTIGRAVITY.envFilter), signal: AbortSignal.timeout(20_000), res, handle, stopOn: AGY_AUTH_PROMPT_RE });
+  return windows?.length ? windows : null;
+}
+
 // Extra options: bin, env, autonomous (default true: --dangerously-skip-permissions approves every tool, like
 // Claude's bypassPermissions; false leaves agy's headless policy), settingsPath (agy's settings.json, checked for
-// API-key mode), onMessage (raw NDJSON events). agy has no system-prompt append flag, so systemAppend is prepended.
+// API-key mode), onMessage (raw NDJSON events), usageProbe (default true: after an ok or rate-limited run, read the
+// plan windows with agyUsage into res.windows). agy has no system-prompt append flag, so systemAppend is prepended.
 async function runAntigravity({ model, prompt, cwd, resume, systemAppend, signal, onEvent, bin, env = process.env, autonomous = true, onMessage,
-  settingsPath = path.join(HOME, '.gemini/antigravity-cli/settings.json') }) {
-  const res = { outcome: 'error', text: '', sessionId: resume || null, usage: {}, numTurns: 0, resetsAt: null, limitType: null, stderr: '', errorCode: null };
+  settingsPath = path.join(HOME, '.gemini/antigravity-cli/settings.json'), usageProbe = true }) {
+  const res = { outcome: 'error', text: '', sessionId: resume || null, usage: {}, numTurns: 0, resetsAt: null, limitType: null, stderr: '', errorCode: null, windows: null };
   // `"modelProvider": "gemini"` switches agy to GEMINI_API_KEY billing; refuse rather than spend API credits.
   let settings = {};
   try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch {}
@@ -434,9 +524,15 @@ async function runAntigravity({ model, prompt, cwd, resume, systemAppend, signal
     signal, res, handle, stopOn: AGY_AUTH_PROMPT_RE });
 
   if (aborted) { res.outcome = 'aborted'; return res; }
+  const probe = async () => {
+    if (!usageProbe || signal?.aborted) return;
+    try { res.windows = await agyUsage({ bin, env, cwd }); } catch {}
+    if (res.windows && onEvent) { try { onEvent({ k: 'windows', windows: res.windows }); } catch {} }
+  };
   if (result?.status === 'SUCCESS' && exitCode === 0 && !stopped) {
     if (result.response) res.text = result.response;
     res.outcome = 'ok';
+    await probe();
     return res;
   }
   const errMsg = result?.error || (result ? `agy ended with status ${result.status}` : '');
@@ -444,7 +540,12 @@ async function runAntigravity({ model, prompt, cwd, resume, systemAppend, signal
   if (!res.text || result?.status !== 'SUCCESS') res.text = errMsg || res.stderr.trim();
   if (stopped || AGY_AUTH_RE.test(hay) && !AGY_LIMIT_RE.test(errMsg)) { res.outcome = 'auth_error'; res.errorCode = 'authentication_failed'; }
   // Only the result's error decides a limit: a failed run's stderr log may mention 'quota' in passing.
-  else if (AGY_LIMIT_RE.test(errMsg)) { res.outcome = 'rate_limited'; res.errorCode = 'rate_limit'; res.resetsAt = codexResetsAt(errMsg); }
+  else if (AGY_LIMIT_RE.test(errMsg)) {
+    res.outcome = 'rate_limited'; res.errorCode = 'rate_limit'; res.resetsAt = codexResetsAt(errMsg);
+    await probe();
+    const full = (res.windows || []).filter((w) => w.pct >= 100).sort((a, b) => (b.resetsAt || 0) - (a.resetsAt || 0))[0];
+    if (full) { res.limitType = full.window; res.resetsAt ??= full.resetsAt; }
+  }
   else {
     res.outcome = 'error';
     if (resume && AGY_NO_SESSION_RE.test(hay)) res.errorCode = 'no_session';

@@ -1,6 +1,7 @@
 // Usage history: an append-only log at <DATA>/metrics/usage.jsonl, one JSON record per line (t = epoch ms,
 // resetsAt = epoch s or null), kept for 30 days:
-//   {t, agent, kind:'window', window, pct, resetsAt}           a plan window reading (dedupe: unchanged within 5 min)
+//   {t, agent, kind:'window', window, pct, resetsAt}           a plan window reading (dedupe: unchanged within 5 min);
+//     claude: five_hour/seven_day/…, codex: 5h/weekly (from window_minutes), antigravity: <group>-5h/<group>-weekly
 //   {t, agent, kind:'tokens', input, output, cached, source, ref}  one chat turn ('chat', ref = convo id) or run ('task', ref = task id)
 //   {t, agent, kind:'limit', status:'hit'|'cleared', resetsAt, window?}
 // `input` is uncached input (Claude: input + cache writes; codex/agy report input including the cached part).
@@ -76,6 +77,8 @@ export function createUsageLog(dataDir, { now = Date.now } = {}) {
       if (last && last.pct === r.pct && last.resetsAt === r.resetsAt && now() - last.t < DEDUPE_MS) return null;
       return append(r);
     },
+    // An adapter's res.windows ([{window, pct, resetsAt}], e.g. codex '5h'/'weekly', agy 'gemini-5h').
+    windows(agent, list) { return (list || []).map((w) => this.window(agent, w.window, w.pct, w.resetsAt)).filter(Boolean); },
     tokens(agent, usage, source, ref) {
       const u = normUsage(agent, usage);
       if (!u.input && !u.output && !u.cached) return null;

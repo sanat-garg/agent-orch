@@ -13,3 +13,7 @@ Get real limit windows (not just tokens) for the non-Claude agents into usage.mj
 ## Done when
 
 `npm test` passes with a codex fixture test asserting that the rate-limit snapshot becomes usage window points, and .agent-orch/AGENTS.md states what usage data agy exposes
+
+## Result — done (check passed) (2026-09-25 13:40)
+
+AGENT-ORCH-STATUS: done — Codex and agy usage windows now recorded; npm test passes

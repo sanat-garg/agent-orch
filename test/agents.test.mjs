@@ -5,7 +5,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AGENTS, runAgentCli, codexResetsAt, isMissingSession } from '../agents.mjs';
+import { AGENTS, runAgentCli, codexResetsAt, codexWindows, isMissingSession } from '../agents.mjs';
+import { createUsageLog } from '../usage.mjs';
 
 const fakeQuery = (msgs, seen = {}) => (args) => { Object.assign(seen, args); return (async function* () { for (const m of msgs) yield m; })(); };
 
@@ -150,6 +151,45 @@ test('codex: a usage-limit failure is rate_limited with resetsAt', async () => {
   assert.ok(!events.some((e) => e.k === 'result'));
 });
 
+// test/fixtures/codex-rollout.jsonl: token_count snapshots recorded from a real `codex exec` rollout (0.157.0, Plus plan);
+// the stub writes it into CODEX_STUB_HOME/sessions, the latest snapshot stamped now and an older one from the day before.
+test('codex: the rollout rate-limit snapshot becomes 5h/weekly usage window points', async () => {
+  const home = tmp(), data = tmp(), events = [];
+  const res = await runAgentCli({ agent: 'codex', bin: STUB, prompt: 'hi', cwd: tmp(), codexHome: home,
+    env: { PATH: process.env.PATH, CODEX_STUB: 'ok', CODEX_STUB_HOME: home }, onEvent: (e) => events.push(e) });
+  const want = [{ window: '5h', pct: 0, resetsAt: 1790361203 }, { window: 'weekly', pct: 17, resetsAt: 1790454622 }];
+  assert.equal(res.outcome, 'ok');
+  assert.deepEqual(res.windows, want); // the stale day-old snapshot (3% / 12%) is skipped
+  assert.deepEqual(events.at(-1), { k: 'windows', windows: want });
+  const log = createUsageLog(data);
+  assert.equal(log.windows('codex', res.windows).length, 2);
+  assert.equal(log.windows('codex', res.windows).length, 0); // unchanged readings are deduped
+  const h = log.history('24h').agents.codex;
+  assert.deepEqual(h.windows['5h'].map(({ t, ...p }) => p), [{ pct: 0, resetsAt: 1790361203 }]);
+  assert.deepEqual(h.windows.weekly.map(({ t, ...p }) => p), [{ pct: 17, resetsAt: 1790454622 }]);
+  assert.deepEqual(h.status.windows.weekly.pct, 17);
+});
+
+test('codex: a streamed token_count snapshot is used as is; a full window names the limit', async () => {
+  const events = [], t0 = Date.now();
+  const res = await runAgentCli({ agent: 'codex', bin: STUB, prompt: 'hi', cwd: tmp(), codexHome: tmp(),
+    env: { PATH: process.env.PATH, CODEX_STUB: 'ok', CODEX_STUB_STREAM_LIMITS: '1' }, onEvent: (e) => events.push(e) });
+  assert.equal(res.windows[0].window, '5h');
+  assert.equal(res.windows[0].pct, 42.5);
+  assert.ok(Math.abs(res.windows[0].resetsAt - (t0 / 1000 + 600)) < 5); // resets_in_seconds -> epoch s
+  assert.deepEqual(res.windows[1], { window: 'weekly', pct: 7, resetsAt: 1790454622 });
+  assert.equal(events.filter((e) => e.k === 'windows').length, 1);
+
+  const home = tmp();
+  const lim = await runAgentCli({ agent: 'codex', bin: STUB, prompt: 'hi', cwd: tmp(), codexHome: home, env: { PATH: process.env.PATH, CODEX_STUB: 'limit', CODEX_STUB_HOME: home } });
+  assert.equal(lim.outcome, 'rate_limited');
+  assert.equal(lim.limitType, '5h');
+  assert.equal(lim.resetsAt, Date.parse('2030-01-01T00:00:00Z') / 1000); // 'try again at' wins over the snapshot
+  assert.deepEqual(lim.windows[0], { window: '5h', pct: 100, resetsAt: 1790361203 });
+  assert.deepEqual(codexWindows({ primary: { used_percent: 5, window_minutes: 60, resets_at: 1 }, secondary: { used_percent: 1, window_minutes: 45 } }),
+    [{ window: '1h', pct: 5, resetsAt: 1 }, { window: '45m', pct: 1, resetsAt: null }]);
+});
+
 test('codex: resetsAt parsing handles clock times and missing hints', () => {
   const now = new Date(2026, 8, 25, 10, 0, 0);
   assert.equal(codexResetsAt('try again at 3:05 PM.', now), new Date(2026, 8, 25, 15, 5).getTime() / 1000);
@@ -185,6 +225,12 @@ test('codex: background commands left by a clean run are killed (SIGKILL for one
 
 const AGY = fileURLToPath(new URL('./fixtures/agy-stub.mjs', import.meta.url));
 const noSettings = '/nonexistent/agy-settings.json';
+const AGY_WINDOWS = [
+  { window: 'gemini-weekly', pct: 0.13, resetsAt: Date.parse('2026-09-26T22:58:53Z') / 1000 },
+  { window: 'gemini-5h', pct: 0, resetsAt: Date.parse('2026-09-25T18:36:12Z') / 1000 },
+  { window: '3p-weekly', pct: 0, resetsAt: Date.parse('2026-10-02T13:36:12Z') / 1000 },
+  { window: '3p-5h', pct: 0, resetsAt: Date.parse('2026-09-25T18:36:12Z') / 1000 },
+];
 
 test('antigravity: NDJSON events become normalised text/tool/result events; API vars are stripped', async () => {
   const dir = tmp(), log = path.join(dir, 'log.json'), events = [];
@@ -202,9 +248,12 @@ test('antigravity: NDJSON events become normalised text/tool/result events; API 
     { k: 'tool_result', id: '3', text: 'no such file', isError: true },
     { k: 'text', text: 'hello' },
     { k: 'result', usage: { input_tokens: 10418, output_tokens: 589, thinking_tokens: 551, cache_read_tokens: 8113, total_tokens: 11007 } },
+    { k: 'windows', windows: AGY_WINDOWS },
   ]);
   assert.equal(res.outcome, 'ok');
   assert.equal(res.text, 'hello');
+  // The windows come from a follow-up `agy -p /usage` (the recorded agy-usage.jsonl), one 5h + weekly pair per model group.
+  assert.deepEqual(res.windows, AGY_WINDOWS);
   assert.equal(res.sessionId, '3f0c9a2e-agy');
   assert.equal(res.numTurns, 1);
   assert.equal(res.usage.total_tokens, 11007);
@@ -242,7 +291,21 @@ test('antigravity: a RESOURCE_EXHAUSTED result is rate_limited with resetsAt', a
   assert.equal(res.errorCode, 'rate_limit');
   assert.equal(res.resetsAt, reset);
   assert.match(res.text, /RESOURCE_EXHAUSTED/);
-  assert.deepEqual(events, [{ k: 'limit', resetsAt: reset }]);
+  assert.deepEqual(events, [{ k: 'limit', resetsAt: reset }, { k: 'windows', windows: AGY_WINDOWS }]);
+  assert.equal(res.limitType, null); // no bucket is empty in the recorded /usage
+});
+
+test('antigravity: an empty /usage bucket names the limit window; usageProbe false skips the probe', async () => {
+  const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'hi', cwd: tmp(), settingsPath: noSettings,
+    env: { PATH: process.env.PATH, AGY_STUB: 'limit', AGY_STUB_USAGE: 'exhausted' } });
+  assert.equal(res.outcome, 'rate_limited');
+  assert.equal(res.limitType, 'gemini-5h');
+  assert.equal(res.resetsAt, Date.parse('2030-01-01T00:00:00Z') / 1000); // the error's own hint wins
+  assert.deepEqual(res.windows.find((w) => w.window === 'gemini-5h'), { window: 'gemini-5h', pct: 100, resetsAt: Date.parse('2026-09-25T18:36:12Z') / 1000 });
+  const off = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'hi', cwd: tmp(), settingsPath: noSettings, usageProbe: false,
+    env: { PATH: process.env.PATH, AGY_STUB: 'ok' } });
+  assert.equal(off.outcome, 'ok');
+  assert.equal(off.windows, null);
 });
 
 test('antigravity: stderr mentioning quota does not make a failed run a limit', async () => {

@@ -103,6 +103,12 @@ shapes come from codex-rs `exec_events.rs`, and their field names are confirmed 
 - Transient 429s show up as `Reconnecting... n/5` error events before the turn fails.
 - Adapter rule: match `/usage limit|usage_limit_reached|quota_exceeded|429|rate limit/i` in `turn.failed` or the
   final `error` and treat it like Claude's rate-limit pause. Parse "try again at" when present.
+- **Plan windows (verified 2026-09-25, codex-cli 0.157.0, Plus plan):** `exec --json` does **not** stream rate
+  limits. The thread's rollout `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<thread_id>.jsonl` gets one
+  `{"type":"event_msg","payload":{"type":"token_count","info":{…},"rate_limits":{"limit_id":"codex","primary":{"used_percent":0.0,"window_minutes":300,"resets_at":1790361203},"secondary":{"used_percent":17.0,"window_minutes":10080,"resets_at":1790454622},"credits":{…},"plan_type":"plus","rate_limit_reached_type":null}}}`
+  line per turn (`resets_at` epoch s; older builds used `resets_in_seconds`). The adapter (`codexRolloutWindows`)
+  reads the latest snapshot after each run into `res.windows` as `5h`/`weekly` (from `window_minutes`) and also
+  accepts a streamed `token_count` event if a later CLI starts emitting one.
 
 ---
 
@@ -175,6 +181,14 @@ cd /path/to/workdir &&            # no --cd flag: the working dir is the process
   `result.error`, a diagnostic on stderr, and exit 1. The binary contains gRPC `RESOURCE_EXHAUSTED`. Adapter rule:
   match `/RESOURCE_EXHAUSTED|quota|rate limit|429|exhausted/i` in `result.error` or stderr. Capture a real
   sample the first time it happens.
+- **Usage data agy exposes (verified 2026-09-25, agy 1.2.11):** there is no `agy usage`/`agy quota` subcommand,
+  but the read-only slash commands work in print mode: `agy -p /usage` (alias `/quota`) prints one tab-separated
+  line per bucket (`Gemini Models	Five Hour Limit Remaining	100%	2026-09-25T18:34:11Z`), and with
+  `--output-format stream-json` a `{"event":"command_result","command":{"name":"usage","data":{"groups":[{"name":"Gemini Models","buckets":[{"id":"gemini-weekly","window":"weekly","remaining_fraction":0.9987,"reset_time":"…Z"},{"id":"gemini-5h","window":"5h",…}]},{"name":"Claude and GPT models","buckets":[{"id":"3p-weekly",…},{"id":"3p-5h",…}]}]}}}`
+  event plus a `result` with 0 tokens (no model call). Each model group (Gemini; Claude/GPT-OSS) has its own 5h
+  and weekly limit, consumed in proportion to token cost. `agy -p /credits` prints `Remaining credits	0`. Stream
+  events of normal runs carry only token `usage`, no quota. The adapter runs `/usage` after every ok or
+  rate-limited run (`agyUsage`) and records the buckets as windows named by bucket id (`gemini-5h`, `3p-weekly`).
 
 ---
 

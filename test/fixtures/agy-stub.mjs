@@ -4,6 +4,13 @@
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 
+// `agy -p /usage`: the recorded command_result (agy-usage.jsonl); AGY_STUB_USAGE=exhausted empties the Gemini 5h bucket.
+if (process.argv[3] === '/usage') {
+  let text = fs.readFileSync(new URL('./agy-usage.jsonl', import.meta.url), 'utf8');
+  if (process.env.AGY_STUB_USAGE === 'exhausted') text = text.replace(/("id":"gemini-5h"[^}]*"remaining_fraction":)[\d.]+/g, '$10');
+  process.stdout.write(text);
+  process.exit(0);
+}
 if (process.env.AGY_STUB_LOG) fs.writeFileSync(process.env.AGY_STUB_LOG, JSON.stringify({ argv: process.argv.slice(2), env: process.env, cwd: process.cwd() }));
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 const mode = process.env.AGY_STUB || 'ok';

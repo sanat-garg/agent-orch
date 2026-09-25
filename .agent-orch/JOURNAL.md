@@ -313,3 +313,7 @@ bin/shot.mjs captures PNGs; prompts and README updated
 ## 2026-09-25 13:32 — #92 Record per-agent usage history and serve /api/usage/history [done (check passed)]
 
 Usage history store and /api/usage/history endpoint built, tests passing
+
+## 2026-09-25 13:40 — #93 Feed Codex and Antigravity rate-limit windows into usage history [done (check passed)]
+
+Codex and agy usage windows now recorded; npm test passes

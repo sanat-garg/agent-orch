@@ -20,7 +20,18 @@ if (mode === 'nosession') {
   process.stderr.write(`Error: thread/resume failed: no rollout found for thread id ${process.argv.at(-2)}\n`);
   process.exit(1);
 }
-out({ type: 'thread.started', thread_id: '01a0d699-1efd-7d72-b9f4-2616f4bf739a' });
+const tid = '01a0d699-1efd-7d72-b9f4-2616f4bf739a';
+// CODEX_STUB_HOME: write the thread's rollout (recorded token_count rate-limit snapshots, the latest stamped now),
+// as the real CLI does in ~/.codex/sessions; CODEX_STUB_STREAM_LIMITS: also stream a token_count event.
+if (process.env.CODEX_STUB_HOME) {
+  const dir = `${process.env.CODEX_STUB_HOME}/sessions/2026/09/25`;
+  const src = new URL(`./codex-rollout${mode === 'limit' ? '-limit' : ''}.jsonl`, import.meta.url);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(`${dir}/rollout-2026-09-25T13-33-21-${tid}.jsonl`, fs.readFileSync(src, 'utf8').replace('__NOW__', new Date().toISOString()));
+}
+out({ type: 'thread.started', thread_id: tid });
+if (process.env.CODEX_STUB_STREAM_LIMITS) out({ type: 'token_count', info: null,
+  rate_limits: { primary: { used_percent: 42.5, window_minutes: 300, resets_in_seconds: 600 }, secondary: { used_percent: 7, window_minutes: 10080, resets_at: 1790454622 } } });
 out({ type: 'turn.started' });
 if (mode === 'ok') {
   process.stderr.write('Reading prompt...\n');

@@ -1107,6 +1107,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     }
     if (stopped) res.outcome = stopped;
     usageLog.tokens(agent, res.usage, taskId ? 'task' : 'chat', taskId ?? null);
+    usageLog.windows(agent, res.windows);
     if (taskId) writeShots();
     if (taskId) writeEntry({ k: 'end', at: now(), outcome: res.outcome, turns: res.numTurns });
     log?.end();

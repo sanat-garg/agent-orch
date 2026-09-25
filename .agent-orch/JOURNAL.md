@@ -261,3 +261,7 @@ Stale .ao2/ removed from git; npm test passes
 ## 2026-09-25 09:12 — #74 Send pasted sign-in codes with -- and fail if the send fails (AUDIT #25) [done (check passed)]
 
 Codes are sent after `--`; failed sends return 500 without Enter; tests pass
+
+## 2026-09-25 09:17 — #75 Make login start/cancel/finish race-safe (AUDIT #22) [done (check passed)]
+
+Login start/cancel/finish race-safe; race tests pass; #22 Fixed

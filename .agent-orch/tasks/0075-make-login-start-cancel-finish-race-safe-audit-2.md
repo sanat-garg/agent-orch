@@ -13,3 +13,7 @@ Fix AUDIT.md item #22 in /home/ubuntu/agent-orch/connections.mjs (start/cancel/f
 ## Done when
 
 `npm test` passes, including the three new race tests in test/connections.test.mjs, and AUDIT.md marks #22 Fixed.
+
+## Result — done (check passed) (2026-09-25 09:17)
+
+AGENT-ORCH-STATUS: done — Login start/cancel/finish race-safe; race tests pass; #22 Fixed

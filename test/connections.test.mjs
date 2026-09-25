@@ -72,12 +72,14 @@ test('an empty pane yields nothing yet', () => {
   assert.deepEqual(parsePane(SPECS.codex, ''), { url: null, code: null, prompts: [], exited: false, exitCode: null, ok: false, error: null });
 });
 
-// A fake tmux: records every call and serves pane text from `screen`; `failSend` makes send-keys fail.
+// A fake tmux: records every call and serves pane text from `screen`; `failSend` makes send-keys fail; `delay` (ms)
+// makes every call slow, to open race windows.
 function fakeTmux() {
   const calls = [];
-  const t = { calls, screen: '', alive: false };
+  const t = { calls, screen: '', alive: false, delay: 0 };
   t.run = async (args) => {
     calls.push(args);
+    if (t.delay) await new Promise((r) => setTimeout(r, t.delay));
     if (args[0] === 'new-session') { t.alive = true; return { ok: true, out: '' }; }
     if (args[0] === 'kill-session') { const was = t.alive; t.alive = false; return { ok: was, out: '' }; }
     if (args[0] === 'capture-pane') return { ok: t.alive, out: t.alive ? t.screen : '' };
@@ -153,6 +155,49 @@ test('login flow: times out and kills the session', async () => {
   await until(() => conn.list()[0].login.state === 'failed');
   assert.match(conn.list()[0].login.error, /timed out/);
   assert.equal(t.alive, false);
+});
+
+test('race: two starts at once make one session and one poller (AUDIT #22)', async () => {
+  const { t, conn } = setup(SPECS.codex);
+  t.delay = 10;
+  const orig = globalThis.setInterval;
+  let intervals = 0;
+  globalThis.setInterval = (...a) => { intervals++; return orig(...a); };
+  try {
+    const [a, b] = await Promise.all([conn.start('x'), conn.start('x')]);
+    assert.deepEqual([a.status, b.status], [200, 200]);
+  } finally { globalThis.setInterval = orig; }
+  assert.equal(t.calls.filter((c) => c[0] === 'new-session').length, 1);
+  assert.equal(intervals, 1);
+  assert.equal(conn.list()[0].login.state, 'waiting');
+  await conn.cancel('x');
+});
+
+test('race: start, cancel, start again: the old deadline does not fail the new login (AUDIT #22)', async () => {
+  const { t, conn } = setup(SPECS.codex, { timeoutMs: 200 });
+  t.delay = 5;
+  await Promise.all([conn.start('x'), conn.start('x')]);
+  await conn.cancel('x');
+  assert.equal(conn.list()[0].login.state, 'cancelled');
+  await new Promise((r) => setTimeout(r, 100));
+  await conn.start('x');
+  await new Promise((r) => setTimeout(r, 150)); // past the first login's deadline, before the second's
+  assert.equal(conn.list()[0].login.state, 'waiting');
+  assert.equal(t.alive, true);
+  await conn.cancel('x');
+});
+
+test('race: a cancel while start is in flight wins and kills the new session (AUDIT #22)', async () => {
+  const { t, conn } = setup(SPECS.codex);
+  t.delay = 10;
+  const started = conn.start('x');
+  await new Promise((r) => setTimeout(r, 15)); // between kill-session and new-session
+  assert.equal((await conn.cancel('x')).status, 200);
+  await started;
+  await new Promise((r) => setTimeout(r, 30));
+  assert.notEqual(conn.list()[0].login.state, 'waiting');
+  assert.equal(t.alive, false, 'the session start() made was killed');
+  assert.equal(t.calls.filter((c) => c[0] === 'capture-pane').length, 0, 'no poller');
 });
 
 test('entries without a spec cannot start a login', async () => {

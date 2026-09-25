@@ -119,9 +119,9 @@ export function createConnections({ entries, env = process.env, onChange = () =>
   }
   const changed = () => { try { onChange(list()); } catch {} };
 
-  async function finish(id, state, error = null) {
-    const l = logins.get(id);
-    if (!l || l.state !== 'waiting') return;
+  // Acts only on login `l` while it is still the current one, so an orphaned timer or probe can't end a newer login.
+  async function finish(id, state, error = null, l = logins.get(id)) {
+    if (!l || logins.get(id) !== l || l.state !== 'waiting') return;
     clearInterval(l.timer);
     clearTimeout(l.deadline);
     Object.assign(l, { state, error });
@@ -130,25 +130,25 @@ export function createConnections({ entries, env = process.env, onChange = () =>
     changed();
   }
 
-  async function poll(id) {
-    const l = logins.get(id), e = byId.get(id);
-    if (!l || l.state !== 'waiting' || l.polling) return;
+  async function poll(id, l) {
+    const e = byId.get(id);
+    if (logins.get(id) !== l || l.state !== 'waiting' || l.polling) return;
     l.polling = true;
     try {
       const r = await tmux(['capture-pane', '-p', '-J', '-S', '-200', '-t', `=${session(id)}:`]);
-      if (l.state !== 'waiting') return;
-      if (!r.ok) return finish(id, 'failed', 'the sign-in session ended unexpectedly');
+      if (logins.get(id) !== l || l.state !== 'waiting') return;
+      if (!r.ok) return finish(id, 'failed', 'the sign-in session ended unexpectedly', l);
       const p = parsePane(e.spec, r.out);
       for (const i of p.prompts) {
         if (l.answered.has(i)) continue;
         l.answered.add(i);
         await tmux(['send-keys', '-t', `=${session(id)}:`, ...e.spec.answers[i][1]]);
       }
-      if (p.exited) return finish(id, p.ok ? 'done' : 'failed', p.error);
+      if (p.exited) return finish(id, p.ok ? 'done' : 'failed', p.error, l);
       if (p.url !== l.url || p.code !== l.code) { l.url = p.url; l.code = p.code; changed(); }
       if (e.probe && Date.now() - l.probedAt >= probeMs) {
         l.probedAt = Date.now();
-        if (await e.probe().catch(() => false)) return finish(id, 'done');
+        if (await e.probe().catch(() => false)) return finish(id, 'done', null, l);
       }
     } finally { l.polling = false; }
   }
@@ -162,15 +162,20 @@ export function createConnections({ entries, env = process.env, onChange = () =>
     // Strip the API-billing env vars (a login must end on the subscription), and keep the exit status visible.
     const unset = e.envFilter ? Object.keys(env).filter((k) => e.envFilter.test(k)) : [];
     const cmd = `${unset.length ? `unset ${unset.join(' ')}; ` : ''}${e.spec.start.map(shq).join(' ')}; printf '\\n__AO_EXIT:%s\\n' $?; sleep 3600`;
-    await tmux(['kill-session', '-t', `=${session(id)}`]);
-    const r = await tmux(['new-session', '-d', '-s', session(id), '-x', '250', '-y', '50', '-c', os.homedir(), cmd]);
-    if (!r.ok) return { status: 500, error: 'could not start tmux' };
+    // The entry goes in before the first await, so a second start returns it and a cancel can reach it (AUDIT #22).
     const l = { state: 'waiting', url: null, code: null, needsPastedCode: !!e.spec.needsPastedCode, error: null, startedAt: Date.now(), probedAt: Date.now(), answered: new Set() };
     logins.set(id, l);
-    l.timer = setInterval(() => poll(id).catch(() => {}), pollMs);
-    l.deadline = setTimeout(() => finish(id, 'failed', 'timed out after 10 minutes'), timeoutMs);
+    await tmux(['kill-session', '-t', `=${session(id)}`]);
+    const r = await tmux(['new-session', '-d', '-s', session(id), '-x', '250', '-y', '50', '-c', os.homedir(), cmd]);
+    if (l.state !== 'waiting') { // cancelled while starting: don't leave the new session behind
+      if (r.ok) await tmux(['kill-session', '-t', `=${session(id)}`]);
+      return { status: 200, login: view(l) };
+    }
+    if (!r.ok) { logins.delete(id); return { status: 500, error: 'could not start tmux' }; }
+    l.timer = setInterval(() => poll(id, l).catch(() => {}), pollMs);
+    l.deadline = setTimeout(() => finish(id, 'failed', 'timed out after 10 minutes', l), timeoutMs);
     changed();
-    poll(id).catch(() => {});
+    poll(id, l).catch(() => {});
     return { status: 200, login: view(l) };
   }
 

@@ -1,6 +1,6 @@
 # Audit: server, orchestrator, GitHub wrapper, UI
 
-**Status (2026-09-25, task #71):** items 1-21 fixed (rounds 1-2); round 3: #25 fixed, #22-24 and #26 open.
+**Status (2026-09-25, task #71):** items 1-21 fixed (rounds 1-2); round 3: #22 and #25 fixed, #23-24 and #26 open.
 
 _Task #12, 2026-09-24. Items were open when audited; a `- **Fixed** (task #N)` line marks one resolved since. Each item was verified by reading the code; #1 was also reproduced
 against a throwaway instance (`PORT=3999 CW_DATA_DIR=$(mktemp -d)`). The items are ranked by value. Each fix
@@ -240,6 +240,7 @@ seconds on both paths, and codex/agy `resetsAt` are epoch seconds like `withUnti
   per-id `starting` promise that later callers await). Have `finish(id, state, err, l)` act only when
   `logins.get(id) === l`, and have the timer, deadline and probe closures pass their own `l`. `cancel` during a
   start should mark the placeholder cancelled so `start` kills the session it just made.
+- **Fixed** (task #75): `start` sets the entry before its first await; `finish`/poll/deadline/probe act only on their own `l`; a cancel mid-start kills the new session. Three race tests in test/connections.test.mjs.
 
 ### 23. [med] After a server restart (or a missed WS message) the Connections panel is stuck on "Signing in…", and the login's tmux session is orphaned (public/app.js:1340-1348, connections.mjs:188-192)
 - **What:** Login state lives only in memory, and nothing clears the `agent-orch-login` socket at boot. When the

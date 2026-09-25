@@ -104,6 +104,7 @@ a same-origin request. Caddy's `reverse_proxy` overwrites `X-Forwarded-For`, so 
   metrics and chat streaming until it finishes.
 - **Fix:** Switch `git()` to promisified `execFile` and make `gitCommit` async. It is already called from async
   paths (`finishWork`, `verifyFailed`, `fail`, `finishReflection`), so await it there.
+- **Fixed** (task #42): `git()` uses promisified `execFile` (16 MB maxBuffer); `gitCommit`/`ensureGit` are async, serialized per repo, and awaited by their callers (`setConvoMode` fires `ensureGit` without awaiting it, and `planTurn` awaits it).
 
 ### 11. [low] `runCheck` ignores cancellation and leaks background processes (orchestrator.mjs:416-431, :1322)
 - **What:** The done-when check gets no abort signal. Cancelling or pausing a task during its check leaves the check

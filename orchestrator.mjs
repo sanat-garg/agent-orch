@@ -13,7 +13,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { AGENTS, agentStatus, runAgentCli, toolInputSummary } from './agents.mjs';
 
@@ -1063,29 +1064,46 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     try { const s = fs.statSync(path.join(memDir(p), 'CONTEXT.md')).size; return s > CFG.contextBudgetBytes ? s - CFG.contextBudgetBytes : null; } catch { return null; }
   }
   const GIT_ID = ['-c', 'user.name=agent-orch Orchestrator', '-c', 'user.email=orchestrator@agent-orch.local'];
-  function git(p, args) { return execFileSync('git', args, { cwd: p, encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'pipe'] }); }
+  const execFileP = promisify(execFile);
+  // Async so a slow `git add -A` or commit hook doesn't freeze HTTP/WS traffic; calls on one repo are
+  // chained so concurrent finishes don't collide on .git/index.lock.
+  async function git(p, args) {
+    return (await execFileP('git', args, { cwd: p, encoding: 'utf8', timeout: 120000, maxBuffer: 16 * 1024 * 1024 })).stdout;
+  }
+  const gitChains = new Map(); // repo path -> tail promise of queued git work
+  function serialGit(p, fn) {
+    const next = (gitChains.get(p) || Promise.resolve()).then(fn, fn);
+    const tail = next.catch(() => {});
+    gitChains.set(p, tail);
+    tail.then(() => { if (gitChains.get(p) === tail) gitChains.delete(p); });
+    return next;
+  }
   function gitCommit(p, message) {
-    if (!CFG.autoCommit || !fs.existsSync(path.join(p, '.git'))) return '';
-    try {
-      if (!git(p, ['status', '--porcelain']).trim()) return '';
-      git(p, ['add', '-A']);
-      git(p, [...GIT_ID, 'commit', '-q', '-m', message]);
-      const sha = git(p, ['rev-parse', '--short', 'HEAD']).trim();
-      onCommit(p, sha, message); // pushed to GitHub by the owner's protocol
-      return sha;
-    } catch { return ''; }
+    if (!CFG.autoCommit || !fs.existsSync(path.join(p, '.git'))) return Promise.resolve('');
+    return serialGit(p, async () => {
+      try {
+        if (!(await git(p, ['status', '--porcelain'])).trim()) return '';
+        await git(p, ['add', '-A']);
+        await git(p, [...GIT_ID, 'commit', '-q', '-m', message]);
+        const sha = (await git(p, ['rev-parse', '--short', 'HEAD'])).trim();
+        onCommit(p, sha, message); // pushed to GitHub by the owner's protocol
+        return sha;
+      } catch { return ''; }
+    });
   }
   function ensureGit(p) {
-    if (fs.existsSync(path.join(p, '.git'))) return;
-    try {
-      execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: p, stdio: 'ignore' });
-      return; // already inside a repository
-    } catch {}
-    try {
-      git(p, ['init', '-q']);
-      git(p, ['add', '-A']);
-      git(p, [...GIT_ID, 'commit', '-q', '--allow-empty', '-m', 'Orchestrator: starting point']);
-    } catch {}
+    if (fs.existsSync(path.join(p, '.git'))) return Promise.resolve();
+    return serialGit(p, async () => {
+      try {
+        await git(p, ['rev-parse', '--show-toplevel']);
+        return; // already inside a repository
+      } catch {}
+      try {
+        await git(p, ['init', '-q']);
+        await git(p, ['add', '-A']);
+        await git(p, [...GIT_ID, 'commit', '-q', '--allow-empty', '-m', 'Orchestrator: starting point']);
+      } catch {}
+    });
   }
 
   // ---- routing rules (routes table): project routes first, then global ones (project_id NULL)
@@ -1181,7 +1199,6 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       p = getProject(p.id);
     }
     initProject(p.path);
-    ensureGit(p.path);
     return p;
   }
 
@@ -1189,6 +1206,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   const planningProjects = new Set();
   async function planTurn(convo, text) {
     const project = ensureProject(convo);
+    await ensureGit(project.path);
     if (project.status !== 'active') updateProject(project.id, { status: 'active' });
     // While limited, save the message; a plan task answers it the moment capacity returns.
     const blocked = blockedUntil();
@@ -1332,7 +1350,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     } catch (e) {
       logEvent(`#${task.id} crashed: ${e?.message || e}`, { level: 'error', projectId: project.id, taskId: task.id });
       const attempts = task.attempts + 1;
-      if (attempts >= CFG.maxAttempts) fail(getTask(task.id), project, 'crash', String(e?.message || e));
+      if (attempts >= CFG.maxAttempts) await fail(getTask(task.id), project, 'crash', String(e?.message || e));
       else requeueIfRunning(task.id, { attempts, not_before: now() + Math.min(300 * 2 ** (attempts - 1), 3600), last_error: `[crash] ${e?.message || e}`.slice(0, 2000) });
     }
   }
@@ -1425,7 +1443,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const [status, note] = parseStatus(res.text);
     if (status === 'continue' && task.continuations < CFG.maxContinuations) {
       recordResult(project.path, task, `in progress (${task.continuations + 1})`, res.text);
-      gitCommit(project.path, `agent-orch #${tid} (in progress): ${task.title}`);
+      await gitCommit(project.path, `agent-orch #${tid} (in progress): ${task.title}`);
       requeueIfRunning(tid, { continuations: task.continuations + 1, session_id: res.sessionId || task.session_id, result: res.text });
       return logEvent(`↻ #${tid} not finished yet: ${note.slice(0, 160) || 'continuing'}`, { projectId: project.id, taskId: tid });
     }
@@ -1448,36 +1466,36 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       else checked = ' (check passed)';
     }
     recordResult(project.path, task, `done${checked}`, res.text);
-    const sha = gitCommit(project.path, `agent-orch #${tid}: ${task.title}`);
+    const sha = await gitCommit(project.path, `agent-orch #${tid}: ${task.title}`);
     if (!updateTask(tid, { status: 'done', finished_at: now(), result: res.text, session_id: res.sessionId, verify_output: null, commit_sha: sha || null }, true)) return;
     logEvent(`✔ #${tid} done${checked}: ${task.title}${sha ? ` (commit ${sha})` : ''}`, { projectId: project.id, taskId: tid });
   }
 
-  function verifyFailed(task, project, res, command, output) {
+  async function verifyFailed(task, project, res, command, output) {
     const tid = task.id;
     retireSession(res.sessionId, 'verify_failed');
     if (task.continuations >= CFG.maxContinuations) {
       return fail(task, project, 'verification', `\`${command}\` still failing after ${CFG.maxContinuations} sessions:\n${output.slice(-1500)}`);
     }
     recordResult(project.path, task, `verify failed (${task.continuations + 1})`, `Command: ${command}\n\n${output}`);
-    gitCommit(project.path, `agent-orch #${tid} (in progress): ${task.title}`);
+    await gitCommit(project.path, `agent-orch #${tid} (in progress): ${task.title}`);
     requeueIfRunning(tid, { continuations: task.continuations + 1, session_id: res.sessionId || task.session_id, result: res.text, verify_output: output });
     logEvent(`↻ #${tid} done-when check failed: ${command}\n${output.slice(0, 300)}`, { projectId: project.id, taskId: tid });
   }
 
-  function fail(task, project, outcome, detail) {
+  async function fail(task, project, outcome, detail) {
     const tid = task.id;
     if (!updateTask(tid, { status: 'failed', attempts: task.attempts + 1, finished_at: now(), result: detail }, true)) return;
     if (task.kind === 'work') {
       recordResult(project.path, task, `failed (${outcome})`, detail);
-      gitCommit(project.path, `agent-orch #${tid} failed: ${task.title} (partial work)`);
+      await gitCommit(project.path, `agent-orch #${tid} failed: ${task.title} (partial work)`);
     }
     const blocked = cascadeBlock(tid, 'failed', `${blockedPrefix(tid)}(${outcome})`);
     logEvent(`✖ #${tid} failed (${outcome}): ${String(detail).slice(0, 200)}${blocked.length ? `; blocked ${blocked.map((b) => `#${b}`).join(', ')}` : ''}`,
       { level: 'error', projectId: project.id, taskId: tid });
   }
 
-  function finishReflection(task, project, res) {
+  async function finishReflection(task, project, res) {
     const [clean, payload] = extractTasks(res.text);
     const ids = queuePayload(getProject(project.id), payload, 'reflection');
     const key = `reflect_empty_streak:${project.id}`;
@@ -1486,7 +1504,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const cooldown = ids.length ? 0 : reflectCooldown(decision(), streak);
     updateProject(project.id, { next_reflect_at: now() + cooldown });
     updateTask(task.id, { status: 'done', finished_at: now(), result: (clean || '').slice(0, 4000) }, true);
-    gitCommit(project.path, `agent-orch: roadmap update (reflection #${task.id})`);
+    await gitCommit(project.path, `agent-orch: roadmap update (reflection #${task.id})`);
     const summary = (clean || '').trim();
     if (project.convo_id && convoExists(project.convo_id)) {
       if (summary) emitChat(project.convo_id, { t: 'text', text: summary });
@@ -1575,6 +1593,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const p = q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd });
     if (mode === 'orchestrator') {
       const project = ensureProject(convo);
+      ensureGit(project.path); // never rejects; planTurn awaits it before any task can commit
       if (project.status !== 'active') updateProject(project.id, { status: 'active' });
       return getProject(project.id);
     }

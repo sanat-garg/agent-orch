@@ -595,8 +595,24 @@ const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
 // ---------- GitHub protocol ----------
 // Every project is a private GitHub repo; every finished task and chat reply is pushed.
 const gh = createGitHub({ env: CLAUDE_ENV, log: (m) => console.log(`[github] ${m}`) });
+// convo.repo mirrors the folder's real `origin` (a stale copy survives repo moves); cleared when there is none.
+async function refreshRepo(convo) {
+  if (!fs.existsSync(convo.cwd)) return false;
+  const repo = await gh.remoteOf(convo.cwd);
+  if (repo?.full === convo.repo?.full && repo?.url === convo.repo?.url) return false;
+  if (repo) convo.repo = repo; else delete convo.repo;
+  return true;
+}
+async function refreshAllRepos() {
+  const changed = (await Promise.all(convos.map(refreshRepo))).some(Boolean);
+  if (!changed) return;
+  saveConvos();
+  broadcastConvos();
+  orch?.refreshProjects();
+}
 async function setupRepo(convo) {
   try {
+    await refreshRepo(convo);
     convo.repo = await gh.ensureRepo(convo.cwd);
     convo.git = { ...(convo.git || {}), error: null };
   } catch (e) {
@@ -610,7 +626,7 @@ async function syncGit(dir, message) {
   const c = convos.find((x) => x.cwd === dir);
   if (!c || !fs.existsSync(dir)) return;
   const r = message ? await gh.commitAndPush(dir, message) : await gh.push(dir);
-  if (r.repo && !c.repo) { c.repo = r.repo; orch?.refreshProjects(); }
+  if (r.repo && r.repo.full !== c.repo?.full) { c.repo = r.repo; orch?.refreshProjects(); }
   c.git = { pushedAt: r.ok ? Date.now() : c.git?.pushedAt || null, error: r.ok ? null : r.error, unpushed: r.ok ? 0 : await gh.unpushed(dir) };
   saveConvos();
   broadcastConvos();
@@ -1123,7 +1139,10 @@ async function handleRequest(req, res) {
         ? uniqueProjectDir(slugify(body.newProject.name) || slugify(body.newProject.fromText, true) || 'project')
         : safeCwd(body.folder);
       const existing = convos.find((c) => c.cwd === cwd);
-      if (existing) return json(res, 200, existing); // one chat per project
+      if (existing) { // one chat per project
+        if (await refreshRepo(existing)) { saveConvos(); broadcastConvos(); orch?.refreshProjects(); }
+        return json(res, 200, existing);
+      }
       // Mandatory protocol: every project lives in a GitHub repo, so GitHub must be linked first.
       if (!gh.status().linked && !(await gh.refresh()).linked) {
         return json(res, 409, { error: 'Link GitHub first: every project gets its own GitHub repo.', github: false });
@@ -1376,5 +1395,7 @@ if (process.argv[2] === 'set-password') {
   console.log('Password updated. Everyone has been signed out.');
   process.exit(0);
 } else {
-  server.listen(PORT, '127.0.0.1', () => console.log(`agent-orch on 127.0.0.1:${PORT}`));
+  // Repo links are refreshed from each folder's git origin before serving, so the API never returns a stale one.
+  refreshAllRepos().catch((e) => console.error('[github] repo refresh failed', e))
+    .finally(() => server.listen(PORT, '127.0.0.1', () => console.log(`agent-orch on 127.0.0.1:${PORT}`)));
 }

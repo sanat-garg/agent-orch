@@ -209,3 +209,7 @@ restart-when-idle endpoint and status fields added, all tests pass
 ## 2026-09-25 04:22 — #57 UI: 'updates since start' banner with a Restart when idle button [done (check passed)]
 
 Update banner with Restart-when-idle button added; tests pass
+
+## 2026-09-25 08:23 — #65 Header repo link: derive from the real git remote, not cached convo.repo [done (check passed)]
+
+Repo link now comes from git origin; tests pass

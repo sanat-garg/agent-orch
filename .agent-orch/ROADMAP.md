@@ -3,23 +3,22 @@
 _Maintained by the orchestrator's reflection loop._
 
 ## Assessment
-_2026-09-25 (reflect #53)._ `npm test` passes 74/74. The Definition of Done is met: README, a real test suite, and all 16 AUDIT items Fixed. The pacing governor and the scheduler now have unit tests (#50, #51). Route fallbacks show their reason on the task badge (#52).
+_2026-09-25 (reflect #58)._ `npm test` passes 77/77. The Definition of Done is still met. The restart-when-idle flow has shipped (#55–#57): `drain()`, `POST /api/restart-when-idle`, and a UI banner. **Owner action:** the live service has been running since 03:23 UTC, so none of #32–#57 are live yet. Press "Restart when idle" in the banner once it shows. The UI code that draws the banner isn't running yet either, so the first restart has to be done by hand: `sudo systemctl restart agent-orch` while no task is running.
 
-**The biggest gap is operational.** The live service started at 03:23 UTC, so almost none of the fixes from #32–#52 are running yet. There is no safe way to pick them up. Restarting kills running agents mid-task (they get requeued with RESUME), and the process has no SIGTERM handling. The orchestrator keeps committing to its own repo, so this happens again after every push. A "restart when idle" flow closes this gap, and it is how the owner will pick up every future change.
+**The main risk is audit round 2 (AUDIT #17–#21). All five items are open.** #17 is high severity: if codex or agy ever fails authentication (an expired token, or agy set to API-key mode), the global `blocked_until` is set again every 10 minutes, and all Claude work stops for good. #18 has a similar effect: a codex weekly limit, or an agy stderr line that happens to mention "quota", pauses the Claude subscription for days. Neither has happened in production yet, but only because codex is not logged in, so every codex task falls back to Claude. Both will happen once the owner signs in to codex or agy. These fixes come before any new scope.
 
-**Second risk: the multi-agent code (#26–#34, #52) is new and was never audited.** That covers agents.mjs, resolveRoute, agentChatTurn and the login detection. Codex is still "Not logged in", so today only the Claude fallback path runs in production.
-
-Minor: `.ao2/tasks/0017…` and `0018…` are still tracked in git. They are expected until a restart runs `migrateMemDir()`, and can be deleted after that.
+Minor: `.ao2/tasks/0017…` and `0018…` are still tracked in git. They can be deleted once a restart has run `migrateMemDir()`.
 
 ## Next (queued)
-1. Audit round 2 of the multi-agent and routing code. Record findings as AUDIT #17+ (no fixes in this task).
-2. Orchestrator `drain()`: stop claiming new tasks, then resolve once running tasks finish. Test it.
-3. Server: `restartPending` (HEAD differs from the boot commit) in state, plus `POST /api/restart-when-idle`, which drains and then exits so systemd restarts the app. Test it on a test port.
-4. UI: a banner saying "N new commits since start", with a "Restart when idle" button.
-5. (next reflection) Fix the AUDIT #17+ items one per task.
+1. AUDIT #17: a non-Claude auth_error marks only that agent unusable, and routing falls back to Claude.
+2. AUDIT #18: rate limits are tracked per agent (`blocked_until:<agent>`), and `AGY_LIMIT_RE` is matched only against the error.
+3. AUDIT #19: a stale codex/agy session gets `errorCode 'no_session'`, the dead session id is dropped, and the run retries once without resume, in both chat and orchestrator.
+4. AUDIT #20: a route's agent is inferred from the model family, and model/agent mismatches are dropped.
+5. AUDIT #21: CLI adapters kill the process group after a normal exit.
 
 ## Later
-- SIGTERM handler: abort agents cleanly and mark runs interrupted, instead of a hard kill.
-- A real end-to-end run on codex/agy. Owner action first: `codex login --device-auth`, then `agy` sign-in.
+- SIGTERM handler: abort agents cleanly and mark runs interrupted, instead of a hard kill. This matters less now that restart-when-idle exists.
+- A real end-to-end run on codex/agy. Owner action first: `codex login --device-auth`, then sign in to `agy`. Do this after #17/#18 are fixed.
+- Delete the tracked `.ao2/` leftovers after the first restart.
 - Split public/app.js (2.5k lines) into native ESM modules, once UI tests or a manual check can catch regressions.
-- Mobile layout review on a real phone. Task log readability, e.g. collapsing long tool results.
+- Mobile layout review on a real phone. Make task logs easier to read, e.g. by collapsing long tool results.

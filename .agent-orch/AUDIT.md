@@ -1,6 +1,6 @@
 # Audit: server, orchestrator, GitHub wrapper, UI
 
-**Status (2026-09-25, task #63):** all items (1-21) fixed, including round 2 (multi-agent, #17-21).
+**Status (2026-09-25, task #71):** items 1-21 fixed (rounds 1-2); round 3 (#22-26) open.
 
 _Task #12, 2026-09-24. Items were open when audited; a `- **Fixed** (task #N)` line marks one resolved since. Each item was verified by reading the code; #1 was also reproduced
 against a throwaway instance (`PORT=3999 CW_DATA_DIR=$(mktemp -d)`). The items are ranked by value. Each fix
@@ -212,3 +212,74 @@ tasks during a chat turn); `applyRoute` upsert/delete; chat delete mid-turn (`em
 - **Fix:** After `close`, `killGroup('SIGTERM')` (ignore ESRCH) and keep the SIGKILL follow-up timer (unref'd)
   instead of clearing it in `finally`.
 - **Fixed** (task #63): after the CLI closes, `spawnJsonl` SIGTERMs its process group if any member is left and keeps the unref'd 5 s SIGKILL follow-up (no longer cleared in `finally`), so the result isn't delayed; test/fixtures/bg-stub.mjs + test/agents.test.mjs.
+
+## Round 3 (2026-09-25, task #71): sign-in connections, drain/restart-when-idle, limit notices
+
+Checked and found no issue: every /api/connections route sits behind `isAuthed` and the POST same-origin check, the
+`:id` is looked up in the entry map (unknown → 404), and the WS `connections` broadcast only reaches authed sockets.
+The login command is built from fixed argv quoted with `shq`, and env var names come from the server's own env, so
+there is no shell injection. The pasted code is typed with `send-keys -l` and CR/LF is refused, so it can't run
+commands. The scraped URL only matches `https://` patterns, so the panel's link can't be `javascript:`. Claude logout
+needs strict `confirm === true` (only sent after the browser `confirm()`). `limitReset` works in fractions/epoch
+seconds on both paths, and codex/agy `resetsAt` are epoch seconds like `withUntil` expects. `refreshRepo` and
+`commitsSinceBoot` can't reject: `gh.remoteOf` and the `git` helper resolve on error.
+
+### 22. [med] A double "Connect" starts two logins; the orphan's timers later kill a new sign-in as "timed out" (connections.mjs:156-175)
+- **What:** `start` checks `logins.get(id)?.state === 'waiting'` and only sets the entry after two awaited tmux calls.
+  A second start that arrives in that window runs `kill-session` on the first one's new session and makes its own.
+  Both calls then `logins.set`, the second overwrites the first, and the first `setInterval` and 10-minute `deadline`
+  are never cleared. `finish` looks the login up by id rather than by identity, so when the orphaned deadline fires
+  it ends whichever login is current then. The same gap affects cancel: `cancel` while `start` is still in flight
+  finds no waiting entry, returns `{ok:true}`, and the login then starts anyway. A slow `probe()` (up to 8 s) from an
+  old login can also `finish` a newer one.
+- **Repro (verified):** with real tmux on a scratch socket, 20 pairs of `start('x')` calls 0-19 ms apart gave 6 cases
+  with two pollers. Using a fake tmux and `timeoutMs: 400`: double start, cancel, start again, and the new login fails
+  after 82 ms with "timed out after 10 minutes". Cancel 15 ms into a start returned ok, and the state stayed `waiting`.
+  In the UI the Connect button stays clickable until the reply arrives, so a double-click is enough.
+- **Fix:** Put the placeholder `{state:'waiting', …}` into `logins` synchronously before the first await (or keep a
+  per-id `starting` promise that later callers await). Have `finish(id, state, err, l)` act only when
+  `logins.get(id) === l`, and have the timer, deadline and probe closures pass their own `l`. `cancel` during a
+  start should mark the placeholder cancelled so `start` kills the session it just made.
+
+### 23. [med] After a server restart (or a missed WS message) the Connections panel is stuck on "Signing in…", and the login's tmux session is orphaned (public/app.js:1340-1348, connections.mjs:188-192)
+- **What:** Login state lives only in memory, and nothing clears the `agent-orch-login` socket at boot. When the
+  server restarts mid-login (now routine via "Restart when idle", #24), the `login-<id>` session keeps running. agy
+  never exits and `claude auth login` waits at its paste prompt, so both stay alive until someone starts that same
+  login again. The browser only loads connections once at boot (`refreshConnections`, app.js:2732) and after that
+  relies on WS `connections` broadcasts. `ws.onopen` refetches status but not connections, so the panel keeps showing
+  the old `waiting` login. Submit then fails with an alert ("No sign-in in progress"). Cancel hits `finish`, which
+  does nothing, and the response is `{ok:true}` with no `login` and no broadcast, so the panel doesn't change. The
+  Connect button is hidden while `waiting`, so only a page reload gets out. The same happens when the phone
+  sleeps through the `done`/`failed` broadcast.
+- **Fix:** Call `refreshConnections()` in `ws.onopen`. Have `cancel` return the current `login` (or null), and have
+  `connAction` apply it even when it's null. At startup, run `tmux -L agent-orch-login kill-server` (ignoring
+  errors) in `createConnections` or server boot.
+
+### 24. [med] "Restart when idle" exits in the middle of a chat reply or planner turn (server.mjs:1141-1146, orchestrator.mjs:1392-1395)
+- **What:** `drain()` waits only for orchestrator `running` tasks. It ignores Claude chat runtimes that are
+  replying (`rt.busy`), non-Claude chat turns (`agentTurns`), and chat planner turns (`planning` / `planningProjects`
+  'chat'). `planTurn` also doesn't check `draining`, so a message sent while draining still starts a planner run.
+  With no task running, `process.exit(0)` fires at once and kills the owner's in-flight reply or orchestrator-mode
+  plan (a planner reply and its tasks block are lost, and the chat shows the WS dropping). With tasks running, it
+  exits when the last task ends, whatever chat work is going on then. There is also no way to cancel a drain:
+  `restartPending` only resets on exit, so a long task keeps the orchestrator idle, and the banner hides its
+  buttons, until that task finishes.
+- **Fix:** Have the server's exit wait for `orch.drain()` **and** for no busy chat (`runtimes` busy, `agentTurns`,
+  `planning`): re-check on each chat `result`/turn end. While draining, queue new chat planner turns (or refuse them
+  with a notice). Optionally add `POST /api/restart-when-idle {cancel:true}`, which clears `draining`/`restartPending`.
+
+### 25. [low] A pasted Claude code that starts with `-` is read as tmux flags, and the UI says it was sent (connections.mjs:183-185)
+- **What:** `send-keys -t … -l <code>` doesn't put `--` before the code, so tmux's getopt parses a leading `-` as
+  options. Claude's OAuth codes are base64url, so about 1 in 64 start with `-`. The send fails, `submitCode` ignores
+  the tmux result and still sends a bare `Enter` to the CLI, and it returns 200, so the panel says "Code sent,
+  checking…" until the 10-minute timeout.
+- **Repro (verified, tmux 3.6):** `tmux send-keys -t =t: -l '-abc_def'` → `command send-keys: unknown flag -a`, exit 1.
+- **Fix:** Send `['send-keys', '-t', target, '-l', '--', code]`. If the send fails, return 500 (the session is gone)
+  and don't send Enter.
+
+### 26. [low] Old limit notices read "at your usage limit until now" when the chat history is reloaded (public/app.js:1773-1775)
+- **What:** `withUntil` formats `{until}` when the event is rendered. Persisted notices are replayed on every chat
+  open, and `fmtResetAt` returns `'now'` for a past time. So yesterday's notice reads "…until now; the orchestrator
+  answers then.", "Retrying around now." or "it resets now.", which looks like a current limit.
+- **Fix:** When `until` is in the past, render the absolute time (e.g. "until Thu 3:10 PM") without the relative
+  part, or add "(passed)".

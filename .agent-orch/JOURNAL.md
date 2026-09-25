@@ -249,3 +249,7 @@ Routes infer agents from model family and drop mismatched models
 ## 2026-09-25 09:01 — #63 CLI adapters kill leftover process-group members after normal exit (AUDIT #21) [done (check passed)]
 
 CLI runs now kill leftover process-group members; AUDIT #21 fixed
+
+## 2026-09-25 09:06 — #71 Audit round 3: sign-in connections, drain/restart-when-idle, limit notices [done (check passed)]
+
+AUDIT.md now has Round 3 with bugs #22-26

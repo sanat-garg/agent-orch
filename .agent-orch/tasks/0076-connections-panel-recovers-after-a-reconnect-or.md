@@ -13,3 +13,7 @@ Fix AUDIT.md item #23 (read the full finding in .agent-orch/AUDIT.md). Three cha
 ## Done when
 
 `npm test` passes with the new startup kill-server and cancel-returns-null tests, `node --check public/app.js` succeeds, and AUDIT.md marks #23 Fixed.
+
+## Result — done (check passed) (2026-09-25 09:19)
+
+AGENT-ORCH-STATUS: done — Connections panel reloads on reconnect; orphaned login tmux killed at boot

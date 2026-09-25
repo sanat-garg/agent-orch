@@ -1343,6 +1343,7 @@ function connect() {
     $('connText').textContent = 'Connected';
     send({ t: 'open', cid: state.cid });
     pollUpdates();
+    refreshConnections();
     if (!$('serverModal').hidden) send({ t: 'metrics_sub', on: true });
     if (O.drawer) { send({ t: 'owatch', taskId: O.drawer, on: true }); loadDetail(); }
   };
@@ -2525,7 +2526,7 @@ function openConnections(id) {
 async function connAction(c, action, body) {
   try {
     const r = await api(`/api/connections/${c.id}/${action}`, 'POST', body);
-    if (r.login) { c.login = r.login; renderConnections(true); }
+    if ('login' in r) { c.login = r.login; renderConnections(true); }
     return r;
   } catch (e) { alert(`${c.label}: ${e.message}`); return null; }
 }

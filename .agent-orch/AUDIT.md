@@ -1,6 +1,6 @@
 # Audit: server, orchestrator, GitHub wrapper, UI
 
-**Status (2026-09-25, task #71):** items 1-21 fixed (rounds 1-2); round 3: #22 and #25 fixed, #23-24 and #26 open.
+**Status (2026-09-25, task #71):** items 1-21 fixed (rounds 1-2); round 3: #22, #23 and #25 fixed, #24 and #26 open.
 
 _Task #12, 2026-09-24. Items were open when audited; a `- **Fixed** (task #N)` line marks one resolved since. Each item was verified by reading the code; #1 was also reproduced
 against a throwaway instance (`PORT=3999 CW_DATA_DIR=$(mktemp -d)`). The items are ranked by value. Each fix
@@ -255,6 +255,7 @@ seconds on both paths, and codex/agy `resetsAt` are epoch seconds like `withUnti
 - **Fix:** Call `refreshConnections()` in `ws.onopen`. Have `cancel` return the current `login` (or null), and have
   `connAction` apply it even when it's null. At startup, run `tmux -L agent-orch-login kill-server` (ignoring
   errors) in `createConnections` or server boot.
+- **Fixed** (task #76): `ws.onopen` calls `refreshConnections()`; `cancel` returns `login` (null when none) and `connAction` applies it; `createConnections` runs `kill-server` on the login socket at startup and `start` waits for it.
 
 ### 24. [med] "Restart when idle" exits in the middle of a chat reply or planner turn (server.mjs:1141-1146, orchestrator.mjs:1392-1395)
 - **What:** `drain()` waits only for orchestrator `running` tasks. It ignores Claude chat runtimes that are

@@ -107,6 +107,8 @@ export function createConnections({ entries, env = process.env, onChange = () =>
   const byId = new Map(entries.map((e) => [e.id, e]));
   const logins = new Map(); // id -> {state, url, code, needsPastedCode, error, startedAt, timer, answered}
   const session = (id) => `login-${id}`;
+  // Logins live in memory, so sessions left on the socket by a previous server process are orphans (AUDIT #23).
+  const booted = Promise.resolve().then(() => tmux(['kill-server'])).catch(() => {});
 
   const view = (l) => l && { state: l.state, url: l.url, code: l.code, needsPastedCode: l.needsPastedCode, error: l.error, startedAt: l.startedAt };
   function list() {
@@ -165,6 +167,7 @@ export function createConnections({ entries, env = process.env, onChange = () =>
     // The entry goes in before the first await, so a second start returns it and a cancel can reach it (AUDIT #22).
     const l = { state: 'waiting', url: null, code: null, needsPastedCode: !!e.spec.needsPastedCode, error: null, startedAt: Date.now(), probedAt: Date.now(), answered: new Set() };
     logins.set(id, l);
+    await booted;
     await tmux(['kill-session', '-t', `=${session(id)}`]);
     const r = await tmux(['new-session', '-d', '-s', session(id), '-x', '250', '-y', '50', '-c', os.homedir(), cmd]);
     if (l.state !== 'waiting') { // cancelled while starting: don't leave the new session behind
@@ -195,7 +198,7 @@ export function createConnections({ entries, env = process.env, onChange = () =>
   async function cancel(id) {
     if (!byId.has(id)) return { status: 404, error: 'No such connection' };
     await finish(id, 'cancelled');
-    return { status: 200, ok: true };
+    return { status: 200, ok: true, login: view(logins.get(id)) || null };
   }
 
   async function logout(id, { confirm = false } = {}) {

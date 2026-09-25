@@ -265,3 +265,7 @@ Codes are sent after `--`; failed sends return 500 without Enter; tests pass
 ## 2026-09-25 09:17 — #75 Make login start/cancel/finish race-safe (AUDIT #22) [done (check passed)]
 
 Login start/cancel/finish race-safe; race tests pass; #22 Fixed
+
+## 2026-09-25 09:19 — #76 Connections panel recovers after a reconnect or restart; kill orphaned login tmux at boot (AUDIT #23) [done (check passed)]
+
+Connections panel reloads on reconnect; orphaned login tmux killed at boot

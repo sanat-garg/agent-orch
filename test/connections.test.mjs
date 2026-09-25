@@ -232,3 +232,23 @@ test('claude logout needs an explicit confirmation and carries the warning', asy
   assert.deepEqual([r.status, r.needsConfirm], [409, true]);
   assert.equal((await conn.logout('claude', { confirm: true })).status, 200);
 });
+
+test('startup kills logins orphaned by a previous server on the login socket (AUDIT #23)', async () => {
+  const { t, conn } = setup(SPECS.codex);
+  await until(() => t.calls.length > 0);
+  assert.deepEqual(t.calls[0], ['kill-server']);
+  await conn.start('x');
+  assert.deepEqual(t.calls.slice(0, 3).map((c) => c[0]), ['kill-server', 'kill-session', 'new-session'], 'start waits for it');
+  await conn.cancel('x');
+  // A failing tmux (e.g. no server running) is ignored.
+  createConnections({ entries: [], tmux: async () => { throw new Error('no server'); } });
+});
+
+test('cancel with no login returns login: null so a stale panel clears (AUDIT #23)', async () => {
+  const { conn } = setup(SPECS.codex);
+  const { status, ...body } = await conn.cancel('x');
+  assert.equal(status, 200);
+  assert.deepEqual(body, { ok: true, login: null });
+  await conn.start('x');
+  assert.equal((await conn.cancel('x')).login.state, 'cancelled');
+});

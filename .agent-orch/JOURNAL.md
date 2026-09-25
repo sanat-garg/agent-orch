@@ -169,3 +169,7 @@ ensureRepo dedupes concurrent calls per dir; test passes
 ## 2026-09-25 03:57 — #45 runCheck honours task cancellation and kills its process group (AUDIT #11) [done (check passed)]
 
 runCheck now honours task cancellation and kills its process group
+
+## 2026-09-25 04:02 — #46 Planner-busy guard so plan tasks and chat planner turns never overlap (AUDIT #5) [done (check passed)]
+
+Plan tasks and chat planner turns no longer overlap; test added

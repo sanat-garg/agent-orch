@@ -13,3 +13,7 @@ Fix AUDIT #5 in .agent-orch/AUDIT.md. In orchestrator.mjs, `planTurn` (chat, ~12
 ## Done when
 
 `npm test` passes and `grep -A14 '### 5\.' .agent-orch/AUDIT.md | grep -q Fixed`
+
+## Result — done (check passed) (2026-09-25 04:02)
+
+AGENT-ORCH-STATUS: done — Plan tasks and chat planner turns no longer overlap; test added

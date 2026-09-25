@@ -63,6 +63,7 @@ a same-origin request. Caddy's `reverse_proxy` overwrites `X-Forwarded-For`, so 
 - **Fix:** Keep a per-project "planner busy" guard that both `planTurn` and plan-task `execute` check. The chat
   side should queue behind it (or the plan task should defer while the chat side is busy). Reuse the :1086
   existence check at :1121.
+- **Fixed** (task #46): `planningProjects` records who holds the planner session ('chat'/'task'); claimNext skips plan tasks while a chat turn runs, a chat message during a plan task is saved and answered by a follow-up plan task, and `deferMessage` dedupes "Answer owner's message" tasks (test/planner-guard.test.mjs).
 
 ### 6. [med] Deleting a chat mid-plan keeps planning and reactivates the paused project (server.mjs:1021-1029)
 - **What:** DELETE calls `orch.abortPlan` and `detachConvo` but doesn't clear `planQueue`. When the aborted turn

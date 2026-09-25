@@ -862,7 +862,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
   function claimNext(allowed) {
     // Mandatory GitHub protocol: a project's work only starts once its repo exists.
-    const row = runnable(allowed, true, 25).find((r) => projectReady(getProject(r.project_id)?.path));
+    // A plan task waits while the owner's chat turn holds the planner session (AUDIT #5).
+    const row = runnable(allowed, true, 25).find((r) => !(r.kind === 'plan' && planningProjects.has(r.project_id)) && projectReady(getProject(r.project_id)?.path));
     if (!row) return null;
     run("UPDATE tasks SET status='running', started_at=:t WHERE id=:id", { t: now(), id: row.id });
     pushTask(row.id);
@@ -1209,30 +1210,41 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
 
   const planAborts = new Map(); // convo id -> AbortController for a planner turn in progress
-  const planningProjects = new Set();
+  // project id -> 'chat' | 'task': who holds the planner session. Two `--resume` runs must never share it.
+  const planningProjects = new Map();
+  // Save a chat message for later and make sure one plan task (other than `selfId`) is waiting to answer it.
+  function deferMessage(projectId, text, selfId = 0) {
+    if (text != null) run("INSERT INTO messages(project_id,content,created_at) VALUES(:p,:c,:t)", { p: projectId, c: text, t: now() });
+    if (!q1("SELECT 1 AS x FROM tasks WHERE project_id=:p AND kind='plan' AND status IN ('queued','running') AND id!=:s", { p: projectId, s: selfId })) {
+      addTask(projectId, { title: "Answer owner's message", prompt: '(pending chat messages)', kind: 'plan', source: 'user' });
+    }
+  }
   async function planTurn(convo, text) {
     const project = ensureProject(convo);
     await ensureGit(project.path);
     if (project.status !== 'active') updateProject(project.id, { status: 'active' });
+    // A plan task is answering saved messages on this session: queue behind it.
+    if (planningProjects.get(project.id) === 'task') {
+      deferMessage(project.id, text);
+      emitChat(convo.id, { t: 'notice', text: 'Saved. The planner is busy answering earlier messages; it answers this right after.' });
+      return;
+    }
     // While limited, save the message; a plan task answers it the moment capacity returns.
     const blocked = blockedUntil();
     if (blocked) {
-      run("INSERT INTO messages(project_id,content,created_at) VALUES(:p,:c,:t)", { p: project.id, c: text, t: now() });
-      if (!qa("SELECT id FROM tasks WHERE project_id=:p AND kind='plan' AND status IN ('queued','running')", { p: project.id }).length) {
-        addTask(project.id, { title: "Answer owner's message", prompt: '(pending chat messages)', kind: 'plan', source: 'user' });
-      }
+      deferMessage(project.id, text);
       emitChat(convo.id, { t: 'notice', text: `Saved. You're at your usage limit until ${new Date(blocked * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}; the orchestrator answers then.` });
       return;
     }
     const ac = new AbortController();
     planAborts.set(convo.id, ac);
-    planningProjects.add(project.id);
-    try { await plannerRun(project, text, convo.id, ac.signal); }
+    planningProjects.set(project.id, 'chat');
+    try { await plannerRun(project, text, convo.id, ac.signal, true); }
     finally { planAborts.delete(convo.id); planningProjects.delete(project.id); }
   }
   const abortPlan = (convoId) => planAborts.get(convoId)?.abort();
 
-  async function plannerRun(project, text, convoId, signal) {
+  async function plannerRun(project, text, convoId, signal, fromChat = false) {
     const prompt = plannerTurnPrompt(project, listTasks(project.id, 25), text, `${ENVIRONMENT}\n${routesText(project.id)}`);
     // The planner streams Claude messages into the chat, so a 'plan' route can only change its Claude model.
     const route = resolveRoute({ kind: 'plan', title: '' }, project, listRoutes(project.id), () => true);
@@ -1253,10 +1265,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         const why = res.outcome === 'rate_limited' ? 'You hit your usage limit. The message is saved and will be answered after the reset.'
           : res.outcome === 'aborted' ? 'Stopped.' : `The planner couldn't finish (${res.outcome}). ${String(res.stderr || res.text).trim().slice(-300)}`;
         emitChat(convoId, { t: res.outcome === 'aborted' ? 'notice' : 'error', text: why });
-        if (res.outcome === 'rate_limited') {
-          run("INSERT INTO messages(project_id,content,created_at) VALUES(:p,:c,:t)", { p: project.id, c: text, t: now() });
-          addTask(project.id, { title: "Answer owner's message", prompt: '(pending chat messages)', kind: 'plan', source: 'user' });
-        }
+        // A plan task's messages are still pending and the task itself is requeued.
+        if (res.outcome === 'rate_limited' && fromChat) deferMessage(project.id, text);
       }
       return { res, ids: [] };
     }
@@ -1346,9 +1356,14 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         if (!pending.length) return updateTask(task.id, { status: 'done', finished_at: now(), result: 'nothing pending' });
         let text = pending.map((m) => m.content).join('\n\n');
         if (pending.length > 1) text = '(Several messages arrived while you were rate-limited:)\n\n' + text;
-        const out = await plannerRun(project, text, project.convo_id && convoExists(project.convo_id) ? project.convo_id : null, signal);
-        res = out.res;
-        if (res.outcome === 'ok') for (const m of pending) run("UPDATE messages SET status='done' WHERE id=:id", { id: m.id });
+        planningProjects.set(project.id, 'task');
+        try { res = (await plannerRun(project, text, project.convo_id && convoExists(project.convo_id) ? project.convo_id : null, signal)).res; }
+        finally { if (planningProjects.get(project.id) === 'task') planningProjects.delete(project.id); }
+        if (res.outcome === 'ok') {
+          for (const m of pending) run("UPDATE messages SET status='done' WHERE id=:id", { id: m.id });
+          // Messages the owner sent while this ran get their own turn.
+          if (q1("SELECT 1 AS x FROM messages WHERE project_id=:p AND status='pending'", { p: project.id })) deferMessage(project.id, null, task.id);
+        }
       } else {
         res = await runTask(task, project, signal);
       }

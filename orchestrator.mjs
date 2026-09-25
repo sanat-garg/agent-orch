@@ -19,7 +19,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { AGENTS, agentStatus, isMissingSession, modelCatalog, modelNames, runAgentCli, toolInputSummary } from './agents.mjs';
 import { mediaCollector } from './media.mjs';
 import { createUsageLog } from './usage.mjs';
-import { CATEGORIES, DELEGATE_CFG, createDelegator, eligible as delegationEligible } from './delegate.mjs';
+import { CATEGORIES, DELEGATE_CFG, createDelegator, eligible as delegationEligible, rankCandidates, taskCategory } from './delegate.mjs';
 
 // ---------------------------------------------------------------- config
 
@@ -1302,6 +1302,57 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     logEvent(`#${task.id} delegated from ${fromName} (at its usage limit) to ${top.agent}/${top.model}: ${top.reason}`, { projectId: task.project_id, taskId: task.id });
     return true;
   }
+  // Manual delegation (the task drawer's "Delegate…" sheet). The owner is choosing, so policy and pins don't apply;
+  // every model of a connected agent is listed with its status, comparable candidates (delegate.mjs ranking) first.
+  function agentUsage(agent) {
+    const until = blockedUntilFor(agent);
+    if (until) return { status: 'limited', until };
+    const hot = (usageLog.current?.(agent) || []).filter((w) => Number(w.pct) >= CFG.delegate.maxWindowPct);
+    if (hot.length) return { status: 'limited', until: Math.max(0, ...hot.map((w) => w.resetsAt || 0)) || null, window: hot[0].window };
+    return { status: 'available', until: null };
+  }
+  function delegateOptions(id) {
+    const task = getTask(id);
+    if (!task) return null;
+    const cur = intendedRoute(task, getProject(task.project_id));
+    let view = null;
+    try { view = modelMetrics(); } catch {}
+    const entries = view?.entries || [];
+    const connected = Object.keys(AGENTS).filter((a) => (a === 'claude' ? onSubscription() : agentAvailable(a) === true));
+    const all = connected.flatMap((a) => (modelCatalog(a).models || []).map((m) => ({ agent: a, model: m.id, label: m.label || m.id, default: !!m.default })));
+    const current = { agent: cur.agent, model: cur.model || all.find((m) => m.agent === cur.agent && m.default)?.model || null };
+    const ranked = rankCandidates({ current, entries, available: all, category: taskCategory(task), cfg: CFG.delegate });
+    const byKey = new Map(ranked.candidates.map((c) => [`${c.agent}/${c.model}`, c]));
+    const metricsOf = (a, m) => entries.find((e) => e.agent === a && e.model === m)?.metrics || null;
+    const rows = all.filter((m) => !(m.agent === current.agent && m.model === current.model)).map((m) => {
+      const c = byKey.get(`${m.agent}/${m.model}`);
+      return { agent: m.agent, model: m.model, label: m.label, ...agentUsage(m.agent), comparable: !!c, score: c?.score ?? null, ratio: c?.ratio ?? null,
+        reason: c?.reason || (ranked.original ? 'not comparable on the metrics' : 'no metrics for the current model'), metrics: metricsOf(m.agent, m.model) };
+    });
+    const rank = new Map(ranked.candidates.map((c, i) => [`${c.agent}/${c.model}`, i]));
+    rows.sort((a, b) => (rank.get(`${a.agent}/${a.model}`) ?? 1e9) - (rank.get(`${b.agent}/${b.model}`) ?? 1e9) || (a.status === 'available' ? 0 : 1) - (b.status === 'available' ? 0 : 1));
+    return { task: taskView(task), category: ranked.category, source: view?.source || 'manual', fetched_at: view?.fetched_at ?? null, attribution: view?.attribution || null,
+      current: { ...current, label: all.find((m) => m.agent === current.agent && m.model === current.model)?.label || current.model, score: ranked.original?.score ?? null,
+        metrics: metricsOf(current.agent, current.model), ...agentUsage(current.agent) }, candidates: rows };
+  }
+  function delegateTask(id, { agent, model } = {}) {
+    const task = getTask(id);
+    if (!task) return { error: 'No such task', status: 404 };
+    if (task.status !== 'queued') return { error: `Only queued tasks can be delegated (#${id} is ${task.status})`, status: 409 };
+    if ((task.kind || 'work') !== 'work') return { error: 'Only work tasks can be delegated', status: 409 };
+    if (!AGENTS[agent]) return { error: 'Unknown agent' };
+    model = model ? String(model) : null;
+    if (unlistedModel(agent, model)) return { error: `${model} is not a ${agent} model` };
+    const project = getProject(task.project_id);
+    const from = intendedRoute(task, project);
+    const fromName = `${from.agent}/${from.model || 'default'}`;
+    const opt = delegateOptions(id)?.candidates.find((c) => c.agent === agent && c.model === model);
+    const reason = `chosen by the owner${opt?.comparable ? `; ${opt.reason}` : ''}`;
+    updateTask(id, { agent, model, session_id: null, delegated_from: task.delegated_from || fromName, delegated_reason: reason });
+    logEvent(`#${id} delegated by the owner from ${fromName} to ${agent}/${model || 'default'}`, { projectId: task.project_id, taskId: id });
+    setTimeout(tick, 100);
+    return { ok: true, task: taskView(getTask(id)) };
+  }
   function routesText(projectId) {
     const agents = Object.values(AGENTS).map((a) => {
       const st = a.id === 'claude' || agentStatus(a.id);
@@ -2010,7 +2061,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   return {
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
-    planTurn, abortPlan, candidates, eligible: delegationEligible, taskAction, projectAction, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
+    planTurn, abortPlan, candidates, eligible: delegationEligible, delegateOptions, delegateTask, taskAction, projectAction, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
     drain, undrain, chatPlanning, stateView, limitResetFor, recordLimit: recordGovernor, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     unwatch: (ws) => { for (const set of runSubs.values()) set.delete(ws); },
   };

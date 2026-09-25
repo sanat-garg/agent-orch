@@ -64,3 +64,13 @@ test('the sidebar usage card opens the Usage modal with per-agent charts', () =>
   assert.match(appJs, /U\.timer = setInterval\(loadUsageHistory, 60e3\)/, 'live refresh while open');
   assert.match(appJs, /openConnections\(id\)/);
 });
+
+test("the model picker renders 'Auto Delegate' first and each message carries the choice", () => {
+  const fn = appJs.slice(appJs.indexOf('function renderAgentPicker()'));
+  const body = fn.slice(0, fn.indexOf('\n}\n'));
+  assert.match(body, /el\('option', '', 'Auto Delegate'\)[\s\S]*?value = AUTO_PICK;[\s\S]*?sel\.append\(auto\);[\s\S]*for \(const a of AGENT_LIST\)/);
+  assert.match(appJs, /send\(\{ t: 'send', cid: state\.cid, text, autoDelegate: autoPick\(\) \}\)/);
+  assert.match(indexHtml, /id="pickChip"/);
+  assert.match(appJs, /\/api\/orch\/tasks\/\$\{[^}]+\}\/delegate/);
+  assert.match(appJs, /'Delegate…'/);
+});

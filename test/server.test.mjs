@@ -384,3 +384,54 @@ test('GET /api/models/metrics: manual without a key, Artificial Analysis once a 
   assert.equal(JSON.parse(r.text).configured, false);
   assert.equal(JSON.parse((await call('GET', '/api/models/metrics')).text).source, 'manual');
 });
+
+test('POST /api/orch/tasks/:id/delegate reassigns a queued task and rejects running and done ones', async () => {
+  const r0 = await fetch(base + '/api/orch/tasks/1/delegate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  assert.equal(r0.status, 401);
+  await r0.arrayBuffer();
+  const ok = await fetch(base + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: PASSWORD }) });
+  const cookie = ok.headers.get('set-cookie').split(';')[0];
+  await ok.arrayBuffer();
+  const call = async (m, p, body) => {
+    const r = await fetch(base + p, { method: m, headers: { cookie, 'content-type': 'application/json' }, body: body && JSON.stringify(body) });
+    return { status: r.status, body: JSON.parse(await r.text()) };
+  };
+  // A paused project, so the test server's scheduler never runs these rows.
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
+  db.exec('PRAGMA busy_timeout=5000');
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-del-proj-'));
+  try {
+    const pid = Number(db.prepare("INSERT INTO projects(path,name,status,perpetual,created_at) VALUES(?,?,'paused',0,0)").run(proj, 'del').lastInsertRowid);
+    const task = (status, pinned = null) => Number(db.prepare("INSERT INTO tasks(project_id,title,prompt,status,origin,pinned_model,agent,model,created_at) VALUES(?,?,?,?,'chat',?,'codex','gpt-x',0)")
+      .run(pid, 'Fix the parser bug', 'code', status, pinned).lastInsertRowid);
+    const queued = task('queued', 'gpt-x'), running = task('running'), done = task('done');
+
+    let r = await call('GET', `/api/orch/tasks/${queued}/delegate`);
+    assert.equal(r.status, 200);
+    assert.deepEqual([r.body.current.agent, r.body.current.model], ['codex', 'gpt-x']);
+    assert.ok(Array.isArray(r.body.candidates) && 'source' in r.body && 'fetched_at' in r.body);
+    assert.equal((await call('GET', '/api/orch/tasks/999999/delegate')).status, 404);
+
+    assert.equal((await call('POST', `/api/orch/tasks/${queued}/delegate`, { agent: 'nope' })).status, 400);
+    // Pinned or not, the owner's choice goes through.
+    r = await call('POST', `/api/orch/tasks/${queued}/delegate`, { agent: 'claude', model: null });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    let row = db.prepare('SELECT * FROM tasks WHERE id=?').get(queued);
+    assert.deepEqual([row.status, row.agent, row.model, row.delegated_from], ['queued', 'claude', null, 'codex/gpt-x']);
+    assert.match(row.delegated_reason, /chosen by the owner/);
+    assert.equal(r.body.task.delegated_from, 'codex/gpt-x');
+
+    for (const id of [running, done]) {
+      r = await call('POST', `/api/orch/tasks/${id}/delegate`, { agent: 'claude' });
+      assert.equal(r.status, 409, JSON.stringify(r.body));
+      assert.match(r.body.error, /Only queued tasks/);
+      row = db.prepare('SELECT * FROM tasks WHERE id=?').get(id);
+      assert.deepEqual([row.agent, row.model, row.delegated_from], ['codex', 'gpt-x', null]);
+    }
+    assert.equal((await call('POST', '/api/orch/tasks/999999/delegate', { agent: 'claude' })).status, 404);
+  } finally {
+    db.close();
+    fs.rmSync(proj, { recursive: true, force: true });
+  }
+});

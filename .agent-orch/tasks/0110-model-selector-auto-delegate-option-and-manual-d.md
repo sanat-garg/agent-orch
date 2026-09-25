@@ -13,3 +13,7 @@ UI plus wiring for delegation (public/app.js, app.css, server.mjs, orchestrator.
 ## Done when
 
 `npm test` passes with delegate-endpoint tests, and app.js renders an 'Auto Delegate' option in the model picker
+
+## Result — done (check passed) (2026-09-25 18:42)
+
+AGENT-ORCH-STATUS: done — Auto Delegate picker option and manual Delegate sheet with endpoint tests

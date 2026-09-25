@@ -361,3 +361,7 @@ AA key storage, cached metrics, model mapping, /api/models/metrics, tests pass
 ## 2026-09-25 18:33 — #109 Delegation engine: rank comparable models with available usage for a task [done (check passed)]
 
 delegate.mjs ranks models and moves eligible tasks; tests pass
+
+## 2026-09-25 18:42 — #110 Model selector 'Auto Delegate' option and manual Delegate action on queued tasks [done (check passed)]
+
+Auto Delegate picker option and manual Delegate sheet with endpoint tests

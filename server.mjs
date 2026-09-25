@@ -1318,6 +1318,20 @@ async function handleRequest(req, res) {
     const d = orch.taskDetail(id);
     return d ? json(res, 200, d) : json(res, 404, { error: 'No such task' });
   }
+  // Manual delegation: GET lists the options (delegate.mjs ranking + usage status), POST {agent, model} reassigns a queued task.
+  const od = p.match(/^\/api\/orch\/tasks\/(\d+)\/delegate$/);
+  if (od) {
+    const id = Number(od[1]);
+    if (req.method === 'GET') {
+      const v = orch.delegateOptions(id);
+      return v ? json(res, 200, v) : json(res, 404, { error: 'No such task' });
+    }
+    if (req.method === 'POST') {
+      const body = await readBody(req);
+      const r = orch.delegateTask(id, { agent: String(body.agent || ''), model: body.model || null });
+      return json(res, r.error ? r.status || 400 : 200, r.error ? { error: r.error } : r);
+    }
+  }
   const op = p.match(/^\/api\/orch\/project\/(\d+)$/);
   if (op && req.method === 'POST') {
     const r = orch.projectAction(Number(op[1]), await readBody(req));

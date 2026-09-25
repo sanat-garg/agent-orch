@@ -75,6 +75,7 @@ const state = {
   draftMode: store.get('cw.fullAccess') ? store.get('cw.mode') || 'bypassPermissions'
     : (store.set('cw.fullAccess', '1'), ['plan', 'orchestrator'].includes(store.get('cw.mode')) ? store.get('cw.mode') : 'bypassPermissions'),
   draftModel: store.get('cw.model') || 'claude|', // agent|model (an older saved value is a bare Claude model)
+  draftAuto: store.get('cw.auto') === '1', // Auto Delegate for the next new chat
   busy: false,
   ws: null,
   live: null,        // element receiving streamed text
@@ -1173,6 +1174,7 @@ $('composer').addEventListener('submit', async (e) => {
       if (!state.convos.find((x) => x.id === c.id)) state.convos.unshift(c);
       openConvo(c.id);
       if (pickVal(parsePick(state.draftModel)) !== 'claude|') send({ t: 'set_model', cid: c.id, ...parsePick(state.draftModel) });
+      setAutoPick(state.draftAuto);
     } catch (err) {
       const n = el('div', 'notice error', err.message);
       if (/github/i.test(err.message)) {
@@ -1185,7 +1187,7 @@ $('composer').addEventListener('submit', async (e) => {
       return;
     }
   }
-  if (!send({ t: 'send', cid: state.cid, text })) {
+  if (!send({ t: 'send', cid: state.cid, text, autoDelegate: autoPick() })) {
     // Keep the text (under this chat's draft key, which reconnect restores) rather than lose it.
     store.set('cw.draft.' + state.cid, input.value);
     add(el('div', 'notice error', 'Not connected, reconnecting. Your message was kept.'));
@@ -1211,7 +1213,9 @@ function changeMode(mode) {
 $('mode').addEventListener('change', () => changeMode($('mode').value));
 $('model').addEventListener('change', () => {
   const v = $('model').value;
-  if (v === CONNECT_PICK) { $('model').value = $('model').dataset.prev || 'claude|'; openConnections(); return; }
+  if (v === CONNECT_PICK) { $('model').value = autoPick() ? AUTO_PICK : $('model').dataset.prev || 'claude|'; openConnections(); return; }
+  if (v === AUTO_PICK) { setAutoPick(true); return; }
+  setAutoPick(false);
   $('model').dataset.prev = v;
   if (state.cid) send({ t: 'set_model', cid: state.cid, ...parsePick(v) });
   else { state.draftModel = v; store.set('cw.model', v); }
@@ -1223,6 +1227,29 @@ let AGENT_LIST = [];
 // A model's display name as its CLI reports it (the id when the agent's list doesn't name it).
 const modelLabel = (agent, id) => AGENT_LIST.find((a) => a.id === agent)?.models.find((m) => m.id === id || m.resolved === id)?.label || id;
 const CONNECT_PICK = '__connect'; // the picker's last option: opens the Connections window
+// The picker's first option: agent-orch may move this chat's queued tasks to a comparable model with usage left
+// (BRIEF goal 8). It is a per-chat flag sent with each message; the chat keeps its agent/model as the starting point.
+// Any specific model pins the tasks to it.
+const AUTO_PICK = '__auto';
+const autoPick = () => (state.cid ? store.get('cw.auto.' + state.cid) === '1' : state.draftAuto);
+function setAutoPick(on) {
+  if (state.cid) store.set('cw.auto.' + state.cid, on ? '1' : '0');
+  else { state.draftAuto = on; store.set('cw.auto', on ? '1' : '0'); }
+  const sel = $('model');
+  sel.value = on ? AUTO_PICK : sel.dataset.prev || 'claude|';
+  renderPickChip();
+}
+// The composer chip: "Auto" or the model this chat's tasks are pinned to.
+function renderPickChip() {
+  const c = $('pickChip');
+  if (!c) return;
+  const { agent, model } = parsePick($('model').dataset.prev || 'claude|');
+  const auto = autoPick();
+  c.classList.toggle('auto', auto);
+  c.textContent = auto ? 'Auto' : model ? modelLabel(agent, model) : shortLabel(agent);
+  c.title = auto ? `Auto Delegate: queued tasks may move to a comparable model with usage left (starts on ${model ? modelLabel(agent, model) : shortLabel(agent)})`
+    : 'Pinned: tasks from this chat stay on this model';
+}
 const pickVal = ({ agent, model }) => `${agent || 'claude'}|${model || ''}`;
 const parsePick = (v) => (v.includes('|') ? { agent: v.slice(0, v.indexOf('|')), model: v.slice(v.indexOf('|') + 1) } : { agent: 'claude', model: v });
 const shortLabel = (agent) => (AGENT_LIST.find((a) => a.id === agent)?.label || agent).replace(/ (Code|CLI)$/, '');
@@ -1234,12 +1261,17 @@ function setPick(v) {
     o.value = val;
     sel.append(o);
   }
-  sel.value = val;
   sel.dataset.prev = val;
+  sel.value = autoPick() ? AUTO_PICK : val;
+  renderPickChip();
 }
 function renderAgentPicker() {
-  const sel = $('model'), keep = sel.value;
+  const sel = $('model'), keep = sel.dataset.prev || sel.value;
   sel.textContent = '';
+  const auto = el('option', '', 'Auto Delegate');
+  auto.value = AUTO_PICK;
+  auto.title = 'agent-orch picks, and may reassign to a comparable model with usage left while this message\'s tasks wait';
+  sel.append(auto);
   for (const a of AGENT_LIST) {
     const g = document.createElement('optgroup');
     g.label = !a.available ? `${a.label} (not installed)` : a.loggedIn === false ? `${a.label} (sign in via Connections)` : a.label;
@@ -1279,6 +1311,13 @@ function agentBadge(t) {
   b.title = t.ran_agent ? 'Agent and model it ran on' : 'Agent and model it will run on';
   if (t.route_note) { b.classList.add('warn'); b.title += ` — ${t.route_note}`; }
   if (t.delegated_from) { b.textContent = `↪ ${b.textContent}`; b.title += ` — delegated from ${t.delegated_from}${t.delegated_reason ? `: ${t.delegated_reason}` : ''}`; }
+  return b;
+}
+// "delegated from claude/opus": shown next to the agent badge.
+function delegatedBadge(t) {
+  if (!t.delegated_from) return null;
+  const b = el('span', 'tc-tag deleg', `delegated from ${t.delegated_from}`);
+  b.title = t.delegated_reason || '';
   return b;
 }
 
@@ -2474,6 +2513,8 @@ function fillCard(b, id) {
   if (open && t.deadline) tags.append(el('span', 'tc-tag due', `Due ${fmtDue(t.deadline)}`));
   const badge = agentBadge(t);
   if (badge) tags.append(badge);
+  const deleg = delegatedBadge(t);
+  if (deleg) tags.append(deleg);
   b.classList.toggle('active', O.drawer === id);
 }
 const refreshCards = (id) => document.querySelectorAll(`.tcard[data-task="${id}"]`).forEach((b) => fillCard(b, id));
@@ -2666,6 +2707,8 @@ function renderDrawerHead() {
   $('drKicker').textContent = t ? `#${t.id} · ${kindLabel(t)}` : `#${id}`;
   const badge = t && agentBadge(t);
   if (badge) $('drKicker').append(' ', badge);
+  const deleg = t && delegatedBadge(t);
+  if (deleg) $('drKicker').append(' ', deleg);
   $('drTitle').textContent = t ? displayTitle(t) : 'Loading…';
 }
 
@@ -2721,6 +2764,10 @@ function renderDrawer(fromLive = false) {
       const next = el('button', 'btn small', 'Do next');
       next.onclick = () => orchAction('next');
       row.append(next);
+      const dg = el('button', 'btn small', 'Delegate…');
+      dg.title = 'Move this task to another agent or model';
+      dg.onclick = () => openDelegate(t.id);
+      row.append(dg);
     }
   }
   if (isOpen) {
@@ -2941,6 +2988,113 @@ async function orchAction(action, value) {
     O.err = e.message;
   }
   loadDetail();
+}
+
+// ----- the "Delegate…" sheet: move a queued task to another agent/model (GET/POST /api/orch/tasks/:id/delegate)
+const DG = { id: null, data: null, err: '', busy: false, lastFocus: null };
+// [label, read(metrics), format, higher is better]
+const DG_METRICS = [
+  ['Coding Index', (m) => m.coding_index, (v) => v.toFixed(1), true],
+  ['Agentic Index', (m) => m.agentic_index, (v) => v.toFixed(1), true],
+  ['Terminal-Bench', (m) => m.benchmarks?.terminalbench_hard, (v) => `${(v <= 1 ? v * 100 : v).toFixed(1)}%`, true],
+  ['SciCode', (m) => m.benchmarks?.scicode, (v) => `${(v <= 1 ? v * 100 : v).toFixed(1)}%`, true],
+  ['TTFT', (m) => m.ttft_s, (v) => `${v.toFixed(2)} s`, false],
+  ['Speed', (m) => m.tokens_per_s, (v) => `${Math.round(v)} tok/s`, true],
+  ['Context', (m) => m.context_window, (v) => (v >= 1e6 ? `${+(v / 1e6).toFixed(1)}M` : `${Math.round(v / 1e3)}k`), true],
+  ['Price', (m) => m.pricing?.blended ?? m.pricing?.output, (v) => `$${v.toFixed(2)}/M`, false],
+];
+const dgNum = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+function openDelegate(id) {
+  if ($('delegModal').hidden) DG.lastFocus = document.activeElement;
+  Object.assign(DG, { id, data: null, err: '', busy: false });
+  $('delegModal').hidden = false;
+  renderDelegate();
+  $('delegModal').querySelector('[data-close].icon-btn').focus();
+  api(`/api/orch/tasks/${id}/delegate`).then((d) => { if (DG.id === id) { DG.data = d; renderDelegate(); } })
+    .catch((e) => { if (DG.id === id) { DG.err = e.message; renderDelegate(); } });
+}
+function closeDelegate() {
+  $('delegModal').hidden = true;
+  DG.id = null;
+  DG.lastFocus?.focus?.();
+}
+$('delegModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeDelegate(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('delegModal').hidden) { e.stopImmediatePropagation(); closeDelegate(); } }, true);
+function dgStatus(r) {
+  if (r.status === 'available') return el('span', 'dg-st ok', 'available');
+  return el('span', 'dg-st lim', r.until ? `limited until ${fmtUntil(r.until)}` : 'limited');
+}
+function dgMetrics(m, base) {
+  const g = el('div', 'dg-metrics');
+  for (const [label, read, fmt, up] of DG_METRICS) {
+    const v = m && dgNum(read(m)), b = base && dgNum(read(base));
+    const cell = el('div', 'dg-m');
+    cell.append(el('span', 'k', label), el('span', 'v', v == null ? '—' : fmt(v)));
+    if (v != null && b != null && b !== 0 && v !== b) {
+      const pct = ((v - b) / Math.abs(b)) * 100;
+      const better = up ? v > b : v < b;
+      cell.append(el('span', `d ${better ? 'up' : 'down'}`, `${pct > 0 ? '+' : ''}${Math.abs(pct) < 10 ? pct.toFixed(1) : Math.round(pct)}%`));
+    }
+    g.append(cell);
+  }
+  return g;
+}
+function renderDelegate() {
+  const body = $('dgBody'), d = DG.data;
+  body.textContent = '';
+  const t = O.tasks.get(DG.id) || d?.task;
+  $('dgTitle').textContent = `Delegate #${DG.id}`;
+  $('dgSub').textContent = t ? displayTitle(t) : '';
+  if (DG.err) body.append(el('div', 'dr-err', DG.err));
+  if (!d) { if (!DG.err) body.append(el('div', 'out-live', 'Loading…')); return; }
+  const src = el('p', 'dg-src');
+  src.append(d.source === 'artificialanalysis' ? 'Metrics from Artificial Analysis' : 'Metrics entered manually (.agent-orch/model-metrics.json)',
+    d.fetched_at ? ` · updated ${relTime(d.fetched_at)}` : ' · never updated', ` · ranked for ${d.category} work`);
+  if (d.attribution?.url) {
+    const a = el('a', '', d.attribution.text);
+    a.href = d.attribution.url; a.target = '_blank'; a.rel = 'noopener';
+    src.append(' · ', a);
+  }
+  body.append(src);
+  const cur = el('div', 'dg-row current');
+  const ch = el('div', 'dg-head');
+  ch.append(el('span', 'dg-name', `Now: ${d.current.agent} · ${d.current.label || d.current.model || 'default model'}`), dgStatus(d.current));
+  cur.append(ch, dgMetrics(d.current.metrics, null));
+  body.append(cur);
+  if (!d.candidates.length) body.append(el('p', 'muted', 'No other signed-in agent or model to move it to.'));
+  let shownOther = false;
+  for (const r of d.candidates) {
+    if (!r.comparable && !shownOther) { body.append(el('h3', 'dg-group', 'Other models')); shownOther = true; }
+    const row = el('button', `dg-row${r.status === 'available' ? '' : ' limited'}`);
+    row.type = 'button';
+    row.disabled = DG.busy;
+    const h = el('div', 'dg-head');
+    h.append(el('span', 'dg-name', `${r.agent} · ${r.label || r.model}`));
+    if (r.ratio != null) {
+      const pct = Math.round((r.ratio - 1) * 100);
+      h.append(el('span', `dg-delta ${pct >= 0 ? 'up' : 'down'}`, `${pct >= 0 ? '+' : ''}${pct}% vs now`));
+    }
+    h.append(dgStatus(r));
+    row.append(h, dgMetrics(r.metrics, d.current.metrics), el('div', 'dg-why', r.reason));
+    row.onclick = () => pickDelegate(r);
+    body.append(row);
+  }
+}
+async function pickDelegate(r) {
+  if (DG.busy) return;
+  DG.busy = true;
+  renderDelegate();
+  try {
+    const res = await api(`/api/orch/tasks/${DG.id}/delegate`, 'POST', { agent: r.agent, model: r.model });
+    if (res.task) O.tasks.set(res.task.id, { ...(O.tasks.get(res.task.id) || {}), ...res.task });
+    O.err = '';
+    closeDelegate();
+    loadDetail();
+  } catch (e) {
+    DG.busy = false;
+    DG.err = e.message;
+    renderDelegate();
+  }
 }
 
 // ---------- GitHub ----------

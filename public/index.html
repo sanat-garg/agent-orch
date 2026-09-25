@@ -157,6 +157,7 @@
                   <option value="claude|">Claude Code</option>
                 </select>
               </label>
+              <span class="pick-chip" id="pickChip" aria-live="polite"></span>
             </div>
             <button type="submit" class="send" id="send" aria-label="Send">
               <svg class="i-send" viewBox="0 0 24 24" width="18" height="18"><path d="M12 19V5M5 12l7-7 7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -282,6 +283,23 @@
       <div class="cn-list" id="connsList"></div>
       <div class="cn-list" id="connsData"></div>
     </div>
+  </div>
+</div>
+
+<div class="modal sheet" id="delegModal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-panel dg" role="dialog" aria-modal="true" aria-labelledby="dgTitle">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <div class="m-head">
+      <div>
+        <h2 id="dgTitle">Delegate</h2>
+        <p class="m-sub" id="dgSub"></p>
+      </div>
+      <button class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="m-body" id="dgBody"></div>
   </div>
 </div>
 

@@ -75,8 +75,11 @@ const TASKS_FORMAT = `Emit work as a fenced block exactly like this (strict JSON
     "done_when": "The single observable check that proves this task is finished (a command to run, a test that passes, a file that exists with X in it).",
     "urgency": "urgent | normal | background",
     "deadline": "2026-09-19T18:00 or null",
-    "after": 0}
- ]}
+    "after": 0,
+    "agent": "optional: claude | codex | antigravity",
+    "model": "optional model id"}
+ ],
+ "routes": [{"match": "tests", "agent": "codex", "model": null, "scope": "project"}, {"remove": 3}]}
 \`\`\`
 
 **Break work into small, separately verifiable steps. This matters more than anything else here.**
@@ -101,7 +104,18 @@ const TASKS_FORMAT = `Emit work as a fenced block exactly like this (strict JSON
   more important is waiting, so it can wait days without harm.
 
 \`project.priority\` (0–100, default 50) ranks this whole project against the others, and \`project.mode\`
-is "build" (has an end) or "maintain" (ongoing upkeep). Only include \`project\` when it should change.`;
+is "build" (has an end) or "maintain" (ongoing upkeep). Only include \`project\` when it should change.
+
+**Which agent and model run a task.** The context lists the coding agents, their suggested models and the
+current routing rules. A task runs on, in order: its own \`agent\`/\`model\` (omit both unless this one task
+needs something special), else the first matching project route, else the first matching global route, else
+Claude on the chat's model. A route's \`match\` is a task kind (\`work\`, \`reflect\`, \`plan\`) or a keyword
+looked for in task titles (\`tests\`, \`ui\`, \`docs\`, \`refactor\`, …), so title tasks with that word.
+When the owner states a lasting preference ("use codex for writing tests", "use opus for planning", "gemini for
+UI work"), save it in \`routes\`: \`agent\` and/or \`model\`, \`scope\` "project" (default) or "global" (every
+project), optional \`note\`. A new route with the same match and scope replaces the old one; \`{"remove": id}\`
+deletes one. A \`plan\` route may only pick a Claude model. Unavailable agents fall back to Claude.
+A block may contain only \`routes\` (with \`"tasks": []\`).`;
 
 const PLANNER_SYSTEM = `You are the planning mind of an agent orchestrator (agent-orch) running inside the owner's Claude Web.
 You talk with the owner, understand exactly what they want, and turn it into small, well-specified steps
@@ -377,7 +391,23 @@ export function extractTasks(text) {
       deadline: parseDeadline(t.deadline),
       after: t.after ?? null,
       priority: t.priority != null ? clamp(t.priority, 1, 90, null) : null,
+      agent: normalizeAgent(t.agent),
+      model: t.model ? String(t.model).trim().slice(0, 100) || null : null,
     });
+  }
+  const routes = [];
+  for (const r of Array.isArray(payload.routes) ? payload.routes : []) {
+    if (!r || typeof r !== 'object') continue;
+    if (r.remove != null) {
+      const id = parseInt(String(r.remove).replace(/^#/, ''), 10);
+      if (id > 0) routes.push({ remove: id });
+      continue;
+    }
+    const match = String(r.match || '').trim().toLowerCase().slice(0, 100);
+    const agent = normalizeAgent(r.agent), model = r.model ? String(r.model).trim().slice(0, 100) || null : null;
+    if (!match || (!agent && !model)) continue;
+    routes.push({ match, agent, model, scope: String(r.scope || '').toLowerCase() === 'global' ? 'global' : 'project',
+      note: r.note ? String(r.note).slice(0, 300) : null });
   }
   let project = null;
   if (payload.project && typeof payload.project === 'object') {
@@ -387,7 +417,49 @@ export function extractTasks(text) {
     if (mode === 'build' || mode === 'maintain') project.mode = mode;
     if (!Object.keys(project).length) project = null;
   }
-  return [clean, { tasks, project }];
+  return [clean, { tasks, project, routes }];
+}
+
+// ---- routing: which agent/model runs a task
+
+const AGENT_ALIASES = { claude: 'claude', 'claude-code': 'claude', codex: 'codex', openai: 'codex', antigravity: 'antigravity', agy: 'antigravity', gemini: 'antigravity' };
+// A known agent id (accepting aliases such as 'gemini' → 'antigravity'), or null.
+export function normalizeAgent(name) {
+  const id = AGENT_ALIASES[String(name || '').trim().toLowerCase()];
+  return id && AGENTS[id] ? id : null;
+}
+const agentForModel = (model) => (model ? Object.keys(AGENTS).find((id) => AGENTS[id].models?.includes(model)) || null : null);
+
+// A route's `match` hits a task whose kind equals it or whose title contains it as a word (plural-tolerant:
+// 'tests' matches "Add a test" and 'refactor' matches "Refactors").
+const KIND_WORDS = { planning: 'plan', planner: 'plan', reflection: 'reflect', reflecting: 'reflect' };
+export function routeMatches(match, task) {
+  const m = String(match || '').trim().toLowerCase();
+  if (!m) return false;
+  if ((KIND_WORDS[m] || m) === String(task.kind || '').toLowerCase()) return true;
+  const stem = m.replace(/(?<=\w{3})e?s$/, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`\\b${stem}(?:e?s|ing|ed)?\\b`, 'i').test(String(task.title || ''));
+}
+
+// Resolution order: the task's own agent/model, the first matching project route, the first matching
+// global route, then the project default (Claude on project.model). An agent that isn't available
+// falls back to Claude; `fellBack` names it so the caller can log it.
+export function resolveRoute(task, project, routes = [], isAvailable = (id) => AGENTS[id]?.available()) {
+  const pick = (agent, model, source) => {
+    agent = normalizeAgent(agent) || agentForModel(model) || 'claude';
+    return { agent, model: model || (agent === 'claude' ? project?.model || null : null), source };
+  };
+  let r;
+  if (task.agent || task.model) r = pick(task.agent, task.model, 'task');
+  else {
+    const hit = (scope) => routes.find((x) => (scope === 'project' ? x.project_id != null && x.project_id === project?.id : x.project_id == null)
+      && routeMatches(x.match, task));
+    const route = hit('project') || hit('global');
+    r = route ? { ...pick(route.agent, route.model, route.project_id == null ? 'global' : 'project'), routeId: route.id }
+      : { agent: 'claude', model: project?.model || null, source: 'default' };
+  }
+  if (r.agent !== 'claude' && !isAvailable(r.agent)) return { agent: 'claude', model: project?.model || null, source: r.source, fellBack: r.agent };
+  return r;
 }
 
 // Accepts an epoch (seconds), an ISO timestamp, or everyday phrasing ("tomorrow 6pm", "in 3 days").
@@ -608,6 +680,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   session_id TEXT PRIMARY KEY, project_id INTEGER NOT NULL, created_at REAL NOT NULL, last_used_at REAL NOT NULL,
   task_count INTEGER NOT NULL DEFAULT 0, total_input_tokens INTEGER NOT NULL DEFAULT 0,
   total_cache_read_tokens INTEGER NOT NULL DEFAULT 0, last_task_id INTEGER, status TEXT NOT NULL DEFAULT 'warm', retire_reason TEXT);
+CREATE TABLE IF NOT EXISTS routes (
+  id INTEGER PRIMARY KEY, project_id INTEGER, match TEXT NOT NULL, agent TEXT, model TEXT, note TEXT, created_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL, content TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at REAL NOT NULL);
 `;
@@ -677,6 +751,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   const db = new DatabaseSync(path.join(dir, 'agent-orch.db'));
   db.exec('PRAGMA journal_mode=WAL');
   db.exec(SCHEMA);
+  // Columns added after release: tasks.agent/model (explicit per-task routing), runs.agent (who made the session).
+  for (const [table, col] of [['tasks', 'agent'], ['tasks', 'model'], ['runs', 'agent']]) {
+    if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} TEXT`);
+  }
 
   const q1 = (sql, p = {}) => db.prepare(sql).get(p);
   const qa = (sql, p = {}) => db.prepare(sql).all(p);
@@ -720,15 +798,15 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return eff;
   }
 
-  function addTask(projectId, { title, prompt, kind = 'work', source = 'user', priority = null, urgency = 'normal', deadline = null, dependsOn = null, doneWhen = null }) {
+  function addTask(projectId, { title, prompt, kind = 'work', source = 'user', priority = null, urgency = 'normal', deadline = null, dependsOn = null, doneWhen = null, agent = null, model = null }) {
     deadline = parseDeadline(deadline);
     if (priority == null) {
       priority = kind === 'plan' ? PRIORITY.plan : kind === 'reflect' ? PRIORITY.reflect
         : urgency !== 'normal' && URGENCY[urgency] ? URGENCY[urgency] : PRIORITY[source] ?? 50;
     }
-    const r = run(`INSERT INTO tasks(project_id,kind,title,prompt,priority,urgency,deadline,depends_on,done_when,source,created_at)
-      VALUES(:p,:k,:ti,:pr,:pri,:u,:d,:dep,:dw,:s,:c)`,
-      { p: projectId, k: kind, ti: title, pr: prompt, pri: priority, u: urgency, d: deadline, dep: dependsOn, dw: doneWhen, s: source, c: now() });
+    const r = run(`INSERT INTO tasks(project_id,kind,title,prompt,priority,urgency,deadline,depends_on,done_when,source,agent,model,created_at)
+      VALUES(:p,:k,:ti,:pr,:pri,:u,:d,:dep,:dw,:s,:ag,:mo,:c)`,
+      { p: projectId, k: kind, ti: title, pr: prompt, pri: priority, u: urgency, d: deadline, dep: dependsOn, dw: doneWhen, s: source, ag: agent, mo: model, c: now() });
     const id = Number(r.lastInsertRowid);
     pushTask(id);
     return id;
@@ -797,8 +875,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return revived;
   }
 
-  function startRun(taskId, purpose) {
-    const r = run('INSERT INTO runs(task_id,purpose,started_at) VALUES(:t,:p,:s)', { t: taskId, p: purpose, s: now() });
+  function startRun(taskId, purpose, agent = 'claude') {
+    const r = run('INSERT INTO runs(task_id,purpose,agent,started_at) VALUES(:t,:p,:a,:s)', { t: taskId, p: purpose, a: agent, s: now() });
     const id = Number(r.lastInsertRowid);
     const logPath = path.join(runsDir, `run-${String(id).padStart(6, '0')}.jsonl`);
     run('UPDATE runs SET log_path=:l WHERE id=:id', { l: logPath, id });
@@ -810,6 +888,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       c: res.usage.cache_read_input_tokens || 0, n: res.numTurns || 0, f: now(), id: runId,
     });
   }
+  const lastRunAgent = (taskId) => q1('SELECT agent FROM runs WHERE task_id=:t ORDER BY id DESC LIMIT 1', { t: taskId })?.agent || 'claude';
   const lastRunOutcome = (taskId) => q1('SELECT outcome FROM runs WHERE task_id=:t AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1', { t: taskId })?.outcome || null;
 
   // ---- warm session reuse (agent-orch sessions.py): a new task may continue a recent, healthy session
@@ -859,7 +938,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   function recordGovernor(res) {
     // Status and reset time only: pacing takes utilization from the verified /usage reading,
     // whose scale is known, rather than from these live events.
-    for (const l of res.limits) {
+    for (const l of res.limits || []) { // only the Claude adapter reports these
       upsertLimit(l.rateLimitType || 'unknown', l.status || 'allowed', l.resetsAt ? Number(l.resetsAt) : null, null);
     }
     if (res.outcome === 'rate_limited') {
@@ -897,7 +976,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // Task drawer Output entries: public messages, commands and tool results (logged as k:'result').
   const logEntryOf = (e) => (e.k === 'tool_result' ? { ...e, k: 'result' } : e.k === 'text' || e.k === 'tool' ? e : null);
 
-  async function runAgent({ prompt, cwd, resume, model, append, tools, autonomous, signal, timeoutSec, taskId, runId, logPath, onMessage, partial }) {
+  async function runAgent({ agent = 'claude', prompt, cwd, resume, model, append, tools, autonomous, signal, timeoutSec, taskId, runId, logPath, onMessage, partial }) {
     const ac = new AbortController();
     let stopped = null;
     const onAbort = () => { stopped = stopped || 'aborted'; ac.abort(); };
@@ -912,13 +991,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         for (const ws of subs) if (ws.readyState === 1) ws.send(msg);
       }
     };
-    if (taskId) writeEntry({ k: 'start', at: now(), resumed: !!resume });
+    if (taskId) writeEntry({ k: 'start', at: now(), resumed: !!resume, agent, model: model || null });
     let res;
     try {
       res = await runAgentCli({
-        agent: 'claude', model, prompt, cwd, resume, systemAppend: append, autonomous, signal: ac.signal,
+        agent, model, prompt, cwd, resume, systemAppend: append, autonomous, signal: ac.signal,
         onEvent: taskId ? (e) => { const l = logEntryOf(e); if (l) writeEntry(l); } : null,
-        query, bin: claudeBin, env: agentEnv, partial, onMessage,
+        query, bin: agent === 'claude' ? claudeBin : undefined, env: agentEnv, partial, onMessage,
       });
     } finally {
       clearTimeout(timer);
@@ -993,17 +1072,43 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     } catch {}
   }
 
+  // ---- routing rules (routes table): project routes first, then global ones (project_id NULL)
+  const listRoutes = (projectId) => qa('SELECT * FROM routes WHERE project_id=:p OR project_id IS NULL ORDER BY project_id IS NULL, id', { p: projectId ?? -1 });
+  function applyRoute(project, r) {
+    if (r.remove) {
+      const res = run('DELETE FROM routes WHERE id=:id AND (project_id=:p OR project_id IS NULL)', { id: r.remove, p: project.id });
+      if (res.changes) logEvent(`route #${r.remove} removed`, { projectId: project.id });
+      return;
+    }
+    const pid = r.scope === 'global' ? null : project.id;
+    const same = q1('SELECT id FROM routes WHERE match=:m AND project_id IS :p', { m: r.match, p: pid });
+    if (same) run('UPDATE routes SET agent=:a, model=:mo, note=:n, created_at=:t WHERE id=:id', { a: r.agent, mo: r.model, n: r.note, t: now(), id: same.id });
+    else run('INSERT INTO routes(project_id,match,agent,model,note,created_at) VALUES(:p,:m,:a,:mo,:n,:t)', { p: pid, m: r.match, a: r.agent, mo: r.model, n: r.note, t: now() });
+    logEvent(`route (${r.scope}): '${r.match}' → ${[r.agent, r.model].filter(Boolean).join(' / ')}`, { projectId: project.id });
+  }
+  function routeFor(task, project) {
+    const r = resolveRoute(task, project, listRoutes(project.id));
+    if (r.fellBack) logEvent(`${r.fellBack} is not available; #${task.id || task.kind} runs on Claude instead`, { level: 'warn', projectId: project.id, taskId: task.id || null });
+    return r;
+  }
+  function routesText(projectId) {
+    const agents = Object.values(AGENTS).map((a) => `  - ${a.id} (${a.label})${a.available() ? '' : ' [NOT INSTALLED: falls back to Claude]'}: models ${a.models.join(', ')}`);
+    const routes = listRoutes(projectId).map((r) => `  #${r.id} [${r.project_id == null ? 'global' : 'project'}] '${r.match}' → ${[r.agent, r.model].filter(Boolean).join(' / ')}${r.note ? ` (${r.note})` : ''}`);
+    return `Coding agents:\n${agents.join('\n')}\nRouting rules:\n${routes.join('\n') || '  (none: everything runs on Claude with the chat model)'}`;
+  }
+
   // ---- queueing a planner/reflector reply
   function queuePayload(project, payload, source) {
     if (!payload) return [];
     if (payload.project) updateProject(project.id, payload.project);
+    for (const r of payload.routes || []) applyRoute(project, r);
     const ids = [], batch = [];
     for (const t of payload.tasks) {
       const dup = findDuplicate(project.id, t.title);
       if (dup) { logEvent(`skipped duplicate: ${t.title} (already #${dup.id})`, { projectId: project.id }); batch.push(dup.id); continue; }
       let dependsOn = resolveAfter(t.after, batch);
       if (dependsOn != null && !getTask(dependsOn)) dependsOn = null;
-      const id = addTask(project.id, { title: t.title, prompt: t.prompt, kind: 'work', source, priority: t.priority, urgency: t.urgency, deadline: t.deadline, dependsOn, doneWhen: t.done_when });
+      const id = addTask(project.id, { title: t.title, prompt: t.prompt, kind: 'work', source, priority: t.priority, urgency: t.urgency, deadline: t.deadline, dependsOn, doneWhen: t.done_when, agent: t.agent, model: t.model });
       writeTaskSpec(project.path, getTask(id));
       ids.push(id);
       batch.push(id);
@@ -1082,9 +1187,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   const abortPlan = (convoId) => planAborts.get(convoId)?.abort();
 
   async function plannerRun(project, text, convoId, signal) {
-    const prompt = plannerTurnPrompt(project, listTasks(project.id, 25), text, ENVIRONMENT);
+    const prompt = plannerTurnPrompt(project, listTasks(project.id, 25), text, `${ENVIRONMENT}\n${routesText(project.id)}`);
+    // The planner streams Claude messages into the chat, so a 'plan' route can only change its Claude model.
+    const route = resolveRoute({ kind: 'plan', title: '' }, project, listRoutes(project.id), () => true);
     const attempt = (resume) => runAgent({
-      prompt, cwd: project.path, resume, model: project.model, append: resume ? null : PLANNER_SYSTEM,
+      prompt, cwd: project.path, resume, model: route.agent === 'claude' ? route.model : project.model, append: resume ? null : PLANNER_SYSTEM,
       tools: PLANNER_TOOLS, autonomous: false, signal, timeoutSec: 30 * 60, partial: !!convoId,
       onMessage: convoId ? chatStreamer(convoId) : null,
     });
@@ -1211,7 +1318,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   async function runTask(task, project, signal) {
     initProject(project.path);
     writeTaskSpec(project.path, task);
-    let resume = task.session_id, reused = false, body, system, tools, autonomous;
+    const route = routeFor(task, project);
+    // A session id only resumes on the agent that created it.
+    let resume = task.session_id && lastRunAgent(task.id) === route.agent ? task.session_id : null, reused = false, body, system, tools, autonomous;
     if (task.kind === 'reflect') {
       const failures = qa("SELECT * FROM tasks WHERE project_id=:p AND status IN ('failed') AND finished_at>=:s ORDER BY finished_at DESC LIMIT 8",
         { p: project.id, s: now() - 7 * 86400 });
@@ -1223,7 +1332,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       tools = [...PLANNER_TOOLS, ...CFG.safeTools.filter((t) => t.startsWith('Bash('))];
       autonomous = false;
     } else {
-      if (!resume) { resume = pickSession(task); reused = !!resume; }
+      if (!resume && route.agent === 'claude') { resume = pickSession(task); reused = !!resume; }
       body = reused ? nextTaskPrompt(task) : workerTaskPrompt(project, task, ENVIRONMENT);
       system = WORKER_SYSTEM;
       tools = CFG.safeTools;
@@ -1236,11 +1345,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       else if (task.continuations) prompt = CONTINUE;
       else prompt = RESUME;
     }
-    const { runId, logPath } = startRun(task.id, task.kind);
+    const { runId, logPath } = startRun(task.id, task.kind, route.agent);
     const r = running.get(task.id);
     if (r) r.runId = runId;
     const res = await runAgent({
-      prompt, cwd: project.path, resume, model: project.model, append: resume ? null : system, tools, autonomous,
+      agent: route.agent, prompt, cwd: project.path, resume, model: route.model, append: resume ? null : system, tools, autonomous,
       signal, timeoutSec: CFG.taskTimeoutSec, taskId: task.id, runId, logPath,
     });
     finishRun(runId, res);
@@ -1248,7 +1357,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       updateTask(task.id, { session_id: null });
       res.outcome = 'aborted';
     }
-    if (task.kind === 'work') recordSessionUse(res, project.id, task.id);
+    if (task.kind === 'work' && route.agent === 'claude') recordSessionUse(res, project.id, task.id);
     return res;
   }
 
@@ -1463,7 +1572,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       priority: t.priority, deadline: t.deadline, depends_on: t.depends_on, attempts: t.attempts,
       continuations: t.continuations, not_before: t.not_before, source: t.source, created_at: t.created_at,
       started_at: t.started_at, finished_at: t.finished_at, commit_sha: t.commit_sha,
-      has_verify_failure: t.verify_output != null,
+      agent: t.agent, model: t.model, has_verify_failure: t.verify_output != null,
       summary: t.status === 'done' ? parseStatus(t.result)[1] || null : t.status === 'failed' || t.status === 'cancelled' ? String(t.result || '').slice(0, 200) : null,
     };
   }

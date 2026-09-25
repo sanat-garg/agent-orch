@@ -113,3 +113,7 @@ codex adapter added; stub-binary tests pass under npm test
 ## 2026-09-25 03:34 — #28 Add Antigravity/Gemini CLI adapter to agents.mjs [done (check passed)]
 
 Antigravity adapter added; stub-binary tests pass in npm test
+
+## 2026-09-25 03:37 — #29 Route orchestrator tasks to agents/models via rules and per-task fields [done (check passed)]
+
+Tasks route to agents/models; npm test passes, 40/40

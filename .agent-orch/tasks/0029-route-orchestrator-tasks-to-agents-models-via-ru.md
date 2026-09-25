@@ -13,3 +13,7 @@ Make the orchestrator pick the agent and model per task. 1) DB: add nullable `ag
 ## Done when
 
 `npm test` passes with tests showing that a task with no explicit agent picks the matching project route, then the global route, then the default
+
+## Result — done (check passed) (2026-09-25 03:37)
+
+AGENT-ORCH-STATUS: done — Tasks route to agents/models; npm test passes, 40/40

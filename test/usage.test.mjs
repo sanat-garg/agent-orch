@@ -1,0 +1,114 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createUsageLog, bucketTokens, downsample, normUsage, readRecords, usageHistory, KEEP_MS, MAX_POINTS } from '../usage.mjs';
+
+const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'usage-test-'));
+const H = 3600e3, D = 86400e3;
+
+test('the store round-trips window, token and limit records with dedupe', () => {
+  const dir = tmp();
+  let t = Date.UTC(2026, 8, 25, 12);
+  const log = createUsageLog(dir, { now: () => t });
+  try {
+    assert.ok(log.window('claude', 'five_hour', 40, '2026-09-25T15:00:00Z'));
+    t += 60e3;
+    assert.equal(log.window('claude', 'five_hour', 40, '2026-09-25T15:00:00Z'), null); // unchanged within 5 min
+    assert.ok(log.window('claude', 'five_hour', 41, '2026-09-25T15:00:00Z'));
+    t += 6 * 60e3;
+    assert.ok(log.window('claude', 'five_hour', 41, '2026-09-25T15:00:00Z')); // unchanged but older than 5 min
+    assert.ok(log.tokens('codex', { input_tokens: 1000, cached_input_tokens: 800, output_tokens: 50 }, 'task', 7));
+    assert.ok(log.tokens('claude', { input_tokens: 10, cache_creation_input_tokens: 5, cache_read_input_tokens: 90, output_tokens: 3 }, 'chat', 'c1'));
+    assert.equal(log.tokens('claude', {}, 'chat', 'c1'), null);
+    assert.equal(log.limitCleared('codex'), null); // never hit
+    assert.ok(log.limitHit('codex', 1893456000));
+    assert.equal(log.limitHit('codex', 1893456000), null);
+    assert.ok(log.limitCleared('codex'));
+    assert.equal(log.limitCleared('codex'), null);
+
+    const recs = readRecords(path.join(dir, 'metrics', 'usage.jsonl'));
+    assert.deepEqual(recs.map((r) => r.kind), ['window', 'window', 'window', 'tokens', 'tokens', 'limit', 'limit']);
+    assert.equal(recs[0].resetsAt, Date.UTC(2026, 8, 25, 15) / 1000);
+    assert.deepEqual(recs[3], { t, agent: 'codex', kind: 'tokens', input: 200, output: 50, cached: 800, source: 'task', ref: 7 });
+    assert.deepEqual([recs[4].input, recs[4].cached, recs[4].output], [15, 90, 3]);
+    assert.deepEqual(recs.slice(5).map((r) => [r.status, r.resetsAt]), [['hit', 1893456000], ['cleared', 1893456000]]);
+
+    // A fresh instance picks the dedupe state up from the file.
+    const again = createUsageLog(dir, { now: () => t });
+    assert.equal(again.window('claude', 'five_hour', 41, '2026-09-25T15:00:00Z'), null);
+    assert.equal(again.limitCleared('codex'), null);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('compact drops records older than 30 days', () => {
+  const dir = tmp();
+  const t = Date.UTC(2026, 8, 25);
+  try {
+    fs.mkdirSync(path.join(dir, 'metrics'));
+    const lines = [{ t: t - KEEP_MS - 1, agent: 'claude', kind: 'tokens', input: 1 }, { t: t - D, agent: 'claude', kind: 'tokens', input: 2 }];
+    fs.writeFileSync(path.join(dir, 'metrics', 'usage.jsonl'), lines.map((l) => JSON.stringify(l)).join('\n') + '\nnot json\n');
+    const log = createUsageLog(dir, { now: () => t });
+    assert.equal(log.compact(), 2);
+    assert.deepEqual(readRecords(log.file).map((r) => r.input), [2]);
+    assert.equal(log.compact(), 0);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('normUsage maps every adapter to uncached input, output and cached', () => {
+  assert.deepEqual(normUsage('antigravity', { input_tokens: 10418, output_tokens: 589, cache_read_tokens: 8113 }), { input: 2305, output: 589, cached: 8113 });
+  assert.deepEqual(normUsage('codex', null), { input: 0, output: 0, cached: 0 });
+});
+
+test('tokens bucket per hour/day and window series downsample to 300 points', () => {
+  const at = Date.UTC(2026, 8, 25, 12, 30);
+  const recs = [
+    { t: at - 10 * 60e3, agent: 'claude', kind: 'tokens', input: 5, output: 1, cached: 2 },
+    { t: at - 20 * 60e3, agent: 'claude', kind: 'tokens', input: 5, output: 1, cached: 2 },
+    { t: at - 3 * H, agent: 'claude', kind: 'tokens', input: 7, output: 0, cached: 0 },
+    { t: at - 2 * D, agent: 'claude', kind: 'tokens', input: 100, output: 0, cached: 0 }, // outside 24h
+  ];
+  const hours = bucketTokens(recs, at - D, at, H);
+  assert.equal(hours.length, 25);
+  assert.equal(hours.at(-1).t, Date.UTC(2026, 8, 25, 12));
+  assert.deepEqual(hours.at(-1), { t: Date.UTC(2026, 8, 25, 12), input: 10, output: 2, cached: 4, turns: 2 });
+  assert.equal(hours.at(-4).input, 7);
+  assert.equal(hours.reduce((s, b) => s + b.input, 0), 17);
+  const days = bucketTokens(recs, at - 7 * D, at, D);
+  assert.equal(days.length, 8);
+  assert.equal(days.at(-1).input, 17);
+  assert.equal(days.at(-3).input, 100);
+
+  const pts = Array.from({ length: 1000 }, (_, i) => ({ t: i, pct: i }));
+  const ds = downsample(pts);
+  assert.equal(ds.length, MAX_POINTS);
+  assert.deepEqual([ds[0].t, ds.at(-1).t], [0, 999]);
+  assert.equal(downsample(pts.slice(0, 5)).length, 5);
+});
+
+test('usageHistory groups by agent with limit events and current status', () => {
+  const at = Date.UTC(2026, 8, 25, 12);
+  const s = at / 1000;
+  const recs = [
+    { t: at - 3 * D, agent: 'claude', kind: 'window', window: 'seven_day', pct: 20, resetsAt: s + D / 1000 }, // before the range: status only
+    ...Array.from({ length: 500 }, (_, i) => ({ t: at - D + 1 + i * 60e3, agent: 'claude', kind: 'window', window: 'five_hour', pct: i % 100, resetsAt: s + 3600 })),
+    { t: at - H, agent: 'codex', kind: 'limit', status: 'hit', resetsAt: s + 3600 },
+    { t: at - 2 * H, agent: 'antigravity', kind: 'limit', status: 'hit', resetsAt: s - 60 }, // reset has passed
+  ];
+  const h = usageHistory(recs, '24h', at);
+  assert.deepEqual([h.range, h.bucketMs, h.to], ['24h', H, at]);
+  assert.deepEqual(Object.keys(h.agents).sort(), ['antigravity', 'claude', 'codex']);
+  const c = h.agents.claude;
+  assert.equal(c.windows.five_hour.length, MAX_POINTS);
+  assert.equal(c.windows.seven_day, undefined);
+  assert.equal(c.status.windows.seven_day.pct, 20);
+  assert.equal(c.status.windows.five_hour.pct, 499 % 100);
+  assert.equal(c.status.blocked, false);
+  assert.equal(c.tokens.length, 25);
+  assert.deepEqual(h.agents.codex.limits, [{ t: at - H, status: 'hit', resetsAt: s + 3600 }]);
+  assert.deepEqual([h.agents.codex.status.blocked, h.agents.codex.status.resetsAt], [true, s + 3600]);
+  assert.equal(h.agents.antigravity.status.blocked, false);
+  assert.equal(usageHistory([], 'bogus', at).range, '24h');
+  assert.equal(usageHistory([], '30d', at).bucketMs, D);
+});

@@ -18,6 +18,7 @@ import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { AGENTS, agentStatus, isMissingSession, runAgentCli, toolInputSummary } from './agents.mjs';
 import { mediaCollector } from './media.mjs';
+import { createUsageLog } from './usage.mjs';
 
 // ---------------------------------------------------------------- config
 
@@ -796,7 +797,7 @@ function takeLock(file) {
 }
 
 export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLimits, onSubscription, emitChat, broadcast, convoExists, refreshUsage,
-  onCommit = () => {}, projectReady = () => true, disabled = false }) {
+  onCommit = () => {}, projectReady = () => true, disabled = false, usageLog = createUsageLog(dataDir) }) {
   const dir = path.join(dataDir, 'orchestrator');
   const runsDir = path.join(dir, 'runs');
   fs.mkdirSync(runsDir, { recursive: true });
@@ -1026,6 +1027,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       upsertLimit(l.rateLimitType || 'unknown', l.status || 'allowed', l.resetsAt ? Number(l.resetsAt) : null, null);
     }
     const own = agent === 'claude' ? '' : `:${agent}`;
+    if (res.outcome === 'rate_limited') usageLog.limitHit(agent, res.resetsAt, res.limitType || undefined);
+    else if (res.outcome === 'ok') usageLog.limitCleared(agent);
     if (res.outcome === 'rate_limited') {
       let resetsAt = res.resetsAt;
       if (resetsAt) kvSet(`unknown_limit_streak${own}`, 0);
@@ -1103,6 +1106,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       signal?.removeEventListener('abort', onAbort);
     }
     if (stopped) res.outcome = stopped;
+    usageLog.tokens(agent, res.usage, taskId ? 'task' : 'chat', taskId ?? null);
     if (taskId) writeShots();
     if (taskId) writeEntry({ k: 'end', at: now(), outcome: res.outcome, turns: res.numTurns });
     log?.end();
@@ -1854,7 +1858,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     setInterval(tick, CFG.pollMs);
     setTimeout(tick, 5000);
     // A limit that has passed: capacity is back, so refresh usage for pacing.
-    setInterval(() => { if (!blockedUntil() && kvGet('blocked_until', '0') !== '0') { kvSet('blocked_until', 0); pushState(); refreshUsage?.(); } }, 15000);
+    setInterval(() => {
+      if (!blockedUntil() && kvGet('blocked_until', '0') !== '0') { kvSet('blocked_until', 0); usageLog.limitCleared('claude'); pushState(); refreshUsage?.(); }
+      for (const id of Object.keys(AGENTS)) {
+        const u = id === 'claude' ? 0 : kvTime(`blocked_until:${id}`);
+        if (u && u <= now()) { kvSet(`blocked_until:${id}`, 0); usageLog.limitCleared(id); }
+      }
+    }, 15000);
   } else {
     console.warn(`[orchestrator] WARNING: data dir is locked by live process ${leader.pid} (${path.join(dir, 'lock')}); ` +
       'not requeueing or scheduling tasks in this instance');

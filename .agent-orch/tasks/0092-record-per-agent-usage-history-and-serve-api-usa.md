@@ -13,3 +13,7 @@ Build the data layer for a usage-over-time view. Today server.mjs (~lines 463-58
 ## Done when
 
 `npm test` passes with usage.mjs store/bucketing tests and an /api/usage/history endpoint test
+
+## Result — done (check passed) (2026-09-25 13:32)
+
+AGENT-ORCH-STATUS: done — Usage history store and /api/usage/history endpoint built, tests passing

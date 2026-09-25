@@ -309,3 +309,7 @@ Screenshots render in chat and task drawer, with a lightbox
 ## 2026-09-25 13:24 — #90 Screenshot helper and instructions for agents to capture UI screenshots [done]
 
 bin/shot.mjs captures PNGs; prompts and README updated
+
+## 2026-09-25 13:32 — #92 Record per-agent usage history and serve /api/usage/history [done (check passed)]
+
+Usage history store and /api/usage/history endpoint built, tests passing

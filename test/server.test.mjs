@@ -280,3 +280,34 @@ test('GET /api/media/:id serves stored images to signed-in users only, with stri
   assert.notEqual(raw.status, 200);
   assert.doesNotMatch(raw.body, /salt|hash/);
 });
+
+test('GET /api/usage/history is login-protected and returns per-agent series', async () => {
+  const unauth = await get('/api/usage/history?range=24h');
+  assert.equal(unauth.status, 401);
+  await unauth.arrayBuffer();
+  // A window name no real reading uses: this test server may record the live Claude windows itself.
+  const now = Date.now();
+  const recs = [
+    { t: now - 3600e3, agent: 'codex', kind: 'tokens', input: 10, output: 2, cached: 5, source: 'task', ref: 1 },
+    { t: now - 1800e3, agent: 'claude', kind: 'window', window: 'test_window', pct: 42, resetsAt: Math.round(now / 1000) + 3600 },
+    { t: now - 600e3, agent: 'codex', kind: 'limit', status: 'hit', resetsAt: Math.round(now / 1000) + 7200 },
+  ];
+  fs.mkdirSync(path.join(dataDir, 'metrics'), { recursive: true });
+  fs.appendFileSync(path.join(dataDir, 'metrics', 'usage.jsonl'), recs.map((r) => JSON.stringify(r) + '\n').join(''));
+  const ok = await fetch(base + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: PASSWORD }) });
+  const cookie = ok.headers.get('set-cookie').split(';')[0];
+  await ok.arrayBuffer();
+  const r = await get('/api/usage/history?range=7d', { cookie });
+  assert.equal(r.status, 200);
+  const h = await r.json();
+  assert.equal(h.range, '7d');
+  assert.equal(h.bucketMs, 86400e3);
+  assert.equal(h.agents.claude.windows.test_window[0].pct, 42);
+  assert.equal(h.agents.claude.status.windows.test_window.pct, 42);
+  assert.equal(h.agents.codex.tokens.reduce((s, b) => s + b.input, 0), 10);
+  assert.equal(h.agents.codex.limits[0].status, 'hit');
+  assert.equal(h.agents.codex.status.blocked, true);
+  const bad = await get('/api/usage/history?range=1y', { cookie });
+  assert.equal(bad.status, 400);
+  await bad.arrayBuffer();
+});

@@ -14,6 +14,7 @@ import { retireRuntime, chatIdle, whenIdle } from './runtimes.mjs';
 import { AGENTS, runAgentCli, clearLoginCache, isMissingSession } from './agents.mjs';
 import { createConnections, SPECS, codexAccount, onPath } from './connections.mjs';
 import { mediaCollector, MEDIA_ID_RE, MEDIA_TYPES, toolResultImages } from './media.mjs';
+import { createUsageLog, RANGES as USAGE_RANGES } from './usage.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -322,6 +323,9 @@ const METRIC_FIELDS = ['cpu', 'steal', 'iowait', 'mem', 'rx', 'tx', 'dr', 'dw'];
 const METRICS_DIR = path.join(DATA, 'metrics');
 fs.mkdirSync(METRICS_DIR, { recursive: true });
 const RAW_FILE = path.join(METRICS_DIR, 'raw.jsonl');
+// Per-agent usage history (plan windows, tokens per turn/run, limit events): usage.mjs.
+const usageLog = createUsageLog(DATA);
+try { usageLog.compact(); } catch (e) { console.error('[usage] compact failed', e); }
 const MINUTE_FILE = path.join(METRICS_DIR, 'minutes.jsonl');
 
 function loadSeries(file, keepMs) {
@@ -475,6 +479,10 @@ async function refreshUsage(liveQuery) {
       breakdown: Array.isArray(rl.seven_day_breakdown?.rows) ? rl.seven_day_breakdown.rows.map((r) => ({ name: r.display_name, pct: r.percent })) : null,
       updatedAt: Date.now(),
     };
+    const rec = (name, w) => w && usageLog.window('claude', name, w.pct, w.resetsAt);
+    rec('five_hour', usage.session); rec('seven_day', usage.weekly);
+    rec('seven_day_opus', usage.weeklyOpus); rec('seven_day_sonnet', usage.weeklySonnet);
+    for (const m of usage.models) if (m.name) rec(m.name, m);
   } catch (e) {
     usage = { ...usage, error: String(e?.message || e), updatedAt: Date.now() };
   } finally {
@@ -580,6 +588,7 @@ const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
   claudeEnv: CLAUDE_ENV,
   dataDir: DATA,
   // The usage card's /usage reading, in the shape pacing expects (fractions, epoch seconds).
+  usageLog,
   getLimits: () => {
     if (!usage.available) return [];
     const observed = usage.updatedAt / 1000;
@@ -810,6 +819,7 @@ function handleMessage(convo, rt, m) {
         else if (b.type === 'tool_use') emit(cid, { t: 'tool_use', id: b.id, name: b.name, input: b.input, sub });
       }
       if (m.error) emit(cid, { t: 'error', text: authHint(m.error) });
+      if (m.error === 'rate_limit') usageLog.limitHit('claude', null);
       break;
     case 'user': {
       const content = m.message?.content;
@@ -832,6 +842,8 @@ function handleMessage(convo, rt, m) {
       rt.busy = false;
       if (rt.media) emitShots(cid, rt.media);
       refreshUsageSoon(rt.q);
+      usageLog.tokens('claude', m.usage, 'chat', cid);
+      if (m.subtype === 'success' && !m.is_error) usageLog.limitCleared('claude');
       emit(cid, {
         t: 'result',
         ok: m.subtype === 'success' && !m.is_error,
@@ -910,6 +922,9 @@ async function agentChatTurn(convo, text) {
     }
     if (res.sessionId) convo.agentSession = { agent, id: res.sessionId };
     emitShots(cid, media);
+    usageLog.tokens(agent, res.usage, 'chat', cid);
+    if (res.outcome === 'rate_limited') usageLog.limitHit(agent, res.resetsAt, res.limitType || undefined);
+    else if (res.outcome === 'ok') usageLog.limitCleared(agent);
     if (res.outcome === 'auth_error') emit(cid, { t: 'error', text: `${a.label} is not signed in on this server. ${a.login}.` });
     else if (res.outcome === 'rate_limited') emit(cid, { t: 'error', text: `${a.label} hit its usage limit${res.resetsAt ? '; it resets {until}' : ''}.`, ...(res.resetsAt && { until: res.resetsAt, untilKnown: true }) });
     else if (res.outcome === 'aborted') emit(cid, { t: 'notice', text: 'Interrupted' });
@@ -1179,6 +1194,11 @@ async function handleRequest(req, res) {
   }
   if (p === '/api/metrics/history') {
     return json(res, 200, historyFor(url.searchParams.get('range') || '1h'));
+  }
+  if (p === '/api/usage/history') {
+    const range = url.searchParams.get('range') || '24h';
+    if (!USAGE_RANGES[range]) return json(res, 400, { error: 'range must be 24h, 7d or 30d' });
+    return json(res, 200, usageLog.history(range));
   }
   if (p === '/api/metrics') {
     return json(res, 200, await metrics(Number(url.searchParams.get('since')) || 0));

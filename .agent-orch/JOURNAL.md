@@ -193,3 +193,7 @@ scheduling tests added; npm test passes, all 73 tests
 ## 2026-09-25 04:12 — #52 Show route fallback reason on the task's agent badge [done (check passed)]
 
 fallback reason stored in route_note and shown on badge
+
+## 2026-09-25 04:16 — #54 Audit round 2: multi-agent adapters, routing and non-Claude chat [done (check passed)]
+
+AUDIT.md lists five confirmed multi-agent findings, #17–#21

@@ -1,6 +1,6 @@
 # Audit: server, orchestrator, GitHub wrapper, UI
 
-**Status (2026-09-25, task #48):** 16 of 16 items fixed, 0 deferred.
+**Status (2026-09-25, task #54):** items 1-16 fixed; round 2 (multi-agent, #17-21) open.
 
 _Task #12, 2026-09-24. Items were open when audited; a `- **Fixed** (task #N)` line marks one resolved since. Each item was verified by reading the code; #1 was also reproduced
 against a throwaway instance (`PORT=3999 CW_DATA_DIR=$(mktemp -d)`). The items are ranked by value. Each fix
@@ -153,3 +153,57 @@ a same-origin request. Caddy's `reverse_proxy` overwrites `X-Forwarded-For`, so 
 - **Fix:** Have the planner write absence checks as one command (`! grep … && npm test`), and/or make
   `extractCommand` join every backticked command in the text with `&&`.
 - **Fixed** (task #33): with no triple-backtick block, `extractCommand` joins every command-like single-backtick snippet with ` && ` (file names/identifiers ignored, any unsafe one → no check); the planner prompt says absence checks use `! grep`.
+
+## Round 2 (2026-09-25, task #54): multi-agent adapters, routing, non-Claude chat
+
+Checked and found no issue: every adapter strips its own billing vars and chat/orchestrator runs start from the
+Anthropic-stripped env; codex forces `forced_login_method="chatgpt"` and treats an API-key login as logged out;
+the planner guard (`planningProjects` is set synchronously before any await on both paths, `claimNext` skips plan
+tasks during a chat turn); `applyRoute` upsert/delete; chat delete mid-turn (`emit` drops events for a deleted convo).
+
+### 17. [high] A codex/agy auth failure blocks all Claude work, forever, as "Claude Code is not signed in" (orchestrator.mjs:1441)
+- **What:** `handle` treats every `auth_error` the same: requeue the task, set the global `blocked_until` +600 s and
+  say Claude is not signed in. A codex/agy task keeps its route (`agentStatus` only checks `codex login status` or
+  that an agy token file exists), so an expired agy token (the run is killed on the OAuth prompt), agy in API-key
+  mode (`modelProvider: "gemini"`, refused before spawning), or a codex 401 re-fails every 10 minutes and the whole
+  orchestrator, Claude tasks included, never runs again.
+- **Fix:** For a non-Claude `auth_error`, don't touch `blocked_until`: mark the agent unusable (e.g. a
+  `loginCache` entry set to false for the TTL, or a kv "agent X auth failed until …") so `resolveRoute` falls back
+  to Claude with a route_note, requeue the task, and log "<agent> is not signed in".
+
+### 18. [med] A non-Claude usage limit pauses every Claude task until that agent resets (orchestrator.mjs:968, agents.mjs:420)
+- **What:** `recordGovernor` sets the global `blocked_until` for any `rate_limited` outcome. Codex's weekly limit
+  ("try again at <date days away>") therefore idles the Claude subscription for days, which defeats the point of
+  the orchestrator. agy's check is also loose: `AGY_LIMIT_RE` (`quota|exhausted|rate.?limit|429`) is matched against
+  the whole stderr, so any failed agy run whose log mentions "quota" is read as a limit and blocks everything
+  for the unknown-reset backoff.
+- **Fix:** Keep a per-agent block (kv `blocked_until:<agent>`): `resolveRoute` falls back to Claude (or `claimNext`
+  defers only tasks routed to that agent) while it is set; only Claude limits set the global block. Test
+  `AGY_LIMIT_RE` against `result.error` only, not stderr.
+
+### 19. [med] A stale codex/agy session is resumed forever (server.mjs:847, orchestrator.mjs:1418)
+- **What:** Resume recovery only looks for Claude's `no conversation found`. Real codex prints
+  `thread/resume failed: no rollout found for thread id …` (verified with /usr/bin/codex and a made-up id). In chat,
+  `res.sessionId` starts as `resume`, so `convo.agentSession` keeps the dead id and every later message in that
+  chat fails the same way (switching agents and back doesn't clear it). In the orchestrator the task retries on the
+  same `session_id` until `maxAttempts` and then fails.
+- **Fix:** Recognise the non-Claude "session not found" messages (`no rollout found`, agy's equivalent) in one
+  helper, e.g. `res.errorCode = 'no_session'` set in the adapter; on it, drop `convo.agentSession` / `session_id`
+  and retry once without resume.
+
+### 20. [med] A model-only route with a model not in `AGENTS[*].models` runs Claude with that model (orchestrator.mjs:455)
+- **What:** `pick` uses `normalizeAgent(agent) || agentForModel(model) || 'claude'`, and `agentForModel` only knows
+  the short hard-coded lists. The owner's own example "use gemini-2.5-pro for UI work" (a route with
+  `model: "gemini-2.5-pro"` and no agent) resolves to `{agent:'claude', model:'gemini-2.5-pro'}`, so every UI task
+  errors on Claude until it fails. An agent+model mismatch (`codex` + `opus`) is also passed straight through.
+- **Fix:** Infer the agent from the model's family (`/^(gpt|o\d|codex)/` → codex, `/^gemini/` → antigravity,
+  `/^(claude|opus|sonnet|haiku)/` → claude) when it isn't listed, and drop a model that clearly belongs to another
+  agent (log it); have `parseTasksBlock` reject such routes too.
+
+### 21. [low] CLI adapters leave background processes running after a normal exit (agents.mjs:222-232)
+- **What:** `spawnJsonl` only kills the process group on abort or `stopOn`. When codex/agy exits normally, anything
+  its tools started in the background (a dev server, `sleep`, a watcher) keeps running (verified: a stub that
+  spawns `sleep 300` and exits cleanly leaves it alive). On abort, `finally` clears the SIGKILL timer as soon as
+  the leader exits, so group members that ignore SIGTERM also survive. Same pattern as #11.
+- **Fix:** After `close`, `killGroup('SIGTERM')` (ignore ESRCH) and keep the SIGKILL follow-up timer (unref'd)
+  instead of clearing it in `finally`.

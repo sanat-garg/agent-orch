@@ -275,23 +275,27 @@ test('antigravity: resume passes --conversation; non-autonomous drops the skip-p
   assert.deepEqual(JSON.parse(fs.readFileSync(log, 'utf8')).argv, ['-p', 'more', '--output-format', 'stream-json', '--print-timeout', '0', '--conversation', 'abc']);
 });
 
-test('antigravity: view_file retains AbsolutePath and the original tool error', () => {
-  // Parameter spelling observed in run 136 and the live read-only reproduction.
-  const update = (state, extra = {}) => ({ event: 'step_update', step_update: {
-    step_index: 2, state, step_type: 'tool', tool_name: 'view_file',
-    tool_info: { name: 'view_file', parameters: { AbsolutePath: '/workspace/package.json' }, ...extra },
-  } });
-  const st = { text: new Map(), started: new Set() };
-  assert.deepEqual([...AGENTS.antigravity.events(update('ACTIVE'), st)], [
-    { k: 'tool', id: '2', name: 'view_file', input: { file_path: '/workspace/package.json' } },
+test('antigravity: recorded file tools retain paths, native errors and successful reads', async () => {
+  // Live read-only control: absent file followed by an existing file (2026-09-25).
+  const events = [];
+  const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'read files', cwd: tmp(),
+    settingsPath: noSettings, usageProbe: false, env: { PATH: process.env.PATH, AGY_STUB: 'file-tools' },
+    onEvent: (e) => events.push(e) });
+  assert.equal(res.outcome, 'ok'); // a recoverable tool error does not fail the turn
+  assert.deepEqual(events.filter((e) => e.k === 'tool'), [
+    { k: 'tool', id: '2', name: 'view_file', input: { file_path: '/workspace/missing.txt' } },
+    { k: 'tool', id: '4', name: 'view_file', input: { file_path: '/workspace/present.txt' } },
   ]);
-  assert.deepEqual([...AGENTS.antigravity.events(update('DONE', { output: '20 lines, 487 bytes' }), st)], [
-    { k: 'tool_result', id: '2', text: '20 lines, 487 bytes', isError: false, lines: 1 },
-  ]);
-  // Synthetic missing-file control, not a claim that the owner's file read failed.
-  assert.deepEqual([...AGENTS.antigravity.events(update('ERROR', { error: 'no such file' }), st)], [
-    { k: 'tool_result', id: '2', text: 'no such file', isError: true, lines: 1 },
-  ]);
+  const results = events.filter((e) => e.k === 'tool_result');
+  assert.equal(results.length, 2);
+  assert.equal(results[0].id, '2');
+  assert.equal(results[0].isError, true);
+  assert.deepEqual(JSON.parse(results[0].text), {
+    type: 'TOOL_ERROR',
+    message: 'declaring permissions: cortex tool view_file: convert tool call for permissions: model output error: invalid tool call error (invalid_args) failed to read file: stat /workspace/missing.txt: no such file or directory',
+  });
+  assert.deepEqual(results[1], { k: 'tool_result', id: '4', text: '2 lines, 24 bytes', isError: false, lines: 1 });
+  assert.match(res.text, /ANTIGRAVITY_READ_OK_134/);
 });
 
 test('antigravity: resuming a missing conversation is errorCode no_session', async () => {

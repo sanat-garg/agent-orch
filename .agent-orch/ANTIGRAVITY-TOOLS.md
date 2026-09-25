@@ -4,9 +4,10 @@
 
 The reported `view_file` execution failure was **not reproduced**. A real diagnostic
 read succeeded. The supported adapter fix below corrects loss of the file path in
-tool events; it does not claim to fix a failed native file read. The requested
-execution-failure reproduction remains unverified; do not infer it from the
-planning session's bwrap failure or from the old synthetic test fixture.
+tool events; it does not claim to fix a failed native file read. The investigation found no evidence of a broken native file reader in the
+reported run. Do not infer one from the planning session's bwrap failure or the
+old synthetic test fixture. A controlled native failure and recovery are now
+recorded below, and the supported adapter defect has a real-event regression.
 
 Read `.agent-orch/AGENTS.md`, BRIEF and CONTEXT. Launch path: orchestrator.mjs
 `runAgent` → agents.mjs `runAgentCli` / `runAntigravity` →
@@ -74,22 +75,70 @@ it missed the native spelling. `agents.mjs` now maps `view_file.AbsolutePath`
 to the existing `file_path` event field before summarizing. No CLI flags,
 permissions, dependency installation, native execution or other adapter changed.
 
-Affected files: `agents.mjs`, `test/agents.test.mjs`, `.agent-orch/BRIEF.md`,
-`.agent-orch/CONTEXT.md`, and this report. No UI source changed.
+Affected files: `agents.mjs`, `test/agents.test.mjs`,
+`test/fixtures/agy-stub.mjs`, `test/fixtures/agy-file-tools.jsonl`,
+`.agent-orch/BRIEF.md`, `.agent-orch/CONTEXT.md`, and this report. No UI source changed.
 
-## Regression verification
+## Controlled native failure and recovery
 
-`node --test --test-name-pattern='view_file retains' test/agents.test.mjs`
-failed before the adapter fix: expected `input.file_path`, received `input:{}`.
-The focused test replays the observed ACTIVE/DONE shape and additionally checks
-that a synthetic missing-file ERROR retains its original error and `isError:true`.
-The synthetic control is not evidence of a historical failed file read.
+A second read-only diagnostic used a temporary cwd containing `present.txt`
+and an intentionally absent `missing.txt`, with the same subscription-only
+adapter and no permission changes. It requested these two `view_file` calls
+only. No orchestrator task was launched (that acceptance belongs to #135).
 
-After the fix, `node --test test/agents.test.mjs` exited 0: **24 passed,
-0 failed**, including the new regression and Claude/Codex adapter, environment
-stripping, resume, cancellation and usage checks.
+First, explicitly selecting the historical model `claude-opus-4-6-thinking`
+reproduced provider failure before any tool call: conversation
+`8dc4710e-38dc-422a-aa33-9d11a19bc82b`, native log
+`cli-20260925_205538.log`, `RESOURCE_EXHAUSTED (code 429): Individual quota
+reached`, five retries, then the diagnostic's 55-second abort. This isolates
+the model's quota from file-tool execution; it is not a file-tool failure.
 
-Remaining limitation: there is no demonstrated native file-execution failure
-whose root cause can support an execution/configuration fix. The evidence
-supports the diagnostic mapping fix only. Task #135's live orchestrated
-acceptance is deliberately not undertaken here.
+A fresh diagnostic with no model override completed successfully, conversation
+`56749c65-bb54-4892-bdea-d4a60b3b2779`, empty stderr:
+
+1. `view_file({AbsolutePath:"/tmp/agy-file-diagnostic-WR2v4X/missing.txt"})`
+   emitted ACTIVE then ERROR with the following native structured error:
+
+   ```json
+   {"type":"TOOL_ERROR","message":"declaring permissions: cortex tool view_file: convert tool call for permissions: model output error: invalid tool call error (invalid_args) failed to read file: stat /tmp/agy-file-diagnostic-WR2v4X/missing.txt: no such file or directory"}
+   ```
+
+   Root cause: the requested file does not exist. Despite the outer
+   `declaring permissions` / `invalid_args` wording, this is ENOENT from
+   path validation, not missing tool registration, a malformed tool schema,
+   denied filesystem access, bwrap or a runtime dependency. This deliberately
+   induced failure is not presented as the owner's historical failure.
+2. The next call read `present.txt` successfully: ACTIVE then DONE,
+   `2 lines, 24 bytes`; the model returned `ANTIGRAVITY_READ_OK_134`.
+   Normalized events retained both absolute paths, marked only the first
+   result as an error, and the final turn outcome was `ok`.
+
+The temporary directory was removed after the check. The fixture preserves
+these native step/result events, replacing only the temporary root with
+`/workspace` and conversation ID with `agy-file-diagnostic`.
+
+## Regression verification and completion
+
+The initial synthetic regression failed before the mapping fix (expected
+`input.file_path`, received `input:{}`). It is now replaced by a stronger
+recorded-stream regression through the existing stub CLI and `runAgentCli`,
+including the actual structured native error above and successful recovery.
+
+`node --test --test-name-pattern='recorded file tools' test/agents.test.mjs`
+passes. As a negative control, an isolated temporary copy with only the
+`AbsolutePath` mapping removed exited 1 on this same test: both normalized
+file paths disappeared. No live source or process was changed for that check.
+
+`node --test test/agents.test.mjs` exited 0: **24 passed, 0 failed**,
+including the recorded regression and Claude/Codex adapter, environment
+stripping, resume, cancellation and usage checks. `git diff --check` passes.
+
+Done-when evidence: this report identifies observed failed calls and their
+causes (the historical duplicate scheduler condition and controlled native
+missing-file error), reproduces the adapter's path-loss defect on the real
+failed file call, and records a passing regression for the minimal mapping
+fix. Historical successful reads, independent command cancellation and
+provider quota exhaustion remain explicitly distinguished. No evidence
+supports a broader execution/configuration or permission change; the
+investigation is complete within that boundary. This does not claim that
+the owner's alleged historical file-read failure was reproduced or repaired.

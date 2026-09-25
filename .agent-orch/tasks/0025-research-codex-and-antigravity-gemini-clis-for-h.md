@@ -13,3 +13,7 @@ Research and install the non-Claude coding agent CLIs so later tasks can build a
 ## Done when
 
 .agent-orch/AGENTS.md exists with a section per CLI covering install, subscription login, headless command, model flag, resume and output event format, and `codex --help` exits 0
+
+## Result — done (2026-09-25 03:28)
+
+AGENT-ORCH-STATUS: done — AGENTS.md covers Codex, Antigravity and Gemini; codex --help exits 0

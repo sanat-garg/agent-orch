@@ -10,6 +10,7 @@ _Durable knowledge for every agent session: architecture, conventions, decisions
 - `runtimes.mjs`: chat runtime ownership. To replace or close a chat's runtime, use `retireRuntime`, not `q.close()` plus `runtimes.delete`. A runtime loop touches the map only while `runtimes.get(convo.id) === rt`.
 - `github.mjs`: the gh CLI wrapper. Every project gets a private repo, and pushes go to `origin`.
 - `public/`: a vanilla JS SPA (app.js ~2.4k lines, marked + dompurify), a login page and a PWA manifest.
+- `.agent-orch/AGENTS.md`: research notes on the Codex, Antigravity (`agy`) and Gemini CLIs (install, subscription login, headless flags, stream formats, billing env vars to strip), for the agents.mjs adapters.
 - `bin/term-attach.sh`: the ttyd terminal attach helper. Live setup: ttyd on 127.0.0.1:7682 behind Caddy at `/shell/` (not `/term/`, despite a server.mjs comment); systemd units agent-orch, agent-orch-shell, agent-orch-tmux (renamed 2026-09-25 by bin/rename-install.sh; the install dir moved from ~/claude-web to ~/agent-orch).
 - `data/` (gitignored): auth.json, convos.json, metrics, logs, and the orchestrator DB and run logs.
 

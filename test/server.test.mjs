@@ -199,9 +199,12 @@ test('GET /api/connections lists claude, codex, antigravity and github; actions 
   const anon = await post('/api/connections/codex/cancel');
   assert.equal(anon.status, 401);
   await anon.arrayBuffer();
-  const nope = await post('/api/connections/claude/start', { cookie });
-  assert.equal(nope.status, 400); // no web sign-in spec for Claude yet, and no tmux session is started
-  await nope.arrayBuffer();
+  const claude = connections.find((c) => c.id === 'claude'), agy = connections.find((c) => c.id === 'antigravity');
+  assert.deepEqual([claude.canLogin, claude.canLogout, agy.canLogin, agy.canLogout], [true, true, true, false]);
+  assert.match(claude.logoutWarning, /Every chat and orchestrator agent/);
+  const nope = await post('/api/connections/claude/logout', { cookie });
+  assert.equal(nope.status, 409); // needs {confirm: true}: nothing is signed out
+  assert.equal((await nope.json()).needsConfirm, true);
   const code = await post('/api/connections/codex/code', { cookie });
   assert.equal(code.status, 409); // no sign-in in progress
   await code.arrayBuffer();

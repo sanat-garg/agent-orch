@@ -13,3 +13,7 @@ Extend connections.mjs (built in the previous task) with login specs for Claude 
 ## Done when
 
 `npm test` passes with Claude and agy parsing fixtures, and GET /api/connections reports correct installed/signedIn for claude and agy on this machine
+
+## Result — done (check passed) (2026-09-25 08:38)
+
+AGENT-ORCH-STATUS: done — Claude and agy sign-in specs, fixtures, tests and status checks work

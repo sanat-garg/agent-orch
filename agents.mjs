@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process';
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 
 const HOME = os.homedir();
@@ -150,13 +150,30 @@ async function runClaude({ model, prompt, cwd, resume, systemAppend, signal, onE
   return res;
 }
 
+export function parseClaudeAuth(out) {
+  let j;
+  try { j = JSON.parse(String(out || '')); } catch { return { ok: false, email: null }; }
+  const ok = j?.loggedIn === true && (j.apiProvider || 'firstParty') === 'firstParty' && /^claude\.ai$/i.test(j.authMethod || '');
+  return { ok, email: ok ? j.email || null : null };
+}
+
 const CLAUDE = {
   id: 'claude',
   label: 'Claude Code',
   bin: path.join(HOME, '.local/bin/claude'),
   available() { return onPath(this.bin); },
-  loggedIn() { return cachedLogin(this, () => fs.existsSync(path.join(HOME, '.claude/.credentials.json'))); },
-  login: 'claude, then /login',
+  // `claude auth status --json` → {loggedIn, authMethod, apiProvider, email, …}. Only a first-party claude.ai
+  // (subscription) login counts; an API key or Console login would bill API credits.
+  loggedIn() {
+    return cachedLogin(this, () => {
+      const r = spawnSync(this.bin, ['auth', 'status', '--json'], { env: stripEnv(process.env, this.envFilter), encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] });
+      const st = parseClaudeAuth(r.stdout);
+      this.email = st.ok ? st.email : null;
+      return st.ok;
+    });
+  },
+  account() { return this.loggedIn() ? this.email || null : null; },
+  login: 'Connect from the sidebar',
   models: ['opus', 'sonnet', 'haiku', 'claude-opus-5-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001'],
   envFilter: /^(ANTHROPIC_(API_KEY|AUTH_TOKEN|BASE_URL)|CLAUDE_CODE_USE_(BEDROCK|VERTEX|FOUNDRY))$/,
   events: claudeEvents,
@@ -322,7 +339,7 @@ const CODEX = {
       return r.status === 0 && /logged in/i.test(out) && !/not logged in|api key/i.test(out);
     });
   },
-  login: 'codex login --device-auth',
+  login: 'Connect from the sidebar',
   models: ['gpt-5-codex', 'gpt-5'],
   envFilter: /^(OPENAI_(API_KEY|BASE_URL|ORG_ID|ORGANIZATION|PROJECT_ID)|CODEX_(API_KEY|ACCESS_TOKEN|AUTH|HOME)|AZURE_OPENAI_.*)$/,
   events: codexEvents,
@@ -422,19 +439,25 @@ async function runAntigravity({ model, prompt, cwd, resume, systemAppend, signal
   return res;
 }
 
+export const agyModelsOk = (r) => r.status === 0 && !/sign in|not signed/i.test(`${r.stdout || ''}\n${r.stderr || ''}`);
+
 const ANTIGRAVITY = {
   id: 'antigravity',
   label: 'Antigravity CLI',
   bin: path.join(HOME, '.local/bin/agy'),
   available() { return onPath(this.bin); },
-  // With no keyring on this VM agy keeps its OAuth token in a file under ~/.gemini/antigravity-cli/ (see
-  // .agent-orch/AGENTS.md; the exact name is unconfirmed), so look for a token/credential file there.
-  credsDir: path.join(HOME, '.gemini/antigravity-cli'),
+  // `agy models` prints the model list when signed in, and exits 1 with "Please sign in …" right away when not
+  // (the token's location varies: keyring or a file). API-key env vars are stripped, so only the Google login counts.
   loggedIn() {
-    return cachedLogin(this, () => fs.readdirSync(this.credsDir, { withFileTypes: true })
-      .some((f) => f.isFile() && /token|cred|oauth/i.test(f.name) && fs.statSync(path.join(this.credsDir, f.name)).size > 0));
+    return cachedLogin(this, () => agyModelsOk(spawnSync(this.bin, ['models'], { ...this.modelsOpts(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })));
   },
-  login: 'agy (once, interactively)',
+  // The same check, uncached and async (connections.mjs polls it while a sign-in is waiting).
+  probe() {
+    return new Promise((resolve) => execFile(this.bin, ['models'], this.modelsOpts(), (err, stdout, stderr) =>
+      resolve(agyModelsOk({ status: err ? 1 : 0, stdout, stderr }))));
+  },
+  modelsOpts() { return { env: stripEnv(process.env, this.envFilter), cwd: HOME, timeout: 8000 }; },
+  login: 'Connect from the sidebar',
   models: ['gemini-3.8-flash-high'],
   envFilter: /^(GEMINI_API_KEY|GOOGLE_(API_KEY|GEMINI_BASE_URL|GENAI_USE_VERTEXAI|GENAI_USE_ENTERPRISE|GENAI_USE_GCA|APPLICATION_CREDENTIALS|CLOUD_PROJECT(_ID)?|CLOUD_LOCATION)|AGY_(ADC_AUTH|BUSINESS_PAYGO_TIER))$/,
   events: agyEvents,

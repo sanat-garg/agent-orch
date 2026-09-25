@@ -221,3 +221,7 @@ Usage-limit notices show the real reset in the viewer's timezone; tests pass
 ## 2026-09-25 08:32 — #67 Server: tmux-driven sign-in sessions for agent CLIs (codex first) [done (check passed)]
 
 Web sign-in backend for codex/GitHub via tmux; tests pass
+
+## 2026-09-25 08:38 — #68 Connections: add Claude and Antigravity (agy) sign-in specs [done (check passed)]
+
+Claude and agy sign-in specs, fixtures, tests and status checks work

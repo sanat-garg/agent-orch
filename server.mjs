@@ -600,9 +600,10 @@ const gh = createGitHub({ env: CLAUDE_ENV, log: (m) => console.log(`[github] ${m
 const agentEntry = (a, extra = {}) => ({ id: a.id, label: a.label, installed: () => a.available(), signedIn: () => a.loggedIn(), envFilter: a.envFilter, ...extra });
 const connections = createConnections({
   entries: [
-    agentEntry(AGENTS.claude),
+    agentEntry(AGENTS.claude, { spec: SPECS.claude, account: () => AGENTS.claude.account(), afterChange: () => clearLoginCache() }),
     agentEntry(AGENTS.codex, { spec: SPECS.codex, account: () => codexAccount(), afterChange: () => clearLoginCache() }),
-    agentEntry(AGENTS.antigravity),
+    agentEntry(AGENTS.antigravity, { spec: SPECS.antigravity, afterChange: () => clearLoginCache(),
+      probe: () => AGENTS.antigravity.probe() }),
     { id: 'github', label: 'GitHub', installed: () => onPath('gh'), signedIn: () => gh.status().linked, account: () => gh.status().login,
       spec: SPECS.github, afterChange: () => gh.refresh() },
   ],
@@ -888,7 +889,7 @@ async function agentChatTurn(convo, text) {
       res = { outcome: 'error', text: String(e?.message || e), stderr: '' };
     }
     if (res.sessionId) convo.agentSession = { agent, id: res.sessionId };
-    if (res.outcome === 'auth_error') emit(cid, { t: 'error', text: `${a.label} is not signed in on this server. Sign in from the Terminal: ${a.login}` });
+    if (res.outcome === 'auth_error') emit(cid, { t: 'error', text: `${a.label} is not signed in on this server. ${a.login}.` });
     else if (res.outcome === 'rate_limited') emit(cid, { t: 'error', text: `${a.label} hit its usage limit${res.resetsAt ? '; it resets {until}' : ''}.`, ...(res.resetsAt && { until: res.resetsAt, untilKnown: true }) });
     else if (res.outcome === 'aborted') emit(cid, { t: 'notice', text: 'Interrupted' });
     else if (res.outcome !== 'ok') emit(cid, { t: 'error', text: `${a.label} failed: ${String(res.text || res.stderr || res.outcome).trim().slice(-600)}` });
@@ -1250,7 +1251,7 @@ async function handleRequest(req, res) {
     const [, id, action] = cn;
     const r = action === 'start' ? await connections.start(id)
       : action === 'code' ? await connections.submitCode(id, (await readBody(req)).code)
-      : action === 'cancel' ? await connections.cancel(id) : await connections.logout(id);
+      : action === 'cancel' ? await connections.cancel(id) : await connections.logout(id, await readBody(req));
     const { status, ...body } = r;
     return json(res, status, body);
   }

@@ -37,6 +37,37 @@ test('gh pane: code, fallback device URL, prompts to answer, success', () => {
   assert.deepEqual([done.exited, done.ok], [true, true]);
 });
 
+test('claude pane (recorded): subscription OAuth URL, waits for a pasted code; failure from the exit marker', () => {
+  assert.deepEqual(SPECS.claude.start.slice(1), ['auth', 'login', '--claudeai']);
+  assert.ok(!SPECS.claude.start.includes('--console'), 'never the API-billing Console login');
+  const p = parsePane(SPECS.claude, pane('claude-login.txt'));
+  assert.match(p.url, /^https:\/\/claude\.com\/cai\/oauth\/authorize\?code=true&client_id=[\w-]+&.*state=[\w-]+$/);
+  assert.deepEqual([p.code, p.exited, SPECS.claude.needsPastedCode], [null, false, true]);
+  const bad = parsePane(SPECS.claude, pane('claude-failed.txt'));
+  assert.deepEqual([bad.exited, bad.exitCode, bad.ok], [true, 1, false]);
+  assert.match(bad.error, /^Paste code here if prompted > Login failed: Request failed with status code 400$/);
+  const ok = parsePane(SPECS.claude, `${pane('claude-login.txt')}\nLogin successful.\n__AO_EXIT:0\n`);
+  assert.deepEqual([ok.exited, ok.ok], [true, true]);
+});
+
+test('agy panes (recorded): picks Google OAuth, rejoins the wrapped URL, reads the TUI error', () => {
+  const menu = parsePane(SPECS.antigravity, pane('agy-select.txt'));
+  assert.deepEqual([menu.url, menu.prompts, menu.exited], [null, [0], false]);
+  assert.deepEqual(SPECS.antigravity.answers[0][1], ['Enter']);
+  const p = parsePane(SPECS.antigravity, pane('agy-url.txt'));
+  assert.match(p.url, /^https:\/\/accounts\.google\.com\/o\/oauth2\/auth\?access_type=offline&client_id=[\w.-]+&/);
+  assert.ok(p.url.includes('&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback&'), 'wrapped lines rejoined');
+  assert.ok(p.url.includes('userinfo.profile+'), 'mid-word wrap rejoined');
+  assert.ok(p.url.endsWith('+openid&state=kMk9I9CTODCHtI5FVNl_yg'));
+  assert.ok(!/\s/.test(p.url));
+  assert.deepEqual([p.prompts, p.exited, SPECS.antigravity.needsPastedCode], [[], false, true]);
+  const bad = parsePane(SPECS.antigravity, pane('agy-error.txt'));
+  assert.deepEqual([bad.exited, bad.exitCode, bad.ok], [true, null, false]);
+  assert.match(bad.error, /^Got an error: token exchange failed: .*Malformed auth code/);
+  const ok = parsePane(SPECS.antigravity, 'Authentication successful!\n');
+  assert.deepEqual([ok.exited, ok.ok], [true, true]);
+});
+
 test('an empty pane yields nothing yet', () => {
   assert.deepEqual(parsePane(SPECS.codex, ''), { url: null, code: null, prompts: [], exited: false, exitCode: null, ok: false, error: null });
 });
@@ -116,4 +147,29 @@ test('entries without a spec cannot start a login', async () => {
   assert.equal((await conn.logout('c')).status, 400);
   assert.equal((await conn.start('nope')).status, 404);
   assert.deepEqual(conn.list()[0], { id: 'c', label: 'C', installed: true, signedIn: true, account: null, canLogin: false, canLogout: false, login: null });
+});
+
+test('login flow: a probe that reports signed in ends the login as done', async () => {
+  const t = fakeTmux();
+  let probes = 0, signed = false;
+  const conn2 = createConnections({
+    entries: [{ id: 'a', label: 'A', installed: () => true, signedIn: () => signed, spec: SPECS.antigravity, probe: async () => { probes++; return signed; } }],
+    tmux: t.run, pollMs: 5, probeMs: 20,
+  });
+  await conn2.start('a');
+  t.screen = pane('agy-url.txt');
+  await until(() => conn2.list()[0].login.url?.includes('oauth2'));
+  await until(() => probes >= 1);
+  assert.equal(conn2.list()[0].login.state, 'waiting');
+  signed = true;
+  await until(() => conn2.list()[0].login.state === 'done');
+  assert.equal(t.alive, false);
+});
+
+test('claude logout needs an explicit confirmation and carries the warning', async () => {
+  const conn = createConnections({ entries: [{ id: 'claude', label: 'Claude Code', installed: () => true, signedIn: () => true, spec: { ...SPECS.claude, logout: ['true'] } }], tmux: async () => ({ ok: true, out: '' }) });
+  assert.match(conn.list()[0].logoutWarning, /Every chat and orchestrator agent/);
+  const r = await conn.logout('claude', {});
+  assert.deepEqual([r.status, r.needsConfirm], [409, true]);
+  assert.equal((await conn.logout('claude', { confirm: true })).status, 200);
 });

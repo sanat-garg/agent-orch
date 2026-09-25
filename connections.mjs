@@ -11,12 +11,34 @@ export const SOCKET = 'agent-orch-login';
 export const LOGIN_TIMEOUT = 10 * 60_000;
 const EXIT_RE = /__AO_EXIT:(\d+)/;
 
-// Per-agent login specs. start: argv run in the pane. url/code: regexes (group 1) over the captured pane text; url
-// falls back to `defaultUrl`. needsPastedCode: the CLI waits for a code from the browser (POST …/code). answers:
-// prompts auto-answered once each with the given keys. successRe: printed on success (exit 0 counts as success too).
-// logout: argv, when the CLI supports it. Status checks stay with their owners (agents.mjs `loggedIn()`: `codex login
-// status`; github.mjs `gh.status()`), passed in as each entry's signedIn().
+// Per-agent login specs. start: argv run in the pane. url/code: regexes (group 1) or functions over the captured pane
+// text; url falls back to `defaultUrl`. needsPastedCode: the CLI waits for a code from the browser (POST …/code).
+// answers: prompts auto-answered once each with the given keys. successRe: printed on success (exit 0 counts as
+// success too). liveSuccessRe/liveFailRe: end the login while the CLI is still running (a TUI that never exits).
+// logout: argv, when the CLI supports it; logoutWarning: logout then needs {confirm: true}. Status checks stay with
+// their owners (agents.mjs `loggedIn()`; github.mjs `gh.status()`), passed in as each entry's signedIn().
+const BIN = path.join(os.homedir(), '.local/bin');
 export const SPECS = {
+  // `claude auth login --claudeai` = the Claude subscription (never --console, which bills API usage). It prints an
+  // OAuth URL and waits at "Paste code here if prompted >" for the code the callback page shows.
+  claude: {
+    start: [path.join(BIN, 'claude'), 'auth', 'login', '--claudeai'],
+    url: /(https:\/\/claude\.(?:com|ai)\/\S*oauth\/authorize\S+)/,
+    needsPastedCode: true,
+    successRe: /Login successful/i,
+    logout: [path.join(BIN, 'claude'), 'auth', 'logout'],
+    logoutWarning: 'Every chat and orchestrator agent in agent-orch runs on this Claude login. Signing out stops them all until you sign in again.',
+  },
+  // `agy` with no args: a TUI login menu (Google OAuth first), then a Google OAuth URL the TUI wraps over several
+  // lines, then a code field. It never exits on its own, so success/failure are read off the screen.
+  antigravity: {
+    start: [path.join(BIN, 'agy')],
+    url: agyUrl,
+    needsPastedCode: true,
+    answers: [[/Select login method:[\s\S]*> 1\. Google OAuth/, ['Enter']]],
+    liveSuccessRe: /Authentication successful/i,
+    liveFailRe: /^\s*(Got an error:.*|Error: authentication interrupted.*)$/m,
+  },
   codex: {
     start: ['codex', 'login', '--device-auth', '-c', 'forced_login_method="chatgpt"'],
     url: /(https:\/\/auth\.openai\.com\/\S+)/,
@@ -37,14 +59,31 @@ export const SPECS = {
   },
 };
 
+// agy's TUI breaks the OAuth URL into hard lines; rejoin the lines that are nothing but URL characters.
+export function agyUrl(text) {
+  const lines = text.split('\n'), i = lines.findIndex((l) => /^\s*https:\/\/accounts\.google\.com\/o\/oauth2\//.test(l));
+  if (i < 0) return null;
+  let url = lines[i].trim();
+  for (let j = i + 1; j < lines.length && /^\s*[\w%&=.+~:/?#-]+\s*$/.test(lines[j]); j++) url += lines[j].trim();
+  return url;
+}
+
+const grab = (re, text) => (typeof re === 'function' ? re(text) : text.match(re)?.[1]) || null;
+
 // What the pane shows so far: {url, code, prompts (indices of `answers` visible), exited, exitCode, ok, error}.
 export function parsePane(spec, text) {
   text = String(text || '').replace(/\r/g, '');
-  const url = text.match(spec.url)?.[1] || spec.defaultUrl || null;
-  const code = spec.code ? text.match(spec.code)?.[1] || null : null;
+  const url = grab(spec.url, text) || spec.defaultUrl || null;
+  const code = spec.code ? grab(spec.code, text) : null;
   const prompts = (spec.answers || []).flatMap(([re], i) => (re.test(text) ? [i] : []));
   const ex = text.match(EXIT_RE);
-  if (!ex) return { url, code, prompts, exited: false, exitCode: null, ok: false, error: null };
+  if (!ex) {
+    // A TUI that stays open: its success/failure text ends the login (exitCode stays null).
+    const fail = spec.liveFailRe && text.match(spec.liveFailRe);
+    if (fail) return { url, code, prompts, exited: true, exitCode: null, ok: false, error: (fail[1] || fail[0]).trim().slice(0, 300) };
+    if (spec.liveSuccessRe?.test(text)) return { url, code, prompts, exited: true, exitCode: null, ok: true, error: null };
+    return { url, code, prompts, exited: false, exitCode: null, ok: false, error: null };
+  }
   const exitCode = Number(ex[1]);
   const ok = exitCode === 0 || !!spec.successRe?.test(text);
   const before = text.slice(0, ex.index).split('\n').map((l) => l.trim()).filter(Boolean);
@@ -60,9 +99,11 @@ export const tmuxRunner = (args) => new Promise((resolve) => {
   execFile('tmux', ['-L', SOCKET, ...args], { timeout: 5000 }, (err, out) => resolve({ ok: !err, out: String(out || '') }));
 });
 
-// entries: [{id, label, installed(), signedIn(), account?(), spec?, envFilter?, afterChange?()}]. onChange(list) fires on
-// every state change (the server broadcasts it). tmux/pollMs/timeoutMs are injectable for tests.
-export function createConnections({ entries, env = process.env, onChange = () => {}, tmux = tmuxRunner, pollMs = 1000, timeoutMs = LOGIN_TIMEOUT }) {
+// entries: [{id, label, installed(), signedIn(), account?(), probe?(), spec?, envFilter?, afterChange?()}]. probe: an
+// uncached async sign-in check, run every probeMs while a login waits; true ends it as done (for CLIs whose success
+// screen isn't known). onChange(list) fires on every state change (the server broadcasts it). tmux/pollMs/probeMs/
+// timeoutMs are injectable for tests.
+export function createConnections({ entries, env = process.env, onChange = () => {}, tmux = tmuxRunner, pollMs = 1000, probeMs = 5000, timeoutMs = LOGIN_TIMEOUT }) {
   const byId = new Map(entries.map((e) => [e.id, e]));
   const logins = new Map(); // id -> {state, url, code, needsPastedCode, error, startedAt, timer, answered}
   const session = (id) => `login-${id}`;
@@ -72,7 +113,8 @@ export function createConnections({ entries, env = process.env, onChange = () =>
     return entries.map((e) => {
       let installed = false, signedIn = false, account = null;
       try { installed = !!e.installed(); signedIn = installed && !!e.signedIn(); account = signedIn ? e.account?.() || null : null; } catch {}
-      return { id: e.id, label: e.label, installed, signedIn, account, canLogin: !!e.spec, canLogout: !!e.spec?.logout, login: view(logins.get(e.id)) || null };
+      return { id: e.id, label: e.label, installed, signedIn, account, canLogin: !!e.spec, canLogout: !!e.spec?.logout,
+        ...(e.spec?.logoutWarning ? { logoutWarning: e.spec.logoutWarning } : {}), login: view(logins.get(e.id)) || null };
     });
   }
   const changed = () => { try { onChange(list()); } catch {} };
@@ -104,6 +146,10 @@ export function createConnections({ entries, env = process.env, onChange = () =>
       }
       if (p.exited) return finish(id, p.ok ? 'done' : 'failed', p.error);
       if (p.url !== l.url || p.code !== l.code) { l.url = p.url; l.code = p.code; changed(); }
+      if (e.probe && Date.now() - l.probedAt >= probeMs) {
+        l.probedAt = Date.now();
+        if (await e.probe().catch(() => false)) return finish(id, 'done');
+      }
     } finally { l.polling = false; }
   }
 
@@ -119,7 +165,7 @@ export function createConnections({ entries, env = process.env, onChange = () =>
     await tmux(['kill-session', '-t', `=${session(id)}`]);
     const r = await tmux(['new-session', '-d', '-s', session(id), '-x', '250', '-y', '50', '-c', os.homedir(), cmd]);
     if (!r.ok) return { status: 500, error: 'could not start tmux' };
-    const l = { state: 'waiting', url: null, code: null, needsPastedCode: !!e.spec.needsPastedCode, error: null, startedAt: Date.now(), answered: new Set() };
+    const l = { state: 'waiting', url: null, code: null, needsPastedCode: !!e.spec.needsPastedCode, error: null, startedAt: Date.now(), probedAt: Date.now(), answered: new Set() };
     logins.set(id, l);
     l.timer = setInterval(() => poll(id).catch(() => {}), pollMs);
     l.deadline = setTimeout(() => finish(id, 'failed', 'timed out after 10 minutes'), timeoutMs);
@@ -145,10 +191,11 @@ export function createConnections({ entries, env = process.env, onChange = () =>
     return { status: 200, ok: true };
   }
 
-  async function logout(id) {
+  async function logout(id, { confirm = false } = {}) {
     const e = byId.get(id);
     if (!e) return { status: 404, error: 'No such connection' };
     if (!e.spec?.logout) return { status: 400, error: `${e.label} can't be signed out from here` };
+    if (e.spec.logoutWarning && confirm !== true) return { status: 409, error: e.spec.logoutWarning, needsConfirm: true };
     const unset = new Set(e.envFilter ? Object.keys(env).filter((k) => e.envFilter.test(k)) : []);
     const r = await new Promise((resolve) => execFile(e.spec.logout[0], e.spec.logout.slice(1), {
       timeout: 15000, env: Object.fromEntries(Object.entries(env).filter(([k]) => !unset.has(k))),

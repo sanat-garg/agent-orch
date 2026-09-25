@@ -1852,6 +1852,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     }
     const { runId, logPath } = startRun(task.id, task.kind, route.agent);
     updateTask(task.id, { ran_agent: route.agent, ran_model: route.model || null, route_note: routeNote(route) });
+    pushState(); // Publish the actual route once fallback/model resolution has finished.
     const r = running.get(task.id);
     if (r) r.runId = runId;
     const res = await runAgent({
@@ -2132,7 +2133,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       const r = blockedUntilFor(id) && { until: blockedUntilFor(id), known: kvGet(limitKey('blocked_known', id), '0') === '1', reason: kvGet(limitKey('blocked_reason', id)) || 'usage limit' };
       if (r) blocks[id] = r;
     }
-    return { blocks, blockedUntil: blockedUntil(), blockedReason: kvGet('blocked_reason'), pacing: d?.reason || kvGet('budget_reason'), slots: d?.concurrency ?? CFG.concurrency, running: running.size, draining, subscription: onSubscription() };
+    const activeUsage = qa("SELECT DISTINCT CASE WHEN kind='plan' THEN COALESCE(agent, 'claude') ELSE COALESCE(ran_agent, agent, 'claude') END AS agent FROM tasks WHERE status='running'");
+    return { activeUsage, blocks, blockedUntil: blockedUntil(), blockedReason: kvGet('blocked_reason'), pacing: d?.reason || kvGet('budget_reason'), slots: d?.concurrency ?? CFG.concurrency, running: running.size, draining, subscription: onSubscription() };
   }
   function pushTask(id) {
     const t = taskView(getTask(id));

@@ -570,9 +570,11 @@ function projectLabel() {
 function updateFolderChip() {
   const c = currentConvo();
   const isNew = !c && state.draft.type === 'new';
-  $('folderLabel').textContent = projectLabel();
-  $('folderBtn').classList.toggle('new', isNew);
-  $('folderBtn').title = c ? `This chat works in ${tilde(c.cwd)}. Pick another project to start a new chat there.` : 'Choose which project Claude works in';
+  if ($('folderBtn')) {
+    $('folderLabel').textContent = projectLabel();
+    $('folderBtn').classList.toggle('new', isNew);
+    $('folderBtn').title = c ? `This chat works in ${tilde(c.cwd)}. Pick another project to start a new chat there.` : 'Choose which project Claude works in';
+  }
   // The big picker in the empty state
   const pick = document.querySelector('.project-pick');
   if (pick) {
@@ -1212,6 +1214,7 @@ const VERBS = ['Working', 'Thinking', 'Reading', 'Tinkering', 'Building', 'Ponde
 let workTimer;
 function setBusy(b) {
   state.busy = b;
+  renderUsage();
   $('working').hidden = !b;
   updateSendButton();
   clearInterval(workTimer);
@@ -1953,7 +1956,7 @@ async function browse(dir) {
   $('pkUseHere').title = d.path === d.home ? 'Pick a folder inside your home folder' : '';
 }
 
-$('folderBtn').addEventListener('click', openPicker);
+$('folderBtn')?.addEventListener('click', openPicker);
 $('pickerModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closePicker(); });
 $('pkSearch').addEventListener('input', renderProjectList);
 $('pkBrowseBtn').addEventListener('click', () => browse(state.workspace));
@@ -2049,6 +2052,7 @@ function onServer(msg) {
     updateFolderChip();
     updateHeader();
     refreshAutoPreview();
+    renderUsage();
     return;
   }
   if (msg.cid && msg.cid !== state.cid) return;
@@ -2457,37 +2461,78 @@ function fmtUntil(until, now = Date.now()) {
 function withUntil(ev) {
   return ev.until ? ev.text.replace('{until}', fmtUntil(ev.until)) : ev.text;
 }
-function renderUsage(fresh = false) {
-  const u = M.usage;
-  const planName = u?.plan ? `Claude ${u.plan[0].toUpperCase()}${u.plan.slice(1)}` : 'Claude';
-  $('usageCard').title = `${planName} limits · open usage over time`;
-  const show = (key, w) => {
-    if (w) tween($(`us${key}`), w.pct, fmtPct, fresh);
-    else blurSwap($(`us${key}`), '–');
-    setBar($(`us${key}Bar`), w ? w.pct : 0);
-    $(`us${key}Row`).title = w ? fmtReset(w.resetsAt) : '';
+// Subscription limits belong to agents, so two models sharing an agent share one slide.
+const usageSlides = { agent: null, ids: [], data: null, loading: false, at: 0, error: false };
+function runningUsageAgents() {
+  const runs = O.state?.activeUsage || [...O.tasks.values()].filter((t) => t.status === 'running').map((t) => ({ agent: t.kind === 'plan' ? t.agent || 'claude' : t.ran_agent || t.agent || 'claude' }));
+  const ids = new Set(runs.map((r) => r.agent));
+  for (const c of state.convos) if (c.id === state.cid ? state.busy : c.busy) ids.add(c.agent || 'claude');
+  return ids.size ? [...ids].sort() : [currentConvo()?.agent || 'claude'];
+}
+async function loadSidebarUsage() {
+  if (usageSlides.loading) return;
+  usageSlides.loading = true;
+  try {
+    usageSlides.data = (await api('/api/usage/history?range=6h')).agents;
+    usageSlides.at = Date.now();
+    usageSlides.error = false;
+  } catch { usageSlides.error = true; }
+  finally { usageSlides.loading = false; renderUsage(); }
+}
+function sidebarUsage() {
+  if (usageSlides.agent === 'claude') return M.usage;
+  const windows = Object.entries(usageSlides.data?.[usageSlides.agent]?.status?.windows || {});
+  const active = windows.filter(([, w]) => !w.resetsAt || w.resetsAt * 1000 > Date.now());
+  return {
+    available: !!active.length,
+    updatedAt: windows.length ? Math.max(...windows.map(([, w]) => w.t)) : null,
+    windows: active.map(([id, w]) => ({ ...w, label: winLabel(id), resetsAt: w.resetsAt ? new Date(w.resetsAt * 1000).toISOString() : null })),
   };
-  show('Session', u?.session);
-  show('Weekly', u?.weekly);
+}
+function renderUsage(fresh = false) {
+  const ids = runningUsageAgents();
+  usageSlides.ids = ids;
+  if (!ids.includes(usageSlides.agent)) usageSlides.agent = ids[0];
+  const id = usageSlides.agent, u = sidebarUsage();
+  const name = id === 'claude' ? 'Claude' : agentLabel(id);
+  const title = `${name} limits${ids.length > 1 ? ` · ${ids.indexOf(id) + 1}/${ids.length}` : ''}`;
+  blurSwap($('usageTitle'), title);
+  $('usageCard').title = `${name} subscription limits · open usage over time`;
+  $('usRefresh').setAttribute('aria-label', `Refresh ${name} usage limits`);
+  const windows = id === 'claude' ? [{ ...u?.session, label: '5-hour' }, { ...u?.weekly, label: 'Weekly' }] : (u?.windows || []);
+  for (const [i, key] of ['Session', 'Weekly'].entries()) {
+    const w = windows[i];
+    blurSwap($(`us${key}Row`).firstElementChild, w?.label || (i ? 'Weekly' : '5-hour'));
+    blurSwap($(`us${key}`), w?.pct != null ? fmtPct(w.pct) : '–', fresh);
+    setBar($(`us${key}Bar`), w?.pct ?? 0);
+    $(`us${key}Row`).title = w?.resetsAt ? fmtReset(w.resetsAt) : '';
+  }
   let note;
-  if (!u || !u.updatedAt) note = 'Checking plan limits…';
-  else if (!u.available) note = u.error ? `Couldn't read limits: ${u.error}` : 'Plan limits unavailable (not signed in with a subscription)';
+  if (id === 'claude' && !u?.updatedAt) note = 'Checking plan limits…';
+  else if (!u?.available) note = id === 'claude'
+    ? (u?.error ? `Couldn't read limits: ${u.error}` : 'Plan limits unavailable')
+    : usageSlides.error ? "Couldn't refresh limits" : 'No current limits reported by this agent';
   else {
-    note = [u.session?.resetsAt && `5-hour resets ${fmtResetAt(u.session.resetsAt)}`,
-      u.weekly?.resetsAt && `Weekly resets ${fmtResetAt(u.weekly.resetsAt)}`].filter(Boolean).join('\n');
-    // Only speak up about extra usage when it's switched on, since that is the case that can cost money.
+    note = windows.map((w, i) => `${i > 1 ? `${w.label}: ${fmtPct(w.pct)} · ` : ''}${w.resetsAt ? `${w.label} resets ${fmtResetAt(w.resetsAt)}` : i > 1 ? 'reset unknown' : ''}`).filter(Boolean).join('\n');
     if (u.extraUsage === true) note += ' ⚠ Extra usage is ON: it can bill beyond your plan';
   }
   blurSwap($('usNote'), note.trim(), fresh);
   renderUsageAge();
 }
+setInterval(() => {
+  if (document.hidden) return;
+  const ids = runningUsageAgents();
+  usageSlides.agent = ids[(ids.indexOf(usageSlides.agent) + 1) % ids.length];
+  renderUsage();
+  if (ids.some((id) => id !== 'claude') && Date.now() - usageSlides.at > 30000) loadSidebarUsage();
+}, 3000);
 function renderUsageAge() {
-  const u = M.usage;
+  const u = sidebarUsage();
   if ($('usRefresh').classList.contains('spin')) { blurSwap($('usAge'), 'checking…'); return; }
   if (!u?.updatedAt) { blurSwap($('usAge'), ''); return; }
   const m = Math.floor((Date.now() - u.updatedAt) / 60e3);
   blurSwap($('usAge'), m < 1 ? 'just now' : `${m}m ago`);
-  $('usAge').title = `Checked ${new Date(u.updatedAt).toLocaleTimeString()}. Updates every 3 minutes and after each chat reply.`;
+  $('usAge').title = `Checked ${new Date(u.updatedAt).toLocaleTimeString()}. ${usageSlides.agent === 'claude' ? 'Updates every 3 minutes and after each chat reply.' : 'Latest reading reported by this agent.'}`;
 }
 let refreshGuard;
 function setRefreshing(on) {
@@ -2499,7 +2544,11 @@ function setRefreshing(on) {
   if (on) refreshGuard = setTimeout(() => setRefreshing(false), 25000);
   renderUsageAge();
 }
-$('usRefresh').addEventListener('click', () => { setRefreshing(true); send({ t: 'usage_refresh' }); });
+$('usRefresh').addEventListener('click', () => {
+  setRefreshing(true);
+  if (usageSlides.agent === 'claude') send({ t: 'usage_refresh' });
+  else loadSidebarUsage().finally(() => setRefreshing(false));
+});
 setInterval(renderUsageAge, 5000);
 
 // ----- live stream from the server -----
@@ -3023,6 +3072,7 @@ function applyOrchSnapshot(s) {
   O.project = s?.project || null;
   if (s?.state) O.state = s.state;
   for (const t of s?.tasks || []) O.tasks.set(t.id, t);
+  renderUsage();
   renderOrchBar();
   renderUpdateBanner();
   refreshAllCards();
@@ -3032,6 +3082,7 @@ function applyOrchSnapshot(s) {
 function onOrch(msg) {
   if (msg.t === 'otask') {
     O.tasks.set(msg.task.id, msg.task);
+    renderUsage();
     refreshCards(msg.task.id);
     for (const other of O.tasks.values()) if (other.depends_on === msg.task.id) refreshCards(other.id);
     if (O.drawer === msg.task.id) { renderDrawerHead(); scheduleDetail(); }
@@ -3048,6 +3099,7 @@ function onOrch(msg) {
     }
   } else if (msg.t === 'ostate') {
     O.state = msg.state;
+    renderUsage();
     refreshAutoPreview();
     renderOrchBar();
     renderUpdateBanner();

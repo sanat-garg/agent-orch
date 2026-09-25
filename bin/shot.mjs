@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 // Screenshot a URL with Playwright's cached Chromium. Files saved under .agent-orch/shots/ show up in the owner's chat.
 // Usage: node bin/shot.mjs <url> [out.png] [--full] [--width=1280] [--height=800] [--mobile] [--wait=ms] [--cookie=name=value]
+//   [--storage=key=value] (localStorage before load) [--click=selector] (clicked in order after load)
 // CW_SHOT_COOKIE (`name=value`, or a bare token meaning cw_session=<token>) is sent too, e.g. to log into agent-orch.
 import fs from 'node:fs';
 import path from 'node:path';
 import { chromium } from 'playwright-core';
 
-const USAGE = 'usage: node bin/shot.mjs <url> [out.png] [--full] [--width=1280] [--height=800] [--mobile] [--wait=ms] [--cookie=name=value]';
-const opts = { width: 1280, height: 800, wait: 0, full: false, mobile: false, cookies: [] };
+const USAGE = 'usage: node bin/shot.mjs <url> [out.png] [--full] [--width=1280] [--height=800] [--mobile] [--wait=ms] [--cookie=name=value] [--storage=key=value] [--click=selector]';
+const opts = { width: 1280, height: 800, wait: 0, full: false, mobile: false, cookies: [], storage: [], clicks: [] };
 const pos = [];
 for (const a of process.argv.slice(2)) {
   const m = a.match(/^--([a-z]+)(?:=(.*))?$/);
@@ -16,6 +17,8 @@ for (const a of process.argv.slice(2)) {
   if (k === 'full' || k === 'mobile') opts[k] = true;
   else if (k === 'width' || k === 'height' || k === 'wait') opts[k] = Number(v);
   else if (k === 'cookie' && v) opts.cookies.push(v);
+  else if (k === 'storage' && v?.includes('=')) opts.storage.push(v);
+  else if (k === 'click' && v) opts.clicks.push(v);
   else if (k === 'help') { console.log(USAGE); process.exit(0); }
   else { console.error(`unknown option ${a}\n${USAGE}`); process.exit(2); }
 }
@@ -42,11 +45,15 @@ try {
       return { name: c.slice(0, i), value: c.slice(i + 1), url };
     }));
   }
+  if (opts.storage.length) {
+    await context.addInitScript((kv) => { for (const e of kv) { const i = e.indexOf('='); localStorage.setItem(e.slice(0, i), e.slice(i + 1)); } }, opts.storage);
+  }
   const page = await context.newPage();
   await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 }).catch(async (e) => {
     if (!/Timeout/.test(e.message)) throw e; // pages with long-lived connections (WebSocket, polling) never go idle
     await page.waitForLoadState('load');
   });
+  for (const sel of opts.clicks) await page.locator(sel).first().click({ timeout: 10000 });
   if (opts.wait) await page.waitForTimeout(opts.wait);
   await page.screenshot({ path: out, fullPage: opts.full });
   console.log(out);

@@ -1369,7 +1369,7 @@ document.fonts?.ready.then(fitPick);
 // Auto Delegate preview (GET /api/delegate/preview), next to the picker only while Auto Delegate is chosen: the start
 // model and the comparable models most likely used after it, each with a status dot. A specific model shows nothing.
 // The popup previews saved order or automatic ranking; score details are optional.
-const AP = { data: null, key: '', seq: 0, timer: 0, lastFocus: null, addOpen: false, search: '', drag: null, saving: false, error: '' };
+const AP = { data: null, key: '', seq: 0, timer: 0, lastFocus: null, error: '', fe: {}, saving: Promise.resolve(), saveSeq: 0, pending: 0, confirmed: null };
 const AP_ST = { available: 'available', near: 'near limit', limited: 'limited', unavailable: 'unavailable' };
 function apStatusText(r) {
   const base = r.status === 'limited' && r.until ? `limited until ${fmtUntil(r.until)}` : AP_ST[r.status] || r.status;
@@ -1398,8 +1398,8 @@ function loadAutoPreview() {
     ? `/api/delegate/preview?convo=${encodeURIComponent(cid)}&agent=${encodeURIComponent(agent)}&model=${encodeURIComponent(model)}&category=coding`
     : `/api/delegate/preview?agent=${encodeURIComponent(agent)}&model=${encodeURIComponent(model)}&category=coding`;
   api(url).then((d) => {
-    if (seq !== AP.seq) return;
-    AP.data = d; AP.error = '';
+    if (seq !== AP.seq || AP.pending) return;
+    AP.data = d; AP.error = ''; AP.confirmed = d.fallbacks ?? null;
     if (d.data_status === 'loading') { clearTimeout(AP.timer); AP.timer = setTimeout(loadAutoPreview, 1500); }
     renderApChip();
     if (!$('apModal').hidden) renderAutoPreview();
@@ -1414,54 +1414,33 @@ function refreshAutoPreview() {
   clearTimeout(AP.timer);
   if (AP.key) AP.timer = setTimeout(loadAutoPreview, 400);
 }
-// Optimistic save of the fallback list; revert + toast on error.
-function apSaveFallbacks(list) {
-  const cid = state.cid;
-  if (!cid || AP.saving) return;
-  const prev = AP.data?.fallbacks ?? null;
-  // Optimistic: update local state immediately.
-  if (AP.data) AP.data.fallbacks = list;
+// Save the fallback list (null = automatic): optimistic, so the popup and composer chip update at once. PUTs run in
+// order; if the latest one fails, the last list the server confirmed comes back.
+function apApplyFallbacks(list) {
+  const d = AP.data;
   const convo = currentConvo();
   if (convo) convo.fallbacks = list;
+  if (!d) return;
+  const info = new Map([d.start, ...(d.suggested || []), ...d.candidates].map((r) => [apKey(r), r]));
+  d.fallbacks = list;
+  d.candidates = list == null ? d.suggested || []
+    : list.filter((f) => apKey(f) !== apKey(d.start)).map((f) => ({ ...(info.get(apKey(f)) || { label: modelLabel(f.agent, f.model), status: null }), agent: f.agent, model: f.model }));
   renderApChip();
-  renderAutoPreview();
-  AP.saving = true;
-  api(`/api/convos/${cid}/fallbacks`, 'PUT', { fallbacks: list }).then((c) => {
-    AP.saving = false;
-    // Server response is authoritative — sync the convo.
-    if (convo) convo.fallbacks = c.fallbacks ?? null;
-    // Re-fetch the preview so candidates/suggested reflect the new list.
-    loadAutoPreview();
-  }).catch((e) => {
-    AP.saving = false;
-    // Revert.
-    if (AP.data) AP.data.fallbacks = prev;
-    if (convo) convo.fallbacks = prev;
-    renderApChip();
-    renderAutoPreview();
-    toast(`Failed to save fallbacks: ${e.message}`);
-  });
+  if (!$('apModal').hidden) renderAutoPreview();
 }
-function apAddFallback(agent, model) {
-  const cur = (AP.data?.fallbacks ?? currentConvo()?.fallbacks) || [];
-  if (cur.some((f) => f.agent === agent && f.model === model)) return;
-  apSaveFallbacks([...cur, { agent, model }]);
-}
-function apRemoveFallback(idx) {
-  const cur = (AP.data?.fallbacks ?? currentConvo()?.fallbacks) || [];
-  if (idx < 0 || idx >= cur.length) return;
-  apSaveFallbacks(cur.filter((_, i) => i !== idx));
-}
-function apMoveFallback(from, to) {
-  const cur = [...((AP.data?.fallbacks ?? currentConvo()?.fallbacks) || [])];
-  if (from < 0 || from >= cur.length || to < 0 || to >= cur.length || from === to) return;
-  const [item] = cur.splice(from, 1);
-  cur.splice(to, 0, item);
-  apSaveFallbacks(cur);
-}
-function apResetFallbacks() {
-  apSaveFallbacks(null);
-  AP.addOpen = false;
+function apSaveFallbacks(list) {
+  const cid = state.cid;
+  if (!cid) return;
+  apApplyFallbacks(list);
+  const seq = ++AP.saveSeq;
+  AP.pending++;
+  AP.saving = AP.saving.then(() => api(`/api/convos/${cid}/fallbacks`, 'PUT', { fallbacks: list })).then((c) => {
+    AP.confirmed = c.fallbacks ?? null;
+  }, (e) => {
+    if (seq !== AP.saveSeq) return;
+    apApplyFallbacks(AP.confirmed);
+    toast(`Could not save fallbacks: ${e.message}`);
+  }).finally(() => { if (!--AP.pending) loadAutoPreview(); });
 }
 function renderApChip() {
   const c = $('apChip'), d = AP.data;
@@ -1487,7 +1466,7 @@ function openAutoPreview() {
   const m = $('apModal');
   if (m.hidden) AP.lastFocus = document.activeElement;
   m.hidden = false;
-  AP.addOpen = false; AP.search = '';
+  AP.fe = { refresh: renderAutoPreview };
   // Desktop: a small popover above the chip; mobile (≤800px): the .modal.sheet bottom sheet.
   const panel = m.querySelector('.modal-panel');
   if (matchMedia('(min-width: 801px)').matches) {
@@ -1501,63 +1480,20 @@ function openAutoPreview() {
 }
 function closeAutoPreview() {
   $('apModal').hidden = true;
-  AP.addOpen = false; AP.search = '';
+  AP.fe = {};
   AP.lastFocus?.focus?.();
 }
 $('apChip').addEventListener('click', openAutoPreview);
 $('apModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeAutoPreview(); });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('apModal').hidden) { e.stopImmediatePropagation(); closeAutoPreview(); } }, true);
-
-// --- Drag-to-reorder fallbacks with Pointer Events (long-press on touch) ---
-function apPointerDown(e, idx) {
-  if (e.button) return;
-  const card = e.currentTarget;
-  const isTouch = e.pointerType === 'touch';
-  const startY = e.clientY;
-  AP.drag = { idx, card, startY, isTouch, started: false, pressTimer: 0 };
-  card.setPointerCapture(e.pointerId);
-  if (isTouch) {
-    AP.drag.pressTimer = setTimeout(() => { if (AP.drag) { AP.drag.started = true; card.classList.add('ap-dragging'); } }, 350);
-  }
-  const move = (ev) => {
-    if (!AP.drag) return;
-    if (!AP.drag.started) {
-      if (isTouch) return; // wait for long-press timer
-      if (Math.abs(ev.clientY - startY) > 5) { AP.drag.started = true; card.classList.add('ap-dragging'); }
-      else return;
-    }
-    ev.preventDefault();
-    const list = card.parentElement;
-    const cards = [...list.querySelectorAll('.ap-fb-row')];
-    const dy = ev.clientY - startY;
-    card.style.transform = `translateY(${dy}px)`;
-    card.style.zIndex = '10';
-    // Find the target index based on pointer position relative to other cards.
-    const cr = card.getBoundingClientRect(), cy = cr.top + cr.height / 2;
-    let target = idx;
-    cards.forEach((c, i) => { if (i !== idx) { const r = c.getBoundingClientRect(); if (cy > r.top + r.height / 2) target = i < idx ? i + 1 : i; else if (cy < r.top + r.height / 2 && i < idx) target = i; } });
-    AP.drag.target = target;
-  };
-  const up = (ev) => {
-    card.removeEventListener('pointermove', move);
-    card.removeEventListener('pointerup', up);
-    card.removeEventListener('pointercancel', up);
-    clearTimeout(AP.drag?.pressTimer);
-    card.classList.remove('ap-dragging');
-    card.style.transform = ''; card.style.zIndex = '';
-    if (AP.drag?.started && AP.drag.target != null && AP.drag.target !== idx) apMoveFallback(idx, AP.drag.target);
-    AP.drag = null;
-  };
-  card.addEventListener('pointermove', move);
-  card.addEventListener('pointerup', up);
-  card.addEventListener('pointercancel', up);
-}
-// Prevent iOS scroll while dragging a fallback row.
-$('apModal').addEventListener('touchmove', (e) => { if (AP.drag?.started) e.preventDefault(); }, { passive: false });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('apModal').hidden && !e.target.closest?.('.fe-add')) { e.stopImmediatePropagation(); closeAutoPreview(); } }, true);
 
 function renderAutoPreview() {
+  if (AP.fe.busy) { AP.fe.stale = true; return; } // a pressed/dragged row would be detached mid-gesture
   const body = $('apBody'), d = AP.data;
   const expanded = body.querySelector('details')?.open || false;
+  // Re-renders (save, refetch) keep keyboard focus on the same fallback row.
+  const focused = document.activeElement?.closest?.('#apBody .fe-row')?.dataset.key;
+  if (focused && !AP.fe.focusKey) AP.fe.focusKey = focused;
   body.textContent = '';
   $('apTitle').textContent = 'Auto Delegate';
   $('apSub').textContent = 'When usage runs out, queued tasks may use a fallback.';
@@ -1579,20 +1515,17 @@ function renderAutoPreview() {
   if (d.data_status === 'unconfigured' || d.data_status === 'error') {
     action('Open Connections', () => { closeAutoPreview(); openConnections('aa'); });
   }
-  body.append(el('h3', 'dg-group', 'Starting model'), apModelRow(d.start, null, true));
-  body.append(el('h3', 'dg-group', isCurated ? 'Saved fallback order' : 'Ranked fallbacks'));
-  if (d.candidates.length) {
-    const list = el('ol', 'ap-ranked');
-    d.candidates.forEach((r) => {
-      const item = el('li'); item.append(apModelRow(r)); list.append(item);
-    });
-    body.append(list);
-  } else {
-    body.append(el('p', 'dg-why', isCurated ? 'No fallbacks saved. Tasks wait for the starting model.'
-      : dataMessage ? 'Fallback comparison is unavailable.'
-      : d.start.score == null ? 'No comparable scores for the starting model. Choose a specific model to continue.'
-      : 'No comparable fallback available. Tasks wait for usage to reset.'));
-  }
+  const scoreLabel = d.category[0].toUpperCase() + d.category.slice(1);
+  body.append(el('h3', 'dg-group', 'Starting model'), apStartRow(d.start, scoreLabel));
+  body.append(el('h3', 'dg-group', 'Fallbacks'));
+  if (!isCurated && !d.candidates.length && d.start.score == null && !dataMessage) body.append(el('p', 'dg-why', 'No comparable scores for the starting model.'));
+  const info = new Map([d.start, ...d.candidates].map((r) => [apKey(r), r]));
+  const editor = body.appendChild(el('div'));
+  renderFallbackEditor(editor, {
+    list: isCurated ? d.fallbacks.map((f) => ({ ...(info.get(apKey(f)) || {}), agent: f.agent, model: f.model })) : null,
+    suggested: d.candidates, exclude: [d.start], scoreLabel,
+    onChange: apSaveFallbacks, ui: AP.fe,
+  });
   const details = el('details', 'ap-details'); details.open = expanded;
   details.append(el('summary', '', 'Scores and ranking details'));
   details.append(el('p', 'dg-why', isCurated ? 'Uses your saved order; scores do not change it.'
@@ -1626,103 +1559,210 @@ function renderAutoPreview() {
     body.append(src);
   }
 }
-// One explanation per row; numeric comparisons belong in the shared disclosure.
-function apModelRow(r, head, start = false) {
-  const box = el('div', 'ap-compact-row');
-  box.append(el('div', 'dg-name', `${shortLabel(r.agent)} · ${apName(r)}`));
-  const why = r.status && r.status !== 'available' ? apStatusText(r)
-    : start ? 'Available to start'
-    : AP.data?.fallbacks != null ? 'Available · uses your saved order'
-    : r.score != null ? 'Available · comparable score'
-    : 'Comparison unavailable';
-  box.append(el('p', 'dg-why', why));
+// The starting model, laid out like an editor row (no handle, position or remove).
+function apStartRow(r, scoreLabel) {
+  const box = el('div', 'fe-row fe-start');
+  box.append(feMain(r, scoreLabel));
   return box;
 }
-// An editable fallback row: drag handle, name, status, metrics, up/down buttons, remove.
-function apEditableRow(r, idx, total) {
-  const box = el('div', `ap-fb-row dg-row ap-row${r.status === 'available' || r.status === 'near' ? '' : ' limited'}`);
-  box.setAttribute('data-idx', idx);
-  // Drag handle
-  const grip = el('span', 'ap-grip', '⠿');
-  grip.title = 'Drag to reorder';
-  grip.style.cursor = 'grab';
-  box.addEventListener('pointerdown', (e) => { if (e.target.closest('.ap-grip') || e.target === box) apPointerDown(e, idx); });
-  // Up/down accessible buttons
-  const upBtn = el('button', 'ap-move-btn', '↑');
-  upBtn.type = 'button'; upBtn.title = 'Move up'; upBtn.disabled = idx === 0;
-  upBtn.addEventListener('click', () => apMoveFallback(idx, idx - 1));
-  const downBtn = el('button', 'ap-move-btn', '↓');
-  downBtn.type = 'button'; downBtn.title = 'Move down'; downBtn.disabled = idx === total - 1;
-  downBtn.addEventListener('click', () => apMoveFallback(idx, idx + 1));
-  // Name + status
-  const h = el('div', 'dg-head ap-fb-head');
-  const st = el('span', `ap-e st-${r.status || 'available'}`);
-  st.append(el('span', 'ap-dot'));
-  h.append(el('span', 'dg-name', `${shortLabel(r.agent)} · ${apName(r)}`), st);
-  // Remove button
-  const rm = el('button', 'ap-rm-btn', '×');
-  rm.type = 'button'; rm.title = 'Remove fallback';
-  rm.addEventListener('click', () => apRemoveFallback(idx));
-  // Key metrics (compact)
-  const g = el('div', 'dg-metrics ap-metrics');
-  for (const [label, read, fmt] of DG_METRICS.slice(0, 2)) {
-    const v = r.metrics && dgNum(read(r.metrics));
-    const cell = el('div', 'dg-m');
-    cell.append(el('span', 'k', label), el('span', 'v', v == null ? '—' : fmt(v)));
-    g.append(cell);
-  }
-  const ctrl = el('div', 'ap-fb-ctrl');
-  ctrl.append(upBtn, downBtn, rm);
-  box.append(grip, h, g, ctrl);
-  if (!r.metrics && AP.data?.data_status === 'ready') box.append(el('p', 'dg-why', 'No metrics available for this model.'));
-  return box;
-}
-// Searchable "add fallback" panel: all discovered models grouped by agent with availability.
-function renderApAddPanel(d) {
-  const panel = el('div', 'ap-add-panel');
-  const input = el('input', 'ap-search');
-  input.type = 'search'; input.placeholder = 'Search models…'; input.value = AP.search;
-  input.addEventListener('input', () => { AP.search = input.value; renderApAddList(panel, d, input); });
-  panel.append(input);
-  renderApAddList(panel, d, input);
-  setTimeout(() => input.focus(), 50);
-  return panel;
-}
-function renderApAddList(panel, d, input) {
-  // Remove previous list if any.
-  const prev = panel.querySelector('.ap-add-list');
-  if (prev) prev.remove();
-  const list = el('div', 'ap-add-list');
-  const q = AP.search.toLowerCase().trim();
-  const inList = new Set((d.fallbacks || []).map(apKey));
-  // Also mark the start model.
-  inList.add(apKey(d.start));
-  for (const a of AGENT_LIST) {
-    if (!a.available || a.loggedIn === false) continue;
-    const models = a.models.filter((m) => !q || m.label.toLowerCase().includes(q) || m.id.toLowerCase().includes(q) || a.label.toLowerCase().includes(q));
-    if (!models.length) continue;
-    const group = el('div', 'ap-add-group');
-    group.append(el('h4', 'ap-add-agent', a.label));
-    for (const m of models) {
-      const key = `${a.id}/${m.id}`;
-      const already = inList.has(key);
-      const row = el('div', `ap-add-row${already ? ' ap-in-list' : ''}`);
-      const name = el('span', 'ap-add-name', m.label + (m.default ? ' (default)' : ''));
-      row.append(name);
-      if (already) {
-        row.append(el('span', 'ap-add-check', '✓'));
-      } else {
-        const addB = el('button', 'ap-add-pick', 'Add');
-        addB.type = 'button';
-        addB.addEventListener('click', () => { apAddFallback(a.id, m.id); AP.addOpen = true; });
-        row.append(addB);
+// Reusable fallback-order editor. list: [{agent, model, label?, status?, until?, note?, score?}] in order, or null for
+// automatic (shows `suggested`; the first edit pins that order). onChange(next) gets [{agent, model}] or null (reset).
+// catalog: agents with models for '+ Add model' (AGENT_LIST shape); exclude: [{agent, model}] that can't be added;
+// ui: a host-owned object that keeps add-panel, search and focus state across re-renders. While a row is pressed or
+// dragged ui.busy is set: the host should skip re-rendering, set ui.stale, and provide ui.refresh to catch up after.
+function renderFallbackEditor(container, opts) {
+  const { list, onChange, suggested = [], catalog = AGENT_LIST, exclude = [], scoreLabel = 'Score', ui = {} } = opts;
+  const auto = list == null, rows = auto ? suggested : list;
+  const plain = (xs) => xs.map(({ agent, model }) => ({ agent, model }));
+  const name = (r) => r.label || modelLabel(r.agent, r.model);
+  const change = (next) => { ui.rows = next; onChange(next && plain(next)); };
+  ui.rows = rows;
+  container.textContent = '';
+  container.classList.add('fe');
+  if (auto) container.append(el('p', 'fe-hint', rows.length ? 'Automatic, ranked by score. Any change saves this order as your own.' : 'No automatic fallback right now.'));
+  const ol = el('ol', 'fe-list');
+  ol.setAttribute('aria-label', 'Fallback order. Alt+Up or Alt+Down moves the focused model; Delete removes it.');
+  const move = (i, j) => {
+    if (j < 0 || j >= rows.length || i === j) return;
+    const next = [...rows], [r] = next.splice(i, 1);
+    next.splice(j, 0, r);
+    ui.focusKey = apKey(r);
+    change(next);
+  };
+  const remove = (i) => {
+    const r = rows[i], near = rows[i + 1] || rows[i - 1];
+    ui.focusKey = near ? apKey(near) : null;
+    ui.focusAdd = !near;
+    change(rows.filter((_, j) => j !== i));
+    toast(`Removed ${name(r)}`, { action: 'Undo', run: () => {
+      const cur = ui.rows || [];
+      if (cur.some((x) => apKey(x) === apKey(r))) return;
+      const next = [...cur];
+      next.splice(Math.min(i, next.length), 0, r);
+      ui.focusKey = apKey(r);
+      change(next);
+    } });
+  };
+  rows.forEach((r, i) => {
+    const li = el('li', 'fe-row');
+    li.tabIndex = 0;
+    li.dataset.key = apKey(r);
+    const st = feStatus(r);
+    li.setAttribute('aria-label', `${i + 1}. ${name(r)}, ${shortLabel(r.agent)}${st ? `, ${st}` : ''}`);
+    const grip = el('span', 'fe-grip');
+    grip.innerHTML = '<svg viewBox="0 0 10 16" width="10" height="16" aria-hidden="true"><g fill="currentColor"><circle cx="2.5" cy="3" r="1.4"/><circle cx="7.5" cy="3" r="1.4"/><circle cx="2.5" cy="8" r="1.4"/><circle cx="7.5" cy="8" r="1.4"/><circle cx="2.5" cy="13" r="1.4"/><circle cx="7.5" cy="13" r="1.4"/></g></svg>';
+    grip.title = 'Drag to reorder';
+    const rm = el('button', 'fe-rm');
+    rm.type = 'button';
+    rm.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+    rm.setAttribute('aria-label', `Remove ${name(r)}`);
+    rm.title = 'Remove';
+    rm.addEventListener('click', () => remove(i));
+    li.append(grip, el('span', 'fe-pos', String(i + 1)), feMain(r, scoreLabel), rm);
+    li.addEventListener('keydown', (e) => {
+      if (e.target !== li) return;
+      if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) { e.preventDefault(); move(i, i + (e.key === 'ArrowUp' ? -1 : 1)); }
+      else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); (e.key === 'ArrowUp' ? li.previousElementSibling : li.nextElementSibling)?.focus(); }
+      else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); remove(i); }
+    });
+    li.addEventListener('pointerdown', (e) => feDrag(e, ol, li, i, ui, move));
+    ol.append(li);
+  });
+  // A long-pressed row must not scroll the sheet on iOS (touchmove is the only cancelable hook there).
+  ol.addEventListener('touchmove', (e) => { if (ui.dragging) e.preventDefault(); }, { passive: false });
+  if (rows.length) container.append(ol);
+  else if (!auto) container.append(el('p', 'fe-hint', 'No fallbacks. Tasks wait for the starting model.'));
+
+  const foot = el('div', 'fe-foot');
+  const addBtn = el('button', 'btn small fe-add-btn', '+ Add model');
+  addBtn.type = 'button';
+  addBtn.setAttribute('aria-expanded', String(!!ui.addOpen));
+  addBtn.addEventListener('click', () => { ui.addOpen = !ui.addOpen; ui.search = ''; renderFallbackEditor(container, opts); });
+  foot.append(addBtn);
+  container.append(foot);
+  if (ui.addOpen) {
+    const panel = el('div', 'fe-add');
+    const input = el('input', 'fe-search');
+    input.type = 'search'; input.placeholder = 'Search models'; input.value = ui.search || '';
+    input.setAttribute('aria-label', 'Search models');
+    const results = el('div', 'fe-results');
+    const taken = new Set([...rows, ...exclude].map(apKey));
+    const fill = () => {
+      results.textContent = '';
+      const q = (ui.search || '').toLowerCase().trim();
+      for (const a of catalog) {
+        if (!a.available || a.loggedIn === false) continue;
+        const ms = (a.models || []).filter((m) => !q || `${m.label} ${m.id} ${a.label}`.toLowerCase().includes(q));
+        if (!ms.length) continue;
+        results.append(el('h4', 'fe-group', shortLabel(a.id)));
+        for (const m of ms) {
+          const has = taken.has(`${a.id}/${m.id}`);
+          const b = el('button', 'fe-opt');
+          b.type = 'button'; b.disabled = has;
+          b.append(el('span', 'fe-model', m.label || m.id), el('span', 'fe-agent', has ? 'Added' : ''));
+          b.addEventListener('click', () => { ui.addOpen = false; ui.focusKey = `${a.id}/${m.id}`; change([...rows, { agent: a.id, model: m.id, label: m.label }]); });
+          results.append(b);
+        }
       }
-      group.append(row);
-    }
-    list.append(group);
+      if (!results.children.length) results.append(el('p', 'fe-hint', q ? 'No models match.' : 'No signed-in agents have models.'));
+    };
+    input.addEventListener('input', () => { ui.search = input.value; fill(); });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); ui.addOpen = false; renderFallbackEditor(container, opts); container.querySelector('.fe-add-btn')?.focus(); }
+      else if (e.key === 'Enter') { e.preventDefault(); results.querySelector('.fe-opt:not(:disabled)')?.click(); }
+    });
+    fill();
+    panel.append(input, results);
+    container.append(panel);
+    if (!ui.focusKey) setTimeout(() => input.isConnected && document.activeElement !== input && input.focus(), 0);
   }
-  if (!list.children.length) list.append(el('p', 'dg-why', q ? 'No models match your search.' : 'No agents are signed in.'));
-  panel.append(list);
+  if (!auto) {
+    const reset = el('button', 'link-btn fe-reset', 'Reset to automatic');
+    reset.type = 'button';
+    reset.addEventListener('click', () => { ui.addOpen = false; change(null); });
+    container.append(reset);
+  }
+  if (ui.focusKey) {
+    const key = ui.focusKey;
+    ui.focusKey = null;
+    [...ol.children].find((li) => li.dataset.key === key)?.focus();
+  } else if (ui.focusAdd) {
+    ui.focusAdd = false;
+    addBtn.focus();
+  }
+}
+// A row's text: model name with a small agent label; status dot + short status and one key score below.
+function feMain(r, scoreLabel) {
+  const main = el('div', 'fe-main'), top = el('div', 'fe-name'), meta = el('div', 'fe-meta'), st = feStatus(r);
+  top.append(el('span', 'fe-model', r.label || modelLabel(r.agent, r.model)), el('span', 'fe-agent', shortLabel(r.agent)));
+  if (st) {
+    const s = el('span', `ap-e st-${r.status}`);
+    s.append(el('span', 'ap-dot'), el('span', '', st));
+    meta.append(s);
+  }
+  if (r.score != null) meta.append(el('span', 'fe-score', `${scoreLabel} ${Number(r.score).toFixed(1)}`));
+  main.append(top);
+  if (meta.children.length) main.append(meta);
+  return main;
+}
+// 'available', 'near limit', 'resets 4:45 AM', 'resets Fri 9:00 AM', or why it can't run.
+function feStatus(r) {
+  if (!r.status) return '';
+  if (r.status === 'limited' && r.until) {
+    const t = new Date(r.until * 1000), time = t.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    return `resets ${t.toDateString() === new Date().toDateString() ? time : `${t.toLocaleDateString([], { weekday: 'short' })} ${time}`}`;
+  }
+  if (r.status === 'unavailable' && r.note) return r.note;
+  return AP_ST[r.status] || r.status;
+}
+// Drag a fallback row with Pointer Events: mouse/pen after 4px, touch after a 350 ms long-press (or at once on the
+// handle). Rows in between slide to show the drop slot; the drop calls move(from, to).
+function feDrag(e, ol, li, i, ui, move) {
+  if (e.button || e.target.closest('button')) return;
+  const touch = e.pointerType === 'touch', items = [...ol.children], y0 = e.clientY, id = e.pointerId;
+  const step = items.length > 1 ? items[1].getBoundingClientRect().top - items[0].getBoundingClientRect().top : li.offsetHeight;
+  let started = false, target = i, timer = 0;
+  ui.busy = true;
+  const start = () => {
+    started = ui.dragging = true;
+    ol.classList.add('dragging'); li.classList.add('fe-lift'); li.classList.remove('fe-press');
+    try { li.setPointerCapture(id); } catch {}
+  };
+  const onMove = (ev) => {
+    if (ev.pointerId !== id) return;
+    const dy = ev.clientY - y0;
+    if (!started) {
+      if (touch) { if (Math.abs(dy) > 8) end(); return; }
+      if (Math.abs(dy) < 4) return;
+      start();
+    }
+    ev.preventDefault();
+    target = Math.max(0, Math.min(items.length - 1, i + Math.round(dy / step)));
+    li.style.transform = `translateY(${Math.max(-i * step - 8, Math.min((items.length - 1 - i) * step + 8, dy))}px)`;
+    items.forEach((it, j) => { if (j !== i) it.style.transform = j > i && j <= target ? `translateY(${-step}px)` : j < i && j >= target ? `translateY(${step}px)` : ''; });
+  };
+  const end = (ev) => {
+    if (ev && ev.pointerId !== id) return;
+    clearTimeout(timer);
+    removeEventListener('pointermove', onMove);
+    removeEventListener('pointerup', end);
+    removeEventListener('pointercancel', end);
+    li.classList.remove('fe-press');
+    ui.busy = false;
+    const catchUp = () => { if (ui.stale) { ui.stale = false; ui.refresh?.(); } };
+    if (!started) return catchUp();
+    ui.dragging = false;
+    ol.classList.remove('dragging'); li.classList.remove('fe-lift');
+    items.forEach((it) => (it.style.transform = ''));
+    if (ev?.type === 'pointerup' && target !== i) { ui.stale = false; move(i, target); }
+    else { li.focus(); catchUp(); }
+  };
+  addEventListener('pointermove', onMove, { passive: false });
+  addEventListener('pointerup', end);
+  addEventListener('pointercancel', end);
+  if (!touch) return;
+  if (e.target.closest('.fe-grip')) start();
+  else { li.classList.add('fe-press'); timer = setTimeout(start, 350); }
 }
 const pickVal = ({ agent, model }) => `${agent || 'claude'}|${model || ''}`;
 const parsePick = (v) => (v.includes('|') ? { agent: v.slice(0, v.indexOf('|')), model: v.slice(v.indexOf('|') + 1) } : { agent: 'claude', model: v });
@@ -3667,12 +3707,19 @@ function queueTree(queued) {
   return out;
 }
 let toastTimer;
-function toast(msg) {
+// toast(msg, {action: 'Undo', run}) adds one action button and stays up a little longer.
+function toast(msg, { action, run } = {}) {
   const t = $('toast');
   t.textContent = msg;
+  if (action) {
+    const b = el('button', 'toast-act', action);
+    b.type = 'button';
+    b.addEventListener('click', () => { t.hidden = true; clearTimeout(toastTimer); run(); });
+    t.append(b);
+  }
   t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.hidden = true), 4500);
+  toastTimer = setTimeout(() => (t.hidden = true), action ? 6000 : 4500);
 }
 function openQueue() {
   if ($('queueModal').hidden) Q.lastFocus = document.activeElement;

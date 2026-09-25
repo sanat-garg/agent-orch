@@ -12,3 +12,7 @@ Bug: in the composer's Auto Delegate fallback popup, the owner can't reorder or 
 ## Done when
 
 `npm test` passes including test/ui-fallbacks.test.mjs, which verifies remove and reorder persisted through PUT /api/convos/:id/fallbacks
+
+## Result — done (check passed) (2026-09-25 23:54)
+
+AGENT-ORCH-STATUS: done — fallback editor rebuilt, interactions persist; npm test passes

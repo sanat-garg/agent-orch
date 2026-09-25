@@ -417,3 +417,7 @@ Diagnostic fix verified; reported file-execution failure remains unreproduced
 ## 2026-09-25 23:26 — #136 Add cached LiveBench scores for delegation [done]
 
 LiveBench adapter fetches official livebench.ai results; tests pass
+
+## 2026-09-25 23:54 — #140 Fix and redesign the Auto Delegate fallback editor in the app's theme [done (check passed)]
+
+fallback editor rebuilt, interactions persist; npm test passes

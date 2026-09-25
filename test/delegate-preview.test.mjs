@@ -199,12 +199,12 @@ test('saved free-tier connection reaches popup JSON; loading, unmatched, provide
     const page = await browser.newPage();
     await page.setContent('<div id="apTitle"></div><div id="apSub"></div><div id="apBody"></div>');
     const app = fs.readFileSync(path.join(ROOT, 'public/app.js'), 'utf8');
-    const functions = app.slice(app.indexOf('function renderAutoPreview()'), app.indexOf('// Searchable "add fallback"'));
+    const functions = app.slice(app.indexOf('function renderAutoPreview()'), app.indexOf('const pickVal ='));
     const metrics = app.slice(app.indexOf('const DG_METRICS ='), app.indexOf('function openDelegate('));
     await page.addScriptTag({ content: `
       const $=id=>document.getElementById(id), el=(tag,cls,text)=>{const e=document.createElement(tag);e.className=cls||'';if(text)e.textContent=text;return e};
-      const state={}, shortLabel=a=>a, apName=r=>r.label, apStatusText=r=>r.status;
-      const AP={data:null};
+      const state={}, shortLabel=a=>a, apName=r=>r.label, apStatusText=r=>r.status, modelLabel=(a,m)=>m, apKey=r=>r.agent+"/"+r.model;
+      const AP={data:null,fe:{}}, AP_ST={}, AGENT_LIST=[], apSaveFallbacks=()=>{}, toast=()=>{};
       ${metrics}
 ${functions}
       window.renderData=d=>{AP.data=d;renderAutoPreview();};

@@ -202,6 +202,21 @@ code, pre, kbd { font-family: var(--mono); }
   margin-left: auto; max-width: 88%; width: fit-content;
 }
 .msg.text { overflow-wrap: anywhere; }
+.msg.user.saved { margin-bottom: 4px; }
+.msg.user.editing { width: 100%; padding: 8px 10px; margin-bottom: 18px; }
+.msg-edit {
+  display: block; width: 100%; resize: none; border: 0; outline: none; background: transparent; color: var(--text);
+  font: inherit; line-height: 1.5; min-height: 3em; max-height: 40vh; padding: 2px 4px;
+}
+.msg-edit-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+/* Pending · Edit · Undo under a saved bubble: always visible (touch has no hover); 44px hit targets. */
+.msg-status { display: flex; justify-content: flex-end; align-items: center; gap: 2px; font-size: 12.5px; color: var(--muted); margin: 0 0 14px; }
+.msg-status .sep { padding: 0 1px; }
+.msg-status > span:first-child { margin-right: 4px; }
+.msg-status .err { color: var(--danger); }
+.msg-act { background: none; border: 0; color: var(--accent); font: inherit; font-weight: 550; cursor: pointer; min-height: 44px; margin: -13px 0; padding: 0 8px; }
+.msg-act:disabled { opacity: .5; cursor: default; }
+@media (pointer: coarse) { .msg-edit { font-size: 16px; } } /* iOS zooms into smaller inputs */
 .msg.text > :first-child { margin-top: 0; }
 .msg.text > :last-child { margin-bottom: 0; }
 .msg.text p, .msg.text ul, .msg.text ol { margin: 0 0 .7em; }

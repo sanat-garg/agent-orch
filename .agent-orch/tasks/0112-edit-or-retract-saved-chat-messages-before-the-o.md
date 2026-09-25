@@ -12,3 +12,7 @@ When the planner is busy or rate-limited, chat messages are saved (deferMessage 
 ## Done when
 
 `npm test` passes with pending-message edit/delete tests including the 409-after-consume case
+
+## Result — done (check passed) (2026-09-25 18:52)
+
+AGENT-ORCH-STATUS: done — saved messages editable/retractable while pending; 409 after consume, tests pass

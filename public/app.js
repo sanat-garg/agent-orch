@@ -84,6 +84,8 @@ const state = {
   perms: new Map(),  // pid -> card
   workingSince: 0,
 };
+// Saved chat messages still editable/retractable (see markPending): msgId -> { bubble, status, notice, editing, state }.
+const pendingMsgs = new Map();
 
 // ---------- view toggle (chat / terminals) ----------
 function setView(view) {
@@ -610,6 +612,8 @@ function resetMessages() {
   $('messages').textContent = '';
   state.tools.clear();
   state.perms.clear();
+  pendingMsgs.clear();
+  state.lastUser = null;
   state.live = null;
   state.liveText = '';
 }
@@ -838,7 +842,7 @@ function renderEvent(ev, replay) {
   switch (ev.t) {
     case 'user': {
       endLive();
-      add(el('div', 'msg user', ev.text));
+      state.lastUser = add(el('div', 'msg user', ev.text));
       if (!replay) { stick = true; scrollDown(true); }
       break;
     }
@@ -887,12 +891,22 @@ function renderEvent(ev, replay) {
       break;
     }
     case 'error':
+    case 'notice': {
       endLive();
-      add(el('div', 'notice error', withUntil(ev)));
+      const n = add(el('div', ev.t === 'error' ? 'notice error' : 'notice', withUntil(ev)));
+      if (ev.msgId) markPending(ev.msgId, n);
       break;
-    case 'notice':
-      endLive();
-      add(el('div', 'notice', withUntil(ev)));
+    }
+    case 'msg_edit': {
+      const p = pendingMsgs.get(ev.msgId);
+      if (p && !p.editing) p.bubble.textContent = ev.text;
+      break;
+    }
+    case 'msg_retract':
+      dropPending(ev.msgId);
+      break;
+    case 'msg_state':
+      for (const id of ev.ids || []) setMsgState(id, ev.state);
       break;
     case 'text_end':
       // The planner's reply was only a tasks block: drop the empty streaming bubble.
@@ -919,6 +933,96 @@ function renderEvent(ev, replay) {
       break;
     }
   }
+}
+
+// ---------- saved messages ----------
+// A message saved for later (orchestrator deferMessage; the 'Saved…' notice carries its msgId) can be edited or
+// retracted until a plan task reads it. Its bubble is the chat's latest user bubble when the notice arrives.
+function markPending(id, notice) {
+  const bubble = state.lastUser;
+  if (!bubble?.isConnected || bubble.dataset.msgId || pendingMsgs.has(id)) return;
+  bubble.dataset.msgId = id;
+  const status = el('div', 'msg-status');
+  bubble.after(status);
+  pendingMsgs.set(id, { bubble, status, notice, editing: false });
+  setMsgState(id, 'pending');
+}
+function setMsgState(id, st) {
+  const p = pendingMsgs.get(id);
+  if (!p) return;
+  p.state = st;
+  p.status.textContent = '';
+  p.bubble.classList.add('saved');
+  if (st !== 'pending') { p.status.append(el('span', '', 'Read by planner')); return; }
+  const act = (label, fn) => { const b = el('button', 'msg-act', label); b.type = 'button'; b.onclick = fn; return b; };
+  p.status.append(el('span', '', 'Pending'), el('span', 'sep', '·'), act('Edit', () => editPending(id)), el('span', 'sep', '·'), act('Undo', () => undoPending(id)));
+}
+function dropPending(id) {
+  const p = pendingMsgs.get(id);
+  if (!p) return;
+  p.bubble.remove(); p.status.remove(); p.notice?.remove();
+  pendingMsgs.delete(id);
+}
+// The server said no (usually 409: a plan task took it meanwhile).
+function pendingFailed(id, err) {
+  if (/already read/i.test(err.message)) return setMsgState(id, 'read');
+  const p = pendingMsgs.get(id);
+  p?.status.prepend(el('span', 'err', `${err.message} `));
+}
+function editPending(id) {
+  const p = pendingMsgs.get(id);
+  if (!p || p.editing || p.state !== 'pending') return;
+  const old = p.bubble.textContent;
+  const ta = el('textarea', 'msg-edit');
+  ta.value = old;
+  ta.setAttribute('aria-label', 'Edit message');
+  const save = el('button', 'btn small primary', 'Save'), cancel = el('button', 'btn small', 'Cancel');
+  save.type = cancel.type = 'button';
+  const bar = el('div', 'msg-edit-actions');
+  bar.append(cancel, save);
+  const close = (text) => {
+    p.editing = false;
+    p.bubble.classList.remove('editing');
+    p.bubble.textContent = text;
+    p.status.hidden = false;
+  };
+  const submit = async () => {
+    const text = ta.value.trim();
+    if (!text || text === old) return close(old);
+    save.disabled = cancel.disabled = ta.disabled = true;
+    try { await api(`/api/orch/messages/${id}`, 'PATCH', { text }); close(text); }
+    catch (err) { close(old); pendingFailed(id, err); }
+  };
+  save.onclick = submit;
+  cancel.onclick = () => close(old);
+  ta.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !coarse) { e.preventDefault(); submit(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(old); }
+  });
+  ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; });
+  p.editing = true;
+  p.status.hidden = true;
+  p.bubble.classList.add('editing');
+  p.bubble.textContent = '';
+  p.bubble.append(ta, bar);
+  ta.style.height = ta.scrollHeight + 'px';
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+}
+async function undoPending(id) {
+  const p = pendingMsgs.get(id);
+  if (!p || p.state !== 'pending') return;
+  const text = p.bubble.textContent;
+  p.status.querySelectorAll('button').forEach((b) => (b.disabled = true));
+  try { await api(`/api/orch/messages/${id}`, 'DELETE'); }
+  catch (err) { setMsgState(id, p.state); return pendingFailed(id, err); }
+  dropPending(id);
+  // Back into the composer, ahead of anything already typed there.
+  input.value = input.value.trim() ? `${text}\n\n${input.value}` : text;
+  store.set('cw.draft.' + (state.cid || 'new'), input.value);
+  autosize();
+  updateSendButton();
+  input.focus();
 }
 
 // ---------- permission prompts ----------

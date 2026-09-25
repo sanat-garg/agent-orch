@@ -1332,6 +1332,14 @@ async function handleRequest(req, res) {
       return json(res, r.error ? r.status || 400 : 200, r.error ? { error: r.error } : r);
     }
   }
+  // A saved chat message (orchestrator deferMessage): PATCH {text} edits it, DELETE retracts it; 409 once a plan task took it.
+  const om = p.match(/^\/api\/orch\/messages\/(\d+)$/);
+  if (om && (req.method === 'PATCH' || req.method === 'DELETE')) {
+    const body = req.method === 'PATCH' ? await readBody(req) : null;
+    if (body && typeof body.text !== 'string') return json(res, 400, { error: 'text is required' });
+    const r = orch.changeMessage(Number(om[1]), body ? body.text : null);
+    return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r);
+  }
   const op = p.match(/^\/api\/orch\/project\/(\d+)$/);
   if (op && req.method === 'POST') {
     const r = orch.projectAction(Number(op[1]), await readBody(req));

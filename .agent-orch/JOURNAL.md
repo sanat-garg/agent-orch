@@ -365,3 +365,7 @@ delegate.mjs ranks models and moves eligible tasks; tests pass
 ## 2026-09-25 18:42 — #110 Model selector 'Auto Delegate' option and manual Delegate action on queued tasks [done (check passed)]
 
 Auto Delegate picker option and manual Delegate sheet with endpoint tests
+
+## 2026-09-25 18:52 — #112 Edit or retract saved chat messages before the orchestrator reads them [done (check passed)]
+
+saved messages editable/retractable while pending; 409 after consume, tests pass

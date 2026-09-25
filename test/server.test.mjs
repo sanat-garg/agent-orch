@@ -435,3 +435,51 @@ test('POST /api/orch/tasks/:id/delegate reassigns a queued task and rejects runn
     fs.rmSync(proj, { recursive: true, force: true });
   }
 });
+
+test('PATCH/DELETE /api/orch/messages/:id edit and retract a saved message only while it is pending', async () => {
+  const r0 = await fetch(base + '/api/orch/messages/1', { method: 'DELETE' });
+  assert.equal(r0.status, 401);
+  await r0.arrayBuffer();
+  const ok = await fetch(base + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: PASSWORD }) });
+  const cookie = ok.headers.get('set-cookie').split(';')[0];
+  await ok.arrayBuffer();
+  const call = async (m, p, body) => {
+    const r = await fetch(base + p, { method: m, headers: { cookie, 'content-type': 'application/json' }, body: body && JSON.stringify(body) });
+    return { status: r.status, body: JSON.parse(await r.text()) };
+  };
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
+  db.exec('PRAGMA busy_timeout=5000');
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-msg-proj-'));
+  try {
+    // A paused project, so the test server never runs its plan task.
+    const pid = Number(db.prepare("INSERT INTO projects(path,name,status,perpetual,created_at) VALUES(?,?,'paused',0,0)").run(proj, 'msg').lastInsertRowid);
+    const msg = (c) => Number(db.prepare('INSERT INTO messages(project_id,content,created_at) VALUES(?,?,0)').run(pid, c).lastInsertRowid);
+    const m1 = msg('first'), m2 = msg('second');
+    const plan = Number(db.prepare("INSERT INTO tasks(project_id,kind,title,prompt,created_at) VALUES(?, 'plan', 'Answer owner''s message', 'x', 0)").run(pid).lastInsertRowid);
+    const row = (id) => db.prepare('SELECT * FROM messages WHERE id=?').get(id);
+
+    let r = await call('PATCH', `/api/orch/messages/${m1}`, { text: '  first, edited ' });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(row(m1).content, 'first, edited');
+    assert.equal((await call('PATCH', `/api/orch/messages/${m1}`, { text: '  ' })).status, 400);
+    assert.equal((await call('PATCH', '/api/orch/messages/999999', { text: 'x' })).status, 404);
+    assert.equal((await call('DELETE', '/api/orch/messages/999999')).status, 404);
+
+    r = await call('DELETE', `/api/orch/messages/${m2}`);
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(row(m2), undefined);
+    assert.equal(db.prepare('SELECT status FROM tasks WHERE id=?').get(plan).status, 'queued'); // m1 still waits
+
+    // A plan task took it: too late to change.
+    db.prepare("UPDATE messages SET status='taken', task_id=? WHERE id=?").run(plan, m1);
+    r = await call('PATCH', `/api/orch/messages/${m1}`, { text: 'too late' });
+    assert.equal(r.status, 409);
+    assert.match(r.body.error, /already read/);
+    assert.equal((await call('DELETE', `/api/orch/messages/${m1}`)).status, 409);
+    assert.equal(row(m1).content, 'first, edited');
+  } finally {
+    db.close();
+    fs.rmSync(proj, { recursive: true, force: true });
+  }
+});

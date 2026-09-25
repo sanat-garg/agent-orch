@@ -859,6 +859,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   for (const col of ['pinned_model', 'category', 'delegated_from', 'delegated_reason']) {
     if (!db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === col)) db.exec(`ALTER TABLE tasks ADD COLUMN ${col} TEXT`);
   }
+  // messages.task_id: the plan task that took a saved message (status 'taken'); it is 'done' once answered.
+  if (!db.prepare('PRAGMA table_info(messages)').all().some((c) => c.name === 'task_id')) db.exec('ALTER TABLE messages ADD COLUMN task_id INTEGER');
 
   const q1 = (sql, p = {}) => db.prepare(sql).get(p);
   const qa = (sql, p = {}) => db.prepare(sql).all(p);
@@ -1439,13 +1441,32 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // project id -> 'chat' | 'task': who holds the planner session. Two `--resume` runs must never share it.
   const planningProjects = new Map();
   // Save a chat message for later and make sure one plan task (other than `selfId`) is waiting to answer it.
-  // `agent`/`model`: what the plan task's planner runs on (the chat's choice).
+  // `agent`/`model`: what the plan task's planner runs on (the chat's choice). Returns the saved message's id,
+  // which the 'Saved…' notice carries (`msgId`) so the owner can edit or retract it while it is still pending.
   function deferMessage(projectId, text, selfId = 0, agent = null, model = null) {
-    if (text != null) run("INSERT INTO messages(project_id,content,created_at) VALUES(:p,:c,:t)", { p: projectId, c: text, t: now() });
+    const msgId = text != null ? Number(run("INSERT INTO messages(project_id,content,created_at) VALUES(:p,:c,:t)", { p: projectId, c: text, t: now() }).lastInsertRowid) : null;
     if (!q1("SELECT 1 AS x FROM tasks WHERE project_id=:p AND kind='plan' AND status IN ('queued','running') AND id!=:s", { p: projectId, s: selfId })) {
       addTask(projectId, { title: "Answer owner's message", prompt: '(pending chat messages)', kind: 'plan', source: 'user',
         agent: agent && agent !== 'claude' ? agent : null, model: agent && agent !== 'claude' ? model : null });
     }
+    return msgId;
+  }
+  // Owner edits/retracts of a saved message: only while it is pending (a plan task's claim is one UPDATE, so no race).
+  function changeMessage(id, text) {
+    const m = q1('SELECT * FROM messages WHERE id=:id', { id });
+    if (!m) return { status: 404, error: 'No such message' };
+    const retract = text == null;
+    if (!retract && !String(text).trim()) return { status: 400, error: 'Message is empty' };
+    const r = retract ? run("DELETE FROM messages WHERE id=:id AND status='pending'", { id })
+      : run("UPDATE messages SET content=:c WHERE id=:id AND status='pending'", { id, c: String(text).trim() });
+    if (!r.changes) return { status: 409, error: 'The planner has already read this message' };
+    const convoId = getProject(m.project_id)?.convo_id;
+    if (convoId && convoExists(convoId)) emitChat(convoId, retract ? { t: 'msg_retract', msgId: id } : { t: 'msg_edit', msgId: id, text: String(text).trim() });
+    // Nothing left to answer: the waiting plan task goes too.
+    if (retract && !q1("SELECT 1 AS x FROM messages WHERE project_id=:p AND status IN ('pending','taken')", { p: m.project_id })) {
+      for (const t of qa("SELECT id FROM tasks WHERE project_id=:p AND kind='plan' AND status='queued'", { p: m.project_id })) taskAction(t.id, 'cancel');
+    }
+    return { ok: true };
   }
   // The planner runs on the chat's selected agent; Claude when none (or an unknown one) is selected.
   const plannerAgent = (agent) => (agent && agent !== 'claude' && AGENTS[agent] ? agent : 'claude');
@@ -1457,14 +1478,14 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (project.status !== 'active') updateProject(project.id, { status: 'active' });
     // A plan task is answering saved messages on this session: queue behind it.
     if (planningProjects.get(project.id) === 'task') {
-      deferMessage(project.id, text);
-      emitChat(convo.id, { t: 'notice', text: 'Saved. The planner is busy answering earlier messages; it answers this right after.' });
+      const msgId = deferMessage(project.id, text);
+      emitChat(convo.id, { t: 'notice', msgId, text: 'Saved. The planner is busy answering earlier messages; it answers this right after.' });
       return;
     }
     // Restart when idle is pending: save the message; a plan task answers it after the restart.
     if (draining) {
-      deferMessage(project.id, text);
-      emitChat(convo.id, { t: 'notice', text: 'Saved. agent-orch is restarting once idle; the planner answers this after the restart.' });
+      const msgId = deferMessage(project.id, text);
+      emitChat(convo.id, { t: 'notice', msgId, text: 'Saved. agent-orch is restarting once idle; the planner answers this after the restart.' });
       return;
     }
     let agent = plannerAgent(convo.agent), model = agent === 'claude' ? null : convo.model || null;
@@ -1482,9 +1503,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         emitChat(convo.id, { t: 'notice', until: r.at, untilKnown: r.known, text: `${agentName(agent)} is at its usage limit until {until}; ${agentName(alt)} answers this instead (Auto Delegate).` });
         agent = alt; model = null;
       } else {
-        deferMessage(project.id, text, 0, agent, model);
+        const msgId = deferMessage(project.id, text, 0, agent, model);
         // The browser replaces {until} with `until` in its own timezone.
-        emitChat(convo.id, { t: 'notice', until: r.at, untilKnown: r.known, agent, text: r.known
+        emitChat(convo.id, { t: 'notice', msgId, until: r.at, untilKnown: r.known, agent, text: r.known
           ? `Saved. ${agentName(agent)} is at its usage limit until {until}; the orchestrator answers then.`
           : `Saved. ${agentName(agent)} is at its usage limit; the reset time isn't known yet. Retrying around {until}.` });
         return;
@@ -1533,9 +1554,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       if (convoId) {
         const why = res.outcome === 'rate_limited' ? `${agentName(agent)} hit its usage limit. The message is saved and will be answered after the reset.`
           : res.outcome === 'aborted' ? 'Stopped.' : `The planner couldn't finish (${res.outcome}). ${String(res.stderr || res.text).trim().slice(-300)}`;
-        emitChat(convoId, { t: res.outcome === 'aborted' ? 'notice' : 'error', text: why });
-        // A plan task's messages are still pending and the task itself is requeued.
-        if (res.outcome === 'rate_limited' && fromChat) deferMessage(project.id, text, 0, agent, model);
+        // A plan task's messages go back to pending and the task itself is requeued.
+        const msgId = res.outcome === 'rate_limited' && fromChat ? deferMessage(project.id, text, 0, agent, model) : null;
+        emitChat(convoId, { t: res.outcome === 'aborted' ? 'notice' : 'error', text: why, ...(msgId ? { msgId } : {}) });
       }
       return { res, ids: [] };
     }
@@ -1635,14 +1656,24 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     try {
       let res;
       if (task.kind === 'plan') {
-        const pending = qa("SELECT * FROM messages WHERE project_id=:p AND status='pending' ORDER BY id", { p: project.id });
+        // Claim the pending messages in one statement (plus any this task took on an earlier, crashed attempt):
+        // from here on the owner can no longer edit or retract them.
+        const pending = qa("UPDATE messages SET status='taken', task_id=:t WHERE project_id=:p AND (status='pending' OR (status='taken' AND task_id=:t)) RETURNING *",
+          { p: project.id, t: task.id }).sort((a, b) => a.id - b.id);
         if (!pending.length) return updateTask(task.id, { status: 'done', finished_at: now(), result: 'nothing pending' });
+        const convoId = project.convo_id && convoExists(project.convo_id) ? project.convo_id : null;
+        const ids = pending.map((m) => m.id);
+        if (convoId) emitChat(convoId, { t: 'msg_state', ids, state: 'read' });
         let text = pending.map((m) => m.content).join('\n\n');
         if (pending.length > 1) text = '(Several messages arrived while you were rate-limited:)\n\n' + text;
         planningProjects.set(project.id, 'task');
-        try { res = (await plannerRun(project, text, project.convo_id && convoExists(project.convo_id) ? project.convo_id : null, signal, false, { agent: plannerAgent(task.agent), model: task.model })).res; }
+        try { res = (await plannerRun(project, text, convoId, signal, false, { agent: plannerAgent(task.agent), model: task.model })).res; }
         finally { if (planningProjects.get(project.id) === 'task') planningProjects.delete(project.id); }
-        if (res.outcome === 'ok') {
+        if (res.outcome !== 'ok') {
+          // Not answered: the messages wait (and are editable) again until the task's next attempt.
+          for (const id of ids) run("UPDATE messages SET status='pending', task_id=NULL WHERE id=:id AND status='taken'", { id });
+          if (convoId) emitChat(convoId, { t: 'msg_state', ids, state: 'pending' });
+        } else {
           for (const m of pending) run("UPDATE messages SET status='done' WHERE id=:id", { id: m.id });
           // Messages the owner sent while this ran get their own turn.
           if (q1("SELECT 1 AS x FROM messages WHERE project_id=:p AND status='pending'", { p: project.id })) deferMessage(project.id, null, task.id);
@@ -2061,7 +2092,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   return {
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
-    planTurn, abortPlan, candidates, eligible: delegationEligible, delegateOptions, delegateTask, taskAction, projectAction, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
+    planTurn, abortPlan, candidates, eligible: delegationEligible, delegateOptions, delegateTask, taskAction, changeMessage, projectAction, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
     drain, undrain, chatPlanning, stateView, limitResetFor, recordLimit: recordGovernor, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     unwatch: (ws) => { for (const set of runSubs.values()) set.delete(ws); },
   };

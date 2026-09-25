@@ -141,3 +141,4 @@ a same-origin request. Caddy's `reverse_proxy` overwrites `X-Forwarded-For`, so 
   `npm test` never runs.
 - **Fix:** Have the planner write absence checks as one command (`! grep … && npm test`), and/or make
   `extractCommand` join every backticked command in the text with `&&`.
+- **Fixed** (task #33): with no triple-backtick block, `extractCommand` joins every command-like single-backtick snippet with ` && ` (file names/identifiers ignored, any unsafe one → no check); the planner prompt says absence checks use `! grep`.

@@ -88,7 +88,8 @@ const TASKS_FORMAT = `Emit work as a fenced block exactly like this (strict JSON
 - Never emit a task like "build the app", "implement the feature end to end", or "set everything up".
   Emit the chain instead: skeleton that runs → one endpoint/screen/function → its tests → the next one.
 - \`done_when\` must be checkable by a machine or by looking at one specific thing. No "works well".
-  When a command proves it, put that command in backticks, e.g. \`npm test\`.
+  When a command proves it, put that command in backticks, e.g. \`npm test\`. Every command-like backticked
+  snippet is run, joined with &&. Absence checks use \`! grep …\` (a bare grep exits 1 when nothing matches).
 - \`after\` sequences the chain: the 0-based index of an earlier task in THIS block, or "#12" for an
   existing task id. A task only starts once the one it points at has finished. Use it liberally —
   later steps must not begin until the step they build on is actually done.
@@ -505,24 +506,33 @@ function resolveAfter(after, batchIds) {
 // Only ever returns a command when the done_when text clearly names one; anything ambiguous or
 // risky returns null, because a false positive means running something unattended.
 const RUNNERS = ['python3', 'python', 'pytest', 'npm', 'npx', 'pnpm', 'yarn', 'node', 'make', 'cargo', 'go', 'uv', 'bun', 'deno', './'];
-function extractCommand(doneWhen) {
+// A single-backtick snippet counts as a command only if it starts like one; `server.mjs` or `loggedIn` don't.
+const CMD_START = /^(!|test\s|\[\s|grep\b|node\b|npm\b|bash\b|sh\s|curl\b|python)/;
+const looksLikeCommand = (s) => RUNNERS.some((r) => s.startsWith(r)) || CMD_START.test(s);
+export function extractCommand(doneWhen) {
   if (!doneWhen) return null;
-  let cand = null;
   const triple = doneWhen.match(/```(?:\w+\n)?([\s\S]*?)```/);
-  const single = doneWhen.match(/`([^`\n]+)`/);
-  if (triple) cand = triple[1].trim();
-  else if (single) cand = single[1].trim();
-  else {
-    for (let line of doneWhen.split('\n')) {
-      line = line.trim().replace(/^\$\s+/, '');
-      if (RUNNERS.some((r) => line.startsWith(r))) { cand = line; break; }
-    }
+  if (triple) return checkCommand(triple[1], doneWhen);
+  const singles = [...doneWhen.matchAll(/`([^`\n]+)`/g)].map((m) => m[1].trim().replace(/^\$\s+/, '')).filter(looksLikeCommand);
+  if (singles.length) {
+    // Every command-like snippet must be safe; dropping one silently would weaken the check.
+    const cmds = singles.map((c) => checkCommand(c, doneWhen));
+    if (cmds.some((c) => !c)) return null;
+    return cmds.length === 1 ? cmds[0] : cmds.map((c) => (/;/.test(c) ? `{ ${c}; }` : c)).join(' && ');
   }
-  if (!cand) return null;
+  if (/`/.test(doneWhen)) return null;
+  for (let line of doneWhen.split('\n')) {
+    line = line.trim().replace(/^\$\s+/, '');
+    if (RUNNERS.some((r) => line.startsWith(r))) return checkCommand(line, doneWhen);
+  }
+  return null;
+}
+
+function checkCommand(cand, doneWhen) {
   cand = cand.trim().replace(/^\$\s+/, '');
   if (!cand || />|\brm\s|\bsudo\b|\bgit\s+push\b|\bcurl\b/.test(cand)) return null;
   if ((cand.match(/;/g) || []).length + (cand.match(/&&/g) || []).length > 1) return null;
-  if (!RUNNERS.some((r) => cand.startsWith(r)) && !/^(test|ls|grep|cat|git)\b/.test(cand)) return null;
+  if (!RUNNERS.some((r) => cand.startsWith(r)) && !/^(test|ls|grep|cat|git|!|\[|bash|sh)(\s|\b)/.test(cand)) return null;
   // "`grep …` prints nothing": grep exits 1 when clean, so pass only on exit 1 (matches → 0, errors → 2 still fail).
   if (/^grep\b/.test(cand) && !/[;&|]/.test(cand)) {
     const after = doneWhen.slice(doneWhen.indexOf(cand) + cand.length).replace(/^[`\s]+/, '');

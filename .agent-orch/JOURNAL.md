@@ -125,3 +125,7 @@ Agent/model picker, task agent badges, deletable routes list; tests pass
 ## 2026-09-25 03:43 — #32 Remove leftover Claude Web strings and mark AUDIT #2 and #15 fixed [done]
 
 Claude Web strings removed; AUDIT #2 and #15 marked fixed
+
+## 2026-09-25 03:44 — #33 Verifier runs every command-like backticked snippet in Done when (AUDIT #16) [done]
+
+Verifier now runs all command-like Done-when snippets, joined with &&

@@ -13,3 +13,7 @@ AUDIT #16 in .agent-orch/AUDIT.md: extractCommand(doneWhen) in orchestrator.mjs 
 ## Done when
 
 `npm test 2>&1 | grep -qi 'extractCommand' && npm test`
+
+## Result — done (2026-09-25 03:44)
+
+AGENT-ORCH-STATUS: done — Verifier now runs all command-like Done-when snippets, joined with &&

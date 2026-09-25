@@ -31,7 +31,7 @@ _Durable knowledge for every agent session: architecture, conventions, decisions
   agents can work on this repo.
 
 ## Gotchas
-- The verifier runs only the FIRST backticked command in "Done when" (AUDIT #16), so put the whole check in one backticked command, e.g. `! grep -q foo x.mjs && npm test`.
+- The verifier (`extractCommand`) runs every command-like single-backtick snippet in "Done when", joined with ` && ` (a triple-backtick block wins if present); snippets like `server.mjs` are ignored. Commands containing `>` (incl. `2>&1`) or `curl` are refused, so such checks never run.
 - "Done when" checks asserting absence must use `! grep …`: grep exits 1 on no matches, so a bare `grep` check fails exactly when the code is clean.
 - Editing server.mjs or orchestrator.mjs doesn't affect the running app until the owner restarts it.
 - Project memory lives in `.agent-orch/` (formerly `.ao2/`). `migrateMemDir()` renames it on init/read, and merges a `.ao2/` that a pre-restart server recreated, so a stray `.ao2/` in a commit is expected until restart.

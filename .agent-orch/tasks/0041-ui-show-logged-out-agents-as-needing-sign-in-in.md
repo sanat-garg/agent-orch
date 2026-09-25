@@ -13,3 +13,7 @@ In /home/ubuntu/agent-orch, GET /api/agents already returns `loggedIn` per agent
 ## Done when
 
 `grep -q loggedIn public/app.js` and `npm test` passes
+
+## Result — done (check passed) (2026-09-25 03:53)
+
+AGENT-ORCH-STATUS: done — Picker and routes list flag logged-out agents as needing sign-in

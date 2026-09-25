@@ -153,3 +153,7 @@ Deleting a chat mid-plan now drops its queued planner turns
 ## 2026-09-25 03:52 — #40 Skip corrupt JSONL lines instead of blanking chat and task logs (AUDIT #13) [done (check passed)]
 
 Corrupt JSONL lines are skipped; chat and task logs still load
+
+## 2026-09-25 03:53 — #41 UI: show logged-out agents as needing sign-in in picker and routes list [done (check passed)]
+
+Picker and routes list flag logged-out agents as needing sign-in

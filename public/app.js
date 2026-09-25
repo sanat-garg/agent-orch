@@ -1097,8 +1097,8 @@ function renderAgentPicker() {
   sel.textContent = '';
   for (const a of AGENT_LIST) {
     const g = document.createElement('optgroup');
-    g.label = a.available ? a.label : `${a.label} (sign in: ${a.login})`;
-    g.disabled = !a.available;
+    g.label = !a.available ? `${a.label} (not installed)` : a.loggedIn === false ? `${a.label} (not logged in: ${a.login})` : a.label;
+    g.disabled = !(a.available && a.loggedIn !== false);
     const def = el('option', '', `${a.label} · default model`);
     def.value = pickVal({ agent: a.id });
     g.append(def);
@@ -2011,6 +2011,8 @@ function renderOrchBar() {
       const row = el('div', 'ob-route');
       const what = el('span', '', `"${r.match}" → ${[r.agent, r.model].filter(Boolean).join(' · ')}`);
       what.append(el('small', '', r.scope === 'global' ? 'all projects' : 'this project'));
+      const ag = AGENT_LIST.find((a) => a.id === r.agent);
+      if (ag && ag.id !== 'claude' && (!ag.available || ag.loggedIn === false)) what.append(el('small', '', `${ag.available ? 'not logged in' : 'not installed'}, falls back to Claude`));
       const del = el('button', 'btn small danger', 'Delete');
       del.type = 'button';
       del.onclick = (e) => {

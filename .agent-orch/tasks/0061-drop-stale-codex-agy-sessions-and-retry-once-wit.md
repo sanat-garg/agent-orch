@@ -13,3 +13,7 @@ Fix AUDIT #19 in .agent-orch/AUDIT.md (read it first). Resume recovery only reco
 ## Done when
 
 `npm test` passes and `grep -n no_session agents.mjs orchestrator.mjs server.mjs` shows uses in all three files
+
+## Result — done (check passed) (2026-09-25 08:53)
+
+AGENT-ORCH-STATUS: done — Dead codex/agy sessions are now dropped and the turn retried fresh

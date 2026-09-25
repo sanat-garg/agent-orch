@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Stand-in for `agy -p … --output-format stream-json`: prints recorded NDJSON events and never touches the network.
-// AGY_STUB=ok|limit|quota-log|auth|hang picks the script; AGY_STUB_LOG, if set, receives {argv, env, cwd} as JSON.
+// AGY_STUB=ok|limit|quota-log|auth|hang|nosession picks the script; AGY_STUB_LOG, if set, receives {argv, env, cwd} as JSON.
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 
@@ -10,7 +10,10 @@ const mode = process.env.AGY_STUB || 'ok';
 const cid = '3f0c9a2e-agy';
 const step = (o) => out({ event: 'step_update', step_update: { conversation_id: cid, ...o } });
 
-if (mode === 'auth') {
+if (mode === 'nosession') {
+  out({ event: 'result', result: { status: 'ERROR', error: 'conversation 9 not found' } });
+  process.exitCode = 1;
+} else if (mode === 'auth') {
   // Signed out: agy prints an OAuth URL and blocks waiting for a pasted code.
   process.stderr.write('Please visit https://accounts.google.com/o/oauth2/auth?client_id=x&redirect_uri=https://antigravity.google/oauth-callback\n');
   process.stderr.write('Waiting for authentication (timeout 60s)...\n');

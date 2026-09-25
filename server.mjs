@@ -11,7 +11,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createOrchestrator, parseJsonl } from './orchestrator.mjs';
 import { createGitHub } from './github.mjs';
 import { retireRuntime } from './runtimes.mjs';
-import { AGENTS, runAgentCli, clearLoginCache } from './agents.mjs';
+import { AGENTS, runAgentCli, clearLoginCache, isMissingSession } from './agents.mjs';
 import { createConnections, SPECS, codexAccount, onPath } from './connections.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
@@ -871,22 +871,29 @@ async function agentChatTurn(convo, text) {
     const agent = chatAgent(convo), a = AGENTS[agent], ac = new AbortController();
     agentTurns.set(cid, ac);
     broadcastConvos();
+    const started = Date.now();
+    const turn = async (resume) => {
+      try {
+        return await runAgentCli({
+          agent, prompt: next, cwd: convo.cwd, resume, model: convo.model || undefined, signal: ac.signal, env: CLAUDE_ENV,
+          systemAppend: resume ? undefined : chatSystemAppend(convo), autonomous: convo.mode === 'bypassPermissions',
+          onEvent: (e) => {
+            if (e.k === 'text') emit(cid, { t: 'text', text: e.text });
+            else if (e.k === 'tool') emit(cid, { t: 'tool_use', id: e.id, name: e.name, input: e.input });
+            else if (e.k === 'tool_result') emit(cid, { t: 'tool_result', id: e.id, text: clip(e.text || ''), isError: !!e.isError });
+          },
+        });
+      } catch (e) {
+        return { outcome: 'error', text: String(e?.message || e), stderr: '' };
+      }
+    };
     // A session id only resumes on the agent that created it.
     const resume = convo.agentSession?.agent === agent ? convo.agentSession.id : null;
-    const started = Date.now();
-    let res;
-    try {
-      res = await runAgentCli({
-        agent, prompt: next, cwd: convo.cwd, resume, model: convo.model || undefined, signal: ac.signal, env: CLAUDE_ENV,
-        systemAppend: resume ? undefined : chatSystemAppend(convo), autonomous: convo.mode === 'bypassPermissions',
-        onEvent: (e) => {
-          if (e.k === 'text') emit(cid, { t: 'text', text: e.text });
-          else if (e.k === 'tool') emit(cid, { t: 'tool_use', id: e.id, name: e.name, input: e.input });
-          else if (e.k === 'tool_result') emit(cid, { t: 'tool_result', id: e.id, text: clip(e.text || ''), isError: !!e.isError });
-        },
-      });
-    } catch (e) {
-      res = { outcome: 'error', text: String(e?.message || e), stderr: '' };
+    let res = await turn(resume);
+    // The session is gone (errorCode 'no_session' or Claude's text): forget it and retry once fresh.
+    if (resume && isMissingSession(res)) {
+      convo.agentSession = null;
+      res = await turn(null);
     }
     if (res.sessionId) convo.agentSession = { agent, id: res.sessionId };
     if (res.outcome === 'auth_error') emit(cid, { t: 'error', text: `${a.label} is not signed in on this server. ${a.login}.` });

@@ -237,3 +237,7 @@ non-Claude auth failures now fall back to Claude; tests pass
 ## 2026-09-25 08:50 — #60 Per-agent rate-limit blocks; tighten agy limit detection (AUDIT #18) [done (check passed)]
 
 Non-Claude usage limits now block only that agent
+
+## 2026-09-25 08:53 — #61 Drop stale codex/agy sessions and retry once without resume (AUDIT #19) [done (check passed)]
+
+Dead codex/agy sessions are now dropped and the turn retried fresh

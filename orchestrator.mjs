@@ -16,7 +16,7 @@ import path from 'node:path';
 import { spawn, execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
-import { AGENTS, agentStatus, runAgentCli, toolInputSummary } from './agents.mjs';
+import { AGENTS, agentStatus, isMissingSession, runAgentCli, toolInputSummary } from './agents.mjs';
 
 // ---------------------------------------------------------------- config
 
@@ -1294,7 +1294,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       onMessage: convoId ? chatStreamer(convoId) : null,
     });
     let res = await attempt(project.chat_session_id);
-    if (res.outcome === 'error' && project.chat_session_id && /no conversation found/i.test(res.text + res.stderr)) {
+    if (project.chat_session_id && isMissingSession(res)) {
       updateProject(project.id, { chat_session_id: null });
       res = await attempt(null);
     }
@@ -1465,9 +1465,12 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       signal, timeoutSec: CFG.taskTimeoutSec, taskId: task.id, runId, logPath,
     });
     finishRun(runId, res);
-    if (res.outcome === 'error' && resume && /no conversation found/i.test(res.text + res.stderr)) {
+    // A missing session (Claude's 'no conversation found', a codex/agy errorCode 'no_session') is dropped; the task
+    // requeues without spending an attempt and starts fresh.
+    if (resume && isMissingSession(res)) {
       updateTask(task.id, { session_id: null });
       res.outcome = 'aborted';
+      res.sessionId = null; // CLI adapters echo `resume` back; don't let the requeue restore it
     }
     if (task.kind === 'work' && route.agent === 'claude') recordSessionUse(res, project.id, task.id);
     return res;

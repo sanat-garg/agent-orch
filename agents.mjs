@@ -321,7 +321,10 @@ async function runCodex({ model, prompt, cwd, resume, systemAppend, signal, onEv
     res.errorCode = 'rate_limit';
     res.resetsAt = codexResetsAt(hay);
   } else if (CODEX_AUTH_RE.test(hay)) { res.outcome = 'auth_error'; res.errorCode = 'authentication_failed'; }
-  else res.outcome = 'error';
+  else {
+    res.outcome = 'error';
+    if (resume && /no rollout found/i.test(hay)) res.errorCode = 'no_session';
+  }
   return res;
 }
 
@@ -352,6 +355,7 @@ const AGY_LIMIT_RE = /RESOURCE_EXHAUSTED|quota|rate.?limit|\b429\b|exhausted/i;
 const AGY_AUTH_RE = /waiting for authentication|sign in|accounts\.google\.com\/o\/oauth2|authorization code|not logged in|unauthenticated|\b401\b/i;
 // agy -p doesn't fail when signed out: it prints an OAuth URL on stderr and blocks ~60 s. Kill it on sight.
 const AGY_AUTH_PROMPT_RE = /waiting for authentication|paste the authorization code|accounts\.google\.com\/o\/oauth2/i;
+const AGY_NO_SESSION_RE = /(conversation|session).*not found|no such (conversation|session)/i;
 const AGY_DONE = new Set(['DONE', 'ERROR', 'FAILED', 'CANCELED', 'CANCELLED', 'INTERRUPTED']);
 
 const snakeKeys = (o = {}) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase(), v]));
@@ -436,7 +440,10 @@ async function runAntigravity({ model, prompt, cwd, resume, systemAppend, signal
   if (stopped || AGY_AUTH_RE.test(hay) && !AGY_LIMIT_RE.test(errMsg)) { res.outcome = 'auth_error'; res.errorCode = 'authentication_failed'; }
   // Only the result's error decides a limit: a failed run's stderr log may mention 'quota' in passing.
   else if (AGY_LIMIT_RE.test(errMsg)) { res.outcome = 'rate_limited'; res.errorCode = 'rate_limit'; res.resetsAt = codexResetsAt(errMsg); }
-  else res.outcome = 'error';
+  else {
+    res.outcome = 'error';
+    if (resume && AGY_NO_SESSION_RE.test(hay)) res.errorCode = 'no_session';
+  }
   return res;
 }
 
@@ -464,6 +471,11 @@ const ANTIGRAVITY = {
   events: agyEvents,
   run: runAntigravity,
 };
+
+// A resumed run failed because its session is gone (Claude's text, or an adapter's errorCode 'no_session'):
+// callers drop the stored session id and retry once fresh.
+export const isMissingSession = (res) => res.outcome === 'error' &&
+  (res.errorCode === 'no_session' || /no conversation found/i.test(`${res.text || ''}\n${res.stderr || ''}`));
 
 export const AGENTS = { claude: CLAUDE, codex: CODEX, antigravity: ANTIGRAVITY };
 

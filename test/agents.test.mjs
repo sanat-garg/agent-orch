@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AGENTS, runAgentCli, codexResetsAt } from '../agents.mjs';
+import { AGENTS, runAgentCli, codexResetsAt, isMissingSession } from '../agents.mjs';
 
 const fakeQuery = (msgs, seen = {}) => (args) => { Object.assign(seen, args); return (async function* () { for (const m of msgs) yield m; })(); };
 
@@ -129,6 +129,16 @@ test('codex: resume passes the thread id; non-autonomous keeps the sandbox', asy
     '-c', 'sandbox_mode="workspace-write"', '-c', 'approval_policy="never"', '--', 'abc', 'more']);
 });
 
+test('codex: resuming a thread with no rollout is errorCode no_session', async () => {
+  const res = await runAgentCli({ agent: 'codex', bin: STUB, prompt: 'more', cwd: tmp(), resume: 'dead-id', env: { PATH: process.env.PATH, CODEX_STUB: 'nosession' } });
+  assert.equal(res.outcome, 'error');
+  assert.equal(res.errorCode, 'no_session');
+  assert.match(res.text, /no rollout found for thread id dead-id/);
+  assert.ok(isMissingSession(res));
+  assert.ok(isMissingSession({ outcome: 'error', text: 'No conversation found with session ID: x' }));
+  assert.ok(!isMissingSession({ outcome: 'error', text: 'boom', errorCode: null }));
+});
+
 test('codex: a usage-limit failure is rate_limited with resetsAt', async () => {
   const events = [];
   const res = await runAgentCli({ agent: 'codex', bin: STUB, prompt: 'hi', cwd: tmp(), env: { PATH: process.env.PATH, CODEX_STUB: 'limit' }, onEvent: (e) => events.push(e) });
@@ -200,6 +210,14 @@ test('antigravity: resume passes --conversation; non-autonomous drops the skip-p
     env: { PATH: process.env.PATH, AGY_STUB: 'ok', AGY_STUB_LOG: log } });
   assert.equal(res.outcome, 'ok');
   assert.deepEqual(JSON.parse(fs.readFileSync(log, 'utf8')).argv, ['-p', 'more', '--output-format', 'stream-json', '--print-timeout', '0', '--conversation', 'abc']);
+});
+
+test('antigravity: resuming a missing conversation is errorCode no_session', async () => {
+  const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'more', cwd: tmp(), resume: '9', settingsPath: noSettings,
+    env: { PATH: process.env.PATH, AGY_STUB: 'nosession' } });
+  assert.equal(res.outcome, 'error');
+  assert.equal(res.errorCode, 'no_session');
+  assert.ok(isMissingSession(res));
 });
 
 test('antigravity: a RESOURCE_EXHAUSTED result is rate_limited with resetsAt', async () => {

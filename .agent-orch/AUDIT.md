@@ -192,6 +192,7 @@ tasks during a chat turn); `applyRoute` upsert/delete; chat delete mid-turn (`em
 - **Fix:** Recognise the non-Claude "session not found" messages (`no rollout found`, agy's equivalent) in one
   helper, e.g. `res.errorCode = 'no_session'` set in the adapter; on it, drop `convo.agentSession` / `session_id`
   and retry once without resume.
+- **Fixed** (task #61): codex (`no rollout found`) and agy (`conversation/session … not found`) resumed runs set `errorCode: 'no_session'`; `isMissingSession(res)` in agents.mjs also covers Claude's text. Chat drops `convo.agentSession` and retries once fresh; the orchestrator clears `session_id` and requeues fresh (planner too). Test in test/agents.test.mjs.
 
 ### 20. [med] A model-only route with a model not in `AGENTS[*].models` runs Claude with that model (orchestrator.mjs:455)
 - **What:** `pick` uses `normalizeAgent(agent) || agentForModel(model) || 'claude'`, and `agentForModel` only knows

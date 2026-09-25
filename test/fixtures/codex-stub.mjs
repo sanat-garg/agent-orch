@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Stand-in for `codex exec --json`: prints recorded JSONL events and never touches the network.
-// CODEX_STUB=ok|limit|auth|hang picks the script; CODEX_STUB_LOG, if set, receives {argv, env, cwd} as JSON.
+// CODEX_STUB=ok|limit|auth|hang|nosession picks the script; CODEX_STUB_LOG, if set, receives {argv, env, cwd} as JSON.
 // `login status` answers like the real CLI: logged in unless CODEX_STUB_LOGIN=out.
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
@@ -15,6 +15,11 @@ if (process.env.CODEX_STUB_LOG) fs.writeFileSync(process.env.CODEX_STUB_LOG, JSO
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 const mode = process.env.CODEX_STUB || 'ok';
 
+if (mode === 'nosession') {
+  // What the real CLI prints when `exec resume <id>` names a thread with no rollout on disk.
+  process.stderr.write(`Error: thread/resume failed: no rollout found for thread id ${process.argv.at(-2)}\n`);
+  process.exit(1);
+}
 out({ type: 'thread.started', thread_id: '01a0d699-1efd-7d72-b9f4-2616f4bf739a' });
 out({ type: 'turn.started' });
 if (mode === 'ok') {

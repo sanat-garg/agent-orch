@@ -68,10 +68,20 @@ test('GET / without a session redirects to the login page', async () => {
 });
 
 test('public static assets are served without a session', async () => {
-  for (const p of ['/login.css', '/icon.svg', '/manifest.webmanifest']) {
+  for (const p of ['/login.css', '/fonts.css', '/icon.svg', '/manifest.webmanifest']) {
     const r = await get(p);
     assert.equal(r.status, 200, p);
     await r.arrayBuffer();
+  }
+});
+
+test('bundled variable fonts are public and cached immutably', async () => {
+  for (const name of ['InterVariable-4.1', 'InterVariable-Italic-4.1', 'JetBrainsMono-2.304', 'JetBrainsMono-Italic-2.304']) {
+    const r = await get(`/fonts/${name}.woff2`);
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get('content-type'), 'font/woff2');
+    assert.equal(r.headers.get('cache-control'), 'public, max-age=31536000, immutable');
+    assert.equal(Buffer.from(await r.arrayBuffer()).toString('ascii', 0, 4), 'wOF2');
   }
 });
 

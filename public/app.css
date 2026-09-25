@@ -25,7 +25,6 @@
   --focus: rgba(201, 100, 66, 0.28);
   --chart-2: #3b6fa0;
   --chart-3: #6a8f3a;
-  --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
   --scroll: rgba(0, 0, 0, 0.18);
   --scroll-hover: rgba(0, 0, 0, 0.34);
   color-scheme: light;
@@ -80,7 +79,7 @@ html, body { height: 100%; margin: 0; }
 body {
   background: var(--bg);
   color: var(--text);
-  font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", system-ui, Roboto, sans-serif;
+  font: 15px/1.55 'Inter', 'InterVariable', 'Helvetica Neue', Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
 }

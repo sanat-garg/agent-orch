@@ -1463,7 +1463,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const ms = modelCatalog(agent).models || [];
     const current = { agent, model: model || (ms.find((m) => m.default) || ms[0])?.id || null };
     const r = previewDelegation({ current, entries: view?.entries || [], all, usage: previewUsage, category: CATEGORIES.includes(category) ? category : 'coding', fallbacks, cfg: CFG.delegate });
-    return { ...r, source: view?.source || 'manual', fetched_at: view?.fetched_at ?? null, attribution: view?.attribution || null };
+    return { ...r, data_status: view?.data_status || 'error', data_error: view?.data_error || null, stale: !!view?.stale, source: view?.source || 'manual', fetched_at: view?.fetched_at ?? null, attribution: view?.attribution || null };
   }
   function delegateTask(id, { agent, model } = {}) {
     const task = getTask(id);

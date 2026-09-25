@@ -51,17 +51,27 @@ export function parseModel(r) {
 // Fetches every page. Rate-limit headers are returned so the caller can avoid a 429; a 429 throws with retryAfter (s).
 export async function fetchModels(key, { fetch = globalThis.fetch, base = AA_BASE } = {}) {
   const rows = [];
-  let tier = null, limit = null;
+  let tier = null, limit = null, endpoint = 'models';
   for (let page = 1; page <= MAX_PAGES; page++) {
-    const r = await fetch(`${base}/language/models?page=${page}`, { headers: { 'x-api-key': key, accept: 'application/json' } });
+    const request = () => fetch(`${base}/language/${endpoint}?page=${page}`, { headers: { 'x-api-key': key, accept: 'application/json' } });
+    let r = await request();
+    // Free keys cannot access the full endpoint. Keep paid-tier benchmarks when available.
+    if (r.status === 403 && endpoint === 'models') {
+      await r.arrayBuffer?.();
+      endpoint = 'models/free';
+      rows.length = 0; page = 1;
+      r = await request();
+    }
     const h = (n) => r.headers?.get?.(n) ?? null;
     limit = { remaining: Number(h('x-ratelimit-remaining') ?? NaN), reset: Number(h('x-ratelimit-reset') ?? NaN) };
     if (r.status === 429) throw Object.assign(new Error('Artificial Analysis rate limit reached'), { status: 429, retryAfter: Number(h('retry-after')) || 3600 });
-    if (r.status === 401 || r.status === 403) throw Object.assign(new Error('Artificial Analysis rejected the API key'), { status: r.status });
+    if (r.status === 401) throw Object.assign(new Error('Artificial Analysis rejected the API key'), { status: r.status });
+    if (r.status === 403) throw Object.assign(new Error('Artificial Analysis access denied for this subscription'), { status: r.status });
     if (!r.ok) throw Object.assign(new Error(`Artificial Analysis: HTTP ${r.status}`), { status: r.status });
     const j = await r.json();
     tier = j.tier ?? tier;
-    rows.push(...(j.data || []));
+    if (!Array.isArray(j.data)) throw new Error('Invalid Artificial Analysis response');
+    rows.push(...j.data);
     if (!j.pagination?.has_more) break;
   }
   return { models: rows.map(parseModel).filter((m) => m.slug), tier, limit };
@@ -187,10 +197,10 @@ export function createAAStore({ dataDir, metaDir, catalog, env = process.env, fe
         if (unmatched.length) log(`unmatched CLI models: ${unmatched.map((u) => `${u.agent}:${u.model}`).join(', ')}`);
         return true;
       } catch (e) {
-        lastError = e.message;
+        lastError = e.status ? e.message : 'Artificial Analysis request failed';
         notBefore = now() + (e.status === 429 ? e.retryAfter * 1000 : e.status === 401 || e.status === 403 ? ttl : 3600e3);
-        if (cache) save({ ...cache, notBefore, error: lastError });
-        log(`fetch failed: ${e.message}`);
+        save({ ...cache, notBefore, error: lastError });
+        log(`fetch failed: ${lastError}`);
         return false;
       } finally { inflight = null; }
     })();
@@ -201,10 +211,11 @@ export function createAAStore({ dataDir, metaDir, catalog, env = process.env, fe
   function view() {
     const cat = catalog();
     const { key } = keyInfo();
-    const useAA = !!(key && cache?.models?.length);
+    const useAA = !!(key && Array.isArray(cache?.models));
     const overrides = readJson(path.join(metaDir, 'model-map.json'), {}) || {};
-    const manual = useAA ? null : readJson(path.join(metaDir, 'model-metrics.json'), null);
-    const source = useAA ? 'artificialanalysis' : 'manual';
+    const manual = key ? null : readJson(path.join(metaDir, 'model-metrics.json'), null);
+    const source = key ? 'artificialanalysis' : 'manual';
+    const data_status = key ? (inflight ? 'loading' : lastError ? 'error' : useAA ? 'ready' : 'loading') : manual && Object.keys(manual.models || {}).length ? 'ready' : 'unconfigured';
     const fetched_at = useAA ? cache.fetched_at : manual?.updated ? Date.parse(manual.updated) || null : null;
     const { matches, unmatched } = useAA ? matchModels(cat, cache.models, overrides) : { matches: {}, unmatched: [] };
     const entries = [], manualMissing = [];
@@ -216,7 +227,7 @@ export function createAAStore({ dataDir, metaDir, catalog, env = process.env, fe
           ...(useAA && hit ? { aa: { slug: hit.slug, name: hit.name } } : {}), metrics: metricsOf(hit) });
       }
     }
-    return { source, fetched_at, entries, unmatched: useAA ? unmatched : manualMissing, attribution: ATTRIBUTION };
+    return { source, fetched_at, data_status, data_error: key ? lastError : null, stale: useAA && (stale() || !!lastError), entries, unmatched: useAA ? unmatched : manualMissing, attribution: ATTRIBUTION };
   }
   // What the Connections row may show: never the key itself.
   function status() {

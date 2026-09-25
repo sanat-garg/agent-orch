@@ -1369,7 +1369,7 @@ document.fonts?.ready.then(fitPick);
 // Auto Delegate preview (GET /api/delegate/preview), next to the picker only while Auto Delegate is chosen: the start
 // model and the comparable models most likely used after it, each with a status dot. A specific model shows nothing.
 // When the convo has curated fallbacks, the popover lets the owner edit them: add, remove, reorder, reset to automatic.
-const AP = { data: null, key: '', seq: 0, timer: 0, lastFocus: null, addOpen: false, search: '', drag: null, saving: false };
+const AP = { data: null, key: '', seq: 0, timer: 0, lastFocus: null, addOpen: false, search: '', drag: null, saving: false, error: '' };
 const AP_ST = { available: 'available', near: 'near limit', limited: 'limited', unavailable: 'unavailable' };
 function apStatusText(r) {
   const base = r.status === 'limited' && r.until ? `limited until ${fmtUntil(r.until)}` : AP_ST[r.status] || r.status;
@@ -1399,10 +1399,15 @@ function loadAutoPreview() {
     : `/api/delegate/preview?agent=${encodeURIComponent(agent)}&model=${encodeURIComponent(model)}&category=coding`;
   api(url).then((d) => {
     if (seq !== AP.seq) return;
-    AP.data = d;
+    AP.data = d; AP.error = '';
+    if (d.data_status === 'loading') { clearTimeout(AP.timer); AP.timer = setTimeout(loadAutoPreview, 1500); }
     renderApChip();
     if (!$('apModal').hidden) renderAutoPreview();
-  }).catch(() => {});
+  }).catch(() => {
+    if (seq !== AP.seq) return;
+    AP.data = null; AP.error = 'Could not load fallback data. Reopen to retry.';
+    if (!$('apModal').hidden) renderAutoPreview();
+  });
 }
 // Limits changed (WS 'ostate'): refetch, coalescing bursts.
 function refreshAutoPreview() {
@@ -1553,12 +1558,19 @@ $('apModal').addEventListener('touchmove', (e) => { if (AP.drag?.started) e.prev
 function renderAutoPreview() {
   const body = $('apBody'), d = AP.data;
   body.textContent = '';
-  if (!d) { $('apSub').textContent = ''; $('apTitle').textContent = 'Auto Delegate'; body.append(el('div', 'out-live', 'Loading…')); return; }
+  if (!d) { $('apSub').textContent = ''; $('apTitle').textContent = 'Auto Delegate'; body.append(el('div', 'out-live', AP.error || 'Loading…')); return; }
   const isCurated = d.fallbacks != null;
   $('apTitle').textContent = isCurated ? 'Your list' : 'Automatic';
   $('apSub').textContent = isCurated
     ? `Starts on ${apName(d.start)}. When it runs out of usage, tasks move to the next model in your list.`
     : `Starts on ${apName(d.start)}. When it runs out of usage, queued tasks may move to a comparable model.`;
+
+  const dataMessage = d.data_status === 'loading' ? 'Loading Artificial Analysis metrics…'
+    : d.data_status === 'unconfigured' ? 'Connect Artificial Analysis in Connections to load model metrics.'
+    : d.data_status === 'error' ? `${d.data_error || 'Artificial Analysis could not load metrics'}. Check Artificial Analysis in Connections.`
+    : '';
+  if (dataMessage) body.append(el('p', 'dg-why', dataMessage));
+  if (d.stale) body.append(el('p', 'dg-why', 'Showing cached metrics; the latest refresh is unavailable.'));
 
   // --- Start model ---
   body.append(apModelRow(d.start, 'Start'));
@@ -1612,7 +1624,7 @@ function renderAutoPreview() {
     if (d.candidates.length) {
       body.append(el('h3', 'dg-group', 'Likely fallbacks'));
       d.candidates.forEach((r, i) => body.append(apModelRow(r, `${i + 1}`)));
-    } else body.append(el('p', 'dg-why', d.start.score == null ? 'No metrics for the start model, so nothing is comparable to it.' : 'No comparable model on another signed-in agent.'));
+    } else if (!dataMessage) body.append(el('p', 'dg-why', d.start.score == null ? 'No metrics for the start model, so nothing is comparable to it.' : 'No comparable model on another signed-in agent.'));
     // "Customise" button to switch to curated mode (starts with the current automatic candidates).
     if (state.cid) {
       const cust = el('button', 'ap-add-btn', 'Customise fallback list');
@@ -1653,6 +1665,7 @@ function apModelRow(r, head, compact) {
     }
     box.append(g);
   }
+  if (!r.metrics && AP.data?.data_status === 'ready') box.append(el('p', 'dg-why', 'No metrics available for this model.'));
   if (r.reason && !compact) box.append(el('div', 'dg-why', r.reason));
   return box;
 }
@@ -1692,6 +1705,7 @@ function apEditableRow(r, idx, total) {
   const ctrl = el('div', 'ap-fb-ctrl');
   ctrl.append(upBtn, downBtn, rm);
   box.append(grip, h, g, ctrl);
+  if (!r.metrics && AP.data?.data_status === 'ready') box.append(el('p', 'dg-why', 'No metrics available for this model.'));
   return box;
 }
 // Searchable "add fallback" panel: all discovered models grouped by agent with availability.

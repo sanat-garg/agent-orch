@@ -401,3 +401,7 @@ curated per-chat fallbacks stored, snapshotted, honoured; npm test passes
 ## 2026-09-25 20:27 — #131 Fix mobile queue list overflowing the viewport [done]
 
 Mobile queue fits and scrolls at all three widths
+
+## 2026-09-25 20:45 — #132 Fix missing Artificial Analysis data in Auto Delegate fallback popup [done]
+
+Free-tier metrics reach popup; distinct data states pass regression.

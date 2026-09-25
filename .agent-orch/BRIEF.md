@@ -9,7 +9,7 @@ an agent orchestrator that plans work and runs autonomous Claude Code tasks so t
 limits get used around the clock.
 
 ## Goals (current push, set 2026-09-24)
-Immediate goal (task #131): keep the queue sheet and every task row within 320, 375 and 390 CSS-pixel mobile viewports, including long titles, dependency labels and nested dependents; keep the last row reachable through the sheet's vertical scroll.
+Immediate goals (owner, tasks #132–133): restore missing Artificial Analysis data in the Auto Delegate fallback popup with honest loading, unconfigured, provider-error and unavailable-metric states. Then simplify the popup to the starting model and a compact ordered fallback list, with scores and technical explanations behind one optional details disclosure; preserve ranking and saved per-chat choices. Task #132 fixes the data path only; #133 owns the simplification.
 1. Repo hygiene: the GitHub repo is github.com/sanat-garg/agent-orch (private; `origin`). No secrets or
    runtime data are tracked, and a README explains setup.
 2. Find and fix existing bugs and gaps in the server, orchestrator and UI.
@@ -46,7 +46,8 @@ Immediate goal (task #131): keep the queue sheet and every task row within 320, 
 - Keep dependencies minimal: plain Node ESM with no build step.
 
 ## Definition of Done (this push)
-- Task #131: `.agent-orch/MOBILE-QUEUE-CHECK.md` records browser measurements at 320, 375 and 390 CSS pixels showing no horizontal document overflow, in-viewport queue panel and rows, and the last row and its controls reachable by scrolling.
+- Task #132: `.agent-orch/DELEGATE-DATA-CHECK.md` identifies the verified cause and passing provider-to-popup regression, including unavailable/error cases.
+- Task #133: `.agent-orch/DELEGATE-POPUP-CHECK.md` records the simplified popup at desktop and 375 pixels with real score details and actionable unavailable states.
 - A README.md exists and covers what the app is, setup (Caddy, ttyd, systemd/env vars) and security notes.
 - `npm test` runs a real smoke test suite that passes.
 - .agent-orch/AUDIT.md lists the bugs found, and each one is either fixed or explicitly deferred.

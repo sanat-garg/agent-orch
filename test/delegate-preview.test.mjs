@@ -22,6 +22,8 @@ const AA = { pagination: { page: 1, total_pages: 1, has_more: false }, data: [
 ] };
 const CID = 'chat-1';
 let child, base, dataDir, home, aaStub, cookie;
+let providerStatus = 200, releaseProvider;
+const providerPaths = [];
 
 const freePort = () => new Promise((resolve, reject) => {
   const s = net.createServer().listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); });
@@ -38,13 +40,21 @@ before(async () => {
   fs.mkdirSync(bin, { recursive: true });
   fs.symlinkSync(path.join(ROOT, 'test/fixtures/codex-stub.mjs'), path.join(bin, 'codex'));
   fs.symlinkSync(path.join(ROOT, 'test/fixtures/agy-stub.mjs'), path.join(bin, 'agy'));
-  aaStub = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(AA)); });
+  fs.writeFileSync(path.join(dataDir, 'secrets.json'), JSON.stringify({ aa_api_key: 'test-key' }));
+  aaStub = http.createServer(async (req, res) => {
+    providerPaths.push(req.url);
+    assert.equal(req.headers['x-api-key'], 'test-key');
+    if (providerStatus === 'wait') await new Promise((r) => { releaseProvider = r; });
+    const status = providerStatus === 200 && !req.url.includes('/free?') ? 403 : providerStatus;
+    res.writeHead(status, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(status === 200 ? AA : { error: 'provider denied' }));
+  });
   await new Promise((r) => aaStub.listen(0, '127.0.0.1', r));
   const port = await freePort();
   base = `http://127.0.0.1:${port}`;
   // PATH without the real claude/codex/agy: only the stubs in the temp HOME.
   const PATH = `${bin}:/usr/local/bin:/usr/bin:/bin:${path.dirname(process.execPath)}`;
-  child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: { ...process.env, HOME: home, PATH, AA_API_KEY: 'test-key', CW_AA_BASE: `http://127.0.0.1:${aaStub.address().port}`,
+  child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: { ...process.env, HOME: home, PATH, AA_API_KEY: '', CW_AA_BASE: `http://127.0.0.1:${aaStub.address().port}`,
     PORT: String(port), CW_DATA_DIR: dataDir, CW_NO_ORCHESTRATOR: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   await new Promise((resolve, reject) => {
@@ -145,4 +155,88 @@ test('PUT /api/convos/:id/fallbacks: validated against the discovered models; th
   ({ body: r } = await get(`/api/delegate/preview?agent=codex&model=gpt-5.5&convo=${CID}`));
   assert.equal(r.fallbacks, null);
   assert.deepEqual(r.candidates, r.suggested);
+});
+
+const setKey = async () => {
+  const r = await fetch(base + '/api/aa/key', { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ key: 'test-key' }) });
+  return r.json();
+};
+
+test('saved free-tier connection reaches popup JSON; loading, unmatched, provider failure and unconfigured stay distinct', async () => {
+  let { body: d } = await preview('agent=codex&model=gpt-5.5');
+  assert.ok(providerPaths.includes('/language/models?page=1'));
+  assert.ok(providerPaths.includes('/language/models/free?page=1'));
+  assert.equal(d.data_status, 'ready');
+  assert.equal(d.start.metrics.coding_index, 50);
+  assert.equal(d.start.metrics.agentic_index, 55);
+  assert.ok(!JSON.stringify(d).includes('test-key'));
+  // The real free shape omits benchmarks: never invent them or coerce null to zero.
+  const original = structuredClone(AA);
+  AA.data = AA.data.filter((m) => m.slug !== 'gpt-6-sol').map((m) => ({ ...m, evaluations: {
+    artificial_analysis_intelligence_index: m.evaluations.artificial_analysis_intelligence_index,
+    artificial_analysis_coding_index: m.evaluations.artificial_analysis_coding_index,
+    artificial_analysis_agentic_index: null,
+  } }));
+  providerStatus = 'wait';
+  const pending = setKey();
+  while (!releaseProvider) await new Promise((r) => setTimeout(r, 10));
+  assert.equal((await get('/api/delegate/preview?agent=codex&model=gpt-5.5')).body.data_status, 'loading');
+  providerStatus = 200; releaseProvider(); await pending;
+  await put(`/api/convos/${CID}/fallbacks`, { fallbacks: [{ agent: 'codex', model: 'gpt-6-sol' }] });
+  d = (await get(`/api/delegate/preview?agent=codex&model=gpt-5.5&convo=${CID}`)).body;
+  assert.equal(d.data_status, 'ready');
+  assert.equal(d.start.metrics.coding_index, 50);
+  assert.equal(d.start.metrics.agentic_index, null);
+  assert.deepEqual(d.start.metrics.benchmarks, {});
+  assert.equal(d.candidates[0].model, 'gpt-6-sol');
+  assert.equal(d.candidates[0].metrics, null);
+  assert.equal(d.candidates[0].score, null);
+  assert.equal(d.suggested[0].metrics.coding_index, 49);
+  // Execute the actual popup consumer with the serialized HTTP response.
+  const { chromium } = await import('playwright-core');
+  const browser = await chromium.launch();
+  try {
+    const page = await browser.newPage();
+    await page.setContent('<div id="apTitle"></div><div id="apSub"></div><div id="apBody"></div>');
+    const app = fs.readFileSync(path.join(ROOT, 'public/app.js'), 'utf8');
+    const functions = app.slice(app.indexOf('function renderAutoPreview()'), app.indexOf('// Searchable "add fallback"'));
+    const metrics = app.slice(app.indexOf('const DG_METRICS ='), app.indexOf('function openDelegate('));
+    await page.addScriptTag({ content: `
+      const $=id=>document.getElementById(id), el=(tag,cls,text)=>{const e=document.createElement(tag);e.className=cls||'';if(text)e.textContent=text;return e};
+      const state={}, shortLabel=a=>a, apName=r=>r.label, apStatusText=r=>r.status;
+      const AP={data:null};
+      ${metrics}
+${functions}
+      window.renderData=d=>{AP.data=d;renderAutoPreview();};
+    ` });
+    await page.evaluate((d) => window.renderData(d), d);
+    assert.match(await page.locator('#apBody').innerText(), /50.0/);
+    assert.match(await page.locator('#apBody').innerText(), /No metrics available for this model/);
+    assert.ok((await page.locator('.v').allTextContents()).includes('—'));
+    for (const [status, message] of [['loading', /Loading Artificial Analysis/], ['unconfigured', /Connect Artificial Analysis/], ['error', /Check Artificial Analysis in Connections/]]) {
+      await page.evaluate((d) => window.renderData(d), { ...d, data_status: status });
+      assert.match(await page.locator('#apBody').innerText(), message);
+    }
+  } finally { await browser.close(); }
+
+  providerStatus = 503; await setKey();
+  d = (await get('/api/delegate/preview?agent=codex&model=gpt-5.5')).body;
+  assert.equal(d.data_status, 'error');
+  assert.match(d.data_error, /503/);
+  assert.equal(d.stale, true);
+  assert.equal(d.start.metrics.coding_index, 50, 'cached real data survives provider failure');
+  const del = await fetch(base + '/api/aa/key', { method: 'DELETE', headers: { cookie } }); await del.arrayBuffer();
+  d = (await get('/api/delegate/preview?agent=codex&model=gpt-5.5')).body;
+  assert.equal(d.data_status, 'unconfigured');
+  assert.equal(d.start.metrics, null);
+  // Simulate a first-fetch failure, with no previous successful cache.
+  fs.unlinkSync(path.join(dataDir, 'aa-models.json'));
+  const { createAAStore } = await import('../aa.mjs');
+  const store = createAAStore({ dataDir, metaDir: dataDir, catalog: () => ({ codex: [{ id: 'gpt-5.5' }] }), env: {}, fetch: async () => new Response('{}', { status: 401 }) });
+  await store.setKey('test-key');
+  assert.equal(store.view().data_status, 'error');
+  assert.equal(store.view().source, 'artificialanalysis');
+  assert.equal(store.view().entries[0].metrics, null);
+  assert.match(store.view().data_error, /rejected/);
+  AA.data = original.data;
 });

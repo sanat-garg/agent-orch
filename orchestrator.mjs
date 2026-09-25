@@ -603,7 +603,7 @@ const WEEK = 7 * 86400, FIVE_H = 5 * 3600, STALE = 15 * 60;
 const hrs = (s) => (s >= 3600 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 60)}m`);
 const pct = (f) => `${Math.round(f * 100)}%`;
 
-function decide(limits, t, hasUrgent) {
+export function decide(limits, t, hasUrgent) {
   const get = (type) => limits.find((l) => l.limit_type === type) || {};
   let { utilization: wU = null, resets_at: wR = null, observed_at: wO = null } = get('seven_day');
   let { utilization: fU = null, resets_at: fR = null, observed_at: fO = null } = get('five_hour');

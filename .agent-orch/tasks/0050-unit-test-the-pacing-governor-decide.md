@@ -13,3 +13,7 @@ In /home/ubuntu/agent-orch, orchestrator.mjs has an unexported pure function `de
 ## Done when
 
 `npm test` passes and test/pacing.test.mjs exists with at least 8 tests calling decide()
+
+## Result — done (check passed) (2026-09-25 04:06)
+
+AGENT-ORCH-STATUS: done — decide() exported, 13 pacing tests pass, npm test green

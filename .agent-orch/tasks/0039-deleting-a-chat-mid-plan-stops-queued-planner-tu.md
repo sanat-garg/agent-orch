@@ -13,3 +13,7 @@ Fix AUDIT #6 in /home/ubuntu/agent-orch/server.mjs. The chat DELETE handler (aro
 ## Done when
 
 `grep -q 'planQueue.delete(c.id)' server.mjs` and `npm test` passes
+
+## Result — done (check passed) (2026-09-25 03:52)
+
+AGENT-ORCH-STATUS: done — Deleting a chat mid-plan now drops its queued planner turns

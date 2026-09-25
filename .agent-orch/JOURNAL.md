@@ -145,3 +145,7 @@ Oversized bodies now get 413 and bad JSON gets 400
 ## 2026-09-25 03:51 — #38 Close expired or revoked sessions' WebSockets (AUDIT #9) [done (check passed)]
 
 WebSockets for removed or expired sessions now close with 4001
+
+## 2026-09-25 03:52 — #39 Deleting a chat mid-plan stops queued planner turns (AUDIT #6) [done (check passed)]
+
+Deleting a chat mid-plan now drops its queued planner turns

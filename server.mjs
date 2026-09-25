@@ -633,6 +633,7 @@ async function orchestratorTurn(convo, text) {
   try {
     for (let next = text; next;) {
       await orch.planTurn(convo, next);
+      if (!findConvo(convo.id)) break; // deleted mid-plan: don't re-plan (and reactivate) its project
       const waiting = planQueue.get(convo.id);
       next = waiting?.length ? waiting.splice(0).join('\n\n') : null;
     }
@@ -640,8 +641,7 @@ async function orchestratorTurn(convo, text) {
     emit(convo.id, { t: 'error', text: `Orchestrator error: ${e?.message || e}` });
   } finally {
     planning.delete(convo.id);
-    convo.updatedAt = Date.now();
-    saveConvos();
+    if (findConvo(convo.id)) { convo.updatedAt = Date.now(); saveConvos(); }
     broadcast(convo.id, { t: 'busy', busy: false });
     broadcastConvos();
     refreshUsageSoon();
@@ -1123,6 +1123,7 @@ async function handleRequest(req, res) {
       retireRuntime(runtimes, c.id);
       agentQueue.delete(c.id);
       agentTurns.get(c.id)?.abort();
+      planQueue.delete(c.id);
       orch.abortPlan(c.id);
       orch.detachConvo(c.id); // its project's background work pauses; the folder and tasks are kept
       convos = convos.filter((x) => x.id !== c.id);

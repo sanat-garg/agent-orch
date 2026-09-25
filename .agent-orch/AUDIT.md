@@ -72,6 +72,7 @@ a same-origin request. Caddy's `reverse_proxy` overwrites `X-Forwarded-For`, so 
 - **Repro:** In Orchestrator Mode, send a message, send a second one while the first is planning, then delete the chat.
 - **Fix:** Run `planQueue.delete(c.id)` in the DELETE handler, and stop the loop in `orchestratorTurn` if
   `!findConvo(convo.id)`.
+- **Fixed** (task #39): the DELETE handler clears `planQueue`, and `orchestratorTurn` stops its loop and skips saving once the convo is gone.
 
 ### 7. [med] Messages sent while the WebSocket is reconnecting are silently lost (public/app.js:1049, :1276)
 - **What:** `send()` drops the message when `readyState !== 1`. The composer submit handler then clears the input

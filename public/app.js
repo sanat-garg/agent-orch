@@ -1365,13 +1365,15 @@ function fitPick() {
 document.fonts?.ready.then(fitPick);
 // Auto Delegate preview (GET /api/delegate/preview), next to the picker only while Auto Delegate is chosen: the start
 // model and the comparable models most likely used after it, each with a status dot. A specific model shows nothing.
-const AP = { data: null, key: '', seq: 0, timer: 0, lastFocus: null };
+// When the convo has curated fallbacks, the popover lets the owner edit them: add, remove, reorder, reset to automatic.
+const AP = { data: null, key: '', seq: 0, timer: 0, lastFocus: null, addOpen: false, search: '', drag: null, saving: false };
 const AP_ST = { available: 'available', near: 'near limit', limited: 'limited', unavailable: 'unavailable' };
 function apStatusText(r) {
   const base = r.status === 'limited' && r.until ? `limited until ${fmtUntil(r.until)}` : AP_ST[r.status] || r.status;
   return r.note && r.status !== 'available' ? `${base} (${r.note})` : base;
 }
 const apName = (r) => r.label || (r.model ? modelLabel(r.agent, r.model) : shortLabel(r.agent));
+const apKey = (r) => `${r.agent}/${r.model}`;
 function renderPickChip() {
   fitPick();
   const c = $('apChip');
@@ -1387,7 +1389,12 @@ function renderPickChip() {
 function loadAutoPreview() {
   if (!AP.key) return;
   const [agent, model] = AP.key.split('|'), seq = ++AP.seq;
-  api(`/api/delegate/preview?agent=${encodeURIComponent(agent)}&model=${encodeURIComponent(model)}&category=coding`).then((d) => {
+  // Use ?convo= when the current chat has an id so the backend returns curated fallbacks + suggested.
+  const cid = state.cid;
+  const url = cid
+    ? `/api/delegate/preview?convo=${encodeURIComponent(cid)}&agent=${encodeURIComponent(agent)}&model=${encodeURIComponent(model)}&category=coding`
+    : `/api/delegate/preview?agent=${encodeURIComponent(agent)}&model=${encodeURIComponent(model)}&category=coding`;
+  api(url).then((d) => {
     if (seq !== AP.seq) return;
     AP.data = d;
     renderApChip();
@@ -1398,6 +1405,55 @@ function loadAutoPreview() {
 function refreshAutoPreview() {
   clearTimeout(AP.timer);
   if (AP.key) AP.timer = setTimeout(loadAutoPreview, 400);
+}
+// Optimistic save of the fallback list; revert + toast on error.
+function apSaveFallbacks(list) {
+  const cid = state.cid;
+  if (!cid || AP.saving) return;
+  const prev = AP.data?.fallbacks ?? null;
+  // Optimistic: update local state immediately.
+  if (AP.data) AP.data.fallbacks = list;
+  const convo = currentConvo();
+  if (convo) convo.fallbacks = list;
+  renderApChip();
+  renderAutoPreview();
+  AP.saving = true;
+  api(`/api/convos/${cid}/fallbacks`, 'PUT', { fallbacks: list }).then((c) => {
+    AP.saving = false;
+    // Server response is authoritative — sync the convo.
+    if (convo) convo.fallbacks = c.fallbacks ?? null;
+    // Re-fetch the preview so candidates/suggested reflect the new list.
+    loadAutoPreview();
+  }).catch((e) => {
+    AP.saving = false;
+    // Revert.
+    if (AP.data) AP.data.fallbacks = prev;
+    if (convo) convo.fallbacks = prev;
+    renderApChip();
+    renderAutoPreview();
+    toast(`Failed to save fallbacks: ${e.message}`);
+  });
+}
+function apAddFallback(agent, model) {
+  const cur = (AP.data?.fallbacks ?? currentConvo()?.fallbacks) || [];
+  if (cur.some((f) => f.agent === agent && f.model === model)) return;
+  apSaveFallbacks([...cur, { agent, model }]);
+}
+function apRemoveFallback(idx) {
+  const cur = (AP.data?.fallbacks ?? currentConvo()?.fallbacks) || [];
+  if (idx < 0 || idx >= cur.length) return;
+  apSaveFallbacks(cur.filter((_, i) => i !== idx));
+}
+function apMoveFallback(from, to) {
+  const cur = [...((AP.data?.fallbacks ?? currentConvo()?.fallbacks) || [])];
+  if (from < 0 || from >= cur.length || to < 0 || to >= cur.length || from === to) return;
+  const [item] = cur.splice(from, 1);
+  cur.splice(to, 0, item);
+  apSaveFallbacks(cur);
+}
+function apResetFallbacks() {
+  apSaveFallbacks(null);
+  AP.addOpen = false;
 }
 function renderApChip() {
   const c = $('apChip'), d = AP.data;
@@ -1423,10 +1479,11 @@ function openAutoPreview() {
   const m = $('apModal');
   if (m.hidden) AP.lastFocus = document.activeElement;
   m.hidden = false;
+  AP.addOpen = false; AP.search = '';
   // Desktop: a small popover above the chip; mobile (≤800px): the .modal.sheet bottom sheet.
   const panel = m.querySelector('.modal-panel');
   if (matchMedia('(min-width: 801px)').matches) {
-    const r = $('apChip').getBoundingClientRect(), w = Math.min(400, innerWidth - 24);
+    const r = $('apChip').getBoundingClientRect(), w = Math.min(440, innerWidth - 24);
     panel.style.left = `${Math.max(12, Math.min(r.left, innerWidth - w - 12))}px`;
     panel.style.bottom = `${innerHeight - r.top + 8}px`;
   } else panel.style.left = panel.style.bottom = '';
@@ -1436,38 +1493,135 @@ function openAutoPreview() {
 }
 function closeAutoPreview() {
   $('apModal').hidden = true;
+  AP.addOpen = false; AP.search = '';
   AP.lastFocus?.focus?.();
 }
 $('apChip').addEventListener('click', openAutoPreview);
 $('apModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeAutoPreview(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('apModal').hidden) { e.stopImmediatePropagation(); closeAutoPreview(); } }, true);
+
+// --- Drag-to-reorder fallbacks with Pointer Events (long-press on touch) ---
+function apPointerDown(e, idx) {
+  if (e.button) return;
+  const card = e.currentTarget;
+  const isTouch = e.pointerType === 'touch';
+  const startY = e.clientY;
+  AP.drag = { idx, card, startY, isTouch, started: false, pressTimer: 0 };
+  card.setPointerCapture(e.pointerId);
+  if (isTouch) {
+    AP.drag.pressTimer = setTimeout(() => { if (AP.drag) { AP.drag.started = true; card.classList.add('ap-dragging'); } }, 350);
+  }
+  const move = (ev) => {
+    if (!AP.drag) return;
+    if (!AP.drag.started) {
+      if (isTouch) return; // wait for long-press timer
+      if (Math.abs(ev.clientY - startY) > 5) { AP.drag.started = true; card.classList.add('ap-dragging'); }
+      else return;
+    }
+    ev.preventDefault();
+    const list = card.parentElement;
+    const cards = [...list.querySelectorAll('.ap-fb-row')];
+    const dy = ev.clientY - startY;
+    card.style.transform = `translateY(${dy}px)`;
+    card.style.zIndex = '10';
+    // Find the target index based on pointer position relative to other cards.
+    const cr = card.getBoundingClientRect(), cy = cr.top + cr.height / 2;
+    let target = idx;
+    cards.forEach((c, i) => { if (i !== idx) { const r = c.getBoundingClientRect(); if (cy > r.top + r.height / 2) target = i < idx ? i + 1 : i; else if (cy < r.top + r.height / 2 && i < idx) target = i; } });
+    AP.drag.target = target;
+  };
+  const up = (ev) => {
+    card.removeEventListener('pointermove', move);
+    card.removeEventListener('pointerup', up);
+    card.removeEventListener('pointercancel', up);
+    clearTimeout(AP.drag?.pressTimer);
+    card.classList.remove('ap-dragging');
+    card.style.transform = ''; card.style.zIndex = '';
+    if (AP.drag?.started && AP.drag.target != null && AP.drag.target !== idx) apMoveFallback(idx, AP.drag.target);
+    AP.drag = null;
+  };
+  card.addEventListener('pointermove', move);
+  card.addEventListener('pointerup', up);
+  card.addEventListener('pointercancel', up);
+}
+// Prevent iOS scroll while dragging a fallback row.
+$('apModal').addEventListener('touchmove', (e) => { if (AP.drag?.started) e.preventDefault(); }, { passive: false });
+
 function renderAutoPreview() {
   const body = $('apBody'), d = AP.data;
   body.textContent = '';
-  if (!d) { $('apSub').textContent = ''; body.append(el('div', 'out-live', 'Loading…')); return; }
-  $('apSub').textContent = `Starts on ${apName(d.start)}. When it runs out of usage, queued tasks may move to a comparable model.`;
-  const row = (r, head) => {
-    const box = el('div', `dg-row ap-row${r.status === 'available' || r.status === 'near' ? '' : ' limited'}`);
-    const h = el('div', 'dg-head');
-    const st = el('span', `ap-e st-${r.status}`);
-    st.append(el('span', 'ap-dot'), el('span', '', apStatusText(r)));
-    h.append(el('span', 'dg-name', `${head}${r.agent} · ${apName(r)}`), st);
-    const g = el('div', 'dg-metrics ap-metrics');
-    for (const [label, read, fmt] of DG_METRICS.slice(0, 3)) {
-      const v = r.metrics && dgNum(read(r.metrics));
-      const cell = el('div', 'dg-m');
-      cell.append(el('span', 'k', label), el('span', 'v', v == null ? '—' : fmt(v)));
-      g.append(cell);
+  if (!d) { $('apSub').textContent = ''; $('apTitle').textContent = 'Auto Delegate'; body.append(el('div', 'out-live', 'Loading…')); return; }
+  const isCurated = d.fallbacks != null;
+  $('apTitle').textContent = isCurated ? 'Your list' : 'Automatic';
+  $('apSub').textContent = isCurated
+    ? `Starts on ${apName(d.start)}. When it runs out of usage, tasks move to the next model in your list.`
+    : `Starts on ${apName(d.start)}. When it runs out of usage, queued tasks may move to a comparable model.`;
+
+  // --- Start model ---
+  body.append(apModelRow(d.start, 'Start'));
+
+  // --- Current fallbacks (curated) or automatic candidates ---
+  if (isCurated) {
+    if (d.candidates.length) {
+      body.append(el('h3', 'dg-group', 'Fallbacks'));
+      const listEl = el('div', 'ap-fb-list');
+      d.candidates.forEach((r, i) => {
+        const row = apEditableRow(r, i, d.candidates.length);
+        listEl.append(row);
+      });
+      body.append(listEl);
+    } else {
+      body.append(el('p', 'dg-why ap-empty', 'No fallbacks added yet. Add one below or reset to automatic.'));
     }
-    box.append(h, g);
-    if (r.reason) box.append(el('div', 'dg-why', r.reason));
-    return box;
-  };
-  body.append(row(d.start, 'Start: '));
-  if (d.candidates.length) {
-    body.append(el('h3', 'dg-group', 'Likely fallbacks'));
-    d.candidates.forEach((r, i) => body.append(row(r, `${i + 1}. `)));
-  } else body.append(el('p', 'dg-why', d.start.score == null ? 'No metrics for the start model, so nothing is comparable to it.' : 'No comparable model on another signed-in agent.'));
+    // "+ Add fallback" button
+    const addBtn = el('button', 'ap-add-btn', '+ Add fallback');
+    addBtn.type = 'button';
+    addBtn.addEventListener('click', () => { AP.addOpen = !AP.addOpen; AP.search = ''; renderAutoPreview(); });
+    body.append(addBtn);
+    // Add panel (searchable model list)
+    if (AP.addOpen) body.append(renderApAddPanel(d));
+    // Suggested section: automatic top picks not yet in the curated list.
+    const sugFiltered = (d.suggested || []).filter((s) => !(d.fallbacks || []).some((f) => f.agent === s.agent && f.model === s.model));
+    if (sugFiltered.length) {
+      body.append(el('h3', 'dg-group', 'Suggested'));
+      for (const s of sugFiltered) {
+        const srow = apModelRow(s, null, true);
+        const add = el('button', 'ap-sug-add', '+ Add');
+        add.type = 'button';
+        add.addEventListener('click', () => apAddFallback(s.agent, s.model));
+        srow.querySelector('.dg-head').append(add);
+        body.append(srow);
+      }
+    }
+    // Reset to automatic
+    const reset = el('button', 'ap-reset-btn', 'Reset to automatic');
+    reset.type = 'button';
+    reset.addEventListener('click', () => {
+      if (AP._confirmReset) { apResetFallbacks(); AP._confirmReset = false; return; }
+      AP._confirmReset = true;
+      reset.textContent = 'Tap again to confirm';
+      reset.classList.add('confirm');
+      setTimeout(() => { AP._confirmReset = false; if (!$('apModal').hidden) renderAutoPreview(); }, 3000);
+    });
+    body.append(reset);
+  } else {
+    // Automatic mode: show candidates as before.
+    if (d.candidates.length) {
+      body.append(el('h3', 'dg-group', 'Likely fallbacks'));
+      d.candidates.forEach((r, i) => body.append(apModelRow(r, `${i + 1}`)));
+    } else body.append(el('p', 'dg-why', d.start.score == null ? 'No metrics for the start model, so nothing is comparable to it.' : 'No comparable model on another signed-in agent.'));
+    // "Customise" button to switch to curated mode (starts with the current automatic candidates).
+    if (state.cid) {
+      const cust = el('button', 'ap-add-btn', 'Customise fallback list');
+      cust.type = 'button';
+      cust.addEventListener('click', () => {
+        const initial = (d.candidates || []).map((c) => ({ agent: c.agent, model: c.model }));
+        apSaveFallbacks(initial);
+      });
+      body.append(cust);
+    }
+  }
+  // Attribution
   const src = el('p', 'dg-src');
   src.append(d.source === 'artificialanalysis' ? 'Metrics from Artificial Analysis' : 'Metrics entered manually (.agent-orch/model-metrics.json)',
     ` · ranked for ${d.category} work`);
@@ -1477,6 +1631,112 @@ function renderAutoPreview() {
     src.append(' · ', a);
   }
   body.append(src);
+}
+// A read-only model row with status dot and key metrics.
+function apModelRow(r, head, compact) {
+  const box = el('div', `dg-row ap-row${r.status === 'available' || r.status === 'near' ? '' : ' limited'}`);
+  const h = el('div', 'dg-head');
+  const st = el('span', `ap-e st-${r.status || 'available'}`);
+  st.append(el('span', 'ap-dot'), el('span', '', r.status ? apStatusText(r) : ''));
+  h.append(el('span', 'dg-name', `${head ? head + '. ' : ''}${shortLabel(r.agent)} · ${apName(r)}`), st);
+  box.append(h);
+  if (!compact) {
+    const g = el('div', 'dg-metrics ap-metrics');
+    for (const [label, read, fmt] of DG_METRICS.slice(0, 3)) {
+      const v = r.metrics && dgNum(read(r.metrics));
+      const cell = el('div', 'dg-m');
+      cell.append(el('span', 'k', label), el('span', 'v', v == null ? '—' : fmt(v)));
+      g.append(cell);
+    }
+    box.append(g);
+  }
+  if (r.reason && !compact) box.append(el('div', 'dg-why', r.reason));
+  return box;
+}
+// An editable fallback row: drag handle, name, status, metrics, up/down buttons, remove.
+function apEditableRow(r, idx, total) {
+  const box = el('div', `ap-fb-row dg-row ap-row${r.status === 'available' || r.status === 'near' ? '' : ' limited'}`);
+  box.setAttribute('data-idx', idx);
+  // Drag handle
+  const grip = el('span', 'ap-grip', '⠿');
+  grip.title = 'Drag to reorder';
+  grip.style.cursor = 'grab';
+  box.addEventListener('pointerdown', (e) => { if (e.target.closest('.ap-grip') || e.target === box) apPointerDown(e, idx); });
+  // Up/down accessible buttons
+  const upBtn = el('button', 'ap-move-btn', '↑');
+  upBtn.type = 'button'; upBtn.title = 'Move up'; upBtn.disabled = idx === 0;
+  upBtn.addEventListener('click', () => apMoveFallback(idx, idx - 1));
+  const downBtn = el('button', 'ap-move-btn', '↓');
+  downBtn.type = 'button'; downBtn.title = 'Move down'; downBtn.disabled = idx === total - 1;
+  downBtn.addEventListener('click', () => apMoveFallback(idx, idx + 1));
+  // Name + status
+  const h = el('div', 'dg-head ap-fb-head');
+  const st = el('span', `ap-e st-${r.status || 'available'}`);
+  st.append(el('span', 'ap-dot'));
+  h.append(el('span', 'dg-name', `${shortLabel(r.agent)} · ${apName(r)}`), st);
+  // Remove button
+  const rm = el('button', 'ap-rm-btn', '×');
+  rm.type = 'button'; rm.title = 'Remove fallback';
+  rm.addEventListener('click', () => apRemoveFallback(idx));
+  // Key metrics (compact)
+  const g = el('div', 'dg-metrics ap-metrics');
+  for (const [label, read, fmt] of DG_METRICS.slice(0, 2)) {
+    const v = r.metrics && dgNum(read(r.metrics));
+    const cell = el('div', 'dg-m');
+    cell.append(el('span', 'k', label), el('span', 'v', v == null ? '—' : fmt(v)));
+    g.append(cell);
+  }
+  const ctrl = el('div', 'ap-fb-ctrl');
+  ctrl.append(upBtn, downBtn, rm);
+  box.append(grip, h, g, ctrl);
+  return box;
+}
+// Searchable "add fallback" panel: all discovered models grouped by agent with availability.
+function renderApAddPanel(d) {
+  const panel = el('div', 'ap-add-panel');
+  const input = el('input', 'ap-search');
+  input.type = 'search'; input.placeholder = 'Search models…'; input.value = AP.search;
+  input.addEventListener('input', () => { AP.search = input.value; renderApAddList(panel, d, input); });
+  panel.append(input);
+  renderApAddList(panel, d, input);
+  setTimeout(() => input.focus(), 50);
+  return panel;
+}
+function renderApAddList(panel, d, input) {
+  // Remove previous list if any.
+  const prev = panel.querySelector('.ap-add-list');
+  if (prev) prev.remove();
+  const list = el('div', 'ap-add-list');
+  const q = AP.search.toLowerCase().trim();
+  const inList = new Set((d.fallbacks || []).map(apKey));
+  // Also mark the start model.
+  inList.add(apKey(d.start));
+  for (const a of AGENT_LIST) {
+    if (!a.available || a.loggedIn === false) continue;
+    const models = a.models.filter((m) => !q || m.label.toLowerCase().includes(q) || m.id.toLowerCase().includes(q) || a.label.toLowerCase().includes(q));
+    if (!models.length) continue;
+    const group = el('div', 'ap-add-group');
+    group.append(el('h4', 'ap-add-agent', a.label));
+    for (const m of models) {
+      const key = `${a.id}/${m.id}`;
+      const already = inList.has(key);
+      const row = el('div', `ap-add-row${already ? ' ap-in-list' : ''}`);
+      const name = el('span', 'ap-add-name', m.label + (m.default ? ' (default)' : ''));
+      row.append(name);
+      if (already) {
+        row.append(el('span', 'ap-add-check', '✓'));
+      } else {
+        const addB = el('button', 'ap-add-pick', 'Add');
+        addB.type = 'button';
+        addB.addEventListener('click', () => { apAddFallback(a.id, m.id); AP.addOpen = true; });
+        row.append(addB);
+      }
+      group.append(row);
+    }
+    list.append(group);
+  }
+  if (!list.children.length) list.append(el('p', 'dg-why', q ? 'No models match your search.' : 'No agents are signed in.'));
+  panel.append(list);
 }
 const pickVal = ({ agent, model }) => `${agent || 'claude'}|${model || ''}`;
 const parsePick = (v) => (v.includes('|') ? { agent: v.slice(0, v.indexOf('|')), model: v.slice(v.indexOf('|') + 1) } : { agent: 'claude', model: v });
@@ -1788,6 +2048,7 @@ function onServer(msg) {
     renderConvoList();
     updateFolderChip();
     updateHeader();
+    refreshAutoPreview();
     return;
   }
   if (msg.cid && msg.cid !== state.cid) return;

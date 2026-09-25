@@ -72,7 +72,8 @@ test("the model picker renders 'Auto Delegate' first and each message carries th
   assert.match(appJs, /send\(\{ t: 'send', cid: state\.cid, text, autoDelegate: autoPick\(\) \}\)/);
   assert.match(indexHtml, /id="apChip"/);
   assert.match(indexHtml, /class="modal sheet ap-pop" id="apModal"/);
-  assert.match(appJs, /api\(`\/api\/delegate\/preview\?agent=/);
+  assert.match(appJs, /\/api\/delegate\/preview\?.*agent=/);
+  assert.match(appJs, /\/api\/convos\/\$\{.*\}\/fallbacks.*PUT/);
   assert.doesNotMatch(appJs, /Pinned:/);
   assert.match(appJs, /\/api\/orch\/tasks\/\$\{[^}]+\}\/delegate/);
   assert.match(appJs, /'Delegate…'/);

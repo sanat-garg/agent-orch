@@ -397,3 +397,7 @@ queue is wider, shows dependents as a tree, has new glyphs
 ## 2026-09-25 19:59 — #129 Backend: owner-defined fallback list per chat for Auto Delegate [done (check passed)]
 
 curated per-chat fallbacks stored, snapshotted, honoured; npm test passes
+
+## 2026-09-25 20:27 — #131 Fix mobile queue list overflowing the viewport [done]
+
+Mobile queue fits and scrolls at all three widths

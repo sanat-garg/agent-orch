@@ -1240,9 +1240,11 @@ wss.on('connection', (ws, req) => {
   let current = null;
   const token = parseCookies(req)[COOKIE];
   const alive = setInterval(() => {
-    if (!sessions[token]) ws.close(4001, 'signed out');
+    syncSessions();
+    const s = sessions[token];
+    if (!s || s.exp < Date.now()) ws.close(4001, 'signed out');
     else if (ws.readyState === 1) ws.ping();
-  }, 30e3);
+  }, Number(process.env.CW_WS_KEEPALIVE_MS) || 30e3);
 
   send(ws, { t: 'convos', convos: convos.map(publicConvo) });
   if (history.length) send(ws, { t: 'mtick', s: history[history.length - 1], sampleMs: SAMPLE_MS });

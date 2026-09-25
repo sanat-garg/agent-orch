@@ -95,6 +95,7 @@ a same-origin request. Caddy's `reverse_proxy` overwrites `X-Forwarded-For`, so 
   after it expires. After `set-password` rewrites sessions.json, open sockets stay connected until some HTTP
   request happens to trigger `syncSessions`.
 - **Fix:** In the interval, call `syncSessions()` and close with 4001 when `!s || s.exp < Date.now()`.
+- **Fixed** (task #38): the keepalive calls `syncSessions()` and closes with 4001 on a missing or expired session; `CW_WS_KEEPALIVE_MS` overrides the 30 s period, and a regression test covers removal and expiry.
 
 ### 10. [med] Orchestrator git commits block the whole server's event loop (orchestrator.mjs:986-996)
 - **What:** `gitCommit`/`ensureGit` use `execFileSync` with a 120 s timeout, up to 4 calls per commit. A slow

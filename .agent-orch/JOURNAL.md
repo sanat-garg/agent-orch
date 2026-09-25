@@ -141,3 +141,7 @@ parallel login bursts now hit lockout; regression test passes
 ## 2026-09-25 03:49 — #36 Answer oversized request bodies with 413 instead of hanging (AUDIT #14) [done]
 
 Oversized bodies now get 413 and bad JSON gets 400
+
+## 2026-09-25 03:51 — #38 Close expired or revoked sessions' WebSockets (AUDIT #9) [done (check passed)]
+
+WebSockets for removed or expired sessions now close with 4001

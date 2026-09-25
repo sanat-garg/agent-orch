@@ -9,6 +9,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import WebSocket from 'ws';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PASSWORD = 'smoke-test-password';
@@ -30,7 +31,7 @@ before(async () => {
   const port = await freePort();
   assert.notEqual(port, 3000);
   base = `http://127.0.0.1:${port}`;
-  child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, CODEX_STUB_LOGIN: 'out', PORT: String(port), CW_DATA_DIR: dataDir }, stdio: ['ignore', 'pipe', 'pipe'] });
+  child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, CODEX_STUB_LOGIN: 'out', CW_WS_KEEPALIVE_MS: '200', PORT: String(port), CW_DATA_DIR: dataDir }, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`server did not start:\n${out}`)), 20000);
@@ -174,4 +175,32 @@ test('GET /api/agents lists the agent registry, including claude', async () => {
   const codex = agents.find((a) => a.id === 'codex');
   assert.equal(codex.available, true);
   assert.equal(codex.loggedIn, false);
+});
+
+test('WebSockets of removed or expired sessions close with 4001 (AUDIT #9)', async () => {
+  const login = async () => {
+    const r = await fetch(base + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: PASSWORD }) });
+    await r.arrayBuffer();
+    return r.headers.get('set-cookie').split(';')[0];
+  };
+  const open = async (cookie) => {
+    const ws = new WebSocket(base.replace('http', 'ws') + '/ws', { headers: { cookie } });
+    await new Promise((resolve, reject) => { ws.on('open', resolve); ws.on('error', reject); });
+    ws.closed = new Promise((resolve) => ws.on('close', (code) => resolve(code)));
+    return ws;
+  };
+  const [gone, stale, kept] = await Promise.all([login(), login(), login()]);
+  const sockets = await Promise.all([gone, stale, kept].map(open));
+  // Rewrite sessions.json from outside, like `set-password` does: drop one session, expire another.
+  const file = path.join(dataDir, 'sessions.json');
+  const sessions = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const tok = (c) => decodeURIComponent(c.slice(c.indexOf('=') + 1));
+  delete sessions[tok(gone)];
+  sessions[tok(stale)].exp = Date.now() - 1000;
+  fs.writeFileSync(file, JSON.stringify(sessions));
+  const timeout = (ms) => new Promise((r) => setTimeout(() => r('open'), ms));
+  assert.equal(await Promise.race([sockets[0].closed, timeout(3000)]), 4001, 'removed session');
+  assert.equal(await Promise.race([sockets[1].closed, timeout(3000)]), 4001, 'expired session');
+  assert.equal(await Promise.race([sockets[2].closed, timeout(500)]), 'open', 'a valid session stays connected');
+  sockets[2].close();
 });

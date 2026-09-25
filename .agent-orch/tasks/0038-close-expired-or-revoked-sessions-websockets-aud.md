@@ -12,3 +12,7 @@ Fix AUDIT #9 in /home/ubuntu/agent-orch/server.mjs. The per-socket keepalive int
 ## Done when
 
 `grep -q 4001 test/server.test.mjs` and `npm test` passes
+
+## Result — done (check passed) (2026-09-25 03:51)
+
+AGENT-ORCH-STATUS: done — WebSockets for removed or expired sessions now close with 4001

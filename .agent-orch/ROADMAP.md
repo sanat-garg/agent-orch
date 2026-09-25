@@ -3,27 +3,18 @@
 _Maintained by the orchestrator's reflection loop._
 
 ## Assessment
-_2026-09-25 (reflect #43)._ `npm test` passes 50/50. All five tasks from reflect #37 landed: AUDIT #6, #9, #10 and #13, plus the "needs sign-in"
-state in the UI. Goals 1, 4 and 5 are in place.
-AUDIT still has three open items, and I checked each one against the code:
-- **#5:** `planningProjects` only blocks reflections. Plan-kind tasks (orchestrator.mjs ~1338) can still resume `chat_session_id` while a chat `planTurn` runs. `plannerRun`'s rate-limit branch (~1252) adds "Answer owner's message" without the "already queued" check.
-- **#11:** `runCheck` has no abort signal and doesn't kill the process group on close.
-- **#12:** `ensureRepo` has no inflight dedupe; only `push` has one.
+_2026-09-25 (reflect #49)._ `npm test` passes 55/55. All 16 AUDIT items are Fixed. The README covers setup, security and multi-agent. The Definition of Done for this push is met.
+Goals 1, 2, 4 and 5 are done. "claude-web" and "ao2" now appear only in migration code (DB, memory dir, tasks-block aliases, rename script), and that is deliberate.
+Codex is installed but `codex login status` says "Not logged in". Antigravity's data dir exists. So Claude fallback is what actually runs today.
 
-The README doesn't mention multi-agent at all: no Codex or agy, and nothing on logins or routes. Closing these items meets the Definition of Done.
+Biggest remaining risk: the pacing governor (`decide()` in orchestrator.mjs ~606) and task scheduling (`runnable`/`claimNext`, `cascadeBlock`/`reviveBlocked`, `blocked_until`) are the core of "use the limits around the clock". Neither has any tests. A regression there silently wastes or overspends capacity. Hardening them is worth more than new features.
 
 ## Next (queued)
-1. AUDIT #12: per-dir inflight dedupe in `gh.ensureRepo`.
-2. AUDIT #11: `runCheck` takes the task's abort signal and kills the process group on abort and on close.
-3. AUDIT #5: a per-project planner-busy guard shared by chat `planTurn` and plan tasks, and dedupe of rate-limit plan tasks.
-4. README: a multi-agent section covering installing and logging in to Codex and agy, how routing rules work, and the Claude fallback.
-5. DoD closeout: every AUDIT.md item is marked Fixed or Deferred, and the README is checked against the live setup.
+1. Export `decide()` and unit-test its tiers: weekly thresholds, the urgent-only rule, the 5h push-harder and one-slot rules, and stale or too-old readings.
+2. Scheduling tests: urgency and priority ordering, `depends_on` gating, one running task per project, a failed parent cascading to its children and reviving them, and `blocked_until` pausing claims.
+3. UX: when a route falls back to Claude, record the reason on the task and show it on the task's agent badge.
 
-## After that (not queued yet)
-- A real end-to-end run on codex/agy once the owner logs in. Owner action: `codex login --device-auth`, then `agy`.
-- Unit tests for orchestrator scheduling (priority, preemption, blocked_until) with the SDK stubbed.
-
-## Ideas / Later (goal 3: usability)
-- UI polish pass: mobile layout, connection-status indicator, task log readability.
-- Split app.js (2.5k lines) into native ESM modules.
-- Show why a route fell back to Claude directly on the task card.
+## Later
+- A real end-to-end run on codex/agy. Owner action first: `codex login --device-auth`, then `agy` sign-in.
+- Split public/app.js (2.5k lines) into native ESM modules, once UI tests or a manual check can catch regressions.
+- Mobile layout review on a real phone. Task log readability, e.g. collapsing long tool results.

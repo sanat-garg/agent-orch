@@ -1,12 +1,12 @@
 // Pluggable coding-agent layer. Each adapter runs one headless agent turn and reports NORMALISED events:
 //   {k:'text',text}  {k:'tool',name,input}  {k:'tool_result',text,isError}  {k:'result',usage}  {k:'limit',resetsAt}
-// (adapters may add fields such as a tool id). Every adapter strips its `envFilter` vars from the env so
+// (adapters may add fields such as a tool id). Adapters: claude (Agent SDK), codex (`codex exec --json`). Every adapter strips its `envFilter` vars from the env so
 // billing stays on the owner's subscription login, never an API key. See .agent-orch/AGENTS.md.
 
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 
 const HOME = os.homedir();
@@ -140,7 +140,152 @@ const CLAUDE = {
   run: runClaude,
 };
 
-export const AGENTS = { claude: CLAUDE };
+// ---------------------------------------------------------------- codex (OpenAI Codex CLI, `codex exec --json`)
+
+const CODEX_LIMIT_RE = /usage limit|usage_limit_reached|usage_not_included|quota_exceeded|\b429\b|rate.?limit/i;
+const CODEX_AUTH_RE = /401 Unauthorized|not logged in|missing bearer|please (?:log ?in|sign in)|codex login|token (?:expired|revoked)/i;
+
+// "…Try again at 3:05 PM." / "try again at 2026-09-25T15:05:00Z" -> epoch seconds (null if unparseable).
+export function codexResetsAt(msg, now = new Date()) {
+  const m = /try again (?:at|after) ([^.()\n]+(?:\.\d+)?)/i.exec(msg || '');
+  if (!m) return null;
+  let t = Date.parse(m[1].trim());
+  if (Number.isNaN(t)) {
+    const hm = /^(\d{1,2}):(\d{2})\s*([ap]\.?m\.?)?/i.exec(m[1].trim());
+    if (!hm) return null;
+    let h = +hm[1] % (hm[3] ? 12 : 24);
+    if (hm[3] && /p/i.test(hm[3])) h += 12;
+    const d = new Date(now); d.setHours(h, +hm[2], 0, 0);
+    if (d <= now) d.setDate(d.getDate() + 1);
+    t = d.getTime();
+  }
+  return Math.floor(t / 1000);
+}
+
+const clip = (t) => (t.length > 6000 ? t.slice(0, 6000) + '\n…' : t);
+
+function codexTool(it) {
+  switch (it.type) {
+    case 'command_execution': return { name: 'Bash', input: { command: it.command } };
+    case 'file_change': return { name: 'Edit', input: { file_path: (it.changes || []).map((c) => `${c.kind || 'update'} ${c.path}`).join('\n') } };
+    case 'mcp_tool_call': return { name: `mcp__${it.server}__${it.tool}`, input: toolInputSummary(it.tool, it.arguments || {}) };
+    case 'web_search': return { name: 'WebSearch', input: { query: it.query } };
+    default: return null;
+  }
+}
+
+// JSONL event -> normalised events. `started` (a Set of item ids) lets a tool be announced once, whether or not
+// Codex sent item.started for it.
+function* codexEvents(m, started = new Set()) {
+  const it = m.item;
+  if (m.type === 'item.completed' && it?.type === 'agent_message') {
+    if (it.text?.trim()) yield { k: 'text', text: it.text };
+  } else if ((m.type === 'item.started' || m.type === 'item.completed') && it && codexTool(it)) {
+    if (!started.has(it.id)) { started.add(it.id); yield { k: 'tool', id: it.id, ...codexTool(it) }; }
+    if (m.type !== 'item.completed') return;
+    let text = '', isError = it.status === 'failed';
+    if (it.type === 'command_execution') { text = it.aggregated_output || ''; isError ||= it.exit_code != null && it.exit_code !== 0; }
+    else if (it.type === 'file_change') text = (it.changes || []).map((c) => `${c.kind || 'update'} ${c.path}`).join('\n');
+    else if (it.type === 'mcp_tool_call') {
+      const r = it.result?.content;
+      text = Array.isArray(r) ? r.map((c) => c.text || '').join('\n') : it.error?.message || '';
+      isError ||= !!it.error;
+    }
+    yield { k: 'tool_result', id: it.id, text: clip(text), isError, lines: text.split('\n').length };
+  } else if (m.type === 'turn.completed') yield { k: 'result', usage: m.usage || {} };
+  else if (m.type === 'turn.failed' || m.type === 'error') {
+    const msg = m.error?.message || m.message || '';
+    if (CODEX_LIMIT_RE.test(msg) && (m.type === 'turn.failed' || /usage limit/i.test(msg))) yield { k: 'limit', resetsAt: codexResetsAt(msg) };
+  }
+}
+
+// Extra options: bin, env, autonomous (default true: no approvals and no sandbox, like Claude's bypassPermissions;
+// false keeps the workspace-write sandbox), onMessage (raw JSONL events). Codex has no system-prompt append flag,
+// so systemAppend is prepended to the prompt.
+async function runCodex({ model, prompt, cwd, resume, systemAppend, signal, onEvent, bin, env = process.env, autonomous = true, onMessage }) {
+  const res = { outcome: 'error', text: '', sessionId: resume || null, usage: {}, numTurns: 0, resetsAt: null, limitType: null, stderr: '', errorCode: null };
+  const args = ['exec', ...(resume ? ['resume'] : []), '--json', '--skip-git-repo-check', '-c', 'forced_login_method="chatgpt"'];
+  if (model) args.push('-m', model);
+  if (autonomous) args.push('--dangerously-bypass-approvals-and-sandbox');
+  else args.push('-c', 'sandbox_mode="workspace-write"', '-c', 'approval_policy="never"');
+  const text = systemAppend ? `${systemAppend}\n\n${prompt}` : prompt;
+  args.push('--', ...(resume ? [resume] : []), text);
+
+  let aborted = false, completed = false, failMsg = '', lastError = '', exitCode = null, killTimer;
+  const started = new Set();
+  // detached: the CLI gets its own process group, so an abort also kills the commands it spawned.
+  const child = spawn(bin || CODEX.bin, args, { cwd, env: stripEnv(env, CODEX.envFilter), stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  const killGroup = (sig) => { try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch {} } };
+  const onAbort = () => {
+    aborted = true;
+    killGroup('SIGTERM');
+    killTimer = setTimeout(() => killGroup('SIGKILL'), 5000);
+    killTimer.unref?.();
+  };
+  if (signal) { if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true }); }
+  child.stderr.on('data', (d) => { res.stderr = (res.stderr + d).slice(-4000); });
+
+  const handle = (m) => {
+    if (m.type === 'thread.started' && m.thread_id) res.sessionId = m.thread_id;
+    else if (m.type === 'item.completed' && m.item?.type === 'agent_message' && m.item.text?.trim()) res.text = m.item.text;
+    else if (m.type === 'turn.started') res.numTurns++;
+    else if (m.type === 'turn.completed') { completed = true; res.usage = m.usage || {}; }
+    else if (m.type === 'turn.failed') failMsg = m.error?.message || 'turn failed';
+    else if (m.type === 'error') lastError = m.message || '';
+    if (onEvent) for (const e of codexEvents(m, started)) { try { onEvent(e); } catch {} }
+    try { onMessage?.(m); } catch {}
+  };
+  let buf = '';
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (d) => {
+    buf += d;
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, i).trim();
+      buf = buf.slice(i + 1);
+      if (!line) continue;
+      let m;
+      try { m = JSON.parse(line); } catch { continue; }
+      handle(m);
+    }
+  });
+  try {
+    exitCode = await new Promise((resolve) => {
+      child.on('error', (e) => { res.stderr += `\n${e?.message || e}`; resolve(null); });
+      child.on('close', (code) => resolve(code));
+    });
+    if (buf.trim()) { try { handle(JSON.parse(buf)); } catch {} }
+  } finally {
+    clearTimeout(killTimer);
+    signal?.removeEventListener('abort', onAbort);
+  }
+
+  if (aborted) { res.outcome = 'aborted'; return res; }
+  const errMsg = failMsg || (!completed ? lastError : '');
+  if (completed && !failMsg && exitCode === 0) { res.outcome = 'ok'; return res; }
+  const hay = `${errMsg}\n${res.stderr}`;
+  if (!res.text) res.text = errMsg || res.stderr.trim();
+  if (CODEX_LIMIT_RE.test(errMsg) || (!errMsg && /usage limit/i.test(res.stderr))) {
+    res.outcome = 'rate_limited';
+    res.errorCode = 'rate_limit';
+    res.resetsAt = codexResetsAt(hay);
+  } else if (CODEX_AUTH_RE.test(hay)) { res.outcome = 'auth_error'; res.errorCode = 'authentication_failed'; }
+  else res.outcome = 'error';
+  return res;
+}
+
+const CODEX = {
+  id: 'codex',
+  label: 'Codex CLI',
+  bin: 'codex',
+  available() { return onPath(this.bin); },
+  models: ['gpt-5-codex', 'gpt-5'],
+  envFilter: /^(OPENAI_(API_KEY|BASE_URL|ORG_ID|ORGANIZATION|PROJECT_ID)|CODEX_(API_KEY|ACCESS_TOKEN|AUTH|HOME)|AZURE_OPENAI_.*)$/,
+  events: codexEvents,
+  run: runCodex,
+};
+
+export const AGENTS = { claude: CLAUDE, codex: CODEX };
 
 // Runs one turn on `agent` (default 'claude'). Returns at least {outcome, text, sessionId, usage, resetsAt, errorCode};
 // outcome is ok | aborted | rate_limited | auth_error | max_turns | error.

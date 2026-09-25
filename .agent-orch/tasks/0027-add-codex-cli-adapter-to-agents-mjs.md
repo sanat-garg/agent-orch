@@ -13,3 +13,7 @@ Add a 'codex' adapter to agents.mjs following the interface there and the Codex 
 ## Done when
 
 `npm test` passes with a codex adapter test that runs a stub binary and asserts the normalised text/tool/result events
+
+## Result — done (check passed) (2026-09-25 03:32)
+
+AGENT-ORCH-STATUS: done — codex adapter added; stub-binary tests pass under npm test

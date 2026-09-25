@@ -105,3 +105,7 @@ AGENTS.md covers Codex, Antigravity and Gemini; codex --help exits 0
 ## 2026-09-25 03:30 — #26 Create agents.mjs adapter interface with Claude adapter [done (check passed)]
 
 agents.mjs has a Claude adapter that runAgent calls through; tests pass
+
+## 2026-09-25 03:32 — #27 Add Codex CLI adapter to agents.mjs [done (check passed)]
+
+codex adapter added; stub-binary tests pass under npm test

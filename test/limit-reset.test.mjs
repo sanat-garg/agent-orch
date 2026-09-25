@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { limitReset } from '../orchestrator.mjs';
 
@@ -31,4 +32,26 @@ test('only a backoff guess: the retry time, marked unknown', () => {
   const rows = [{ limit_type: 'seven_day', status: 'allowed', utilization: 0.5, resets_at: t + 86400 }];
   assert.deepEqual(limitReset(rows, opts({ reason: 'usage limit' })), { at: t + 320, known: false });
   assert.deepEqual(limitReset(null, opts()), { at: t + 320, known: false });
+});
+
+// public/app.js is a plain browser script, so pull the pure formatters out of its source and evaluate them.
+const appJs = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+const fn = name => appJs.match(new RegExp(`^function ${name}\\(.*?^}$`, 'ms'))[0];
+const fmtUntil = new Function(`${fn('fmtResetAt')}\n${fn('fmtUntil')}\nreturn fmtUntil;`)();
+const now = Date.UTC(2026, 8, 25, 12, 0);
+const clock = s => new Date(s * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+const wday = s => new Date(s * 1000).toLocaleDateString([], { weekday: 'short' });
+
+test('a notice whose until has passed shows the absolute time, not "now"', () => {
+  const until = now / 1000 - 26 * 3600;
+  const out = fmtUntil(until, now);
+  assert.equal(out, `${wday(until)} ${clock(until)}`);
+  assert.doesNotMatch(out, /now|\bin\b/);
+});
+
+test('a future until shows the time and how long until it', () => {
+  const until = now / 1000 + 2 * 3600 + 9 * 60 + 30;
+  assert.match(fmtUntil(until, now), new RegExp(`^(${wday(until)} )?${clock(until)} \\(in 2h 9m\\)$`));
+  const later = now / 1000 + 3 * 86400 + 4 * 3600 + 30;
+  assert.equal(fmtUntil(later, now), `${wday(later)} ${clock(later)} (in 3d 4h)`);
 });

@@ -13,3 +13,7 @@ Fix AUDIT.md item #26 in /home/ubuntu/agent-orch/public/app.js (withUntil / fmtR
 ## Done when
 
 `npm test` passes with a new case that a past `until` renders an absolute time and not 'now', and AUDIT.md marks #26 Fixed.
+
+## Result — done (check passed) (2026-09-25 09:26)
+
+AGENT-ORCH-STATUS: done — Past limit notices now show an absolute time; tests pass

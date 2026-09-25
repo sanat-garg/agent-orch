@@ -1,6 +1,6 @@
 # Audit: server, orchestrator, GitHub wrapper, UI
 
-**Status (2026-09-25, task #71):** items 1-21 fixed (rounds 1-2); round 3: #22-#25 fixed, #26 open.
+**Status (2026-09-25, task #71):** items 1-21 fixed (rounds 1-2); round 3: #22-#26 fixed.
 
 _Task #12, 2026-09-24. Items were open when audited; a `- **Fixed** (task #N)` line marks one resolved since. Each item was verified by reading the code; #1 was also reproduced
 against a throwaway instance (`PORT=3999 CW_DATA_DIR=$(mktemp -d)`). The items are ranked by value. Each fix
@@ -287,3 +287,4 @@ seconds on both paths, and codex/agy `resetsAt` are epoch seconds like `withUnti
   answers then.", "Retrying around now." or "it resets now.", which looks like a current limit.
 - **Fix:** When `until` is in the past, render the absolute time (e.g. "until Thu 3:10 PM") without the relative
   part, or add "(passed)".
+- **Fixed** (task #78): `withUntil` uses `fmtUntil`, which shows only the absolute time ("Thu 3:10 PM") for a past `until`; test/limit-reset.test.mjs evaluates it from app.js.

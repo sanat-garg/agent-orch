@@ -273,3 +273,7 @@ Connections panel reloads on reconnect; orphaned login tmux killed at boot
 ## 2026-09-25 09:23 — #77 Restart-when-idle waits for busy chat and planner turns, and can be cancelled (AUDIT #24) [done (check passed)]
 
 Restart waits for busy chat work, and restarts can be cancelled
+
+## 2026-09-25 09:26 — #78 Past usage-limit notices show an absolute time, not 'now' (AUDIT #26) [done (check passed)]
+
+Past limit notices now show an absolute time; tests pass

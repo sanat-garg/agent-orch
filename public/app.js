@@ -1763,17 +1763,23 @@ function fmtReset(iso) {
 }
 // `fresh` is true when new numbers just arrived from the server, so they blur in even if unchanged.
 // "11:40 PM · in 2h 9m", or "Mon 8:30 PM · in 3d 4h" when it's not today.
-function fmtResetAt(iso) {
-  const t = new Date(iso), secs = (t - Date.now()) / 1000;
+function fmtResetAt(iso, now = Date.now()) {
+  const t = new Date(iso), secs = (t - now) / 1000;
   if (!(secs > 0)) return 'now';
   const clock = t.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  const day = t.toDateString() === new Date().toDateString() ? '' : `${t.toLocaleDateString([], { weekday: 'short' })} `;
+  const day = t.toDateString() === new Date(now).toDateString() ? '' : `${t.toLocaleDateString([], { weekday: 'short' })} `;
   const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600), m = Math.floor((secs % 3600) / 60);
   return `${day}${clock} · in ${d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`}`;
 }
 // A notice's {until} (epoch s from the server) in this browser's timezone: "Fri 1:50 PM (in 5h 30m)".
+// Replayed notices whose time has passed show just the absolute time ("Thu 3:10 PM"), never "now".
+function fmtUntil(until, now = Date.now()) {
+  const t = new Date(until * 1000);
+  if (t - now > 0) return fmtResetAt(t, now).replace(/^(.+) · (.+)$/, '$1 ($2)');
+  return `${t.toLocaleDateString([], { weekday: 'short' })} ${t.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+}
 function withUntil(ev) {
-  return ev.until ? ev.text.replace('{until}', fmtResetAt(ev.until * 1000).replace(/^(.+) · (.+)$/, '$1 ($2)')) : ev.text;
+  return ev.until ? ev.text.replace('{until}', fmtUntil(ev.until)) : ev.text;
 }
 function renderUsage(fresh = false) {
   const u = M.usage;

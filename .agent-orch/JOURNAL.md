@@ -293,3 +293,7 @@ UI static smoke test added; it and npm test pass
 ## 2026-09-25 10:14 — #85 Merge Connections into the sidebar footer and open it as a modal [done (check passed)]
 
 Connections now open as a modal from the sidebar footer button
+
+## 2026-09-25 10:18 — #86 Click-to-copy for terminal commands shown in chat [done (check passed)]
+
+Shell commands, code blocks and inline commands now copy on click

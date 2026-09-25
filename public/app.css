@@ -901,3 +901,14 @@ details.dr-more[open] > summary { margin-bottom: 12px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0s !important; transition: none !important; }
 }
+
+/* click-to-copy shell commands */
+.copy-cmd, [data-copy] { cursor: pointer; }
+pre.copy-cmd { position: relative; }
+pre.copy-cmd::after { content: ''; position: absolute; top: 8px; right: 8px; width: 14px; height: 14px; background: var(--muted); opacity: 0; transition: opacity .15s;
+  -webkit-mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>') center / contain no-repeat;
+  mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>') center / contain no-repeat; }
+pre.copy-cmd:hover::after { opacity: .7; }
+.copy-cmd.copied, [data-copy].copied { outline: 1px solid var(--accent); outline-offset: 1px; }
+.copy-tip { position: fixed; z-index: 1000; transform: translateX(-50%); padding: 3px 8px; border-radius: 6px; background: var(--text); color: var(--bg); font-size: 12px; pointer-events: none; animation: copy-tip 1.2s ease forwards; }
+@keyframes copy-tip { 0%, 75% { opacity: 1; } 100% { opacity: 0; } }

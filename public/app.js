@@ -15,6 +15,53 @@ const store = {
 marked.setOptions({ gfm: true, breaks: false });
 const md = (text) => DOMPurify.sanitize(marked.parse(text || ''), { ADD_ATTR: ['target'] });
 
+// ---------- click-to-copy for shell commands ----------
+// Markdown marks shell code blocks and command-like inline code with .copy-cmd; tool lines carry
+// data-copy. One capture-phase handler copies either (capture, so it runs before a row's toggle).
+const SHELL_LANG = /\blanguage-(?:bash|sh|shell|zsh|console)\b/;
+const SHELL_CMD = /^(?:git|npm|npx|node|python3?|sudo|cd|ls|codex|agy|claude|gh|tmux|systemctl)(?:\s|$)|\s&&\s|\s\|\s/;
+DOMPurify.addHook('afterSanitizeAttributes', (n) => {
+  if (n.nodeName !== 'CODE') return;
+  const pre = n.parentNode?.nodeName === 'PRE' ? n.parentNode : null;
+  if (pre ? SHELL_LANG.test(n.className) || /^\$ /m.test(n.textContent) : SHELL_CMD.test(n.textContent.trim())) (pre || n).classList.add('copy-cmd');
+});
+// "$ cmd" lines in a block: copy just the commands, without the prompt or their output.
+function copyText(node) {
+  if (node.dataset.copy != null) return node.dataset.copy;
+  const t = node.textContent.replace(/\n$/, '');
+  const cmds = t.split('\n').filter((l) => l.startsWith('$ ')).map((l) => l.slice(2));
+  return cmds.length ? cmds.join('\n') : t;
+}
+async function copyToClipboard(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch {}
+  // Plain http has no navigator.clipboard.
+  const ta = el('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+  document.body.append(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch {}
+  ta.remove();
+  return ok;
+}
+document.addEventListener('click', async (e) => {
+  const node = e.target.closest?.('.copy-cmd, [data-copy]');
+  if (!node || e.target.closest('a') || String(window.getSelection?.() || '')) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const ok = await copyToClipboard(copyText(node));
+  // A fixed tip, since tool lines clip their overflow.
+  const r = node.getBoundingClientRect();
+  const tip = el('div', 'copy-tip', ok ? 'Copied' : 'Copy failed');
+  tip.style.left = `${Math.max(8, Math.min(r.left + Math.min(r.width, 240) / 2, innerWidth - 8))}px`;
+  tip.style.top = `${Math.max(4, r.top - 30)}px`;
+  document.body.append(tip);
+  node.classList.add('copied');
+  setTimeout(() => { tip.remove(); node.classList.remove('copied'); }, 1200);
+}, true);
+
 const MODES = ['default', 'acceptEdits', 'plan', 'bypassPermissions', 'orchestrator'];
 const MODE_NAMES = { default: 'Ask before acting', acceptEdits: 'Auto-accept edits', plan: 'Plan mode', bypassPermissions: 'Full access', orchestrator: 'Orchestrator Mode' };
 
@@ -645,7 +692,7 @@ function todoView(todos = []) {
 }
 function toolInputView(name, input = {}) {
   const frag = document.createDocumentFragment();
-  if (name === 'Bash') frag.append(el('pre', 'cmd', '$ ' + input.command));
+  if (name === 'Bash') { const pre = frag.appendChild(el('pre', 'cmd', '$ ' + input.command)); pre.dataset.copy = input.command; }
   else if (name === 'Edit') frag.append(diffView([input]));
   else if (name === 'MultiEdit') frag.append(diffView(input.edits || []));
   else if (name === 'Write') frag.append(writeView(input.content));
@@ -659,7 +706,9 @@ function toolInputView(name, input = {}) {
 function toolCard(ev) {
   const card = el('details', 'tool running' + (ev.sub ? ' msg sub' : ''));
   const sum = el('summary');
-  sum.append(el('span', 'st'), el('span', 'tn', TOOL_LABEL[ev.name] || ev.name), el('span', 'ts', toolSummary(ev.name, ev.input) || ''));
+  const ts = el('span', 'ts', toolSummary(ev.name, ev.input) || '');
+  if (ev.name === 'Bash' && ev.input?.command) ts.dataset.copy = ev.input.command;
+  sum.append(el('span', 'st'), el('span', 'tn', TOOL_LABEL[ev.name] || ev.name), ts);
   const chev = el('span', 'chev');
   chev.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
   sum.append(chev);
@@ -2413,14 +2462,17 @@ function groupNode(group) {
       const row = el('div', 'out-row' + (res?.isError ? ' err' : ''));
       const rb = el('button');
       rb.type = 'button';
-      rb.append(el('span', 'verb', TOOL_VERB[e.name] || e.name), el('span', 'txt', toolLine(e) || '(no details)'));
+      const txt = el('span', 'txt', toolLine(e) || '(no details)');
+      if (e.name === 'Bash' && e.input?.command) txt.dataset.copy = e.input.command;
+      rb.append(el('span', 'verb', TOOL_VERB[e.name] || e.name), txt);
       rb.onclick = () => { if (!O.expanded.delete(key)) O.expanded.add(key); group.refresh(); };
       row.append(rb);
       if (rowOpen) {
         const i = e.input || {};
         const shown = i.command || (i.new_string != null ? `${i.file_path}\n\n- ${String(i.old_string || '').split('\n').join('\n- ')}\n+ ${String(i.new_string).split('\n').join('\n+ ')}`
           : i.content != null ? `${i.file_path}\n\n${i.content}` : JSON.stringify(i, null, 2));
-        row.append(el('pre', 'dr-pre', shown));
+        const pre = row.appendChild(el('pre', 'dr-pre', shown));
+        if (e.name === 'Bash' && i.command) pre.dataset.copy = i.command;
         row.append(el('pre', 'dr-pre' + (res?.isError ? ' err' : ''), res ? (res.text.trim() || 'No output') : 'Still running…'));
       }
       box.append(row);

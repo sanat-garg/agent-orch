@@ -13,3 +13,7 @@ In the chat interface (public/app.js, public/app.css), make every displayed term
 ## Done when
 
 `node --check public/app.js && npm test` passes, and public/app.js contains a single delegated click-to-copy handler that covers tool command lines, shell code blocks and inline command code
+
+## Result — done (check passed) (2026-09-25 10:18)
+
+AGENT-ORCH-STATUS: done — Shell commands, code blocks and inline commands now copy on click

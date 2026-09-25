@@ -169,12 +169,33 @@ test('GET /api/agents lists the agent registry, including claude', async () => {
   assert.ok(claude, 'claude is listed');
   assert.equal(claude.label, 'Claude Code');
   assert.equal(typeof claude.available, 'boolean');
-  assert.ok(claude.models.includes('opus'));
+  for (const a of agents) {
+    assert.ok(Array.isArray(a.models), `${a.id} lists models`);
+    for (const m of a.models) assert.ok(m.id && m.label, `${a.id} model has id and label`);
+    if (!a.models.length) assert.ok(a.modelsError, `${a.id} says why it has no models`);
+  }
   for (const a of agents) assert.ok(a.login, `${a.id} has a login hint`);
   for (const a of agents) assert.equal(typeof a.loggedIn, 'boolean', `${a.id} reports loggedIn`);
   const codex = agents.find((a) => a.id === 'codex');
   assert.equal(codex.available, true);
   assert.equal(codex.loggedIn, false);
+  // Signed out: no models, never placeholders (discovery runs at boot; 'loading' only until it finishes).
+  assert.deepEqual(codex.models, []);
+  assert.match(codex.modelsError, /not signed in|loading/);
+});
+
+test('boot discovery caches every agent in models.json; a signed-out agent is stored empty with the reason', async () => {
+  const file = path.join(dataDir, 'models.json');
+  let saved = null;
+  for (let i = 0; i < 150 && !saved; i++) {
+    try { saved = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { await new Promise((r) => setTimeout(r, 200)); }
+  }
+  assert.ok(saved, 'models.json written');
+  assert.ok(saved.saved > 0);
+  assert.deepEqual(Object.keys(saved.agents).sort(), ['antigravity', 'claude', 'codex']);
+  assert.deepEqual(saved.agents.codex.models, []);
+  assert.equal(saved.agents.codex.error, 'not signed in');
+  assert.ok(saved.agents.codex.at > 0);
 });
 
 test('GET /api/connections lists claude, codex, antigravity and github; actions are login-protected', async () => {

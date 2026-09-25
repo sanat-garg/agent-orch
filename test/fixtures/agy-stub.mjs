@@ -11,6 +11,14 @@ if (process.argv[3] === '/usage') {
   process.stdout.write(text);
   process.exit(0);
 }
+// `agy models`, as recorded from agy 1.2.11: progress on stderr, `<id>\t<name>` lines on stdout; AGY_STUB_LOGIN=out
+// answers like a signed-out CLI.
+if (process.argv[2] === 'models') {
+  process.stderr.write('Fetching available models...\n');
+  if (process.env.AGY_STUB_LOGIN === 'out') { process.stderr.write('Error: Please sign in to view available models.\n'); process.exit(1); }
+  process.stdout.write('gemini-3.8-flash-high\tGemini 3.8 Flash (High)\ngemini-3.1-pro-high\tGemini 3.1 Pro (High)\nclaude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n');
+  process.exit(0);
+}
 if (process.env.AGY_STUB_LOG) fs.writeFileSync(process.env.AGY_STUB_LOG, JSON.stringify({ argv: process.argv.slice(2), env: process.env, cwd: process.cwd() }));
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 const mode = process.env.AGY_STUB || 'ok';

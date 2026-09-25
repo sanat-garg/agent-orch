@@ -11,7 +11,8 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createOrchestrator, parseJsonl, SHOT_HINT } from './orchestrator.mjs';
 import { createGitHub } from './github.mjs';
 import { retireRuntime, chatIdle, whenIdle } from './runtimes.mjs';
-import { AGENTS, runAgentCli, clearLoginCache, isMissingSession } from './agents.mjs';
+import { AGENTS, runAgentCli, clearLoginCache, isMissingSession, modelCatalog } from './agents.mjs';
+import { createModelStore } from './models.mjs';
 import { createConnections, SPECS, codexAccount, onPath } from './connections.mjs';
 import { mediaCollector, MEDIA_ID_RE, MEDIA_TYPES, toolResultImages } from './media.mjs';
 import { createUsageLog, RANGES as USAGE_RANGES } from './usage.mjs';
@@ -610,13 +611,18 @@ const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
 // Every project is a private GitHub repo; every finished task and chat reply is pushed.
 const gh = createGitHub({ env: CLAUDE_ENV, log: (m) => console.log(`[github] ${m}`) });
 // ---------- Sign-in connections (agent CLIs + GitHub), driven from the web UI ----------
-const agentEntry = (a, extra = {}) => ({ id: a.id, label: a.label, installed: () => a.available(), signedIn: () => a.loggedIn(), envFilter: a.envFilter, ...extra });
+// Each agent's models, discovered from its CLI (models.mjs); clients refetch /api/agents on {t:'models'}.
+const modelStore = createModelStore({ file: path.join(DATA, 'models.json'), log: (m) => console.log(`[models] ${m}`),
+  onChange: () => { for (const ws of allClients) send(ws, { t: 'models' }); } });
+modelStore.start().catch((e) => console.error('[models] discovery failed', e));
+// A sign-in or sign-out re-checks the login and rediscovers that agent's models (in the background).
+const signInChanged = (id) => () => { clearLoginCache(); modelStore.refresh([id]).catch(() => {}); };
+const agentEntry = (a, extra = {}) => ({ id: a.id, label: a.label, installed: () => a.available(), signedIn: () => a.loggedIn(), envFilter: a.envFilter, afterChange: signInChanged(a.id), ...extra });
 const connections = createConnections({
   entries: [
-    agentEntry(AGENTS.claude, { spec: SPECS.claude, account: () => AGENTS.claude.account(), afterChange: () => clearLoginCache() }),
-    agentEntry(AGENTS.codex, { spec: SPECS.codex, account: () => codexAccount(), afterChange: () => clearLoginCache() }),
-    agentEntry(AGENTS.antigravity, { spec: SPECS.antigravity, afterChange: () => clearLoginCache(),
-      probe: () => AGENTS.antigravity.probe() }),
+    agentEntry(AGENTS.claude, { spec: SPECS.claude, account: () => AGENTS.claude.account() }),
+    agentEntry(AGENTS.codex, { spec: SPECS.codex, account: () => codexAccount() }),
+    agentEntry(AGENTS.antigravity, { spec: SPECS.antigravity, probe: () => AGENTS.antigravity.probe() }),
     { id: 'github', label: 'GitHub', installed: () => onPath('gh'), signedIn: () => gh.status().linked, account: () => gh.status().login,
       spec: SPECS.github, afterChange: () => gh.refresh() },
   ],
@@ -1334,7 +1340,11 @@ async function handleRequest(req, res) {
     });
   }
   if (p === '/api/agents') {
-    return json(res, 200, { agents: Object.values(AGENTS).map((a) => ({ id: a.id, label: a.label, available: !!a.available(), loggedIn: !!a.available() && a.loggedIn(), models: a.models, login: a.login })) });
+    // models: [{id, label, description?, default?}] from the CLI; empty with modelsError ('not signed in', 'loading', or why discovery failed).
+    return json(res, 200, { agents: Object.values(AGENTS).map((a) => {
+      const { models, error, at } = modelCatalog(a.id);
+      return { id: a.id, label: a.label, available: !!a.available(), loggedIn: !!a.available() && a.loggedIn(), models, modelsError: error || null, modelsAt: at, login: a.login };
+    }) });
   }
   if (p === '/api/projects') {
     const list = listFolders(WORKSPACE).map((f) => {

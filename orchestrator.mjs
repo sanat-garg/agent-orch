@@ -16,7 +16,7 @@ import path from 'node:path';
 import { spawn, execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
-import { AGENTS, agentStatus, isMissingSession, runAgentCli, toolInputSummary } from './agents.mjs';
+import { AGENTS, agentStatus, isMissingSession, modelCatalog, modelNames, runAgentCli, toolInputSummary } from './agents.mjs';
 import { mediaCollector } from './media.mjs';
 import { createUsageLog } from './usage.mjs';
 
@@ -454,17 +454,19 @@ export function normalizeAgent(name) {
   const id = AGENT_ALIASES[String(name || '').trim().toLowerCase()];
   return id && AGENTS[id] ? id : null;
 }
-// The agent a model belongs to: its AGENTS[*].models list, else its family by name; null if unknown.
+// The agent a model belongs to: the agent whose discovered list names it, else its family by name; null if unknown.
 const MODEL_FAMILIES = [[/^(gpt|o\d|codex)/i, 'codex'], [/^gemini/i, 'antigravity'], [/^(claude|opus|sonnet|haiku)/i, 'claude']];
 function agentForModel(model) {
   if (!model) return null;
-  const listed = Object.keys(AGENTS).find((id) => AGENTS[id].models?.includes(model));
+  const listed = Object.keys(AGENTS).find((id) => modelNames(id).includes(model));
   if (listed) return listed;
   const fam = MODEL_FAMILIES.find(([re]) => re.test(String(model).trim()))?.[1];
   return fam && AGENTS[fam] ? fam : null;
 }
 // An explicit agent paired with another agent's model keeps the agent and drops the model (null when they fit).
 const foreignModel = (agent, model) => { const fam = agentForModel(model); return agent && fam && fam !== agent ? fam : null; };
+// A model the agent's discovered list doesn't name (only judged once the list is known).
+const unlistedModel = (agent, model) => { const names = modelNames(agent); return !!model && names.length > 0 && !names.includes(model); };
 
 // A route's `match` hits a task whose kind equals it or whose title contains it as a word (plural-tolerant:
 // 'tests' matches "Add a test" and 'refactor' matches "Refactors").
@@ -484,9 +486,11 @@ export function routeMatches(match, task) {
 export function resolveRoute(task, project, routes = [], isAvailable = agentStatus) {
   // A model from another agent's family is dropped (`dropped` names it) in favour of the agent's default.
   const pick = (agent, model, source) => {
-    const named = normalizeAgent(agent), dropped = foreignModel(named, model) ? model : null;
+    const named = normalizeAgent(agent);
+    let dropped = foreignModel(named, model) ? model : null;
     if (dropped) model = null;
     agent = named || agentForModel(model) || 'claude';
+    if (unlistedModel(agent, model)) { dropped = model; model = null; }
     return { agent, model: model || (agent === 'claude' ? project?.model || null : null), source, ...(dropped && { dropped }) };
   };
   let r;
@@ -1250,7 +1254,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   function routesText(projectId) {
     const agents = Object.values(AGENTS).map((a) => {
       const st = a.id === 'claude' || agentStatus(a.id);
-      return `  - ${a.id} (${a.label})${st === true ? '' : ` [${st.toUpperCase()}: falls back to Claude]`}: models ${a.models.join(', ')}`;
+      const { models, error } = modelCatalog(a.id);
+      return `  - ${a.id} (${a.label})${st === true ? '' : ` [${st.toUpperCase()}: falls back to Claude]`}: models ${models.map((m) => m.id).join(', ') || `unknown (${error || 'none listed'}); omit \`model\``}`;
     });
     const routes = listRoutes(projectId).map((r) => `  #${r.id} [${r.project_id == null ? 'global' : 'project'}] '${r.match}' → ${[r.agent, r.model].filter(Boolean).join(' / ')}${r.note ? ` (${r.note})` : ''}`);
     return `Coding agents:\n${agents.join('\n')}\nRouting rules:\n${routes.join('\n') || '  (none: everything runs on Claude with the chat model)'}`;

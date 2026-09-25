@@ -325,3 +325,7 @@ Usage card opens per-agent charts modal; npm test passes
 ## 2026-09-25 14:01 — #97 Make rate limits fully independent per agent (chat and workers) [done (check passed)]
 
 per-agent rate limits independent; npm test passes (138)
+
+## 2026-09-25 14:13 — #98 Model selectors: fetch real model lists from each CLI, no hardcoded guesses [done (check passed)]
+
+Model lists now come from each CLI; tests pass

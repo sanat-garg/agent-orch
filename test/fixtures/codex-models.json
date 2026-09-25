@@ -1,0 +1,44 @@
+{
+ "models": [
+  {
+   "slug": "gpt-5.5",
+   "display_name": "GPT-5.5",
+   "description": "Legacy coding model.",
+   "default_reasoning_level": "medium",
+   "visibility": "list",
+   "supported_in_api": true,
+   "priority": 12,
+   "context_window": 272000
+  },
+  {
+   "slug": "gpt-reserve",
+   "display_name": "GPT-Reserve",
+   "description": "Fast and affordable agentic coding model.",
+   "default_reasoning_level": "medium",
+   "visibility": "hide",
+   "supported_in_api": true,
+   "priority": 3,
+   "context_window": 272000
+  },
+  {
+   "slug": "gpt-6-sol",
+   "display_name": "GPT-6-Sol",
+   "description": "Workhorse model for coding and everyday work.",
+   "default_reasoning_level": "medium",
+   "visibility": "list",
+   "supported_in_api": true,
+   "priority": 2,
+   "context_window": 272000
+  },
+  {
+   "slug": "gpt-6-astra",
+   "display_name": "GPT-6-Astra",
+   "description": "Frontier intelligence for the most demanding work.",
+   "default_reasoning_level": "low",
+   "visibility": "list",
+   "supported_in_api": true,
+   "priority": 1,
+   "context_window": 272000
+  }
+ ]
+}

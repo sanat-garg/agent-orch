@@ -10,14 +10,15 @@ import { createUsageLog } from '../usage.mjs';
 
 const fakeQuery = (msgs, seen = {}) => (args) => { Object.assign(seen, args); return (async function* () { for (const m of msgs) yield m; })(); };
 
-test('registry: every adapter declares id, label, available(), models and envFilter', () => {
+test('registry: every adapter declares id, label, available(), listModels() and envFilter', () => {
   assert.ok(AGENTS.claude);
   for (const [id, a] of Object.entries(AGENTS)) {
     assert.equal(a.id, id);
     assert.equal(typeof a.label, 'string');
     assert.equal(typeof a.available, 'function');
     assert.equal(typeof a.available(), 'boolean');
-    assert.ok(Array.isArray(a.models) && a.models.length);
+    assert.equal(typeof a.listModels, 'function');
+    assert.equal(a.models, undefined, 'no hardcoded model list');
     assert.ok(a.envFilter instanceof RegExp);
   }
   assert.ok(AGENTS.claude.envFilter.test('ANTHROPIC_API_KEY'));

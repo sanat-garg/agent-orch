@@ -178,7 +178,16 @@ const CLAUDE = {
   },
   account() { return this.loggedIn() ? this.email || null : null; },
   login: 'Connect from the sidebar',
-  models: ['opus', 'sonnet', 'haiku', 'claude-opus-5-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001'],
+  // The CLI's own /model list via the SDK's supportedModels(): a query with an input stream that never sends a
+  // message, so nothing is billed and no session is written. query is injectable for tests.
+  async listModels({ query = sdkQuery, bin, env = process.env, timeoutMs = 30_000 } = {}) {
+    const ac = new AbortController();
+    const idle = (async function* () { await new Promise((r) => ac.signal.addEventListener('abort', r, { once: true })); })();
+    try {
+      const q = query({ prompt: idle, options: { cwd: HOME, abortController: ac, pathToClaudeCodeExecutable: bin || this.bin, env: stripEnv(env, this.envFilter) } });
+      return claudeModels(await withTimeout(q.supportedModels(), timeoutMs, 'claude'));
+    } finally { ac.abort(); }
+  },
   envFilter: /^(ANTHROPIC_(API_KEY|AUTH_TOKEN|BASE_URL)|CLAUDE_CODE_USE_(BEDROCK|VERTEX|FOUNDRY))$/,
   events: claudeEvents,
   run: runClaude,
@@ -410,7 +419,11 @@ const CODEX = {
     });
   },
   login: 'Connect from the sidebar',
-  models: ['gpt-5-codex', 'gpt-5'],
+  // `codex debug models` prints the model catalog as JSON (refreshed from the account; hidden models skipped).
+  async listModels({ bin, env = process.env, timeoutMs = 30_000 } = {}) {
+    const out = await execOut(bin || this.bin, ['debug', 'models'], { env: stripEnv(env, this.envFilter), cwd: HOME, timeout: timeoutMs });
+    return codexModels(JSON.parse(out));
+  },
   envFilter: /^(OPENAI_(API_KEY|BASE_URL|ORG_ID|ORGANIZATION|PROJECT_ID)|CODEX_(API_KEY|ACCESS_TOKEN|AUTH|HOME)|AZURE_OPENAI_.*)$/,
   events: codexEvents,
   run: runCodex,
@@ -572,11 +585,70 @@ const ANTIGRAVITY = {
   },
   modelsOpts() { return { env: stripEnv(process.env, this.envFilter), cwd: HOME, timeout: 8000 }; },
   login: 'Connect from the sidebar',
-  models: ['gemini-3.8-flash-high'],
+  // `agy models` prints one `<id>\t<display name>` line per model (progress goes to stderr).
+  async listModels({ bin, env = process.env, timeoutMs = 20_000 } = {}) {
+    return agyModels(await execOut(bin || this.bin, ['models'], { env: stripEnv(env, this.envFilter), cwd: HOME, timeout: timeoutMs }));
+  },
   envFilter: /^(GEMINI_API_KEY|GOOGLE_(API_KEY|GEMINI_BASE_URL|GENAI_USE_VERTEXAI|GENAI_USE_ENTERPRISE|GENAI_USE_GCA|APPLICATION_CREDENTIALS|CLOUD_PROJECT(_ID)?|CLOUD_LOCATION)|AGY_(ADC_AUTH|BUSINESS_PAYGO_TIER))$/,
   events: agyEvents,
   run: runAntigravity,
 };
+
+// ---------------------------------------------------------------- model discovery
+
+// Each CLI's models as {id, label, description?, default?} (claude adds `resolved`, the full id an alias maps to).
+// SDK ModelInfo rows; the 'default' row isn't a model, it marks the alias it resolves to as the default.
+export function claudeModels(list) {
+  const rows = Array.isArray(list) ? list.filter((m) => m?.value) : [];
+  const def = rows.find((m) => m.value === 'default');
+  const models = rows.filter((m) => m.value !== 'default').map((m) => ({ id: m.value, label: m.displayName || m.value,
+    ...(m.description && { description: m.description }), ...(m.resolvedModel && m.resolvedModel !== m.value && { resolved: m.resolvedModel }) }));
+  const d = def && models.find((m) => (m.resolved || m.id) === (def.resolvedModel || def.value));
+  if (d) d.default = true;
+  return models;
+}
+// `codex debug models` JSON (a `models` array of {slug, display_name, description, visibility, priority}), in priority order.
+export function codexModels(j) {
+  return (Array.isArray(j?.models) ? j.models : []).filter((m) => m?.slug && m.visibility !== 'hide')
+    .sort((a, b) => (a.priority ?? 1e9) - (b.priority ?? 1e9))
+    .map((m) => ({ id: m.slug, label: m.display_name || m.slug, ...(m.description && { description: m.description }) }));
+}
+// `agy models` stdout: `<id>\t<display name>` per line.
+export function agyModels(text) {
+  const out = [];
+  for (const line of String(text || '').split('\n')) {
+    const [id, label] = line.trim().split('\t').map((x) => x?.trim());
+    if (id && /^[\w.:/-]+$/.test(id) && (label || !/\s/.test(line.trim()))) out.push({ id, label: label || id });
+  }
+  return out;
+}
+function withTimeout(p, ms, what) {
+  let timer;
+  return Promise.race([p, new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`${what} took over ${ms / 1000} s`)), ms); })]).finally(() => clearTimeout(timer));
+}
+// stdout of a command; rejects with the last stderr line (or the exec error) when it fails.
+const execOut = (bin, args, opts) => new Promise((resolve, reject) => execFile(bin, args, { maxBuffer: 64 << 20, encoding: 'utf8', ...opts },
+  (err, stdout, stderr) => (err ? reject(new Error(String(stderr || '').trim().split('\n').pop() || (err.killed ? 'timed out' : err.message))) : resolve(stdout))));
+
+// The discovered model list per agent: {models, error, at}. Filled by models.mjs (cached in <DATA>/models.json);
+// empty with an error until then, when discovery fails, or when the agent is signed out.
+const catalog = new Map(), NO_MODELS = Object.freeze([]);
+const none = (error, at = Date.now()) => ({ models: NO_MODELS, error, at });
+export const modelCatalog = (id) => catalog.get(id) || none('loading', null);
+export const setModelCatalog = (id, entry) => { catalog.set(id, entry); };
+// Every id a model can be named by on this agent (ids plus the full ids aliases resolve to).
+export const modelNames = (id) => modelCatalog(id).models.flatMap((m) => (m.resolved ? [m.id, m.resolved] : [m.id]));
+// One agent's discovery: {models, error, at}; opts go to its listModels (bin, env, query for tests).
+export async function discoverModels(id, opts = {}) {
+  const a = AGENTS[id], at = Date.now();
+  if (!a) return none('unknown agent', at);
+  if (!a.available()) return none('not installed', at);
+  if (!a.loggedIn()) return none('not signed in', at);
+  try {
+    const models = await a.listModels(opts);
+    return models.length ? { models, error: null, at } : none('the CLI listed no models', at);
+  } catch (e) { return none(String(e?.message || e).split('\n')[0].slice(0, 200) || 'discovery failed', at); }
+}
 
 // A resumed run failed because its session is gone (Claude's text, or an adapter's errorCode 'no_session'):
 // callers drop the stored session id and retry once fresh.

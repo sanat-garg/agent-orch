@@ -13,3 +13,7 @@ The owner wants the model selector to show only real models, never assumed data.
 ## Done when
 
 `! grep -nE "models: \[" agents.mjs` (no hardcoded model arrays), and `npm test` passes with discovery tests using stub CLIs
+
+## Result — done (check passed) (2026-09-25 14:13)
+
+AGENT-ORCH-STATUS: done — Model lists now come from each CLI; tests pass

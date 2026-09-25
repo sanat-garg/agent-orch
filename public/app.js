@@ -1219,7 +1219,8 @@ $('model').addEventListener('change', () => {
 
 // ---------- agent + model picker (options come from the server's agent registry) ----------
 let AGENT_LIST = [];
-const MODEL_NAMES = { opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku' };
+// A model's display name as its CLI reports it (the id when the agent's list doesn't name it).
+const modelLabel = (agent, id) => AGENT_LIST.find((a) => a.id === agent)?.models.find((m) => m.id === id || m.resolved === id)?.label || id;
 const CONNECT_PICK = '__connect'; // the picker's last option: opens the Connections window
 const pickVal = ({ agent, model }) => `${agent || 'claude'}|${model || ''}`;
 const parsePick = (v) => (v.includes('|') ? { agent: v.slice(0, v.indexOf('|')), model: v.slice(v.indexOf('|') + 1) } : { agent: 'claude', model: v });
@@ -1228,7 +1229,7 @@ function setPick(v) {
   const sel = $('model'), val = pickVal(parsePick(v || ''));
   if (![...sel.options].some((o) => o.value === val)) {
     const { agent, model } = parsePick(val);
-    const o = el('option', '', model ? `${shortLabel(agent)} · ${MODEL_NAMES[model] || model}` : shortLabel(agent));
+    const o = el('option', '', model ? `${shortLabel(agent)} · ${modelLabel(agent, model)}` : shortLabel(agent));
     o.value = val;
     sel.append(o);
   }
@@ -1246,8 +1247,18 @@ function renderAgentPicker() {
     def.value = pickVal({ agent: a.id });
     g.append(def);
     for (const m of a.models) {
-      const o = el('option', '', `${shortLabel(a.id)} · ${MODEL_NAMES[m] || m}`);
-      o.value = pickVal({ agent: a.id, model: m });
+      const o = el('option', '', `${shortLabel(a.id)} · ${m.label}${m.default ? ' (default)' : ''}`);
+      o.value = pickVal({ agent: a.id, model: m.id });
+      if (m.description) o.title = m.description;
+      g.append(o);
+    }
+    // Only real models from the CLI: when there are none, say why instead of guessing.
+    if (!a.models.length && a.available) {
+      const why = a.loggedIn === false || a.modelsError === 'not signed in' ? 'Sign in to load models'
+        : a.modelsError === 'loading' ? 'Loading models…' : `Couldn't load models: ${a.modelsError || 'none listed'}`;
+      const o = el('option', '', why);
+      o.disabled = true;
+      o.value = `__note:${a.id}`;
       g.append(o);
     }
     sel.append(g);
@@ -1500,6 +1511,7 @@ function onServer(msg) {
   if (msg.t === 'mtick' || msg.t === 'mhist' || msg.t === 'mdetail' || msg.t === 'usage') return onMetrics(msg);
   if (['otask', 'oproject', 'ostate', 'orun'].includes(msg.t)) return onOrch(msg);
   if (msg.t === 'connections') return applyConnections(msg.connections);
+  if (msg.t === 'models') return api('/api/agents').then((d) => { AGENT_LIST = d.agents || []; renderAgentPicker(); }).catch(() => {});
   if (msg.t === 'status') { upd.pending = !!msg.restartPending; return renderUpdateBanner(); }
   if (msg.t === 'convos') {
     state.convos = msg.convos;
@@ -3001,7 +3013,7 @@ function applyConnections(list) {
 function routedAgents() {
   const ids = new Set();
   for (const r of O.project?.routes || []) {
-    const id = r.agent || AGENT_LIST.find((a) => a.models.includes(r.model))?.id;
+    const id = r.agent || AGENT_LIST.find((a) => a.models.some((m) => m.id === r.model || m.resolved === r.model))?.id;
     if (id && id !== 'claude') ids.add(id);
   }
   return ids;

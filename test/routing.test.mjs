@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { resolveRoute, routeMatches, normalizeAgent, extractTasks, routeNote } from '../orchestrator.mjs';
-import { agentStatus, clearLoginCache } from '../agents.mjs';
+import { agentStatus, clearLoginCache, setModelCatalog } from '../agents.mjs';
 
 const project = { id: 1, model: 'sonnet' };
 const all = () => true;
@@ -70,6 +70,22 @@ test('a model not in any list implies its agent by family; a foreign model is dr
   assert.equal(routeNote({ agent: 'claude', model: 'sonnet' }), null);
   assert.deepEqual(resolveRoute(task('x', { agent: 'claude', model: 'gemini-2.5-pro' }), project, [], all),
     { agent: 'claude', model: 'sonnet', source: 'task', dropped: 'gemini-2.5-pro' });
+});
+
+test('discovered model lists decide the agent and drop a model the agent does not list', (t) => {
+  const at = Date.now();
+  setModelCatalog('claude', { models: [{ id: 'opus', label: 'Opus 5.5', resolved: 'claude-opus-5-5' }], error: null, at });
+  setModelCatalog('codex', { models: [{ id: 'gpt-6-sol', label: 'GPT-6-Sol' }], error: null, at });
+  setModelCatalog('antigravity', { models: [{ id: 'gemini-3.8-flash-high', label: 'Gemini 3.8 Flash (High)' }, { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' }], error: null, at });
+  t.after(() => { for (const id of ['claude', 'codex', 'antigravity']) setModelCatalog(id, { models: [], error: 'loading', at: null }); });
+  // A listed model names its agent even against the family guess (agy serves some Claude models).
+  assert.equal(resolveRoute(task('x', { model: 'claude-sonnet-4-6' }), project, [], all).agent, 'antigravity');
+  // An alias's resolved id counts as listed.
+  assert.deepEqual(resolveRoute(task('x', { model: 'claude-opus-5-5' }), project, [], all), { agent: 'claude', model: 'claude-opus-5-5', source: 'task' });
+  // Unlisted on an agent with a known list: the agent runs its default model instead.
+  assert.deepEqual(resolveRoute(task('x', { agent: 'codex', model: 'gpt-5-codex' }), project, [], all), { agent: 'codex', model: null, source: 'task', dropped: 'gpt-5-codex' });
+  assert.deepEqual(resolveRoute(task('x', { model: 'gemini-2.5-pro' }), project, [], all), { agent: 'antigravity', model: null, source: 'task', dropped: 'gemini-2.5-pro' });
+  assert.deepEqual(resolveRoute(task('x', { agent: 'codex', model: 'gpt-6-sol' }), project, [], all), { agent: 'codex', model: 'gpt-6-sol', source: 'task' });
 });
 
 test('extractTasks strips a model that belongs to another agent, with a reason', () => {

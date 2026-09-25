@@ -17,6 +17,17 @@ Summary:
 use it as the "Google" agent. The Gemini CLI is also installed and documented below as a fallback, and for Gemini
 models that agy doesn't expose. Both use a Google-account subscription login.
 
+**Model discovery (Task #98, verified 2026-09-25).** The model picker and routing only use lists the CLIs report
+(agents.mjs `listModels`/`discoverModels`, cached by models.mjs in `<DATA>/models.json`, refreshed at boot, every 6 h
+and after a sign-in change). Nothing is hardcoded; a signed-out agent or a failed discovery gives an empty list and
+a reason.
+
+| Agent | Command | Output |
+|---|---|---|
+| Claude Code | SDK `query({prompt: <stream that never yields>}).supportedModels()`, then abort (no message sent, nothing billed) | `ModelInfo[]` `{value, resolvedModel, displayName, description}`; the `value: "default"` row marks which alias is the default |
+| Codex | `codex debug models` (`--bundled` skips the account refresh) | JSON `{models: […]}` with `slug`, `display_name`, `description`, `priority` and `visibility` (`list` or `hide`) |
+| Antigravity | `agy models` | stdout lines `<id>\t<display name>`, "Fetching available models..." on stderr; signed out → exit 1 "Please sign in to view available models." |
+
 ---
 
 ## 1. OpenAI Codex CLI

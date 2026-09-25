@@ -1,13 +1,20 @@
 #!/usr/bin/env node
 // Stand-in for `codex exec --json`: prints recorded JSONL events and never touches the network.
 // CODEX_STUB=ok|limit|auth|hang|nosession picks the script; CODEX_STUB_LOG, if set, receives {argv, env, cwd} as JSON.
-// `login status` answers like the real CLI: logged in unless CODEX_STUB_LOGIN=out.
+// `login status` answers like the real CLI: logged in unless CODEX_STUB_LOGIN=out. `debug models` prints a catalog.
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 
 if (process.argv[2] === 'login' && process.argv[3] === 'status') {
   if (process.env.CODEX_STUB_LOGIN === 'out') { process.stderr.write('Not logged in\n'); process.exit(1); }
   process.stderr.write('Logged in using ChatGPT\n');
+  process.exit(0);
+}
+
+// `debug models`: a trimmed catalog recorded from codex-cli 0.157.0 (codex-models.json); CODEX_STUB_MODELS=fail errors out.
+if (process.argv[2] === 'debug' && process.argv[3] === 'models') {
+  if (process.env.CODEX_STUB_MODELS === 'fail') { process.stderr.write('Error: failed to refresh the model catalog: 503 Service Unavailable\n'); process.exit(1); }
+  process.stdout.write(fs.readFileSync(new URL('./codex-models.json', import.meta.url), 'utf8'));
   process.exit(0);
 }
 

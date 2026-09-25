@@ -221,7 +221,7 @@ test('GET /api/connections lists claude, codex, antigravity and github; actions 
   assert.equal(anon.status, 401);
   await anon.arrayBuffer();
   const claude = connections.find((c) => c.id === 'claude'), agy = connections.find((c) => c.id === 'antigravity');
-  assert.deepEqual([claude.canLogin, claude.canLogout, agy.canLogin, agy.canLogout], [true, true, true, false]);
+  assert.deepEqual([claude.canLogin, claude.canLogout, agy.canLogin, agy.canLogout], [true, true, true, true]);
   assert.match(claude.logoutWarning, /Every chat and orchestrator agent/);
   const nope = await post('/api/connections/claude/logout', { cookie });
   assert.equal(nope.status, 409); // needs {confirm: true}: nothing is signed out

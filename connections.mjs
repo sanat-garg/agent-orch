@@ -15,7 +15,7 @@ const EXIT_RE = /__AO_EXIT:(\d+)/;
 // text; url falls back to `defaultUrl`. needsPastedCode: the CLI waits for a code from the browser (POST …/code).
 // answers: prompts auto-answered once each with the given keys. successRe: printed on success (exit 0 counts as
 // success too). liveSuccessRe/liveFailRe: end the login while the CLI is still running (a TUI that never exits).
-// logout: argv, when the CLI supports it; logoutWarning: logout then needs {confirm: true}. Status checks stay with
+// logout: argv, or an async function (home) for a CLI with no logout command; logoutWarning: logout then needs {confirm: true}. Status checks stay with
 // their owners (agents.mjs `loggedIn()`; github.mjs `gh.status()`), passed in as each entry's signedIn().
 const BIN = path.join(os.homedir(), '.local/bin');
 export const SPECS = {
@@ -38,6 +38,8 @@ export const SPECS = {
     answers: [[/Select login method:[\s\S]*> 1\. Google OAuth/, ['Enter']]],
     liveSuccessRe: /Authentication successful/i,
     liveFailRe: /^\s*(Got an error:.*|Error: authentication interrupted.*)$/m,
+    // agy has no logout subcommand (only the TUI's /logout), so signing out removes its token file.
+    logout: agyLogout,
   },
   codex: {
     start: ['codex', 'login', '--device-auth', '-c', 'forced_login_method="chatgpt"'],
@@ -207,7 +209,8 @@ export function createConnections({ entries, env = process.env, onChange = () =>
     if (!e.spec?.logout) return { status: 400, error: `${e.label} can't be signed out from here` };
     if (e.spec.logoutWarning && confirm !== true) return { status: 409, error: e.spec.logoutWarning, needsConfirm: true };
     const unset = new Set(e.envFilter ? Object.keys(env).filter((k) => e.envFilter.test(k)) : []);
-    const r = await new Promise((resolve) => execFile(e.spec.logout[0], e.spec.logout.slice(1), {
+    const r = typeof e.spec.logout === 'function' ? await Promise.resolve().then(() => e.spec.logout()).then(() => ({ ok: true }), (err) => ({ ok: false, err: err.message }))
+      : await new Promise((resolve) => execFile(e.spec.logout[0], e.spec.logout.slice(1), {
       timeout: 15000, env: Object.fromEntries(Object.entries(env).filter(([k]) => !unset.has(k))),
     }, (err, out, stderr) => resolve({ ok: !err, err: String(stderr || err?.message || '').trim() })));
     try { await e.afterChange?.(); } catch {}
@@ -218,12 +221,21 @@ export function createConnections({ entries, env = process.env, onChange = () =>
   return { list, start, submitCode, cancel, logout };
 }
 
-// The ChatGPT account email from ~/.codex/auth.json's id_token, when there is one.
-export function codexAccount(home = os.homedir()) {
+// The `email` claim of a JSON credential file's id_token (payload decoded locally, never verified or sent anywhere).
+function idTokenEmail(file, pick) {
   try {
-    const auth = JSON.parse(fs.readFileSync(path.join(home, '.codex/auth.json'), 'utf8'));
-    const jwt = auth.tokens?.id_token;
+    const jwt = pick(JSON.parse(fs.readFileSync(file, 'utf8')));
     const claims = JSON.parse(Buffer.from(String(jwt).split('.')[1], 'base64url').toString());
-    return claims.email || null;
+    return typeof claims.email === 'string' && claims.email || null;
   } catch { return null; }
+}
+// The ChatGPT account email from ~/.codex/auth.json's id_token, when there is one.
+export const codexAccount = (home = os.homedir()) => idTokenEmail(path.join(home, '.codex/auth.json'), (a) => a.tokens?.id_token);
+// agy's Google login: {token: {access_token, refresh_token, …}, auth_method, id_token} in this one file.
+export const agyTokenFile = (home = os.homedir()) => path.join(home, '.gemini/antigravity-cli/antigravity-oauth-token');
+export const agyAccount = (home = os.homedir()) => idTokenEmail(agyTokenFile(home), (a) => a.id_token);
+export function agyLogout(home = os.homedir()) {
+  try { fs.unlinkSync(agyTokenFile(home)); } catch (e) {
+    throw new Error(e.code === 'ENOENT' ? 'no Antigravity token file found to remove' : e.message);
+  }
 }

@@ -13,7 +13,7 @@ import { createGitHub } from './github.mjs';
 import { retireRuntime, chatIdle, whenIdle } from './runtimes.mjs';
 import { AGENTS, runAgentCli, clearLoginCache, isMissingSession, modelCatalog } from './agents.mjs';
 import { createModelStore } from './models.mjs';
-import { createConnections, SPECS, codexAccount, onPath } from './connections.mjs';
+import { createConnections, SPECS, codexAccount, agyAccount, onPath } from './connections.mjs';
 import { mediaCollector, MEDIA_ID_RE, MEDIA_TYPES, toolResultImages } from './media.mjs';
 import { createUsageLog, RANGES as USAGE_RANGES } from './usage.mjs';
 
@@ -622,7 +622,7 @@ const connections = createConnections({
   entries: [
     agentEntry(AGENTS.claude, { spec: SPECS.claude, account: () => AGENTS.claude.account() }),
     agentEntry(AGENTS.codex, { spec: SPECS.codex, account: () => codexAccount() }),
-    agentEntry(AGENTS.antigravity, { spec: SPECS.antigravity, probe: () => AGENTS.antigravity.probe() }),
+    agentEntry(AGENTS.antigravity, { spec: SPECS.antigravity, account: () => agyAccount(), probe: () => AGENTS.antigravity.probe() }),
     { id: 'github', label: 'GitHub', installed: () => onPath('gh'), signedIn: () => gh.status().linked, account: () => gh.status().login,
       spec: SPECS.github, afterChange: () => gh.refresh() },
   ],

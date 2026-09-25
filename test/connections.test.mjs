@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parsePane, createConnections, SPECS } from '../connections.mjs';
+import os from 'node:os';
+import { parsePane, createConnections, SPECS, agyAccount, agyLogout, agyTokenFile } from '../connections.mjs';
 
 const pane = (f) => fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures/panes', f), 'utf8');
 
@@ -251,4 +252,37 @@ test('cancel with no login returns login: null so a stale panel clears (AUDIT #2
   assert.deepEqual(body, { ok: true, login: null });
   await conn.start('x');
   assert.equal((await conn.cancel('x')).login.state, 'cancelled');
+});
+
+// A fake agy home: the token file with an unsigned JWT id_token, plus agy's other files that must survive a logout.
+function fakeAgyHome(claims = { iss: 'https://accounts.google.com', sub: '123', email: 'owner@example.com', email_verified: true }) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-home-')), dir = path.join(home, '.gemini/antigravity-cli');
+  fs.mkdirSync(dir, { recursive: true });
+  const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  fs.writeFileSync(path.join(dir, 'antigravity-oauth-token'), JSON.stringify({
+    token: { access_token: 'ya29.fake', token_type: 'Bearer', refresh_token: '1//fake', expiry: '2026-09-25T15:00:00Z' },
+    auth_method: 'consumer', id_token: `${b64({ alg: 'RS256' })}.${b64(claims)}.sig` }));
+  fs.writeFileSync(path.join(dir, 'settings.json'), '{}');
+  fs.writeFileSync(path.join(dir, 'installation_id'), 'x');
+  return { home, dir };
+}
+
+test('agy account email comes from the token file id_token', () => {
+  assert.equal(agyAccount(fakeAgyHome().home), 'owner@example.com');
+  assert.equal(agyAccount(fakeAgyHome({ sub: '1' }).home), null);
+  assert.equal(agyAccount(fs.mkdtempSync(path.join(os.tmpdir(), 'agy-none-'))), null);
+});
+
+test('agy logout removes only the token file, and fails when there is none', async () => {
+  const { home, dir } = fakeAgyHome();
+  const conn = createConnections({ entries: [{ id: 'antigravity', label: 'Antigravity CLI', installed: () => true, signedIn: () => fs.existsSync(agyTokenFile(home)),
+    account: () => agyAccount(home), spec: { ...SPECS.antigravity, logout: () => agyLogout(home) } }], tmux: async () => ({ ok: true, out: '' }) });
+  assert.deepEqual([conn.list()[0].canLogout, conn.list()[0].account, conn.list()[0].logoutWarning], [true, 'owner@example.com', undefined]);
+  assert.equal((await conn.logout('antigravity')).status, 200);
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['installation_id', 'settings.json']);
+  assert.deepEqual([conn.list()[0].signedIn, conn.list()[0].account], [false, null]);
+  const r = await conn.logout('antigravity');
+  assert.equal(r.status, 500);
+  assert.match(r.error, /no Antigravity token file/);
+  assert.equal(SPECS.antigravity.logout, agyLogout);
 });

@@ -329,3 +329,7 @@ per-agent rate limits independent; npm test passes (138)
 ## 2026-09-25 14:13 — #98 Model selectors: fetch real model lists from each CLI, no hardcoded guesses [done (check passed)]
 
 Model lists now come from each CLI; tests pass
+
+## 2026-09-25 14:22 — #99 Antigravity connection: show signed-in email and a Disconnect button [done (check passed)]
+
+Antigravity shows its signed-in email and can be disconnected

@@ -13,3 +13,7 @@ In the Connections modal, Antigravity shows as connected without the account ema
 ## Done when
 
 `npm test` passes with agy email-extraction and logout tests, and GET /api/connections on this machine returns an account email for antigravity
+
+## Result — done (check passed) (2026-09-25 14:22)
+
+AGENT-ORCH-STATUS: done — Antigravity shows its signed-in email and can be disconnected

@@ -13,3 +13,7 @@ Create agents.mjs, a pluggable coding-agent layer. Export `AGENTS` (a registry) 
 ## Done when
 
 agents.mjs exports AGENTS with a 'claude' adapter, orchestrator.mjs runAgent calls through it, and `npm test` passes including test/agents.test.mjs
+
+## Result — done (check passed) (2026-09-25 03:30)
+
+AGENT-ORCH-STATUS: done — agents.mjs has a Claude adapter that runAgent calls through; tests pass

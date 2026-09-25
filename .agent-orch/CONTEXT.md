@@ -7,6 +7,7 @@ _Durable knowledge for every agent session: architecture, conventions, decisions
   and chat via `query()` from @anthropic-ai/claude-agent-sdk, and serves `public/`. PORT defaults to 3000.
 - `orchestrator.mjs` (~1.6k lines): AO2. It uses a node:sqlite DB at data/orchestrator/agent-orch.db (renamed from ao2.db on start), a
   planner/worker/reflection loop, and a `runAgent()` wrapper around the SDK `query()`. Prompts live inline.
+- `agents.mjs`: the coding-agent adapter registry (`AGENTS`, `runAgentCli`), emitting normalised events (text/tool/tool_result/result/limit). Only 'claude' (SDK query) so far; orchestrator `runAgent` wraps it and adds timeout and the task-run log (tool_result is logged as k:'result').
 - `runtimes.mjs`: chat runtime ownership. To replace or close a chat's runtime, use `retireRuntime`, not `q.close()` plus `runtimes.delete`. A runtime loop touches the map only while `runtimes.get(convo.id) === rt`.
 - `github.mjs`: the gh CLI wrapper. Every project gets a private repo, and pushes go to `origin`.
 - `public/`: a vanilla JS SPA (app.js ~2.4k lines, marked + dompurify), a login page and a PWA manifest.

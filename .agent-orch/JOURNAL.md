@@ -101,3 +101,7 @@ Unsent messages stay in composer with a reconnecting notice
 ## 2026-09-25 03:28 — #25 Research Codex and Antigravity/Gemini CLIs for headless use [done]
 
 AGENTS.md covers Codex, Antigravity and Gemini; codex --help exits 0
+
+## 2026-09-25 03:30 — #26 Create agents.mjs adapter interface with Claude adapter [done (check passed)]
+
+agents.mjs has a Claude adapter that runAgent calls through; tests pass

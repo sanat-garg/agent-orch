@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
+import { AGENTS, runAgentCli, toolInputSummary } from './agents.mjs';
 
 // ---------------------------------------------------------------- config
 
@@ -892,65 +893,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return d;
   }
 
-  // ---- running Claude Code through the SDK
-  const LIMIT_RE = /(hit your (?:\w+ )?limit|usage limit reached|rate limit|limit reached|out of (?:extra )?usage)/i;
-  const AUTH_RE = /(failed to authenticate|please run \/login|oauth (?:session|token) (?:expired|revoked)|invalid api key|not logged in|authentication_error)/i;
-
-  function classify(res, result) {
-    const rejected = res.limits.filter((l) => l.status === 'rejected' && !l.isUsingOverage);
-    let isError, subtype = '';
-    if (result) {
-      res.text = result.result || res.text || '';
-      res.usage = result.usage || {};
-      res.numTurns = result.num_turns || 0;
-      subtype = result.subtype || '';
-      isError = !!result.is_error || subtype !== 'success';
-    } else {
-      res.text = res.text || res.stderr.trim();
-      isError = true;
-    }
-    const hay = (res.text.length < 600 ? res.text : '') + '\n' + res.stderr;
-    const limitNotice = rejected.length && res.text.length < 300 && LIMIT_RE.test(res.text);
-    if (!isError && !limitNotice && res.errorCode !== 'rate_limit') res.outcome = 'ok';
-    else if (subtype === 'error_max_turns') res.outcome = 'max_turns';
-    else if (res.errorCode === 'authentication_failed' || AUTH_RE.test(hay)) res.outcome = 'auth_error';
-    else if (rejected.length || res.errorCode === 'rate_limit' || LIMIT_RE.test(hay) || result?.api_error_status === 429) {
-      res.outcome = 'rate_limited';
-      if (rejected.length) {
-        const latest = rejected.reduce((a, b) => ((b.resetsAt || 0) > (a.resetsAt || 0) ? b : a));
-        res.resetsAt = latest.resetsAt ? Number(latest.resetsAt) : null;
-        res.limitType = latest.rateLimitType || null;
-      }
-    } else res.outcome = 'error';
-    return res;
-  }
-
-  // Compact entries for the task drawer's Output (public messages, commands and results only).
-  function* entriesOf(m) {
-    if (m.type === 'assistant' && !m.parent_tool_use_id) {
-      for (const b of m.message?.content || []) {
-        if (b.type === 'text' && b.text.trim()) yield { k: 'text', text: b.text };
-        else if (b.type === 'tool_use') yield { k: 'tool', id: b.id, name: b.name, input: toolInputSummary(b.name, b.input) };
-      }
-    } else if (m.type === 'user' && Array.isArray(m.message?.content)) {
-      for (const b of m.message.content) {
-        if (b.type !== 'tool_result') continue;
-        let text = typeof b.content === 'string' ? b.content
-          : Array.isArray(b.content) ? b.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n') : '';
-        const lines = text.split('\n').length;
-        if (text.length > 6000) text = text.slice(0, 6000) + '\n…';
-        yield { k: 'result', id: b.tool_use_id, text, isError: !!b.is_error, lines };
-      }
-    }
-  }
-  function toolInputSummary(name, input = {}) {
-    const keep = {};
-    for (const k of ['command', 'description', 'file_path', 'path', 'pattern', 'url', 'query', 'old_string', 'new_string', 'content', 'todos']) {
-      if (input[k] == null) continue;
-      keep[k] = typeof input[k] === 'string' && input[k].length > 4000 ? input[k].slice(0, 4000) + '\n…' : input[k];
-    }
-    return keep;
-  }
+  // ---- running a coding agent (agents.mjs; Claude Code through the SDK)
+  // Task drawer Output entries: public messages, commands and tool results (logged as k:'result').
+  const logEntryOf = (e) => (e.k === 'tool_result' ? { ...e, k: 'result' } : e.k === 'text' || e.k === 'tool' ? e : null);
 
   async function runAgent({ prompt, cwd, resume, model, append, tools, autonomous, signal, timeoutSec, taskId, runId, logPath, onMessage, partial }) {
     const ac = new AbortController();
@@ -958,7 +903,6 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const onAbort = () => { stopped = stopped || 'aborted'; ac.abort(); };
     if (signal) { if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true }); }
     const timer = timeoutSec ? setTimeout(() => { stopped = 'timeout'; ac.abort(); }, timeoutSec * 1000) : null;
-    const res = { outcome: 'error', text: '', sessionId: resume || null, usage: {}, numTurns: 0, limits: [], resetsAt: null, limitType: null, stderr: '', errorCode: null };
     const log = logPath ? fs.createWriteStream(logPath, { flags: 'a' }) : null;
     const writeEntry = (e) => {
       log?.write(JSON.stringify(e) + '\n');
@@ -969,44 +913,18 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       }
     };
     if (taskId) writeEntry({ k: 'start', at: now(), resumed: !!resume });
-    let result = null;
+    let res;
     try {
-      const it = query({
-        prompt,
-        options: {
-          cwd, resume: resume || undefined, model: model || undefined,
-          pathToClaudeCodeExecutable: claudeBin, env: agentEnv, abortController: ac,
-          systemPrompt: append ? { type: 'preset', preset: 'claude_code', append } : { type: 'preset', preset: 'claude_code' },
-          // Unattended sessions never prompt: allowed tools run, everything else is refused.
-          // The owner runs this on a disposable server and gave every agent full access (including
-          // this app's own code): no permission prompts, nothing refused. Roles such as "the
-          // planner doesn't edit code" are kept by instructions, not by blocking tools.
-          permissionMode: 'bypassPermissions',
-          allowDangerouslySkipPermissions: true,
-          includePartialMessages: !!partial,
-          stderr: (d) => { res.stderr = (res.stderr + d).slice(-4000); },
-        },
+      res = await runAgentCli({
+        agent: 'claude', model, prompt, cwd, resume, systemAppend: append, autonomous, signal: ac.signal,
+        onEvent: taskId ? (e) => { const l = logEntryOf(e); if (l) writeEntry(l); } : null,
+        query, bin: claudeBin, env: agentEnv, partial, onMessage,
       });
-      for await (const m of it) {
-        if (m.session_id) res.sessionId = m.session_id;
-        if (m.type === 'rate_limit_event' && m.rate_limit_info) res.limits.push(m.rate_limit_info);
-        if (m.type === 'assistant' && m.error) res.errorCode = m.error;
-        if (m.type === 'result') result = m;
-        if (m.type === 'assistant' && !m.parent_tool_use_id) {
-          const t = (m.message?.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
-          if (t.trim()) res.text = t;
-        }
-        if (taskId) for (const e of entriesOf(m)) writeEntry(e);
-        try { onMessage?.(m); } catch {}
-      }
-    } catch (e) {
-      if (!stopped) res.stderr += `\n${e?.message || e}`;
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
     }
     if (stopped) res.outcome = stopped;
-    else classify(res, result);
     if (taskId) writeEntry({ k: 'end', at: now(), outcome: res.outcome, turns: res.numTurns });
     log?.end();
     return res;
@@ -1119,7 +1037,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
           } else if (b.type === 'tool_use') emitChat(convoId, { t: 'tool_use', id: b.id, name: b.name, input: toolInputSummary(b.name, b.input) });
         }
       } else if (m.type === 'user' && Array.isArray(m.message?.content)) {
-        for (const e of entriesOf(m)) emitChat(convoId, { t: 'tool_result', id: e.id, text: e.text, isError: e.isError });
+        for (const e of AGENTS.claude.events(m)) if (e.k === 'tool_result') emitChat(convoId, { t: 'tool_result', id: e.id, text: e.text, isError: e.isError });
       }
     };
   }

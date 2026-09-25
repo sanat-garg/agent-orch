@@ -1,6 +1,6 @@
 # Audit: server, orchestrator, GitHub wrapper, UI
 
-_Task #12, 2026-09-24. Nothing is fixed here. Each item was verified by reading the code; #1 was also reproduced
+_Task #12, 2026-09-24. Items were open when audited; a `- **Fixed** (task #N)` line marks one resolved since. Each item was verified by reading the code; #1 was also reproduced
 against a throwaway instance (`PORT=3999 CW_DATA_DIR=$(mktemp -d)`). The items are ranked by value. Each fix
 is sized to fit one 15–45 minute task._
 
@@ -30,6 +30,7 @@ a same-origin request. Caddy's `reverse_proxy` overwrites `X-Forwarded-For`, so 
 - **Fix:** Take an exclusive lock file (`data/orchestrator/lock` with the PID, checked with `process.kill(pid, 0)`)
   in `createOrchestrator`. If another live process holds it, don't requeue and don't schedule (log a warning).
   Also update BRIEF/README to say that test instances must set `CW_DATA_DIR`.
+- **Fixed** (task #16): `createOrchestrator` takes `data/orchestrator/lock` via `takeLock` (exclusive create with the PID, stale PIDs checked with `process.kill(pid, 0)`). A second instance on a locked data dir logs a warning and does not requeue or schedule tasks.
 
 ### 3. [high] A chat context rollover orphans the new Claude runtime (server.mjs:702, :815-823)
 - **What:** When a chat exceeds `CHAT_CONTEXT_LIMIT`, `sendUserMessage` closes the old query and immediately calls
@@ -131,6 +132,7 @@ a same-origin request. Caddy's `reverse_proxy` overwrites `X-Forwarded-For`, so 
   `systemctl is-active claude-term` → inactive, `claude-shell` → active). The comment at server.mjs:1 also says
   `/term/`, but Caddy serves `/shell/`.
 - **Fix:** Check `claude-shell` (and maybe `claude-tmux`) and correct the comment.
+- **Fixed** (rename, tasks #20/#23): `slowMetrics` now checks the `agent-orch-shell` unit (with `agent-orch` and `caddy`), and the server.mjs:1 comment says `/shell/`.
 
 ### 16. [medium] The verifier drops the prose around the check command (orchestrator.mjs:393)
 - **What:** `extractCommand` runs only the first backticked command from "Done when" and ignores the words

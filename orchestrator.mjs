@@ -1,4 +1,4 @@
-// Orchestrator Mode: agent-orch's agent orchestrator running inside Claude Web.
+// Orchestrator Mode: agent-orch's agent orchestrator.
 //
 //   planner    your chat in Orchestrator Mode. Reads the project, keeps .agent-orch/BRIEF.md and CONTEXT.md
 //              current, and turns what you want into small, chained, verifiable tasks.
@@ -117,7 +117,7 @@ project), optional \`note\`. A new route with the same match and scope replaces 
 deletes one. A \`plan\` route may only pick a Claude model. Unavailable agents fall back to Claude.
 A block may contain only \`routes\` (with \`"tasks": []\`).`;
 
-const PLANNER_SYSTEM = `You are the planning mind of an agent orchestrator (agent-orch) running inside the owner's Claude Web.
+const PLANNER_SYSTEM = `You are the planning mind of an agent orchestrator (agent-orch) running on the owner's server.
 You talk with the owner, understand exactly what they want, and turn it into small, well-specified steps
 for autonomous Claude Code agents that run around the clock within the owner's plan usage limits.
 
@@ -1047,7 +1047,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   function contextOverage(p) {
     try { const s = fs.statSync(path.join(memDir(p), 'CONTEXT.md')).size; return s > CFG.contextBudgetBytes ? s - CFG.contextBudgetBytes : null; } catch { return null; }
   }
-  const GIT_ID = ['-c', 'user.name=Claude Web Orchestrator', '-c', 'user.email=orchestrator@claude-web.local'];
+  const GIT_ID = ['-c', 'user.name=agent-orch Orchestrator', '-c', 'user.email=orchestrator@agent-orch.local'];
   function git(p, args) { return execFileSync('git', args, { cwd: p, encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'pipe'] }); }
   function gitCommit(p, message) {
     if (!CFG.autoCommit || !fs.existsSync(path.join(p, '.git'))) return '';

@@ -12,3 +12,7 @@ The product is named agent-orch (see .agent-orch/BRIEF.md goal 4). A few old nam
 ## Done when
 
 `! grep -niE 'claude[ -]web' orchestrator.mjs server.mjs && test $(grep -c '\*\*Fixed\*\*' .agent-orch/AUDIT.md) -ge 7 && npm test`
+
+## Result — done (2026-09-25 03:43)
+
+AGENT-ORCH-STATUS: done — Claude Web strings removed; AUDIT #2 and #15 marked fixed

@@ -1,4 +1,4 @@
-// agent-orch: login + chat UI for Claude Code, with the ttyd terminal proxied by Caddy at /term/.
+// agent-orch: login + chat UI for Claude Code, with the ttyd terminal proxied by Caddy at /shell/.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';

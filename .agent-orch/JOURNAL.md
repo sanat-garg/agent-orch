@@ -185,3 +185,7 @@ All 16 AUDIT items fixed, README checked against live setup
 ## 2026-09-25 04:06 — #50 Unit-test the pacing governor decide() [done (check passed)]
 
 decide() exported, 13 pacing tests pass, npm test green
+
+## 2026-09-25 04:10 — #51 Test orchestrator task scheduling: ordering, deps, cascade, blocked_until [done (check passed)]
+
+scheduling tests added; npm test passes, all 73 tests

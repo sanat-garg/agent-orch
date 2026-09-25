@@ -23,6 +23,8 @@ _Durable knowledge for every agent session: architecture, conventions, decisions
 - Tests: use Node's built-in `node --test` (no extra test deps). `npm test` runs `test/**/*.test.mjs` (Node 22 won't take a
   bare `test/` dir). test/server.test.mjs spawns server.mjs on a free port with `CW_DATA_DIR` set to a temp dir
   (CW_DATA_DIR overrides data/ for the server and the orchestrator).
+  Orchestrator scheduling tests (planner-guard, scheduling) run createOrchestrator in a child process with a fake `query`
+  and rows inserted via node:sqlite before the first tick (5 s); a five_hour limit at 95% from `getLimits` forces one slot.
 
 ## Decisions
 - 2026-09-24: The repo moved to sanat-garg/agent-orch with a fresh single-commit history, because the old

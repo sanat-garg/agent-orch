@@ -13,3 +13,7 @@ In /home/ubuntu/agent-orch, task scheduling in orchestrator.mjs (runnable/claimN
 ## Done when
 
 `npm test` passes and test/scheduling.test.mjs exists covering ordering, depends_on, per-project exclusivity, cascade/revive and blocked_until
+
+## Result — done (check passed) (2026-09-25 04:10)
+
+AGENT-ORCH-STATUS: done — scheduling tests added; npm test passes, all 73 tests

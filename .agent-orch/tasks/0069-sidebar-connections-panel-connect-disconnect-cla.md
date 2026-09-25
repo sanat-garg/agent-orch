@@ -13,3 +13,7 @@ Add a 'Connections' section to the sidebar (public/index.html, public/app.js, pu
 ## Done when
 
 public/index.html contains the Connections section, `node --check public/app.js` passes, and `npm test` passes
+
+## Result — done (check passed) (2026-09-25 08:44)
+
+AGENT-ORCH-STATUS: done — sidebar Connections panel added; browser flow verified and tests pass

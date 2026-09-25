@@ -24,6 +24,14 @@
       New project
     </button>
     <nav class="convo-list" id="convoList" aria-label="Chats"></nav>
+    <section class="conns" id="conns" aria-labelledby="connsTitle">
+      <button type="button" class="cn-head" id="connsToggle" aria-expanded="true" aria-controls="connsList">
+        <span class="ms-title" id="connsTitle">Connections</span>
+        <span class="cn-sum" id="connsSum"></span>
+        <svg class="caret" viewBox="0 0 24 24" width="12" height="12"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+      </button>
+      <div class="cn-list" id="connsList"></div>
+    </section>
     <div class="mini-stats">
       <button class="ms-server" id="miniStats" aria-haspopup="dialog" title="Open server details">
         <span class="ms-head">

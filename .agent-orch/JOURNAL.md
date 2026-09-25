@@ -225,3 +225,7 @@ Web sign-in backend for codex/GitHub via tmux; tests pass
 ## 2026-09-25 08:38 — #68 Connections: add Claude and Antigravity (agy) sign-in specs [done (check passed)]
 
 Claude and agy sign-in specs, fixtures, tests and status checks work
+
+## 2026-09-25 08:44 — #69 Sidebar Connections panel: connect/disconnect Claude, Codex, Antigravity, GitHub [done (check passed)]
+
+sidebar Connections panel added; browser flow verified and tests pass

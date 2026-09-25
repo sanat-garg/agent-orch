@@ -1078,6 +1078,8 @@ function changeMode(mode) {
 $('mode').addEventListener('change', () => changeMode($('mode').value));
 $('model').addEventListener('change', () => {
   const v = $('model').value;
+  if (v === CONNECT_PICK) { $('model').value = $('model').dataset.prev || 'claude|'; openConnections(); return; }
+  $('model').dataset.prev = v;
   if (state.cid) send({ t: 'set_model', cid: state.cid, ...parsePick(v) });
   else { state.draftModel = v; store.set('cw.model', v); }
 });
@@ -1085,6 +1087,7 @@ $('model').addEventListener('change', () => {
 // ---------- agent + model picker (options come from the server's agent registry) ----------
 let AGENT_LIST = [];
 const MODEL_NAMES = { opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku' };
+const CONNECT_PICK = '__connect'; // the picker's last option: opens the sidebar's Connections panel
 const pickVal = ({ agent, model }) => `${agent || 'claude'}|${model || ''}`;
 const parsePick = (v) => (v.includes('|') ? { agent: v.slice(0, v.indexOf('|')), model: v.slice(v.indexOf('|') + 1) } : { agent: 'claude', model: v });
 const shortLabel = (agent) => (AGENT_LIST.find((a) => a.id === agent)?.label || agent).replace(/ (Code|CLI)$/, '');
@@ -1097,13 +1100,14 @@ function setPick(v) {
     sel.append(o);
   }
   sel.value = val;
+  sel.dataset.prev = val;
 }
 function renderAgentPicker() {
   const sel = $('model'), keep = sel.value;
   sel.textContent = '';
   for (const a of AGENT_LIST) {
     const g = document.createElement('optgroup');
-    g.label = !a.available ? `${a.label} (not installed)` : a.loggedIn === false ? `${a.label} (not logged in: ${a.login})` : a.label;
+    g.label = !a.available ? `${a.label} (not installed)` : a.loggedIn === false ? `${a.label} (sign in: Connections in the sidebar)` : a.label;
     g.disabled = !(a.available && a.loggedIn !== false);
     const def = el('option', '', `${a.label} · default model`);
     def.value = pickVal({ agent: a.id });
@@ -1115,6 +1119,10 @@ function renderAgentPicker() {
     }
     sel.append(g);
   }
+  const off = AGENT_LIST.filter((a) => !a.available || a.loggedIn === false).length;
+  const link = el('option', '', off ? 'Sign in to more agents…' : 'Connections…');
+  link.value = CONNECT_PICK;
+  sel.append(link);
   setPick(keep);
 }
 api('/api/agents').then((d) => { AGENT_LIST = d.agents || []; renderAgentPicker(); }).catch(() => {});
@@ -1358,6 +1366,7 @@ function send(msg) {
 function onServer(msg) {
   if (msg.t === 'mtick' || msg.t === 'mhist' || msg.t === 'mdetail' || msg.t === 'usage') return onMetrics(msg);
   if (['otask', 'oproject', 'ostate', 'orun'].includes(msg.t)) return onOrch(msg);
+  if (msg.t === 'connections') return applyConnections(msg.connections);
   if (msg.t === 'convos') {
     state.convos = msg.convos;
     if (state.cid && !state.convos.find((c) => c.id === state.cid)) openConvo(null);
@@ -2046,7 +2055,14 @@ function renderOrchBar() {
       const what = el('span', '', `"${r.match}" → ${[r.agent, r.model].filter(Boolean).join(' · ')}`);
       what.append(el('small', '', r.scope === 'global' ? 'all projects' : 'this project'));
       const ag = AGENT_LIST.find((a) => a.id === r.agent);
-      if (ag && ag.id !== 'claude' && (!ag.available || ag.loggedIn === false)) what.append(el('small', '', `${ag.available ? 'not logged in' : 'not installed'}, falls back to Claude`));
+      if (ag && ag.id !== 'claude' && (!ag.available || ag.loggedIn === false)) {
+        const hint = el('small', '', `${ag.available ? 'not signed in' : 'not installed'}, falls back to Claude · `);
+        const go = el('button', 'link-btn inline', ag.available ? 'Sign in' : 'Connections');
+        go.type = 'button';
+        go.onclick = (e) => { e.stopPropagation(); $('obPop').hidden = true; openConnections(ag.id); };
+        hint.append(go);
+        what.append(hint);
+      }
       const del = el('button', 'btn small danger', 'Delete');
       del.type = 'button';
       del.onclick = (e) => {
@@ -2451,6 +2467,197 @@ async function linkGitHub() {
   setTimeout(() => clearInterval(poll), 10 * 60e3);
 }
 
+// ---------- Connections (agent CLI and GitHub sign-ins; the server runs each CLI's login in tmux) ----------
+const CONN = { list: [], sig: '', drafts: {}, sent: {}, dismissed: {}, justDone: {}, collapsed: store.get('cw.connsCollapsed') === '1' };
+const CONN_ICONS = {
+  claude: '<path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6L5.6 18.4" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>',
+  codex: '<path d="M12 2.8l8 4.6v9.2l-8 4.6-8-4.6V7.4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M9 10l2.5 2L9 14M13 14.5h3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+  antigravity: '<path d="M12 3.5L21 19.5H3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M12 10v5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+};
+const connIcon = (id) => {
+  const s = id === 'github' ? $('repoLink').querySelector('svg').cloneNode(true) : null;
+  if (s) { s.setAttribute('width', '16'); s.setAttribute('height', '16'); return s; }
+  const w = el('span');
+  w.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">${CONN_ICONS[id] || '<circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/>'}</svg>`;
+  return w.firstChild;
+};
+async function refreshConnections() {
+  try { applyConnections((await api('/api/connections')).connections); } catch {}
+}
+function applyConnections(list) {
+  const prev = new Map(CONN.list.map((c) => [c.id, c]));
+  CONN.list = list || [];
+  let agentsChanged = false;
+  for (const c of CONN.list) {
+    const p = prev.get(c.id);
+    if (p?.login?.state === 'waiting' && c.login?.state === 'done') {
+      CONN.justDone[c.id] = true;
+      setTimeout(() => { delete CONN.justDone[c.id]; renderConnections(true); }, 6000);
+    }
+    if (c.login?.state === 'waiting' && CONN.collapsed) setConnsCollapsed(false);
+    if (p && (p.signedIn !== c.signedIn || p.installed !== c.installed)) {
+      if (c.id === 'github') refreshGitHub().then(() => { if (!$('pickerModal').hidden) renderGhRow(); });
+      else agentsChanged = true;
+    }
+  }
+  // Sign-in state feeds the model picker's disabled groups and the routing-rule hints.
+  if (agentsChanged) api('/api/agents').then((d) => { AGENT_LIST = d.agents || []; renderAgentPicker(); }).catch(() => {});
+  renderConnections();
+}
+function setConnsCollapsed(v) {
+  CONN.collapsed = v;
+  store.set('cw.connsCollapsed', v ? '1' : '0');
+  $('conns').classList.toggle('collapsed', v);
+  $('connsToggle').setAttribute('aria-expanded', String(!v));
+}
+$('connsToggle').addEventListener('click', () => setConnsCollapsed(!CONN.collapsed));
+setConnsCollapsed(CONN.collapsed);
+// From the model picker and routing hints: bring the panel into view (opening the sidebar on mobile).
+function openConnections(id) {
+  $('app').classList.add('side-open');
+  setConnsCollapsed(false);
+  const row = (id && $('conns').querySelector(`[data-conn="${id}"]`)) || $('conns');
+  row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  row.classList.remove('flash');
+  void row.offsetWidth;
+  row.classList.add('flash');
+}
+async function connAction(c, action, body) {
+  try {
+    const r = await api(`/api/connections/${c.id}/${action}`, 'POST', body);
+    if (r.login) { c.login = r.login; renderConnections(true); }
+    return r;
+  } catch (e) { alert(`${c.label}: ${e.message}`); return null; }
+}
+async function connStart(c) {
+  delete CONN.sent[c.id];
+  delete CONN.drafts[c.id];
+  await connAction(c, 'start');
+}
+async function connLogout(c) {
+  if (!confirm(c.logoutWarning ? `Sign out of ${c.label}?\n\n${c.logoutWarning}` : `Sign out of ${c.label} on this server?`)) return;
+  await connAction(c, 'logout', c.logoutWarning ? { confirm: true } : {});
+}
+function connStatus(c) {
+  if (!c.installed) return ['', 'Not installed'];
+  if (c.signedIn) return ['on', c.account ? `Connected as ${c.account}` : 'Connected'];
+  if (c.login?.state === 'waiting') return ['wait', 'Signing in…'];
+  return ['warn', 'Not signed in'];
+}
+function connPanel(c) {
+  const l = c.login, box = el('div', 'cn-panel');
+  if (l.state !== 'waiting') {
+    box.classList.add('failed');
+    box.append(el('p', 'cn-err', `Sign-in failed: ${l.error || 'unknown error'}`));
+    const acts = el('div', 'cn-acts');
+    const again = el('button', 'btn small primary', 'Try again');
+    again.type = 'button';
+    again.onclick = () => connStart(c);
+    const close = el('button', 'link-btn', 'Close');
+    close.type = 'button';
+    close.onclick = () => { CONN.dismissed[c.id] = l.startedAt; renderConnections(true); };
+    acts.append(again, close);
+    box.append(acts);
+    return box;
+  }
+  let n = 0;
+  const step = (text) => el('div', 'cn-step', `${++n}. ${text}`);
+  if (l.url) {
+    box.append(step('Open the sign-in page'));
+    let host = l.url;
+    try { host = new URL(l.url).host; } catch {}
+    const a = el('a', 'cn-link', `${host} ↗`);
+    a.href = l.url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.title = l.url;
+    box.append(a);
+  } else box.append(el('div', 'cn-step muted', 'Waiting for the sign-in link…'));
+  if (l.code) {
+    box.append(step('Enter this one-time code'));
+    const row = el('div', 'cn-code');
+    const code = el('code', '', l.code);
+    const copy = el('button', 'btn small', 'Copy');
+    copy.type = 'button';
+    copy.onclick = async () => {
+      try { await navigator.clipboard.writeText(l.code); copy.textContent = 'Copied'; } catch {
+        getSelection().selectAllChildren(code); copy.textContent = 'Press ⌘C';
+      }
+      setTimeout(() => { copy.textContent = 'Copy'; }, 1800);
+    };
+    row.append(code, copy);
+    box.append(row);
+  }
+  if (l.needsPastedCode) {
+    box.append(step('Paste the code the page shows you'));
+    const f = el('form', 'cn-paste');
+    const inp = el('input');
+    inp.placeholder = 'Authorization code';
+    inp.autocomplete = 'off';
+    inp.spellcheck = false;
+    inp.dataset.connInput = c.id;
+    inp.value = CONN.drafts[c.id] || '';
+    inp.oninput = () => { CONN.drafts[c.id] = inp.value; };
+    const go = el('button', 'btn small primary', 'Submit');
+    f.append(inp, go);
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      if (!inp.value.trim()) return inp.focus();
+      go.disabled = true;
+      if (await connAction(c, 'code', { code: inp.value.trim() })) { CONN.sent[c.id] = true; CONN.drafts[c.id] = ''; }
+      renderConnections(true);
+    };
+    box.append(f);
+    if (CONN.sent[c.id]) box.append(el('div', 'cn-step muted', 'Code sent, checking…'));
+  } else box.append(el('div', 'cn-step muted', 'This panel updates by itself once you finish in the other tab.'));
+  const acts = el('div', 'cn-acts');
+  const cancel = el('button', 'link-btn', 'Cancel');
+  cancel.type = 'button';
+  cancel.onclick = () => connAction(c, 'cancel');
+  acts.append(cancel);
+  box.append(acts);
+  return box;
+}
+function renderConnections(force) {
+  const list = CONN.list;
+  const sig = JSON.stringify([list, CONN.justDone, CONN.dismissed, CONN.sent]);
+  if (!force && sig === CONN.sig) return;
+  CONN.sig = sig;
+  const box = $('connsList'), focused = document.activeElement?.dataset?.connInput;
+  box.textContent = '';
+  $('connsSum').textContent = list.length ? `${list.filter((c) => c.signedIn).length}/${list.length}` : '';
+  for (const c of list) {
+    const row = el('div', 'cn-row');
+    row.dataset.conn = c.id;
+    const [dot, text] = connStatus(c);
+    const main = el('div', 'cn-main');
+    const info = el('div', 'cn-info');
+    info.append(el('span', 'cn-label', c.label));
+    const st = el('span', 'cn-status');
+    st.append(el('span', `dot ${dot}`), el('span', 'cn-st', CONN.justDone[c.id] && c.signedIn ? `✓ ${text}` : text));
+    st.title = text;
+    info.append(st);
+    main.append(connIcon(c.id), info);
+    const waiting = c.login?.state === 'waiting';
+    if (c.installed && c.signedIn && c.canLogout && !waiting) {
+      const b = el('button', 'btn small cn-btn', 'Disconnect');
+      b.type = 'button';
+      b.onclick = () => connLogout(c);
+      main.append(b);
+    } else if (c.installed && !c.signedIn && c.canLogin && !waiting) {
+      const b = el('button', 'btn small primary cn-btn', 'Connect');
+      b.type = 'button';
+      b.onclick = () => connStart(c);
+      main.append(b);
+    }
+    row.append(main);
+    const l = c.login;
+    if (l && (l.state === 'waiting' || (l.state === 'failed' && !c.signedIn && CONN.dismissed[c.id] !== l.startedAt))) row.append(connPanel(c));
+    box.append(row);
+  }
+  if (focused) box.querySelector(`[data-conn-input="${focused}"]`)?.focus();
+}
+
 // ---------- while you were away ----------
 const AWAY_MIN_MS = 10 * 60e3; // only worth a summary after at least this long away
 let hiddenAt = null;
@@ -2522,6 +2729,7 @@ setInterval(() => { if (!document.hidden) markSeen(); }, 60e3);
   setInterval(renderConvoList, 60e3);
   setInterval(() => { if (!document.hidden) pollUpdates(); }, 60e3);
   refreshGitHub();
+  refreshConnections();
   const lastSeen = Number(store.get('cw.lastSeen')) || 0;
   if (lastSeen && Date.now() - lastSeen >= AWAY_MIN_MS) showAway(lastSeen);
   markSeen();

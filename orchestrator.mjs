@@ -550,21 +550,27 @@ function checkCommand(cand, doneWhen) {
 }
 
 // Resolves [ok, output, exitCode]. Runs without a login shell so the orchestrator's PATH (with its
-// `python` → python3 alias) is the one used.
-function runCheck(command, cwd, env, timeoutSec) {
+// `python` → python3 alias) is the one used. Aborting `signal` kills the check's process group; the group is
+// also killed when the check exits, so anything it started in the background doesn't outlive it.
+export function runCheck(command, cwd, env, timeoutSec, signal) {
   return new Promise((resolve) => {
     let out = '';
     let done = false;
     const child = spawn('bash', ['-c', command], { cwd, env, detached: true });
-    const finish = (ok, text, code) => { if (!done) { done = true; clearTimeout(timer); resolve([ok, text.slice(-3000), code]); } };
-    const timer = setTimeout(() => {
-      try { process.kill(-child.pid, 'SIGKILL'); } catch {}
-      finish(false, (out || '') + '\n(timed out)', null);
-    }, timeoutSec * 1000);
+    const killGroup = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} };
+    const onAbort = () => { killGroup(); finish(false, (out || '') + '\n(aborted)', null); };
+    const finish = (ok, text, code) => {
+      if (done) return;
+      done = true; clearTimeout(timer); signal?.removeEventListener('abort', onAbort);
+      resolve([ok, text.slice(-3000), code]);
+    };
+    const timer = setTimeout(() => { killGroup(); finish(false, (out || '') + '\n(timed out)', null); }, timeoutSec * 1000);
     child.stdout.on('data', (d) => { out += d; if (out.length > 200000) out = out.slice(-100000); });
     child.stderr.on('data', (d) => { out += d; if (out.length > 200000) out = out.slice(-100000); });
     child.on('error', (e) => finish(false, String(e), null));
-    child.on('close', (code) => finish(code === 0, out || (code === 0 ? '(no output)' : `exit ${code}`), code));
+    child.on('exit', killGroup); // background jobs hold stdout open, so 'close' would wait for them
+    child.on('close', (code) => { killGroup(); finish(code === 0, out || (code === 0 ? '(no output)' : `exit ${code}`), code); });
+    if (signal) { if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true }); }
   });
 }
 
@@ -1346,7 +1352,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       } else {
         res = await runTask(task, project, signal);
       }
-      await handle(getTask(task.id), getProject(project.id), res);
+      await handle(getTask(task.id), getProject(project.id), res, signal);
     } catch (e) {
       logEvent(`#${task.id} crashed: ${e?.message || e}`, { level: 'error', projectId: project.id, taskId: task.id });
       const attempts = task.attempts + 1;
@@ -1402,7 +1408,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return res;
   }
 
-  async function handle(task, project, res) {
+  async function handle(task, project, res, signal) {
     if (task.kind !== 'plan') recordGovernor(res);
     const tid = task.id, pid = project.id;
     if (task.status !== 'running') return; // cancelled while it ran
@@ -1410,7 +1416,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       if (task.last_error != null) updateTask(tid, { last_error: null });
       if (task.kind === 'reflect') return finishReflection(task, project, res);
       if (task.kind === 'plan') return updateTask(tid, { status: 'done', finished_at: now(), result: (res.text || '').slice(0, 4000) });
-      return finishWork(task, project, res);
+      return finishWork(task, project, res, signal);
     }
     if (res.outcome === 'rate_limited') {
       requeueIfRunning(tid, { session_id: res.sessionId || task.session_id });
@@ -1438,7 +1444,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     logEvent(`↻ #${tid} ${res.outcome} (attempt ${attempts}): ${detail.slice(0, 200)}`, { level: 'warn', projectId: pid, taskId: tid });
   }
 
-  async function finishWork(task, project, res) {
+  async function finishWork(task, project, res, signal) {
     const tid = task.id;
     const [status, note] = parseStatus(res.text);
     if (status === 'continue' && task.continuations < CFG.maxContinuations) {
@@ -1453,9 +1459,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (command) {
       logEvent(`checking #${tid}: ${command}`, { projectId: project.id, taskId: tid });
       let ok, output, code;
-      try { [ok, output, code] = await runCheck(command, project.path, agentEnv, CFG.verifyTimeoutSec); }
+      try { [ok, output, code] = await runCheck(command, project.path, agentEnv, CFG.verifyTimeoutSec, signal); }
       catch (e) { ok = false; output = `verification crashed: ${e?.message || e}`; }
       if (getTask(tid)?.status !== 'running') return;
+      if (signal?.aborted) { // paused or preempted mid-check: same as an interrupted run
+        requeueIfRunning(tid, { session_id: res.sessionId || task.session_id, not_before: now() + 5 });
+        return logEvent(`#${tid} interrupted during its check; will continue later`, { projectId: project.id, taskId: tid });
+      }
       if (!ok && code === 127 && /command not found/i.test(output)) {
         // The check names a program this machine doesn't have; the worker can't fix that, so its
         // own verification stands and the gap is logged instead of looping on it.

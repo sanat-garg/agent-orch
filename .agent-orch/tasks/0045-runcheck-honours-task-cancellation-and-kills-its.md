@@ -13,3 +13,7 @@ Fix AUDIT #11 in .agent-orch/AUDIT.md. In orchestrator.mjs, `runCheck(command, c
 ## Done when
 
 `npm test` passes and `grep -A10 '### 11\.' .agent-orch/AUDIT.md | grep -q Fixed`
+
+## Result — done (check passed) (2026-09-25 03:57)
+
+AGENT-ORCH-STATUS: done — runCheck now honours task cancellation and kills its process group

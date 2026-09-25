@@ -112,6 +112,7 @@ a same-origin request. Caddy's `reverse_proxy` overwrites `X-Forwarded-For`, so 
   started in the background (for example `node server.mjs & sleep 2 && …`) outlives a successful check.
 - **Fix:** Pass the task's `signal` to `runCheck` and kill `-child.pid` on abort. Also kill the group
   (ignoring ESRCH) in the `close` handler.
+- **Fixed** (task #45): `runCheck` takes the task's signal (abort kills the group, a paused/preempted check requeues like an interrupted run) and kills the group on exit/close; test/runcheck.test.mjs.
 
 ### 12. [low] Concurrent `ensureRepo` calls can create duplicate GitHub repos (github.mjs:55-67)
 - **What:** `setupRepo` (server.mjs:1013, not awaited) calls `gh.ensureRepo` directly, outside `push`'s `inflight`

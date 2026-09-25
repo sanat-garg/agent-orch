@@ -165,3 +165,7 @@ Orchestrator git commits now async and serialized; tests pass
 ## 2026-09-25 03:56 — #44 Dedupe concurrent gh.ensureRepo calls per directory (AUDIT #12) [done (check passed)]
 
 ensureRepo dedupes concurrent calls per dir; test passes
+
+## 2026-09-25 03:57 — #45 runCheck honours task cancellation and kills its process group (AUDIT #11) [done (check passed)]
+
+runCheck now honours task cancellation and kills its process group

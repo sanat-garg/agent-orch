@@ -72,7 +72,7 @@ test('an empty pane yields nothing yet', () => {
   assert.deepEqual(parsePane(SPECS.codex, ''), { url: null, code: null, prompts: [], exited: false, exitCode: null, ok: false, error: null });
 });
 
-// A fake tmux: records every call and serves pane text from `screen`.
+// A fake tmux: records every call and serves pane text from `screen`; `failSend` makes send-keys fail.
 function fakeTmux() {
   const calls = [];
   const t = { calls, screen: '', alive: false };
@@ -81,6 +81,7 @@ function fakeTmux() {
     if (args[0] === 'new-session') { t.alive = true; return { ok: true, out: '' }; }
     if (args[0] === 'kill-session') { const was = t.alive; t.alive = false; return { ok: was, out: '' }; }
     if (args[0] === 'capture-pane') return { ok: t.alive, out: t.alive ? t.screen : '' };
+    if (args[0] === 'send-keys') return { ok: !t.failSend, out: '' };
     return { ok: true, out: '' };
   };
   return t;
@@ -126,11 +127,24 @@ test('login flow: auto-answers prompts once, forwards a pasted code, cancels', a
   assert.deepEqual(keys, [['Y', 'Enter'], ['Enter']]);
   assert.equal((await conn.submitCode('x', 'bad\ncode')).status, 400);
   assert.equal((await conn.submitCode('x', ' abc123 ')).status, 200);
-  assert.deepEqual(t.calls.slice(-2).map((c) => c.slice(3)), [['-l', 'abc123'], ['Enter']]);
+  assert.deepEqual(t.calls.slice(-2).map((c) => c.slice(3)), [['-l', '--', 'abc123'], ['Enter']]);
   assert.equal((await conn.cancel('x')).status, 200);
   assert.equal(conn.list()[0].login.state, 'cancelled');
   assert.equal(t.alive, false);
   assert.equal((await conn.submitCode('x', 'abc')).status, 409);
+});
+
+test('submitCode: a leading-dash code goes after --, and a failed send skips Enter (AUDIT #25)', async () => {
+  const { t, conn } = setup(SPECS.claude);
+  await conn.start('x');
+  assert.equal((await conn.submitCode('x', '-abc_def')).status, 200);
+  assert.deepEqual(t.calls.slice(-2).map((c) => c.slice(3)), [['-l', '--', '-abc_def'], ['Enter']]);
+  t.failSend = true;
+  const n = t.calls.length, r = await conn.submitCode('x', '-abc_def');
+  assert.equal(r.status, 500);
+  assert.match(r.error, /could not send/);
+  assert.deepEqual(t.calls.slice(n).filter((c) => c[0] === 'send-keys').map((c) => c.slice(3)), [['-l', '--', '-abc_def']], 'no Enter');
+  await conn.cancel('x');
 });
 
 test('login flow: times out and kills the session', async () => {

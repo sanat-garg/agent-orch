@@ -257,3 +257,7 @@ AUDIT.md now has Round 3 with bugs #22-26
 ## 2026-09-25 09:07 — #72 Remove tracked .ao2/ leftovers from git [done (check passed)]
 
 Stale .ao2/ removed from git; npm test passes
+
+## 2026-09-25 09:12 — #74 Send pasted sign-in codes with -- and fail if the send fails (AUDIT #25) [done (check passed)]
+
+Codes are sent after `--`; failed sends return 500 without Enter; tests pass

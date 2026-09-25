@@ -12,3 +12,7 @@ Fix AUDIT.md item #25 in /home/ubuntu/agent-orch/connections.mjs (submitCode, ar
 ## Done when
 
 `npm test` passes, including a new connections test for a leading-dash code, and AUDIT.md marks #25 Fixed.
+
+## Result — done (check passed) (2026-09-25 09:12)
+
+AGENT-ORCH-STATUS: done — Codes are sent after `--`; failed sends return 500 without Enter; tests pass

@@ -1,6 +1,6 @@
 # Audit: server, orchestrator, GitHub wrapper, UI
 
-**Status (2026-09-25, task #71):** items 1-21 fixed (rounds 1-2); round 3 (#22-26) open.
+**Status (2026-09-25, task #71):** items 1-21 fixed (rounds 1-2); round 3: #25 fixed, #22-24 and #26 open.
 
 _Task #12, 2026-09-24. Items were open when audited; a `- **Fixed** (task #N)` line marks one resolved since. Each item was verified by reading the code; #1 was also reproduced
 against a throwaway instance (`PORT=3999 CW_DATA_DIR=$(mktemp -d)`). The items are ranked by value. Each fix
@@ -276,6 +276,7 @@ seconds on both paths, and codex/agy `resetsAt` are epoch seconds like `withUnti
 - **Repro (verified, tmux 3.6):** `tmux send-keys -t =t: -l '-abc_def'` → `command send-keys: unknown flag -a`, exit 1.
 - **Fix:** Send `['send-keys', '-t', target, '-l', '--', code]`. If the send fails, return 500 (the session is gone)
   and don't send Enter.
+- **Fixed** (task #74): `submitCode` types the code with `send-keys -t … -l -- <code>`; if that send fails it returns 500 and skips Enter; test/connections.test.mjs.
 
 ### 26. [low] Old limit notices read "at your usage limit until now" when the chat history is reloaded (public/app.js:1773-1775)
 - **What:** `withUntil` formats `{until}` when the event is rendered. Persisted notices are replayed on every chat

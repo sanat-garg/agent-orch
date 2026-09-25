@@ -180,7 +180,9 @@ export function createConnections({ entries, env = process.env, onChange = () =>
     if (!e.spec.needsPastedCode) return { status: 400, error: `${e.label} doesn't take a pasted code` };
     code = String(code || '').trim();
     if (!code || code.length > 4096 || /[\r\n]/.test(code)) return { status: 400, error: 'Invalid code' };
-    await tmux(['send-keys', '-t', `=${session(id)}:`, '-l', code]);
+    // `--` so a code starting with '-' isn't read as tmux flags; no Enter when the code didn't get typed.
+    const r = await tmux(['send-keys', '-t', `=${session(id)}:`, '-l', '--', code]);
+    if (!r.ok) return { status: 500, error: 'could not send the code to the sign-in session' };
     await tmux(['send-keys', '-t', `=${session(id)}:`, 'Enter']);
     return { status: 200, login: view(l) };
   }

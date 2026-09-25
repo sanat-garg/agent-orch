@@ -12,3 +12,7 @@ Fix AUDIT #12 in .agent-orch/AUDIT.md. In github.mjs, `ensureRepo(dir)` can run 
 ## Done when
 
 `npm test` passes and `grep -A12 '### 12\.' .agent-orch/AUDIT.md | grep -q Fixed`
+
+## Result — done (check passed) (2026-09-25 03:56)
+
+AGENT-ORCH-STATUS: done — ensureRepo dedupes concurrent calls per dir; test passes

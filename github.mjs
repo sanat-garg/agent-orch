@@ -52,7 +52,15 @@ export function createGitHub({ env, log }) {
   }
 
   // A private repo named after the folder (with -2, -3… if the name is taken), pushed straight away.
-  async function ensureRepo(dir) {
+  // Concurrent calls for one dir share a single run, so only one `gh repo create` happens.
+  const ensuring = new Map();
+  function ensureRepo(dir) {
+    if (ensuring.has(dir)) return ensuring.get(dir);
+    const p = createRepo(dir).finally(() => ensuring.delete(dir));
+    ensuring.set(dir, p);
+    return p;
+  }
+  async function createRepo(dir) {
     if (!status.linked) await refresh();
     if (!status.linked) throw new Error('GitHub is not linked');
     await ensureLocalRepo(dir);

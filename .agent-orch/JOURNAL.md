@@ -161,3 +161,7 @@ Picker and routes list flag logged-out agents as needing sign-in
 ## 2026-09-25 03:54 — #42 Make orchestrator git commits async so they don't block the server (AUDIT #10) [done]
 
 Orchestrator git commits now async and serialized; tests pass
+
+## 2026-09-25 03:56 — #44 Dedupe concurrent gh.ensureRepo calls per directory (AUDIT #12) [done (check passed)]
+
+ensureRepo dedupes concurrent calls per dir; test passes

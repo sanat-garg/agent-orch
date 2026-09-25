@@ -119,6 +119,7 @@ a same-origin request. Caddy's `reverse_proxy` overwrites `X-Forwarded-For`, so 
   setup completes, both calls see no `origin` and both run `gh repo create`. That leaves a stray `name-2` repo or
   an "origin already exists" error in `convo.git.error`.
 - **Fix:** Keep a per-dir inflight map in `ensureRepo` itself, like `push`.
+- **Fixed** (task #44): `ensureRepo` shares one in-flight run per dir (`ensuring` map); test/github.test.mjs checks two parallel calls make one `gh repo create` via test/fixtures/gh-stub.mjs.
 
 ### 13. [low] One corrupt JSONL line blanks a whole chat history or task run log (server.mjs:156, orchestrator.mjs:1531)
 - **What:** `readLog` and `taskDetail` call `JSON.parse` on every line inside a single try, so one bad line (for

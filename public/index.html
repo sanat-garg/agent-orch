@@ -114,6 +114,10 @@
         <span class="ob-title">Orchestrator</span>
         <span class="ob-status" id="obStatus"></span>
         <span class="ob-counts" id="obCounts"></span>
+        <button type="button" class="chip" id="obQueue" hidden>
+          <svg viewBox="0 0 24 24" width="14" height="14"><path d="M4 6h16M4 12h16M4 18h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <span>Queue</span>
+        </button>
         <div class="pop-wrap">
           <button type="button" class="chip" id="obSettingsBtn" aria-haspopup="true">
             <svg viewBox="0 0 24 24" width="14" height="14"><path d="M4 7h10M18 7h2M4 17h2M10 17h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="7" r="2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="8" cy="17" r="2" fill="none" stroke="currentColor" stroke-width="2"/></svg>
@@ -285,6 +289,25 @@
     </div>
   </div>
 </div>
+
+<div class="modal sheet" id="queueModal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-panel qs" role="dialog" aria-modal="true" aria-labelledby="qTitle">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <div class="m-head">
+      <div>
+        <h2 id="qTitle">Queue</h2>
+        <p class="m-sub" id="qSub">Drag a queued task to reorder (press and hold on touch, or Alt+↑/↓). Its dependents move with it.</p>
+      </div>
+      <button class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="m-body" id="qBody"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
 <div class="modal sheet" id="delegModal" hidden>
   <div class="modal-backdrop" data-close></div>

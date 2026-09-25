@@ -1040,3 +1040,34 @@ button.dg-row:disabled { opacity: .6; cursor: progress; }
   .pick-chip { max-width: 96px; }
 }
 @keyframes sheet-up { from { transform: translateY(100%); } }
+
+/* queue sheet: drag to reorder (app.js Q) */
+.modal-panel.qs { width: min(560px, 100%); }
+.q-list { position: relative; display: flex; flex-direction: column; gap: 6px; margin: 0 0 12px; }
+.q-card { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; touch-action: pan-y; cursor: grab; }
+.q-grip { display: flex; flex: none; margin: 0 -6px 0 -4px; color: var(--faint); }
+.q-card:hover .q-grip { color: var(--muted); }
+.q-card.q-pressing { transform: scale(.98); transition: transform .35s ease, border-color .15s; border-color: var(--accent); }
+.q-list.dragging { cursor: grabbing; }
+.q-list.dragging .q-card { transition: transform .18s cubic-bezier(.2,.8,.2,1), opacity .15s; }
+.q-card.q-hide { position: absolute; left: 0; right: 0; visibility: hidden; }
+.q-list.dragging .q-card.q-nodrop { opacity: .4; }
+.q-list.dragging .q-card.q-prereq { opacity: .7; border-style: dashed; border-color: var(--warn); }
+.q-ghost { position: fixed; left: 0; top: 0; z-index: 80; pointer-events: none; will-change: transform; }
+.q-stack { position: relative; isolation: isolate; }
+.q-stack.stacked::before, .q-stack.stacked::after { content: ''; position: absolute; inset: 0; z-index: -1; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--raised); }
+.q-stack.stacked::before { transform: translate(8px, 10px); opacity: .6; }
+.q-stack.stacked::after { transform: translate(4px, 5px); }
+.q-ghost .tcard { background: var(--panel); border-color: var(--accent); box-shadow: 0 14px 32px rgba(0,0,0,.28); transform: rotate(-.6deg) scale(1.02); }
+.q-ghost.invalid .tcard { border-color: var(--danger); box-shadow: 0 14px 32px rgba(0,0,0,.28), 0 0 0 3px var(--danger-soft); cursor: not-allowed; }
+.q-meta { display: flex; justify-content: flex-end; gap: 6px; margin-top: 14px; }
+.q-more, .q-hint { font-size: 11.5px; line-height: 20px; padding: 0 9px; border-radius: 99px; white-space: nowrap; }
+.q-more { background: var(--accent); color: #fff; }
+.q-hint:empty { display: none; }
+.q-hint { background: var(--danger); color: #fff; }
+.tc-after { color: var(--accent); text-decoration: underline dotted; text-underline-offset: 2px; cursor: pointer; }
+.q-flash { animation: q-flash 1.2s ease; }
+@keyframes q-flash { 0%, 40% { box-shadow: 0 0 0 3px var(--accent-soft); border-color: var(--accent); } }
+.toast { position: fixed; left: 50%; bottom: max(24px, calc(env(safe-area-inset-bottom) + 12px)); transform: translateX(-50%); z-index: 90;
+  max-width: min(92vw, 480px); padding: 10px 14px; border-radius: 10px; background: var(--text); color: var(--bg); font-size: 13.5px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.25); animation: fade .15s ease; }

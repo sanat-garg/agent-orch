@@ -1654,7 +1654,7 @@ function send(msg) {
 
 function onServer(msg) {
   if (msg.t === 'mtick' || msg.t === 'mhist' || msg.t === 'mdetail' || msg.t === 'usage') return onMetrics(msg);
-  if (['otask', 'oproject', 'ostate', 'orun'].includes(msg.t)) return onOrch(msg);
+  if (['otask', 'oproject', 'ostate', 'orun', 'oorder'].includes(msg.t)) return onOrch(msg);
   if (msg.t === 'connections') return applyConnections(msg.connections);
   if (msg.t === 'models') return api('/api/agents').then((d) => { AGENT_LIST = d.agents || []; renderAgentPicker(); }).catch(() => {});
   if (msg.t === 'status') { upd.pending = !!msg.restartPending; return renderUpdateBanner(); }
@@ -2609,7 +2609,17 @@ function fillCard(b, id) {
   b.querySelector('.tc-glyph').className = `tc-glyph ${s.cls}`;
   title.textContent = displayTitle(t);
   sub.textContent = '';
-  sub.append(el('span', 'id', `#${t.id}`), document.createTextNode(` · ${s.label}`));
+  sub.append(el('span', 'id', `#${t.id}`));
+  // A queued task with a prerequisite shows which one ('after #N'), so the queue's dependencies are visible.
+  const dep = t.status === 'queued' && t.depends_on;
+  if (dep) {
+    const a = el('span', 'tc-after', `after #${dep}`);
+    a.setAttribute('role', 'link');
+    a.title = `Starts after #${dep}`;
+    a.addEventListener('click', (e) => { e.stopPropagation(); showTask(dep); });
+    sub.append(document.createTextNode(' · '), a);
+  }
+  sub.append(document.createTextNode(` · ${dep && s.label === `Waits for #${dep}` ? 'Waiting' : s.label}`));
   tags.textContent = '';
   const open = t.status === 'queued' || t.status === 'running';
   if (open && t.urgency === 'urgent') tags.append(el('span', 'tc-tag urgent', 'Urgent'));
@@ -2631,6 +2641,7 @@ function applyOrchSnapshot(s) {
   renderOrchBar();
   renderUpdateBanner();
   refreshAllCards();
+  scheduleQueue();
 }
 
 function onOrch(msg) {
@@ -2639,6 +2650,10 @@ function onOrch(msg) {
     refreshCards(msg.task.id);
     for (const other of O.tasks.values()) if (other.depends_on === msg.task.id) refreshCards(other.id);
     if (O.drawer === msg.task.id) { renderDrawerHead(); scheduleDetail(); }
+    if (msg.task.project_id === O.project?.id) scheduleQueue();
+  } else if (msg.t === 'oorder') {
+    for (const r of msg.order || []) { const t = O.tasks.get(r.id); if (t) t.position = r.position; }
+    if (msg.project_id === O.project?.id) scheduleQueue();
   } else if (msg.t === 'oproject') {
     const c = currentConvo();
     if (msg.project && c && msg.project.path === c.cwd) {
@@ -2717,6 +2732,7 @@ function renderOrchBar() {
     }
   }
   $('obPause').hidden = !p;
+  $('obQueue').hidden = !p;
   $('obSettingsBtn').parentElement.hidden = !p;
   if (p) {
     $('obPause').textContent = p.status === 'paused' ? 'Resume' : 'Pause';
@@ -2772,7 +2788,7 @@ function closeTask() {
 $('drClose').addEventListener('click', closeTask);
 $('drawerScrim').addEventListener('click', closeTask);
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && O.drawer && $('pickerModal').hidden && $('serverModal').hidden && $('connsModal').hidden && $('usageModal').hidden && !e.target.closest?.('.dr-due')) {
+  if (e.key === 'Escape' && O.drawer && $('pickerModal').hidden && $('serverModal').hidden && $('connsModal').hidden && $('usageModal').hidden && $('queueModal').hidden && !e.target.closest?.('.dr-due')) {
     e.stopImmediatePropagation();
     closeTask();
   }
@@ -3200,6 +3216,273 @@ async function pickDelegate(r) {
     renderDelegate();
   }
 }
+
+// ----- the queue sheet: the project's running and queued tasks, queued ones in manual order. A queued card drags
+// with Pointer Events (mouse: after a 5 px move; touch: a ~350 ms long-press, so a swipe still scrolls) or moves with
+// Alt+↑/↓. Its queued dependents move with it as one block: POST /api/orch/tasks/:id/move, 409 if it would go ahead
+// of a prerequisite (the UI also greys those slots out).
+const Q = { press: null, drag: null, busy: false, lastFocus: null, noClick: false, timer: 0 };
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+const queuedTasks = () => [...O.tasks.values()].filter((t) => t.status === 'queued' && t.project_id === O.project?.id)
+  .sort((a, b) => (a.position ?? Infinity) - (b.position ?? Infinity) || a.id - b.id);
+let toastTimer;
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (t.hidden = true), 4500);
+}
+function openQueue() {
+  if ($('queueModal').hidden) Q.lastFocus = document.activeElement;
+  $('queueModal').hidden = false;
+  renderQueue();
+  $('queueModal').querySelector('.q-card, [data-close].icon-btn').focus();
+}
+function closeQueue(refocus = true) {
+  if (Q.drag) endDrag(false);
+  $('queueModal').hidden = true;
+  if (refocus) Q.lastFocus?.focus?.();
+}
+$('obQueue').addEventListener('click', openQueue);
+$('queueModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeQueue(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || $('queueModal').hidden) return;
+  e.stopImmediatePropagation();
+  if (Q.drag) endDrag(false);
+  else closeQueue();
+}, true);
+function scheduleQueue() { clearTimeout(Q.timer); Q.timer = setTimeout(renderQueue, 120); }
+function renderQueue() {
+  if ($('queueModal').hidden || Q.drag || Q.busy) return;
+  const body = $('qBody');
+  const focused = document.activeElement?.closest?.('#qBody .tcard')?.dataset.task; // keeps keyboard focus across re-renders
+  body.textContent = '';
+  const running = [...O.tasks.values()].filter((t) => t.status === 'running' && t.project_id === O.project?.id);
+  const queued = queuedTasks();
+  if (running.length) {
+    body.append(el('h3', 'dg-group', 'Running'));
+    const box = el('div', 'q-list');
+    for (const t of running) box.append(queueCard(t.id, false));
+    body.append(box);
+  }
+  body.append(el('h3', 'dg-group', `Up next · ${queued.length}`));
+  if (!queued.length) body.append(el('p', 'muted', 'Nothing queued.'));
+  const list = el('div', 'q-list');
+  list.id = 'qList';
+  for (const t of queued) list.append(queueCard(t.id, queued.length > 1));
+  body.append(list);
+  if (focused) body.querySelector(`.tcard[data-task="${focused}"]`)?.focus({ preventScroll: true });
+}
+function queueCard(id, movable) {
+  const b = taskCard(id);
+  b.addEventListener('click', () => closeQueue(false)); // taskCard's own handler opens the drawer
+  if (movable) {
+    b.classList.add('q-card');
+    b.setAttribute('aria-keyshortcuts', 'Alt+ArrowUp Alt+ArrowDown');
+    b.insertAdjacentHTML('afterbegin', '<span class="q-grip" aria-hidden="true"><svg viewBox="0 0 24 24" width="14" height="14"><g fill="currentColor"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></g></svg></span>');
+  }
+  return b;
+}
+// 'after #N': jump to the prerequisite's card in the open queue, else open it in the drawer.
+function showTask(id) {
+  const card = !$('queueModal').hidden && $('qBody').querySelector(`.tcard[data-task="${id}"]`);
+  if (!card) return openTask(id);
+  card.scrollIntoView({ block: 'nearest', behavior: reducedMotion.matches ? 'auto' : 'smooth' });
+  card.classList.remove('q-flash');
+  void card.offsetWidth;
+  card.classList.add('q-flash');
+}
+
+// The block that moves with `id` (it plus its queued dependents, in list order), the rest, the block's current slot
+// among the rest, and the first valid slot: every prerequisite outside the block must stay above it.
+function qContext(id) {
+  const cards = [...$('qList').querySelectorAll('.q-card')];
+  const ids = new Set([id, ...(O.tasks.get(id)?.dependents || [])]);
+  const block = cards.filter((c) => ids.has(Number(c.dataset.task)));
+  const rest = cards.filter((c) => !ids.has(Number(c.dataset.task)));
+  const lead = cards.findIndex((c) => Number(c.dataset.task) === id);
+  const slot = rest.filter((c) => cards.indexOf(c) < lead).length;
+  let minSlot = 0, blocker = null;
+  const ups = new Set();
+  for (const c of block) {
+    for (const up of O.tasks.get(Number(c.dataset.task))?.prereqs || []) {
+      const i = rest.findIndex((r) => Number(r.dataset.task) === up);
+      if (i >= 0) ups.add(up);
+      if (i >= 0 && i + 1 > minSlot) { minSlot = i + 1; blocker = up; }
+    }
+  }
+  return { cards, block, rest, slot, minSlot, blocker, ups };
+}
+const qTops = () => new Map([...$('qBody').querySelectorAll('.tcard[data-task]')].map((c) => [c.dataset.task, c.getBoundingClientRect().top]));
+// FLIP: cards slide from where they were (`before`: id → top) to where the re-render put them.
+function qFlip(before) {
+  if (reducedMotion.matches) return;
+  const moves = [];
+  for (const c of $('qBody').querySelectorAll('.tcard[data-task]')) {
+    const b = before.get(c.dataset.task);
+    const dy = b == null ? 0 : b - c.getBoundingClientRect().top;
+    if (Math.abs(dy) > 0.5) moves.push([c, dy]);
+  }
+  for (const [c, dy] of moves) { c.style.transition = 'none'; c.style.transform = `translateY(${dy}px)`; }
+  void $('qBody').offsetHeight;
+  for (const [c] of moves) {
+    c.style.transition = 'transform .24s cubic-bezier(.2,.8,.2,1)';
+    c.style.transform = '';
+    c.addEventListener('transitionend', () => (c.style.transition = ''), { once: true });
+  }
+}
+// Move `id`'s block to `slot` among the rest: reorder optimistically, then ask the server; on an error (409:
+// a prerequisite) slide back and say why.
+async function qMove(id, ctx, slot, before = qTops()) {
+  const { rest } = ctx;
+  const where = slot < rest.length ? { before: Number(rest[slot].dataset.task) } : { after: Number(rest[rest.length - 1].dataset.task) };
+  const prev = queuedTasks().map((t) => [t.id, t.position]);
+  const restIds = rest.map((c) => Number(c.dataset.task));
+  const order = [...restIds.slice(0, slot), ...ctx.block.map((c) => Number(c.dataset.task)), ...restIds.slice(slot)];
+  order.forEach((tid, i) => { const t = O.tasks.get(tid); if (t) t.position = i + 1; });
+  const rerender = (tops) => {
+    renderQueue();
+    qFlip(tops);
+    if (document.activeElement?.dataset?.task === String(id)) document.activeElement.scrollIntoView({ block: 'nearest' });
+  };
+  rerender(before);
+  Q.busy = true;
+  try {
+    const r = await api(`/api/orch/tasks/${id}/move`, 'POST', where);
+    for (const p of r.order || []) { const t = O.tasks.get(p.id); if (t) t.position = p.position; }
+    Q.busy = false;
+    rerender(qTops());
+  } catch (e) {
+    for (const [tid, pos] of prev) { const t = O.tasks.get(tid); if (t) t.position = pos; }
+    Q.busy = false;
+    rerender(qTops());
+    toast(e.message);
+  }
+}
+
+function qPointerDown(e) {
+  const card = e.target.closest('.q-card');
+  if (!card || Q.busy || Q.drag || Q.press || (e.pointerType === 'mouse' && e.button !== 0) || e.target.closest('.tc-after')) return;
+  const p = { card, id: Number(card.dataset.task), x: e.clientX, y: e.clientY, pid: e.pointerId, touch: e.pointerType !== 'mouse', timer: 0 };
+  Q.press = p;
+  if (p.touch) {
+    card.classList.add('q-pressing');
+    p.timer = setTimeout(() => { if (Q.press === p) startDrag(p); }, 350);
+  }
+}
+function cancelPress() {
+  if (!Q.press) return;
+  clearTimeout(Q.press.timer);
+  Q.press.card.classList.remove('q-pressing');
+  Q.press = null;
+}
+function startDrag(p) {
+  clearTimeout(p.timer);
+  p.card.classList.remove('q-pressing');
+  const ctx = qContext(p.id);
+  if (!ctx.rest.length) { cancelPress(); return toast(`#${p.id}'s dependents move with it, so there's nothing to reorder it against`); }
+  navigator.vibrate?.(10);
+  const list = $('qList'), rect = p.card.getBoundingClientRect(), before = qTops();
+  const ghost = el('div', 'q-ghost');
+  const stack = el('div', `q-stack${ctx.block.length > 1 ? ' stacked' : ''}`);
+  const face = p.card.cloneNode(true);
+  face.classList.remove('active', 'q-pressing');
+  face.removeAttribute('data-task');
+  stack.append(face);
+  const meta = el('div', 'q-meta');
+  if (ctx.block.length > 1) meta.append(el('span', 'q-more', `+${ctx.block.length - 1} dependent${ctx.block.length > 2 ? 's' : ''}`));
+  const hint = el('span', 'q-hint');
+  meta.append(hint);
+  ghost.append(stack, meta);
+  ghost.style.width = `${rect.width}px`;
+  document.body.append(ghost);
+  const d = Q.drag = { ...p, ...ctx, list, ghost, hint, x: p.x, y: p.y, offX: p.x - rect.left, offY: p.y - rect.top, h: rect.height,
+    gap: rect.height + (parseFloat(getComputedStyle(list).rowGap) || 0), raf: 0 };
+  for (const c of d.block) c.classList.add('q-hide');
+  list.classList.add('dragging');
+  list.style.paddingBottom = `${d.gap}px`;
+  const listTop = list.getBoundingClientRect().top;
+  d.geo = d.rest.map((c) => ({ top: c.offsetTop, h: c.offsetHeight }));
+  d.rest.forEach((c, k) => {
+    c.classList.toggle('q-nodrop', k < d.minSlot);
+    c.classList.toggle('q-prereq', d.ups.has(Number(c.dataset.task)));
+    if (reducedMotion.matches) return;
+    c.style.transition = 'none';
+    c.style.transform = `translateY(${before.get(c.dataset.task) - (listTop + c.offsetTop)}px)`;
+  });
+  void list.offsetHeight;
+  qShift(d);
+  dragMove();
+  const scroll = () => {
+    if (Q.drag !== d) return;
+    const r = $('qBody').getBoundingClientRect(), edge = Math.min(64, r.height / 4);
+    const v = d.y < r.top + edge ? -(r.top + edge - d.y) / edge : d.y > r.bottom - edge ? (d.y - (r.bottom - edge)) / edge : 0;
+    if (v) { $('qBody').scrollTop += Math.max(-1, Math.min(1, v)) * 14; dragMove(); }
+    d.raf = requestAnimationFrame(scroll);
+  };
+  d.raf = requestAnimationFrame(scroll);
+}
+function qShift(d) {
+  d.rest.forEach((c, k) => {
+    c.style.transition = '';
+    c.style.transform = k >= d.slot ? `translateY(${d.gap}px)` : '';
+  });
+}
+function dragMove() {
+  const d = Q.drag;
+  if (!d) return;
+  d.ghost.style.transform = `translate3d(${d.x - d.offX}px, ${d.y - d.offY}px, 0)`;
+  const gy = d.y - d.offY + d.h / 2 - d.list.getBoundingClientRect().top;
+  const slot = d.geo.filter((g, k) => g.top + g.h / 2 + (k >= d.slot ? d.gap : 0) < gy).length;
+  if (slot !== d.slot) { d.slot = slot; qShift(d); }
+  const bad = d.slot < d.minSlot;
+  d.ghost.classList.toggle('invalid', bad);
+  d.hint.textContent = bad ? `Needs #${d.blocker} first` : '';
+}
+function endDrag(drop) {
+  const d = Q.drag;
+  Q.drag = null;
+  Q.press = null;
+  cancelAnimationFrame(d.raf);
+  Q.noClick = true;
+  setTimeout(() => (Q.noClick = false), 80);
+  const tops = qTops(), g = d.ghost.getBoundingClientRect().top;
+  d.block.forEach((c, j) => tops.set(c.dataset.task, g + j * 6));
+  d.ghost.remove();
+  d.list.classList.remove('dragging');
+  const ctx = qContext(d.id); // the list's order is unchanged until the move applies
+  if (drop && d.slot >= d.minSlot && d.slot !== ctx.slot) return qMove(d.id, ctx, d.slot, tops);
+  if (drop && d.slot < d.minSlot) toast(`#${d.id} can't go above #${d.blocker}: it needs #${d.blocker} first`);
+  renderQueue();
+  qFlip(tops);
+}
+$('qBody').addEventListener('pointerdown', qPointerDown);
+addEventListener('pointermove', (e) => {
+  const p = Q.press;
+  if (!p || e.pointerId !== p.pid) return;
+  if (Q.drag) { Q.drag.x = e.clientX; Q.drag.y = e.clientY; return dragMove(); }
+  const dist = Math.hypot(e.clientX - p.x, e.clientY - p.y);
+  if (p.touch) { if (dist > 8) cancelPress(); } // a swipe: let it scroll
+  else if (dist > 5) startDrag(p);
+});
+addEventListener('pointerup', (e) => { if (Q.press?.pid === e.pointerId) (Q.drag ? endDrag(true) : cancelPress()); });
+addEventListener('pointercancel', (e) => { if (Q.press?.pid === e.pointerId) (Q.drag ? endDrag(false) : cancelPress()); });
+// Once a long-press picked a card up, the finger drags it instead of scrolling the sheet (iOS needs this non-passive).
+document.addEventListener('touchmove', (e) => { if (Q.drag) e.preventDefault(); }, { passive: false });
+$('qBody').addEventListener('contextmenu', (e) => { if (Q.press || Q.drag) e.preventDefault(); });
+$('qBody').addEventListener('click', (e) => { if (Q.noClick) { e.stopPropagation(); e.preventDefault(); } }, true);
+$('qBody').addEventListener('keydown', (e) => {
+  const card = e.target.closest?.('.q-card');
+  if (!card || !e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+  e.preventDefault();
+  if (Q.busy || Q.drag) return;
+  const id = Number(card.dataset.task), ctx = qContext(id);
+  const slot = ctx.slot + (e.key === 'ArrowUp' ? -1 : 1);
+  if (slot < 0 || slot > ctx.rest.length) return;
+  if (slot < ctx.minSlot) return toast(`#${id} needs #${ctx.blocker} first`);
+  qMove(id, ctx, slot);
+});
 
 // ---------- GitHub ----------
 const GH = { linked: false, login: null };

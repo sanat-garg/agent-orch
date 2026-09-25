@@ -11,8 +11,8 @@ const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
 const appJs = read('public/app.js');
 const indexHtml = read('public/index.html');
 
-// Ids that app.js creates itself before looking them up with $(). Starts empty (checked 2026-09-25).
-const DYNAMIC_IDS = new Set([]);
+// Ids that app.js creates itself before looking them up with $(): qList is the queue sheet's list (renderQueue).
+const DYNAMIC_IDS = new Set(['qList']);
 
 test('public/app.js parses', () => {
   assert.doesNotThrow(() => new vm.Script(appJs, { filename: 'public/app.js' }));

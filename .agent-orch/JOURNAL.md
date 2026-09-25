@@ -377,3 +377,7 @@ Usage modal offers 6h range with 15-minute token buckets
 ## 2026-09-25 19:09 — #114 Task queue order: position column, dependency-aware reorder API [done (check passed)]
 
 manual queue reorder API added; all 172 tests pass
+
+## 2026-09-25 19:25 — #115 Drag-and-drop task cards in the queue, moving dependents with them [done (check passed)]
+
+Queue sheet drag-reorders tasks with dependents via the move API

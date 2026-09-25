@@ -13,3 +13,7 @@ UI for reordering the task queue (public/app.js, app.css) using the POST /api/or
 ## Done when
 
 `node --check public/app.js && npm test` passes, and app.js uses pointer events plus a long-press to drag queued task cards and calls /api/orch/tasks/:id/move
+
+## Result — done (check passed) (2026-09-25 19:25)
+
+AGENT-ORCH-STATUS: done — Queue sheet drag-reorders tasks with dependents via the move API

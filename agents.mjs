@@ -205,8 +205,8 @@ export function codexResetsAt(msg, now = new Date()) {
 const clip = (t) => (t.length > 6000 ? t.slice(0, 6000) + '\n…' : t);
 
 // Spawns a CLI that prints one JSON object per stdout line and feeds each to `handle`; stderr is kept (last 4k) in
-// res.stderr. detached: the CLI gets its own process group, so an abort also kills the commands it spawned. If
-// `stopOn` matches stderr, the run is killed too (and `stopped` is true), e.g. a CLI blocking on an auth prompt.
+// res.stderr. detached: the CLI gets its own process group, so an abort, or the CLI's exit, also kills the commands
+// it spawned. If `stopOn` matches stderr, the run is killed too (and `stopped` is true), e.g. a CLI blocking on an auth prompt.
 async function spawnJsonl({ bin, args, cwd, env, signal, res, handle, stopOn }) {
   let aborted = false, stopped = false, killTimer;
   const child = spawn(bin, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
@@ -244,8 +244,10 @@ async function spawnJsonl({ bin, args, cwd, env, signal, res, handle, stopOn }) 
     });
     if (buf.trim()) { try { handle(JSON.parse(buf)); } catch {} }
   } finally {
-    clearTimeout(killTimer);
     signal?.removeEventListener('abort', onAbort);
+    // Leftover group members (background commands the CLI's tools started) die with the run; the unref'd SIGKILL
+    // follow-up still fires for ones that ignore SIGTERM, without delaying the result.
+    if (child.pid) { try { process.kill(-child.pid, 0); kill(); } catch {} }
   }
   return { aborted, stopped, exitCode };
 }

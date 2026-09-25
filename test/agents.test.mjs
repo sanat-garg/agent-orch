@@ -168,6 +168,19 @@ test('codex: abort kills the process group and ends with outcome aborted', async
   assert.ok(!alive(g), 'grandchild survived the abort');
 });
 
+test('codex: background commands left by a clean run are killed (SIGKILL for ones ignoring SIGTERM)', async () => {
+  const pids = path.join(tmp(), 'pids'), bin = fileURLToPath(new URL('./fixtures/bg-stub.mjs', import.meta.url));
+  const t0 = Date.now();
+  const res = await runAgentCli({ agent: 'codex', bin, prompt: 'hi', cwd: tmp(), env: { PATH: process.env.PATH, BG_STUB_PIDS: pids } });
+  assert.equal(res.outcome, 'ok');
+  assert.ok(Date.now() - t0 < 4000, 'the result waited for the SIGKILL timer');
+  const { plain, stubborn } = JSON.parse(fs.readFileSync(pids, 'utf8'));
+  for (let i = 0; i < 100 && alive(plain); i++) await new Promise((r) => setTimeout(r, 20));
+  assert.ok(!alive(plain), 'background sleep survived the run');
+  for (let i = 0; i < 200 && alive(stubborn); i++) await new Promise((r) => setTimeout(r, 50));
+  assert.ok(!alive(stubborn), 'SIGTERM-ignoring member survived the SIGKILL follow-up');
+});
+
 // ---- antigravity: runs test/fixtures/agy-stub.mjs, which prints recorded `agy --output-format stream-json` events.
 
 const AGY = fileURLToPath(new URL('./fixtures/agy-stub.mjs', import.meta.url));

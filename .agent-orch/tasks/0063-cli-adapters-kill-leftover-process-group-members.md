@@ -13,3 +13,7 @@ Fix AUDIT #21 in .agent-orch/AUDIT.md (read it first). In agents.mjs `spawnJsonl
 ## Done when
 
 `npm test` passes and `grep -n 'Fixed' .agent-orch/AUDIT.md` shows a Fixed line under item 21
+
+## Result — done (check passed) (2026-09-25 09:01)
+
+AGENT-ORCH-STATUS: done — CLI runs now kill leftover process-group members; AUDIT #21 fixed

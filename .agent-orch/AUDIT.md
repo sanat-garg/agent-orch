@@ -1,6 +1,6 @@
 # Audit: server, orchestrator, GitHub wrapper, UI
 
-**Status (2026-09-25, task #54):** items 1-16 fixed; round 2 (multi-agent, #17-21) open.
+**Status (2026-09-25, task #63):** all items (1-21) fixed, including round 2 (multi-agent, #17-21).
 
 _Task #12, 2026-09-24. Items were open when audited; a `- **Fixed** (task #N)` line marks one resolved since. Each item was verified by reading the code; #1 was also reproduced
 against a throwaway instance (`PORT=3999 CW_DATA_DIR=$(mktemp -d)`). The items are ranked by value. Each fix
@@ -211,3 +211,4 @@ tasks during a chat turn); `applyRoute` upsert/delete; chat delete mid-turn (`em
   the leader exits, so group members that ignore SIGTERM also survive. Same pattern as #11.
 - **Fix:** After `close`, `killGroup('SIGTERM')` (ignore ESRCH) and keep the SIGKILL follow-up timer (unref'd)
   instead of clearing it in `finally`.
+- **Fixed** (task #63): after the CLI closes, `spawnJsonl` SIGTERMs its process group if any member is left and keeps the unref'd 5 s SIGKILL follow-up (no longer cleared in `finally`), so the result isn't delayed; test/fixtures/bg-stub.mjs + test/agents.test.mjs.

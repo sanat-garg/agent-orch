@@ -245,3 +245,7 @@ Dead codex/agy sessions are now dropped and the turn retried fresh
 ## 2026-09-25 08:58 — #62 Infer route agent from model family and drop mismatched models (AUDIT #20) [done (check passed)]
 
 Routes infer agents from model family and drop mismatched models
+
+## 2026-09-25 09:01 — #63 CLI adapters kill leftover process-group members after normal exit (AUDIT #21) [done (check passed)]
+
+CLI runs now kill leftover process-group members; AUDIT #21 fixed

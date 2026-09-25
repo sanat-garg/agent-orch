@@ -37,3 +37,7 @@ bash: -c: line 1: unexpected EOF while looking for matching `"'
 Command: ! grep -nE "signed in\
 
 bash: -c: line 1: unexpected EOF while looking for matching `"'
+
+## Result — done (check passed) (2026-09-25 14:34)
+
+AGENT-ORCH-STATUS: done — restarted server's check passes; this prompt's failure predates restart

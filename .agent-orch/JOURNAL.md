@@ -349,3 +349,7 @@ Command: ! grep -nE "signed in\
 ## 2026-09-25 14:30 — #100 Sidebar footer: drop the 'N/N signed in' count [verify failed (4)]
 
 Command: ! grep -nE "signed in\
+
+## 2026-09-25 14:34 — #100 Sidebar footer: drop the 'N/N signed in' count [done (check passed)]
+
+restarted server's check passes; this prompt's failure predates restart

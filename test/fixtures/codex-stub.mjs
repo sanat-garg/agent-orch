@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Stand-in for `codex exec --json`: prints recorded JSONL events and never touches the network.
-// CODEX_STUB=ok|limit|hang picks the script; CODEX_STUB_LOG, if set, receives {argv, env, cwd} as JSON.
+// CODEX_STUB=ok|limit|auth|hang picks the script; CODEX_STUB_LOG, if set, receives {argv, env, cwd} as JSON.
 // `login status` answers like the real CLI: logged in unless CODEX_STUB_LOGIN=out.
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
@@ -37,6 +37,10 @@ if (mode === 'ok') {
   const msg = "You've hit your usage limit. Upgrade to Pro or try again at 2030-01-01T00:00:00Z.";
   out({ type: 'error', message: msg });
   out({ type: 'turn.failed', error: { message: msg } });
+  process.exitCode = 1;
+} else if (mode === 'auth') {
+  out({ type: 'error', message: 'unexpected status 401 Unauthorized: Missing bearer or basic authentication in header' });
+  out({ type: 'turn.failed', error: { message: 'unexpected status 401 Unauthorized' } });
   process.exitCode = 1;
 } else if (mode === 'hang') {
   // A grandchild in the same process group: aborting must kill it too.

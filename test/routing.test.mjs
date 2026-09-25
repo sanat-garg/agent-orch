@@ -203,3 +203,43 @@ test('a task routed to a missing agent runs on Claude and its view carries route
     fs.rmSync(proj, { recursive: true, force: true });
   }
 });
+
+test('a codex auth_error blocks only codex: blocked_until stays 0 and the retry runs on Claude', { timeout: 60000 }, () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-auth-')), proj = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-auth-p-'));
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-auth-bin-'));
+  try {
+    fs.symlinkSync(fileURLToPath(new URL('./fixtures/codex-stub.mjs', import.meta.url)), path.join(bin, 'codex'));
+    const script = `import { createOrchestrator } from ${JSON.stringify(new URL('../orchestrator.mjs', import.meta.url).href)};
+      import { DatabaseSync } from 'node:sqlite';
+      import path from 'node:path';
+      const [dataDir, proj] = process.argv.slice(1);
+      const query = () => (async function* () {
+        yield { type: 'result', subtype: 'success', result: 'AGENT-ORCH-STATUS: done — ok', session_id: 's', num_turns: 1 };
+      })();
+      const o = createOrchestrator({ query, dataDir, claudeEnv: { PATH: process.env.PATH, CODEX_STUB: 'auth' }, getLimits: () => [], onSubscription: () => true,
+        broadcast() {}, emitChat() {}, convoExists: () => false });
+      const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
+      const pid = Number(db.prepare("INSERT INTO projects(path,name,priority,status,perpetual,created_at) VALUES(?,'p',50,'active',0,0)").run(proj).lastInsertRowid);
+      const id = Number(db.prepare("INSERT INTO tasks(project_id,title,prompt,agent,created_at) VALUES(?,'Add tests','p','codex',0)").run(pid).lastInsertRowid);
+      const until = async (f) => { for (let i = 0; i < 300 && !f(); i++) await new Promise((r) => setTimeout(r, 100)); };
+      await until(() => !db.prepare("SELECT 1 FROM tasks WHERE status IN ('queued','running')").get());
+      const kv = (k) => db.prepare('SELECT value FROM kv WHERE key=?').get(k)?.value ?? null;
+      const runs = db.prepare('SELECT agent FROM runs WHERE task_id=? ORDER BY id').all(id).map((r) => r.agent);
+      const events = db.prepare('SELECT message FROM events').all().map((e) => e.message);
+      console.log(JSON.stringify({ task: o.taskDetail(id).task, blocked: kv('blocked_until'), failed: kv('agent_auth_failed:codex'), runs, events }));
+      process.exit(0);`;
+    const out = execFileSync(process.execPath, ['--input-type=module', '-e', script, dataDir, proj],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+    const r = JSON.parse(out.trim().split('\n').pop());
+    assert.deepEqual(r.runs, ['codex', 'claude'], JSON.stringify(r));
+    assert.ok(!parseFloat(r.blocked || '0'), `blocked_until = ${r.blocked}`);
+    assert.ok(parseFloat(r.failed) > Date.now() / 1000);
+    assert.equal(r.task.status, 'done');
+    assert.equal(r.task.ran_agent, 'claude');
+    assert.equal(r.task.route_note, 'codex sign-in failed, ran on Claude');
+    assert.ok(r.events.some((m) => m.startsWith('Codex CLI is not signed in')), r.events.join('\n'));
+    assert.ok(!r.events.some((m) => /Claude Code is not/.test(m)));
+  } finally {
+    for (const d of [dataDir, proj, bin]) fs.rmSync(d, { recursive: true, force: true });
+  }
+});

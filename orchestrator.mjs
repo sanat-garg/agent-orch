@@ -1149,9 +1149,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
   // A global route shows in every project's view.
   const pushRoutes = () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); };
+  // A non-Claude auth_error marks just that agent unusable for 10 min (kv agent_auth_failed:<id>), so its routes fall back to Claude.
+  const agentAvailable = (id) => (parseFloat(kvGet(`agent_auth_failed:${id}`, '0')) || 0) > now() ? 'sign-in failed' : agentStatus(id);
   function routeFor(task, project) {
-    const r = resolveRoute(task, project, listRoutes(project.id));
-    if (r.fellBack) logEvent(`${r.fellBack} is ${r.reason}; #${task.id || task.kind} runs on Claude instead`, { level: 'warn', projectId: project.id, taskId: task.id || null });
+    const r = resolveRoute(task, project, listRoutes(project.id), agentAvailable);
+    if (r.fellBack) logEvent(`${r.fellBack} ${/^not /.test(r.reason) ? 'is ' : ''}${r.reason}; #${task.id || task.kind} runs on Claude instead`, { level: 'warn', projectId: project.id, taskId: task.id || null });
     return r;
   }
   function routesText(projectId) {
@@ -1471,6 +1473,12 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       requeueIfRunning(tid, { session_id: res.sessionId || task.session_id });
       const u = blockedUntil();
       return logEvent(`⏸ #${tid} hit the ${res.limitType || 'usage'} limit; resumes ${u ? fmtAt(u) : 'soon'}`, { level: 'warn', projectId: pid, taskId: tid });
+    }
+    if (res.outcome === 'auth_error' && task.ran_agent && task.ran_agent !== 'claude') {
+      requeueIfRunning(tid);
+      kvSet(`agent_auth_failed:${task.ran_agent}`, now() + 600);
+      pushState();
+      return logEvent(`${AGENTS[task.ran_agent]?.label || task.ran_agent} is not signed in; its tasks run on Claude for 10 min`, { level: 'error', projectId: pid, taskId: tid });
     }
     if (res.outcome === 'auth_error') {
       requeueIfRunning(tid);

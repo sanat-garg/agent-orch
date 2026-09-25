@@ -170,6 +170,7 @@ tasks during a chat turn); `applyRoute` upsert/delete; chat delete mid-turn (`em
 - **Fix:** For a non-Claude `auth_error`, don't touch `blocked_until`: mark the agent unusable (e.g. a
   `loginCache` entry set to false for the TTL, or a kv "agent X auth failed until …") so `resolveRoute` falls back
   to Claude with a route_note, requeue the task, and log "<agent> is not signed in".
+- **Fixed** (task #59): a non-Claude auth_error sets kv `agent_auth_failed:<agent>` for 600 s instead of `blocked_until`; `routeFor` treats that agent as 'sign-in failed' and falls back to Claude (test/routing.test.mjs).
 
 ### 18. [med] A non-Claude usage limit pauses every Claude task until that agent resets (orchestrator.mjs:968, agents.mjs:420)
 - **What:** `recordGovernor` sets the global `blocked_until` for any `rate_limited` outcome. Codex's weekly limit

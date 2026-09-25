@@ -12,3 +12,7 @@ Fix AUDIT #17 in .agent-orch/AUDIT.md (read it first). In orchestrator.mjs `hand
 ## Done when
 
 `npm test` passes and `grep -n 'Fixed' .agent-orch/AUDIT.md` shows a Fixed line under item 17
+
+## Result — done (check passed) (2026-09-25 08:47)
+
+AGENT-ORCH-STATUS: done — non-Claude auth failures now fall back to Claude; tests pass

@@ -281,3 +281,7 @@ Past limit notices now show an absolute time; tests pass
 ## 2026-09-25 09:33 — #80 Add CW_NO_ORCHESTRATOR=1 to boot the server without running the orchestrator [done (check passed)]
 
 CW_NO_ORCHESTRATOR=1 boots inert, tested; all 117 tests pass
+
+## 2026-09-25 09:35 — #81 Preflight HEAD against a copy of the live data dir and write .agent-orch/PREFLIGHT.md [done (check passed)]
+
+HEAD boots cleanly on copied live data; PREFLIGHT verdict OK

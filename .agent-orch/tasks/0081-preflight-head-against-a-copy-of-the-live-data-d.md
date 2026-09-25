@@ -23,3 +23,7 @@ Write .agent-orch/PREFLIGHT.md: date, HEAD sha, a first line that is exactly `Ve
 ## Done when
 
 `grep -E '^Verdict: (OK|NOT OK)' .agent-orch/PREFLIGHT.md` succeeds
+
+## Result — done (check passed) (2026-09-25 09:35)
+
+AGENT-ORCH-STATUS: done — HEAD boots cleanly on copied live data; PREFLIGHT verdict OK

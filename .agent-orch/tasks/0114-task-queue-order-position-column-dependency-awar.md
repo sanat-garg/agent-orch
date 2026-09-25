@@ -12,3 +12,7 @@ Backend for manual queue reordering in orchestrator.mjs plus server.mjs. 1) Add 
 ## Done when
 
 `npm test` passes with reorder tests for moving a subtree, rejecting a move above a prerequisite, and scheduler order
+
+## Result — done (check passed) (2026-09-25 19:09)
+
+AGENT-ORCH-STATUS: done — manual queue reorder API added; all 172 tests pass

@@ -861,6 +861,14 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
   // messages.task_id: the plan task that took a saved message (status 'taken'); it is 'done' once answered.
   if (!db.prepare('PRAGMA table_info(messages)').all().some((c) => c.name === 'task_id')) db.exec('ALTER TABLE messages ADD COLUMN task_id INTEGER');
+  // tasks.position: the owner's manual queue order within a project (lower runs first; see `runnable`). Existing rows
+  // start in the order the scheduler used before: effective priority, then age.
+  if (!db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === 'position')) {
+    db.exec('ALTER TABLE tasks ADD COLUMN position REAL');
+    db.exec(`UPDATE tasks SET position=(SELECT rn FROM (SELECT t.id, ROW_NUMBER() OVER (PARTITION BY t.project_id
+      ORDER BY ${EFFECTIVE_SQL.replaceAll(':now', String(Date.now() / 1000))} DESC, t.created_at ASC, t.id ASC) AS rn
+      FROM tasks t JOIN projects p ON p.id=t.project_id) o WHERE o.id=tasks.id)`);
+  }
 
   const q1 = (sql, p = {}) => db.prepare(sql).get(p);
   const qa = (sql, p = {}) => db.prepare(sql).all(p);
@@ -911,10 +919,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       priority = kind === 'plan' ? PRIORITY.plan : kind === 'reflect' ? PRIORITY.reflect
         : urgency !== 'normal' && URGENCY[urgency] ? URGENCY[urgency] : PRIORITY[source] ?? 50;
     }
-    const r = run(`INSERT INTO tasks(project_id,kind,title,prompt,priority,urgency,deadline,depends_on,done_when,source,agent,model,origin,auto_delegate,pinned_model,category,created_at)
-      VALUES(:p,:k,:ti,:pr,:pri,:u,:d,:dep,:dw,:s,:ag,:mo,:or,:ad,:pm,:cat,:c)`,
+    const pos = insertPosition(projectId, effectivePriority({ priority, deadline }, getProject(projectId)), dependsOn);
+    const r = run(`INSERT INTO tasks(project_id,kind,title,prompt,priority,urgency,deadline,depends_on,done_when,source,agent,model,origin,auto_delegate,pinned_model,category,position,created_at)
+      VALUES(:p,:k,:ti,:pr,:pri,:u,:d,:dep,:dw,:s,:ag,:mo,:or,:ad,:pm,:cat,:pos,:c)`,
       { p: projectId, k: kind, ti: title, pr: prompt, pri: priority, u: urgency, d: deadline, dep: dependsOn, dw: doneWhen, s: source, ag: agent, mo: model,
-        or: origin, ad: autoDelegate ? 1 : 0, pm: pinnedModel, cat: category, c: now() });
+        or: origin, ad: autoDelegate ? 1 : 0, pm: pinnedModel, cat: category, pos, c: now() });
     const id = Number(r.lastInsertRowid);
     pushTask(id);
     return id;
@@ -936,14 +945,104 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       AND (t.depends_on IS NULL OR EXISTS(SELECT 1 FROM tasks d WHERE d.id=t.depends_on AND d.status='done'))`;
   function runnable(allowed, exclusive, limit) {
     let sql = RUNNABLE;
-    const p = { now: now(), n: limit };
+    const p = { now: now() };
     if (allowed) {
       sql += ` AND (t.urgency IN (${allowed.map((_, i) => `:u${i}`).join(',')}) OR t.urgency='urgent')`;
       allowed.forEach((u, i) => (p[`u${i}`] = u));
     }
     // Never two running tasks in one project: they'd race on the same checkout and its git commits.
     if (exclusive) sql += " AND NOT EXISTS(SELECT 1 FROM tasks r WHERE r.project_id=t.project_id AND r.status='running')";
-    return qa(sql + ' ORDER BY eff DESC, (t.session_id IS NOT NULL) DESC, t.created_at ASC LIMIT :n', p);
+    return queueOrder(qa(sql, p)).slice(0, limit);
+  }
+
+  // ---- queue order. Within a project the owner's manual `position` is the primary order and effective priority
+  // (urgency, deadline, project priority) only breaks ties. Three things still go first regardless of position:
+  // plan/reflect tasks and anything the owner queued directly (source 'user'), and tasks a deadline under 24 h away
+  // promotes to urgent. Across projects the scheduler takes each project's head in effective-priority order
+  // (only one task per project runs at a time anyway). Rows need `eff` (EFFECTIVE_SQL).
+  const goesFirst = (r) => r.kind !== 'work' || r.source === 'user' || (r.deadline != null && r.deadline - now() < 86400);
+  const byPosition = (a, b) => (a.position ?? Infinity) - (b.position ?? Infinity) || 0;
+  const withinProject = (a, b) => goesFirst(b) - goesFirst(a) || byPosition(a, b) || b.eff - a.eff
+    || (b.session_id != null) - (a.session_id != null) || a.created_at - b.created_at || a.id - b.id;
+  function queueOrder(rows) {
+    const groups = new Map();
+    for (const r of rows) (groups.get(r.project_id) || groups.set(r.project_id, []).get(r.project_id)).push(r);
+    const lists = [...groups.values()].map((g) => g.sort(withinProject));
+    lists.sort((a, b) => goesFirst(b[0]) - goesFirst(a[0]) || b[0].eff - a[0].eff || a[0].created_at - b[0].created_at);
+    return lists.flat();
+  }
+  // A project's queued tasks in manual order (the list the UI reorders).
+  const queuedInOrder = (projectId) => qa("SELECT * FROM tasks WHERE project_id=:p AND status='queued' ORDER BY position IS NULL, position, id", { p: projectId });
+  function renumber(rows) {
+    rows.forEach((r, i) => { r.position = i + 1; run('UPDATE tasks SET position=:pos WHERE id=:id', { pos: i + 1, id: r.id }); });
+    return rows;
+  }
+  // Where a new task lands: after its queued prerequisites, before the first queued task it outranks.
+  function insertPosition(projectId, eff, dependsOn) {
+    let rows = queuedInOrder(projectId).filter((r) => r.position != null);
+    if (!rows.length) return (q1('SELECT MAX(position) AS m FROM tasks WHERE project_id=:p', { p: projectId })?.m ?? 0) + 1;
+    const project = getProject(projectId);
+    const ups = new Set(prereqIds(dependsOn));
+    let i = Math.max(0, ...rows.map((r, j) => (ups.has(r.id) ? j + 1 : 0)));
+    while (i < rows.length && effectivePriority(rows[i], project) >= eff) i++;
+    if (i === rows.length) return rows[i - 1].position + 1;
+    const prev = i ? rows[i - 1].position : rows[0].position - 1;
+    if (rows[i].position - prev < 1e-6) { rows = renumber(rows); return i + 0.5; }
+    return (prev + rows[i].position) / 2;
+  }
+  // The depends_on chain upward from `id` (inclusive) that hasn't finished yet: what must finish first.
+  function prereqIds(id) {
+    const out = [], seen = new Set();
+    for (let t = id != null ? getTask(id) : null; t && !seen.has(t.id); t = t.depends_on != null ? getTask(t.depends_on) : null) {
+      seen.add(t.id);
+      if (t.status !== 'done') out.push(t.id);
+    }
+    return out;
+  }
+  // Every queued task whose depends_on chain leads to `id`, in queue order: they move with it.
+  const dependentIds = (id) => qa(`WITH RECURSIVE d(id) AS (SELECT id FROM tasks WHERE depends_on=:id UNION SELECT t.id FROM tasks t JOIN d ON t.depends_on=d.id)
+    SELECT t.id FROM tasks t JOIN d ON d.id=t.id WHERE t.status='queued' ORDER BY t.position IS NULL, t.position, t.id`, { id }).map((r) => r.id);
+
+  // Owner reorder: move a queued task and its queued dependent subtree as one block (relative order kept) to just
+  // before `before` or just after `after` (queued tasks of the same project). Rejected (409) if any block member
+  // would end up ahead of a queued prerequisite outside the block. One transaction; broadcasts the new order.
+  function moveTask(id, { before = null, after = null } = {}) {
+    const task = getTask(id);
+    if (!task) return { error: 'No such task', status: 404 };
+    if (task.status !== 'queued') return { error: `#${id} is ${task.status}; only queued tasks can move`, status: 409 };
+    if ((before == null) === (after == null)) return { error: 'Give exactly one of before or after', status: 400 };
+    const targetId = Number(before ?? after);
+    const target = getTask(targetId);
+    if (!target || target.project_id !== task.project_id || target.status !== 'queued') return { error: `#${targetId} is not a queued task in this project`, status: 400 };
+    const blockIds = new Set([id, ...dependentIds(id)]);
+    if (blockIds.has(targetId)) return { error: `#${targetId} moves with #${id}; pick a task outside its dependents`, status: 409 };
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const rows = queuedInOrder(task.project_id);
+      const block = rows.filter((r) => blockIds.has(r.id)), rest = rows.filter((r) => !blockIds.has(r.id));
+      const at = rest.findIndex((r) => r.id === targetId) + (after != null ? 1 : 0);
+      const order = [...rest.slice(0, at), ...block, ...rest.slice(at)];
+      const index = new Map(order.map((r, i) => [r.id, i]));
+      for (const r of block) {
+        for (const up of prereqIds(r.depends_on)) {
+          if (index.has(up) && index.get(up) > index.get(r.id)) {
+            db.exec('ROLLBACK');
+            return { error: up === id || blockIds.has(up) ? `#${r.id} can't go before #${up}, which it depends on`
+              : `#${r.id} can't go before its prerequisite #${up}: #${up} must finish first`, status: 409 };
+          }
+        }
+      }
+      renumber(order);
+      db.exec('COMMIT');
+      const view = order.map((r) => ({ id: r.id, position: r.position }));
+      broadcast({ t: 'oorder', project_id: task.project_id, order: view });
+      logEvent(`#${id}${block.length > 1 ? ` (+${block.length - 1} dependent)` : ''} moved ${after != null ? 'after' : 'before'} #${targetId}`, { projectId: task.project_id, taskId: id });
+      setTimeout(tick, 100);
+      return { ok: true, order: view };
+    } catch (e) {
+      if (db.isTransaction) db.exec('ROLLBACK');
+      throw e;
+    }
   }
   function claimNext(allowed) {
     // Mandatory GitHub protocol: a project's work only starts once its repo exists.
@@ -1882,7 +1981,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         // "Do next" is the owner speaking: it outranks everything waiting, deadlines included.
         const top = Math.max(0, ...runnable(null, false, 200).map((t) => t.eff));
         const own = effectivePriority(task, getProject(task.project_id)) - task.priority;
-        updateTask(id, { priority: Math.max(task.priority, top - own + 5), urgency: 'urgent', not_before: 0 });
+        // Manual position is the primary order within the project, so it also goes to the front of its queue
+        // (unless a queued prerequisite has to finish first).
+        const queue = queuedInOrder(task.project_id).filter((r) => r.position != null && r.id !== id);
+        const front = queue.length && !prereqIds(task.depends_on).some((up) => queue.some((r) => r.id === up)) ? { position: queue[0].position - 1 } : {};
+        updateTask(id, { priority: Math.max(task.priority, top - own + 5), urgency: 'urgent', not_before: 0, ...front });
         logEvent(`#${id} moved to the front`, { projectId: task.project_id, taskId: id });
         setTimeout(tick, 100);
         return { ok: true };
@@ -1967,7 +2070,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (!t) return null;
     return {
       id: t.id, project_id: t.project_id, kind: t.kind, title: t.title, status: t.status, urgency: t.urgency,
-      priority: t.priority, deadline: t.deadline, depends_on: t.depends_on, attempts: t.attempts,
+      priority: t.priority, deadline: t.deadline, depends_on: t.depends_on, attempts: t.attempts, position: t.position ?? null,
+      // prereqs: unfinished tasks up the depends_on chain (must finish first); dependents: the queued subtree that moves with it.
+      prereqs: prereqIds(t.depends_on), dependents: dependentIds(t.id),
       continuations: t.continuations, not_before: t.not_before, source: t.source, created_at: t.created_at,
       started_at: t.started_at, finished_at: t.finished_at, commit_sha: t.commit_sha,
       agent: t.agent, model: t.model, ran_agent: t.ran_agent, ran_model: t.ran_model, route_note: t.route_note ?? null,
@@ -2092,7 +2197,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   return {
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
-    planTurn, abortPlan, candidates, eligible: delegationEligible, delegateOptions, delegateTask, taskAction, changeMessage, projectAction, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
+    planTurn, abortPlan, candidates, eligible: delegationEligible, delegateOptions, delegateTask, taskAction, moveTask, changeMessage, projectAction, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
     drain, undrain, chatPlanning, stateView, limitResetFor, recordLimit: recordGovernor, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     unwatch: (ws) => { for (const set of runSubs.values()) set.delete(ws); },
   };

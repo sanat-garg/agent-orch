@@ -373,3 +373,7 @@ saved messages editable/retractable while pending; 409 after consume, tests pass
 ## 2026-09-25 18:59 — #113 Usage modal: add a 6h range [done (check passed)]
 
 Usage modal offers 6h range with 15-minute token buckets
+
+## 2026-09-25 19:09 — #114 Task queue order: position column, dependency-aware reorder API [done (check passed)]
+
+manual queue reorder API added; all 172 tests pass

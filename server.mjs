@@ -1332,6 +1332,14 @@ async function handleRequest(req, res) {
       return json(res, r.error ? r.status || 400 : 200, r.error ? { error: r.error } : r);
     }
   }
+  // Queue reorder: POST {before: id|null, after: id|null} moves a queued task with its dependent subtree (409 if it
+  // would go ahead of a prerequisite, or the task isn't queued).
+  const omv = p.match(/^\/api\/orch\/tasks\/(\d+)\/move$/);
+  if (omv && req.method === 'POST') {
+    const body = await readBody(req);
+    const r = orch.moveTask(Number(omv[1]), { before: body.before ?? null, after: body.after ?? null });
+    return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r);
+  }
   // A saved chat message (orchestrator deferMessage): PATCH {text} edits it, DELETE retracts it; 409 once a plan task took it.
   const om = p.match(/^\/api\/orch\/messages\/(\d+)$/);
   if (om && (req.method === 'PATCH' || req.method === 'DELETE')) {

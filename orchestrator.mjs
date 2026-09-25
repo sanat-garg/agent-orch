@@ -1278,8 +1278,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   // ---- the scheduler (agent-orch's daemon, as timers inside this process)
   let ticking = false;
+  let draining = false, drained = []; // in memory only: a restart forgets drain()
   async function tick() {
-    if (ticking || !leader.ok) return;
+    if (ticking || !leader.ok || draining) return;
     ticking = true;
     try {
       if (kvGet('paused_all') === '1') return;
@@ -1309,7 +1310,16 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     pushState();
     execute(task, abort.signal)
       .catch((e) => console.error('[orchestrator] task crashed', e))
-      .finally(() => { running.delete(task.id); pushState(); setTimeout(tick, 200); });
+      .finally(() => {
+        running.delete(task.id); pushState(); setTimeout(tick, 200);
+        if (!running.size) for (const r of drained.splice(0)) r();
+      });
+  }
+
+  // Stop claiming (plan, work and reflect) and resolve once every running task has finished.
+  function drain() {
+    draining = true; pushState();
+    return new Promise((r) => running.size ? drained.push(r) : r());
   }
 
   function scheduleReflections() {
@@ -1660,7 +1670,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
   function stateView() {
     const d = decisionCache?.d;
-    return { blockedUntil: blockedUntil(), blockedReason: kvGet('blocked_reason'), pacing: d?.reason || kvGet('budget_reason'), slots: d?.concurrency ?? CFG.concurrency, running: running.size, subscription: onSubscription() };
+    return { blockedUntil: blockedUntil(), blockedReason: kvGet('blocked_reason'), pacing: d?.reason || kvGet('budget_reason'), slots: d?.concurrency ?? CFG.concurrency, running: running.size, draining, subscription: onSubscription() };
   }
   function pushTask(id) {
     const t = taskView(getTask(id));
@@ -1748,7 +1758,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   return {
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
     planTurn, abortPlan, taskAction, projectAction, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
-    stateView, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
+    drain, stateView, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     unwatch: (ws) => { for (const set of runSubs.values()) set.delete(ws); },
   };
 }

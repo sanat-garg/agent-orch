@@ -197,3 +197,7 @@ fallback reason stored in route_note and shown on badge
 ## 2026-09-25 04:16 — #54 Audit round 2: multi-agent adapters, routing and non-Claude chat [done (check passed)]
 
 AUDIT.md lists five confirmed multi-agent findings, #17–#21
+
+## 2026-09-25 04:18 — #55 Orchestrator drain(): stop claiming tasks and resolve when running tasks finish [done (check passed)]
+
+drain() stops claims, resolves when idle; tests pass

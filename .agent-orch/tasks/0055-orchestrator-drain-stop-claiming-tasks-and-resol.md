@@ -13,3 +13,7 @@ Read .agent-orch/CONTEXT.md first. In orchestrator.mjs, add a `drain()` method t
 ## Done when
 
 `node --test test/drain.test.mjs && npm test`
+
+## Result — done (check passed) (2026-09-25 04:18)
+
+AGENT-ORCH-STATUS: done — drain() stops claims, resolves when idle; tests pass

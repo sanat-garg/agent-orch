@@ -269,3 +269,7 @@ Login start/cancel/finish race-safe; race tests pass; #22 Fixed
 ## 2026-09-25 09:19 — #76 Connections panel recovers after a reconnect or restart; kill orphaned login tmux at boot (AUDIT #23) [done (check passed)]
 
 Connections panel reloads on reconnect; orphaned login tmux killed at boot
+
+## 2026-09-25 09:23 — #77 Restart-when-idle waits for busy chat and planner turns, and can be cancelled (AUDIT #24) [done (check passed)]
+
+Restart waits for busy chat work, and restarts can be cancelled

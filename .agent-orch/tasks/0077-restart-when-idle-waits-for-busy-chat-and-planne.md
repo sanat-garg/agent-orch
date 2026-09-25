@@ -12,3 +12,7 @@ Fix AUDIT.md item #24 (read the full finding in .agent-orch/AUDIT.md). In /home/
 ## Done when
 
 `npm test` passes, including new drain tests for busy-chat waiting and drain cancellation, and AUDIT.md marks #24 Fixed.
+
+## Result — done (check passed) (2026-09-25 09:23)
+
+AGENT-ORCH-STATUS: done — Restart waits for busy chat work, and restarts can be cancelled

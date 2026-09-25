@@ -54,6 +54,11 @@ test('restart-when-idle rejects unauthenticated calls, then drains and exits 0',
   assert.equal(st.restartPending, false);
   assert.equal(typeof st.commitsSinceBoot, 'number');
 
+  const c = await fetch(base + '/api/restart-when-idle', { method: 'POST', headers: { cookie }, body: JSON.stringify({ cancel: true }) });
+  assert.equal(c.status, 200);
+  assert.deepEqual(await c.json(), { draining: false });
+  assert.equal(child.exitCode, null);
+
   const r = await fetch(base + '/api/restart-when-idle', { method: 'POST', headers: { cookie } });
   assert.equal(r.status, 202);
   assert.deepEqual(await r.json(), { draining: true });

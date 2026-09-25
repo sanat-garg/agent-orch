@@ -28,7 +28,7 @@ _Durable knowledge for every agent session: architecture, conventions, decisions
 - 2026-09-24: the owner removed DENY_TOOLS so agents can work on this repo.
 
 ## Gotchas
-- This checkout IS the live app. Never restart/kill it or call `POST /api/restart-when-idle` on port 3000. Test instances MUST use another port and `CW_DATA_DIR=$(mktemp -d)`, or they double-run live tasks.
+- This checkout IS the live app. Never restart/kill it or call `POST /api/restart-when-idle` on port 3000 (body `{cancel:true}` cancels a drain). Test instances MUST use another port and `CW_DATA_DIR=$(mktemp -d)`, or they double-run live tasks.
 - Edits to server/orchestrator only go live on restart. The UI banner offers "Restart when idle" (drain, exit 0, systemd restarts).
 - The verifier (`extractCommand`) runs every command-like backtick snippet in "Done when", joined with ` && `. Commands containing `>` (incl. `2>&1`) or `curl` are refused. Absence checks must use `! grep …`.
 - `migrateMemDir()` renames a legacy `.ao2/` into `.agent-orch/`.

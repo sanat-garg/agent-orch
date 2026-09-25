@@ -1296,6 +1296,12 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       emitChat(convo.id, { t: 'notice', text: 'Saved. The planner is busy answering earlier messages; it answers this right after.' });
       return;
     }
+    // Restart when idle is pending: save the message; a plan task answers it after the restart.
+    if (draining) {
+      deferMessage(project.id, text);
+      emitChat(convo.id, { t: 'notice', text: 'Saved. agent-orch is restarting once idle; the planner answers this after the restart.' });
+      return;
+    }
     // While limited, save the message; a plan task answers it the moment capacity returns.
     const blocked = blockedUntil();
     if (blocked) {
@@ -1393,6 +1399,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     draining = true; pushState();
     return new Promise((r) => running.size ? drained.push(r) : r());
   }
+  // Cancel a drain: claiming resumes. Pending drain() promises still resolve when running tasks end.
+  function undrain() {
+    draining = false; pushState(); setTimeout(tick, 100);
+  }
+  const chatPlanning = () => [...planningProjects.values()].includes('chat');
 
   function scheduleReflections() {
     let added = false;
@@ -1841,7 +1852,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   return {
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
     planTurn, abortPlan, taskAction, projectAction, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
-    drain, stateView, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
+    drain, undrain, chatPlanning, stateView, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     unwatch: (ws) => { for (const set of runSubs.values()) set.delete(ws); },
   };
 }

@@ -1368,6 +1368,7 @@ function onServer(msg) {
   if (msg.t === 'mtick' || msg.t === 'mhist' || msg.t === 'mdetail' || msg.t === 'usage') return onMetrics(msg);
   if (['otask', 'oproject', 'ostate', 'orun'].includes(msg.t)) return onOrch(msg);
   if (msg.t === 'connections') return applyConnections(msg.connections);
+  if (msg.t === 'status') { upd.pending = !!msg.restartPending; return renderUpdateBanner(); }
   if (msg.t === 'convos') {
     state.convos = msg.convos;
     if (state.cid && !state.convos.find((c) => c.id === state.cid)) openConvo(null);

@@ -1,6 +1,6 @@
 # Audit: server, orchestrator, GitHub wrapper, UI
 
-**Status (2026-09-25, task #71):** items 1-21 fixed (rounds 1-2); round 3: #22, #23 and #25 fixed, #24 and #26 open.
+**Status (2026-09-25, task #71):** items 1-21 fixed (rounds 1-2); round 3: #22-#25 fixed, #26 open.
 
 _Task #12, 2026-09-24. Items were open when audited; a `- **Fixed** (task #N)` line marks one resolved since. Each item was verified by reading the code; #1 was also reproduced
 against a throwaway instance (`PORT=3999 CW_DATA_DIR=$(mktemp -d)`). The items are ranked by value. Each fix
@@ -269,6 +269,7 @@ seconds on both paths, and codex/agy `resetsAt` are epoch seconds like `withUnti
 - **Fix:** Have the server's exit wait for `orch.drain()` **and** for no busy chat (`runtimes` busy, `agentTurns`,
   `planning`): re-check on each chat `result`/turn end. While draining, queue new chat planner turns (or refuse them
   with a notice). Optionally add `POST /api/restart-when-idle {cancel:true}`, which clears `draining`/`restartPending`.
+- **Fixed** (task #77): the exit waits for `orch.drain()` then polls `chatIdle` (runtimes.mjs) every 2 s; `planTurn` saves messages sent while draining for after the restart; `POST /api/restart-when-idle {cancel:true}` clears `restartPending` and calls `orch.undrain()`; test/drain.test.mjs.
 
 ### 25. [low] A pasted Claude code that starts with `-` is read as tmux flags, and the UI says it was sent (connections.mjs:183-185)
 - **What:** `send-keys -t … -l <code>` doesn't put `--` before the code, so tmux's getopt parses a leading `-` as

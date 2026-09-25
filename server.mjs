@@ -10,7 +10,7 @@ import { WebSocketServer } from 'ws';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createOrchestrator, parseJsonl } from './orchestrator.mjs';
 import { createGitHub } from './github.mjs';
-import { retireRuntime } from './runtimes.mjs';
+import { retireRuntime, chatIdle, whenIdle } from './runtimes.mjs';
 import { AGENTS, runAgentCli, clearLoginCache, isMissingSession } from './agents.mjs';
 import { createConnections, SPECS, codexAccount, onPath } from './connections.mjs';
 
@@ -241,7 +241,7 @@ setInterval(() => refreshClaudeAuth().catch((e) => console.error('[auth] refresh
 // ---------- self-restart ----------
 // The boot commit tells the UI how far HEAD has moved since this process started (a restart is due).
 const git = (args) => new Promise((resolve) => execFile('git', args, { cwd: ROOT, timeout: 5000 }, (err, out) => resolve(err ? '' : out.trim())));
-let bootCommit = '', restartPending = false, sinceBoot = { at: 0, count: 0, busy: false };
+let bootCommit = '', restartPending = false, restartGen = 0, sinceBoot = { at: 0, count: 0, busy: false };
 git(['rev-parse', 'HEAD']).then((c) => { bootCommit = c; });
 function commitsSinceBoot() {
   if (bootCommit && !sinceBoot.busy && Date.now() - sinceBoot.at > 30e3) {
@@ -1137,12 +1137,27 @@ async function handleRequest(req, res) {
       restartPending, commitsSinceBoot: commitsSinceBoot(),
     });
   }
-  // Stop claiming tasks, then exit once the running ones finish; systemd (Restart=always) brings the app back.
+  // Stop claiming tasks, then exit once the running ones and every chat reply/planner turn finish; systemd
+  // (Restart=always) brings the app back. `{cancel:true}` stops the drain and task claiming resumes.
   if (p === '/api/restart-when-idle' && req.method === 'POST') {
+    if ((await readBody(req)).cancel) {
+      if (restartPending) {
+        restartPending = false; restartGen++;
+        orch.undrain();
+        console.log('[restart] cancelled');
+      }
+      for (const ws of allClients) send(ws, { t: 'status', restartPending });
+      return json(res, 200, { draining: false });
+    }
     if (!restartPending) {
       restartPending = true;
-      console.log('[restart] draining: waiting for running tasks to finish');
-      orch.drain().then(() => { console.log('[restart] idle; exiting for restart'); process.exit(0); });
+      const gen = ++restartGen;
+      console.log('[restart] draining: waiting for running tasks and chat turns to finish');
+      whenIdle({
+        drained: orch.drain(), cancelled: () => gen !== restartGen,
+        idle: () => chatIdle({ runtimes, agentTurns, planning, chatPlanning: orch.chatPlanning }),
+      }).then((ok) => { if (ok) { console.log('[restart] idle; exiting for restart'); process.exit(0); } });
+      for (const ws of allClients) send(ws, { t: 'status', restartPending });
     }
     return json(res, 202, { draining: true });
   }

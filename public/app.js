@@ -1046,7 +1046,12 @@ $('composer').addEventListener('submit', async (e) => {
       return;
     }
   }
-  send({ t: 'send', cid: state.cid, text });
+  if (!send({ t: 'send', cid: state.cid, text })) {
+    // Keep the text (under this chat's draft key, which reconnect restores) rather than lose it.
+    store.set('cw.draft.' + state.cid, input.value);
+    add(el('div', 'notice error', 'Not connected, reconnecting. Your message was kept.'));
+    return;
+  }
   input.value = '';
   store.set('cw.draft.' + state.cid, '');
   store.set('cw.draft.new', '');
@@ -1292,7 +1297,9 @@ function connect() {
   ws.onmessage = (m) => onServer(JSON.parse(m.data));
 }
 function send(msg) {
-  if (state.ws?.readyState === 1) state.ws.send(JSON.stringify(msg));
+  if (state.ws?.readyState !== 1) return false;
+  state.ws.send(JSON.stringify(msg));
+  return true;
 }
 
 function onServer(msg) {

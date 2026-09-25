@@ -78,6 +78,7 @@ a same-origin request. Caddy's `reverse_proxy` overwrites `X-Forwarded-For`, so 
   with no error.
 - **Fix:** Make `send()` return a boolean. On `false`, keep the text, show a "Not connected — will send when
   reconnected" notice, and either queue the message for `onopen` or leave the text in the composer.
+- **Fixed** (task #18): `send()` returns whether it sent. On `false` the composer submit handler keeps the text and its saved draft and shows a "Not connected, reconnecting. Your message was kept." notice. Nothing is queued, so a message is never sent twice.
 
 ### 8. [med] The login lockout can be bypassed with parallel requests (server.mjs:944-953)
 - **What:** `lockedFor(ip)` is checked before `await readBody(req)`, so every request in a concurrent burst passes the

@@ -130,7 +130,7 @@ test('createOrchestrator adds agent/model columns and the routes table to an exi
     execFileSync(process.execPath, ['--input-type=module', '-e', script, dataDir], { stdio: 'ignore' });
     const db = new DatabaseSync(file);
     const cols = (t) => db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name);
-    assert.ok(cols('tasks').includes('agent') && cols('tasks').includes('model'));
+    assert.ok(['agent', 'model', 'ran_agent', 'ran_model'].every((c) => cols('tasks').includes(c)));
     assert.ok(cols('runs').includes('agent'));
     assert.deepEqual(cols('routes'), ['id', 'project_id', 'match', 'agent', 'model', 'note', 'created_at']);
     assert.equal(db.prepare('SELECT title, agent FROM tasks').get().agent, null);

@@ -117,3 +117,7 @@ Antigravity adapter added; stub-binary tests pass in npm test
 ## 2026-09-25 03:37 — #29 Route orchestrator tasks to agents/models via rules and per-task fields [done (check passed)]
 
 Tasks route to agents/models; npm test passes, 40/40
+
+## 2026-09-25 03:41 — #30 UI: agent/model picker in chat, agent badge on tasks, routes list [done (check passed)]
+
+Agent/model picker, task agent badges, deletable routes list; tests pass

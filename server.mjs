@@ -11,6 +11,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createOrchestrator } from './orchestrator.mjs';
 import { createGitHub } from './github.mjs';
 import { retireRuntime } from './runtimes.mjs';
+import { AGENTS, runAgentCli } from './agents.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -163,9 +164,11 @@ function readLog(id) {
 }
 function publicConvo(c) {
   const rt = runtimes.get(c.id);
-  return { ...c, busy: !!rt?.busy || planning.has(c.id) };
+  return { ...c, busy: !!rt?.busy || planning.has(c.id) || agentTurns.has(c.id) };
 }
 const planning = new Set(); // convo ids with an orchestrator planner turn in progress
+const agentTurns = new Map(); // convo id -> AbortController of a running non-Claude chat turn
+const chatAgent = (c) => (c.agent && c.agent !== 'claude' && AGENTS[c.agent] ? c.agent : 'claude');
 const MODES = ['default', 'acceptEdits', 'plan', 'bypassPermissions', 'orchestrator'];
 const sdkMode = (mode) => (mode === 'orchestrator' || !mode ? 'default' : mode);
 
@@ -807,7 +810,58 @@ function authHint(code) {
   return `Claude returned an error: ${code}`;
 }
 
+// ---------- non-Claude chats: one runAgentCli turn per message, its normalised events shown as chat events ----------
+const agentQueue = new Map(); // convo id -> [text] sent while a turn was running
+async function agentChatTurn(convo, text) {
+  emit(convo.id, { t: 'user', text });
+  if (agentTurns.has(convo.id)) {
+    if (!agentQueue.has(convo.id)) agentQueue.set(convo.id, []);
+    agentQueue.get(convo.id).push(text);
+    return;
+  }
+  const cid = convo.id;
+  broadcast(cid, { t: 'busy', busy: true });
+  for (let next = text; next;) {
+    const agent = chatAgent(convo), a = AGENTS[agent], ac = new AbortController();
+    agentTurns.set(cid, ac);
+    broadcastConvos();
+    // A session id only resumes on the agent that created it.
+    const resume = convo.agentSession?.agent === agent ? convo.agentSession.id : null;
+    const started = Date.now();
+    let res;
+    try {
+      res = await runAgentCli({
+        agent, prompt: next, cwd: convo.cwd, resume, model: convo.model || undefined, signal: ac.signal, env: CLAUDE_ENV,
+        systemAppend: resume ? undefined : chatSystemAppend(convo), autonomous: convo.mode === 'bypassPermissions',
+        onEvent: (e) => {
+          if (e.k === 'text') emit(cid, { t: 'text', text: e.text });
+          else if (e.k === 'tool') emit(cid, { t: 'tool_use', id: e.id, name: e.name, input: e.input });
+          else if (e.k === 'tool_result') emit(cid, { t: 'tool_result', id: e.id, text: clip(e.text || ''), isError: !!e.isError });
+        },
+      });
+    } catch (e) {
+      res = { outcome: 'error', text: String(e?.message || e), stderr: '' };
+    }
+    if (res.sessionId) convo.agentSession = { agent, id: res.sessionId };
+    if (res.outcome === 'auth_error') emit(cid, { t: 'error', text: `${a.label} is not signed in on this server. Sign in from the Terminal: ${a.login}` });
+    else if (res.outcome === 'rate_limited') emit(cid, { t: 'error', text: `${a.label} hit its usage limit${res.resetsAt ? `; it resets ${new Date(res.resetsAt * 1000).toLocaleString()}` : ''}.` });
+    else if (res.outcome === 'aborted') emit(cid, { t: 'notice', text: 'Interrupted' });
+    else if (res.outcome !== 'ok') emit(cid, { t: 'error', text: `${a.label} failed: ${String(res.text || res.stderr || res.outcome).trim().slice(-600)}` });
+    emit(cid, { t: 'result', ok: res.outcome === 'ok', text: res.outcome === 'ok' ? '' : res.outcome, ms: Date.now() - started, turns: res.numTurns });
+    agentTurns.delete(cid);
+    convo.updatedAt = Date.now();
+    saveConvos();
+    syncGit(convo.cwd, `Chat: ${String(next).replace(/\s+/g, ' ').slice(0, 72)}`).catch((e) => console.error('[github] sync failed', convo.cwd, e));
+    const waiting = res.outcome === 'aborted' ? null : agentQueue.get(cid);
+    next = waiting?.length ? waiting.splice(0).join('\n\n') : null;
+  }
+  agentQueue.delete(cid);
+  broadcast(cid, { t: 'busy', busy: false });
+  broadcastConvos();
+}
+
 async function sendUserMessage(convo, text) {
+  if (convo.mode !== 'orchestrator' && chatAgent(convo) !== 'claude') return agentChatTurn(convo, text);
   if (!onSubscription()) await refreshClaudeAuth();
   if (!onSubscription()) {
     emit(convo.id, { t: 'user', text });
@@ -1039,6 +1093,8 @@ async function handleRequest(req, res) {
     if (!c) return json(res, 404, { error: 'No such chat' });
     if (req.method === 'DELETE') {
       retireRuntime(runtimes, c.id);
+      agentQueue.delete(c.id);
+      agentTurns.get(c.id)?.abort();
       orch.abortPlan(c.id);
       orch.detachConvo(c.id); // its project's background work pauses; the folder and tasks are kept
       convos = convos.filter((x) => x.id !== c.id);
@@ -1100,6 +1156,9 @@ async function handleRequest(req, res) {
   if (op && req.method === 'POST') {
     const r = orch.projectAction(Number(op[1]), await readBody(req));
     return json(res, r.error ? 400 : 200, r);
+  }
+  if (p === '/api/agents') {
+    return json(res, 200, { agents: Object.values(AGENTS).map((a) => ({ id: a.id, label: a.label, available: !!a.available(), models: a.models, login: a.login })) });
   }
   if (p === '/api/projects') {
     const list = listFolders(WORKSPACE).map((f) => {
@@ -1182,9 +1241,9 @@ wss.on('connection', (ws, req) => {
       subscribers.get(convo.id).add(ws);
       const rt = runtimes.get(convo.id);
       send(ws, {
-        t: 'history', cid: convo.id, events: readLog(convo.id), busy: !!rt?.busy || planning.has(convo.id),
+        t: 'history', cid: convo.id, events: readLog(convo.id), busy: !!rt?.busy || planning.has(convo.id) || agentTurns.has(convo.id),
         pending: rt ? [...rt.pending.values()].map((x) => x.req) : [],
-        mode: convo.mode, model: convo.model, cwd: convo.cwd,
+        mode: convo.mode, agent: chatAgent(convo), model: convo.model, cwd: convo.cwd,
         orch: orch.convoSnapshot(convo),
       });
       return;
@@ -1206,6 +1265,7 @@ wss.on('connection', (ws, req) => {
       case 'interrupt': {
         const rt = runtimes.get(convo.id);
         if (planning.has(convo.id)) { planQueue.delete(convo.id); orch.abortPlan(convo.id); }
+        else if (agentTurns.has(convo.id)) { agentQueue.delete(convo.id); agentTurns.get(convo.id).abort(); }
         else if (rt) {
           for (const [pid, p] of rt.pending) {
             p.resolve({ behavior: 'deny', message: 'Interrupted by user', interrupt: true });
@@ -1233,12 +1293,17 @@ wss.on('connection', (ws, req) => {
           }
         }
         break;
-      case 'set_model':
+      case 'set_model': {
+        const agent = AGENTS[msg.agent] ? msg.agent : 'claude';
         convo.model = typeof msg.model === 'string' ? msg.model : '';
+        convo.agent = agent;
         saveConvos();
-        runtimes.get(convo.id)?.q.setModel(convo.model || undefined).catch(() => {});
-        broadcast(convo.id, { t: 'model', model: convo.model });
+        // The Claude runtime is only kept while the chat is on Claude.
+        if (agent === 'claude') runtimes.get(convo.id)?.q.setModel(convo.model || undefined).catch(() => {});
+        else if (runtimes.has(convo.id)) { retireRuntime(runtimes, convo.id); broadcastConvos(); }
+        broadcast(convo.id, { t: 'model', agent, model: convo.model });
         break;
+      }
     }
   });
 

@@ -27,7 +27,7 @@ const state = {
   // Full access is the default here; an older saved "ask first" choice is upgraded once.
   draftMode: store.get('cw.fullAccess') ? store.get('cw.mode') || 'bypassPermissions'
     : (store.set('cw.fullAccess', '1'), ['plan', 'orchestrator'].includes(store.get('cw.mode')) ? store.get('cw.mode') : 'bypassPermissions'),
-  draftModel: store.get('cw.model') || '',
+  draftModel: store.get('cw.model') || 'claude|', // agent|model (an older saved value is a bare Claude model)
   busy: false,
   ws: null,
   live: null,        // element receiving streamed text
@@ -543,7 +543,7 @@ function openConvo(cid) {
     $('messages').append($('emptyTpl').content.cloneNode(true));
     renderRecentProjects();
     setModeUI(state.draftMode);
-    $('model').value = state.draftModel;
+    setPick(state.draftModel);
   }
   updateFolderChip();
   updateHeader();
@@ -1033,7 +1033,7 @@ $('composer').addEventListener('submit', async (e) => {
       state.draft = { type: 'new', name: '' }; // the next new chat starts its own project again
       if (!state.convos.find((x) => x.id === c.id)) state.convos.unshift(c);
       openConvo(c.id);
-      if (state.draftModel) send({ t: 'set_model', cid: c.id, model: state.draftModel });
+      if (pickVal(parsePick(state.draftModel)) !== 'claude|') send({ t: 'set_model', cid: c.id, ...parsePick(state.draftModel) });
     } catch (err) {
       const n = el('div', 'notice error', err.message);
       if (/github/i.test(err.message)) {
@@ -1071,10 +1071,55 @@ function changeMode(mode) {
 }
 $('mode').addEventListener('change', () => changeMode($('mode').value));
 $('model').addEventListener('change', () => {
-  const model = $('model').value;
-  if (state.cid) send({ t: 'set_model', cid: state.cid, model });
-  else { state.draftModel = model; store.set('cw.model', model); }
+  const v = $('model').value;
+  if (state.cid) send({ t: 'set_model', cid: state.cid, ...parsePick(v) });
+  else { state.draftModel = v; store.set('cw.model', v); }
 });
+
+// ---------- agent + model picker (options come from the server's agent registry) ----------
+let AGENT_LIST = [];
+const MODEL_NAMES = { opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku' };
+const pickVal = ({ agent, model }) => `${agent || 'claude'}|${model || ''}`;
+const parsePick = (v) => (v.includes('|') ? { agent: v.slice(0, v.indexOf('|')), model: v.slice(v.indexOf('|') + 1) } : { agent: 'claude', model: v });
+const shortLabel = (agent) => (AGENT_LIST.find((a) => a.id === agent)?.label || agent).replace(/ (Code|CLI)$/, '');
+function setPick(v) {
+  const sel = $('model'), val = pickVal(parsePick(v || ''));
+  if (![...sel.options].some((o) => o.value === val)) {
+    const { agent, model } = parsePick(val);
+    const o = el('option', '', model ? `${shortLabel(agent)} · ${MODEL_NAMES[model] || model}` : shortLabel(agent));
+    o.value = val;
+    sel.append(o);
+  }
+  sel.value = val;
+}
+function renderAgentPicker() {
+  const sel = $('model'), keep = sel.value;
+  sel.textContent = '';
+  for (const a of AGENT_LIST) {
+    const g = document.createElement('optgroup');
+    g.label = a.available ? a.label : `${a.label} (sign in: ${a.login})`;
+    g.disabled = !a.available;
+    const def = el('option', '', `${a.label} · default model`);
+    def.value = pickVal({ agent: a.id });
+    g.append(def);
+    for (const m of a.models) {
+      const o = el('option', '', `${shortLabel(a.id)} · ${MODEL_NAMES[m] || m}`);
+      o.value = pickVal({ agent: a.id, model: m });
+      g.append(o);
+    }
+    sel.append(g);
+  }
+  setPick(keep);
+}
+api('/api/agents').then((d) => { AGENT_LIST = d.agents || []; renderAgentPicker(); }).catch(() => {});
+// "codex · gpt-5-codex": the agent and model a task last ran on (or was assigned).
+function agentBadge(t) {
+  const agent = t.ran_agent || t.agent, model = t.ran_model || t.model;
+  if (!agent && !model) return null;
+  const b = el('span', 'tc-tag agent', [agent || 'claude', model].filter(Boolean).join(' · '));
+  b.title = t.ran_agent ? 'Agent and model it ran on' : 'Agent and model it will run on';
+  return b;
+}
 
 // ---------- project picker ----------
 const FOLDER_ICON = '<svg viewBox="0 0 24 24" width="17" height="17"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
@@ -1324,7 +1369,7 @@ function onServer(msg) {
       for (const req of msg.pending) showPerm(req);
       setBusy(msg.busy);
       setModeUI(msg.mode || 'default');
-      $('model').value = msg.model || '';
+      setPick(pickVal(msg));
       input.value = store.get('cw.draft.' + state.cid) || '';
       autosize();
       updateSendButton();
@@ -1345,7 +1390,7 @@ function onServer(msg) {
       applyOrchSnapshot(msg.orch);
       break;
     case 'model':
-      $('model').value = msg.model || '';
+      setPick(pickVal(msg));
       break;
     case 'init':
       break;
@@ -1892,6 +1937,8 @@ function fillCard(b, id) {
   if (open && t.urgency === 'urgent') tags.append(el('span', 'tc-tag urgent', 'Urgent'));
   if (open && t.urgency === 'background') tags.append(el('span', 'tc-tag', 'Later'));
   if (open && t.deadline) tags.append(el('span', 'tc-tag due', `Due ${fmtDue(t.deadline)}`));
+  const badge = agentBadge(t);
+  if (badge) tags.append(badge);
   b.classList.toggle('active', O.drawer === id);
 }
 const refreshCards = (id) => document.querySelectorAll(`.tcard[data-task="${id}"]`).forEach((b) => fillCard(b, id));
@@ -1953,6 +2000,25 @@ function renderOrchBar() {
       const span = el('span');
       span.append(el('b', '', String(p.counts[k])), document.createTextNode(` ${label}`));
       counts.append(span);
+    }
+  }
+  const routes = $('obRoutes');
+  routes.textContent = '';
+  if (p) {
+    routes.append(el('strong', '', 'Routing rules'));
+    if (!p.routes?.length) routes.append(el('small', '', 'None: every task runs on Claude. Ask in chat, e.g. "use codex for tests".'));
+    for (const r of p.routes || []) {
+      const row = el('div', 'ob-route');
+      const what = el('span', '', `"${r.match}" → ${[r.agent, r.model].filter(Boolean).join(' · ')}`);
+      what.append(el('small', '', r.scope === 'global' ? 'all projects' : 'this project'));
+      const del = el('button', 'btn small danger', 'Delete');
+      del.type = 'button';
+      del.onclick = (e) => {
+        e.stopPropagation(); // the row re-renders, which would otherwise read as a click outside the popover
+        if (confirm(`Delete the routing rule "${r.match}"${r.scope === 'global' ? ' for all projects' : ''}?`)) orchProject({ removeRoute: r.id });
+      };
+      row.append(what, del);
+      routes.append(row);
     }
   }
   $('obPause').hidden = !p;
@@ -2048,6 +2114,8 @@ function renderDrawerHead() {
   const t = O.tasks.get(id) || O.detail?.task;
   $('drGlyph').className = `tc-glyph ${t ? taskState(t).cls : 'queued'}`;
   $('drKicker').textContent = t ? `#${t.id} · ${kindLabel(t)}` : `#${id}`;
+  const badge = t && agentBadge(t);
+  if (badge) $('drKicker').append(' ', badge);
   $('drTitle').textContent = t ? displayTitle(t) : 'Loading…';
 }
 

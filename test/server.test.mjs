@@ -100,3 +100,21 @@ test('a malformed cookie does not crash the server (AUDIT #1)', async () => {
   assert.equal(ok.status, 200);
   await ok.arrayBuffer();
 });
+
+test('GET /api/agents lists the agent registry, including claude', async () => {
+  const unauth = await get('/api/agents');
+  assert.equal(unauth.status, 401);
+  await unauth.arrayBuffer();
+  const ok = await fetch(base + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: PASSWORD }) });
+  const cookie = ok.headers.get('set-cookie').split(';')[0];
+  await ok.arrayBuffer();
+  const r = await get('/api/agents', { cookie });
+  assert.equal(r.status, 200);
+  const { agents } = await r.json();
+  const claude = agents.find((a) => a.id === 'claude');
+  assert.ok(claude, 'claude is listed');
+  assert.equal(claude.label, 'Claude Code');
+  assert.equal(typeof claude.available, 'boolean');
+  assert.ok(claude.models.includes('opus'));
+  for (const a of agents) assert.ok(a.login, `${a.id} has a login hint`);
+});

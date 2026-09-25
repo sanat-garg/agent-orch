@@ -751,8 +751,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   const db = new DatabaseSync(path.join(dir, 'agent-orch.db'));
   db.exec('PRAGMA journal_mode=WAL');
   db.exec(SCHEMA);
-  // Columns added after release: tasks.agent/model (explicit per-task routing), runs.agent (who made the session).
-  for (const [table, col] of [['tasks', 'agent'], ['tasks', 'model'], ['runs', 'agent']]) {
+  // Columns added after release: tasks.agent/model (explicit per-task routing), tasks.ran_agent/ran_model (what its
+  // latest run used, for the UI badge), runs.agent (who made the session).
+  for (const [table, col] of [['tasks', 'agent'], ['tasks', 'model'], ['tasks', 'ran_agent'], ['tasks', 'ran_model'], ['runs', 'agent']]) {
     if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} TEXT`);
   }
 
@@ -1077,7 +1078,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   function applyRoute(project, r) {
     if (r.remove) {
       const res = run('DELETE FROM routes WHERE id=:id AND (project_id=:p OR project_id IS NULL)', { id: r.remove, p: project.id });
-      if (res.changes) logEvent(`route #${r.remove} removed`, { projectId: project.id });
+      if (res.changes) { logEvent(`route #${r.remove} removed`, { projectId: project.id }); pushRoutes(); }
       return;
     }
     const pid = r.scope === 'global' ? null : project.id;
@@ -1085,7 +1086,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (same) run('UPDATE routes SET agent=:a, model=:mo, note=:n, created_at=:t WHERE id=:id', { a: r.agent, mo: r.model, n: r.note, t: now(), id: same.id });
     else run('INSERT INTO routes(project_id,match,agent,model,note,created_at) VALUES(:p,:m,:a,:mo,:n,:t)', { p: pid, m: r.match, a: r.agent, mo: r.model, n: r.note, t: now() });
     logEvent(`route (${r.scope}): '${r.match}' → ${[r.agent, r.model].filter(Boolean).join(' / ')}`, { projectId: project.id });
+    pushRoutes();
   }
+  // A global route shows in every project's view.
+  const pushRoutes = () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); };
   function routeFor(task, project) {
     const r = resolveRoute(task, project, listRoutes(project.id));
     if (r.fellBack) logEvent(`${r.fellBack} is not available; #${task.id || task.kind} runs on Claude instead`, { level: 'warn', projectId: project.id, taskId: task.id || null });
@@ -1346,6 +1350,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       else prompt = RESUME;
     }
     const { runId, logPath } = startRun(task.id, task.kind, route.agent);
+    updateTask(task.id, { ran_agent: route.agent, ran_model: route.model || null });
     const r = running.get(task.id);
     if (r) r.runId = runId;
     const res = await runAgent({
@@ -1526,6 +1531,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   function projectAction(id, fields) {
     const p = getProject(id);
     if (!p) return { error: 'No such project' };
+    if ('removeRoute' in fields) {
+      applyRoute(p, { remove: Number(fields.removeRoute) || 0 });
+      return { ok: true };
+    }
     const allowed = {};
     if ('perpetual' in fields) allowed.perpetual = fields.perpetual ? 1 : 0;
     if ('autonomous' in fields) allowed.autonomous = fields.autonomous ? 1 : 0;
@@ -1572,7 +1581,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       priority: t.priority, deadline: t.deadline, depends_on: t.depends_on, attempts: t.attempts,
       continuations: t.continuations, not_before: t.not_before, source: t.source, created_at: t.created_at,
       started_at: t.started_at, finished_at: t.finished_at, commit_sha: t.commit_sha,
-      agent: t.agent, model: t.model, has_verify_failure: t.verify_output != null,
+      agent: t.agent, model: t.model, ran_agent: t.ran_agent, ran_model: t.ran_model, has_verify_failure: t.verify_output != null,
       summary: t.status === 'done' ? parseStatus(t.result)[1] || null : t.status === 'failed' || t.status === 'cancelled' ? String(t.result || '').slice(0, 200) : null,
     };
   }
@@ -1584,6 +1593,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       id: p.id, name: p.name, path: p.path, convo_id: p.convo_id, status: p.status, priority: p.priority, mode: p.mode,
       perpetual: !!p.perpetual, autonomous: !!p.autonomous, next_reflect_at: p.next_reflect_at, ready: !!projectReady(p.path),
       counts: { queued: c.queued || 0, running: c.running || 0, done: c.done || 0, failed: c.failed || 0 },
+      routes: listRoutes(p.id).map((r) => ({ id: r.id, scope: r.project_id == null ? 'global' : 'project', match: r.match, agent: r.agent, model: r.model, note: r.note })),
     };
   }
   function stateView() {

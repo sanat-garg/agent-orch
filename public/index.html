@@ -118,6 +118,7 @@
               <span><strong>Project priority</strong><small>How this project ranks against your other orchestrated projects.</small></span>
               <select id="obPriority"><option value="25">Low</option><option value="50">Normal</option><option value="80">High</option></select>
             </label>
+            <div class="ob-routes" id="obRoutes"></div>
           </div>
         </div>
         <button type="button" class="chip" id="obPause">Pause</button>
@@ -141,12 +142,9 @@
                   <option value="orchestrator">Orchestrator Mode</option>
                 </select>
               </label>
-              <label class="chip select-chip" title="Model">
-                <select id="model" aria-label="Model">
-                  <option value="">Default model</option>
-                  <option value="opus">Opus</option>
-                  <option value="sonnet">Sonnet</option>
-                  <option value="haiku">Haiku</option>
+              <label class="chip select-chip" title="Agent and model">
+                <select id="model" aria-label="Agent and model">
+                  <option value="claude|">Claude Code</option>
                 </select>
               </label>
             </div>

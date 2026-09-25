@@ -13,3 +13,7 @@ Expose the multi-agent support in the web UI (public/app.js, app.css, server.mjs
 ## Done when
 
 `npm test` passes including an agents-endpoint test, and public/app.js renders the agent badge on task cards
+
+## Result — done (check passed) (2026-09-25 03:41)
+
+AGENT-ORCH-STATUS: done — Agent/model picker, task agent badges, deletable routes list; tests pass

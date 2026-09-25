@@ -87,6 +87,7 @@ a same-origin request. Caddy's `reverse_proxy` overwrites `X-Forwarded-For`, so 
   still in flight keep being evaluated. A burst of N requests tests N passwords. The `attempts` map is also never pruned.
 - **Fix:** Re-check `lockedFor(ip)` after `readBody` (immediately before the synchronous `checkPassword`, which
   makes it atomic). Prune expired entries in `recordFailure`.
+- **Fixed** (task #35): the login handler re-checks `lockedFor(ip)` after `readBody`, right before `checkPassword`, and `recordFailure` prunes lapsed entries. A parallel-burst regression test covers it.
 
 ### 9. [med] Expired or revoked sessions keep their WebSocket open (server.mjs:1131)
 - **What:** The 30 s keepalive only checks `sessions[token]`. It ignores `exp`, and it doesn't call `syncSessions()`.

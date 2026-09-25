@@ -113,8 +113,11 @@ function lockedFor(ip) {
   return a.until - Date.now();
 }
 function recordFailure(ip) {
+  const now = Date.now();
+  // Prune lapsed entries: expired locks and stale partial counts.
+  for (const [k, v] of attempts) if (v.until < now && v.last < now - 15 * 60e3) attempts.delete(k);
   const a = attempts.get(ip) || { count: 0, until: 0 };
-  a.count += 1;
+  a.count += 1; a.last = now;
   if (a.count >= 5) { a.until = Date.now() + 15 * 60e3; a.count = 0; }
   attempts.set(ip, a);
   return 5 - a.count;
@@ -1019,6 +1022,9 @@ async function handleRequest(req, res) {
     const wait = lockedFor(ip);
     if (wait) return json(res, 429, { error: 'locked', retryInSec: Math.ceil(wait / 1000) });
     const body = await readBody(req);
+    // Re-check after the await: a parallel burst all passed the first check before any failure was recorded.
+    const wait2 = lockedFor(ip);
+    if (wait2) return json(res, 429, { error: 'locked', retryInSec: Math.ceil(wait2 / 1000) });
     if (!checkPassword(body.password || '')) {
       const left = recordFailure(ip);
       const w = lockedFor(ip);

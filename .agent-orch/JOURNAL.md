@@ -133,3 +133,7 @@ Verifier now runs all command-like Done-when snippets, joined with &&
 ## 2026-09-25 03:46 — #34 Detect agent login state and route logged-out agents to Claude [done]
 
 Logged-out agents now fall back to Claude; the /api/agents response includes loggedIn
+
+## 2026-09-25 03:48 — #35 Close the parallel-request login lockout bypass (AUDIT #8) [done]
+
+parallel login bursts now hit lockout; regression test passes

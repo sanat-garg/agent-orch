@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -83,6 +84,33 @@ test('login rejects a wrong password and accepts the right one', async () => {
   const home = await get('/', { cookie });
   assert.equal(home.status, 200);
   await home.arrayBuffer();
+});
+
+test('a parallel burst of wrong passwords cannot bypass the login lockout (AUDIT #8)', async () => {
+  // A fake client IP (trusted X-Forwarded-For) so the lockout doesn't hit the other tests on 127.0.0.1.
+  // Headers go out first and bodies only once all are in flight, so every request passes the pre-body check.
+  // The 11th request carries the right password; its body lands last, after the lock, so it must not be tested.
+  const pws = [...Array(10).fill('wrong'), PASSWORD];
+  const reqs = pws.map((password) => {
+    const body = JSON.stringify({ password });
+    const r = http.request(base + '/api/login', { method: 'POST', agent: false, headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'x-forwarded-for': '203.0.113.8' } });
+    r.body = body;
+    return r;
+  });
+  const done = reqs.map((r) => new Promise((resolve, reject) => r.on('response', (res) => {
+    let d = ''; res.on('data', (c) => { d += c; }); res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(d) }));
+  }).on('error', reject)));
+  reqs.forEach((r) => r.flushHeaders());
+  await new Promise((r) => setTimeout(r, 300));
+  reqs.slice(0, 10).forEach((r) => r.end(r.body));
+  const rs = await Promise.all(done.slice(0, 10));
+  reqs[10].end(reqs[10].body);
+  const last = await done[10];
+  const wrong = rs.filter((r) => r.status === 401 && r.body.error === 'wrong').length;
+  const locked = rs.filter((r) => r.status === 429 && r.body.error === 'locked').length;
+  assert.ok(wrong <= 5, `${wrong} parallel attempts got a 'wrong password' answer`);
+  assert.equal(wrong + locked, 10);
+  assert.equal(last.status, 429, 'a right password in the same burst must be refused once locked');
 });
 
 test('a malformed cookie does not crash the server (AUDIT #1)', async () => {

@@ -321,3 +321,7 @@ Codex and agy usage windows now recorded; npm test passes
 ## 2026-09-25 13:50 — #94 Usage modal: click the usage card to see limits over time per agent [done (check passed)]
 
 Usage card opens per-agent charts modal; npm test passes
+
+## 2026-09-25 14:01 — #97 Make rate limits fully independent per agent (chat and workers) [done (check passed)]
+
+per-agent rate limits independent; npm test passes (138)

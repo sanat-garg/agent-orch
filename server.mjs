@@ -676,7 +676,7 @@ gh.refresh().then((s) => console.log(`[github] ${s.linked ? `linked as ${s.login
 // Messages sent while the planner is still replying wait and go together as the next turn,
 // so two turns never run on the same planner session at once.
 const planQueue = new Map(); // convo id -> [text]
-async function orchestratorTurn(convo, text) {
+async function orchestratorTurn(convo, text, opts = {}) {
   emit(convo.id, { t: 'user', text });
   if (planning.has(convo.id)) {
     if (!planQueue.has(convo.id)) planQueue.set(convo.id, []);
@@ -688,7 +688,7 @@ async function orchestratorTurn(convo, text) {
   broadcastConvos();
   try {
     for (let next = text; next;) {
-      await orch.planTurn(convo, next);
+      await orch.planTurn(convo, next, opts);
       if (!findConvo(convo.id)) break; // deleted mid-plan: don't re-plan (and reactivate) its project
       const waiting = planQueue.get(convo.id);
       next = waiting?.length ? waiting.splice(0).join('\n\n') : null;
@@ -892,6 +892,14 @@ async function agentChatTurn(convo, text) {
   broadcast(cid, { t: 'busy', busy: true });
   for (let next = text; next;) {
     const agent = chatAgent(convo), a = AGENTS[agent], ac = new AbortController();
+    // Only this chat's own agent's limit matters (never Claude's): while it's limited, say so and skip the turn.
+    const lim = orch.limitResetFor(agent);
+    if (lim) {
+      emit(cid, { t: 'error', until: lim.at, untilKnown: lim.known, text: `Not sent: ${a.label} is at its usage limit${lim.known ? ' until {until}' : "; the reset time isn't known yet. Try again around {until}"}.` });
+      emit(cid, { t: 'result', ok: false, text: 'rate_limited', ms: 0 });
+      next = agentQueue.get(cid)?.splice(0).join('\n\n') || null;
+      continue;
+    }
     agentTurns.set(cid, ac);
     broadcastConvos();
     const started = Date.now();
@@ -924,8 +932,7 @@ async function agentChatTurn(convo, text) {
     emitShots(cid, media);
     usageLog.tokens(agent, res.usage, 'chat', cid);
     usageLog.windows(agent, res.windows);
-    if (res.outcome === 'rate_limited') usageLog.limitHit(agent, res.resetsAt, res.limitType || undefined);
-    else if (res.outcome === 'ok') usageLog.limitCleared(agent);
+    orch.recordLimit(res, agent); // blocks/unblocks only this agent (tasks routed to it follow) and logs usage history
     if (res.outcome === 'auth_error') emit(cid, { t: 'error', text: `${a.label} is not signed in on this server. ${a.login}.` });
     else if (res.outcome === 'rate_limited') emit(cid, { t: 'error', text: `${a.label} hit its usage limit${res.resetsAt ? '; it resets {until}' : ''}.`, ...(res.resetsAt && { until: res.resetsAt, untilKnown: true }) });
     else if (res.outcome === 'aborted') emit(cid, { t: 'notice', text: 'Interrupted' });
@@ -943,8 +950,10 @@ async function agentChatTurn(convo, text) {
   broadcastConvos();
 }
 
-async function sendUserMessage(convo, text) {
-  if (convo.mode !== 'orchestrator' && chatAgent(convo) !== 'claude') return agentChatTurn(convo, text);
+// opts.autoDelegate (per message): an orchestrator chat whose agent is at its limit may be answered by another agent.
+async function sendUserMessage(convo, text, opts = {}) {
+  // A non-Claude chat depends only on its own agent: no Claude sign-in or limit check.
+  if (chatAgent(convo) !== 'claude') return convo.mode === 'orchestrator' ? orchestratorTurn(convo, text, opts) : agentChatTurn(convo, text);
   if (!onSubscription()) await refreshClaudeAuth();
   if (!onSubscription()) {
     emit(convo.id, { t: 'user', text });
@@ -956,7 +965,7 @@ async function sendUserMessage(convo, text) {
     });
     return;
   }
-  if (convo.mode === 'orchestrator') return orchestratorTurn(convo, text);
+  if (convo.mode === 'orchestrator') return orchestratorTurn(convo, text, opts);
   // Orchestrator-style context control: a session that has grown past the limit is retired, and the next
   // message starts a fresh one carrying the project memory (.agent-orch/) and a recap of the recent chat.
   let prompt = text;
@@ -1425,7 +1434,7 @@ wss.on('connection', (ws, req) => {
     switch (msg.t) {
       case 'send':
         if (typeof msg.text === 'string' && msg.text.trim()) {
-          sendUserMessage(convo, msg.text).catch((e) => emit(convo.id, { t: 'error', text: String(e?.message || e) }));
+          sendUserMessage(convo, msg.text, { autoDelegate: msg.autoDelegate === true }).catch((e) => emit(convo.id, { t: 'error', text: String(e?.message || e) }));
         }
         break;
       case 'perm_reply':

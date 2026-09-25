@@ -2417,7 +2417,8 @@ function taskState(t) {
     }
   }
   const s = O.state;
-  if (s?.blockedUntil && s.blockedUntil > nowS) return { cls: 'limited', label: `Waiting for usage reset · ${fmtClock(s.blockedUntil)}` };
+  const lim = s?.blocks?.[t.runs_on || 'claude'];
+  if (lim && lim.until > nowS) return { cls: 'limited', label: `Waiting for ${limitName(t.runs_on || 'claude')} usage reset · ${fmtClock(lim.until)}` };
   if (O.project && O.project.id === t.project_id && O.project.status === 'paused') return { cls: 'waiting', label: 'Paused' };
   if (t.depends_on) {
     const dep = O.tasks.get(t.depends_on);
@@ -2495,6 +2496,9 @@ function onOrch(msg) {
 }
 
 // ----- the status bar above the chat
+// Each agent's usage limit is independent: state.blocks = { claude: { until, known, reason }, codex: … }.
+const limitName = (id) => (id === 'claude' ? 'Claude' : agentLabel(id));
+const limitedAgents = (s, nowS) => Object.entries(s.blocks || {}).filter(([, b]) => b.until > nowS);
 function renderOrchBar() {
   renderConnFoot(); // routing rules decide whether a signed-out agent warrants the footer's warning
   const on = $('mode').value === 'orchestrator';
@@ -2504,7 +2508,7 @@ function renderOrchBar() {
   let status;
   if (!p) status = 'Describe what you want. The planner breaks it into small, verified tasks.';
   else if (s.subscription === false) status = 'Waiting: Claude Code is not signed in with your subscription';
-  else if (s.blockedUntil && s.blockedUntil > nowS) status = `Usage limit reached · resumes ${fmtClock(s.blockedUntil)}`;
+  else if (limitedAgents(s, nowS).length) status = limitedAgents(s, nowS).map(([id, b]) => `${limitName(id)}: usage limit reached · resumes ${fmtClock(b.until)}`).join(' · ');
   else if (p.ready === false) status = GH.linked ? 'Setting up the GitHub repo… work starts once it exists' : 'Waiting for GitHub: link it and work starts (every task is pushed)';
   else if (p.status === 'paused') status = 'Paused. Tasks keep their progress.';
   else if (p.counts.running) status = `Working on ${p.counts.running} task${p.counts.running > 1 ? 's' : ''}`;

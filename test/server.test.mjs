@@ -204,3 +204,12 @@ test('WebSockets of removed or expired sessions close with 4001 (AUDIT #9)', asy
   assert.equal(await Promise.race([sockets[2].closed, timeout(500)]), 'open', 'a valid session stays connected');
   sockets[2].close();
 });
+
+test('the served app wires the "Restart when idle" banner to its endpoint', async () => {
+  const ok = await fetch(base + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: PASSWORD }) });
+  const cookie = ok.headers.get('set-cookie').split(';')[0];
+  const js = await get('/app.js', { cookie });
+  assert.equal(js.status, 200);
+  assert.match(await js.text(), /\/api\/restart-when-idle/);
+  assert.match(await (await get('/', { cookie })).text(), /id="updateBanner"/);
+});

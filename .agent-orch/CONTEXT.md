@@ -36,7 +36,7 @@ _Durable knowledge for every agent session: architecture, conventions, decisions
 ## Gotchas
 - The verifier (`extractCommand`) runs every command-like single-backtick snippet in "Done when", joined with ` && ` (a triple-backtick block wins if present); snippets like `server.mjs` are ignored. Commands containing `>` (incl. `2>&1`) or `curl` are refused, so such checks never run.
 - "Done when" checks asserting absence must use `! grep …`: grep exits 1 on no matches, so a bare `grep` check fails exactly when the code is clean.
-- Editing server.mjs or orchestrator.mjs doesn't affect the running app until it restarts. `POST /api/restart-when-idle` drains the orchestrator then exits 0 (systemd restarts it); /api/status reports `restartPending`/`commitsSinceBoot`. Never call it on port 3000 from a task.
+- Editing server.mjs or orchestrator.mjs doesn't affect the running app until it restarts. `POST /api/restart-when-idle` drains the orchestrator then exits 0 (systemd restarts it); /api/status reports `restartPending`/`commitsSinceBoot`. The UI's #updateBanner (app.js `upd`) shows when commitsSinceBoot > 0 (dismiss hides it until the count grows) and reads 'Restarting…' while restartPending or orchestrator `draining`. Never call it on port 3000 from a task.
 - Project memory lives in `.agent-orch/` (formerly `.ao2/`). `migrateMemDir()` renames it on init/read, and merges a `.ao2/` that a pre-restart server recreated, so a stray `.ao2/` in a commit is expected until restart.
 - Don't commit macOS `._*` files (they're gitignored).
 - Test instances MUST set `CW_DATA_DIR=$(mktemp -d)`. Without it, a second server on the live data/ requeues and

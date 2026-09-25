@@ -172,6 +172,10 @@ code, pre, kbd { font-family: var(--mono); }
   border: 1px solid var(--border); border-radius: 12px; font-size: 14px;
 }
 .banner span { flex: 1; min-width: 220px; }
+.banner.update { background: var(--accent-soft); padding: 6px 6px 6px 14px; }
+.banner.update span { min-width: 0; }
+.banner.update .icon-btn { width: 32px; height: 32px; }
+@media (max-width: 800px) { .banner.update { margin: 8px 10px 0; gap: 8px; font-size: 13.5px; } }
 .btn { border: 1px solid var(--border-strong); background: var(--panel); border-radius: 9px; padding: 0 14px; height: 36px; cursor: pointer; font-weight: 550; }
 .btn:hover { border-color: var(--accent); }
 .btn.small { height: 32px; font-size: 13.5px; }

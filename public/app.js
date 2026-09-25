@@ -52,6 +52,12 @@ function setView(view) {
 }
 document.querySelectorAll('.seg button').forEach((b) => b.addEventListener('click', () => setView(b.dataset.view)));
 $('bannerTerm').addEventListener('click', () => setView('term'));
+$('updateRestart').addEventListener('click', async () => {
+  $('updateRestart').disabled = true;
+  try { await api('/api/restart-when-idle', 'POST'); upd.pending = true; } catch { $('updateRestart').disabled = false; }
+  renderUpdateBanner();
+});
+$('updateDismiss').addEventListener('click', () => { upd.dismissed = upd.commits; store.set('cw.updDismissed', String(upd.commits)); renderUpdateBanner(); });
 
 // ---------- terminals ----------
 // Every terminal is a tmux session running bash on the server, so it keeps running when the
@@ -1328,6 +1334,7 @@ function connect() {
     $('connDot').className = 'dot on';
     $('connText').textContent = 'Connected';
     send({ t: 'open', cid: state.cid });
+    pollUpdates();
     if (!$('serverModal').hidden) send({ t: 'metrics_sub', on: true });
     if (O.drawer) { send({ t: 'owatch', taskId: O.drawer, on: true }); loadDetail(); }
   };
@@ -1413,10 +1420,30 @@ async function checkStatus() {
         ? '<strong>Chat is paused: Claude Code is signed in with an API key, which bills separately.</strong> Run <code>/login</code> in the terminal and choose your Claude account.'
         : "<strong>Claude Code isn't signed in on this server yet.</strong> Open a terminal, run <code>claude</code> and sign in with your Claude account once. Chat works after that.";
     }
+    applyUpdateStatus(s);
     updateFolderChip();
     updateHeader();
     if (!s.claudeSignedIn) setTimeout(checkStatus, 8000);
   } catch {}
+}
+
+// The server's checkout moved on since it booted (or a restart is queued): offer to restart once idle.
+const upd = { commits: 0, pending: false, dismissed: Number(store.get('cw.updDismissed')) || 0 };
+function applyUpdateStatus(s) {
+  upd.commits = s.commitsSinceBoot || 0;
+  upd.pending = !!s.restartPending;
+  if (upd.commits < upd.dismissed) { upd.dismissed = 0; store.set('cw.updDismissed', '0'); } // a restart reset the count
+  renderUpdateBanner();
+}
+async function pollUpdates() { try { applyUpdateStatus(await api('/api/status')); } catch {} }
+function renderUpdateBanner() {
+  const draining = upd.pending || !!O.state?.draining;
+  $('updateBanner').hidden = !draining && (!upd.commits || upd.commits <= upd.dismissed);
+  $('updateText').textContent = draining ? 'Restarting after running tasks finish…'
+    : `${upd.commits} new commit${upd.commits === 1 ? '' : 's'} since the server started`;
+  $('updateRestart').hidden = draining;
+  $('updateRestart').disabled = false;
+  $('updateDismiss').hidden = draining;
 }
 
 // ---------- server metrics ----------
@@ -1950,6 +1977,7 @@ function applyOrchSnapshot(s) {
   if (s?.state) O.state = s.state;
   for (const t of s?.tasks || []) O.tasks.set(t.id, t);
   renderOrchBar();
+  renderUpdateBanner();
   refreshAllCards();
 }
 
@@ -1969,6 +1997,7 @@ function onOrch(msg) {
   } else if (msg.t === 'ostate') {
     O.state = msg.state;
     renderOrchBar();
+    renderUpdateBanner();
     refreshAllCards();
   } else if (msg.t === 'orun' && O.drawer === msg.taskId && O.detail) {
     appendRunEntry(msg.runId, msg.e);
@@ -2487,6 +2516,7 @@ setInterval(() => { if (!document.hidden) markSeen(); }, 60e3);
   connect();
   setView(store.get('cw.view') || 'chat');
   setInterval(renderConvoList, 60e3);
+  setInterval(() => { if (!document.hidden) pollUpdates(); }, 60e3);
   refreshGitHub();
   const lastSeen = Number(store.get('cw.lastSeen')) || 0;
   if (lastSeen && Date.now() - lastSeen >= AWAY_MIN_MS) showAway(lastSeen);

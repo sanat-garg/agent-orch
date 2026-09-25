@@ -205,3 +205,7 @@ drain() stops claims, resolves when idle; tests pass
 ## 2026-09-25 04:20 — #56 Server: restartPending state and POST /api/restart-when-idle [done (check passed)]
 
 restart-when-idle endpoint and status fields added, all tests pass
+
+## 2026-09-25 04:22 — #57 UI: 'updates since start' banner with a Restart when idle button [done (check passed)]
+
+Update banner with Restart-when-idle button added; tests pass

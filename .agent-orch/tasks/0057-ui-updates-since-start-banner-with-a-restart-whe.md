@@ -13,3 +13,7 @@ Read .agent-orch/CONTEXT.md first. The server now exposes `restartPending`, `com
 ## Done when
 
 `grep -q restart-when-idle public/app.js && npm test`
+
+## Result — done (check passed) (2026-09-25 04:22)
+
+AGENT-ORCH-STATUS: done — Update banner with Restart-when-idle button added; tests pass

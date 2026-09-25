@@ -137,3 +137,7 @@ Logged-out agents now fall back to Claude; the /api/agents response includes log
 ## 2026-09-25 03:48 — #35 Close the parallel-request login lockout bypass (AUDIT #8) [done]
 
 parallel login bursts now hit lockout; regression test passes
+
+## 2026-09-25 03:49 — #36 Answer oversized request bodies with 413 instead of hanging (AUDIT #14) [done]
+
+Oversized bodies now get 413 and bad JSON gets 400

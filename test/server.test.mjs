@@ -113,6 +113,27 @@ test('a parallel burst of wrong passwords cannot bypass the login lockout (AUDIT
   assert.equal(last.status, 429, 'a right password in the same burst must be refused once locked');
 });
 
+test('an oversized login body gets a 413 or a closed connection, not a hang (AUDIT #14)', async () => {
+  const body = Buffer.alloc(2e6, 'a');
+  const outcome = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('oversized request hung for 3 s')), 3000);
+    const settle = (v) => { clearTimeout(timer); resolve(v); };
+    const r = http.request(base + '/api/login', { method: 'POST', agent: false, headers: { 'content-type': 'application/json', 'content-length': body.length, 'x-forwarded-for': '203.0.113.14' } });
+    r.on('response', (res) => { res.resume(); settle(res.statusCode); });
+    r.on('error', () => settle('closed'));
+    r.on('close', () => settle('closed'));
+    r.end(body);
+  });
+  assert.ok(outcome === 413 || outcome === 'closed', `oversized body answered ${outcome}`);
+  const bad = await fetch(base + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': '203.0.113.14' }, body: '{not json' });
+  assert.equal(bad.status, 400);
+  await bad.arrayBuffer();
+  assert.equal(child.exitCode, null);
+  const ok = await get('/login');
+  assert.equal(ok.status, 200);
+  await ok.arrayBuffer();
+});
+
 test('a malformed cookie does not crash the server (AUDIT #1)', async () => {
   const bad = await get('/api/status', { cookie: 'cw_session=%E0%A4%A' });
   assert.equal(bad.status, 401);

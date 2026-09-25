@@ -985,11 +985,28 @@ function json(res, code, body, headers = {}) {
   res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...headers });
   res.end(JSON.stringify(body));
 }
+// Settles on every path: an oversized, malformed or aborted body rejects with an HttpError the server wrapper answers.
+class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
 function readBody(req) {
-  return new Promise((resolve) => {
-    let data = '';
-    req.on('data', (c) => { data += c; if (data.length > 1e6) req.destroy(); });
-    req.on('end', () => { try { resolve(JSON.parse(data || '{}')); } catch { resolve({}); } });
+  return new Promise((resolve, reject) => {
+    let data = '', done = false;
+    const fail = (e) => { if (!done) { done = true; reject(e); } };
+    req.on('data', (c) => {
+      if (done) return;
+      data += c;
+      // Stop reading but keep the socket so the 413 can still go out; the wrapper closes it after.
+      if (data.length > 1e6) { req.pause(); fail(new HttpError(413, 'Body too large')); }
+    });
+    req.on('end', () => {
+      if (done) return;
+      done = true;
+      let v;
+      try { v = JSON.parse(data || '{}'); } catch { return reject(new HttpError(400, 'Bad JSON body')); }
+      if (!v || typeof v !== 'object' || Array.isArray(v)) return reject(new HttpError(400, 'Body must be a JSON object'));
+      resolve(v);
+    });
+    req.on('error', () => fail(new HttpError(400, 'Body read failed')));
+    req.on('close', () => fail(new HttpError(400, 'Body aborted')));
   });
 }
 
@@ -998,6 +1015,11 @@ const PUBLIC_PATHS = new Set(['/login', '/login.css', '/icon.svg', '/manifest.we
 // Last-resort guard: a throw in a handler must answer 500, not take the process down.
 const server = http.createServer(async (req, res) => {
   try { await handleRequest(req, res); } catch (e) {
+    if (e instanceof HttpError) {
+      if (res.headersSent || res.destroyed) return res.destroy();
+      if (e.status === 413) res.on('finish', () => req.destroy());
+      return json(res, e.status, { error: e.message }, e.status === 413 ? { Connection: 'close' } : {});
+    }
     console.error('request error', req.method, req.url, e);
     if (!res.headersSent) { res.writeHead(500); res.end('Internal error'); } else res.destroy();
   }

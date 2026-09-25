@@ -127,6 +127,7 @@ a same-origin request. Caddy's `reverse_proxy` overwrites `X-Forwarded-For`, so 
 - **What:** `readBody` calls `req.destroy()` once the body passes 1 MB, but it never resolves or rejects. The
   awaiting handler (and its closure) stays pending, and the client never gets a 413.
 - **Fix:** Resolve `null` on destroy/`error`/`close`, and have callers answer 413/400 when the body is `null`.
+- **Fixed** (task #36): `readBody` rejects with an `HttpError` on overflow (pauses, then the wrapper sends 413 with `Connection: close` and destroys), bad JSON (400), error or abort; a regression test covers it.
 
 ### 15. [low] The server panel always shows the terminal as down (server.mjs:484)
 - **What:** `slowMetrics` checks the `claude-term` unit, but the live terminal unit is `claude-shell` (verified:

@@ -13,3 +13,7 @@ AUDIT #14 in .agent-orch/AUDIT.md: readBody in server.mjs (~line 920) calls req.
 ## Done when
 
 `npm test 2>&1 | grep -qiE '413|oversized' && npm test`
+
+## Result — done (2026-09-25 03:49)
+
+AGENT-ORCH-STATUS: done — Oversized bodies now get 413 and bad JSON gets 400

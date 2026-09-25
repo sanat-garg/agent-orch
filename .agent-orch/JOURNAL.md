@@ -201,3 +201,7 @@ AUDIT.md lists five confirmed multi-agent findings, #17–#21
 ## 2026-09-25 04:18 — #55 Orchestrator drain(): stop claiming tasks and resolve when running tasks finish [done (check passed)]
 
 drain() stops claims, resolves when idle; tests pass
+
+## 2026-09-25 04:20 — #56 Server: restartPending state and POST /api/restart-when-idle [done (check passed)]
+
+restart-when-idle endpoint and status fields added, all tests pass

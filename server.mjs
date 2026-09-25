@@ -237,6 +237,19 @@ function refreshClaudeAuth() {
 const onSubscription = () => claudeAuth.loggedIn && claudeAuth.authMethod === 'claude.ai';
 setInterval(() => refreshClaudeAuth().catch((e) => console.error('[auth] refresh failed', e)), 5 * 60e3);
 
+// ---------- self-restart ----------
+// The boot commit tells the UI how far HEAD has moved since this process started (a restart is due).
+const git = (args) => new Promise((resolve) => execFile('git', args, { cwd: ROOT, timeout: 5000 }, (err, out) => resolve(err ? '' : out.trim())));
+let bootCommit = '', restartPending = false, sinceBoot = { at: 0, count: 0, busy: false };
+git(['rev-parse', 'HEAD']).then((c) => { bootCommit = c; });
+function commitsSinceBoot() {
+  if (bootCommit && !sinceBoot.busy && Date.now() - sinceBoot.at > 30e3) {
+    sinceBoot.busy = true;
+    git(['rev-list', '--count', `${bootCommit}..HEAD`]).then((n) => { sinceBoot = { at: Date.now(), count: Number(n) || 0, busy: false }; });
+  }
+  return sinceBoot.count;
+}
+
 // ---------- server metrics ----------
 const readText = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } };
 const run = (cmd, args) => new Promise((resolve) => execFile(cmd, args, { timeout: 5000 }, (err, out) => resolve(out || '')));
@@ -1083,7 +1096,17 @@ async function handleRequest(req, res) {
     if (!onSubscription() && Date.now() - claudeAuth.checkedAt > 5000) await refreshClaudeAuth();
     return json(res, 200, {
       claudeSignedIn: onSubscription(), claudeAuth, host: DEVICE_NAME, workspace: WORKSPACE,
+      restartPending, commitsSinceBoot: commitsSinceBoot(),
     });
+  }
+  // Stop claiming tasks, then exit once the running ones finish; systemd (Restart=always) brings the app back.
+  if (p === '/api/restart-when-idle' && req.method === 'POST') {
+    if (!restartPending) {
+      restartPending = true;
+      console.log('[restart] draining: waiting for running tasks to finish');
+      orch.drain().then(() => { console.log('[restart] idle; exiting for restart'); process.exit(0); });
+    }
+    return json(res, 202, { draining: true });
   }
   if (p === '/api/metrics/history') {
     return json(res, 200, historyFor(url.searchParams.get('range') || '1h'));

@@ -13,3 +13,7 @@ Read .agent-orch/CONTEXT.md first. orchestrator.mjs now has `drain()` (task befo
 ## Done when
 
 `npm test`
+
+## Result — done (check passed) (2026-09-25 04:20)
+
+AGENT-ORCH-STATUS: done — restart-when-idle endpoint and status fields added, all tests pass

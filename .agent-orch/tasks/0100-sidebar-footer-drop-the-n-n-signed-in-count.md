@@ -19,3 +19,9 @@ In the sidebar footer connection button (public/app.js, where the footer text is
 Command: ! grep -nE "signed in\
 
 bash: -c: line 1: unexpected EOF while looking for matching `"'
+
+## Result — verify failed (2) (2026-09-25 14:25)
+
+Command: ! grep -nE "signed in\
+
+bash: -c: line 1: unexpected EOF while looking for matching `"'

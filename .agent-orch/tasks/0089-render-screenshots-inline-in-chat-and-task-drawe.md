@@ -13,3 +13,7 @@ Frontend for agent screenshots (public/app.js, public/app.css, public/index.html
 ## Done when
 
 `node --check public/app.js && npm test` passes, and app.js renders k:'image' entries as <img src="/api/media/…"> in both the chat and the task drawer code paths
+
+## Result — done (check passed) (2026-09-25 10:30)
+
+AGENT-ORCH-STATUS: done — Screenshots render in chat and task drawer, with a lightbox

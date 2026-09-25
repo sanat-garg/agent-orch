@@ -42,3 +42,12 @@ test('every local <script src> and <link href> is served', () => {
     }
   }
 });
+
+test('screenshots render as /api/media images in chat and in the task drawer', () => {
+  assert.match(appJs, /const mediaUrl = \(id\) => `\/api\/media\/\$\{encodeURIComponent\(id\)\}`/);
+  assert.match(appJs, /im\.src = mediaUrl\(img\.id\)/);
+  assert.match(appJs, /case 'image':[^]*?shotNode\(ev\)/, 'chat renderEvent handles t:image');
+  assert.match(appJs, /e\.k === 'image'\)[^]*?shotNode\(e\)/, 'drawer output renders k:image entries');
+  assert.match(appJs, /shotGrid\(shots\.slice\(-4\)\)/, "drawer 'What happened' shows the latest 4");
+  assert.match(indexHtml, /id="lightbox"/);
+});

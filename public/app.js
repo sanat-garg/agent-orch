@@ -738,6 +738,81 @@ function finishTool(ev) {
   if (ev.isError) card.open = true;
 }
 
+// ----- screenshots: {id, name, w, h} images served from /api/media/:id
+const mediaUrl = (id) => `/api/media/${encodeURIComponent(id)}`;
+function shotMissing() { return el('div', 'shot-missing', 'Image unavailable'); }
+function shotNode(img) {
+  const fig = el('figure', 'shot');
+  const b = el('button');
+  b.type = 'button';
+  b.title = `Open ${img.name || 'image'}`;
+  const im = el('img');
+  im.src = mediaUrl(img.id);
+  im.alt = img.name || 'Screenshot';
+  im.loading = 'lazy';
+  im.decoding = 'async';
+  if (img.w && img.h) { im.width = img.w; im.height = img.h; }
+  im.onerror = () => { b.replaceWith(shotMissing()); fig.classList.add('broken'); };
+  b.append(im);
+  b.onclick = () => openShot(fig);
+  fig.dataset.id = img.id;
+  fig.dataset.name = img.name || '';
+  fig.append(b, el('figcaption', '', img.name || 'image'));
+  return fig;
+}
+function shotGrid(imgs = []) {
+  const g = el('div', 'shots');
+  for (const img of imgs) g.append(shotNode(img));
+  return g;
+}
+// Prev/next goes through every image of the chat, or of the whole task in the drawer.
+function openShot(fig) {
+  let list;
+  if (fig.closest('#drBody') && O.detail) list = O.detail.runs.flatMap((r) => r.entries.filter((e) => e.k === 'image'));
+  else list = [...$('messages').querySelectorAll('.shot')].map((f) => ({ id: f.dataset.id, name: f.dataset.name }));
+  const seen = new Set();
+  list = list.filter((i) => i.id && !seen.has(i.id) && seen.add(i.id));
+  LB.list = list;
+  LB.lastFocus = document.activeElement;
+  showShot(Math.max(0, list.findIndex((i) => i.id === fig.dataset.id)));
+  $('lightbox').hidden = false;
+  $('lightbox').querySelector('[data-close].icon-btn').focus();
+}
+const LB = { list: [], i: 0, lastFocus: null };
+function showShot(i) {
+  const n = LB.list.length;
+  if (!n) return;
+  LB.i = (i + n) % n;
+  const img = LB.list[LB.i];
+  $('lbTitle').textContent = img.name || 'Screenshot';
+  $('lbSub').textContent = n > 1 ? `${LB.i + 1} of ${n} · use ← → to browse` : '';
+  $('lbOpen').href = mediaUrl(img.id);
+  $('lbMissing').hidden = true;
+  $('lbImg').hidden = false;
+  $('lbImg').alt = img.name || 'Screenshot';
+  $('lbImg').src = mediaUrl(img.id);
+  $('lbPrev').hidden = $('lbNext').hidden = n < 2;
+}
+function closeShot() {
+  $('lightbox').hidden = true;
+  $('lbImg').removeAttribute('src');
+  LB.lastFocus?.focus?.();
+}
+$('lbImg').addEventListener('error', () => { if ($('lbImg').getAttribute('src')) { $('lbImg').hidden = true; $('lbMissing').hidden = false; } });
+$('lbPrev').addEventListener('click', () => showShot(LB.i - 1));
+$('lbNext').addEventListener('click', () => showShot(LB.i + 1));
+$('lightbox').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeShot(); });
+// On window, capturing: runs before the drawer's and the chat's own Escape handlers.
+window.addEventListener('keydown', (e) => {
+  if ($('lightbox').hidden) return;
+  if (e.key === 'Escape') closeShot();
+  else if (e.key === 'ArrowLeft') showShot(LB.i - 1);
+  else if (e.key === 'ArrowRight') showShot(LB.i + 1);
+  else return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+}, true);
+
 function endLive() {
   if (state.live) state.live.classList.remove('streaming');
   state.live = null;
@@ -788,6 +863,15 @@ function renderEvent(ev, replay) {
     case 'tool_result':
       finishTool(ev);
       break;
+    case 'image': {
+      // Consecutive screenshots share one grid.
+      endLive();
+      const last = $('messages').lastElementChild;
+      const grid = last?.classList.contains('shots') ? last : add(shotGrid());
+      grid.append(shotNode(ev));
+      scrollDown();
+      break;
+    }
     case 'perm_done':
       resolvePerm(ev);
       break;
@@ -2320,6 +2404,10 @@ function renderDrawer(fromLive = false) {
   } else {
     s3.append(el('div', 'out-live', t.status === 'running' ? 'Starting…' : 'Nothing yet. It starts when an agent picks it up.'));
   }
+  // The latest screenshots; the rest sit in order under Details → Commands and output.
+  const shots = d.runs.flatMap((r) => r.entries.filter((e) => e.k === 'image'));
+  if (shots.length) s3.append(shotGrid(shots.slice(-4)));
+  if (shots.length > 4) s3.append(el('div', 'muted shots-more', `${shots.length - 4} more under Details`));
   if (t.status === 'running') {
     const live = el('div', 'out-live');
     live.append(el('span', 'spark'), document.createTextNode('Working…'));
@@ -2413,9 +2501,14 @@ function renderOutput(container, runs, isRunning) {
     const how = ri === 0 ? 'Started' : prev?.outcome === 'ok' ? 'Continued' : ['error', 'max_turns', 'timeout'].includes(prev?.outcome) ? 'Retried' : 'Resumed';
     container.append(el('div', 'out-run', `${how} ${fmtClock(run.started_at)}${run.outcome ? ` · ${OUTCOME_TEXT[run.outcome] || run.outcome}` : ''}`));
     const results = new Map(run.entries.filter((e) => e.k === 'result').map((e) => [e.id, e]));
-    let group = null;
+    let group = null, shots = null;
     for (const e of run.entries) {
-      if (e.k === 'text') {
+      if (e.k !== 'image') shots = null;
+      if (e.k === 'image') {
+        group = null;
+        if (!shots) shots = container.appendChild(shotGrid());
+        shots.append(shotNode(e));
+      } else if (e.k === 'text') {
         group = null;
         const div = el('div', 'out-text');
         div.innerHTML = md(e.text.replace(/^\s*(?:AGENT-ORCH|AO2)-STATUS:\s*(done|continue)\s*[—:-]*\s*/im, '✓ '));

@@ -301,3 +301,7 @@ Shell commands, code blocks and inline commands now copy on click
 ## 2026-09-25 10:24 — #88 Capture screenshots from agent runs and serve them via /api/media [done (check passed)]
 
 Screenshots are stored and served at /api/media; tests pass
+
+## 2026-09-25 10:30 — #89 Render screenshots inline in chat and task drawer with a lightbox [done (check passed)]
+
+Screenshots render in chat and task drawer, with a lightbox

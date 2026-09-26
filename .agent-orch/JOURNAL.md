@@ -445,3 +445,7 @@ Four named limits, independent group blocking; all 208 tests pass
 ## 2026-09-26 02:20 — #137 Switch delegation ranking from Artificial Analysis to LiveBench [done]
 
 LiveBench delegation ranking verified with availability and owner overrides preserved
+
+## 2026-09-26 02:25 — #138 Show LiveBench in the simplified delegation popup [done]
+
+LiveBench popup verified at desktop and mobile widths.

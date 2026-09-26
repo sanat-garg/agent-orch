@@ -13,3 +13,7 @@ After the ranking switch, adapt the simplified fallback popup produced by #133; 
 ## Done when
 
 .agent-orch/LIVEBENCH-UI-CHECK.md contains desktop and mobile browser evidence showing LiveBench-backed fallback order, score provenance and accurate unavailable/stale states with no Artificial Analysis setup requirement.
+
+## Result — done (2026-09-26 02:25)
+
+AGENT-ORCH-STATUS: done — LiveBench popup verified at desktop and mobile widths.

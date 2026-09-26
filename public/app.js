@@ -1507,11 +1507,12 @@ function renderAutoPreview() {
     return;
   }
   const isCurated = d.fallbacks != null;
+  const orderNote = isCurated ? 'Using your saved order; unavailable models are skipped when running.' : 'Using non-benchmark fallback order: same agent first, then agent/model ID.';
   const dataMessage = d.data_status === 'loading' ? 'Loading LiveBench scores… This updates automatically.'
-    : d.data_status !== 'ready' ? 'LiveBench unavailable. Using non-benchmark fallback order.' : '';
+    : d.data_status !== 'ready' ? `LiveBench unavailable. ${orderNote}` : '';
   if (dataMessage) body.append(el('p', 'dg-why', dataMessage));
-  if (d.stale) body.append(el('p', 'dg-why', 'LiveBench data is stale. Using non-benchmark fallback order.'));
-  const scoreLabel = d.category[0].toUpperCase() + d.category.slice(1);
+  if (d.stale) body.append(el('p', 'dg-why', `LiveBench data is stale; scores are not used. ${orderNote}`));
+  const scoreLabel = ({coding: 'Coding', agentic: 'Agentic Coding', scientific: 'Mathematics / Data Analysis', general: 'Global average'})[d.category] || 'Score';
   body.append(el('h3', 'dg-group', 'Starting model'), apStartRow(d.start, scoreLabel));
   body.append(el('h3', 'dg-group', 'Fallbacks'));
   if (!isCurated && !d.candidates.length && d.start.score == null && !dataMessage) body.append(el('p', 'dg-why', 'No comparable scores for the starting model.'));
@@ -1524,8 +1525,8 @@ function renderAutoPreview() {
   });
   const details = el('details', 'ap-details'); details.open = expanded;
   details.append(el('summary', '', 'Scores and ranking details'));
-  details.append(el('p', 'dg-why', isCurated ? 'Uses your saved order; scores do not change it.'
-    : `Ranked for ${d.category} work by score similarity; unavailable models follow available models.`));
+  details.append(el('p', 'dg-why', isCurated ? 'Uses your saved order; scores do not change it. Unavailable models are skipped when running.'
+    : `For ${d.category} work, fresh same-release LiveBench scores at least the starting score minus 5 points qualify. Closest score first, then higher score, then agent/model ID. Unscored fallbacks follow, same agent first then agent/model ID. Unavailable models follow usable models and are skipped when running.`));
   if (d.data_error) details.append(el('p', 'dg-why', d.data_error));
   for (const r of [d.start, ...d.candidates]) {
     const row = el('div', 'ap-score-row');
@@ -1541,13 +1542,14 @@ function renderAutoPreview() {
     }
     if (present) row.append(grid);
     else row.append(el('p', 'dg-why', 'No metrics available for this model.'));
-    if (r.reason) row.append(el('p', 'dg-why', r.reason));
+    if (r !== d.start) row.append(el('p', 'dg-why', isCurated ? `Your saved fallback #${d.candidates.indexOf(r) + 1}; score does not determine position.` : r.reason || 'No fresh comparable LiveBench score.'));
+    if (r.score == null) row.append(el('p', 'dg-why', 'Unscored for ranking; no fresh comparable LiveBench score.'));
     details.append(row);
   }
-  details.append(el('p', 'dg-why', '— means the provider did not supply that score.'));
+  details.append(el('p', 'dg-why', 'Scores use a 0–100 scale. — means LiveBench did not supply that category score.'));
   body.append(details);
   if (d.source === 'livebench') {
-    const src = el('p', 'dg-src', `Score source: LiveBench${d.release ? ' · ' + d.release : ''}`);
+    const src = el('p', 'dg-src', `Score source: LiveBench · ${d.release ? 'benchmark release ' + d.release : 'release unavailable'} · ${d.stale ? 'stale' : d.data_status === 'ready' ? 'fresh' : d.data_status}${d.fetched_at ? ' · fetched ' + relTime(d.fetched_at) : ' · not fetched'}`);
     if (d.attribution?.url) {
       const link = el('a', '', d.attribution.text);
       link.href = d.attribution.url; link.target = '_blank'; link.rel = 'noopener'; src.append(' · ', link);
@@ -1575,7 +1577,7 @@ function renderFallbackEditor(container, opts) {
   ui.rows = rows;
   container.textContent = '';
   container.classList.add('fe');
-  if (auto) container.append(el('p', 'fe-hint', rows.length ? 'Automatic, ranked by score. Any change saves this order as your own.' : 'No automatic fallback right now.'));
+  if (auto) container.append(el('p', 'fe-hint', rows.length ? 'Automatic fallback order. Any change saves this order as your own.' : 'No automatic fallback right now.'));
   const ol = el('ol', 'fe-list');
   ol.setAttribute('aria-label', 'Fallback order. Alt+Up or Alt+Down moves the focused model; Delete removes it.');
   const move = (i, j) => {
@@ -3319,7 +3321,7 @@ function renderReflect() {
   const body = $('obReflectBody'), fc = $('obReflectForecast'), d = RF.data;
   body.textContent = ''; fc.textContent = '';
   if (!d) { body.append(el('p', 'fe-hint', RF.error || 'Loading…')); return; }
-  const scoreLabel = d.category[0].toUpperCase() + d.category.slice(1);
+  const scoreLabel = ({coding: 'Coding', agentic: 'Agentic Coding', scientific: 'Mathematics / Data Analysis', general: 'Global average'})[d.category] || 'Score';
   body.append(apStartRow(d.start, scoreLabel));
   const info = new Map([d.start, ...d.candidates].map((r) => [apKey(r), r]));
   const editor = body.appendChild(el('div'));
@@ -4227,7 +4229,6 @@ function openConnections(id) {
   renderConnFoot();
   renderConnections(true);
   refreshConnections();
-  refreshAA();
   $('connsModal').querySelector('[data-close].icon-btn').focus();
   const row = id && $('connsList').querySelector(`[data-conn="${id}"]`);
   if (!row) return;
@@ -4379,71 +4380,6 @@ function renderConnections(force) {
     box.append(row);
   }
   if (focused) box.querySelector(`[data-conn-input="${focused}"]`)?.focus();
-}
-
-// The Artificial Analysis API key (model metrics). Write-only: the server answers only whether one is configured.
-const AA = { status: null, draft: '' };
-async function refreshAA() {
-  try { AA.status = await api('/api/aa/key'); } catch {}
-  renderAA();
-}
-function renderAA() {
-  const box = $('connsData'), s = AA.status;
-  box.textContent = '';
-  if (!s) return;
-  const row = el('div', 'cn-row');
-  row.dataset.conn = 'aa';
-  const main = el('div', 'cn-main'), info = el('div', 'cn-info');
-  const [dot, text] = !s.configured ? ['warn', 'No API key · using the manual metrics table']
-    : s.error ? ['warn', s.error]
-    : ['on', `${s.from === 'env' ? 'Key from AA_API_KEY' : 'Key saved'}${s.count ? ` · ${s.count} models, updated ${relTime(s.fetched_at)}` : ''}`];
-  const st = el('span', 'cn-status');
-  st.append(el('span', `dot ${dot}`), el('span', 'cn-st', text));
-  st.title = text;
-  info.append(el('span', 'cn-label', 'Artificial Analysis'), st);
-  const icon = el('span');
-  icon.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M5 20V13M12 20V5M19 20v-9" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
-  main.append(icon.firstChild, info);
-  if (s.configured && s.from === 'file') {
-    const b = el('button', 'btn small cn-btn', 'Remove');
-    b.type = 'button';
-    b.onclick = async () => {
-      if (!confirm('Remove the Artificial Analysis API key from this server?')) return;
-      try { AA.status = await api('/api/aa/key', 'DELETE'); } catch (e) { alert(e.message); }
-      renderAA();
-    };
-    main.append(b);
-  }
-  row.append(main);
-  if (!s.configured) {
-    const f = el('form', 'cn-paste cn-aa');
-    const inp = el('input');
-    inp.type = 'password';
-    inp.placeholder = 'API key';
-    inp.autocomplete = 'off';
-    inp.setAttribute('aria-label', 'Artificial Analysis API key');
-    inp.value = AA.draft;
-    inp.oninput = () => { AA.draft = inp.value; };
-    const go = el('button', 'btn small primary', 'Save');
-    f.append(inp, go);
-    f.onsubmit = async (e) => {
-      e.preventDefault();
-      if (!inp.value.trim()) return inp.focus();
-      go.disabled = true;
-      go.textContent = 'Checking…';
-      try { AA.status = await api('/api/aa/key', 'POST', { key: inp.value.trim() }); AA.draft = ''; } catch (err) { alert(err.message); }
-      renderAA();
-    };
-    row.append(f);
-  }
-  const by = el('div', 'cn-step muted cn-by');
-  const a = el('a', '', s.attribution?.text || 'Model metrics by Artificial Analysis');
-  a.href = s.attribution?.url || 'https://artificialanalysis.ai';
-  a.target = '_blank';
-  a.rel = 'noopener noreferrer';
-  by.append(a, document.createTextNode(' ↗'));
-  row.append(by);
-  box.append(row);
 }
 
 // ---------- while you were away ----------

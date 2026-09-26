@@ -1,0 +1,7 @@
+{"type":"step_start","sessionID":"ses_fixture","part":{"type":"step-start"}}
+{"type":"text","sessionID":"ses_fixture","part":{"type":"text","text":"Looking"}}
+{"type":"tool_use","sessionID":"ses_fixture","part":{"type":"tool","callID":"call_1","tool":"bash","state":{"status":"running","input":{"command":"cat src/a.js"}}}}
+{"type":"tool_use","sessionID":"ses_fixture","part":{"type":"tool","callID":"call_1","tool":"bash","state":{"status":"completed","input":{"command":"cat src/a.js"},"output":"hello\n"}}}
+{"type":"tool_use","sessionID":"ses_fixture","part":{"type":"tool","callID":"call_2","tool":"read","state":{"status":"completed","input":{"filePath":"/tmp/a.js"},"output":"hello"}}}
+{"type":"text","sessionID":"ses_fixture","part":{"type":"text","text":"Done"}}
+{"type":"step_finish","sessionID":"ses_fixture","part":{"type":"step-finish","reason":"stop","tokens":{"input":209,"output":21,"reasoning":2,"cache":{"read":189,"write":0}},"cost":0}}

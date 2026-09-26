@@ -1262,7 +1262,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   const blockedUntil = () => blockedUntilFor('claude');
   const agentName = (agent) => (agent === 'claude' ? 'Claude' : AGENTS[agent]?.label || agent);
   // 'Antigravity CLI (third-party models)' for a group scope.
-  const scopeName = (scope) => { const g = scopeGroup(scope), a = agentName(scope.split(':')[0]); return g ? `${a} (${AGY_GROUPS[g].toLowerCase()} models)` : a; };
+  const scopeName = (scope) => { const g = scopeGroup(scope), a = agentName(scope.split(':')[0]); return g ? `${a} (${AGY_GROUPS[g]?.toLowerCase() || g} models)` : a; };
   const limitName = (agent, model) => scopeName(limitScope(agent, model));
   // When `agent`'s current limit really resets, for display: { at, known, reason }, or null when it isn't blocked.
   function limitResetFor(agent = 'claude', model) {

@@ -1414,7 +1414,8 @@ function fbModelOf({ agent, model }) {
 const fbName = (r) => (fbModelOf(r) ? modelLabel(r.agent, fbModelOf(r)) : shortLabel(r.agent));
 // The model's usage limit while it is limited (state.blocks is keyed by agents.mjs limitScope), else null.
 function fbLimit({ agent, model }) {
-  const scope = agent === 'antigravity' ? `antigravity:${/^gemini-/i.test(model || '') ? 'gemini' : '3p'}` : agent || 'claude';
+  const scope = agent === 'antigravity' ? `antigravity:${/^gemini-/i.test(model || '') ? 'gemini' : '3p'}`
+    : agent === 'opencode' ? `opencode:${String(model || 'openai/').split('/')[0]}` : agent || 'claude';
   const b = O.state?.blocks?.[scope];
   return b && b.until > Date.now() / 1000 ? b : null;
 }

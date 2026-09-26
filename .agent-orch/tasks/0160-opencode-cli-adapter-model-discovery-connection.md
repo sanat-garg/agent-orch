@@ -13,3 +13,7 @@ Add an 'opencode' agent following the OpenCode section of .agent-orch/AGENTS.md 
 ## Done when
 
 `npm test` passes with opencode adapter tests, and GET /api/connections lists opencode
+
+## Result — done (check passed) (2026-09-26 08:50)
+
+AGENT-ORCH-STATUS: done — OpenCode added; tests and API pass; smoke awaits sign-in

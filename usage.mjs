@@ -2,6 +2,7 @@
 // resetsAt = epoch s or null), kept for 30 days:
 //   {t, agent, kind:'window', window, pct, resetsAt, at?}      a plan window reading (dedupe: unchanged within 5 min);
 //     claude: five_hour/seven_day/…, codex: 5h/weekly (from window_minutes), antigravity: <group>-5h/<group>-weekly;
+//     OpenCode currently exposes per-turn tokens but no live subscription windows or reset times.
 //     at = when the reading was taken (epoch ms) if earlier than t, e.g. a polled codex rollout snapshot
 //   {t, agent, kind:'tokens', input, output, cached, source, ref}  one chat turn ('chat', ref = convo id) or run ('task', ref = task id)
 //   {t, agent, kind:'limit', status:'hit'|'cleared', resetsAt, window?}

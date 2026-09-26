@@ -3,7 +3,7 @@
 //   {k:'image',tool,mediaType,data} (raw base64 from a tool result; callers store it via media.mjs and log {k:'image',id,name})
 //   {k:'windows',windows:[{window,pct,resetsAt}]} (plan-window readings, pct used; codex and agy also leave the latest in res.windows)
 // (adapters may add fields such as a tool id). Adapters: claude (Agent SDK), codex (`codex exec --json`),
-// antigravity (`agy -p --output-format stream-json`). Every adapter strips its `envFilter` vars from the env so
+// antigravity (`agy -p --output-format stream-json`), opencode (`opencode run --format json`). Every adapter strips its `envFilter` vars from the env so
 // billing stays on the owner's subscription login, never an API key. See .agent-orch/AGENTS.md.
 
 import fs from 'node:fs';
@@ -511,12 +511,14 @@ export const agyGroup = (model) => (!model || /^gemini-/i.test(String(model).tri
 export const windowGroup = (w) => /^(gemini|3p)-/.exec(String(w || ''))?.[1] || null;
 // What a usage limit blocks: the agent, or for antigravity the agent + model group ('antigravity:3p'). kv keys and
 // state.blocks use it, so a Gemini limit never blocks third-party models and vice versa.
-export const limitScope = (agent, model) => (agent === 'antigravity' ? `antigravity:${agyGroup(model)}` : agent || 'claude');
+export const limitScope = (agent, model) => (agent === 'antigravity' ? `antigravity:${agyGroup(model)}`
+  : agent === 'opencode' ? `opencode:${String(model || 'openai/').split('/')[0]}` : agent || 'claude');
 export const scopeGroup = (scope) => String(scope || '').split(':')[1] || null;
 // Every scope that can be blocked.
-export const limitScopes = (agents) => agents.flatMap((a) => (a === 'antigravity' ? Object.keys(AGY_GROUPS).map((g) => `${a}:${g}`) : [a]));
+export const limitScopes = (agents) => agents.flatMap((a) => (a === 'antigravity' ? Object.keys(AGY_GROUPS).map((g) => `${a}:${g}`)
+  : a === 'opencode' ? ['opencode:openai'] : [a]));
 // A scope's windows among an agent's: only its group's for antigravity.
-export const scopeWindows = (scope, list) => { const g = scopeGroup(scope); return (list || []).filter((w) => !g || windowGroup(w.window) === g); };
+export const scopeWindows = (scope, list) => { const g = scopeGroup(scope); return (list || []).filter((w) => !g || (scope.startsWith('opencode:') ? w.window.startsWith(`${g}-`) : windowGroup(w.window) === g)); };
 
 // A plan window's display name ('3p-5h' → 'Third-party · 5-hour'); public/app.js winLabel matches it.
 const WIN_NAMES = { '5h': '5-hour', weekly: 'Weekly', five_hour: '5-hour', seven_day: 'Weekly' };
@@ -682,6 +684,118 @@ const ANTIGRAVITY = {
   run: runAntigravity,
 };
 
+// ---------------------------------------------------------------- opencode (OAuth-backed OpenAI provider)
+
+export const opencodeAuthFile = (home = HOME) => path.join(home, '.local/share/opencode/auth.json');
+export function opencodeAuth(home = HOME) {
+  try {
+    const a = JSON.parse(fs.readFileSync(opencodeAuthFile(home), 'utf8'))?.openai;
+    return a?.type === 'oauth' && typeof a.refresh === 'string' && a.refresh.length > 0;
+  } catch { return false; }
+}
+export function opencodeModels(out) {
+  return [...new Set(String(out).split('\n').map((s) => s.trim()).filter((s) => /^openai\/[\w.-]+$/.test(s)))].map((id) => ({ id, label: id.slice(7) }));
+}
+const OPENCODE_LIMIT_RE = /\b429\b|rate.?limit|quota|usage limit|resource.exhausted/i;
+const OPENCODE_AUTH_RE = /\b401\b|unauthorized|not authenticated|not logged in|invalid.*(?:token|credential)|authentication/i;
+const OPENCODE_NO_SESSION_RE = /session.*(?:not found|does not exist)|no such session/i;
+const opencodeError = (e) => [e?.name, e?.data?.code, e?.data?.status, e?.data?.message, e?.message].filter((v) => v != null).join(' ');
+const opencodeReset = (e) => {
+  const data = e?.data || {};
+  const v = data.resetsAt ?? data.resetAt ?? data.reset_at ?? data.retryAfter ?? data.retry_after;
+  if (v != null) {
+    const n = Number(v);
+    if (Number.isFinite(n)) return Math.round(n > 1e12 ? n / 1000 : n < 86400 ? Date.now() / 1000 + n : n);
+    const parsed = Date.parse(v);
+    if (Number.isFinite(parsed)) return Math.round(parsed / 1000);
+  }
+  return codexResetsAt(data.message || e?.message || '');
+};
+// OpenCode updates a tool part from running to completed/error. A tool's output is never a provider error.
+export function* opencodeEvents(m, st = { tools: new Set() }) {
+  const p = m.part || {};
+  if (m.type === 'text' && p.text?.trim()) yield { k: 'text', text: p.text };
+  else if (m.type === 'tool_use' && p.type === 'tool') {
+    const id = p.callID || p.id || p.toolID || m.id || p.tool;
+    const s = p.state || {};
+    if (!st.tools.has(id)) {
+      st.tools.add(id);
+      const input = { ...(s.input || {}) };
+      if (input.filePath != null && input.file_path == null) input.file_path = input.filePath;
+      if (input.targetFile != null && input.file_path == null) input.file_path = input.targetFile;
+      const name = p.tool === 'bash' ? 'Bash' : p.tool;
+      yield { k: 'tool', id, name, input: toolInputSummary(name, input) };
+    }
+    if (['completed', 'error'].includes(s.status)) {
+      const output = s.output ?? s.error ?? '';
+      const value = typeof output === 'string' ? output : JSON.stringify(output);
+      yield { k: 'tool_result', id, text: clip(value), isError: s.status === 'error', lines: value.split('\n').length };
+    }
+  } else if (m.type === 'step_finish' && p.tokens) {
+    const t = p.tokens;
+    yield { k: 'result', usage: { input_tokens: t.input || 0, output_tokens: t.output || 0,
+      cached_input_tokens: t.cache?.read || 0, reasoning_output_tokens: t.reasoning || 0 } };
+  } else if (m.type === 'error' && OPENCODE_LIMIT_RE.test(opencodeError(m.error))) {
+    yield { k: 'limit', resetsAt: opencodeReset(m.error) };
+  }
+}
+async function runOpencode({ model, prompt, cwd, resume, systemAppend, signal, onEvent, onMessage, bin, env = process.env, autonomous = true }) {
+  const res = { outcome: 'error', text: '', sessionId: resume || null, usage: {}, numTurns: 0, resetsAt: null,
+    limitType: null, stderr: '', errorCode: null, windows: null };
+  // A project config can override OAuth with an API key or custom endpoint; don't risk another billing route.
+  for (const file of ['opencode.json', 'opencode.jsonc', '.env']) {
+    try {
+      const cfg = fs.readFileSync(path.join(cwd, file), 'utf8');
+      if (/"(?:apiKey|baseURL)"\s*:/.test(cfg) || file === '.env' && /^\s*(?:[A-Z][A-Z0-9_]*(?:_API_KEY|_TOKEN)|OPENAI_BASE_URL)\s*=/m.test(cfg)) {
+        res.outcome = 'auth_error'; res.errorCode = 'authentication_failed';
+        res.text = `${file} configures an API key or custom endpoint; OpenCode requires subscription OAuth.`;
+        return res;
+      }
+    } catch {}
+  }
+  const args = ['run', '--dir', cwd, '--format', 'json'];
+  if (model) args.push('--model', model);
+  if (resume) args.push('--session', resume);
+  if (autonomous) args.push('--auto');
+  args.push(systemAppend ? `${systemAppend}\n\n${prompt}` : prompt);
+  let failure = null;
+  const st = { tools: new Set() };
+  const handle = (m) => {
+    if (m.sessionID) res.sessionId = m.sessionID;
+    if (m.type === 'error') failure = m.error || { message: 'OpenCode error' };
+    if (m.type === 'step_finish') res.numTurns++;
+    for (const e of opencodeEvents(m, st)) {
+      if (e.k === 'text') res.text = e.text;
+      if (e.k === 'result') for (const [k, v] of Object.entries(e.usage)) res.usage[k] = (res.usage[k] || 0) + v;
+      if (onEvent) { try { onEvent(e); } catch {} }
+    }
+    try { onMessage?.(m); } catch {}
+  };
+  const { aborted, exitCode } = await spawnJsonl({ bin: bin || OPENCODE.bin, args, cwd, env: stripEnv(env, OPENCODE.envFilter), signal, res, handle });
+  if (aborted) { res.outcome = 'aborted'; return res; }
+  if (exitCode === 0 && !failure) { res.outcome = 'ok'; return res; }
+  const message = opencodeError(failure) || res.stderr.trim();
+  if (!res.text) res.text = message;
+  if (failure && OPENCODE_LIMIT_RE.test(message)) {
+    res.outcome = 'rate_limited'; res.errorCode = 'rate_limit'; res.resetsAt = opencodeReset(failure);
+  } else if (OPENCODE_AUTH_RE.test(message)) { res.outcome = 'auth_error'; res.errorCode = 'authentication_failed'; }
+  else if (resume && OPENCODE_NO_SESSION_RE.test(message)) res.errorCode = 'no_session';
+  return res;
+}
+const OPENCODE = {
+  id: 'opencode', label: 'OpenCode CLI', bin: 'opencode',
+  available() { return onPath(this.bin); },
+  loggedIn() { return cachedLogin(this, () => opencodeAuth()); },
+  // auth.json has provider credentials, but no documented reliable account identity.
+  account() { return null; },
+  login: 'Connect from the sidebar',
+  async listModels({ bin, env = process.env, timeoutMs = 30_000 } = {}) {
+    return opencodeModels(await execOut(bin || this.bin, ['models', 'openai'], { env: stripEnv(env, this.envFilter), cwd: HOME, timeout: timeoutMs }));
+  },
+  envFilter: /^(?:.*(?:_API_KEY|_TOKEN)|OPENAI_(?:BASE_URL|ORG_ID|ORGANIZATION|PROJECT_ID)|AZURE_OPENAI_.*|OPENCODE_(?:AUTH|CONFIG|CONFIG_DIR))$/,
+  events: opencodeEvents, run: runOpencode,
+};
+
 // ---------------------------------------------------------------- model discovery
 
 // Each CLI's models as {id, label, description?, default?} (claude adds `resolved`, the full id an alias maps to).
@@ -743,7 +857,7 @@ export async function discoverModels(id, opts = {}) {
 export const isMissingSession = (res) => res.outcome === 'error' &&
   (res.errorCode === 'no_session' || /no conversation found/i.test(`${res.text || ''}\n${res.stderr || ''}`));
 
-export const AGENTS = { claude: CLAUDE, codex: CODEX, antigravity: ANTIGRAVITY };
+export const AGENTS = { claude: CLAUDE, codex: CODEX, antigravity: ANTIGRAVITY, opencode: OPENCODE };
 
 // Runs one turn on `agent` (default 'claude'). Returns at least {outcome, text, sessionId, usage, resetsAt, errorCode};
 // outcome is ok | aborted | rate_limited | auth_error | max_turns | error.

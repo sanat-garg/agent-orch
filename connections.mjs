@@ -49,6 +49,14 @@ export const SPECS = {
     successRe: /successfully logged in/i,
     logout: ['codex', 'logout'],
   },
+  opencode: {
+    start: ['opencode', 'auth', 'login', '--provider', 'openai', '--method', 'ChatGPT Pro/Plus (headless)'],
+    url: /(https:\/\/auth\.openai\.com\/codex\/device)/,
+    code: /Enter code:\s*([A-Z0-9]+-[A-Z0-9]+)/i,
+    needsPastedCode: false,
+    successRe: /credential added|logged in|authentication successful/i,
+    logout: ['opencode', 'auth', 'logout', 'openai'],
+  },
   github: {
     start: ['gh', 'auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web'],
     url: /(https:\/\/github\.com\/login\/device)/,

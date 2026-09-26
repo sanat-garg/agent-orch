@@ -489,3 +489,7 @@ Away sheet and all modals fit phone screens; tests pass
 ## 2026-09-26 08:29 — #159 Research OpenCode, Kiro and GitHub Copilot CLIs for headless use [done]
 
 Three CLI research sections documented; all help checks passed.
+
+## 2026-09-26 08:50 — #160 OpenCode CLI: adapter, model discovery, connection and smoke test [done (check passed)]
+
+OpenCode added; tests and API pass; smoke awaits sign-in

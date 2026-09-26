@@ -168,6 +168,35 @@ describe('worktrees', { concurrency: true, timeout: 120000 }, () => {
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 
+  test('a detached-HEAD worktree is re-attached to its branch with its uncommitted work, not deleted', async () => {
+    const { root, repo } = makeRepo();
+    try {
+      const info = await repoInfo(repo);
+      const wt = await ensureWorktree(info, 7);
+      fs.writeFileSync(path.join(wt.cwd, 'done.txt'), 'committed\n');
+      git(wt.dir, 'add', '-A'); git(wt.dir, 'commit', '-qm', 'work');
+      git(wt.dir, 'checkout', '-q', '--detach');
+      fs.writeFileSync(path.join(wt.cwd, 'wip.txt'), 'uncommitted\n');
+      assert.deepEqual((await listWorktrees(repo)).map((w) => w.id), [7]);
+      const again = await ensureWorktree(info, 7);
+      assert.equal(again.reused, true);
+      assert.equal(fs.readFileSync(path.join(wt.cwd, 'wip.txt'), 'utf8'), 'uncommitted\n');
+      assert.equal(fs.readFileSync(path.join(wt.cwd, 'done.txt'), 'utf8'), 'committed\n');
+      assert.equal(git(wt.dir, 'symbolic-ref', '--short', 'HEAD'), 'agent-orch/task-7');
+      assert.equal(git(repo, 'show', 'agent-orch/task-7:wip.txt'), 'uncommitted');
+      // A rebase killed mid-mergeBack is aborted and the worktree reused on its branch.
+      fs.writeFileSync(path.join(wt.cwd, 'a.txt'), 'one\nmine\nthree\n');
+      git(wt.dir, 'commit', '-qam', 'mine');
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'one\ntheirs\nthree\n');
+      git(repo, 'commit', '-qam', 'main moved');
+      assert.throws(() => git(wt.dir, 'rebase', '-q', 'main'));
+      assert.equal((await ensureWorktree(info, 7)).reused, true);
+      assert.equal(git(wt.dir, 'symbolic-ref', '--short', 'HEAD'), 'agent-orch/task-7');
+      assert.equal(fs.readFileSync(path.join(wt.cwd, 'a.txt'), 'utf8'), 'one\nmine\nthree\n');
+      assert.equal(git(wt.dir, 'status', '--porcelain'), '');
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   test('mergeBack reports a conflict without touching main', async () => {
     const { root, repo } = makeRepo();
     try {

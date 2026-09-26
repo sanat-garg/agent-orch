@@ -13,3 +13,7 @@ Read .agent-orch/AUDIT.md finding #27 (Round 4) first. Bug: worktrees.mjs `listW
 ## Done when
 
 `node --test test/worktree.test.mjs` passes, including a new test for a detached-HEAD worktree keeping its uncommitted file.
+
+## Result — done (check passed) (2026-09-26 10:37)
+
+AGENT-ORCH-STATUS: done — Detached-HEAD task worktrees re-attach and keep work; tests pass

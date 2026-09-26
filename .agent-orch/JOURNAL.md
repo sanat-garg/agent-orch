@@ -529,3 +529,6 @@ OpenCode guard now checks global, parent configs; strips OPENCODE_CONFIG*
 ## 2026-09-26 10:35 — #172 Fix AUDIT #28: a failed or cancelled integrator releases its needs_integration owner [done (check passed)]
 
 Failed/cancelled integrators now release their owners; tests pass
+## 2026-09-26 10:37 — #170 Fix AUDIT #27: re-attach detached-HEAD task worktrees instead of deleting them [done (check passed)]
+
+Detached-HEAD task worktrees re-attach and keep work; tests pass

@@ -48,9 +48,16 @@ export async function ensureWorktree(info, id) {
   const dir = worktreePath(info.top, id), branch = taskBranch(id);
   const wt = { dir, cwd: path.join(dir, info.rel), branch, reused: false };
   const listed = (await listWorktrees(info.top)).find((w) => w.dir === dir);
-  if (listed && fs.existsSync(dir)) return { ...wt, reused: true };
+  if (listed && fs.existsSync(dir)) {
+    await reattach(dir, branch);
+    return { ...wt, reused: true };
+  }
   await git(info.top, ['worktree', 'prune']);
-  if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true }); // a stray directory git no longer knows
+  if (fs.existsSync(dir)) {
+    // A stray directory git no longer knows; one it still has registered holds work and is never deleted.
+    if ((await registered(info.top)).includes(dir)) throw new Error(`${dir} is still a registered worktree`);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
   fs.mkdirSync(path.dirname(dir), { recursive: true });
   const exists = await ok(info.top, ['rev-parse', '--verify', '-q', `refs/heads/${branch}`]);
   await git(info.top, exists ? ['worktree', 'add', '-q', dir, branch] : ['worktree', 'add', '-q', '-b', branch, dir, 'HEAD']);
@@ -59,6 +66,28 @@ export async function ensureWorktree(info, id) {
   const nm = path.join(info.top, info.rel, 'node_modules'), wtNm = path.join(wt.cwd, 'node_modules');
   if (fs.existsSync(nm) && !fs.existsSync(wtNm)) { try { fs.symlinkSync(nm, wtNm, 'dir'); } catch {} }
   return wt;
+}
+
+// Put a reused worktree back on its task branch. A rebase killed mid-`mergeBack` is aborted; a detached HEAD (or
+// another branch) gets its uncommitted work committed and the task branch moved to include it, so nothing is lost.
+async function reattach(dir, branch) {
+  const gitDir = (await git(dir, ['rev-parse', '--absolute-git-dir'])).trim();
+  if (['rebase-merge', 'rebase-apply'].some((d) => fs.existsSync(path.join(gitDir, d)))) await ok(dir, ['rebase', '--abort']);
+  if ((await git(dir, ['symbolic-ref', '-q', 'HEAD']).catch(() => '')).trim() === `refs/heads/${branch}`) return;
+  await commitAll(dir, `agent-orch: work left off branch ${branch}`);
+  const tip = (await git(dir, ['rev-parse', '-q', '--verify', `refs/heads/${branch}`]).catch(() => '')).trim();
+  if (tip && !(await ok(dir, ['merge-base', '--is-ancestor', tip, 'HEAD'])) && !(await ok(dir, [...GIT_ID, 'merge', '-q', '--no-edit', tip]))) {
+    // The branch moved on separately and won't merge cleanly: keep its old tip under a side branch.
+    await ok(dir, ['merge', '--abort']);
+    await git(dir, ['branch', '-f', `${branch}-before-${tip.slice(0, 8)}`, tip]);
+  }
+  await git(dir, ['switch', '-q', '-C', branch]);
+}
+
+// Worktree directories git has registered in this repo (whatever they have checked out).
+async function registered(top) {
+  const out = await git(top, ['worktree', 'list', '--porcelain']).catch(() => '');
+  return out.split('\n\n').map((b) => /^worktree (.+)$/m.exec(b)?.[1]).filter(Boolean);
 }
 
 // Repo-local (untracked) settings shared by every worktree: the union merge for JOURNAL.md, and an exclude for the
@@ -136,6 +165,7 @@ export async function parkWorktree(info, id, message) {
   const dir = worktreePath(info.top, id);
   if (fs.existsSync(dir)) {
     await ok(dir, ['merge', '--abort']);
+    await reattach(dir, taskBranch(id)).catch(() => {});
     await commitAll(dir, message).catch(() => '');
   }
   await removeWorktree(info, id, { keepBranch: true });
@@ -144,14 +174,18 @@ export async function parkWorktree(info, id, message) {
 // Whether task `id`'s branch is already on the main tree's branch (nothing would be lost by deleting it).
 export const isMerged = (info, id) => ok(info.top, ['merge-base', '--is-ancestor', taskBranch(id), info.branch]);
 
-// Task worktrees registered in this repo: [{ dir, id }].
+// Task worktrees registered in this repo: [{ dir, id }]. Recognised by their task branch, or by their directory
+// (<repo>-task-<id> under the worktrees root) whatever HEAD they have (detached by a killed rebase or an agent).
 export async function listWorktrees(top) {
   const out = await git(top, ['worktree', 'list', '--porcelain']).catch(() => '');
-  const list = [];
+  const list = [], prefix = `${path.basename(top)}-task-`;
   for (const block of out.split('\n\n')) {
     const dir = /^worktree (.+)$/m.exec(block)?.[1];
+    if (!dir) continue;
     const m = BRANCH_RE.exec(/^branch refs\/heads\/(.+)$/m.exec(block)?.[1] || '');
-    if (dir && m) list.push({ dir, id: Number(m[1]) });
+    const name = path.basename(dir), byDir = path.dirname(dir) === worktreesRoot(top) && name.startsWith(prefix);
+    const id = m ? m[1] : byDir && /^\d+$/.test(name.slice(prefix.length)) ? name.slice(prefix.length) : null;
+    if (id) list.push({ dir, id: Number(id) });
   }
   return list;
 }

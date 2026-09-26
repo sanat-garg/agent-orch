@@ -518,7 +518,7 @@ export const limitScope = (agent, model) => (agent === 'antigravity' ? `antigrav
 export const scopeGroup = (scope) => String(scope || '').split(':')[1] || null;
 // Every scope that can be blocked.
 export const limitScopes = (agents) => agents.flatMap((a) => (a === 'antigravity' ? Object.keys(AGY_GROUPS).map((g) => `${a}:${g}`)
-  : a === 'opencode' ? Object.keys(OPENCODE_OAUTH).map((p) => `opencode:${p}`) : [a]));
+  : a === 'opencode' ? [...Object.keys(OPENCODE_OAUTH), ZEN].map((p) => `opencode:${p}`) : [a]));
 // A scope's windows among an agent's: only its group's for antigravity.
 export const scopeWindows = (scope, list) => { const g = scopeGroup(scope); return (list || []).filter((w) => !g || (scope.startsWith('opencode:') ? w.window.startsWith(`${g}-`) : windowGroup(w.window) === g)); };
 
@@ -710,15 +710,42 @@ export function opencodeProviders(home = HOME) {
   });
 }
 export const opencodeAuth = (home = HOME) => opencodeProviders(home).length > 0;
-// `opencode models <provider>` output → [{id: 'provider/model', label}]; labels name the provider when several are listed.
-export function opencodeModels(out, providers = Object.keys(OPENCODE_OAUTH)) {
-  const ids = [...new Set(String(out).split('\n').map((s) => s.trim()))].flatMap((id) => {
-    const p = providers.find((x) => id.startsWith(`${x}/`));
-    return p && /^[\w.-]+$/.test(id.slice(p.length + 1)) ? [[id, p]] : [];
-  });
-  const many = new Set(ids.map(([, p]) => p)).size > 1;
-  return ids.map(([id, p]) => ({ id, label: id.slice(p.length + 1) + (many ? ` · ${OPENCODE_OAUTH[p]}` : '') }));
+// A pay-as-you-go OpenCode Zen key (`opencode auth login` → OpenCode Zen). Without one only free Zen models are offered.
+export function opencodeZenKey(home = HOME) {
+  try { const z = JSON.parse(fs.readFileSync(opencodeAuthFile(home), 'utf8'))?.opencode; return z?.type === 'api' && !!z.key; } catch { return false; }
 }
+// OpenCode Zen (provider `opencode`) needs no sign-in for its free models. Free = zero cost in `opencode models
+// --verbose`; without that reading, the Zen naming convention (`-free` ids, big-pickle).
+export const ZEN = 'opencode';
+export const zenFreeId = (id) => /^opencode\/(?:[\w.-]+-free|big-pickle)$/.test(String(id));
+// `opencode models [--verbose]` output → [{id: 'provider/model', label, free?}]: models of the signed-in `providers`,
+// free Zen models, and paid Zen models only with a Zen key. Verbose output puts a JSON block under each id line.
+export function opencodeModels(out, providers = Object.keys(OPENCODE_OAUTH), { zenKey = false } = {}) {
+  const entries = new Map();
+  let cur = null;
+  for (const line of String(out).split('\n')) {
+    if (/^[\w.-]+\/\S+$/.test(line.trim()) && !/^\s/.test(line)) {
+      cur = line.trim();
+      if (!entries.has(cur)) entries.set(cur, []);
+    } else if (cur) entries.get(cur).push(line);
+  }
+  const ids = [...entries].flatMap(([id, body]) => {
+    const p = id.startsWith(`${ZEN}/`) ? ZEN : providers.find((x) => id.startsWith(`${x}/`));
+    if (!p || !/^[\w.-]+$/.test(id.slice(p.length + 1))) return [];
+    let info = null;
+    try { info = body.join('\n').trim() ? JSON.parse(body.join('\n')) : null; } catch {}
+    if (p !== ZEN) return [[id, p, info]];
+    const cost = info?.cost, free = cost ? [cost.input, cost.output, cost.cache?.read, cost.cache?.write].every((v) => !v) : zenFreeId(id);
+    return free || zenKey ? [[id, p, info, free]] : [];
+  });
+  const many = new Set(ids.filter(([, p]) => p !== ZEN).map(([, p]) => p)).size > 1;
+  return ids.map(([id, p, info, free]) => (p === ZEN
+    ? { id, label: `Zen · ${info?.name || id.slice(p.length + 1)}${free ? ' (free)' : ''}`, ...(free ? { free: true } : {}) }
+    : { id, label: id.slice(p.length + 1) + (many ? ` · ${OPENCODE_OAUTH[p]}` : '') }));
+}
+// A Zen model that costs money: refused unless the owner added a Zen key. Uses the discovered catalog's `free` flag.
+export const zenPaid = (model, home = HOME) => String(model || '').startsWith(`${ZEN}/`) && !opencodeZenKey(home)
+  && !(modelCatalog('opencode').models.find((m) => m.id === model)?.free ?? zenFreeId(model));
 const OPENCODE_LIMIT_RE = /\b429\b|rate.?limit|quota|usage limit|resource.exhausted/i;
 const OPENCODE_AUTH_RE = /\b401\b|unauthorized|not authenticated|not logged in|invalid.*(?:token|credential)|authentication/i;
 const OPENCODE_NO_SESSION_RE = /session.*(?:not found|does not exist)|no such session/i;
@@ -790,6 +817,11 @@ async function runOpencode({ model, prompt, cwd, resume, systemAppend, signal, o
     res.text = `${bad} configures an API key or custom endpoint; OpenCode requires subscription OAuth.`;
     return res;
   }
+  if (zenPaid(model, env.HOME || HOME)) {
+    res.outcome = 'auth_error'; res.errorCode = 'authentication_failed';
+    res.text = `${model} is a paid OpenCode Zen model; only the free Zen models run without a Zen key.`;
+    return res;
+  }
   const args = ['run', '--dir', cwd, '--format', 'json'];
   if (model) args.push('--model', model);
   if (resume) args.push('--session', resume);
@@ -822,17 +854,18 @@ async function runOpencode({ model, prompt, cwd, resume, systemAppend, signal, o
 const OPENCODE = {
   id: 'opencode', label: 'OpenCode CLI', bin: 'opencode',
   available() { return onPath(this.bin); },
-  loggedIn() { return cachedLogin(this, () => opencodeAuth()); },
+  // Ready with a subscription provider, or with no sign-in at all when OpenCode lists free Zen models.
+  loggedIn() { return modelCatalog('opencode').models.length > 0 || cachedLogin(this, () => opencodeAuth()); },
+  freeTier: true,
   // One OpenCode login can hold several providers; connections.mjs shows each one's account.
   account() { return null; },
   login: 'Connect from the sidebar',
-  // Only the signed-in subscription providers' models.
+  freeModels() { return modelCatalog('opencode').models.filter((m) => m.free); },
+  // The signed-in subscription providers' models plus the free Zen ones, from one `opencode models --verbose` run in a
+  // neutral cwd (no project config) with the billing env stripped.
   async listModels({ bin, env = process.env, home = HOME, timeoutMs = 30_000 } = {}) {
-    const ids = opencodeProviders(home).map((p) => p.id);
-    if (!ids.length) throw new Error('not signed in');
-    let out = '';
-    for (const id of ids) out += await execOut(bin || this.bin, ['models', id], { env: stripEnv(env, this.envFilter), cwd: HOME, timeout: timeoutMs });
-    return opencodeModels(out, ids);
+    const out = await execOut(bin || this.bin, ['models', '--verbose'], { env: stripEnv(env, this.envFilter), cwd: HOME, timeout: timeoutMs });
+    return opencodeModels(out, opencodeProviders(home).map((p) => p.id), { zenKey: opencodeZenKey(home) });
   },
   envFilter: /^(?:.*(?:_API_KEY|_TOKEN)|OPENAI_(?:BASE_URL|ORG_ID|ORGANIZATION|PROJECT_ID)|AZURE_OPENAI_.*|OPENCODE_(?:AUTH|CONFIG.*))$/,
   events: opencodeEvents, run: runOpencode,
@@ -1092,7 +1125,7 @@ export async function discoverModels(id, opts = {}) {
   const a = AGENTS[id], at = Date.now();
   if (!a) return none('unknown agent', at);
   if (!a.available()) return none('not installed', at);
-  if (!a.loggedIn()) return none('not signed in', at);
+  if (!a.freeTier && !a.loggedIn()) return none('not signed in', at);
   try {
     const models = await a.listModels(opts);
     return models.length ? { models, error: null, at } : none('the CLI listed no models', at);

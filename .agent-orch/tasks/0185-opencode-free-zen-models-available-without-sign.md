@@ -13,3 +13,7 @@ OpenCode ships free 'OpenCode Zen' models that work with NO sign-in. On this mac
 ## Done when
 
 `node bin/agent-smoke.mjs --agent opencode --model opencode/big-pickle` exits 0, `npm test` passes, and GET /api/connections reports opencode ready with the free Zen models listed
+
+## Result — done (check passed) (2026-09-26 15:15)
+
+AGENT-ORCH-STATUS: done — OpenCode is ready with free Zen models, no sign-in needed

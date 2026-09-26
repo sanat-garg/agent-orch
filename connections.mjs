@@ -189,7 +189,8 @@ export const tmuxRunner = (args) => new Promise((resolve) => {
   execFile('tmux', ['-L', SOCKET, ...args], { timeout: 5000 }, (err, out) => resolve({ ok: !err, out: String(out || '') }));
 });
 
-// entries: [{id, label, installed(), signedIn(), account?(), probe?(), spec?, envFilter?, afterChange?()}]. probe: an
+// entries: [{id, label, installed(), signedIn(), account?(), detail?(), probe?(), spec?, envFilter?, afterChange?()}]. detail: extra
+// row fields while signed in (OpenCode: {ready, freeModels} for sign-in-free models). probe: an
 // uncached async sign-in check, run every probeMs while a login waits; true ends it as done (for CLIs whose success
 // screen isn't known). onChange(list) fires on every state change (the server broadcasts it). tmux/pollMs/probeMs/
 // timeoutMs are injectable for tests.
@@ -206,14 +207,15 @@ export function createConnections({ entries, env = process.env, onChange = () =>
   // Entries with spec.providers also list them (for the picker) and every signed-in one, from accounts(): [{id, account}].
   function list() {
     return entries.map((e) => {
-      let installed = false, signedIn = false, account = null, accounts = [];
+      let installed = false, signedIn = false, account = null, accounts = [], detail = {};
       try {
         installed = !!e.installed(); signedIn = installed && !!e.signedIn(); account = signedIn ? e.account?.() || null : null;
         if (signedIn && e.spec?.providers) accounts = (e.accounts?.() || []).flatMap((a) => (providerSpec(e, a.id) ? [{ ...a, label: e.spec.providers[a.id].label }] : []));
+        if (signedIn) detail = e.detail?.() || {};
       } catch {}
       return { id: e.id, label: e.label, installed, signedIn, account, canLogin: !!e.spec, canLogout: !!e.spec?.logout,
         ...(e.spec?.providers ? { providers: Object.entries(e.spec.providers).map(([id, p]) => ({ id, label: p.label, blurb: p.blurb })), accounts } : {}),
-        ...(e.spec?.logoutWarning ? { logoutWarning: e.spec.logoutWarning } : {}), login: view(logins.get(e.id)) || null };
+        ...(e.spec?.logoutWarning ? { logoutWarning: e.spec.logoutWarning } : {}), ...detail, login: view(logins.get(e.id)) || null };
     });
   }
   const changed = () => { try { onChange(list()); } catch {} };

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AGENTS, runAgentCli, opencodeAuth, opencodeModels, opencodeProviders, OPENCODE_OAUTH, limitScope, limitScopes } from '../agents.mjs';
+import { AGENTS, runAgentCli, opencodeAuth, opencodeModels, opencodeProviders, opencodeZenKey, OPENCODE_OAUTH, limitScope, limitScopes, agentStatus, clearLoginCache, discoverModels, setModelCatalog } from '../agents.mjs';
 import { SPECS, parsePane, parseMenu, menuKeys, createConnections } from '../connections.mjs';
 import { normUsage } from '../usage.mjs';
 
@@ -46,13 +46,60 @@ test('model discovery parses provider-specific CLI output without a static catal
   assert.deepEqual(opencodeModels('openai/gpt-5\ngithub-copilot/gpt-5\nxai/grok-4\n', ['openai', 'github-copilot']), [
     { id: 'openai/gpt-5', label: 'gpt-5 · ChatGPT' }, { id: 'github-copilot/gpt-5', label: 'gpt-5 · Copilot' },
   ]);
-  // Only signed-in providers are asked for models.
+  // One verbose listing; only signed-in providers' models plus the free Zen ones survive.
   const log = path.join(tmp(), 'argv.json'), home = authHome({ 'github-copilot': { type: 'oauth', refresh: 'gho', access: 'gho' } });
-  assert.deepEqual(await AGENTS.opencode.listModels({ bin: stub, env: env('success', { OPENCODE_STUB_LOG: log }), home }), []);
-  assert.deepEqual(JSON.parse(fs.readFileSync(log, 'utf8')).argv, ['models', 'github-copilot']);
-  await assert.rejects(AGENTS.opencode.listModels({ bin: stub, env: env('success'), home: tmp() }), /not signed in/);
+  const zenFree = [{ id: 'opencode/big-pickle', label: 'Zen · Big Pickle (free)', free: true },
+    { id: 'opencode/nemotron-3-ultra-free', label: 'Zen · Nemotron 3 Ultra Free (free)', free: true }];
+  assert.deepEqual(await AGENTS.opencode.listModels({ bin: stub, env: env('success', { OPENCODE_STUB_LOG: log }), home }), zenFree);
+  assert.deepEqual(JSON.parse(fs.readFileSync(log, 'utf8')).argv, ['models', '--verbose']);
+  assert.deepEqual(await AGENTS.opencode.listModels({ bin: stub, env: env('success'), home: tmp() }), zenFree, 'no sign-in needed for free Zen');
   assert.deepEqual(await AGENTS.opencode.listModels({ bin: stub, env: env('success'), home: authHome({ openai: { type: 'oauth', refresh: 'r', access: 'a' } }) }),
-    opencodeModels('openai/gpt-5.4\nopenai/gpt-5.3-codex'));
+    [...opencodeModels('openai/gpt-5.4\nopenai/gpt-5.3-codex', ['openai']), ...zenFree]);
+});
+
+test('free Zen filter: zero cost (or the -free/big-pickle naming without costs); paid Zen only with a Zen key', async () => {
+  // The real `opencode models` output on this VM (no sign-in).
+  const plain = 'opencode/big-pickle\nopencode/ling-3.0-flash-fin-free\nopencode/mimo-v2.6-flash-free\nopencode/nemotron-3.5-lightning-free\nopencode/gpt-5-nano\n';
+  assert.deepEqual(opencodeModels(plain, []).map((m) => m.id), ['opencode/big-pickle', 'opencode/ling-3.0-flash-fin-free', 'opencode/mimo-v2.6-flash-free', 'opencode/nemotron-3.5-lightning-free']);
+  assert.equal(opencodeModels(plain, [])[0].label, 'Zen · big-pickle (free)');
+  const verbose = 'opencode/cheap\n{\n  "name": "Cheap",\n  "cost": {"input": 0, "output": 0}\n}\nopencode/pricey-free\n{\n  "name": "Pricey",\n  "cost": {"input": 1, "output": 2}\n}\n';
+  assert.deepEqual(opencodeModels(verbose, []), [{ id: 'opencode/cheap', label: 'Zen · Cheap (free)', free: true }], 'the cost reading beats the name');
+  assert.deepEqual(opencodeModels(verbose, [], { zenKey: true }).map((m) => m.label), ['Zen · Cheap (free)', 'Zen · Pricey']);
+  const zenHome = authHome({ opencode: { type: 'api', key: 'zen' } });
+  assert.equal(opencodeZenKey(zenHome), true);
+  assert.equal(opencodeZenKey(tmp()), false);
+  assert.deepEqual((await AGENTS.opencode.listModels({ bin: stub, env: env('success'), home: zenHome })).map((m) => m.id),
+    ['opencode/big-pickle', 'opencode/nemotron-3-ultra-free', 'opencode/claude-opus-4-5']);
+  // The billing guard refuses a paid Zen model without a key, and runs free ones with no sign-in at all.
+  const home = tmp();
+  const paid = await runAgentCli({ agent: 'opencode', bin: stub, cwd: tmp(), model: 'opencode/claude-opus-4-5', prompt: 'hi', env: env('success', { HOME: home }) });
+  assert.equal(paid.outcome, 'auth_error');
+  assert.match(paid.text, /paid OpenCode Zen model/);
+  const free = await runAgentCli({ agent: 'opencode', bin: stub, cwd: tmp(), model: 'opencode/big-pickle', prompt: 'hi', env: env('success', { HOME: home }) });
+  assert.equal(free.outcome, 'ok');
+  assert.equal(limitScope('opencode', 'opencode/big-pickle'), 'opencode:opencode');
+});
+
+test('OpenCode is ready without a provider login once it lists free Zen models', async () => {
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'opencode-bin-'));
+  fs.symlinkSync(stub, path.join(bin, 'opencode'));
+  const prev = process.env.PATH;
+  process.env.PATH = `${bin}:${prev}`;
+  try {
+    clearLoginCache();
+    setModelCatalog('opencode', { models: [], error: 'not signed in', at: Date.now() });
+    if (opencodeAuth()) return; // a real sign-in on this machine makes the logged-out half meaningless
+    assert.equal(agentStatus('opencode'), 'not logged in');
+    const e = await discoverModels('opencode', { bin: stub, env: env('success', { OPENCODE_STUB_MODELS: 'zen' }), home: tmp() });
+    assert.deepEqual(e.models.map((m) => m.id), ['opencode/big-pickle', 'opencode/nemotron-3-ultra-free']);
+    setModelCatalog('opencode', e);
+    assert.equal(agentStatus('opencode'), true);
+    assert.deepEqual(AGENTS.opencode.freeModels().map((m) => m.id), ['opencode/big-pickle', 'opencode/nemotron-3-ultra-free']);
+  } finally {
+    process.env.PATH = prev;
+    setModelCatalog('opencode', { models: [], error: 'reset', at: Date.now() });
+    clearLoginCache();
+  }
 });
 
 test('recorded OpenCode stream normalizes text, tools, paths, results and usage', async () => {
@@ -153,7 +200,7 @@ test('limits come only from structured error events, not tool output', async () 
   assert.equal(limit.resetsAt, Date.parse('2030-01-01T00:00:00Z') / 1000);
   assert.deepEqual(events.filter((e) => e.k === 'limit'), [{ k: 'limit', resetsAt: limit.resetsAt }]);
   assert.equal(limitScope('opencode', 'openai/gpt-5.4'), 'opencode:openai');
-  assert.deepEqual(limitScopes(['opencode']), ['opencode:openai', 'opencode:github-copilot', 'opencode:xai']);
+  assert.deepEqual(limitScopes(['opencode']), ['opencode:openai', 'opencode:github-copilot', 'opencode:xai', 'opencode:opencode']);
 });
 
 test('recorded signed-out error stays a normal error without a false limit', async () => {

@@ -653,7 +653,8 @@ const gh = createGitHub({ env: CLAUDE_ENV, log: (m) => console.log(`[github] ${m
 // ---------- Sign-in connections (agent CLIs + GitHub), driven from the web UI ----------
 // Each agent's models, discovered from its CLI (models.mjs); clients refetch /api/agents on {t:'models'}.
 const modelStore = createModelStore({ file: path.join(DATA, 'models.json'), log: (m) => console.log(`[models] ${m}`),
-  onChange: () => { for (const ws of allClients) send(ws, { t: 'models' }); } });
+  // New lists can change a connection's state too (OpenCode is ready once it lists free Zen models).
+  onChange: () => { const list = connections.list(); for (const ws of allClients) { send(ws, { t: 'models' }); send(ws, { t: 'connections', connections: list }); } } });
 modelStore.start().catch((e) => console.error('[models] discovery failed', e));
 // A sign-in or sign-out re-checks the login and rediscovers that agent's models (in the background).
 const signInChanged = (id) => () => { clearLoginCache(); modelStore.refresh([id]).catch(() => {}); };
@@ -663,7 +664,10 @@ const connections = createConnections({
     agentEntry(AGENTS.claude, { spec: SPECS.claude, account: () => AGENTS.claude.account() }),
     agentEntry(AGENTS.codex, { spec: SPECS.codex, account: () => codexAccount() }),
     agentEntry(AGENTS.antigravity, { spec: SPECS.antigravity, account: () => agyAccount(), probe: () => AGENTS.antigravity.probe() }),
-    agentEntry(AGENTS.opencode, { spec: SPECS.opencode, accounts: () => opencodeProviders() }),
+    agentEntry(AGENTS.opencode, { spec: SPECS.opencode, accounts: () => opencodeProviders(), detail: () => {
+      const free = AGENTS.opencode.freeModels();
+      return free.length ? { ready: 'free Zen models', freeModels: free.map((m) => ({ id: m.id, label: m.label })) } : {};
+    } }),
     agentEntry(AGENTS.kiro, { spec: SPECS.kiro, account: () => AGENTS.kiro.account() }),
     agentEntry(AGENTS.copilot, { spec: SPECS.copilot, account: () => AGENTS.copilot.account(), afterChange: () => { gh.refresh(); signInChanged('copilot')(); } }),
     { id: 'github', label: 'GitHub', installed: () => onPath('gh'), signedIn: () => gh.status().linked, account: () => gh.status().login,

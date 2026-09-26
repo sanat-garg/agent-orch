@@ -28,10 +28,12 @@ before(async () => {
   // A logged-out `codex` on PATH (the stub answers `codex login status` with "Not logged in").
   binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-bin-'));
   fs.symlinkSync(path.join(ROOT, 'test/fixtures/codex-stub.mjs'), path.join(binDir, 'codex'));
+  // An `opencode` with no provider sign-in that lists only Zen models (two free, one paid).
+  fs.symlinkSync(path.join(ROOT, 'test/fixtures/opencode-stub.mjs'), path.join(binDir, 'opencode'));
   const port = await freePort();
   assert.notEqual(port, 3000);
   base = `http://127.0.0.1:${port}`;
-  child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, CODEX_STUB_LOGIN: 'out', CW_WS_KEEPALIVE_MS: '200', PORT: String(port), CW_DATA_DIR: dataDir }, stdio: ['ignore', 'pipe', 'pipe'] });
+  child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, CODEX_STUB_LOGIN: 'out', OPENCODE_STUB_MODELS: 'zen', CW_WS_KEEPALIVE_MS: '200', PORT: String(port), CW_DATA_DIR: dataDir }, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`server did not start:\n${out}`)), 20000);
@@ -225,7 +227,8 @@ test('boot discovery caches every agent in models.json; a signed-out agent is st
   assert.deepEqual(Object.keys(saved.agents).sort(), ['antigravity', 'claude', 'codex', 'copilot', 'kiro', 'opencode']);
   assert.deepEqual(saved.agents.codex.models, []);
   assert.equal(saved.agents.codex.error, 'not signed in');
-  assert.equal(saved.agents.opencode.error, 'not signed in');
+  // No sign-in, yet OpenCode lists its free Zen models (never the paid one).
+  assert.deepEqual(saved.agents.opencode.models.map((m) => m.id), ['opencode/big-pickle', 'opencode/nemotron-3-ultra-free']);
   assert.ok(saved.agents.codex.at > 0);
 });
 
@@ -247,6 +250,9 @@ test('GET /api/connections lists coding agents and github; actions are login-pro
   }
   const codex = connections.find((c) => c.id === 'codex');
   assert.deepEqual([codex.installed, codex.signedIn, codex.canLogin, codex.canLogout], [true, false, true, true]);
+  const oc = connections.find((c) => c.id === 'opencode');
+  assert.deepEqual([oc.signedIn, oc.accounts, oc.ready], [true, [], 'free Zen models'], 'OpenCode is ready without a provider login');
+  assert.deepEqual(oc.freeModels.map((m) => m.label), ['Zen · Big Pickle (free)', 'Zen · Nemotron 3 Ultra Free (free)']);
   const post = (p, headers = {}) => fetch(base + p, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: '{}' });
   const anon = await post('/api/connections/codex/cancel');
   assert.equal(anon.status, 401);

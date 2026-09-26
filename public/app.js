@@ -4367,7 +4367,8 @@ async function connLogout(c, acct) {
 const connVia = (a) => (a.account ? `${a.label} (${a.account})` : a.label);
 function connStatus(c) {
   if (!c.installed) return ['', 'Not installed'];
-  if (c.signedIn && c.accounts?.length) return ['on', `Connected via ${c.accounts.map(connVia).join(', ')}`];
+  if (c.signedIn && c.accounts?.length) return ['on', `Connected via ${c.accounts.map(connVia).join(', ')}${c.ready ? ` · ${c.ready}` : ''}`];
+  if (c.signedIn && c.ready) return ['on', `Ready · ${c.ready}`];
   if (c.signedIn) return ['on', c.account ? `Connected as ${c.account}` : 'Connected'];
   if (c.login?.state === 'waiting') {
     const p = c.providers?.find((x) => x.id === c.login.provider);
@@ -4515,9 +4516,9 @@ function renderConnections(force) {
     const waiting = c.login?.state === 'waiting', multi = !!c.providers;
     const pick = () => { CONN.picking[c.id] = true; renderConnections(true); $('connsList').querySelector(`[data-conn="${c.id}"] .cn-pick input:checked`)?.focus(); };
     if (multi && c.installed && c.signedIn && !waiting && !CONN.picking[c.id] && c.accounts?.length < c.providers.length) {
-      const b = el('button', 'btn small cn-btn', 'Add');
+      const b = el('button', 'btn small cn-btn', c.accounts.length ? 'Add' : 'Connect a provider');
       b.type = 'button';
-      b.title = `Sign ${c.label} in to another provider`;
+      b.title = `Sign ${c.label} in to ${c.accounts.length ? 'another' : 'a'} provider`;
       b.onclick = pick;
       main.append(b);
     } else if (multi && c.installed && !c.signedIn && !waiting && !CONN.picking[c.id]) {

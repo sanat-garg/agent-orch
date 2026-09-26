@@ -40,6 +40,7 @@ _Durable knowledge for every agent session: architecture, conventions, decisions
 - The verifier runs every command-like backtick snippet in "Done when", joined with ` && `. Commands containing `>` (incl. `2>&1`) or `curl` are refused. Absence checks use `! grep …`.
 - Claude logout needs `confirm: true` — never send it in tests. `agyLogout` deletes `~/.gemini/antigravity-cli/antigravity-oauth-token` — never call it on the real home.
 - agy: native path params need `AGY_PATH_KEYS` mapping; headless agy without `--dangerously-skip-permissions` silently denies run_command, so agy work runs autonomous. `bin/agent-smoke.mjs --agent X --model Y` and `bin/orch-e2e.mjs --agent X --model Y [--parallel]` are live checks (cost quota).
+- OpenCode needs no sign-in for free Zen models (`opencode/*`, zero cost in `opencode models --verbose`): it is "ready" whenever its catalog is non-empty (`freeTier` skips the login gate in `discoverModels`); paid Zen needs an `opencode` key in auth.json.
 - Kiro is signed out on this VM; its authenticated event schema is unverified. Copilot `listModels()` currently returns only `auto`; no remaining/reset reading exists for Copilot.
 - The screenshot lightbox `#lbView` needs `contain: size` or huge images widen the modal.
 - Don't commit macOS `._*` files.

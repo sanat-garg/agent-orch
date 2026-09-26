@@ -573,3 +573,7 @@ Parallel planning, dynamic scheduling, settings verified; all 251 tests pass.
 ## 2026-09-26 14:47 — #205 Integrate #184: OpenCode Connect: let the owner choose the provider instead of forcing OpenAI [done (check passed)]
 
 Merge conflicts resolved; tests pass; no hardcoded OpenAI provider remains
+
+## 2026-09-26 15:15 — #185 OpenCode: free Zen models available without sign-in [done (check passed)]
+
+OpenCode is ready with free Zen models, no sign-in needed

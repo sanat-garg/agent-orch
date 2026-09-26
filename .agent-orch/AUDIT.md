@@ -354,6 +354,7 @@ agent that is unconnected, unlisted, blocked or has a window ≥90%, and an empt
   failed, along with its own dependents. Retrying B first and then A works.
 - **Fix:** In `reviveBlocked(root)`, revive any failed/cancelled dependent whose result has the blocked prefix of **any**
   of its direct prerequisites, once none of them is failed or cancelled. Alternatively, keep a `blocked_by` list.
+- **Fixed** (task #176): `reviveBlocked` revives a dependent blocked by any task once that cause and all its direct prerequisites are back up; test/revive-deps.test.mjs.
 
 ### 31. [low] A declared directory whose name contains a dot (`.agent-orch`, `.github`, `fixtures.v2`) only covers itself (parallel.mjs:46-50)
 - **What:** `segs` treats a pattern as a directory only if it ends in `/` or its last segment has no `.`. So

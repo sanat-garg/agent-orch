@@ -13,3 +13,7 @@ In the task drawer (the side panel for a task, in public/app.js), add a 'Fallbac
 ## Done when
 
 `npm test` passes with task-fallback PATCH tests, and the task drawer renders a Fallbacks section for queued tasks
+
+## Result — done (check passed) (2026-09-26 13:59)
+
+AGENT-ORCH-STATUS: done — Task fallback editing verified; all 248 tests pass.

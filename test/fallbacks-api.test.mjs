@@ -144,3 +144,38 @@ test('manual delegation lists every connected model with its status; the owner\'
     assert.equal(task.delegated_reason, 'chosen by the owner');
   } finally { db.close(); }
 });
+
+test('PATCH task fallbacks validates models, isolates the snapshot and rejects finished tasks', async () => {
+  await discovered();
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
+  const patch = async (id, fallbacks) => {
+    const r = await fetch(base + `/api/orch/tasks/${id}/fallbacks`, { method: 'PATCH', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ fallbacks }) });
+    return { status: r.status, body: await r.json() };
+  };
+  try {
+    const pid = Number(db.prepare("INSERT INTO projects(path,name,status,created_at) VALUES(?,'task-fb','paused',0)").run(path.join(dataDir, 'task-fb')).lastInsertRowid);
+    const add = (status, kind = 'work') => Number(db.prepare("INSERT INTO tasks(project_id,title,prompt,status,kind,created_at) VALUES(?,'Edit','code',?,?,0)").run(pid, status, kind).lastInsertRowid);
+    const id = add('queued'), sibling = add('queued');
+    const chatBefore = (await get('/api/convos')).body;
+    const unauth = await fetch(base + `/api/orch/tasks/${id}/fallbacks`, { method: 'PATCH', body: '{"fallbacks":[]}' });
+    assert.equal(unauth.status, 401); await unauth.arrayBuffer();
+    for (const bad of [undefined, {}, [{ agent: 'codex', model: 'invented' }], [{ agent: 'nope', model: 'gpt-6-sol' }], [{ agent: 'codex' }], Array(21).fill({ agent: 'codex', model: 'gpt-6-sol' })]) {
+      assert.equal((await patch(id, bad)).status, 400);
+    }
+    assert.equal((await patch(999999, [])).status, 404);
+    const list = [{ agent: 'codex', model: 'gpt-6-sol' }, { agent: 'antigravity', model: 'gemini-3.1-pro-high' }];
+    const r = await patch(id, [...list, list[0]]);
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.task.fallbacks, list);
+    assert.deepEqual((await get(`/api/orch/task/${id}`)).body.task.fallbacks, list);
+    assert.equal(db.prepare('SELECT fallbacks FROM tasks WHERE id=?').get(sibling).fallbacks, null);
+    assert.deepEqual((await get('/api/convos')).body, chatBefore);
+    assert.deepEqual((await patch(id, [])).body.task.fallbacks, []);
+    assert.equal((await patch(id, null)).body.task.fallbacks, null);
+    const running = add('running');
+    assert.equal((await patch(running, list)).body.task.status, 'running');
+    for (const status of ['done', 'cancelled', 'failed', 'needs_integration']) assert.equal((await patch(add(status), list)).status, 409);
+    assert.equal((await patch(add('queued', 'plan'), list)).status, 409);
+  } finally { db.close(); }
+});

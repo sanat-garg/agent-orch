@@ -201,3 +201,49 @@ test('reflection fallbacks: the settings popover opens the same sheet instantly,
   assert.deepEqual(errors, []);
   await ctx.close();
 });
+
+test('task drawer edits its own fallback snapshot', { skip, timeout: 60000 }, async () => {
+  const resetChat = await fetch(base + '/api/convos/' + CID + '/fallbacks', { method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ fallbacks: START }) });
+  assert.equal(resetChat.status, 200); await resetChat.json();
+  const id = Number(db.prepare("INSERT INTO tasks(project_id,title,prompt,agent,model,fallbacks,created_at) VALUES(?,'Task fallback editing','code','codex','gpt-5.5',?,0)").run(pid, JSON.stringify(START)).lastInsertRowid);
+  if (process.env.TASK_FB_SHOT) {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const { stdout } = await promisify(execFile)(process.execPath, ['/home/ubuntu/agent-orch/bin/shot.mjs', base + '/#' + CID,
+      '.agent-orch/shots/task-fallbacks-' + process.env.TASK_FB_SHOT + '.png', '--cookie=' + cookie, '--click=#obQueue', '--click=[data-task="' + id + '"]', '--wait=500']);
+    console.log(stdout);
+    if (process.env.TASK_FB_SHOT === 'before') return;
+  }
+  const ctx = await browser.newContext();
+  const [name, value] = cookie.split('=');
+  await ctx.addCookies([{ name, value, url: base }]);
+  const page = await ctx.newPage();
+  await page.goto(base + '/#' + CID);
+  await page.locator('#obQueue').click();
+  await page.locator('[data-task="' + id + '"]').first().click();
+  const section = page.locator('#drBody .dr-sec').filter({ has: page.locator('h3', { hasText: /^Fallbacks$/ }) });
+  await section.waitFor();
+  assert.equal(await section.locator('.fe-row').count(), 3);
+  await section.locator('.fe-row').nth(1).focus();
+  await page.keyboard.press('Alt+ArrowUp');
+  await page.waitForFunction(async (id) => (await (await fetch('/api/orch/task/' + id)).json()).task.fallbacks[0].model === 'gemini-3.1-pro-high', id);
+  assert.match(await page.locator('#drBody .tc-tag.model').innerText(), /Gemini/);
+  await section.locator('.fe-rm').first().click();
+  await section.getByText('Custom', { exact: true }).waitFor();
+  await page.waitForFunction(async (id) => (await (await fetch('/api/orch/task/' + id)).json()).task.fallbacks.length === 2, id);
+  await section.getByRole('button', { name: "Reset to chat's list" }).click();
+  await page.waitForFunction(async (id) => (await (await fetch('/api/orch/task/' + id)).json()).task.fallbacks.length === 3, id);
+  assert.deepEqual(await saved(), START);
+  db.prepare("UPDATE tasks SET status='running' WHERE id=?").run(id);
+  await page.reload();
+  await page.locator('#obQueue').click();
+  await page.locator('[data-task="' + id + '"]').first().click();
+  await section.getByText('Changes apply from the next resume or limit event.').waitFor();
+  db.prepare("UPDATE tasks SET status='done' WHERE id=?").run(id);
+  await page.reload();
+  await page.locator('#obQueue').waitFor();
+  await page.evaluate((id) => openTask(id), id);
+  await page.locator('#drBody h3', { hasText: 'Model' }).waitFor();
+  assert.equal(await section.count(), 0);
+  await ctx.close();
+});

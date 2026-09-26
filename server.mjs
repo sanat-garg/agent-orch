@@ -1321,6 +1321,13 @@ async function handleRequest(req, res) {
       return json(res, 200, c);
     }
   }
+  const tf = p.match(/^\/api\/orch\/tasks\/(\d+)\/fallbacks$/);
+  if (tf && req.method === 'PATCH') {
+    const { list, error } = checkFallbacks((await readBody(req)).fallbacks);
+    if (error) return json(res, 400, { error });
+    const r = orch.setTaskFallbacks(Number(tf[1]), list);
+    return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r);
+  }
   // Reflection fallbacks for a project's reflection-queued tasks: {fallbacks: [{agent, model}] | null}, same rules as a chat's.
   const rf = p.match(/^\/api\/orch\/projects\/(\d+)\/reflect-fallbacks$/);
   if (rf && req.method === 'PUT') {

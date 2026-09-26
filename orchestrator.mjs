@@ -2338,6 +2338,14 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     setTimeout(tick, 100);
     return { ok: true };
   }
+  function setTaskFallbacks(id, list) {
+    const t = getTask(id);
+    if (!t) return { error: 'No such task', status: 404 };
+    if (t.kind !== 'work' || !['queued', 'running'].includes(t.status)) return { error: 'Only queued or running work tasks can edit fallbacks', status: 409 };
+    updateTask(id, { fallbacks: list == null ? null : JSON.stringify(list) });
+    delegateTried.delete(id);
+    return { ok: true, task: taskView(getTask(id)) };
+  }
   // Reflection fallbacks (list already validated by the server): [{agent, model}] or null = none.
   function setReflectFallbacks(id, list) {
     if (!getProject(id)) return { error: 'No such project', status: 404 };
@@ -2518,7 +2526,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   return {
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
-    planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, changeMessage, projectAction, setReflectFallbacks, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
+    planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, changeMessage, projectAction, setTaskFallbacks, setReflectFallbacks, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
     drain, undrain, chatPlanning, stateView, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     unwatch: (ws) => { for (const set of runSubs.values()) set.delete(ws); },
   };

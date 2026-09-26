@@ -558,3 +558,7 @@ Every response now forbids framing; HTTPS sessions use __Host-cw_session
 ## 2026-09-26 13:18 — #186 Kiro Connect: pick the login method; never hang on an unanswered CLI prompt [done (check passed)]
 
 Kiro login methods, prompt safeguards, timeout, and tests pass
+
+## 2026-09-26 13:59 — #191 Edit a task's fallback agents from its side panel [done (check passed)]
+
+Task fallback editing verified; all 248 tests pass.

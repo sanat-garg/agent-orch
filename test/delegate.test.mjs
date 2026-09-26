@@ -77,7 +77,8 @@ test('a queued task moves to its first available fallback when its primary is li
       const list = JSON.stringify([{ agent: 'codex', model: 'gpt-a' }]);
       // curated: its first fallback (antigravity) is not connected, so it moves to the second.
       const ids = { reflect: task('a', 'reflection', list), chat: task('b', 'chat', list), nolist: task('g', 'chat'), empty: task('f', 'chat', '[]'),
-        curated: task('e', 'chat', JSON.stringify([{ agent: 'antigravity', model: 'gemini-x' }, { agent: 'codex', model: 'gpt-mini' }])) };
+        curated: task('e', 'chat', list) };
+      o.setTaskFallbacks(ids.curated, [{ agent: 'antigravity', model: 'gemini-x' }, { agent: 'codex', model: 'gpt-mini' }]);
       db.prepare("UPDATE projects SET convo_id='cb' WHERE name='b'").run();
       const get = (id) => db.prepare('SELECT * FROM tasks WHERE id=?').get(id);
       await until(() => ['reflect', 'chat', 'curated'].every((k) => get(ids[k]).status === 'done'));

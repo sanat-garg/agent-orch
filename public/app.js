@@ -3172,6 +3172,8 @@ function applyOrchSnapshot(s) {
 function onOrch(msg) {
   if (msg.t === 'otask') {
     observeTaskCompletion(msg.task);
+    const edit = taskFallbackEdits.get(msg.task.id);
+    if (edit?.pending) msg.task.fallbacks = edit.list;
     O.tasks.set(msg.task.id, msg.task);
     renderUsage();
     refreshCards(msg.task.id);
@@ -3339,6 +3341,8 @@ async function loadDetail() {
   try {
     const d = await api(`/api/orch/task/${id}`);
     if (O.drawer !== id) return;
+    const edit = taskFallbackEdits.get(id);
+    if (edit?.pending) d.task.fallbacks = edit.list;
     O.detail = d;
     O.tasks.set(id, { ...(O.tasks.get(id) || {}), ...d.task });
     renderDrawer();
@@ -3365,10 +3369,58 @@ function renderDrawerHead() {
   $('drTitle').textContent = t ? displayTitle(t) : 'Loading…';
 }
 
+const taskFallbackEdits = new Map();
+function taskFallbackSection(t) {
+  let edit = taskFallbackEdits.get(t.id);
+  if (!edit) {
+    edit = { ui: {}, chain: Promise.resolve(), pending: 0, confirmed: t.fallbacks };
+    taskFallbackEdits.set(t.id, edit);
+  }
+  const c = section('Fallbacks');
+  const chat = state.convos.find((c) => c.id === O.detail?.project?.convo_id);
+  const list = edit.pending ? edit.list : t.fallbacks;
+  const apply = (list) => {
+    const task = O.tasks.get(t.id);
+    if (task) task.fallbacks = list;
+    if (O.detail?.task.id === t.id) O.detail.task.fallbacks = list;
+    refreshCards(t.id);
+    if (O.drawer === t.id) renderDrawer();
+  };
+  const save = (list) => {
+    if (!edit.pending) edit.confirmed = t.fallbacks;
+    edit.list = list;
+    edit.pending++;
+    apply(list);
+    edit.chain = edit.chain.then(async () => {
+      try {
+        const r = await api(`/api/orch/tasks/${t.id}/fallbacks`, 'PATCH', { fallbacks: list });
+        edit.confirmed = r.task.fallbacks;
+      } catch (e) {
+        toast(`Could not save fallbacks: ${e.message}`, { kind: 'error' });
+      } finally {
+        edit.pending--;
+        apply(edit.pending ? edit.list : edit.confirmed);
+      }
+    });
+  };
+  if (chat && JSON.stringify(list || []) !== JSON.stringify(chat.fallbacks || [])) {
+    c.append(el('span', 'muted', 'Custom'));
+    const reset = el('button', 'btn small', "Reset to chat's list");
+    reset.onclick = () => save(chat.fallbacks ?? null);
+    c.append(reset);
+  }
+  if (t.status === 'running') c.append(el('div', 'dr-check', 'Changes apply from the next resume or limit event.'));
+  const editor = el('div');
+  c.append(editor);
+  renderFallbackEditor(editor, { list, onChange: save, ui: edit.ui });
+  return c;
+}
+
 function modelSection(t) {
   const ms = modelStatus(t), c = section('Model');
   c.append(modelChip(t, ms));
-  if (ms.list.length) {
+  const editable = t.kind === 'work' && ['queued', 'running'].includes(t.status);
+  if (!editable && ms.list.length) {
     const ol = el('ol', 'dr-fallbacks');
     ol.setAttribute('aria-label', 'Fallbacks, in order');
     for (const f of ms.list) {
@@ -3377,7 +3429,7 @@ function modelSection(t) {
       ol.append(li);
     }
     c.append(el('div', 'dr-check', 'Fallbacks at a limit, in order'), ol);
-  } else c.append(el('div', 'dr-check', 'No fallbacks: at a limit it waits for the reset.'));
+  } else if (!editable) c.append(el('div', 'dr-check', 'No fallbacks: at a limit it waits for the reset.'));
   if (t.moves?.length) {
     const ul = el('ul', 'dr-events');
     for (const m of t.moves) {
@@ -3414,6 +3466,8 @@ function renderDrawer(fromLive = false) {
   }
   const d = O.detail;
   const t = { ...d.task, ...(O.tasks.get(id) || {}) };
+  const edit = taskFallbackEdits.get(id);
+  if (edit?.pending) t.fallbacks = edit.list;
   const st = taskState(t);
   const isOpen = t.status === 'queued' || t.status === 'running';
 
@@ -3466,6 +3520,7 @@ function renderDrawer(fromLive = false) {
 
   // Model: the same text as the card's chip, the ordered fallbacks (current one marked) and every move.
   if (t.kind !== 'plan') body.append(modelSection(t));
+  if (t.kind === 'work' && isOpen) body.append(taskFallbackSection(t));
 
   // 2. The instructions it was given.
   if (t.kind === 'work') {

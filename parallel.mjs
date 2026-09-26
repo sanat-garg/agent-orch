@@ -94,6 +94,7 @@ export function readMemInfo(file = '/proc/meminfo') {
 export const MEM = {
   claimFloor: 800 * 1024 ** 2,   // below this nothing new is claimed (plan tasks included)
   pauseBelow: 300 * 1024 ** 2,   // sustained below this, the newest running task is paused
+  reapBelow: 1.5 * 1024 ** 3,    // below this the reaper (resources.mjs) runs right before claiming
   secondSlot: 2.5 * 1024 ** 3,   // a second task needs more than this available...
   secondSlotSwap: 0.25,          // ...and under 25% of swap in use
 };

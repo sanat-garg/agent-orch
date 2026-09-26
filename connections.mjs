@@ -350,7 +350,9 @@ export function createConnections({ entries, env = process.env, onChange = () =>
     return r.ok ? { status: 200, ok: true } : { status: 500, error: r.err.split('\n').pop() || 'sign-out failed' };
   }
 
-  return { list, start, submitCode, cancel, logout };
+  // A login is in progress (its tmux session on SOCKET must not be reaped).
+  const active = () => [...logins.values()].some((l) => l.state === 'waiting');
+  return { list, start, submitCode, cancel, logout, active };
 }
 
 // The `email` claim of a JSON credential file's id_token (payload decoded locally, never verified or sent anywhere).

@@ -22,6 +22,7 @@ import { mediaCollector } from './media.mjs';
 import { createUsageLog } from './usage.mjs';
 import { DELEGATE_CFG, createDelegator, parseFallbacks } from './delegate.mjs';
 import { filesOverlap, parseFiles, spreadAssign, readMemInfo, taskSlots, MEM } from './parallel.mjs';
+import { registerPid, withOwner } from './resources.mjs';
 import { commitAll, ensureWorktree, isMerged, listWorktrees, mergeBack, parkWorktree, removeWorktree, repoInfo, startIntegration, unresolvedFiles, worktreesRoot } from './worktrees.mjs';
 
 // ---------------------------------------------------------------- config
@@ -837,7 +838,7 @@ function takeLock(file) {
 
 export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLimits, onSubscription, emitChat, broadcast, convoExists, refreshUsage,
   convoFallbacks = () => null, onCommit = () => {}, projectReady = () => true, disabled = false, usageLog = createUsageLog(dataDir),
-  codexSnapshot = () => codexLatestSnapshot(), config = {} }) {
+  codexSnapshot = () => codexLatestSnapshot(), reap = null, config = {} }) {
   Object.assign(CFG, config); // tests tune slots (concurrency, parallelTasks, agentSlots, meminfo)
   const dir = path.join(dataDir, 'orchestrator');
   const runsDir = path.join(dir, 'runs');
@@ -1417,7 +1418,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
           if (l) writeEntry(l);
           if (e.k === 'tool_result') writeShots();
         } : onEvent,
-        query, bin: agent === 'claude' ? claudeBin : undefined, env: agentEnv, partial, onMessage,
+        query, bin: agent === 'claude' ? claudeBin : undefined, partial, onMessage,
+        // Ownership for resources.mjs: the task's agent tree is tagged, so it's never reaped while the task runs.
+        env: taskId ? withOwner(agentEnv, 'task', taskId) : agentEnv,
+        onSpawn: taskId ? ({ pid, pgid }) => registerPid({ pid, pgid, kind: 'task', id: taskId }) : undefined,
       });
     } finally {
       clearTimeout(timer);
@@ -1919,6 +1923,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       kvSet('announced_auth', 0);
       const d = decision();
       considerPreemption(d);
+      reapIfLow();
       for (;;) {
         const mem = readMemInfo(CFG.meminfo), slots = slotCount(d, mem);
         if (!slots) {
@@ -1935,6 +1940,14 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     } finally {
       ticking = false;
     }
+  }
+
+  // Low memory: reap leftover processes (resources.mjs) before claiming, at most every 30 s.
+  let reapedAt = 0;
+  function reapIfLow() {
+    if (!reap || Date.now() - reapedAt < 30_000 || readMemInfo(CFG.meminfo).avail >= MEM.reapBelow) return;
+    reapedAt = Date.now();
+    try { reap(); } catch (e) { console.error('[orchestrator] reap failed', e); }
   }
 
   function startTask(task) {
@@ -2582,6 +2595,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
     planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, changeMessage, projectAction, setTaskFallbacks, setReflectFallbacks, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
     drain, undrain, chatPlanning, stateView, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
+    isRunning: (id) => running.has(Number(id)), logEvent,
     unwatch: (ws) => { for (const set of runSubs.values()) set.delete(ws); },
   };
 }

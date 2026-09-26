@@ -599,3 +599,7 @@ one task by default, memory guard added, disk and worktrees cleaned
 ## 2026-09-26 20:27 — #196 Find and fix empty tool inputs/outputs and empty responses from CLI agents [done (check passed)]
 
 empty events fixed; fixtures pass; smoke runs show zero unexplained empties
+
+## 2026-09-26 20:44 — #208 Resource analyzer and safe reaper for leftover processes [done (check passed)]
+
+resources.mjs classifier, safe reaper, /api/resources, and tests all pass

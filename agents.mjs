@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import { toolResultImages } from './media.mjs';
 import { toEpochSec } from './usage.mjs';
@@ -409,9 +410,12 @@ const clip = (t) => (t.length > 6000 ? t.slice(0, 6000) + '\n…' : t);
 // Spawns a CLI that prints one JSON object per stdout line and feeds each to `handle`; stderr is kept (last 4k) in
 // res.stderr. detached: the CLI gets its own process group, so an abort, or the CLI's exit, also kills the commands
 // it spawned. If `stopOn` matches stderr, the run is killed too (and `stopped` is true), e.g. a CLI blocking on an auth prompt.
+// runAgentCli's onSpawn({pid, pgid}) (resources.mjs ownership), reached through the adapters without threading it through each.
+const spawnHook = new AsyncLocalStorage();
 async function spawnJsonl({ bin, args, cwd, env, signal, res, handle, stopOn }) {
   let aborted = false, stopped = false, killTimer;
   const child = spawn(bin, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  if (child.pid) { try { spawnHook.getStore()?.({ pid: child.pid, pgid: child.pid }); } catch {} }
   const killGroup = (sig) => { try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch {} } };
   const kill = () => {
     killGroup('SIGTERM');
@@ -1393,6 +1397,7 @@ export const AGENTS = { claude: CLAUDE, codex: CODEX, antigravity: ANTIGRAVITY, 
 
 // Runs one turn on `agent` (default 'claude'). Returns at least {outcome, text, sessionId, usage, resetsAt, errorCode};
 // outcome is ok | aborted | rate_limited | auth_error | max_turns | error.
+// opts.onSpawn({pid, pgid}) is called for every agent CLI process spawned (not the Claude SDK's own child: see resources.mjs).
 // An ok run without a final reply keeps the last assistant text; if there was none but tools ran, it gets a synthesized
 // summary of them (marked as such, and emitted as a text event); a run with neither is an error, not a success.
 export function runAgentCli(opts) {
@@ -1405,7 +1410,8 @@ export function runAgentCli(opts) {
     if (e.k === 'tool') tools.push(e.name || 'tool');
     opts.onEvent?.(e);
   };
-  return a.run({ ...opts, onEvent }).then((res) => finishEmpty(res, { agent: a, lastText, tools, onEvent }));
+  const run = () => a.run({ ...opts, onEvent });
+  return (opts.onSpawn ? spawnHook.run(opts.onSpawn, run) : run()).then((res) => finishEmpty(res, { agent: a, lastText, tools, onEvent }));
 }
 export function finishEmpty(res, { agent, lastText, tools, onEvent }) {
   if (res?.outcome !== 'ok' || String(res.text || '').trim()) return res;

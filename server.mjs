@@ -17,6 +17,7 @@ import { createConnections, SPECS, codexAccount, agyAccount, onPath } from './co
 import { mediaCollector, MEDIA_ID_RE, MEDIA_TYPES, toolResultImages } from './media.mjs';
 import { createUsageLog, createLimitStore, RANGES as USAGE_RANGES } from './usage.mjs';
 import { healthRow } from './health.mjs';
+import { createResources, registerPid, withOwner } from './resources.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -658,6 +659,7 @@ const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
   onCommit: (dir) => syncGit(dir).catch((e) => console.error('[github] sync failed', dir, e)),
   projectReady: (dir) => gh.status().linked && !!convos.find((c) => c.cwd === dir)?.repo,
   disabled: NO_ORCH,
+  reap: () => resources.reap({ reason: 'low memory' }),
 });
 
 // ---------- GitHub protocol ----------
@@ -691,6 +693,16 @@ const connections = createConnections({
   ],
   onChange: (list) => { for (const ws of allClients) send(ws, { t: 'connections', connections: list }); },
 });
+
+// Resource analyzer + reaper (resources.mjs). AGENT_ORCH_REAPER=on|dry|off; test instances (CW_DATA_DIR) only dry-run.
+const resources = createResources({
+  dataDir: DATA,
+  mode: process.env.AGENT_ORCH_REAPER || (NO_ORCH || !orch ? 'off' : process.env.CW_DATA_DIR ? 'dry' : 'on'),
+  isActive: (o) => (o.kind === 'task' ? !!orch?.isRunning(o.id) : runtimes.has(o.id) || agentTurns.has(o.id)),
+  loginActive: () => connections.active(),
+  log: (message, level = 'info') => { if (orch) orch.logEvent(message, { level }); else console.log(`[resources] ${message}`); },
+});
+if (orch) resources.start();
 
 // convo.repo mirrors the folder's real `origin` (a stale copy survives repo moves); cleared when there is none.
 async function refreshRepo(convo) {
@@ -824,7 +836,7 @@ function startRuntime(convo) {
       includePartialMessages: true,
       systemPrompt: { type: 'preset', preset: 'claude_code', append: chatSystemAppend(convo) },
       pathToClaudeCodeExecutable: CLAUDE_BIN,
-      env: CLAUDE_ENV,
+      env: withOwner(CLAUDE_ENV, 'chat', convo.id),
       canUseTool,
       stderr: (d) => process.stderr.write(`[claude ${convo.id.slice(0, 8)}] ${d}`),
     },
@@ -976,7 +988,8 @@ async function agentChatTurn(convo, text) {
     const turn = async (resume) => {
       try {
         return await runAgentCli({
-          agent, prompt: next, cwd: convo.cwd, resume, model: convo.model || undefined, signal: ac.signal, env: CLAUDE_ENV,
+          agent, prompt: next, cwd: convo.cwd, resume, model: convo.model || undefined, signal: ac.signal, env: withOwner(CLAUDE_ENV, 'chat', cid),
+          onSpawn: ({ pid, pgid }) => registerPid({ pid, pgid, kind: 'chat', id: cid }),
           systemAppend: resume ? undefined : chatSystemAppend(convo), autonomous: convo.mode === 'bypassPermissions',
           onEvent: (e) => {
             if (e.k === 'text') emit(cid, { t: 'text', text: e.text });
@@ -1340,6 +1353,13 @@ async function handleRequest(req, res) {
       broadcastConvos();
       return json(res, 200, c);
     }
+  }
+  if (p === '/api/resources' && req.method === 'GET') return json(res, 200, resources.summary());
+  if (p === '/api/resources/kill' && req.method === 'POST') {
+    const pid = Number((await readBody(req)).pid);
+    if (!Number.isInteger(pid) || pid <= 1) return json(res, 400, { error: 'pid required' });
+    const r = resources.killPid(pid);
+    return json(res, r.error ? r.status : 200, r);
   }
   if (p === '/api/orch/parallel' && req.method === 'PUT') {
     const result = orch.setParallelSettings(await readBody(req));

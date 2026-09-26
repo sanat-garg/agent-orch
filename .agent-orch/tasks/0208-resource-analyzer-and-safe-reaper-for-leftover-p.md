@@ -13,3 +13,7 @@ Add resources.mjs, a CPU/RAM analyzer plus a safe process reaper (BRIEF goal 9).
 ## Done when
 
 `npm test` passes with resources.mjs classification and reaper-safety tests, and GET /api/resources on a test server returns a grouped process list with a reclaimable estimate
+
+## Result — done (check passed) (2026-09-26 20:44)
+
+AGENT-ORCH-STATUS: done — resources.mjs classifier, safe reaper, /api/resources, and tests all pass

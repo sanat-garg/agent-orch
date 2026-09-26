@@ -31,6 +31,24 @@ a reason.
 | Codex | `codex debug models` (`--bundled` skips the account refresh) | JSON `{models: […]}` with `slug`, `display_name`, `description`, `priority` and `visibility` (`list` or `hide`) |
 | Antigravity | `agy models` | stdout lines `<id>\t<display name>`, "Fetching available models..." on stderr; signed out → exit 1 "Please sign in to view available models." |
 
+**Plan limits and health (Task #195, verified 2026-09-26).** `bin/agent-health.mjs [--json] [--cached]` prints, per agent,
+version, sign-in, models, limit windows + source and last fetch; exit 1 if a signed-in agent has 0 models or a window
+without a reset although its source reports resets. Limit readings (agents.mjs `fetchLimits`, cached by usage.mjs
+`createLimitStore` in `<DATA>/limits.json`, refreshed at boot, every 6 h, after a sign-in change and from Connections →
+Refresh):
+
+| Agent | Source | Windows |
+|---|---|---|
+| Claude Code | SDK `usage_EXPERIMENTAL_…()` on an idle query (also polled every 3 min) | `five_hour`, `seven_day`, `seven_day_opus/_sonnet`, model-scoped, with `resets_at` |
+| Codex | newest `~/.codex/sessions/**/rollout-*.jsonl` `token_count.rate_limits` (only as fresh as the last codex run) | `5h`, `weekly`, with `resets_at` |
+| Antigravity | `agy -p /usage --output-format stream-json` (local, no tokens) | `gemini-5h/-weekly`, `3p-5h/-weekly`, with `reset_time` |
+| Copilot | SDK `rpc.account.getCurrentAuth()` → `authInfo.copilotUser.quota_snapshots` | `premium` (premium_interactions, pct = 100 − percent_remaining), reset `quota_reset_date_utc`; unlimited quotas skipped. `rpc.account.getQuota().resetDate` is the snapshot time, **not** the reset: don't use it |
+| OpenCode | **not exposed by CLI** (`opencode stats` = local token/cost totals only; free Zen has no published quota) | — |
+| Kiro | **not exposed by CLI** (credits only in the interactive chat's `/usage`; no headless command or stream event) | — |
+
+Copilot listing only `auto` is a legitimate state for this account (task #187: the SDK's `listModels()` and the
+session model RPC return nothing else). It is shown as **Auto (Copilot picks the model)**, not as an error.
+
 ---
 
 ## 1. OpenAI Codex CLI
@@ -360,4 +378,4 @@ copilot -C /path/to/workdir -p 'follow-up' --output-format json \
 {"type":"result","sessionId":"711a…","exitCode":0,"usage":{"premiumRequests":1,"totalApiDurationMs":2317,"sessionDurationMs":8599}}
 ```
 - The `tool_call_delta` was combined here for readability; real input arrived in many small deltas. `session.usage_checkpoint` may be enormous and includes internal cache state; extract only the counters needed. `result.usage.premiumRequests` is per run; `session.usage_checkpoint.totalPremiumRequests` is session cumulative. `/usage` shows session token and credit statistics, **not** remaining account allowance or its reset time. No real quota/error event occurred. Preserve `type:error`/failure payloads and nonzero `result.exitCode`; classify explicit 429/rate-limit/credit-exhausted messages only after a sample is seen. Do not treat a `tool.execution_complete` failure as provider quota.
-- GitHub billing may use AI credits or legacy premium requests depending on plan. A [legacy-plan reference](https://docs.github.com/en/copilot/reference/copilot-billing/request-based-billing-legacy/copilot-requests) says legacy counters reset at 00:00 UTC on the first of each month; this is **not** evidence of this account's reset. No current remaining-quota/reset command was verified. The Connections status can prove usable auth with a prompt, but not promise a live remaining allowance from CLI output alone.
+- GitHub billing may use AI credits or legacy premium requests depending on plan. A [legacy-plan reference](https://docs.github.com/en/copilot/reference/copilot-billing/request-based-billing-legacy/copilot-requests) says legacy counters reset at 00:00 UTC on the first of each month; this is **not** evidence of this account's reset. The CLI prints no allowance, but the SDK does: `rpc.account.getCurrentAuth().authInfo.copilotUser` carries `quota_snapshots` and `quota_reset_date_utc` (verified 2026-09-26: premium_interactions 200, 82.4% remaining, reset 2026-10-01T00:00Z; see Plan limits and health above).

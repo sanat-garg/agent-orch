@@ -2572,7 +2572,7 @@ function renderUsage(fresh = false) {
   if (id === 'claude' && !u?.updatedAt) note = 'Checking plan limits…';
   else if (!u?.available) note = id === 'claude'
     ? (u?.error ? `Couldn't read limits: ${u.error}` : 'Plan limits unavailable')
-    : usageSlides.error ? "Couldn't refresh limits" : 'No current limits reported by this agent';
+    : usageSlides.error ? "Couldn't refresh limits" : limitsHidden(id) ? 'Limits not exposed by CLI' : 'No current limits reported by this agent';
   else {
     note = windows.map((w) => (w.resetsAt ? `${w.label} resets ${fmtResetAt(w.resetsAt)}` : '')).filter(Boolean).join('\n');
     if (u.extraUsage === true) note += ' ⚠ Extra usage is ON: it can bill beyond your plan';
@@ -2701,7 +2701,7 @@ setInterval(() => { if (M.usage) renderUsage(); }, 30e3); // keep the "in 2h 9m"
 // Per-agent plan windows, tokens and limit hits over time (GET /api/usage/history, see usage.mjs).
 const U = { range: { '6h': 1, '24h': 1, '7d': 1, '30d': 1 }[store.get('cw.urange')] ? store.get('cw.urange') : '24h', data: null, err: '', at: 0, timer: null, lastFocus: null, draws: [] };
 const USAGE_AGENTS = ['claude', 'codex', 'antigravity', 'copilot'];
-const WIN_NAMES = { five_hour: '5-hour', seven_day: 'Weekly', '5h': '5-hour', weekly: 'Weekly' };
+const WIN_NAMES = { five_hour: '5-hour', seven_day: 'Weekly', '5h': '5-hour', weekly: 'Weekly', premium: 'Premium requests' };
 const SERIES = ['var(--accent)', 'var(--chart-2)', 'var(--chart-3)', 'var(--faint)'];
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 // Antigravity has a 5-hour and a weekly limit per model group: Gemini models, and third-party ones (agents.mjs agyGroup).
@@ -2963,7 +2963,7 @@ function usageSection(id, a, conn, d) {
     const host = el('div');
     lc.append(host);
     usageLineChart(host, a.windows, d.from, d.to);
-  } else lc.append(el('p', 'na', 'No window readings in this range.'));
+  } else lc.append(el('p', 'na', limitsHidden(id) ? 'Limits not exposed by CLI' : 'No window readings in this range.'));
   const bc = col(d.bucketMs >= 864e5 ? 'Tokens per day' : d.bucketMs < 3600e3 ? 'Tokens per 15 min' : 'Tokens per hour');
   if (a.tokens.some((b) => b.input || b.output || b.premiumRequests)) {
     const legend = el('div', 'ug-legend');
@@ -4432,6 +4432,7 @@ function openConnections(id) {
   if ($('connsModal').hidden) CONN.lastFocus = document.activeElement;
   $('connsModal').hidden = false;
   renderConnFoot();
+  if (!$('connsRefresh').disabled) $('connsChecked').textContent = 'Models and limits refresh every 6 h and after each sign-in.';
   renderConnections(true);
   refreshConnections();
   $('connsModal').querySelector('[data-close].icon-btn').focus();
@@ -4471,6 +4472,42 @@ async function connLogout(c, acct) {
   await connAction(c, 'logout', { ...(c.logoutWarning ? { confirm: true } : {}), ...(acct ? { provider: acct.id } : {}) });
 }
 const connVia = (a) => (a.account ? `${a.label} (${a.account})` : a.label);
+// An agent CLI whose limits can't be read at all (health.limits.exposed false: OpenCode, Kiro; see .agent-orch/AGENTS.md).
+const limitsHidden = (id) => CONN.list.find((c) => c.id === id)?.health?.limits?.exposed === false;
+// A row's compact health (health.mjs): version, models, limit windows, when they were last read, and what's wrong.
+function connHealth(c) {
+  const h = c.health;
+  if (!h || !c.installed) return null;
+  const parts = [h.version ? `v${h.version}` : ''];
+  if (h.signedIn) {
+    const ms = h.models, L = h.limits;
+    const one = ms.count === 1 && AGENT_LIST.find((a) => a.id === c.id)?.models.find((m) => m.id === ms.ids[0]);
+    parts.push(one ? one.label || one.id : `${ms.count} model${ms.count === 1 ? '' : 's'}`);
+    parts.push(!L.exposed ? 'limits not exposed by CLI'
+      : L.windows.length ? [...L.windows].sort((a, b) => byWin(a.window, b.window)).map((w) => `${winLabel(w.window)} ${Math.round(w.pct)}%`).join(', ')
+      : L.error ? '' : 'no limit reading yet');
+    const at = Math.max(ms.at || 0, L.at || 0);
+    if (at) parts.push(`read ${fmtWhen(at)}`);
+    if (L.error) parts.push(`limit check failed: ${L.error}`);
+    parts.push(...h.problems);
+  }
+  return { text: parts.filter(Boolean).join(' · '), bad: h.problems.length > 0 || !!h.limits.error, title: h.errors.join('\n') };
+}
+async function refreshHealth() {
+  const b = $('connsRefresh');
+  b.disabled = true; b.textContent = 'Checking…';
+  blurSwap($('connsChecked'), 'Checking every agent…');
+  try {
+    const r = await api('/api/connections/refresh', 'POST');
+    AGENT_LIST = (await api('/api/agents')).agents || AGENT_LIST;
+    renderAgentPicker();
+    applyConnections(r.connections);
+    loadSidebarUsage();
+    blurSwap($('connsChecked'), `Checked ${fmtWhen(Date.now())}`);
+  } catch (e) { blurSwap($('connsChecked'), `Refresh failed: ${e.message}`); }
+  finally { b.disabled = false; b.textContent = 'Refresh'; renderConnections(true); }
+}
+$('connsRefresh').addEventListener('click', refreshHealth);
 function connStatus(c) {
   if (!c.installed) return ['', 'Not installed'];
   if (c.signedIn && c.accounts?.length) return ['on', `Connected via ${c.accounts.map(connVia).join(', ')}${c.ready ? ` · ${c.ready}` : ''}`];
@@ -4662,6 +4699,12 @@ function renderConnections(force) {
       }
     }
     row.append(main);
+    const hl = connHealth(c);
+    if (hl?.text) {
+      const hd = el('div', `cn-health${hl.bad ? ' bad' : ''}`, hl.text);
+      hd.title = hl.title || hl.text;
+      row.append(hd);
+    }
     if (multi && c.signedIn && c.canLogout && !waiting) {
       for (const a of c.accounts || []) {
         const r = el('div', 'cn-acct');

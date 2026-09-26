@@ -189,8 +189,9 @@ export const tmuxRunner = (args) => new Promise((resolve) => {
   execFile('tmux', ['-L', SOCKET, ...args], { timeout: 5000 }, (err, out) => resolve({ ok: !err, out: String(out || '') }));
 });
 
-// entries: [{id, label, installed(), signedIn(), account?(), detail?(), probe?(), spec?, envFilter?, afterChange?()}]. detail: extra
-// row fields while signed in (OpenCode: {ready, freeModels} for sign-in-free models). probe: an
+// entries: [{id, label, installed(), signedIn(), account?(), detail?(), health?(), probe?(), spec?, envFilter?, afterChange?()}]. detail: extra
+// row fields while signed in (OpenCode: {ready, freeModels} for sign-in-free models). health({installed, signedIn, account}):
+// the row's `health` (health.mjs healthRow). probe: an
 // uncached async sign-in check, run every probeMs while a login waits; true ends it as done (for CLIs whose success
 // screen isn't known). onChange(list) fires on every state change (the server broadcasts it). tmux/pollMs/probeMs/
 // timeoutMs are injectable for tests.
@@ -212,6 +213,7 @@ export function createConnections({ entries, env = process.env, onChange = () =>
         installed = !!e.installed(); signedIn = installed && !!e.signedIn(); account = signedIn ? e.account?.() || null : null;
         if (signedIn && e.spec?.providers) accounts = (e.accounts?.() || []).flatMap((a) => (providerSpec(e, a.id) ? [{ ...a, label: e.spec.providers[a.id].label }] : []));
         if (signedIn) detail = e.detail?.() || {};
+        if (e.health) detail.health = e.health({ installed, signedIn, account });
       } catch {}
       return { id: e.id, label: e.label, installed, signedIn, account, canLogin: !!e.spec, canLogout: !!e.spec?.logout,
         ...(e.spec?.providers ? { providers: Object.entries(e.spec.providers).map(([id, p]) => ({ id, label: p.label, blurb: p.blurb })), accounts } : {}),

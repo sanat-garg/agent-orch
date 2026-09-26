@@ -13,6 +13,7 @@ import path from 'node:path';
 import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process';
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import { toolResultImages } from './media.mjs';
+import { toEpochSec } from './usage.mjs';
 import { CopilotClient, RuntimeConnection } from '@github/copilot-sdk';
 
 const HOME = os.homedir();
@@ -190,10 +191,29 @@ const CLAUDE = {
       return claudeModels(await withTimeout(q.supportedModels(), timeoutMs, 'claude'));
     } finally { ac.abort(); }
   },
+  // Plan windows from the SDK's usage() on the same idle query (no message sent). The server polls this every 3 min.
+  limitSource: 'Claude SDK usage()',
+  async limits({ query = sdkQuery, bin, env = process.env, timeoutMs = 20_000 } = {}) {
+    const ac = new AbortController();
+    const idle = (async function* () { await new Promise((r) => ac.signal.addEventListener('abort', r, { once: true })); })();
+    try {
+      const q = query({ prompt: idle, options: { cwd: HOME, abortController: ac, pathToClaudeCodeExecutable: bin || this.bin, env: stripEnv(env, this.envFilter) } });
+      const u = await withTimeout(q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }), timeoutMs, 'claude usage');
+      if (!u?.rate_limits_available) throw new Error('Claude reported no plan limits');
+      return { windows: claudeWindows(u.rate_limits) };
+    } finally { ac.abort(); }
+  },
   envFilter: /^(ANTHROPIC_(API_KEY|AUTH_TOKEN|BASE_URL)|CLAUDE_CODE_USE_(BEDROCK|VERTEX|FOUNDRY))$/,
   events: claudeEvents,
   run: runClaude,
 };
+
+// The SDK usage() rate_limits as window points: five_hour, seven_day(_opus|_sonnet) and model-scoped ones by name.
+export function claudeWindows(rl = {}) {
+  const w = (window, x) => (x && x.utilization != null ? [{ window, pct: x.utilization, resetsAt: toEpochSec(x.resets_at) }] : []);
+  return [...w('five_hour', rl.five_hour), ...w('seven_day', rl.seven_day), ...w('seven_day_opus', rl.seven_day_opus),
+    ...w('seven_day_sonnet', rl.seven_day_sonnet), ...(rl.model_scoped || []).flatMap((m) => (m.display_name ? w(m.display_name, m) : []))];
+}
 
 // ---------------------------------------------------------------- codex (OpenAI Codex CLI, `codex exec --json`)
 
@@ -479,6 +499,9 @@ const CODEX = {
     const out = await execOut(bin || this.bin, ['debug', 'models'], { env: stripEnv(env, this.envFilter), cwd: HOME, timeout: timeoutMs });
     return codexModels(JSON.parse(out));
   },
+  // `codex exec --json` streams no limits; the newest rollout rate_limits snapshot is the only reading (at = when written).
+  limitSource: 'codex rollout rate_limits',
+  async limits({ codexHome } = {}) { const s = codexLatestSnapshot(codexHome); return { windows: s?.windows || [], at: s?.t ?? null }; },
   envFilter: /^(OPENAI_(API_KEY|BASE_URL|ORG_ID|ORGANIZATION|PROJECT_ID)|CODEX_(API_KEY|ACCESS_TOKEN|AUTH|HOME)|AZURE_OPENAI_.*)$/,
   events: codexEvents,
   run: runCodex,
@@ -523,7 +546,7 @@ export const limitScopes = (agents) => agents.flatMap((a) => (a === 'antigravity
 export const scopeWindows = (scope, list) => { const g = scopeGroup(scope); return (list || []).filter((w) => !g || (scope.startsWith('opencode:') ? w.window.startsWith(`${g}-`) : windowGroup(w.window) === g)); };
 
 // A plan window's display name ('3p-5h' → 'Third-party · 5-hour'); public/app.js winLabel matches it.
-const WIN_NAMES = { '5h': '5-hour', weekly: 'Weekly', five_hour: '5-hour', seven_day: 'Weekly' };
+const WIN_NAMES = { '5h': '5-hour', weekly: 'Weekly', five_hour: '5-hour', seven_day: 'Weekly', premium: 'Premium requests' };
 export function windowLabel(w) {
   const g = windowGroup(w), rest = g ? String(w).slice(g.length + 1) : String(w || '');
   const name = WIN_NAMES[rest] || rest.charAt(0).toUpperCase() + rest.slice(1).replace(/_/g, ' ');
@@ -680,6 +703,12 @@ const ANTIGRAVITY = {
   // `agy models` prints one `<id>\t<display name>` line per model (progress goes to stderr).
   async listModels({ bin, env = process.env, timeoutMs = 20_000 } = {}) {
     return agyModels(await execOut(bin || this.bin, ['models'], { env: stripEnv(env, this.envFilter), cwd: HOME, timeout: timeoutMs }));
+  },
+  limitSource: 'agy -p /usage',
+  async limits({ bin, env = process.env } = {}) {
+    const windows = await agyUsage({ bin, env });
+    if (!windows) throw new Error('agy /usage returned no windows');
+    return { windows };
   },
   envFilter: /^(GEMINI_API_KEY|GOOGLE_(API_KEY|GEMINI_BASE_URL|GENAI_USE_VERTEXAI|GENAI_USE_ENTERPRISE|GENAI_USE_GCA|APPLICATION_CREDENTIALS|CLOUD_PROJECT(_ID)?|CLOUD_LOCATION)|AGY_(ADC_AUTH|BUSINESS_PAYGO_TIER))$/,
   events: agyEvents,
@@ -861,9 +890,12 @@ const OPENCODE = {
   account() { return null; },
   login: 'Connect from the sidebar',
   freeModels() { return modelCatalog('opencode').models.filter((m) => m.free); },
+  // `opencode stats` totals tokens and cost; no command reports subscription windows or reset times.
+  limitSource: null,
   // The signed-in subscription providers' models plus the free Zen ones, from one `opencode models --verbose` run in a
   // neutral cwd (no project config) with the billing env stripped.
-  async listModels({ bin, env = process.env, home = HOME, timeoutMs = 30_000 } = {}) {
+  // 60 s: it refreshes the models.dev catalog first, which ran past 30 s while every agent was being checked at boot.
+  async listModels({ bin, env = process.env, home = HOME, timeoutMs = 60_000 } = {}) {
     const out = await execOut(bin || this.bin, ['models', '--verbose'], { env: stripEnv(env, this.envFilter), cwd: HOME, timeout: timeoutMs });
     return opencodeModels(out, opencodeProviders(home).map((p) => p.id), { zenKey: opencodeZenKey(home) });
   },
@@ -978,6 +1010,8 @@ const KIRO = {
   },
   account() { return this.loggedIn() ? this.identity : null; },
   login: 'Connect from the sidebar',
+  // Credits show only in the interactive chat's /usage; no headless command or stream event reports them.
+  limitSource: null,
   async listModels({ bin, env = process.env, timeoutMs = 20_000 } = {}) {
     return kiroModels(await execOut(bin || this.bin, ['chat', '--list-models', '--format', 'json'], { env: stripEnv(env, this.envFilter), cwd: HOME, timeout: timeoutMs }));
   },
@@ -1047,9 +1081,20 @@ async function runCopilot({ model, prompt, cwd, resume, systemAppend, signal, on
   else if (resume && COPILOT_NO_SESSION_RE.test(message)) res.errorCode = 'no_session';
   return res;
 }
+// 'auto' alone is a legitimate state (task #187: this account's entitlement lists nothing else), not an error.
+export const COPILOT_AUTO_LABEL = 'Auto (Copilot picks the model)';
 export function copilotModels(rows) {
   if (!Array.isArray(rows)) throw new Error('Copilot returned no model list');
-  return rows.filter((m) => m?.id && !String(m.id).includes('/')).map((m) => ({ id: m.id, label: m.name || m.id, ...(m.id === 'auto' && { default: true }) }));
+  return rows.filter((m) => m?.id && !String(m.id).includes('/'))
+    .map((m) => (m.id === 'auto' ? { id: 'auto', label: COPILOT_AUTO_LABEL, default: true } : { id: m.id, label: m.name || m.id }));
+}
+// The Copilot user record (account.getCurrentAuth → authInfo.copilotUser) → one window per limited quota
+// ('premium' = premium_interactions), reset at quota_reset_date_utc. account.getQuota's resetDate is the snapshot
+// time, not the reset, so it isn't used. Unlimited quotas (chat, completions on paid plans) aren't limits.
+export function copilotWindows(user) {
+  const resetsAt = toEpochSec(user?.quota_reset_date_utc || user?.quota_reset_date);
+  return Object.entries(user?.quota_snapshots || {}).filter(([, q]) => q && !q.unlimited && Number.isFinite(q.percent_remaining))
+    .map(([k, q]) => ({ window: k === 'premium_interactions' ? 'premium' : k, pct: Math.round((100 - q.percent_remaining) * 100) / 100, resetsAt }));
 }
 const COPILOT = {
   id: 'copilot', label: 'GitHub Copilot CLI', bin: 'copilot',
@@ -1064,13 +1109,28 @@ const COPILOT = {
     return r.status === 0 ? r.stdout.trim() || null : null;
   },
   login: 'Connect from the sidebar',
-  async listModels({ bin, env = process.env, timeoutMs = 20_000, clientFactory } = {}) {
+  // One SDK session over stdio: fn(client) runs after start and a signed-in check (which also names the account).
+  async withClient({ bin, env = process.env, timeoutMs = 20_000, clientFactory } = {}, fn) {
     const cleanEnv = { ...stripEnv(env, this.envFilter), COPILOT_HOME: path.join(HOME, '.copilot') };
     const client = clientFactory ? clientFactory() : new CopilotClient({ connection: RuntimeConnection.forStdio({
       path: bin || execFileSync('which', [this.bin], { env: cleanEnv, encoding: 'utf8' }).trim(), env: cleanEnv,
     }) });
-    try { await withTimeout(client.start(), timeoutMs, 'copilot'); return copilotModels(await withTimeout(client.listModels(), timeoutMs, 'copilot models')); }
-    finally { await client.stop(); }
+    try {
+      await withTimeout(client.start(), timeoutMs, 'copilot');
+      const auth = client.getAuthStatus ? await withTimeout(client.getAuthStatus(), timeoutMs, 'copilot auth') : null;
+      if (auth?.isAuthenticated === false) throw new Error(auth.statusMessage || 'Copilot is not signed in');
+      if (auth?.login) this.identity = auth.login;
+      return await fn(client);
+    } finally { await client.stop(); }
+  },
+  listModels(opts = {}) { return this.withClient(opts, async (c) => copilotModels(await withTimeout(c.listModels(), opts.timeoutMs || 20_000, 'copilot models'))); },
+  limitSource: 'Copilot SDK account quota_snapshots',
+  limits(opts = {}) {
+    return this.withClient(opts, async (c) => {
+      const user = (await withTimeout(c.rpc.account.getCurrentAuth(), opts.timeoutMs || 20_000, 'copilot quota'))?.authInfo?.copilotUser;
+      if (!user?.quota_snapshots) throw new Error('Copilot reported no quota');
+      return { windows: copilotWindows(user) };
+    });
   },
   envFilter: /^(?:COPILOT_(?:GITHUB_TOKEN|PROVIDER_.*|HOME)|GH_TOKEN|GITHUB_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY|GEMINI_API_KEY|GOOGLE_API_KEY)$/,
   events: copilotEvents, run: runCopilot,
@@ -1130,6 +1190,46 @@ export async function discoverModels(id, opts = {}) {
     const models = await a.listModels(opts);
     return models.length ? { models, error: null, at } : none('the CLI listed no models', at);
   } catch (e) { return none(String(e?.message || e).split('\n')[0].slice(0, 200) || 'discovery failed', at); }
+}
+
+// ---------------------------------------------------------------- versions and plan limits
+
+// `<bin> --version` → the version number ('2.1.282'; null when unreadable), cached per agent/bin for 6 h. agentVersion(id)
+// answers from the cache at once (null until the first read lands) and re-reads in the background; await readVersion(id)
+// for a fresh one. Never a sync spawn: the server calls agentVersion while listing connections.
+const versions = new Map();
+const versionKey = (a) => `${a.bin}\0${process.env.PATH}`;
+export function readVersion(id) {
+  const a = AGENTS[id];
+  if (!a) return Promise.resolve(null);
+  const e = { key: versionKey(a), at: Date.now(), value: versions.get(id)?.value ?? null };
+  versions.set(id, e);
+  return new Promise((resolve) => execFile(a.bin, ['--version'], { env: stripEnv(process.env, a.envFilter), encoding: 'utf8', timeout: 20_000 }, (err, out) => {
+    e.value = err ? null : /\d+\.\d+[\w.+-]*/.exec(out || '')?.[0]?.replace(/\.$/, '') || null;
+    resolve(e.value);
+  }));
+}
+export function agentVersion(id) {
+  const a = AGENTS[id], hit = versions.get(id);
+  if (!a) return null;
+  if (!hit || hit.key !== versionKey(a) || Date.now() - hit.at > 6 * 3600e3) readVersion(id);
+  return hit?.value ?? null;
+}
+// Why an agent has no limit readings when its CLI has no command or event that reports them (see AGENTS.md).
+export const LIMITS_NOT_EXPOSED = 'not exposed by CLI';
+// One agent's plan windows, read live: {source, exposed, windows: [{window, pct, resetsAt}], error, at} (at = when the
+// reading was taken, null on failure). Agents whose CLI exposes nothing: exposed false, source null, no error.
+export async function fetchLimits(id, opts = {}) {
+  const a = AGENTS[id], at = Date.now();
+  if (!a) return { source: null, exposed: false, windows: [], error: 'unknown agent', at: null };
+  if (!a.limitSource) return { source: null, exposed: false, windows: [], error: null, at };
+  const base = { source: a.limitSource, exposed: true, windows: [] };
+  if (!a.available()) return { ...base, error: 'not installed', at: null };
+  if (!a.loggedIn()) return { ...base, error: 'not signed in', at: null };
+  try {
+    const r = await a.limits(opts);
+    return { ...base, windows: r.windows || [], error: null, at: r.at ?? at };
+  } catch (e) { return { ...base, error: String(e?.message || e).split('\n')[0].slice(0, 200) || 'limit check failed', at: null }; }
 }
 
 // A resumed run failed because its session is gone (Claude's text, or an adapter's errorCode 'no_session'):

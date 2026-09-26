@@ -195,3 +195,52 @@ export function usageHistory(records, rangeKey, at = Date.now()) {
   }
   return { range, from, to: at, bucketMs: bucket, agents };
 }
+
+// Plan-limit checks per agent (agents.mjs `fetchLimits`), for the health view: <DATA>/limits.json keeps each agent's
+// {source, exposed, windows, error, at (last successful reading), checkedAt}; readings also go to the usage log.
+// Refreshed on start, every 6 h, after a sign-in change and from the Connections modal's Refresh; `note` takes a
+// reading made elsewhere (the server's 3-minute Claude poll). fetch(id) is injectable for tests.
+export const LIMITS_TTL = 6 * 3600e3;
+export function createLimitStore({ file, ids, fetch, usageLog = null, intervalMs = LIMITS_TTL, onChange = () => {}, log = () => {}, now = Date.now }) {
+  const status = new Map(), inflight = new Map();
+  let timer = null;
+  try { for (const [id, e] of Object.entries(JSON.parse(fs.readFileSync(file, 'utf8')).agents || {})) if (ids.includes(id)) status.set(id, e); } catch {}
+  const save = () => {
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(`${file}.tmp`, JSON.stringify({ saved: now(), agents: Object.fromEntries(status) }, null, 1));
+      fs.renameSync(`${file}.tmp`, file);
+    } catch (e) { log(`could not save ${file}: ${e.message}`); }
+  };
+  // A failed check keeps the last good windows and their time, so "last successful fetch" stays meaningful.
+  function set(id, r) {
+    const prev = status.get(id);
+    const ok = !r.error;
+    status.set(id, { source: r.source ?? prev?.source ?? null, exposed: r.exposed ?? prev?.exposed ?? true,
+      windows: ok ? r.windows || [] : prev?.windows || [], error: r.error || null, at: ok ? r.at ?? now() : prev?.at ?? null, checkedAt: now() });
+    if (ok && usageLog) for (const w of r.windows || []) usageLog.window(id, w.window, w.pct, w.resetsAt, r.at ?? undefined);
+  }
+  async function refresh(only = ids) {
+    const want = only.filter((id) => ids.includes(id));
+    await Promise.all(want.map((id) => {
+      if (!inflight.has(id)) {
+        inflight.set(id, (async () => {
+          let r;
+          try { r = await fetch(id); } catch (e) { r = { error: String(e?.message || e) }; }
+          set(id, r);
+          if (r.error) log(`${id}: no limits (${r.error})`);
+        })().finally(() => inflight.delete(id)));
+      }
+      return inflight.get(id);
+    }));
+    save();
+    try { onChange(want); } catch {}
+  }
+  return {
+    refresh,
+    note(id, r) { if (!ids.includes(id)) return; set(id, { ...status.get(id), ...r, error: null }); save(); },
+    get: (id) => status.get(id) || null,
+    start() { const p = refresh(); timer = setInterval(() => refresh().catch(() => {}), intervalMs); timer.unref?.(); return p; },
+    stop: () => clearInterval(timer),
+  };
+}

@@ -488,6 +488,10 @@ code, pre, kbd { font-family: var(--mono); }
 .cn-opt-tx { display: flex; flex-direction: column; min-width: 0; }
 .cn-opt-name { color: var(--text); font-size: 13px; font-weight: 600; }
 .cn-opt-sub { color: var(--muted); font-size: 12px; }
+.cn-health { padding-left: 24px; font-size: 12px; color: var(--faint); overflow-wrap: anywhere; }
+.cn-health.bad { color: var(--warn); }
+.cn-bar { display: flex; align-items: center; gap: 8px; margin-top: 12px; padding: 0 4px; }
+.cn-checked { flex: 1; min-width: 0; font-size: 12px; color: var(--muted); }
 .cn-acct { display: flex; align-items: center; gap: 6px; padding-left: 24px; font-size: 12.5px; color: var(--muted); }
 .cn-acct .cn-st { flex: 1; min-width: 0; }
 .cn-acct .link-btn { font-size: 12px; padding: 3px 6px; }

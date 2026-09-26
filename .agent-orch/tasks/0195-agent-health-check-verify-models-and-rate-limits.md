@@ -13,3 +13,7 @@ Make sure models and rate limits are fetched correctly from every agent (claude,
 ## Done when
 
 `node bin/agent-health.mjs` exits 0 on this machine, with every signed-in agent showing at least 1 model and its limit windows or 'not exposed by CLI', and `npm test` passes
+
+## Result — done (check passed) (2026-09-26 15:48)
+
+AGENT-ORCH-STATUS: done — agent-health exits 0; all six agents report health; tests pass

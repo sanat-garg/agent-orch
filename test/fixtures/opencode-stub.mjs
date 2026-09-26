@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 if (process.env.OPENCODE_STUB_LOG) fs.writeFileSync(process.env.OPENCODE_STUB_LOG, JSON.stringify({ argv: process.argv.slice(2), env: process.env, cwd: process.cwd() }));
+if (process.argv[2] === '--version') { process.stdout.write('1.18.32\n'); process.exit(0); }
 if (process.argv[2] === 'models') {
   // `--verbose`: each id line is followed by its JSON (a recorded shape); OPENCODE_STUB_MODELS=zen lists Zen only.
   const cost = (n) => ({ input: n, output: n * 5, cache: { read: 0, write: 0 } });

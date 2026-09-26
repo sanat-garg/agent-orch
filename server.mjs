@@ -11,11 +11,12 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createOrchestrator, parseJsonl, SHOT_HINT } from './orchestrator.mjs';
 import { createGitHub } from './github.mjs';
 import { retireRuntime, chatIdle, whenIdle } from './runtimes.mjs';
-import { AGENTS, runAgentCli, clearLoginCache, isMissingSession, modelCatalog, codexLatestSnapshot, windowLabel, AGY_GROUPS, agyGroup, opencodeProviders } from './agents.mjs';
+import { AGENTS, runAgentCli, clearLoginCache, isMissingSession, modelCatalog, codexLatestSnapshot, claudeWindows, fetchLimits, agentVersion, readVersion, windowLabel, AGY_GROUPS, agyGroup, opencodeProviders } from './agents.mjs';
 import { createModelStore } from './models.mjs';
 import { createConnections, SPECS, codexAccount, agyAccount, onPath } from './connections.mjs';
 import { mediaCollector, MEDIA_ID_RE, MEDIA_TYPES, toolResultImages } from './media.mjs';
-import { createUsageLog, RANGES as USAGE_RANGES } from './usage.mjs';
+import { createUsageLog, createLimitStore, RANGES as USAGE_RANGES } from './usage.mjs';
+import { healthRow } from './health.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -352,6 +353,20 @@ const RAW_FILE = path.join(METRICS_DIR, 'raw.jsonl');
 // Per-agent usage history (plan windows, tokens per turn/run, limit events): usage.mjs.
 const usageLog = createUsageLog(DATA);
 try { usageLog.compact(); } catch (e) { console.error('[usage] compact failed', e); }
+// Every agent's latest plan-limit check (usage.mjs createLimitStore): on start, every 6 h, after sign-in changes and
+// from the Connections modal's Refresh. Claude goes through refreshUsage (it also feeds the sidebar); the others ask
+// their CLI (agents.mjs fetchLimits). Readings land in usageLog; the check itself feeds each connection's health.
+const limitStore = createLimitStore({ file: path.join(DATA, 'limits.json'), ids: Object.keys(AGENTS), usageLog,
+  log: (m) => console.log(`[limits] ${m}`),
+  fetch: async (id) => {
+    if (id !== 'claude') return fetchLimits(id);
+    if (!AGENTS.claude.loggedIn()) return fetchLimits(id);
+    if (!claudeAuth.checkedAt) await refreshClaudeAuth(); // at boot, before refreshUsage can tell it's a subscription
+    await refreshUsage();
+    return usage.available && !usage.error ? { ...limitStore.get('claude'), error: null }
+      : { source: AGENTS.claude.limitSource, exposed: true, error: usage.error || 'Plan limits unavailable' };
+  },
+  onChange: () => { try { const list = connections.list(); for (const ws of allClients) send(ws, { t: 'connections', connections: list }); } catch {} } });
 const MINUTE_FILE = path.join(METRICS_DIR, 'minutes.jsonl');
 
 function loadSeries(file, keepMs) {
@@ -467,16 +482,16 @@ function pushMetrics() {
 // Uses the data behind Claude Code's /usage screen. It is a control call to the CLI and uses
 // no model tokens. The SDK marks it experimental, so every field is read defensively.
 let usage = { available: false, updatedAt: 0 };
-let usageBusy = false;
 let usageTimer = null;
-async function refreshUsage(liveQuery) {
-  if (usageBusy) return; // the check already running will broadcast its answer
+let usageRun = null;
+// One check at a time: callers during a check wait for its answer (the limit store reads `usage` afterwards).
+function refreshUsage(liveQuery) { return (usageRun ||= refreshUsageNow(liveQuery).finally(() => { usageRun = null; })); }
+async function refreshUsageNow(liveQuery) {
   if (!onSubscription()) {
     usage = { available: false, updatedAt: Date.now() };
     for (const ws of allClients) send(ws, { t: 'usage', usage });
     return;
   }
-  usageBusy = true;
   let probe = null;
   try {
     let q = liveQuery;
@@ -505,15 +520,13 @@ async function refreshUsage(liveQuery) {
       breakdown: Array.isArray(rl.seven_day_breakdown?.rows) ? rl.seven_day_breakdown.rows.map((r) => ({ name: r.display_name, pct: r.percent })) : null,
       updatedAt: Date.now(),
     };
-    const rec = (name, w) => w && usageLog.window('claude', name, w.pct, w.resetsAt);
-    rec('five_hour', usage.session); rec('seven_day', usage.weekly);
-    rec('seven_day_opus', usage.weeklyOpus); rec('seven_day_sonnet', usage.weeklySonnet);
-    for (const m of usage.models) if (m.name) rec(m.name, m);
+    const windows = claudeWindows(rl);
+    for (const w of windows) usageLog.window('claude', w.window, w.pct, w.resetsAt);
+    if (usage.available) limitStore.note('claude', { windows, at: usage.updatedAt });
   } catch (e) {
     usage = { ...usage, error: String(e?.message || e), updatedAt: Date.now() };
   } finally {
     probe?.close();
-    usageBusy = false;
   }
   for (const ws of allClients) send(ws, { t: 'usage', usage });
 }
@@ -656,9 +669,12 @@ const modelStore = createModelStore({ file: path.join(DATA, 'models.json'), log:
   // New lists can change a connection's state too (OpenCode is ready once it lists free Zen models).
   onChange: () => { const list = connections.list(); for (const ws of allClients) { send(ws, { t: 'models' }); send(ws, { t: 'connections', connections: list }); } } });
 modelStore.start().catch((e) => console.error('[models] discovery failed', e));
-// A sign-in or sign-out re-checks the login and rediscovers that agent's models (in the background).
-const signInChanged = (id) => () => { clearLoginCache(); modelStore.refresh([id]).catch(() => {}); };
-const agentEntry = (a, extra = {}) => ({ id: a.id, label: a.label, installed: () => a.available(), signedIn: () => a.loggedIn(), envFilter: a.envFilter, afterChange: signInChanged(a.id), ...extra });
+limitStore.start().catch((e) => console.error('[limits] check failed', e));
+// A sign-in or sign-out re-checks the login and rediscovers that agent's models and limits (in the background).
+const signInChanged = (id) => () => { clearLoginCache(); modelStore.refresh([id]).catch(() => {}); limitStore.refresh([id]).catch(() => {}); };
+// health: the compact status each Connections row shows (health.mjs), from the cached model and limit checks.
+const agentEntry = (a, extra = {}) => ({ id: a.id, label: a.label, installed: () => a.available(), signedIn: () => a.loggedIn(), envFilter: a.envFilter, afterChange: signInChanged(a.id),
+  health: (st) => healthRow(a.id, { ...st, version: st.installed ? agentVersion(a.id) : null, models: modelCatalog(a.id), limits: limitStore.get(a.id) }), ...extra });
 const connections = createConnections({
   entries: [
     agentEntry(AGENTS.claude, { spec: SPECS.claude, account: () => AGENTS.claude.account() }),
@@ -1436,6 +1452,12 @@ async function handleRequest(req, res) {
   }
   if (p === '/api/connections' && req.method === 'GET') {
     if (Date.now() - gh.status().checkedAt > 15000) await gh.refresh();
+    return json(res, 200, { connections: connections.list() });
+  }
+  // The Connections modal's Refresh: re-checks every sign-in, version, model list and limit reading, then answers with the rows.
+  if (p === '/api/connections/refresh' && req.method === 'POST') {
+    clearLoginCache();
+    await Promise.all([modelStore.refresh(), limitStore.refresh(), gh.refresh(), ...Object.keys(AGENTS).map(readVersion)].map((x) => x.catch(() => {})));
     return json(res, 200, { connections: connections.list() });
   }
   const cn = p.match(/^\/api\/connections\/([\w-]+)\/(start|code|cancel|logout)$/);

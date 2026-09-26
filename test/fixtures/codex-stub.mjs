@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 
+if (process.argv[2] === '--version') { process.stdout.write('codex-cli 0.157.0\n'); process.exit(0); }
 if (process.argv[2] === 'login' && process.argv[3] === 'status') {
   if (process.env.CODEX_STUB_LOGIN === 'out') { process.stderr.write('Not logged in\n'); process.exit(1); }
   process.stderr.write('Logged in using ChatGPT\n');

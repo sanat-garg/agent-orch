@@ -580,3 +580,7 @@ OpenCode is ready with free Zen models, no sign-in needed
 ## 2026-09-26 15:44 — #193 Parallel lanes view: see agents working side by side [done (check passed)]
 
 That was the old monitor timing out. I'm still waiting for the new run to finish.
+
+## 2026-09-26 15:48 — #195 Agent health check: verify models and rate limits for all six CLIs [done (check passed)]
+
+agent-health exits 0; all six agents report health; tests pass

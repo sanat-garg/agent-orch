@@ -14,7 +14,7 @@ const env = (mode, extra = {}) => ({ ...process.env, COPILOT_STUB: mode, ...extr
 
 test('Copilot model discovery uses the authenticated SDK response', async () => {
   assert.deepEqual(copilotModels([{ id: 'auto', name: 'Auto' }, { id: 'account-model', name: 'Account Model' }, { id: 'byok/model' }]), [
-    { id: 'auto', label: 'Auto', default: true }, { id: 'account-model', label: 'Account Model' },
+    { id: 'auto', label: 'Auto (Copilot picks the model)', default: true }, { id: 'account-model', label: 'Account Model' },
   ]);
   let started = false, stopped = false;
   const rows = await AGENTS.copilot.listModels({ clientFactory: () => ({

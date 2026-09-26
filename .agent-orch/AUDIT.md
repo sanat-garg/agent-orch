@@ -378,3 +378,74 @@ agent that is unconnected, unlisted, blocked or has a window ≥90%, and an empt
   files and on every `opencode.json[c]` from the cwd up to the repo top. Alternatively, run with
   `OPENCODE_CONFIG_CONTENT` set to a pinned config that forces the `openai` OAuth provider.
 - **Fixed** (task #174): `envFilter` strips `OPENCODE_CONFIG_CONTENT`; the apiKey/baseURL guard checks the global config and every `opencode.json[c]` from the cwd up to the repo top; test/opencode.test.mjs.
+
+## Round 5 (2026-09-26, task #177): HTTP/WS endpoint security
+
+Checked against a test instance (spare port, temp `CW_DATA_DIR`, temp `HOME` and `TMUX_TMPDIR`, stub `gh`) and found
+clean: only `/auth/check`, `/api/login`, `/api/logout`, the task-done sound and the four `PUBLIC_PATHS` are reachable
+before the login gate. Without a session, every `/api/*` route (including `/api/media/*`) returns 401 and the `/ws`
+upgrade returns 401. Session lookup is safe against `cw_session=__proto__`/`constructor`. A cross-origin POST gets 403
+and a cross-origin `/ws` upgrade gets 401. PUT/PATCH/DELETE skip `sameOrigin`, but a browser can only send them after a
+CORS preflight, and that preflight gets 401 with no CORS headers, so browsers block them. Caddy 2.6 replaces a client's
+`X-Forwarded-For`, so `clientIp` can't be spoofed through Caddy. Media ids must match `MEDIA_ID_RE`
+(`..%2f` → 400, and a dot-segment path is normalised away → 404), and stored media are sniffed as images first.
+`safeCwd` rejects `/api/folders?path=/etc` and non-string folders (400). Terminal names are generated or match
+`[A-Za-z0-9_-]{1,32}`, and tmux targets use `=name`. `/api/github/link` and every connection `start`/`logout` use
+fixed argv. A pasted code goes to `send-keys -l --` with a length and newline check. Connection ids are looked up in
+a `Map` (prototype names → 404/409). Malformed JSON, an array body or a body over 1 MB → 400/413. Object-typed values
+for task `deadline`, `move`, project `priority` and fallback lists are rejected, and fallback lists refuse
+`constructor`/`__proto__` because the model check fails. Bad `range`/`since` query values only give empty results.
+Every async throw in `handleRequest` becomes a 500, and the process keeps running.
+
+### 33. [med] One `null` WebSocket message crashes the whole server (server.mjs:1501-1502)
+- **What:** The `ws.on('message')` handler does `msg = JSON.parse(raw)` and then reads `msg.t`. `JSON.parse('null')`
+  returns `null`, so `msg.t` throws a TypeError inside the `ws` receiver's `'message'` event. That is an uncaught
+  exception, and the process exits. Every chat turn, planner turn and running orchestrator task dies with it until
+  systemd restarts the app. It needs a signed-in socket (the Origin check keeps other sites out), but one buggy client
+  frame or a stray script is enough.
+- **Repro (verified):** Sign in on a test instance, open `/ws` with the session cookie, and send the text frame `null`.
+  The server prints `TypeError: Cannot read properties of null (reading 't') at WebSocket.<anonymous>
+  (server.mjs:1502:13)` and exits (`kill -0` → no such process).
+- **Fix:** After parsing, `if (!msg || typeof msg !== 'object') return;`. Also wrap the body of the message handler in
+  `try/catch` that logs the error, so a future sync throw (e.g. in `answerPermission` or `orch.setConvoMode`) can't
+  take the process down.
+
+### 34. [med] Every other `*.sslip.io` site is same-site: it can frame the signed-in app (clickjacking) and toss a cookie that signs the owner out (server.mjs:103-106, :1159-1161, :88-96)
+- **What:** The live host is `129-154-229-134.sslip.io`. `sslip.io` is not on the Public Suffix List (checked against
+  publicsuffix.org's current list), so anyone's `<their-ip>.sslip.io` is the **same site** as the app. SameSite=Lax
+  does not stop same-site requests. (1) No response sets `X-Frame-Options` or a CSP `frame-ancestors`, so an attacker's
+  sslip.io page can load the fully signed-in app in an iframe and trick the owner into clicks: Delete chat, Cancel/Retry,
+  connection sign-out, mode switches (full-access chats). (2) That page can also set
+  `cw_session=x; Domain=sslip.io` from JavaScript. The browser then sends two `cw_session` cookies. `parseCookies` keeps
+  the last one, which is the attacker's cookie while it is newer than the owner's, so the owner is signed out.
+  The Origin check still blocks POSTs and the WebSocket, and CORS blocks reading responses. So this is click-driven,
+  not a silent CSRF.
+- **Repro (verified):** Test instance on :3971 plus a stub "attacker" server on :3972, with Chromium (playwright-core)
+  mapping every host to 127.0.0.1 and the session cookie set Lax on `app.129-154-229-134.sslip.io`. A page on
+  `evil.1-2-3-4.sslip.io` with `<iframe src="http://app.129-154-229-134.sslip.io:3971/">` shows the signed-in app
+  (frame title "New chat · agent-orch", composer present). The same page on `evil.example.com` shows only "Sign in".
+  Visiting an `evil.1-2-3-4.sslip.io` page that runs
+  `document.cookie='cw_session=x; Domain=sslip.io; Path=/'` and then reloading the app shows "Sign in · agent-orch",
+  and the cookie jar holds both `app…sslip.io` and `.sslip.io` `cw_session` cookies.
+- **Fix:** Send `Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY` on every response next to
+  `X-Content-Type-Options` in `handleRequest`. Consider adding `header` directives in the Caddyfile so `/shell/`
+  (ttyd) is covered too. Rename the cookie `__Host-cw_session` (it already has Secure, Path=/ and no Domain), so no
+  other host can set or shadow it, and read the first occurrence in `parseCookies`. The lasting fix is a hostname under
+  a domain the owner controls, or one on the PSL.
+
+### 35. [low] Prototype names pass the `AGENTS[x]` checks, and chat modes aren't validated (server.mjs:1573, :1276, :1079; orchestrator.mjs:1660)
+- **What:** `AGENTS` is a plain object, so `AGENTS['constructor']`, `AGENTS['toString']` and `AGENTS['__proto__']` are
+  truthy. WS `set_model {agent: 'constructor'}` stores `convo.agent = 'constructor'`. `chatAgent` accepts it, so every
+  later message in that chat fails with "undefined failed: a.run is not a function" until the model picker is used
+  again. `POST /api/orch/tasks/:id/delegate {agent: 'constructor'}` is accepted and writes `agent='constructor'` to the
+  task row. The run itself falls back to Claude, because `normalizeAgent` rejects the name. `POST /api/convos` stores
+  `mode: body.mode` unchecked (any string or object), unlike WS `set_mode`, which checks `MODES`. `answerPermission`
+  also takes `msg.nextMode` unchecked.
+- **Repro (verified):** On a test instance, `POST /api/convos {"folder":"workspace/proj1","mode":"weird"}` → 200 with
+  `"mode":"weird"` saved in convos.json. Over `/ws`: `open`, `set_model {agent:'constructor', model:'x'}`, `send
+  {text:'hi'}` → broadcast `{"t":"model","agent":"constructor"}`, then `{"t":"error","text":"undefined failed: a.run is
+  not a function"}`, and convos.json keeps `"agent": "constructor"`. In a `createOrchestrator` child harness,
+  `delegateTask(1, {agent:'constructor'})` → `{ok: true}`, and the row reads `agent: "constructor"`.
+- **Fix:** Check agents with `Object.hasOwn(AGENTS, x)` (or a `Set` of ids) in `set_model`, `chatAgent`,
+  `delegateTask`, `checkFallbacks` and `agentStatus`. Validate `body.mode` and `msg.nextMode` against `MODES`, and use
+  the default when a value isn't listed.

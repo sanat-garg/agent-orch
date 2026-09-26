@@ -540,3 +540,6 @@ Setext ======= headings are no longer flagged as unresolved conflicts
 ## 2026-09-26 10:48 — #178 Mobile HIG review: screenshot the main screens at 390x844 and list prioritised UI findings [done (check passed)]
 
 UI-REVIEW.md has 17 HIG findings; 15 screenshots saved
+## 2026-09-26 10:49 — #177 AUDIT round 5: security and robustness of the server's HTTP and WebSocket endpoints [done (check passed)]
+
+Round 5 audit adds three verified findings (#33–#35)

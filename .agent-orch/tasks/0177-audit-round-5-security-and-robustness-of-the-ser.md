@@ -13,3 +13,7 @@ Audit only; do NOT change source code. Read .agent-orch/AUDIT.md (rounds 1–4 a
 ## Done when
 
 `grep -q '^## Round 5' .agent-orch/AUDIT.md` succeeds and `git diff --quiet HEAD -- server.mjs orchestrator.mjs connections.mjs media.mjs public` shows no source changes.
+
+## Result — done (check passed) (2026-09-26 10:49)
+
+AGENT-ORCH-STATUS: done — Round 5 audit adds three verified findings (#33–#35)

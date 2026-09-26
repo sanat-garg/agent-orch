@@ -13,3 +13,7 @@ Teach the planner and scheduler to parallelise (BRIEF goal 9), building on the w
 ## Done when
 
 `npm test` passes with tests for file-overlap gating, multi-dependency gating, agent spreading and integrator ordering
+
+## Result — done (check passed) (2026-09-26 05:44)
+
+AGENT-ORCH-STATUS: done — parallel scheduling with file gating, multi-deps, spreading and integrators; tests pass

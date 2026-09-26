@@ -1740,7 +1740,7 @@ function modelStatus(t, ctx = modelCtx()) {
   const base = { model: cur, agent, from, list, until: null, tip };
   if (lim && lim.until > now) return { ...base, kind: 'waiting', until: lim.until, text: `Waiting for ${cur} · ${clock(lim.until)}` };
   if (from) {
-    const why = move?.until ? ` (limit until ${clock(move.until)})` : move?.by === 'owner' ? ' (by you)' : '';
+    const why = move?.until ? ` (limit until ${clock(move.until)})` : move?.by === 'owner' ? ' (by you)' : move?.by === 'spread' ? ' (to run in parallel)' : '';
     return { ...base, kind: 'delegated', until: move?.until || null, text: `${cur} · moved from ${from}${why}` };
   }
   const next = queued && list.find((f) => !f.current);
@@ -3062,13 +3062,14 @@ function taskState(t) {
   const ms = modelStatus(t);
   if (ms.kind === 'waiting') return { cls: 'limited', label: ms.text };
   if (O.project && O.project.id === t.project_id && O.project.status === 'paused') return { cls: 'waiting', label: 'Paused' };
-  if (t.depends_on) {
-    const dep = O.tasks.get(t.depends_on);
-    if (!dep || dep.status !== 'done') return { cls: 'waiting', label: `Waits for #${t.depends_on}` };
-  }
+  const waitsFor = taskDeps(t).filter((d) => O.tasks.get(d)?.status !== 'done');
+  if (waitsFor.length) return { cls: 'waiting', label: `Waits for ${waitsFor.map((d) => `#${d}`).join(', ')}` };
   if (t.not_before > nowS) return { cls: 'waiting', label: `Retrying at ${fmtClock(t.not_before)}` };
   return { cls: 'queued', label: `Queued${t.continuations ? ' · continuing' : t.attempts ? ` · attempt ${t.attempts + 1}` : ''}` };
 }
+
+// Every prerequisite of a task (it starts once all are done); older views only carry depends_on.
+function taskDeps(t) { return t?.deps || (t?.depends_on ? [t.depends_on] : []); }
 
 function taskCard(id) {
   const b = el('button', 'tcard');
@@ -3093,18 +3094,23 @@ function fillCard(b, id) {
   title.textContent = title.title = displayTitle(t);
   sub.textContent = '';
   sub.append(el('span', 'id', `#${t.id}`));
-  // A queued task with a prerequisite shows which one ('after #N'), so the queue's dependencies are visible.
-  const dep = t.status === 'queued' && t.depends_on;
-  if (dep) {
-    const a = el('span', 'tc-after', `after #${dep}`);
-    a.setAttribute('role', 'link');
-    a.title = `Starts after #${dep}`;
-    a.addEventListener('click', (e) => { e.stopPropagation(); showTask(dep); });
-    sub.append(document.createTextNode(' · '), a);
+  // A queued task with prerequisites shows them ('after #N, #M'), so the queue's dependencies are visible.
+  const deps = t.status === 'queued' ? taskDeps(t) : [];
+  if (deps.length) {
+    sub.append(document.createTextNode(' · '));
+    const a = el('span', 'tc-after', 'after ');
+    a.title = `Starts after ${deps.map((d) => `#${d}`).join(' and ')}`;
+    deps.forEach((d, i) => {
+      const link = el('span', '', `#${d}`);
+      link.setAttribute('role', 'link');
+      link.addEventListener('click', (e) => { e.stopPropagation(); showTask(d); });
+      a.append(...(i ? [document.createTextNode(', ')] : []), link);
+    });
+    sub.append(a);
   }
   // A limit wait is spelled out by the model chip; the sub line keeps just the time (the chip is clipped on phones).
   const wait = s.cls === 'limited' && modelStatus(t);
-  sub.append(document.createTextNode(` · ${wait ? `Waiting until ${fmtWhen(wait.until * 1000)}` : dep && s.label === `Waits for #${dep}` ? 'Waiting' : s.label}`));
+  sub.append(document.createTextNode(` · ${wait ? `Waiting until ${fmtWhen(wait.until * 1000)}` : deps.length && s.label.startsWith('Waits for #') ? 'Waiting' : s.label}`));
   tags.textContent = '';
   const open = t.status === 'queued' || t.status === 'running';
   if (open && t.urgency === 'urgent') tags.append(el('span', 'tc-tag urgent', 'Urgent'));
@@ -3134,7 +3140,7 @@ function onOrch(msg) {
     O.tasks.set(msg.task.id, msg.task);
     renderUsage();
     refreshCards(msg.task.id);
-    for (const other of O.tasks.values()) if (other.depends_on === msg.task.id) refreshCards(other.id);
+    for (const other of O.tasks.values()) if (taskDeps(other).includes(msg.task.id)) refreshCards(other.id);
     if (O.drawer === msg.task.id) { renderDrawerHead(); scheduleDetail(); }
     if (msg.task.project_id === O.project?.id) scheduleQueue();
   } else if (msg.t === 'oorder') {
@@ -3343,6 +3349,7 @@ function modelSection(t) {
       const li = el('li');
       li.append(el('time', '', fmtClock(m.at)), el('span', '', m.by === 'owner'
         ? `You moved it from ${modelName(m.from.agent, m.from.model)} → ${modelName(m.to.agent, m.to.model)}`
+        : m.by === 'spread' ? `${modelName(m.from.agent, m.from.model)} was busy → moved to ${modelName(m.to.agent, m.to.model)} to run in parallel`
         : `${modelName(m.from.agent, m.from.model)} hit its limit → moved to ${modelName(m.to.agent, m.to.model)}`));
       ul.append(li);
     }
@@ -3486,10 +3493,12 @@ function renderDrawer(fromLive = false) {
     if (d.task.verify_output != null && t.status !== 'done') c.append(el('pre', 'dr-pre err', d.task.verify_output || '(no output)'));
     more.append(c);
   }
-  if (d.dependsOn || d.followers.length) {
+  const after = d.after || (d.dependsOn ? [d.dependsOn] : []);
+  if (after.length || d.followers.length) {
     const c = section('Order');
     const links = el('div', 'dr-links');
-    if (d.dependsOn) { O.tasks.set(d.dependsOn.id, { ...(O.tasks.get(d.dependsOn.id) || {}), ...d.dependsOn }); links.append(el('div', 'dr-check', 'Starts after'), taskCard(d.dependsOn.id)); }
+    if (after.length) links.append(el('div', 'dr-check', after.length > 1 ? `Starts after all ${after.length} of` : 'Starts after'));
+    for (const a of after) { O.tasks.set(a.id, { ...(O.tasks.get(a.id) || {}), ...a }); links.append(taskCard(a.id)); }
     if (d.followers.length) {
       links.append(el('div', 'dr-check', 'Then'));
       for (const f of d.followers) { O.tasks.set(f.id, { ...(O.tasks.get(f.id) || {}), ...f }); links.append(taskCard(f.id)); }
@@ -3706,11 +3715,11 @@ const Q = { press: null, drag: null, busy: false, lastFocus: null, noClick: fals
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
 const queuedTasks = () => [...O.tasks.values()].filter((t) => t.status === 'queued' && t.project_id === O.project?.id)
   .sort((a, b) => (a.position ?? Infinity) - (b.position ?? Infinity) || a.id - b.id);
-// The queue as a tree: each task whose depends_on is also queued sits right under it (siblings in queue order).
+// The queue as a tree: each task with a queued prerequisite sits right under the first one (siblings in queue order).
 // Returns [{t, depth, parent}] in display order.
 function queueTree(queued) {
   const ids = new Set(queued.map((t) => t.id)), kids = new Map(), out = [], seen = new Set();
-  const parentOf = (t) => (t.depends_on != null && t.depends_on !== t.id && ids.has(t.depends_on) ? t.depends_on : null);
+  const parentOf = (t) => taskDeps(t).find((d) => d !== t.id && ids.has(d)) ?? null;
   for (const t of queued) {
     const p = parentOf(t);
     if (!kids.has(p)) kids.set(p, []);

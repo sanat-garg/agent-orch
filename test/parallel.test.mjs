@@ -1,0 +1,209 @@
+// Parallel planning (#156): glob-aware file-overlap gating, multi-dependencies ("after": [...]), agent spreading across
+// the fallback list, and an integrator task that starts only after all its parts.
+import { describe, test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
+import { filesOverlap, parseFiles, spreadAssign } from '../parallel.mjs';
+import { extractTasks, resolveAfter } from '../orchestrator.mjs';
+
+const url = (f) => JSON.stringify(new URL(`../${f}`, import.meta.url).href);
+const fixture = (f) => fileURLToPath(new URL(`./fixtures/${f}`, import.meta.url));
+const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+
+describe('file overlap', () => {
+  test('plain paths, directories and globs', () => {
+    const cases = [
+      [['a.txt'], ['b.txt'], false],
+      [['a.txt'], ['./a.txt'], true],
+      [['src/*.js'], ['src/*.css'], false],
+      [['src/*.js'], ['src/app.js'], true],
+      [['src/**/*.js'], ['src/deep/x/a.js'], true],
+      [['src/**/*.js'], ['src/a.css'], false],
+      [['src/**'], ['src/a.css'], true],
+      [['public'], ['public/app.js'], true],       // a plain path without an extension may be a directory
+      [['src/a/'], ['src/b/c.js'], false],
+      [['test/*.test.mjs'], ['test/fixtures/x.mjs'], false],
+      [['test/?.mjs'], ['test/a.mjs'], true],
+      [['*.{js,css}'], ['app.css'], true],
+      [['*.{js,css}'], ['app.html'], false],
+      [['**'], ['anything/at/all.md'], true],
+      [['a.txt', 'lib/**'], ['b.txt', 'lib/x/y.js'], true],
+    ];
+    for (const [a, b, want] of cases) {
+      assert.equal(filesOverlap(a, b), want, `${a} vs ${b}`);
+      assert.equal(filesOverlap(b, a), want, `${b} vs ${a} (symmetric)`);
+    }
+  });
+  test('undeclared files overlap everything', () => {
+    assert.equal(filesOverlap(null, ['a.txt']), true);
+    assert.equal(filesOverlap(['a.txt'], []), true);
+    assert.equal(filesOverlap('["a.txt"]', '["b.txt"]'), false); // JSON as stored in tasks.files
+    assert.deepEqual(parseFiles([' ./src/a.js ', 'src/a.js', 3, '']), ['src/a.js']);
+    assert.equal(parseFiles([]), null);
+  });
+});
+
+describe('planner block', () => {
+  test('"after" takes one reference or an array; "files" is parsed', () => {
+    assert.deepEqual(resolveAfter(null, [10, 11]), []);
+    assert.deepEqual(resolveAfter(1, [10, 11]), [11]);
+    assert.deepEqual(resolveAfter([0, 1, '#1', 0], [10, 11]), [10, 11, 1]); // "#1" is always task id 1
+    assert.deepEqual(resolveAfter(['#12', 'x'], []), [12]);
+    const [, p] = extractTasks('ok\n```agent-orch-tasks\n{"tasks": [{"title": "t", "prompt": "p", "after": [0, "#3"], "files": ["./ui/*.css"]}]}\n```');
+    assert.deepEqual([p.tasks[0].after, p.tasks[0].files], [[0, '#3'], ['ui/*.css']]);
+  });
+});
+
+describe('agent spreading (spreadAssign)', () => {
+  const opts = (a) => [{ agent: 'claude', model: 'opus', primary: true }, ...a];
+  test('primary first; only tasks that would wait spill to a fallback with a free slot and usage', () => {
+    const ready = [
+      { task: 1, options: opts([{ agent: 'codex', model: 'gpt-a' }]) },
+      { task: 2, options: opts([{ agent: 'codex', model: 'gpt-a' }]) },
+      { task: 3, options: opts([{ agent: 'antigravity', model: 'g' }, { agent: 'codex', model: 'gpt-a' }]) },
+      { task: 4, options: opts([]) },
+    ];
+    const got = spreadAssign(ready, { slotsFree: (a) => ({ claude: 1, codex: 2, antigravity: 1 })[a], hasUsage: (a) => a !== 'antigravity' });
+    assert.deepEqual(got.map((g) => [g.task, g.agent, g.spilled]), [[1, 'claude', false], [2, 'codex', true], [3, 'codex', true]]);
+    // With room on the primary nothing spills.
+    assert.deepEqual(spreadAssign(ready.slice(0, 2), { slotsFree: () => 5, hasUsage: () => true }).map((g) => g.agent), ['claude', 'claude']);
+  });
+});
+
+// A temp git repo (worktrees on) plus a HOME with the codex stub. The fake Claude query answers planner turns
+// ('[Owner says]') with globalThis.PLAN as a tasks block, and work prompts by writing `WRITE <file> <text>` lines
+// into its cwd after `HOLD <ms>` (default 700).
+async function scenario(body, { config = {} } = {}) {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-par-'))), repo = path.join(root, 'proj');
+  const dataDir = path.join(root, 'data'), home = path.join(root, 'home');
+  fs.mkdirSync(repo); fs.mkdirSync(path.join(home, '.local/bin'), { recursive: true });
+  fs.symlinkSync(fixture('codex-stub.mjs'), path.join(home, '.local/bin/codex'));
+  git(repo, 'init', '-q', '-b', 'main');
+  git(repo, 'config', 'user.email', 't@t'); git(repo, 'config', 'user.name', 't');
+  fs.writeFileSync(path.join(repo, 'README.md'), 'x\n');
+  git(repo, 'add', '-A'); git(repo, 'commit', '-qm', 'init');
+  try {
+    const script = `import { createOrchestrator } from ${url('orchestrator.mjs')};
+      import { setModelCatalog } from ${url('agents.mjs')};
+      import { DatabaseSync } from 'node:sqlite';
+      import fs from 'node:fs';
+      import path from 'node:path';
+      const [dataDir, repo] = process.argv.slice(1);
+      setModelCatalog('claude', { models: [{ id: 'opus', default: true }], error: null, at: Date.now() });
+      setModelCatalog('codex', { models: [{ id: 'gpt-a', default: true }], error: null, at: Date.now() });
+      globalThis.PLAN = [];
+      const query = ({ prompt, options }) => (async function* () {
+        if (/\\[Owner says\\]/.test(prompt)) {
+          yield { type: 'result', subtype: 'success', result: 'Queued.\\n\`\`\`agent-orch-tasks\\n' + JSON.stringify({ tasks: PLAN }) + '\\n\`\`\`', session_id: 'plan', num_turns: 1 };
+          return;
+        }
+        await new Promise((r) => setTimeout(r, Number(/^HOLD (\\d+)$/m.exec(prompt)?.[1] || 700)));
+        for (const [, f, text] of prompt.matchAll(/^WRITE (\\S+) (\\S+)$/gm)) fs.writeFileSync(path.join(options.cwd, f), text + '\\n');
+        yield { type: 'result', subtype: 'success', result: 'AGENT-ORCH-STATUS: done — ok', session_id: 's-' + Math.random(), num_turns: 1 };
+      })();
+      const convo = { id: 'c1', cwd: repo, fallbacks: [{ agent: 'codex', model: 'gpt-a' }] };
+      const o = createOrchestrator({ query, dataDir, claudeEnv: { PATH: process.env.PATH, HOME: process.env.HOME }, getLimits: () => [], onSubscription: () => true,
+        broadcast() {}, emitChat() {}, convoExists: () => true, config: ${JSON.stringify(config)} });
+      const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
+      const all = () => db.prepare("SELECT * FROM tasks WHERE kind='work' ORDER BY id").all();
+      const byTitle = (t) => all().find((r) => r.title === t);
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const until = async (f) => { for (let i = 0; i < 500 && !f(); i++) await sleep(100); };
+      const plan = async (tasks) => { PLAN = tasks; await o.planTurn(convo, 'go'); db.prepare('UPDATE projects SET perpetual=0').run(); };
+      // Run intervals, from what the fake query and the DB saw: [started_at, finished_at] per title.
+      const spans = () => Object.fromEntries(all().map((t) => [t.title, [t.started_at, t.finished_at]]));
+      const out = await (async () => { ${body} })();
+      console.log(JSON.stringify(out));
+      process.exit(0);`;
+    const env = { ...process.env, HOME: home, PATH: `${path.join(home, '.local/bin')}:${process.env.PATH}` };
+    const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script, dataDir, repo], { encoding: 'utf8', timeout: 110000, env });
+    return { repo, ...JSON.parse(stdout.trim().split('\n').pop()) };
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+const overlaps = (a, b) => a[0] < b[1] && b[0] < a[1];
+
+describe('parallel scheduling', { concurrency: true, timeout: 120000 }, () => {
+  test('file-disjoint tasks run together; overlapping (glob) and undeclared ones wait', async () => {
+    const r = await scenario(`
+      await plan([
+        { title: 'A', prompt: 'WRITE a.js A', files: ['src/a.js'] },
+        { title: 'B', prompt: 'WRITE b.js B', files: ['src/b.js'] },
+        { title: 'C', prompt: 'WRITE c.js C', files: ['src/*.js'] },
+        { title: 'D', prompt: 'WRITE d.txt D' },
+      ]);
+      await until(() => all().length === 4 && all().every((t) => t.status === 'done'));
+      return { spans: spans(), statuses: all().map((t) => t.status), files: all().map((t) => JSON.parse(t.files)) };`, { config: { concurrency: 4, maxParallel: 4, agentSlots: 4 } });
+    assert.deepEqual(r.statuses, ['done', 'done', 'done', 'done']);
+    assert.deepEqual(r.files, [['src/a.js'], ['src/b.js'], ['src/*.js'], null]);
+    const s = r.spans;
+    assert.ok(overlaps(s.A, s.B), 'A and B (disjoint files) ran at the same time');
+    assert.ok(!overlaps(s.C, s.A) && !overlaps(s.C, s.B), 'C (src/*.js) waited for A and B');
+    for (const t of ['A', 'B', 'C']) assert.ok(!overlaps(s.D, s[t]), `D (no files) never ran beside ${t}`);
+  });
+
+  test('multi-dependency: the integrator starts only after ALL parts; cancel cascades and retry revives', async () => {
+    const r = await scenario(`
+      await plan([
+        { title: 'part1', prompt: 'HOLD 400\\nWRITE p1.txt one', files: ['p1.txt'] },
+        { title: 'part2', prompt: 'HOLD 2500\\nWRITE p2.txt two', files: ['p2.txt'] },
+        { title: 'integrate', prompt: 'WRITE merged.txt both', after: [0, 1], done_when: '\`test -f p1.txt\` and \`test -f p2.txt\`' },
+      ]);
+      const ids = all().map((t) => t.id);
+      const deps = db.prepare('SELECT task_id, depends_on FROM task_deps ORDER BY depends_on').all();
+      const view = o.taskDetail(ids[2]);
+      await until(() => byTitle('part1').status === 'done');
+      const whenPart1Done = { part2: byTitle('part2').status, integrate: byTitle('integrate').status };
+      await until(() => all().every((t) => t.status === 'done'));
+      // Cascade: a new pair where one prerequisite is cancelled.
+      await plan([
+        { title: 'x', prompt: 'HOLD 3000', files: ['x.txt'] },
+        { title: 'y', prompt: 'HOLD 3000', files: ['y.txt'] },
+        { title: 'z', prompt: 'ok', after: [0, 1] },
+      ]);
+      await until(() => byTitle('y').status === 'running');
+      o.taskAction(byTitle('y').id, 'cancel');
+      const cancelled = { z: byTitle('z').status, zResult: byTitle('z').result };
+      o.taskAction(byTitle('y').id, 'retry');
+      const revived = byTitle('z').status;
+      await until(() => ['x', 'y', 'z'].every((t) => byTitle(t).status === 'done'));
+      return { ids, deps, after: view.after.map((t) => t.id), zDeps: view.task.deps, spans: spans(), whenPart1Done, cancelled, revived,
+        statuses: all().map((t) => t.status) };`, { config: { concurrency: 3, maxParallel: 3, agentSlots: 3 } });
+    const [p1, p2, it] = r.ids;
+    assert.deepEqual(r.deps, [{ task_id: it, depends_on: p1 }, { task_id: it, depends_on: p2 }]);
+    assert.deepEqual(r.after, [p1, p2]);
+    assert.deepEqual(r.zDeps, [p1, p2]);
+    assert.deepEqual(r.whenPart1Done, { part2: 'running', integrate: 'queued' }, 'one finished part is not enough');
+    const s = r.spans;
+    assert.ok(overlaps(s.part1, s.part2), 'the parts ran in parallel');
+    assert.ok(s.integrate[0] >= s.part1[1] && s.integrate[0] >= s.part2[1], 'the integrator started after both parts finished');
+    assert.equal(r.cancelled.z, 'cancelled');
+    assert.match(r.cancelled.zResult, /^cancelled with #\d+/);
+    assert.equal(r.revived, 'queued');
+    assert.ok(r.statuses.every((x) => x === 'done'), JSON.stringify(r.statuses));
+  });
+
+  test("agent spreading: a task beyond the primary's slots runs on the next fallback with usage left", async () => {
+    const r = await scenario(`
+      await plan([
+        { title: 'S1', prompt: 'HOLD 2500\\nWRITE s1.txt one', files: ['s1.txt'] },
+        { title: 'S2', prompt: 'WRITE s2.txt two', files: ['s2.txt'] },
+      ]);
+      await until(() => all().every((t) => t.status === 'done'));
+      return { spans: spans(), rows: all().map((t) => ({ title: t.title, ran: t.ran_agent, agent: t.agent, moves: JSON.parse(t.moves || '[]'), reason: t.delegated_reason })) };`,
+    { config: { concurrency: 2, maxParallel: 2, agentSlots: 1 } });
+    const [s1, s2] = r.rows;
+    assert.equal(s1.ran, 'claude', 'the first task keeps its primary model');
+    assert.deepEqual(s1.moves, []);
+    assert.equal(s2.ran, 'codex', 'the second spilled to the fallback');
+    assert.deepEqual(s2.moves.map((m) => [m.from.agent, m.to.agent, m.to.model, m.by]), [['claude', 'codex', 'gpt-a', 'spread']]);
+    assert.match(s2.reason, /^spread: Claude already runs 1 task/);
+    assert.ok(overlaps(r.spans.S1, r.spans.S2), 'both ran at once, on two agents');
+  });
+});

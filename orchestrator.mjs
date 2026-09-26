@@ -20,12 +20,15 @@ import { AGENTS, AGY_GROUPS, agentStatus, codexExhausted, codexLatestSnapshot, i
 import { mediaCollector } from './media.mjs';
 import { createUsageLog } from './usage.mjs';
 import { DELEGATE_CFG, createDelegator, parseFallbacks } from './delegate.mjs';
+import { filesOverlap, parseFiles, spreadAssign } from './parallel.mjs';
 import { commitAll, ensureWorktree, isMerged, listWorktrees, mergeBack, parkWorktree, removeWorktree, repoInfo, startIntegration, unresolvedFiles, worktreesRoot } from './worktrees.mjs';
 
 // ---------------------------------------------------------------- config
 
 const CFG = {
   concurrency: 2,               // agent slots (+1 while pacing pushes harder)
+  maxParallel: 5,               // slots while file-disjoint work waits and its agents have usage left (parallel.mjs)
+  agentSlots: 3,                // tasks one agent runs at once; a task beyond that spills to a fallback with usage left
   maxAttempts: 3,               // non-limit failures before a task is marked failed
   maxContinuations: 4,          // times a worker may say "not finished yet"
   resetBufferSec: 20,           // added after a reported reset time
@@ -82,7 +85,8 @@ const TASKS_FORMAT = `Emit work as a fenced block exactly like this (strict JSON
     "done_when": "The single observable check that proves this task is finished (a command to run, a test that passes, a file that exists with X in it).",
     "urgency": "urgent | normal | background",
     "deadline": "2026-09-19T18:00 or null",
-    "after": 0,
+    "after": [0],
+    "files": ["src/api/users.mjs", "test/users.test.mjs", "public/css/*.css"],
     "agent": "optional: claude | codex | antigravity",
     "model": "optional model id"}
  ],
@@ -97,9 +101,17 @@ const TASKS_FORMAT = `Emit work as a fenced block exactly like this (strict JSON
 - \`done_when\` must be checkable by a machine or by looking at one specific thing. No "works well".
   When a command proves it, put that command in backticks, e.g. \`npm test\`. Every command-like backticked
   snippet is run, joined with &&. Absence checks use \`! grep …\` (a bare grep exits 1 when nothing matches).
-- \`after\` sequences the chain: the 0-based index of an earlier task in THIS block, or "#12" for an
-  existing task id. A task only starts once the one it points at has finished. Use it liberally —
-  later steps must not begin until the step they build on is actually done.
+- \`after\` is for TRUE prerequisites only: tasks whose output this task needs. It is one reference or an array
+  of them: the 0-based index of an earlier task in THIS block, or "#12" for an existing task id. The task starts
+  only once ALL of them have finished, and cancelling or failing one cancels everything after it. Never chain
+  tasks just to keep them apart or in order: \`files\` does that. Omit \`after\` when nothing is needed first.
+- \`files\` lists the paths or globs (\`src/**/*.css\`, \`test/\`) the task will create or modify. Tasks whose
+  lists don't overlap run in parallel, each in its own git worktree and possibly on different agents; a task
+  without \`files\` counts as touching everything, so it runs alone. Be accurate and specific: an under-declared
+  list risks merge conflicts, an over-broad one serialises work.
+- Parallelise: split a feature into parts that touch disjoint files (e.g. API, UI, docs), give each its
+  \`files\`, and end with an integrator task whose \`after\` lists every part: it integrates and reconciles
+  their results and runs the full test suite (its \`done_when\` is that suite, e.g. \`npm test\`).
 - Each task is run by a FRESH Claude Code session with no memory of this conversation. It will read
   .agent-orch/BRIEF.md and .agent-orch/CONTEXT.md, so put durable context there and keep each prompt self-contained.
 - Never repeat work that is already queued, running, or done.
@@ -235,7 +247,10 @@ function formatQueue(rows) {
     const bits = [`  #${r.id} [${r.status}] (${r.kind}) ${r.title}`];
     if (r.urgency && r.urgency !== 'normal') bits.push(`urgency=${r.urgency}`);
     if (r.deadline) bits.push(`due ${stamp(r.deadline)}`);
-    if (r.depends_on) bits.push(`after #${r.depends_on}`);
+    const deps = r.deps || (r.depends_on ? [r.depends_on] : []);
+    if (deps.length) bits.push(`after ${deps.map((d) => `#${d}`).join(', ')}`);
+    const files = parseFiles(r.files);
+    if (files && ['queued', 'running'].includes(r.status)) bits.push(`files ${files.join(', ')}`);
     return bits.join(' · ');
   }).join('\n');
 }
@@ -316,7 +331,7 @@ reliability and error handling, security, performance, test coverage, documentat
 
 Then:
 1. Rewrite .agent-orch/ROADMAP.md: a brief honest assessment, the prioritized next steps, and later ideas.
-2. Queue the next 1–5 steps as small, separately verifiable tasks (chain them with \`after\`). Prefer
+2. Queue the next 1–5 steps as small, separately verifiable tasks (\`after\` only for true prerequisites; \`files\` for each). Prefer
    finishing and hardening what exists over new scope unless the brief asks for it. If the project truly
    meets its brief and nothing valuable remains, return an empty task list rather than inventing busywork.
    Unless something is genuinely broken or time-bound, this upkeep work is \`background\` urgency.
@@ -420,6 +435,7 @@ export function extractTasks(text) {
       urgency: URGENCIES.includes(u) ? u : 'normal',
       deadline: parseDeadline(t.deadline),
       after: t.after ?? null,
+      files: parseFiles(t.files),
       priority: t.priority != null ? clamp(t.priority, 1, 90, null) : null,
       agent: normalizeAgent(t.agent),
       model: t.model ? String(t.model).trim().slice(0, 100) || null : null,
@@ -558,12 +574,19 @@ function parseDeadline(value, base = new Date()) {
   return null;
 }
 
-function resolveAfter(after, batchIds) {
-  if (after == null) return null;
-  const n = parseInt(String(after).trim().replace(/^#/, ''), 10);
-  if (!Number.isFinite(n)) return null;
-  if (n >= 0 && n < batchIds.length) return batchIds[n];
-  return n > 0 ? n : null;
+// `after`: one reference or an array of them (the task starts once ALL are done). A number below the batch length is a
+// 0-based index into this block, "#12" (or a larger number) an existing task id. Returns the task ids, deduplicated.
+export function resolveAfter(after, batchIds) {
+  if (after == null) return [];
+  const out = [];
+  for (const a of Array.isArray(after) ? after : [after]) {
+    if (a == null) continue;
+    const str = String(a).trim(), n = parseInt(str.replace(/^#/, ''), 10);
+    if (!Number.isFinite(n)) continue;
+    const id = !str.startsWith('#') && n >= 0 && n < batchIds.length ? batchIds[n] : n > 0 ? n : null;
+    if (id != null && !out.includes(id)) out.push(id);
+  }
+  return out;
 }
 
 // Only ever returns a command when the done_when text clearly names one; anything ambiguous or
@@ -816,7 +839,8 @@ function takeLock(file) {
 
 export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLimits, onSubscription, emitChat, broadcast, convoExists, refreshUsage,
   convoFallbacks = () => null, onCommit = () => {}, projectReady = () => true, disabled = false, usageLog = createUsageLog(dataDir),
-  codexSnapshot = () => codexLatestSnapshot() }) {
+  codexSnapshot = () => codexLatestSnapshot(), config = {} }) {
+  Object.assign(CFG, config); // tests tune slots (concurrency, maxParallel, agentSlots)
   const dir = path.join(dataDir, 'orchestrator');
   const runsDir = path.join(dir, 'runs');
   fs.mkdirSync(runsDir, { recursive: true });
@@ -878,6 +902,16 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // 'needs_integration' task whose worktree this integrator task resolves and merges.
   if (!db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === 'worktree')) db.exec('ALTER TABLE tasks ADD COLUMN worktree TEXT');
   if (!db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === 'integrates')) db.exec('ALTER TABLE tasks ADD COLUMN integrates INTEGER');
+  // Multi-dependencies (#156): task_deps(task_id, depends_on) holds every prerequisite; a task starts once ALL are done.
+  // tasks.depends_on stays the first one (single-dep readers and older rows); all_deps is the union of both.
+  // tasks.files: JSON [path or glob] the task will modify (parallel.mjs); NULL = everything, so it runs alone.
+  db.exec(`CREATE TABLE IF NOT EXISTS task_deps (task_id INTEGER NOT NULL, depends_on INTEGER NOT NULL, PRIMARY KEY(task_id, depends_on));
+    CREATE INDEX IF NOT EXISTS idx_task_deps_up ON task_deps(depends_on);
+    CREATE VIEW IF NOT EXISTS all_deps AS SELECT task_id, depends_on FROM task_deps UNION SELECT id, depends_on FROM tasks WHERE depends_on IS NOT NULL;`);
+  if (!db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === 'files')) {
+    db.exec('ALTER TABLE tasks ADD COLUMN files TEXT');
+    db.exec('INSERT OR IGNORE INTO task_deps(task_id, depends_on) SELECT id, depends_on FROM tasks WHERE depends_on IS NOT NULL');
+  }
   // messages.task_id: the plan task that took a saved message (status 'taken'); it is 'done' once answered.
   if (!db.prepare('PRAGMA table_info(messages)').all().some((c) => c.name === 'task_id')) db.exec('ALTER TABLE messages ADD COLUMN task_id INTEGER');
   // tasks.position: the owner's manual queue order within a project (lower runs first; see `runnable`). Existing rows
@@ -932,19 +966,23 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return eff;
   }
 
+  // dependsOn: a task id or an array of them (all must be done first). files: [path or glob] it will modify, or null.
   function addTask(projectId, { title, prompt, kind = 'work', source = 'user', priority = null, urgency = 'normal', deadline = null, dependsOn = null, doneWhen = null, agent = null, model = null,
-    origin = source === 'reflection' ? 'reflection' : null, fallbacks = null }) {
+    origin = source === 'reflection' ? 'reflection' : null, fallbacks = null, files = null }) {
+    const deps = [...new Set((Array.isArray(dependsOn) ? dependsOn : [dependsOn]).filter((d) => d != null).map(Number))];
+    files = parseFiles(files);
     deadline = parseDeadline(deadline);
     if (priority == null) {
       priority = kind === 'plan' ? PRIORITY.plan : kind === 'reflect' ? PRIORITY.reflect
         : urgency !== 'normal' && URGENCY[urgency] ? URGENCY[urgency] : PRIORITY[source] ?? 50;
     }
-    const pos = insertPosition(projectId, effectivePriority({ priority, deadline }, getProject(projectId)), dependsOn);
-    const r = run(`INSERT INTO tasks(project_id,kind,title,prompt,priority,urgency,deadline,depends_on,done_when,source,agent,model,origin,fallbacks,position,created_at)
-      VALUES(:p,:k,:ti,:pr,:pri,:u,:d,:dep,:dw,:s,:ag,:mo,:or,:fb,:pos,:c)`,
-      { p: projectId, k: kind, ti: title, pr: prompt, pri: priority, u: urgency, d: deadline, dep: dependsOn, dw: doneWhen, s: source, ag: agent, mo: model,
-        or: origin, fb: fallbacks ? JSON.stringify(fallbacks) : null, pos, c: now() });
+    const pos = insertPosition(projectId, effectivePriority({ priority, deadline }, getProject(projectId)), deps);
+    const r = run(`INSERT INTO tasks(project_id,kind,title,prompt,priority,urgency,deadline,depends_on,done_when,source,agent,model,origin,fallbacks,files,position,created_at)
+      VALUES(:p,:k,:ti,:pr,:pri,:u,:d,:dep,:dw,:s,:ag,:mo,:or,:fb,:fi,:pos,:c)`,
+      { p: projectId, k: kind, ti: title, pr: prompt, pri: priority, u: urgency, d: deadline, dep: deps[0] ?? null, dw: doneWhen, s: source, ag: agent, mo: model,
+        or: origin, fb: fallbacks ? JSON.stringify(fallbacks) : null, fi: files ? JSON.stringify(files) : null, pos, c: now() });
     const id = Number(r.lastInsertRowid);
+    for (const d of deps) run('INSERT OR IGNORE INTO task_deps(task_id, depends_on) VALUES(:t,:d)', { t: id, d });
     pushTask(id);
     return id;
   }
@@ -957,12 +995,12 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   function listTasks(projectId, limit = 25) {
     return qa(`SELECT * FROM tasks WHERE project_id=:p ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,
-      CASE WHEN status IN ('running','queued') THEN -priority ELSE -id END LIMIT :n`, { p: projectId, n: limit });
+      CASE WHEN status IN ('running','queued') THEN -priority ELSE -id END LIMIT :n`, { p: projectId, n: limit }).map((r) => ({ ...r, deps: depsOf(r.id) }));
   }
 
   const RUNNABLE = `SELECT t.*, ${EFFECTIVE_SQL} AS eff FROM tasks t JOIN projects p ON p.id=t.project_id
     WHERE t.status='queued' AND p.status='active' AND t.not_before<=:now
-      AND (t.depends_on IS NULL OR EXISTS(SELECT 1 FROM tasks d WHERE d.id=t.depends_on AND d.status='done'))`;
+      AND NOT EXISTS(SELECT 1 FROM all_deps x LEFT JOIN tasks d ON d.id=x.depends_on WHERE x.task_id=t.id AND d.status IS NOT 'done')`;
   function runnable(allowed, exclusive, limit) {
     let sql = RUNNABLE;
     const p = { now: now() };
@@ -971,15 +1009,17 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       allowed.forEach((u, i) => (p[`u${i}`] = u));
     }
     let rows = queueOrder(qa(sql, p));
-    // Two tasks share a project only if both are work tasks in their own worktrees; anything else would race on the
-    // same checkout and its commits. A waiting plan/reflect task also stops more work from starting in its project.
+    // Two tasks share a project only if both are work tasks in their own worktrees and their declared files don't
+    // overlap (parallel.mjs; undeclared = everything); anything else would race on the same checkout, its commits or
+    // the same lines. A waiting plan/reflect task also stops more work from starting in its project.
     if (exclusive) {
-      const busy = qa("SELECT id, project_id FROM tasks WHERE status='running'");
+      const busy = qa("SELECT id, project_id, files FROM tasks WHERE status='running'");
       const blocked = new Set();
       rows = rows.filter((r) => {
         if (blocked.has(r.project_id)) return false;
         const others = busy.filter((b) => b.project_id === r.project_id);
-        const ok = !others.length || (r.kind === 'work' && worktreeCapable(getProject(r.project_id)) && others.every((b) => running.get(b.id)?.wt));
+        const ok = !others.length || (r.kind === 'work' && worktreeCapable(getProject(r.project_id))
+          && others.every((b) => running.get(b.id)?.wt && !filesOverlap(filesOf(r), filesOf(b))));
         if (!ok && r.kind !== 'work') blocked.add(r.project_id);
         return ok;
       });
@@ -1022,17 +1062,25 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (rows[i].position - prev < 1e-6) { rows = renumber(rows); return i + 0.5; }
     return (prev + rows[i].position) / 2;
   }
-  // The depends_on chain upward from `id` (inclusive) that hasn't finished yet: what must finish first.
-  function prereqIds(id) {
-    const out = [], seen = new Set();
-    for (let t = id != null ? getTask(id) : null; t && !seen.has(t.id); t = t.depends_on != null ? getTask(t.depends_on) : null) {
+  // A task's direct prerequisites (all_deps: task_deps plus the legacy depends_on), first-declared first.
+  const depsOf = (id) => qa(`SELECT x.depends_on AS d FROM all_deps x JOIN tasks t ON t.id=x.task_id WHERE x.task_id=:id
+    ORDER BY x.depends_on IS NOT t.depends_on, x.depends_on`, { id }).map((r) => r.d);
+  // Declared files of a task row: null = everything. An integrator touches what the task it integrates declared.
+  const filesOf = (t) => parseFiles(t.files) ?? (t.integrates ? parseFiles(getTask(t.integrates)?.files) : null);
+  // The prerequisite graph upward from `ids` (a task id or array, inclusive) that hasn't finished yet: what must finish first.
+  function prereqIds(ids) {
+    const out = [], seen = new Set(), todo = (Array.isArray(ids) ? ids : [ids]).filter((i) => i != null);
+    while (todo.length) {
+      const t = getTask(todo.shift());
+      if (!t || seen.has(t.id)) continue;
       seen.add(t.id);
       if (t.status !== 'done') out.push(t.id);
+      todo.push(...depsOf(t.id));
     }
     return out;
   }
-  // Every queued task whose depends_on chain leads to `id`, in queue order: they move with it.
-  const dependentIds = (id) => qa(`WITH RECURSIVE d(id) AS (SELECT id FROM tasks WHERE depends_on=:id UNION SELECT t.id FROM tasks t JOIN d ON t.depends_on=d.id)
+  // Every queued task whose prerequisites lead to `id`, in queue order: they move with it.
+  const dependentIds = (id) => qa(`WITH RECURSIVE d(id) AS (SELECT task_id FROM all_deps WHERE depends_on=:id UNION SELECT x.task_id FROM all_deps x JOIN d ON x.depends_on=d.id)
     SELECT t.id FROM tasks t JOIN d ON d.id=t.id WHERE t.status='queued' ORDER BY t.position IS NULL, t.position, t.id`, { id }).map((r) => r.id);
 
   // Owner reorder: move a queued task and its queued dependent subtree as one block (relative order kept) to just
@@ -1056,7 +1104,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       const order = [...rest.slice(0, at), ...block, ...rest.slice(at)];
       const index = new Map(order.map((r, i) => [r.id, i]));
       for (const r of block) {
-        for (const up of prereqIds(r.depends_on)) {
+        for (const up of prereqIds(depsOf(r.id))) {
           if (index.has(up) && index.get(up) > index.get(r.id)) {
             db.exec('ROLLBACK');
             return { error: up === id || blockIds.has(up) ? `#${r.id} can't go before #${up}, which it depends on`
@@ -1076,13 +1124,40 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       throw e;
     }
   }
-  function claimNext(allowed) {
+  // Work that may run beside other work in its project: declared files in a worktree-capable project (parallel.mjs).
+  const parallelSafe = (r) => r.kind === 'work' && !!filesOf(r) && worktreeCapable(getProject(r.project_id));
+  const runningOn = (agent) => [...running.values()].filter((r) => r.agent === agent).length;
+  const listedModel = (agent, model) => !!AGENTS[agent] && (modelCatalog(agent).models || []).some((m) => m.id === model);
+  // A ready task whose agent has no free slot moves to the fallback spreadAssign picked (recorded like a delegation).
+  function spread(task, to) {
+    const from = intendedRoute(task, getProject(task.project_id));
+    const fromModel = from.model || delegator.defaultModel(from.agent), fromName = `${from.agent}/${fromModel || 'default'}`;
+    updateTask(task.id, { agent: to.agent, model: to.model, session_id: null, delegated_from: task.delegated_from || fromName,
+      delegated_reason: `spread: ${agentName(from.agent)} already runs ${runningOn(from.agent)} task(s)`,
+      moves: addMove(task, { from: { agent: from.agent, model: fromModel }, to: { agent: to.agent, model: to.model }, until: null, by: 'spread' }) });
+    logEvent(`#${task.id} spread from ${fromName} (busy) to ${to.agent}/${to.model} to run in parallel`, { projectId: task.project_id, taskId: task.id });
+  }
+  function claimNext(allowed, { boost = false } = {}) {
     // Mandatory GitHub protocol: a project's work only starts once its repo exists.
     // A plan task waits while the owner's chat turn holds the planner session (AUDIT #5).
     // A task whose agent is at its usage limit waits; others (e.g. codex-routed while Claude is limited) still run.
     // A waiting task that may be delegated moves to the owner's first fallback with usage left (delegate.mjs) and runs now.
-    const rows = runnable(allowed, true, 25).filter((r) => !(r.kind === 'plan' && planningProjects.has(r.project_id)) && projectReady(getProject(r.project_id)?.path));
-    const row = rows.find((r) => !waitsForLimit(r)) || rows.find((r) => delegate(r) && !waitsForLimit(getTask(r.id)));
+    // Agent spreading (parallel.mjs spreadAssign): each task takes its own route while that agent has a free slot
+    // (CFG.agentSlots); one that would otherwise wait spills to its first fallback with a free slot and usage left.
+    // `boost`: a slot beyond pacing's concurrency, only for file-declared work whose agent has usage to spare.
+    let rows = runnable(allowed, true, 25).filter((r) => !(r.kind === 'plan' && planningProjects.has(r.project_id)) && projectReady(getProject(r.project_id)?.path));
+    if (boost) rows = rows.filter(parallelSafe);
+    const ready = rows.filter((r) => !waitsForLimit(r)).map((r) => {
+      const route = routeNow(r, getProject(r.project_id)), primary = { agent: route.agent, model: route.model || delegator.defaultModel(route.agent), primary: true };
+      const fallbacks = r.kind === 'work' ? (parseFallbacks(r.fallbacks) || []).filter((f) => listedModel(f.agent, f.model) && `${f.agent}/${f.model}` !== `${primary.agent}/${primary.model}`) : [];
+      return { task: r, options: [primary, ...fallbacks] };
+    });
+    const pick = spreadAssign(ready, {
+      slotsFree: (a) => CFG.agentSlots - runningOn(a),
+      hasUsage: (a, m, o) => (o?.primary && !boost ? true : delegator.hasUsage(a, m)),
+    })[0];
+    if (pick?.spilled) spread(pick.task, pick);
+    const row = pick?.task || (!boost && rows.find((r) => delegate(r) && !waitsForLimit(getTask(r.id))));
     if (!row) return null;
     run("UPDATE tasks SET status='running', started_at=:t WHERE id=:id", { t: now(), id: row.id });
     pushTask(row.id);
@@ -1091,7 +1166,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   function cascadeBlock(taskId, status, reason) {
     const blocked = [];
-    for (const r of qa("SELECT id FROM tasks WHERE depends_on=:id AND status IN ('queued','running')", { id: taskId })) {
+    for (const r of qa("SELECT t.id FROM all_deps x JOIN tasks t ON t.id=x.task_id WHERE x.depends_on=:id AND t.status IN ('queued','running')", { id: taskId })) {
       run('UPDATE tasks SET status=:s, finished_at=:f, result=:r WHERE id=:id', { s: status, f: now(), r: reason, id: r.id });
       running.get(r.id)?.abort.abort();
       pushTask(r.id);
@@ -1105,9 +1180,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const frontier = [rootId];
     while (frontier.length) {
       const parent = frontier.pop();
-      for (const r of qa("SELECT id, result FROM tasks WHERE depends_on=:p AND status IN ('failed','cancelled')", { p: parent })) {
+      for (const r of qa("SELECT t.id, t.result FROM all_deps x JOIN tasks t ON t.id=x.task_id WHERE x.depends_on=:p AND t.status IN ('failed','cancelled')", { p: parent })) {
         const res = r.result || '';
-        if (res.startsWith(blockedPrefix(rootId)) || res === `cancelled with #${rootId}`) {
+        // With several prerequisites, it stays blocked while another one is still failed or cancelled.
+        const otherDown = depsOf(r.id).some((d) => d !== parent && ['failed', 'cancelled'].includes(getTask(d)?.status));
+        if (!otherDown && (res.startsWith(blockedPrefix(rootId)) || res === `cancelled with #${rootId}`)) {
           run("UPDATE tasks SET status='queued', result=NULL, finished_at=NULL, attempts=0, continuations=0, not_before=0 WHERE id=:id", { id: r.id });
           pushTask(r.id);
           revived.push(r.id);
@@ -1160,7 +1237,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       return !(last && last.verify_output != null);
     });
     if (!eligible.length) return null;
-    return (eligible.find((c) => task.depends_on && c.last_task_id === task.depends_on) || eligible[0]).session_id;
+    const deps = depsOf(task.id);
+    return (eligible.find((c) => deps.includes(c.last_task_id)) || eligible[0]).session_id;
   }
 
   // ---- limits & governor
@@ -1333,7 +1411,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (fs.existsSync(f)) return;
     const meta = [`- kind: ${task.kind}`, `- source: ${task.source}`, `- priority: ${task.priority} (${task.urgency})`, `- created: ${stamp(task.created_at)}`];
     if (task.deadline) meta.push(`- deadline: ${stamp(task.deadline)}`);
-    if (task.depends_on) meta.push(`- starts after: #${task.depends_on}`);
+    const deps = depsOf(task.id), files = parseFiles(task.files);
+    if (deps.length) meta.push(`- starts after: ${deps.map((d) => `#${d}`).join(', ')}`);
+    if (files) meta.push(`- files: ${files.join(', ')}`);
     let body = `# Task #${task.id}: ${task.title}\n\n${meta.join('  \n')}\n\n## Prompt\n\n${task.prompt}\n`;
     if (task.done_when) body += `\n## Done when\n\n${task.done_when}\n`;
     fs.writeFileSync(f, body);
@@ -1596,9 +1676,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     for (const t of payload.tasks) {
       const dup = findDuplicate(project.id, t.title);
       if (dup) { logEvent(`skipped duplicate: ${t.title} (already #${dup.id})`, { projectId: project.id }); batch.push(dup.id); continue; }
-      let dependsOn = resolveAfter(t.after, batch);
-      if (dependsOn != null && !getTask(dependsOn)) dependsOn = null;
-      const id = addTask(project.id, { title: t.title, prompt: t.prompt, kind: 'work', source, priority: t.priority, urgency: t.urgency, deadline: t.deadline, dependsOn, doneWhen: t.done_when, agent: t.agent, model: t.model, ...origin });
+      const dependsOn = resolveAfter(t.after, batch).filter((d) => getTask(d));
+      const id = addTask(project.id, { title: t.title, prompt: t.prompt, kind: 'work', source, priority: t.priority, urgency: t.urgency, deadline: t.deadline, dependsOn, doneWhen: t.done_when,
+        agent: t.agent, model: t.model, files: t.files, ...origin });
       writeTaskSpec(project.path, getTask(id));
       ids.push(id);
       batch.push(id);
@@ -1800,9 +1880,12 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       kvSet('announced_auth', 0);
       const d = decision();
       considerPreemption(d);
-      while (running.size < d.concurrency) {
-        const task = claimNext(d.allowed);
-        if (!task) { if (scheduleReflections()) continue; break; }
+      // Past pacing's concurrency, up to CFG.maxParallel slots go to file-disjoint work while usage isn't scarce.
+      const boostTo = !d.scarce && d.concurrency >= CFG.concurrency ? Math.max(CFG.maxParallel, d.concurrency) : d.concurrency;
+      while (running.size < boostTo) {
+        const boost = running.size >= d.concurrency;
+        const task = claimNext(d.allowed, { boost });
+        if (!task) { if (!boost && scheduleReflections()) continue; break; }
         startTask(task);
       }
     } catch (e) {
@@ -1814,7 +1897,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   function startTask(task) {
     const abort = new AbortController();
-    running.set(task.id, { abort, projectId: task.project_id, startedAt: now(), wt: task.kind === 'work' && worktreeCapable(getProject(task.project_id)) });
+    const project = getProject(task.project_id);
+    running.set(task.id, { abort, projectId: task.project_id, startedAt: now(), wt: task.kind === 'work' && worktreeCapable(project), agent: routeNow(task, project).agent });
     pushState();
     execute(task, abort.signal)
       .catch((e) => console.error('[orchestrator] task crashed', e))
@@ -2098,7 +2182,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       `${branch}'s changes and task #${tid}'s intent survive, then verify the result still works. Don't commit, and don't abort the merge.\n\n` +
       `Task #${tid}'s instructions were:\n\n${task.prompt}`;
     const iid = addTask(project.id, { title: `Integrate #${tid}: ${task.title}`.slice(0, 200), prompt, source: task.source, priority: task.priority + 10,
-      doneWhen: task.done_when, agent: task.agent, model: task.model, origin: task.origin, fallbacks: parseFallbacks(task.fallbacks) });
+      doneWhen: task.done_when, agent: task.agent, model: task.model, origin: task.origin, fallbacks: parseFallbacks(task.fallbacks), files: parseFiles(task.files) });
     run('UPDATE tasks SET integrates=:t WHERE id=:id', { t: tid, id: iid });
     updateTask(tid, { result: `${note} Integrator #${iid} merges it.` });
     logEvent(`⚠ #${tid} needs integration: conflicts with ${branch} in ${files.join(', ')}; queued integrator #${iid}`, { level: 'warn', projectId: project.id, taskId: tid });
@@ -2170,7 +2254,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         // Manual position is the primary order within the project, so it also goes to the front of its queue
         // (unless a queued prerequisite has to finish first).
         const queue = queuedInOrder(task.project_id).filter((r) => r.position != null && r.id !== id);
-        const front = queue.length && !prereqIds(task.depends_on).some((up) => queue.some((r) => r.id === up)) ? { position: queue[0].position - 1 } : {};
+        const front = queue.length && !prereqIds(depsOf(task.id)).some((up) => queue.some((r) => r.id === up)) ? { position: queue[0].position - 1 } : {};
         updateTask(id, { priority: Math.max(task.priority, top - own + 5), urgency: 'urgent', not_before: 0, ...front });
         logEvent(`#${id} moved to the front`, { projectId: task.project_id, taskId: id });
         setTimeout(tick, 100);
@@ -2273,8 +2357,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return {
       id: t.id, project_id: t.project_id, kind: t.kind, title: t.title, status: t.status, urgency: t.urgency,
       priority: t.priority, deadline: t.deadline, depends_on: t.depends_on, attempts: t.attempts, position: t.position ?? null,
-      // prereqs: unfinished tasks up the depends_on chain (must finish first); dependents: the queued subtree that moves with it.
-      prereqs: prereqIds(t.depends_on), dependents: dependentIds(t.id),
+      // deps: every direct prerequisite (all must be done); prereqs: unfinished tasks up the prerequisite graph (must finish
+      // first); dependents: the queued subtree that moves with it. files: what it declared it modifies (null = everything).
+      deps: depsOf(t.id), prereqs: prereqIds(depsOf(t.id)), dependents: dependentIds(t.id), files: parseFiles(t.files),
       continuations: t.continuations, not_before: t.not_before, source: t.source, created_at: t.created_at,
       started_at: t.started_at, finished_at: t.finished_at, commit_sha: t.commit_sha,
       agent: t.agent, model: t.model, ran_agent: t.ran_agent, ran_model: t.ran_model, route_note: t.route_note ?? null,
@@ -2357,7 +2442,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       eff: effectivePriority(t, project),
       project: projectView(project),
       dependsOn: t.depends_on ? taskView(getTask(t.depends_on)) : null,
-      followers: qa('SELECT * FROM tasks WHERE depends_on=:id', { id }).map(taskView),
+      after: depsOf(id).map((d) => taskView(getTask(d))).filter(Boolean),
+      followers: qa('SELECT t.* FROM all_deps x JOIN tasks t ON t.id=x.task_id WHERE x.depends_on=:id ORDER BY t.id', { id }).map(taskView),
       events: qa('SELECT ts, level, message FROM events WHERE task_id=:id ORDER BY id DESC LIMIT 40', { id }).reverse(),
       runs,
       running: running.has(id),

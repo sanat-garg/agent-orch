@@ -473,3 +473,7 @@ modelStatus() drives task cards, drawer and chat notices; tests pass
 ## 2026-09-26 05:20 — #155 Run concurrent tasks in isolated git worktrees and merge back safely [done (check passed)]
 
 work tasks run in isolated worktrees and merge back safely
+
+## 2026-09-26 05:44 — #156 Parallel planning: file-scoped tasks, multi-dependencies, integrator tasks, agent spreading [done (check passed)]
+
+parallel scheduling with file gating, multi-deps, spreading and integrators; tests pass

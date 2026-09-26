@@ -1086,7 +1086,8 @@ button.dg-row:disabled { opacity: .6; cursor: progress; }
 .q-more { background: var(--accent); color: #fff; }
 .q-hint:empty { display: none; }
 .q-hint { background: var(--danger); color: #fff; }
-.tc-after { color: var(--accent); text-decoration: underline dotted; text-underline-offset: 2px; cursor: pointer; }
+.tc-after { color: var(--accent); }
+.tc-after [role="link"] { text-decoration: underline dotted; text-underline-offset: 2px; cursor: pointer; }
 @media (max-width: 800px) {
   #queueModal { grid-template-columns: minmax(0, 1fr); }
   #queueModal .qs { min-width: 0; max-width: 100%; }

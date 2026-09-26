@@ -59,8 +59,9 @@ async function scenario(repo, body, pre = '') {
       const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
       const pid = Number(db.prepare("INSERT INTO projects(path,name,priority,status,perpetual,created_at) VALUES(?,?,50,'active',0,0)").run(repo, 'proj').lastInsertRowid);
       let created = 0;
-      const task = (title, prompt, doneWhen = null) => Number(db.prepare('INSERT INTO tasks(project_id,title,prompt,priority,urgency,done_when,created_at) VALUES(?,?,?,50,?,?,?)')
-        .run(pid, title, prompt, 'normal', doneWhen, ++created).lastInsertRowid);
+      // files: what the task declares it modifies (JSON); undeclared tasks run alone.
+      const task = (title, prompt, doneWhen = null, files = null) => Number(db.prepare('INSERT INTO tasks(project_id,title,prompt,priority,urgency,done_when,files,created_at) VALUES(?,?,?,50,?,?,?,?)')
+        .run(pid, title, prompt, 'normal', doneWhen, files && JSON.stringify(files), ++created).lastInsertRowid);
       const get = (id) => db.prepare('SELECT * FROM tasks WHERE id=?').get(id);
       const all = () => db.prepare('SELECT * FROM tasks ORDER BY id').all();
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -82,7 +83,7 @@ describe('worktrees', { concurrency: true, timeout: 120000 }, () => {
     const { root, repo } = makeRepo();
     try {
       const r = await scenario(repo, `
-        const t1 = task('edit a', 'EDIT a.txt 1 ALPHA'), t2 = task('edit b', 'EDIT b.txt 1 BETA', '\`test -d node_modules\`');
+        const t1 = task('edit a', 'EDIT a.txt 1 ALPHA', null, ['a.txt']), t2 = task('edit b', 'EDIT b.txt 1 BETA', '\`test -d node_modules\`', ['b.txt']);
         let overlap = false;
         await until(() => { if (get(t1).status === 'running' && get(t2).status === 'running') overlap = true; return get(t1).status === 'done' && get(t2).status === 'done'; });
         return { overlap, statuses: [get(t1).status, get(t2).status], shas: [get(t1).commit_sha, get(t2).commit_sha], cwds,
@@ -116,7 +117,8 @@ describe('worktrees', { concurrency: true, timeout: 120000 }, () => {
     const { root, repo } = makeRepo();
     try {
       const r = await scenario(repo, `
-        const t1 = task('first', 'EDIT a.txt 2 FIRST'), t2 = task('second', 'EDIT a.txt 2 SECOND');
+        // The second under-declares its files, so both run at once and collide on a.txt.
+        const t1 = task('first', 'EDIT a.txt 2 FIRST', null, ['a.txt']), t2 = task('second', 'EDIT a.txt 2 SECOND', null, ['c.txt']);
         await until(() => all().some((t) => t.status === 'needs_integration'));
         const stuck = all().find((t) => t.status === 'needs_integration');
         const integrator = all().find((t) => t.integrates === stuck.id);

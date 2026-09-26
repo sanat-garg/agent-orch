@@ -543,3 +543,6 @@ UI-REVIEW.md has 17 HIG findings; 15 screenshots saved
 ## 2026-09-26 10:49 — #177 AUDIT round 5: security and robustness of the server's HTTP and WebSocket endpoints [done (check passed)]
 
 Round 5 audit adds three verified findings (#33–#35)
+## 2026-09-26 10:51 — #176 Fix AUDIT #30: retrying two failed prerequisites in either order revives their dependent [done (check passed)]
+
+retrying failed prerequisites in either order revives dependents

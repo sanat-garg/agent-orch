@@ -13,3 +13,7 @@ Fix AUDIT #30 in .agent-orch/AUDIT.md (read it first). In orchestrator.mjs, `rev
 ## Done when
 
 `node --test test/revive-deps.test.mjs` passes and `npm test` passes.
+
+## Result — done (check passed) (2026-09-26 10:51)
+
+AGENT-ORCH-STATUS: done — retrying failed prerequisites in either order revives dependents

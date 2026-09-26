@@ -1195,10 +1195,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     while (frontier.length) {
       const parent = frontier.pop();
       for (const r of qa("SELECT t.id, t.result FROM all_deps x JOIN tasks t ON t.id=x.task_id WHERE x.depends_on=:p AND t.status IN ('failed','cancelled')", { p: parent })) {
-        const res = r.result || '';
-        // With several prerequisites, it stays blocked while another one is still failed or cancelled.
-        const otherDown = depsOf(r.id).some((d) => d !== parent && ['failed', 'cancelled'].includes(getTask(d)?.status));
-        if (!otherDown && (res.startsWith(blockedPrefix(rootId)) || res === `cancelled with #${rootId}`)) {
+        // Only tasks blocked by a prerequisite come back, and only once no prerequisite is still down. The result names the
+        // task whose failure first blocked it, which may be another prerequisite (retried earlier) or an ancestor of one.
+        const cause = Number(/^(?:blocked: #(\d+) |cancelled with #(\d+)$)/.exec(r.result || '')?.slice(1).find(Boolean));
+        const down = (id) => ['failed', 'cancelled'].includes(getTask(id)?.status);
+        if (cause && !down(cause) && !depsOf(r.id).some(down)) {
           run("UPDATE tasks SET status='queued', result=NULL, finished_at=NULL, attempts=0, continuations=0, not_before=0 WHERE id=:id", { id: r.id });
           pushTask(r.id);
           revived.push(r.id);

@@ -170,6 +170,21 @@ function readLog(id) {
     return parseJsonl(fs.readFileSync(logPath(id), 'utf8'));
   } catch { return []; }
 }
+// A curated fallback list from a request body: null = automatic ranking; an array (even empty) is used as-is, in order,
+// deduplicated. Every entry must be a discovered model of a known agent. → {list} | {error}
+function checkFallbacks(v) {
+  if (v !== null && !Array.isArray(v)) return { error: 'fallbacks must be an array of {agent, model} or null' };
+  if (!v) return { list: null };
+  if (v.length > 20) return { error: 'At most 20 fallbacks' };
+  const list = [];
+  for (const f of v) {
+    const agent = f?.agent, model = f?.model;
+    if (typeof agent !== 'string' || !AGENTS[agent]) return { error: `Unknown agent: ${agent}` };
+    if (typeof model !== 'string' || !(modelCatalog(agent).models || []).some((m) => m.id === model)) return { error: `Unknown ${agent} model: ${model}` };
+    if (!list.some((x) => x.agent === agent && x.model === model)) list.push({ agent, model });
+  }
+  return { list };
+}
 function publicConvo(c) {
   const rt = runtimes.get(c.id);
   return { ...c, fallbacks: c.fallbacks ?? null, busy: !!rt?.busy || planning.has(c.id) || agentTurns.has(c.id) };
@@ -1281,6 +1296,14 @@ async function handleRequest(req, res) {
       return json(res, 200, c);
     }
   }
+  // Reflection fallbacks for a project's reflection-queued tasks: {fallbacks: [{agent, model}] | null}, same rules as a chat's.
+  const rf = p.match(/^\/api\/orch\/projects\/(\d+)\/reflect-fallbacks$/);
+  if (rf && req.method === 'PUT') {
+    const { list, error } = checkFallbacks((await readBody(req)).fallbacks);
+    if (error) return json(res, 400, { error });
+    const r = orch.setReflectFallbacks(Number(rf[1]), list);
+    return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r);
+  }
   // Auto Delegate fallbacks the owner curates for a chat: {fallbacks: [{agent, model}] | null}. null = automatic ranking;
   // an array (even empty) is used as-is, in order. Every entry must be a discovered model of a known agent.
   const cf = p.match(/^\/api\/convos\/([\w-]+)\/fallbacks$/);
@@ -1288,19 +1311,8 @@ async function handleRequest(req, res) {
     const c = findConvo(cf[1]);
     if (!c) return json(res, 404, { error: 'No such chat' });
     const body = await readBody(req);
-    const v = body.fallbacks;
-    if (v !== null && !Array.isArray(v)) return json(res, 400, { error: 'fallbacks must be an array of {agent, model} or null' });
-    let list = null;
-    if (v) {
-      if (v.length > 20) return json(res, 400, { error: 'At most 20 fallbacks' });
-      list = [];
-      for (const f of v) {
-        const agent = f?.agent, model = f?.model;
-        if (typeof agent !== 'string' || !AGENTS[agent]) return json(res, 400, { error: `Unknown agent: ${agent}` });
-        if (typeof model !== 'string' || !(modelCatalog(agent).models || []).some((m) => m.id === model)) return json(res, 400, { error: `Unknown ${agent} model: ${model}` });
-        if (!list.some((x) => x.agent === agent && x.model === model)) list.push({ agent, model });
-      }
-    }
+    const { list, error } = checkFallbacks(body.fallbacks);
+    if (error) return json(res, 400, { error });
     c.fallbacks = list;
     saveConvos();
     broadcastConvos();
@@ -1349,10 +1361,15 @@ async function handleRequest(req, res) {
   }
   // Auto Delegate preview for the composer: ?agent=&model=&category= (default coding) → start model + top 3 candidates.
   // ?convo=<id> with a curated fallback list: candidates are that list (with usage + metrics); `suggested` = automatic top 3.
+  // ?project=<id>: the same for the project's reflection tasks (its reflect_fallbacks, starting on its default route).
   if (p === '/api/delegate/preview' && req.method === 'GET') {
     const q = url.searchParams;
     const convo = q.get('convo') ? findConvo(q.get('convo')) : null;
     if (q.get('convo') && !convo) return json(res, 404, { error: 'No such chat' });
+    if (q.get('project')) {
+      const v = orch.delegatePreview({ projectId: Number(q.get('project')), agent: q.get('agent') || null, model: q.get('model') || null, category: q.get('category') || 'coding' });
+      return v ? json(res, 200, v) : json(res, 404, { error: 'No such project' });
+    }
     const v = orch.delegatePreview({ agent: q.get('agent') || 'claude', model: q.get('model') || null, category: q.get('category') || 'coding', fallbacks: convo?.fallbacks ?? null });
     return v ? json(res, 200, v) : json(res, 400, { error: 'Unknown agent' });
   }

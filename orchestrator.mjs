@@ -860,6 +860,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   for (const col of ['pinned_model', 'category', 'delegated_from', 'delegated_reason', 'fallbacks']) {
     if (!db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === col)) db.exec(`ALTER TABLE tasks ADD COLUMN ${col} TEXT`);
   }
+  // projects.reflect_fallbacks: JSON [{agent, model}] the owner curates for reflection-queued tasks (NULL = automatic
+  // ranking); queuePayload snapshots it into their tasks.fallbacks.
+  if (!db.prepare('PRAGMA table_info(projects)').all().some((c) => c.name === 'reflect_fallbacks')) db.exec('ALTER TABLE projects ADD COLUMN reflect_fallbacks TEXT');
   // messages.task_id: the plan task that took a saved message (status 'taken'); it is 'done' once answered.
   if (!db.prepare('PRAGMA table_info(messages)').all().some((c) => c.name === 'task_id')) db.exec('ALTER TABLE messages ADD COLUMN task_id INTEGER');
   // tasks.position: the owner's manual queue order within a project (lower runs first; see `runnable`). Existing rows
@@ -1453,7 +1456,15 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return { status: 'available', until: null, note: null };
   }
   // fallbacks: the chat's curated list (null = automatic); the reply then lists it and still `suggested`s the automatic top 3.
-  function delegatePreview({ agent, model, category, fallbacks = null } = {}) {
+  // projectId: preview for the project's reflection tasks instead: its reflect_fallbacks list, starting on its default route.
+  function delegatePreview({ agent, model, category, fallbacks = null, projectId = null } = {}) {
+    if (projectId != null) {
+      const project = getProject(projectId);
+      if (!project) return null;
+      const r = intendedRoute({ kind: 'work', title: '', prompt: '' }, project);
+      ({ agent, model } = agent ? { agent, model } : r);
+      fallbacks = parseFallbacks(project.reflect_fallbacks);
+    }
     agent = agent || 'claude';
     if (agent !== 'claude' && !AGENTS[agent]) return null;
     let view = null;
@@ -1980,7 +1991,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   async function finishReflection(task, project, res) {
     const [clean, payload] = extractTasks(res.text);
-    const ids = queuePayload(getProject(project.id), payload, 'reflection');
+    // The project's curated reflection fallbacks are snapshotted, so a later edit doesn't change what's already queued.
+    const fresh = getProject(project.id);
+    const ids = queuePayload(fresh, payload, 'reflection', { fallbacks: parseFallbacks(fresh.reflect_fallbacks) });
     const key = `reflect_empty_streak:${project.id}`;
     const streak = ids.length ? 0 : (parseInt(kvGet(key, '0'), 10) || 0) + 1;
     kvSet(key, streak);
@@ -2071,6 +2084,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     setTimeout(tick, 100);
     return { ok: true };
   }
+  // Reflection fallbacks (list already validated by the server): [{agent, model}] or null = automatic ranking.
+  function setReflectFallbacks(id, list) {
+    if (!getProject(id)) return { error: 'No such project', status: 404 };
+    updateProject(id, { reflect_fallbacks: list == null ? null : JSON.stringify(list) });
+    logEvent(`reflection fallbacks: ${list == null ? 'automatic' : list.map((f) => `${f.agent}/${f.model}`).join(' → ') || 'none'}`, { projectId: id });
+    return { ok: true, project: projectView(getProject(id)) };
+  }
   function pauseProject(id) {
     for (const [tid, r] of running) if (r.projectId === id) r.abort.abort(); // sessions are kept and resumed
   }
@@ -2122,6 +2142,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       id: p.id, name: p.name, path: p.path, convo_id: p.convo_id, status: p.status, priority: p.priority, mode: p.mode,
       perpetual: !!p.perpetual, autonomous: !!p.autonomous, next_reflect_at: p.next_reflect_at, ready: !!projectReady(p.path),
       counts: { queued: c.queued || 0, running: c.running || 0, done: c.done || 0, failed: c.failed || 0 },
+      reflect_fallbacks: parseFallbacks(p.reflect_fallbacks),
       routes: listRoutes(p.id).map((r) => ({ id: r.id, scope: r.project_id == null ? 'global' : 'project', match: r.match, agent: r.agent, model: r.model, note: r.note })),
     };
   }
@@ -2230,7 +2251,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   return {
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
-    planTurn, abortPlan, candidates, eligible: delegationEligible, delegateOptions, delegatePreview, delegateTask, taskAction, moveTask, changeMessage, projectAction, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
+    planTurn, abortPlan, candidates, eligible: delegationEligible, delegateOptions, delegatePreview, delegateTask, taskAction, moveTask, changeMessage, projectAction, setReflectFallbacks, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
     drain, undrain, chatPlanning, stateView, limitResetFor, recordLimit: recordGovernor, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     unwatch: (ws) => { for (const set of runSubs.values()) set.delete(ws); },
   };

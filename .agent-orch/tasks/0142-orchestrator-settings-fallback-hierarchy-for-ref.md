@@ -13,3 +13,7 @@ In the orchestrator settings popover (public/index.html #obPop ~line 128, next t
 ## Done when
 
 `npm test` passes with reflect-fallbacks tests, and #obPop contains the reflection fallback editor
+
+## Result — done (check passed) (2026-09-26 00:03)
+
+AGENT-ORCH-STATUS: done — Reflection fallbacks editor added to #obPop, saved and snapshotted per project, npm test passes

@@ -673,6 +673,12 @@ code, pre, kbd { font-family: var(--mono); }
 .ob-opt select { height: 30px; border-radius: 7px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; font-size: 13px; padding: 0 6px; }
 .ob-routes { border-top: 1px solid var(--border); margin-top: 4px; padding: 10px; font-size: 13.5px; }
 .ob-routes > small { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
+.orch-bar .pop-wrap .popover { max-height: min(72vh, 620px); overflow-y: auto; overscroll-behavior: contain; }
+.ob-reflect { border-top: 1px solid var(--border); padding: 10px; font-size: 13.5px; }
+.ob-reflect > small { display: block; color: var(--muted); font-size: 12px; line-height: 1.4; margin: 2px 0 8px; }
+.ob-reflect .fe-start { margin-bottom: 6px; }
+.ob-forecast { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
+.ob-forecast:empty { display: none; }
 .ob-route { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
 .ob-route > span { flex: 1; overflow-wrap: anywhere; }
 .ob-route small { display: block; color: var(--muted); font-size: 12px; }

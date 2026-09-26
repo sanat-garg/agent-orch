@@ -3124,6 +3124,7 @@ function onOrch(msg) {
     O.state = msg.state;
     renderUsage();
     refreshAutoPreview();
+    refreshReflect();
     renderOrchBar();
     renderUpdateBanner();
     refreshAllCards();
@@ -3199,6 +3200,7 @@ function renderOrchBar() {
     $('obPause').textContent = p.status === 'paused' ? 'Resume' : 'Pause';
     $('obPerpetual').checked = p.perpetual;
     $('obPriority').value = p.priority >= 65 ? '80' : p.priority <= 35 ? '25' : '50';
+    if (!$('obPop').hidden && RF.pid !== p.id) openReflect();
   }
 }
 setInterval(() => { refreshAllCards(); renderOrchBar(); if (O.drawer) renderDrawerHead(); }, 15000);
@@ -3216,13 +3218,97 @@ $('obSettingsBtn').addEventListener('click', (e) => {
   const pop = $('obPop');
   pop.hidden = !pop.hidden;
   if (pop.hidden) return;
+  openReflect();
+  // Editor clicks re-render (detaching the target) and Undo lives in the toast: neither is a click outside.
   const close = (ev) => {
-    if (pop.contains(ev.target)) return;
+    if (!pop.hidden && (pop.contains(ev.target) || !ev.target.isConnected || ev.target.closest?.('#toast'))) return;
     pop.hidden = true;
     document.removeEventListener('click', close);
   };
   setTimeout(() => document.addEventListener('click', close));
 });
+
+// Reflection fallbacks (settings popover): the project's ordered list for reflection-queued tasks, edited with
+// renderFallbackEditor and saved via PUT /api/orch/projects/:id/reflect-fallbacks (null = automatic ranking). The
+// preview is GET /api/delegate/preview?project=: start route, the list with usage status, and the automatic suggestion.
+const RF = { pid: null, data: null, error: '', seq: 0, timer: 0, fe: {}, saving: Promise.resolve(), saveSeq: 0, pending: 0, confirmed: null };
+function openReflect() {
+  if (RF.pid !== O.project?.id) { RF.pid = O.project?.id ?? null; RF.data = null; RF.error = ''; }
+  RF.fe = { refresh: renderReflect };
+  renderReflect();
+  loadReflect();
+}
+function loadReflect() {
+  const pid = RF.pid, seq = ++RF.seq;
+  if (pid == null) return;
+  api(`/api/delegate/preview?project=${pid}`).then((d) => {
+    if (seq !== RF.seq || RF.pending || pid !== RF.pid) return;
+    RF.data = d; RF.error = ''; RF.confirmed = d.fallbacks ?? null;
+    if (d.data_status === 'loading') { clearTimeout(RF.timer); RF.timer = setTimeout(loadReflect, 1500); }
+    renderReflect();
+  }).catch(() => {
+    if (seq !== RF.seq) return;
+    RF.data = null; RF.error = 'Could not load the fallback list.';
+    renderReflect();
+  });
+}
+// Limits changed (WS 'ostate') while the popover is open: refetch, coalescing bursts.
+function refreshReflect() {
+  clearTimeout(RF.timer);
+  if (!$('obPop').hidden && RF.pid != null) RF.timer = setTimeout(loadReflect, 400);
+}
+function rfApply(list) {
+  const d = RF.data;
+  if (!d) return;
+  const info = new Map([d.start, ...(d.suggested || []), ...d.candidates].map((r) => [apKey(r), r]));
+  d.fallbacks = list;
+  d.candidates = list == null ? d.suggested || []
+    : list.filter((f) => apKey(f) !== apKey(d.start)).map((f) => ({ ...(info.get(apKey(f)) || { label: modelLabel(f.agent, f.model), status: null }), agent: f.agent, model: f.model }));
+  renderReflect();
+}
+// Optimistic, like apSaveFallbacks: PUTs run in order; if the latest fails, the last confirmed list comes back.
+function rfSave(list) {
+  const pid = RF.pid;
+  if (pid == null) return;
+  rfApply(list);
+  const seq = ++RF.saveSeq;
+  RF.pending++;
+  RF.saving = RF.saving.then(() => api(`/api/orch/projects/${pid}/reflect-fallbacks`, 'PUT', { fallbacks: list })).then((r) => {
+    RF.confirmed = r.project?.reflect_fallbacks ?? null;
+  }, (e) => {
+    if (seq !== RF.saveSeq) return;
+    rfApply(RF.confirmed);
+    toast(`Could not save reflection fallbacks: ${e.message}`);
+  }).finally(() => { if (!--RF.pending) loadReflect(); });
+}
+function renderReflect() {
+  if (RF.fe.busy) { RF.fe.stale = true; return; }
+  const body = $('obReflectBody'), fc = $('obReflectForecast'), d = RF.data;
+  body.textContent = ''; fc.textContent = '';
+  if (!d) { body.append(el('p', 'fe-hint', RF.error || 'Loading…')); return; }
+  const scoreLabel = d.category[0].toUpperCase() + d.category.slice(1);
+  body.append(apStartRow(d.start, scoreLabel));
+  const info = new Map([d.start, ...d.candidates].map((r) => [apKey(r), r]));
+  const editor = body.appendChild(el('div'));
+  renderFallbackEditor(editor, {
+    list: d.fallbacks != null ? d.fallbacks.map((f) => ({ ...(info.get(apKey(f)) || {}), agent: f.agent, model: f.model })) : null,
+    suggested: d.candidates, exclude: [d.start], scoreLabel, onChange: rfSave, ui: RF.fe,
+  });
+  fc.textContent = reflectForecast(d);
+}
+// One line on what the next reflection task would run on right now.
+function reflectForecast(d) {
+  const all = [d.start, ...d.candidates].filter((r) => r.status);
+  if (!all.length) return '';
+  const usable = all.filter((r) => r.status === 'available' || r.status === 'near');
+  if (!usable.length) {
+    const soon = Math.min(...all.map((r) => r.until || Infinity));
+    return `Forecast: no model in this order has usage now, so reflection tasks wait${Number.isFinite(soon) ? ` (earliest reset ${fmtUntil(soon)})` : ''}.`;
+  }
+  const first = usable[0], more = usable.length - 1;
+  const why = first === d.start ? '' : ` (${apName(d.start)} is ${apStatusText(d.start)})`;
+  return `Forecast: runs on ${apName(first)}${why}${first.status === 'near' ? ', near its limit' : ''} · ${more ? `${more} more available after it` : 'no other fallback available'}.`;
+}
 
 // ----- the task drawer
 function openTask(id) {

@@ -421,3 +421,7 @@ LiveBench adapter fetches official livebench.ai results; tests pass
 ## 2026-09-25 23:54 — #140 Fix and redesign the Auto Delegate fallback editor in the app's theme [done (check passed)]
 
 fallback editor rebuilt, interactions persist; npm test passes
+
+## 2026-09-26 00:03 — #142 Orchestrator settings: fallback hierarchy for reflection tasks [done (check passed)]
+
+Reflection fallbacks editor added to #obPop, saved and snapshotted per project, npm test passes

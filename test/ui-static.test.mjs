@@ -78,3 +78,12 @@ test("the model picker renders 'Auto Delegate' first and each message carries th
   assert.match(appJs, /\/api\/orch\/tasks\/\$\{[^}]+\}\/delegate/);
   assert.match(appJs, /'Delegate…'/);
 });
+
+test('orchestrator settings popover has the reflection fallback editor', () => {
+  const pop = indexHtml.slice(indexHtml.indexOf('id="obPop"'), indexHtml.indexOf('id="obPause"'));
+  assert.match(pop, /id="obReflect"[\s\S]*Reflection fallbacks[\s\S]*Reflection tasks run on the first available model in this order[\s\S]*id="obReflectBody"[\s\S]*id="obReflectForecast"/);
+  const fn = appJs.slice(appJs.indexOf('function renderReflect()'));
+  assert.match(fn.slice(0, fn.indexOf('\n}\n')), /renderFallbackEditor\(editor, \{[\s\S]*onChange: rfSave/);
+  assert.match(appJs, /\/api\/orch\/projects\/\$\{pid\}\/reflect-fallbacks`, 'PUT'/);
+  assert.match(appJs, /\/api\/delegate\/preview\?project=/);
+});

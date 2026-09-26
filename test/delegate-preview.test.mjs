@@ -157,6 +157,47 @@ test('PUT /api/convos/:id/fallbacks: validated against the discovered models; th
   assert.deepEqual(r.candidates, r.suggested);
 });
 
+test('PUT /api/orch/projects/:id/reflect-fallbacks: validated against the discovered models; stored per project; ?project= preview carries it', { timeout: 60000 }, async () => {
+  await preview('agent=codex&model=gpt-5.5'); // models discovered
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
+  const pid = Number(db.prepare("INSERT INTO projects(path,name,status,created_at) VALUES(?,?,'active',0)").run(path.join(dataDir, 'rf-project'), 'rf').lastInsertRowid);
+  const stored = () => db.prepare('SELECT reflect_fallbacks FROM projects WHERE id=?').get(pid).reflect_fallbacks;
+  const url = `/api/orch/projects/${pid}/reflect-fallbacks`;
+  try {
+    const unauth = await fetch(base + url, { method: 'PUT', body: '{"fallbacks":null}' });
+    assert.equal(unauth.status, 401);
+    await unauth.arrayBuffer();
+    assert.equal(stored(), null, 'automatic by default');
+    for (const bad of [[{ agent: 'nope', model: 'gpt-5.5' }], [{ agent: 'codex', model: 'gpt-9000' }], [{ agent: 'antigravity', model: 'gpt-5.5' }], [{ agent: 'codex' }], 'codex', undefined]) {
+      const r = await put(url, { fallbacks: bad });
+      assert.equal(r.status, 400, JSON.stringify(bad));
+    }
+    assert.equal(stored(), null, 'rejected lists are not saved');
+    assert.equal((await put('/api/orch/projects/99999/reflect-fallbacks', { fallbacks: null })).status, 404);
+
+    const list = [{ agent: 'antigravity', model: 'gemini-3.1-pro-high' }, { agent: 'codex', model: 'gpt-6-sol' }, { agent: 'antigravity', model: 'gemini-3.1-pro-high' }];
+    let r = await put(url, { fallbacks: list });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.project.reflect_fallbacks, list.slice(0, 2), 'duplicates dropped, order kept');
+    assert.deepEqual(JSON.parse(stored()), list.slice(0, 2));
+
+    ({ body: r } = await get(`/api/delegate/preview?project=${pid}`));
+    assert.equal(r.start.agent, 'claude', "starts on the project's default route");
+    assert.deepEqual(r.fallbacks, list.slice(0, 2));
+    assert.deepEqual(r.candidates.map((c) => [c.model, c.status]), [['gemini-3.1-pro-high', 'available'], ['gpt-6-sol', 'limited']]);
+    assert.equal((await get('/api/delegate/preview?project=99999')).status, 404);
+
+    assert.deepEqual((await put(url, { fallbacks: [] })).body.project.reflect_fallbacks, []);
+    assert.equal(stored(), '[]');
+    assert.equal((await put(url, { fallbacks: null })).body.project.reflect_fallbacks, null);
+    assert.equal(stored(), null);
+    ({ body: r } = await get(`/api/delegate/preview?project=${pid}`));
+    assert.equal(r.fallbacks, null);
+    assert.deepEqual(r.candidates, r.suggested);
+  } finally { db.close(); }
+});
+
 const setKey = async () => {
   const r = await fetch(base + '/api/aa/key', { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ key: 'test-key' }) });
   return r.json();

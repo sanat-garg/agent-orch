@@ -10,6 +10,7 @@ const el = (tag, cls, text) => {
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
   set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+  del(k) { try { localStorage.removeItem(k); } catch {} },
 };
 
 marked.setOptions({ gfm: true, breaks: false });
@@ -75,7 +76,7 @@ const state = {
   draftMode: store.get('cw.fullAccess') ? store.get('cw.mode') || 'bypassPermissions'
     : (store.set('cw.fullAccess', '1'), ['plan', 'orchestrator'].includes(store.get('cw.mode')) ? store.get('cw.mode') : 'bypassPermissions'),
   draftModel: store.get('cw.model') || 'claude|', // agent|model (an older saved value is a bare Claude model)
-  draftAuto: store.get('cw.auto') === '1', // Auto Delegate for the next new chat
+  draftFallbacks: (() => { try { return JSON.parse(store.get('cw.fallbacks')) || null; } catch { return null; } })(), // the next new chat's
   busy: false,
   ws: null,
   live: null,        // element receiving streamed text
@@ -1281,7 +1282,7 @@ $('composer').addEventListener('submit', async (e) => {
       if (!state.convos.find((x) => x.id === c.id)) state.convos.unshift(c);
       openConvo(c.id);
       if (pickVal(parsePick(state.draftModel)) !== 'claude|') send({ t: 'set_model', cid: c.id, ...parsePick(state.draftModel) });
-      setAutoPick(state.draftAuto);
+      if (state.draftFallbacks?.length) await api(`/api/convos/${c.id}/fallbacks`, 'PUT', { fallbacks: state.draftFallbacks }).then((r) => (c.fallbacks = r.fallbacks));
     } catch (err) {
       const n = el('div', 'notice error', err.message);
       if (/github/i.test(err.message)) {
@@ -1294,7 +1295,7 @@ $('composer').addEventListener('submit', async (e) => {
       return;
     }
   }
-  if (!send({ t: 'send', cid: state.cid, text, autoDelegate: autoPick() })) {
+  if (!send({ t: 'send', cid: state.cid, text })) {
     // Keep the text (under this chat's draft key, which reconnect restores) rather than lose it.
     store.set('cw.draft.' + state.cid, input.value);
     add(el('div', 'notice error', 'Not connected, reconnecting. Your message was kept.'));
@@ -1320,10 +1321,9 @@ function changeMode(mode) {
 $('mode').addEventListener('change', () => changeMode($('mode').value));
 $('model').addEventListener('change', () => {
   const v = $('model').value;
-  if (v === CONNECT_PICK) { $('model').value = autoPick() ? AUTO_PICK : $('model').dataset.prev || 'claude|'; fitPick(); openConnections(); return; }
-  if (v === AUTO_PICK) { setAutoPick(true); return; }
-  setAutoPick(false);
+  if (v === CONNECT_PICK) { $('model').value = $('model').dataset.prev || 'claude|'; fitPick(); openConnections(); return; }
   $('model').dataset.prev = v;
+  renderPickChip();
   if (state.cid) send({ t: 'set_model', cid: state.cid, ...parsePick(v) });
   else { state.draftModel = v; store.set('cw.model', v); }
   renderConnFoot();
@@ -1334,18 +1334,6 @@ let AGENT_LIST = [];
 // A model's display name as its CLI reports it (the id when the agent's list doesn't name it).
 const modelLabel = (agent, id) => AGENT_LIST.find((a) => a.id === agent)?.models.find((m) => m.id === id || m.resolved === id)?.label || id;
 const CONNECT_PICK = '__connect'; // the picker's last option: opens the Connections window
-// The picker's first option: agent-orch may move this chat's queued tasks to the first fallback with usage left
-// (BRIEF goal 8). It is a per-chat flag sent with each message; the chat keeps its agent/model as the starting point.
-// Any specific model pins the tasks to it.
-const AUTO_PICK = '__auto';
-const autoPick = () => (state.cid ? store.get('cw.auto.' + state.cid) === '1' : state.draftAuto);
-function setAutoPick(on) {
-  if (state.cid) store.set('cw.auto.' + state.cid, on ? '1' : '0');
-  else { state.draftAuto = on; store.set('cw.auto', on ? '1' : '0'); }
-  const sel = $('model');
-  sel.value = on ? AUTO_PICK : sel.dataset.prev || 'claude|';
-  renderPickChip();
-}
 // Size the model picker to its selected option's text (a native <select> is as wide as its longest option);
 // CSS clamps it and ellipsizes, the title keeps the full name.
 let fitSpan;
@@ -1366,168 +1354,142 @@ function fitPick() {
   sel.title = text;
 }
 document.fonts?.ready.then(fitPick);
-// Auto Delegate preview (GET /api/delegate/preview), next to the picker only while Auto Delegate is chosen: the start
-// model and the chat's fallback list, each with a status dot. A specific model shows nothing.
-const AP = { data: null, key: '', seq: 0, timer: 0, lastFocus: null, error: '', fe: {}, saving: Promise.resolve(), saveSeq: 0, pending: 0, confirmed: null };
-const AP_ST = { available: 'available', near: 'near limit', limited: 'limited', unavailable: 'unavailable' };
-function apStatusText(r) {
-  const base = r.status === 'limited' && r.until ? `limited until ${fmtUntil(r.until)}` : AP_ST[r.status] || r.status;
-  return r.note && r.status !== 'available' ? `${base} (${r.note})` : base;
-}
-const apName = (r) => r.label || (r.model ? modelLabel(r.agent, r.model) : shortLabel(r.agent));
+// ---------- fallbacks (BRIEF goal 8) ----------
+// One sheet (#fbModal) edits an ordered fallback list: a chat's (the tasks its messages queue snapshot it and move down
+// it when their model hits its limit; empty = they wait) or a project's list for reflection tasks. It renders from what
+// is already loaded (convos, O.project, AGENT_LIST, O.state.blocks), never a fetch; every change saves at once (PUT).
+// The composer's button next to the model picker shows the chat's count; the picker itself only picks the primary model.
+function renderPickChip() { fitPick(); renderFbChip(); fbRender(); }
+const FB = { host: null, fe: {}, lastFocus: null, local: null, pending: 0, chain: Promise.resolve(), seq: 0 };
 const apKey = (r) => `${r.agent}/${r.model}`;
-function renderPickChip() {
-  fitPick();
-  const c = $('apChip');
-  if (!c) return;
-  if (!autoPick()) { c.hidden = true; AP.key = ''; AP.data = null; if (!$('apModal').hidden) closeAutoPreview(); return; }
-  const { agent, model } = parsePick($('model').dataset.prev || 'claude|');
-  const key = `${agent}|${model}`;
-  if (AP.key !== key) { AP.key = key; AP.data = null; }
-  c.hidden = false;
-  renderApChip();
-  loadAutoPreview();
+// The model a route runs: its own, else its agent's default.
+function fbModelOf({ agent, model }) {
+  const ms = AGENT_LIST.find((a) => a.id === agent)?.models || [];
+  return model || (ms.find((m) => m.default) || ms[0])?.id || '';
 }
-function loadAutoPreview() {
-  if (!AP.key) return;
-  const [agent, model] = AP.key.split('|'), seq = ++AP.seq;
-  // Use ?convo= when the current chat has an id so the backend returns its fallback list.
-  const cid = state.cid;
-  const url = cid
-    ? `/api/delegate/preview?convo=${encodeURIComponent(cid)}&agent=${encodeURIComponent(agent)}&model=${encodeURIComponent(model)}`
-    : `/api/delegate/preview?agent=${encodeURIComponent(agent)}&model=${encodeURIComponent(model)}`;
-  api(url).then((d) => {
-    if (seq !== AP.seq || AP.pending) return;
-    AP.data = d; AP.error = ''; AP.confirmed = d.fallbacks ?? null;
-    renderApChip();
-    if (!$('apModal').hidden) renderAutoPreview();
-  }).catch(() => {
-    if (seq !== AP.seq) return;
-    AP.data = null; AP.error = 'Could not load fallback data. Reopen to retry.';
-    if (!$('apModal').hidden) renderAutoPreview();
-  });
+const fbName = (r) => (fbModelOf(r) ? modelLabel(r.agent, fbModelOf(r)) : shortLabel(r.agent));
+// The model's usage limit while it is limited (state.blocks is keyed by agents.mjs limitScope), else null.
+function fbLimit({ agent, model }) {
+  const scope = agent === 'antigravity' ? `antigravity:${/^gemini-/i.test(model || '') ? 'gemini' : '3p'}` : agent || 'claude';
+  const b = O.state?.blocks?.[scope];
+  return b && b.until > Date.now() / 1000 ? b : null;
 }
-// Limits changed (WS 'ostate'): refetch, coalescing bursts.
-function refreshAutoPreview() {
-  clearTimeout(AP.timer);
-  if (AP.key) AP.timer = setTimeout(loadAutoPreview, 400);
+const fbCount = (list) => (list?.length ? `Fallbacks · ${list.length}` : 'No fallbacks');
+function fbChipText(c, primary, list, what) {
+  c.textContent = fbCount(list);
+  c.classList.toggle('none', !list?.length);
+  c.title = list?.length ? `If ${fbName(primary)} hits its limit, ${what} move to ${list.map(fbName).join(', then ')}`
+    : `If ${fbName(primary)} hits its limit, ${what} wait for it to reset`;
 }
-// Save the fallback list (null = none): optimistic, so the popup and composer chip update at once. PUTs run in
-// order; if the latest one fails, the last list the server confirmed comes back.
-function apApplyFallbacks(list) {
-  const d = AP.data;
-  const convo = currentConvo();
-  if (convo) convo.fallbacks = list;
-  if (!d) return;
-  const info = new Map([d.start, ...d.candidates].map((r) => [apKey(r), r]));
-  d.fallbacks = list;
-  d.candidates = (list || []).filter((f) => apKey(f) !== apKey(d.start)).map((f) => ({ ...(info.get(apKey(f)) || { label: modelLabel(f.agent, f.model), status: null }), agent: f.agent, model: f.model }));
-  renderApChip();
-  if (!$('apModal').hidden) renderAutoPreview();
+// Hosts: primary {agent, model}; list() → [{agent, model}] | null; url: the PUT (null = the new-chat draft);
+// apply(list) stores it locally; confirmedOf(res) → the list the server saved.
+function chatFallbacks() {
+  const cid = state.cid, convo = () => state.convos.find((c) => c.id === cid);
+  return { what: 'queued tasks', primary: parsePick($('model').dataset.prev || 'claude|'),
+    list: () => (cid ? convo()?.fallbacks : state.draftFallbacks) ?? null,
+    url: cid ? `/api/convos/${cid}/fallbacks` : null,
+    apply: (list) => {
+      if (cid) { const c = convo(); if (c) c.fallbacks = list; } else { state.draftFallbacks = list; store.set('cw.fallbacks', JSON.stringify(list || [])); }
+      renderFbChip();
+    },
+    confirmedOf: (c) => c.fallbacks ?? null };
 }
-function apSaveFallbacks(list) {
-  const cid = state.cid;
-  if (!cid) return;
-  apApplyFallbacks(list);
-  const seq = ++AP.saveSeq;
-  AP.pending++;
-  AP.saving = AP.saving.then(() => api(`/api/convos/${cid}/fallbacks`, 'PUT', { fallbacks: list })).then((c) => {
-    AP.confirmed = c.fallbacks ?? null;
-  }, (e) => {
-    if (seq !== AP.saveSeq) return;
-    apApplyFallbacks(AP.confirmed);
-    toast(`Could not save fallbacks: ${e.message}`);
-  }).finally(() => { if (!--AP.pending) loadAutoPreview(); });
+function reflectFallbacks() {
+  const pid = O.project?.id;
+  return { what: 'reflection tasks', primary: O.project?.work_route || { agent: 'claude', model: '' },
+    list: () => (O.project?.id === pid ? O.project.reflect_fallbacks : null) ?? null,
+    url: `/api/orch/projects/${pid}/reflect-fallbacks`,
+    apply: (list) => { if (O.project?.id === pid) O.project.reflect_fallbacks = list; renderReflectBtn(); },
+    confirmedOf: (r) => r.project?.reflect_fallbacks ?? null };
 }
-function renderApChip() {
-  const c = $('apChip'), d = AP.data;
-  c.textContent = '';
-  const [agent, model] = AP.key.split('|');
-  const list = d ? [d.start, ...d.candidates] : [{ agent, model, status: null }];
-  const full = el('span', 'ap-full'), short = el('span', 'ap-short');
-  list.forEach((r, i) => {
-    if (i) full.append(el('span', 'ap-arrow', '→'));
-    const e = el('span', `ap-e${r.status ? ` st-${r.status}` : ''}`);
-    e.append(el('span', 'ap-dot'), el('span', 'ap-n', apName(r)));
-    if (r.status) e.title = `${apName(r)}: ${apStatusText(r)}`;
-    full.append(e);
-  });
-  const s0 = list[0];
-  short.append(el('span', `ap-e${s0.status ? ` st-${s0.status}` : ''}`), el('span', 'ap-more', list.length > 1 ? `+${list.length - 1}` : ''));
-  short.firstChild.append(el('span', 'ap-dot'), el('span', 'ap-n', apName(s0)));
-  c.append(full, short);
-  c.title = `Auto Delegate: starts on ${list.map((r) => `${apName(r)}${r.status ? ` (${apStatusText(r)})` : ''}`).join(', then ')}. Details…`;
-  c.setAttribute('aria-label', c.title);
+function renderFbChip() {
+  const h = chatFallbacks();
+  fbChipText($('fbChip'), h.primary, h.list(), h.what);
 }
-function openAutoPreview() {
-  const m = $('apModal');
-  if (m.hidden) AP.lastFocus = document.activeElement;
+function renderReflectBtn() {
+  if (!O.project) return;
+  const h = reflectFallbacks();
+  fbChipText($('obReflectBtn'), h.primary, h.list(), h.what);
+}
+// Optimistic: shown and stored at once; PUTs run in order, and if the latest fails the last saved list comes back.
+function fbSave(list) {
+  const h = FB.host;
+  if (!h) return;
+  h.apply(list);
+  if (h.url) {
+    const seq = ++FB.seq, url = h.url;
+    FB.local = { url, list };
+    FB.pending++;
+    FB.chain = FB.chain.then(() => api(url, 'PUT', { fallbacks: list })).then((r) => { h.confirmed = h.confirmedOf(r); }, (e) => {
+      if (seq !== FB.seq) return;
+      FB.local = { url, list: h.confirmed };
+      h.apply(h.confirmed);
+      toast(`Could not save fallbacks: ${e.message}`);
+    }).finally(() => { if (!--FB.pending) { FB.local = null; fbRender(); } });
+  }
+  fbRender();
+}
+function openFallbacks(host, anchor) {
+  const m = $('fbModal');
+  if (m.hidden) FB.lastFocus = anchor;
+  FB.host = host;
+  host.confirmed = host.list();
+  FB.fe = { refresh: fbRender };
   m.hidden = false;
-  AP.fe = { refresh: renderAutoPreview };
-  // Desktop: a small popover above the chip; mobile (≤800px): the .modal.sheet bottom sheet.
+  // Desktop: a small popover next to its button; mobile (≤800px): the .modal.sheet bottom sheet.
   const panel = m.querySelector('.modal-panel');
+  panel.style.left = panel.style.top = panel.style.bottom = '';
   if (matchMedia('(min-width: 801px)').matches) {
-    const r = $('apChip').getBoundingClientRect(), w = Math.min(440, innerWidth - 24);
+    const r = anchor.getBoundingClientRect(), w = Math.min(440, innerWidth - 24);
     panel.style.left = `${Math.max(12, Math.min(r.left, innerWidth - w - 12))}px`;
-    panel.style.bottom = `${innerHeight - r.top + 8}px`;
-  } else panel.style.left = panel.style.bottom = '';
-  renderAutoPreview();
-  loadAutoPreview();
+    if (r.top > innerHeight / 2) panel.style.bottom = `${innerHeight - r.top + 8}px`;
+    else panel.style.top = `${r.bottom + 8}px`;
+  }
+  fbRender();
   m.querySelector('[data-close].icon-btn').focus();
 }
-function closeAutoPreview() {
-  $('apModal').hidden = true;
-  AP.fe = {};
-  AP.lastFocus?.focus?.();
+function closeFallbacks() {
+  $('fbModal').hidden = true;
+  FB.host = null;
+  FB.fe = {};
+  FB.lastFocus?.focus?.();
 }
-$('apChip').addEventListener('click', openAutoPreview);
-$('apModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeAutoPreview(); });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('apModal').hidden && !e.target.closest?.('.fe-add')) { e.stopImmediatePropagation(); closeAutoPreview(); } }, true);
-
-function renderAutoPreview() {
-  if (AP.fe.busy) { AP.fe.stale = true; return; } // a pressed/dragged row would be detached mid-gesture
-  const body = $('apBody'), d = AP.data;
-  // Re-renders (save, refetch) keep keyboard focus on the same fallback row.
-  const focused = document.activeElement?.closest?.('#apBody .fe-row')?.dataset.key;
-  if (focused && !AP.fe.focusKey) AP.fe.focusKey = focused;
-  body.textContent = '';
-  $('apTitle').textContent = 'Auto Delegate';
-  $('apSub').textContent = 'When usage runs out, queued tasks may use a fallback.';
-  const action = (label, fn) => {
-    const button = el('button', 'ap-action', label);
-    button.type = 'button'; button.addEventListener('click', fn); body.append(button);
-  };
-  if (!d) {
-    body.append(el('p', 'dg-why', AP.error || 'Loading fallback list…'));
-    if (AP.error) action('Retry', loadAutoPreview);
-    return;
+$('fbChip').addEventListener('click', () => openFallbacks(chatFallbacks(), $('fbChip')));
+$('fbModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeFallbacks(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('fbModal').hidden && !e.target.closest?.('.fe-add')) { e.stopImmediatePropagation(); closeFallbacks(); } }, true);
+function fbRender() {
+  const h = FB.host;
+  if (!h || $('fbModal').hidden) return;
+  if (FB.fe.busy) { FB.fe.stale = true; return; } // a pressed/dragged row would be detached mid-gesture
+  // Re-renders (save, live updates) keep keyboard focus on the same row.
+  const focused = document.activeElement?.closest?.('#fbBody .fe-row')?.dataset.key;
+  if (focused && !FB.fe.focusKey) FB.fe.focusKey = focused;
+  const list = (FB.local?.url === h.url ? FB.local.list : h.list()) || [], name = fbName(h.primary);
+  $('fbTitle').textContent = `If ${name} hits its limit`;
+  $('fbSub').textContent = `${h.what[0].toUpperCase()}${h.what.slice(1)} move to the first model below with usage left. With none, they wait.`;
+  renderFallbackEditor($('fbBody'), { list, onChange: fbSave, ui: FB.fe,
+    exclude: [{ agent: h.primary.agent, model: fbModelOf(h.primary) }], empty: `No fallbacks: ${h.what} wait for ${name} to reset.` });
+}
+// Chats that had the old per-chat delegation flag on (#153 removed it; it lived in localStorage) with no list get an empty one.
+function migrateAutoDelegate() {
+  for (const c of state.convos) {
+    if (store.get('cw.auto.' + c.id) == null) continue;
+    if (store.get('cw.auto.' + c.id) === '1' && c.fallbacks == null) { c.fallbacks = []; api(`/api/convos/${c.id}/fallbacks`, 'PUT', { fallbacks: [] }).catch(() => {}); }
+    store.del('cw.auto.' + c.id);
   }
-  body.append(el('h3', 'dg-group', 'Starting model'), apStartRow(d.start));
-  body.append(el('h3', 'dg-group', 'Fallbacks'));
-  const info = new Map([d.start, ...d.candidates].map((r) => [apKey(r), r]));
-  const editor = body.appendChild(el('div'));
-  renderFallbackEditor(editor, {
-    list: (d.fallbacks || []).map((f) => ({ ...(info.get(apKey(f)) || {}), agent: f.agent, model: f.model })),
-    exclude: [d.start], onChange: apSaveFallbacks, ui: AP.fe,
-  });
+  store.del('cw.auto');
 }
-// The starting model, laid out like an editor row (no handle, position or remove).
-function apStartRow(r) {
-  const box = el('div', 'fe-row fe-start');
-  box.append(feMain(r));
-  return box;
-}
-// Reusable fallback-order editor. list: [{agent, model, label?, status?, until?, note?}] in order (null = none).
-// onChange(next) gets [{agent, model}] or null (cleared).
+// Reusable fallback-order editor. list: [{agent, model, label?}] in order. onChange(next) gets [{agent, model}].
 // catalog: agents with models for '+ Add model' (AGENT_LIST shape); exclude: [{agent, model}] that can't be added;
-// ui: a host-owned object that keeps add-panel, search and focus state across re-renders. While a row is pressed or
-// dragged ui.busy is set: the host should skip re-rendering, set ui.stale, and provide ui.refresh to catch up after.
+// empty: the text for an empty list; ui: a host-owned object that keeps add-panel, search and focus state across
+// re-renders. While a row is pressed or dragged ui.busy is set: the host should skip re-rendering, set ui.stale, and
+// provide ui.refresh to catch up after.
 function renderFallbackEditor(container, opts) {
-  const { list, onChange, catalog = AGENT_LIST, exclude = [], ui = {} } = opts;
+  const { list, onChange, catalog = AGENT_LIST, exclude = [], empty = 'No fallbacks.', ui = {} } = opts;
   const rows = list || [];
   const plain = (xs) => xs.map(({ agent, model }) => ({ agent, model }));
   const name = (r) => r.label || modelLabel(r.agent, r.model);
-  const change = (next) => { ui.rows = next; onChange(next && plain(next)); };
+  const change = (next) => { ui.rows = next; onChange(plain(next)); };
   ui.rows = rows;
   container.textContent = '';
   container.classList.add('fe');
@@ -1558,8 +1520,7 @@ function renderFallbackEditor(container, opts) {
     const li = el('li', 'fe-row');
     li.tabIndex = 0;
     li.dataset.key = apKey(r);
-    const st = feStatus(r);
-    li.setAttribute('aria-label', `${i + 1}. ${name(r)}, ${shortLabel(r.agent)}${st ? `, ${st}` : ''}`);
+    li.setAttribute('aria-label', `${i + 1}. ${name(r)}, ${shortLabel(r.agent)}${fbLimit(r) ? ', limited now' : ''}`);
     const grip = el('span', 'fe-grip');
     grip.innerHTML = '<svg viewBox="0 0 10 16" width="10" height="16" aria-hidden="true"><g fill="currentColor"><circle cx="2.5" cy="3" r="1.4"/><circle cx="7.5" cy="3" r="1.4"/><circle cx="2.5" cy="8" r="1.4"/><circle cx="7.5" cy="8" r="1.4"/><circle cx="2.5" cy="13" r="1.4"/><circle cx="7.5" cy="13" r="1.4"/></g></svg>';
     grip.title = 'Drag to reorder';
@@ -1582,7 +1543,7 @@ function renderFallbackEditor(container, opts) {
   // A long-pressed row must not scroll the sheet on iOS (touchmove is the only cancelable hook there).
   ol.addEventListener('touchmove', (e) => { if (ui.dragging) e.preventDefault(); }, { passive: false });
   if (rows.length) container.append(ol);
-  else container.append(el('p', 'fe-hint', 'No fallbacks. Tasks wait for the starting model.'));
+  else container.append(el('p', 'fe-hint', empty));
 
   const foot = el('div', 'fe-foot');
   const addBtn = el('button', 'btn small fe-add-btn', '+ Add model');
@@ -1627,12 +1588,6 @@ function renderFallbackEditor(container, opts) {
     container.append(panel);
     if (!ui.focusKey) setTimeout(() => input.isConnected && document.activeElement !== input && input.focus(), 0);
   }
-  if (rows.length) {
-    const reset = el('button', 'link-btn fe-reset', 'Clear list');
-    reset.type = 'button';
-    reset.addEventListener('click', () => { ui.addOpen = false; change(null); });
-    container.append(reset);
-  }
   if (ui.focusKey) {
     const key = ui.focusKey;
     ui.focusKey = null;
@@ -1642,28 +1597,17 @@ function renderFallbackEditor(container, opts) {
     addBtn.focus();
   }
 }
-// A row's text: model name with a small agent label; status dot + short status below.
+// A row's text: model name, its agent in muted text, and a small dot while that model is limited.
 function feMain(r) {
-  const main = el('div', 'fe-main'), top = el('div', 'fe-name'), meta = el('div', 'fe-meta'), st = feStatus(r);
+  const main = el('div', 'fe-main'), top = el('div', 'fe-name'), lim = fbLimit(r);
   top.append(el('span', 'fe-model', r.label || modelLabel(r.agent, r.model)), el('span', 'fe-agent', shortLabel(r.agent)));
-  if (st) {
-    const s = el('span', `ap-e st-${r.status}`);
-    s.append(el('span', 'ap-dot'), el('span', '', st));
-    meta.append(s);
+  if (lim) {
+    const dot = el('span', 'fe-lim');
+    dot.title = `Limited until ${fmtUntil(lim.until)}`;
+    top.append(dot);
   }
   main.append(top);
-  if (meta.children.length) main.append(meta);
   return main;
-}
-// 'available', 'near limit', 'resets 4:45 AM', 'resets Fri 9:00 AM', or why it can't run.
-function feStatus(r) {
-  if (!r.status) return '';
-  if (r.status === 'limited' && r.until) {
-    const t = new Date(r.until * 1000), time = t.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-    return `resets ${t.toDateString() === new Date().toDateString() ? time : `${t.toLocaleDateString([], { weekday: 'short' })} ${time}`}`;
-  }
-  if (r.status === 'unavailable' && r.note) return r.note;
-  return AP_ST[r.status] || r.status;
 }
 // Drag a fallback row with Pointer Events: mouse/pen after 4px, touch after a 350 ms long-press (or at once on the
 // handle). Rows in between slide to show the drop slot; the drop calls move(from, to).
@@ -1726,16 +1670,12 @@ function setPick(v) {
     sel.append(o);
   }
   sel.dataset.prev = val;
-  sel.value = autoPick() ? AUTO_PICK : val;
+  sel.value = val;
   renderPickChip();
 }
 function renderAgentPicker() {
   const sel = $('model'), keep = sel.dataset.prev || sel.value;
   sel.textContent = '';
-  const auto = el('option', '', 'Auto Delegate');
-  auto.value = AUTO_PICK;
-  auto.title = 'Starts on this chat\'s model; while it is at its usage limit, this message\'s tasks move to the first fallback with usage left';
-  sel.append(auto);
   for (const a of AGENT_LIST) {
     const g = document.createElement('optgroup');
     g.label = !a.available ? `${a.label} (not installed)` : a.loggedIn === false ? `${a.label} (sign in via Connections)` : a.label;
@@ -2079,7 +2019,9 @@ function onServer(msg) {
     renderConvoList();
     updateFolderChip();
     updateHeader();
-    refreshAutoPreview();
+    migrateAutoDelegate();
+    renderFbChip();
+    fbRender();
     renderUsage();
     return;
   }
@@ -3162,13 +3104,13 @@ function onOrch(msg) {
     if (msg.project && c && msg.project.path === c.cwd) {
       O.project = msg.project;
       renderOrchBar();
+      fbRender();
       refreshAllCards();
     }
   } else if (msg.t === 'ostate') {
     O.state = msg.state;
     renderUsage();
-    refreshAutoPreview();
-    refreshReflect();
+    fbRender();
     renderOrchBar();
     renderUpdateBanner();
     refreshAllCards();
@@ -3244,7 +3186,7 @@ function renderOrchBar() {
     $('obPause').textContent = p.status === 'paused' ? 'Resume' : 'Pause';
     $('obPerpetual').checked = p.perpetual;
     $('obPriority').value = p.priority >= 65 ? '80' : p.priority <= 35 ? '25' : '50';
-    if (!$('obPop').hidden && RF.pid !== p.id) openReflect();
+    renderReflectBtn();
   }
 }
 setInterval(() => { refreshAllCards(); renderOrchBar(); if (O.drawer) renderDrawerHead(); }, 15000);
@@ -3262,94 +3204,19 @@ $('obSettingsBtn').addEventListener('click', (e) => {
   const pop = $('obPop');
   pop.hidden = !pop.hidden;
   if (pop.hidden) return;
-  openReflect();
-  // Editor clicks re-render (detaching the target) and Undo lives in the toast: neither is a click outside.
+  renderReflectBtn();
   const close = (ev) => {
-    if (!pop.hidden && (pop.contains(ev.target) || !ev.target.isConnected || ev.target.closest?.('#toast'))) return;
+    if (!pop.hidden && pop.contains(ev.target)) return;
     pop.hidden = true;
     document.removeEventListener('click', close);
   };
   setTimeout(() => document.addEventListener('click', close));
 });
-
-// Reflection fallbacks (settings popover): the project's ordered list for reflection-queued tasks, edited with
-// renderFallbackEditor and saved via PUT /api/orch/projects/:id/reflect-fallbacks (null = none). The
-// preview is GET /api/delegate/preview?project=: start route and the list with usage status.
-const RF = { pid: null, data: null, error: '', seq: 0, timer: 0, fe: {}, saving: Promise.resolve(), saveSeq: 0, pending: 0, confirmed: null };
-function openReflect() {
-  if (RF.pid !== O.project?.id) { RF.pid = O.project?.id ?? null; RF.data = null; RF.error = ''; }
-  RF.fe = { refresh: renderReflect };
-  renderReflect();
-  loadReflect();
-}
-function loadReflect() {
-  const pid = RF.pid, seq = ++RF.seq;
-  if (pid == null) return;
-  api(`/api/delegate/preview?project=${pid}`).then((d) => {
-    if (seq !== RF.seq || RF.pending || pid !== RF.pid) return;
-    RF.data = d; RF.error = ''; RF.confirmed = d.fallbacks ?? null;
-    renderReflect();
-  }).catch(() => {
-    if (seq !== RF.seq) return;
-    RF.data = null; RF.error = 'Could not load the fallback list.';
-    renderReflect();
-  });
-}
-// Limits changed (WS 'ostate') while the popover is open: refetch, coalescing bursts.
-function refreshReflect() {
-  clearTimeout(RF.timer);
-  if (!$('obPop').hidden && RF.pid != null) RF.timer = setTimeout(loadReflect, 400);
-}
-function rfApply(list) {
-  const d = RF.data;
-  if (!d) return;
-  const info = new Map([d.start, ...d.candidates].map((r) => [apKey(r), r]));
-  d.fallbacks = list;
-  d.candidates = (list || []).filter((f) => apKey(f) !== apKey(d.start)).map((f) => ({ ...(info.get(apKey(f)) || { label: modelLabel(f.agent, f.model), status: null }), agent: f.agent, model: f.model }));
-  renderReflect();
-}
-// Optimistic, like apSaveFallbacks: PUTs run in order; if the latest fails, the last confirmed list comes back.
-function rfSave(list) {
-  const pid = RF.pid;
-  if (pid == null) return;
-  rfApply(list);
-  const seq = ++RF.saveSeq;
-  RF.pending++;
-  RF.saving = RF.saving.then(() => api(`/api/orch/projects/${pid}/reflect-fallbacks`, 'PUT', { fallbacks: list })).then((r) => {
-    RF.confirmed = r.project?.reflect_fallbacks ?? null;
-  }, (e) => {
-    if (seq !== RF.saveSeq) return;
-    rfApply(RF.confirmed);
-    toast(`Could not save reflection fallbacks: ${e.message}`);
-  }).finally(() => { if (!--RF.pending) loadReflect(); });
-}
-function renderReflect() {
-  if (RF.fe.busy) { RF.fe.stale = true; return; }
-  const body = $('obReflectBody'), fc = $('obReflectForecast'), d = RF.data;
-  body.textContent = ''; fc.textContent = '';
-  if (!d) { body.append(el('p', 'fe-hint', RF.error || 'Loading…')); return; }
-  body.append(apStartRow(d.start));
-  const info = new Map([d.start, ...d.candidates].map((r) => [apKey(r), r]));
-  const editor = body.appendChild(el('div'));
-  renderFallbackEditor(editor, {
-    list: (d.fallbacks || []).map((f) => ({ ...(info.get(apKey(f)) || {}), agent: f.agent, model: f.model })),
-    exclude: [d.start], onChange: rfSave, ui: RF.fe,
-  });
-  fc.textContent = reflectForecast(d);
-}
-// One line on what the next reflection task would run on right now.
-function reflectForecast(d) {
-  const all = [d.start, ...d.candidates].filter((r) => r.status);
-  if (!all.length) return '';
-  const usable = all.filter((r) => r.status === 'available' || r.status === 'near');
-  if (!usable.length) {
-    const soon = Math.min(...all.map((r) => r.until || Infinity));
-    return `Forecast: no model in this order has usage now, so reflection tasks wait${Number.isFinite(soon) ? ` (earliest reset ${fmtUntil(soon)})` : ''}.`;
-  }
-  const first = usable[0], more = usable.length - 1;
-  const why = first === d.start ? '' : ` (${apName(d.start)} is ${apStatusText(d.start)})`;
-  return `Forecast: runs on ${apName(first)}${why}${first.status === 'near' ? ', near its limit' : ''} · ${more ? `${more} more available after it` : 'no other fallback available'}.`;
-}
+// Reflection fallbacks: the same sheet as a chat's, from the already-loaded project (no fetch).
+$('obReflectBtn').addEventListener('click', () => {
+  $('obPop').hidden = true;
+  openFallbacks(reflectFallbacks(), $('obSettingsBtn'));
+});
 
 // ----- the task drawer
 function openTask(id) {

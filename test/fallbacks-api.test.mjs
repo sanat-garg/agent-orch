@@ -1,5 +1,5 @@
-// GET /api/delegate/preview: boots server.mjs with stub codex/agy CLIs (signed in, fixture model lists) and no Claude.
-// Codex is then marked at its usage limit.
+// Fallback lists over HTTP (save/load for a chat and for a project's reflection tasks) and manual delegation: boots
+// server.mjs with stub codex/agy CLIs (signed in, fixture model lists) and no Claude.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -11,7 +11,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-const PASSWORD = 'preview-test-password';
+const PASSWORD = 'fallbacks-api-password';
 const CID = 'chat-1';
 let child, base, dataDir, home, cookie;
 
@@ -54,44 +54,24 @@ after(() => {
 });
 
 const get = async (p) => { const r = await fetch(base + p, { headers: { cookie } }); return { status: r.status, body: JSON.parse(await r.text()) }; };
-// Wait for CLI discovery (the start model's label comes from the discovered list).
-async function preview(q) {
-  let r;
+// Wait for CLI discovery: PUT validates against the discovered models.
+async function discovered() {
   for (let i = 0; i < 100; i++) {
-    r = await get(`/api/delegate/preview?${q}`);
-    if (r.status === 200 && r.body.start.label !== r.body.start.model) return r;
+    const { body } = await get('/api/agents');
+    if (['codex', 'antigravity'].every((id) => body.agents?.find((a) => a.id === id)?.models.length)) return;
     await new Promise((res) => setTimeout(res, 200));
   }
-  assert.fail(`preview never settled: ${JSON.stringify(r)}`);
+  assert.fail('model discovery never finished');
 }
 
-test('GET /api/delegate/preview needs a session', async () => {
-  const r = await fetch(base + '/api/delegate/preview?agent=codex');
-  assert.equal(r.status, 401);
-  await r.arrayBuffer();
-});
-
-test('preview: start model with its usage status; no fallback list means no candidates', { timeout: 60000 }, async () => {
-  let { body } = await preview('agent=codex&model=gpt-5.5');
-  assert.deepEqual([body.start.agent, body.start.model, body.start.status], ['codex', 'gpt-5.5', 'available']);
-  assert.deepEqual([body.fallbacks, body.candidates], [null, []]);
-  for (const k of ['suggested', 'category', 'source', 'release', 'data_status']) assert.equal(k in body, false, k);
-
-  const { DatabaseSync } = await import('node:sqlite');
-  const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
-  const until = Math.floor(Date.now() / 1000) + 3600;
-  db.prepare('INSERT OR REPLACE INTO kv(key,value) VALUES(?,?)').run('blocked_until:codex', String(until));
-  db.close();
-  ({ body } = await get('/api/delegate/preview?agent=codex&model=gpt-5.5'));
-  assert.deepEqual([body.start.status, body.start.until, body.start.note], ['limited', until, 'usage limit']);
-
-  assert.equal((await get('/api/delegate/preview?agent=nope')).status, 400);
+test('GET /api/delegate/preview is gone', async () => {
+  assert.equal((await fetch(base + '/api/delegate/preview?agent=codex', { headers: { cookie } })).status, 404);
 });
 
 const put = async (p, body) => { const r = await fetch(base + p, { method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) }); return { status: r.status, body: JSON.parse(await r.text()) }; };
 
-test('PUT /api/convos/:id/fallbacks: validated against the discovered models; the convo payload and ?convo= preview carry it', { timeout: 60000 }, async () => {
-  await preview('agent=codex&model=gpt-5.5'); // models discovered
+test('PUT /api/convos/:id/fallbacks: validated against the discovered models; saved and loaded with the chat', { timeout: 60000 }, async () => {
+  await discovered();
   const unauth = await fetch(base + `/api/convos/${CID}/fallbacks`, { method: 'PUT', body: '{"fallbacks":null}' });
   assert.equal(unauth.status, 401);
   await unauth.arrayBuffer();
@@ -103,28 +83,19 @@ test('PUT /api/convos/:id/fallbacks: validated against the discovered models; th
   assert.equal((await get('/api/convos')).body.find((c) => c.id === CID).fallbacks, null, 'none by default');
 
   const list = [{ agent: 'codex', model: 'gpt-6-sol' }, { agent: 'antigravity', model: 'gemini-3.1-pro-high' }, { agent: 'codex', model: 'gpt-6-sol' }];
-  let r = await put(`/api/convos/${CID}/fallbacks`, { fallbacks: list });
+  const r = await put(`/api/convos/${CID}/fallbacks`, { fallbacks: list });
   assert.equal(r.status, 200);
   assert.deepEqual(r.body.fallbacks, list.slice(0, 2), 'duplicates dropped, order kept');
   assert.deepEqual((await get('/api/convos')).body.find((c) => c.id === CID).fallbacks, list.slice(0, 2));
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dataDir, 'convos.json'), 'utf8'))[0].fallbacks, list.slice(0, 2));
 
-  // Preview for the chat: the list in the owner's order (codex is limited by the earlier test).
-  ({ body: r } = await get(`/api/delegate/preview?agent=codex&model=gpt-5.5&convo=${CID}`));
-  assert.deepEqual(r.fallbacks, list.slice(0, 2));
-  assert.deepEqual(r.candidates.map((c) => [c.model, c.status]), [['gpt-6-sol', 'limited'], ['gemini-3.1-pro-high', 'available']]);
-  assert.equal((await get('/api/delegate/preview?agent=codex&convo=nope')).status, 404);
-
   assert.deepEqual((await put(`/api/convos/${CID}/fallbacks`, { fallbacks: [] })).body.fallbacks, []);
-  assert.deepEqual((await get(`/api/delegate/preview?agent=codex&model=gpt-5.5&convo=${CID}`)).body.candidates, []);
+  assert.deepEqual((await get('/api/convos')).body.find((c) => c.id === CID).fallbacks, []);
   assert.equal((await put(`/api/convos/${CID}/fallbacks`, { fallbacks: null })).body.fallbacks, null);
-  ({ body: r } = await get(`/api/delegate/preview?agent=codex&model=gpt-5.5&convo=${CID}`));
-  assert.equal(r.fallbacks, null);
-  assert.deepEqual(r.candidates, []);
 });
 
-test('PUT /api/orch/projects/:id/reflect-fallbacks: validated against the discovered models; stored per project; ?project= preview carries it', { timeout: 60000 }, async () => {
-  await preview('agent=codex&model=gpt-5.5'); // models discovered
+test('PUT /api/orch/projects/:id/reflect-fallbacks: validated against the discovered models; stored per project', { timeout: 60000 }, async () => {
+  await discovered();
   const { DatabaseSync } = await import('node:sqlite');
   const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
   const pid = Number(db.prepare("INSERT INTO projects(path,name,status,created_at) VALUES(?,?,'active',0)").run(path.join(dataDir, 'rf-project'), 'rf').lastInsertRowid);
@@ -143,34 +114,24 @@ test('PUT /api/orch/projects/:id/reflect-fallbacks: validated against the discov
     assert.equal((await put('/api/orch/projects/99999/reflect-fallbacks', { fallbacks: null })).status, 404);
 
     const list = [{ agent: 'antigravity', model: 'gemini-3.1-pro-high' }, { agent: 'codex', model: 'gpt-6-sol' }, { agent: 'antigravity', model: 'gemini-3.1-pro-high' }];
-    let r = await put(url, { fallbacks: list });
+    const r = await put(url, { fallbacks: list });
     assert.equal(r.status, 200);
     assert.deepEqual(r.body.project.reflect_fallbacks, list.slice(0, 2), 'duplicates dropped, order kept');
     assert.deepEqual(JSON.parse(stored()), list.slice(0, 2));
-
-    ({ body: r } = await get(`/api/delegate/preview?project=${pid}`));
-    assert.equal(r.start.agent, 'claude', "starts on the project's default route");
-    assert.deepEqual(r.fallbacks, list.slice(0, 2));
-    assert.deepEqual(r.candidates.map((c) => [c.model, c.status]), [['gemini-3.1-pro-high', 'available'], ['gpt-6-sol', 'limited']]);
-    assert.equal((await get('/api/delegate/preview?project=99999')).status, 404);
 
     assert.deepEqual((await put(url, { fallbacks: [] })).body.project.reflect_fallbacks, []);
     assert.equal(stored(), '[]');
     assert.equal((await put(url, { fallbacks: null })).body.project.reflect_fallbacks, null);
     assert.equal(stored(), null);
-    ({ body: r } = await get(`/api/delegate/preview?project=${pid}`));
-    assert.equal(r.fallbacks, null);
-    assert.deepEqual(r.candidates, []);
   } finally { db.close(); }
 });
 
-test('manual delegation lists every connected model with its status; the owner\'s choice overrides pins', async () => {
+test('manual delegation lists every connected model with its status; the owner\'s choice goes through', async () => {
   const { DatabaseSync } = await import('node:sqlite');
   const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
   try {
-    db.prepare("DELETE FROM kv WHERE key='blocked_until:codex'").run();
     const pid = Number(db.prepare("INSERT INTO projects(path,name,status,created_at) VALUES(?,?,'active',0)").run(path.join(dataDir, 'manual'), 'manual').lastInsertRowid);
-    const id = Number(db.prepare("INSERT INTO tasks(project_id,title,prompt,agent,model,pinned_model,created_at) VALUES(?,'Fix code','code','codex','gpt-5.5','gpt-5.5',0)").run(pid).lastInsertRowid);
+    const id = Number(db.prepare("INSERT INTO tasks(project_id,title,prompt,agent,model,created_at) VALUES(?,'Fix code','code','codex','gpt-5.5',0)").run(pid).lastInsertRowid);
     const manual = (await get(`/api/orch/tasks/${id}/delegate`)).body;
     assert.equal(manual.current.model, 'gpt-5.5', 'explicit task route is retained');
     assert.ok(manual.candidates.some((c) => c.model === 'gemini-3.1-pro-high' && c.status === 'available'));

@@ -361,9 +361,9 @@ test('POST /api/orch/tasks/:id/delegate reassigns a queued task and rejects runn
   const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-del-proj-'));
   try {
     const pid = Number(db.prepare("INSERT INTO projects(path,name,status,perpetual,created_at) VALUES(?,?,'paused',0,0)").run(proj, 'del').lastInsertRowid);
-    const task = (status, pinned = null) => Number(db.prepare("INSERT INTO tasks(project_id,title,prompt,status,origin,pinned_model,agent,model,created_at) VALUES(?,?,?,?,'chat',?,'codex','gpt-x',0)")
-      .run(pid, 'Fix the parser bug', 'code', status, pinned).lastInsertRowid);
-    const queued = task('queued', 'gpt-x'), running = task('running'), done = task('done');
+    const task = (status) => Number(db.prepare("INSERT INTO tasks(project_id,title,prompt,status,origin,agent,model,created_at) VALUES(?,?,?,?,'chat','codex','gpt-x',0)")
+      .run(pid, 'Fix the parser bug', 'code', status).lastInsertRowid);
+    const queued = task('queued'), running = task('running'), done = task('done');
 
     let r = await call('GET', `/api/orch/tasks/${queued}/delegate`);
     assert.equal(r.status, 200);
@@ -372,7 +372,7 @@ test('POST /api/orch/tasks/:id/delegate reassigns a queued task and rejects runn
     assert.equal((await call('GET', '/api/orch/tasks/999999/delegate')).status, 404);
 
     assert.equal((await call('POST', `/api/orch/tasks/${queued}/delegate`, { agent: 'nope' })).status, 400);
-    // Pinned or not, the owner's choice goes through.
+    // The owner's choice goes through.
     r = await call('POST', `/api/orch/tasks/${queued}/delegate`, { agent: 'claude', model: null });
     assert.equal(r.status, 200, JSON.stringify(r.body));
     let row = db.prepare('SELECT * FROM tasks WHERE id=?').get(queued);

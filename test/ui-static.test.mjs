@@ -65,25 +65,24 @@ test('the sidebar usage card opens the Usage modal with per-agent charts', () =>
   assert.match(appJs, /openConnections\(id\)/);
 });
 
-test("the model picker renders 'Auto Delegate' first and each message carries the choice", () => {
+test('the model picker picks the primary model only; a Fallbacks button opens the shared sheet', () => {
   const fn = appJs.slice(appJs.indexOf('function renderAgentPicker()'));
   const body = fn.slice(0, fn.indexOf('\n}\n'));
-  assert.match(body, /el\('option', '', 'Auto Delegate'\)[\s\S]*?value = AUTO_PICK;[\s\S]*?sel\.append\(auto\);[\s\S]*for \(const a of AGENT_LIST\)/);
-  assert.match(appJs, /send\(\{ t: 'send', cid: state\.cid, text, autoDelegate: autoPick\(\) \}\)/);
-  assert.match(indexHtml, /id="apChip"/);
-  assert.match(indexHtml, /class="modal sheet ap-pop" id="apModal"/);
-  assert.match(appJs, /\/api\/delegate\/preview\?.*agent=/);
-  assert.match(appJs, /\/api\/convos\/\$\{.*\}\/fallbacks.*PUT/);
+  assert.doesNotMatch(body, /AUTO_PICK|__auto/);
+  assert.match(appJs, /send\(\{ t: 'send', cid: state\.cid, text \}\)/);
+  assert.doesNotMatch(appJs, /autoDelegate|delegate\/preview|Forecast/);
+  assert.match(indexHtml, /class="chip fb-chip" id="fbChip"/);
+  assert.match(indexHtml, /class="modal sheet fb-pop" id="fbModal"/);
+  assert.match(appJs, /\/api\/convos\/\$\{cid\}\/fallbacks/);
+  assert.match(appJs, /`If \$\{name\} hits its limit`/);
   assert.doesNotMatch(appJs, /Pinned:/);
   assert.match(appJs, /\/api\/orch\/tasks\/\$\{[^}]+\}\/delegate/);
   assert.match(appJs, /'Delegate…'/);
 });
 
-test('orchestrator settings popover has the reflection fallback editor', () => {
+test('orchestrator settings popover opens the same fallback sheet for reflection', () => {
   const pop = indexHtml.slice(indexHtml.indexOf('id="obPop"'), indexHtml.indexOf('id="obPause"'));
-  assert.match(pop, /id="obReflect"[\s\S]*Reflection fallbacks[\s\S]*Reflection tasks run on the first available model in this order[\s\S]*id="obReflectBody"[\s\S]*id="obReflectForecast"/);
-  const fn = appJs.slice(appJs.indexOf('function renderReflect()'));
-  assert.match(fn.slice(0, fn.indexOf('\n}\n')), /renderFallbackEditor\(editor, \{[\s\S]*onChange: rfSave/);
-  assert.match(appJs, /\/api\/orch\/projects\/\$\{pid\}\/reflect-fallbacks`, 'PUT'/);
-  assert.match(appJs, /\/api\/delegate\/preview\?project=/);
+  assert.match(pop, /id="obReflect"[\s\S]*Reflection fallbacks[\s\S]*id="obReflectBtn"/);
+  assert.match(appJs, /openFallbacks\(reflectFallbacks\(\), /);
+  assert.match(appJs, /\/api\/orch\/projects\/\$\{pid\}\/reflect-fallbacks/);
 });

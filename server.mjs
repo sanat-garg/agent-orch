@@ -630,6 +630,7 @@ const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
   emitChat: (cid, ev, { persist = true } = {}) => (persist ? emit(cid, ev) : broadcast(cid, ev)),
   broadcast: (msg) => { for (const ws of allClients) send(ws, msg); },
   convoExists: (cid) => !!findConvo(cid),
+  convoFallbacks: (cid) => findConvo(cid)?.fallbacks ?? null,
   refreshUsage: () => refreshUsage().catch((e) => console.error('[usage] refresh failed', e)),
   onCommit: (dir) => syncGit(dir).catch((e) => console.error('[github] sync failed', dir, e)),
   projectReady: (dir) => gh.status().linked && !!convos.find((c) => c.cwd === dir)?.repo,
@@ -711,7 +712,7 @@ gh.refresh().then((s) => console.log(`[github] ${s.linked ? `linked as ${s.login
 // Messages sent while the planner is still replying wait and go together as the next turn,
 // so two turns never run on the same planner session at once.
 const planQueue = new Map(); // convo id -> [text]
-async function orchestratorTurn(convo, text, opts = {}) {
+async function orchestratorTurn(convo, text) {
   emit(convo.id, { t: 'user', text });
   if (planning.has(convo.id)) {
     if (!planQueue.has(convo.id)) planQueue.set(convo.id, []);
@@ -723,7 +724,7 @@ async function orchestratorTurn(convo, text, opts = {}) {
   broadcastConvos();
   try {
     for (let next = text; next;) {
-      await orch.planTurn(convo, next, opts);
+      await orch.planTurn(convo, next);
       if (!findConvo(convo.id)) break; // deleted mid-plan: don't re-plan (and reactivate) its project
       const waiting = planQueue.get(convo.id);
       next = waiting?.length ? waiting.splice(0).join('\n\n') : null;
@@ -985,10 +986,9 @@ async function agentChatTurn(convo, text) {
   broadcastConvos();
 }
 
-// opts.autoDelegate (per message): an orchestrator chat whose agent is at its limit may be answered by another agent.
-async function sendUserMessage(convo, text, opts = {}) {
+async function sendUserMessage(convo, text) {
   // A non-Claude chat depends only on its own agent: no Claude sign-in or limit check.
-  if (chatAgent(convo) !== 'claude') return convo.mode === 'orchestrator' ? orchestratorTurn(convo, text, opts) : agentChatTurn(convo, text);
+  if (chatAgent(convo) !== 'claude') return convo.mode === 'orchestrator' ? orchestratorTurn(convo, text) : agentChatTurn(convo, text);
   if (!onSubscription()) await refreshClaudeAuth();
   if (!onSubscription()) {
     emit(convo.id, { t: 'user', text });
@@ -1000,7 +1000,7 @@ async function sendUserMessage(convo, text, opts = {}) {
     });
     return;
   }
-  if (convo.mode === 'orchestrator') return orchestratorTurn(convo, text, opts);
+  if (convo.mode === 'orchestrator') return orchestratorTurn(convo, text);
   // Orchestrator-style context control: a session that has grown past the limit is retired, and the next
   // message starts a fresh one carrying the project memory (.agent-orch/) and a recap of the recent chat.
   let prompt = text;
@@ -1311,8 +1311,8 @@ async function handleRequest(req, res) {
     const r = orch.setReflectFallbacks(Number(rf[1]), list);
     return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r);
   }
-  // Auto Delegate fallbacks the owner sets for a chat: {fallbacks: [{agent, model}] | null}. null = none;
-  // an array (even empty) is used as-is, in order. Every entry must be a discovered model of a known agent.
+  // A chat's fallbacks: {fallbacks: [{agent, model}] | null}, in order; its queued tasks snapshot the list and move down
+  // it when their model is limited (null or [] = they wait). Every entry must be a discovered model of a known agent.
   const cf = p.match(/^\/api\/convos\/([\w-]+)\/fallbacks$/);
   if (cf && req.method === 'PUT') {
     const c = findConvo(cf[1]);
@@ -1365,20 +1365,6 @@ async function handleRequest(req, res) {
     }
     const d = orch.taskDetail(id);
     return d ? json(res, 200, d) : json(res, 404, { error: 'No such task' });
-  }
-  // Auto Delegate preview for the composer: ?agent=&model= → start model; ?convo=<id>: candidates = the chat's fallback
-  // list in order, each with its usage status.
-  // ?project=<id>: the same for the project's reflection tasks (its reflect_fallbacks, starting on its default route).
-  if (p === '/api/delegate/preview' && req.method === 'GET') {
-    const q = url.searchParams;
-    const convo = q.get('convo') ? findConvo(q.get('convo')) : null;
-    if (q.get('convo') && !convo) return json(res, 404, { error: 'No such chat' });
-    if (q.get('project')) {
-      const v = orch.delegatePreview({ projectId: Number(q.get('project')), agent: q.get('agent') || null, model: q.get('model') || null });
-      return v ? json(res, 200, v) : json(res, 404, { error: 'No such project' });
-    }
-    const v = orch.delegatePreview({ agent: q.get('agent') || 'claude', model: q.get('model') || null, fallbacks: convo?.fallbacks ?? null });
-    return v ? json(res, 200, v) : json(res, 400, { error: 'Unknown agent' });
   }
   // Manual delegation: GET lists the options (every connected model + usage status), POST {agent, model} reassigns a queued task.
   const od = p.match(/^\/api\/orch\/tasks\/(\d+)\/delegate$/);
@@ -1543,7 +1529,7 @@ wss.on('connection', (ws, req) => {
     switch (msg.t) {
       case 'send':
         if (typeof msg.text === 'string' && msg.text.trim()) {
-          sendUserMessage(convo, msg.text, { autoDelegate: msg.autoDelegate === true }).catch((e) => emit(convo.id, { t: 'error', text: String(e?.message || e) }));
+          sendUserMessage(convo, msg.text).catch((e) => emit(convo.id, { t: 'error', text: String(e?.message || e) }));
         }
         break;
       case 'perm_reply':

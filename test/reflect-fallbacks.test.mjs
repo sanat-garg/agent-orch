@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-test('reflection-queued tasks snapshot the project reflection fallbacks; null stays automatic', { timeout: 60000 }, async () => {
+test('reflection-queued tasks snapshot the project reflection fallbacks', { timeout: 60000 }, async () => {
   const dirs = ['cw-rf-', 'cw-rf-p-'].map((p) => fs.mkdtempSync(path.join(os.tmpdir(), p)));
   const [dataDir, root] = dirs;
   try {
@@ -55,8 +55,8 @@ test('reflection-queued tasks snapshot the project reflection fallbacks; null st
     assert.deepEqual(Object.keys(r.tasks).sort(), ['auto', 'curated', 'empty'], JSON.stringify(r));
     for (const t of Object.values(r.tasks)) assert.deepEqual([t.origin, t.source], ['reflection', 'reflection']);
     assert.deepEqual(JSON.parse(r.tasks.curated.fallbacks), [{ agent: 'codex', model: 'gpt-mini' }, { agent: 'claude', model: 'opus' }]);
-    assert.equal(r.tasks.auto.fallbacks, null, 'automatic ranking');
-    assert.equal(r.tasks.empty.fallbacks, '[]', 'an empty list is curated too: never delegate');
+    assert.equal(r.tasks.auto.fallbacks, null, 'no list: they wait');
+    assert.equal(r.tasks.empty.fallbacks, '[]', 'an empty list: they wait');
     assert.equal(r.after, null);
     assert.equal(r.missing, 404);
   } finally {

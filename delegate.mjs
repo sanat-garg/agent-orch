@@ -1,21 +1,11 @@
 // Delegation (BRIEF goal 8): a queued task whose model is at its usage limit moves to the first entry of the owner's
 // ordered fallback list that has usage left. No benchmarks, no automatic ranking: with no list (or an empty one) it waits.
-//   eligible(task)  the policy: reflection tasks yes; the owner's chat tasks only when that message was sent with
-//                   Auto Delegate (tasks.auto_delegate); never when the owner pinned a model for it (tasks.pinned_model).
-//   createDelegator wires the owner's list to live state (connections, blocks, usage windows, model catalog).
+// A task's list is a snapshot (tasks.fallbacks) of its chat's list (or, for reflection tasks, the project's) when queued.
+//   createDelegator wires the list to live state (connections, blocks, usage windows, model catalog).
 
 export const DELEGATE_CFG = {
   maxWindowPct: 90,  // an agent with any plan window at or above this is treated as limited
 };
-
-// The policy matrix. Only work tasks move; plan/reflect runs belong to their agent.
-export function eligible(task = {}) {
-  if ((task.kind || 'work') !== 'work' || task.pinned_model) return false;
-  const origin = task.origin || (task.source === 'reflection' ? 'reflection' : null);
-  if (origin === 'reflection') return true;
-  if (origin === 'chat') return Number(task.auto_delegate) === 1;
-  return false;
-}
 
 // Owner fallbacks (a chat's `fallbacks`, snapshotted into tasks.fallbacks as JSON): [{agent, model}] in the owner's
 // order, or null = none set. An empty array means the same: nothing to delegate to.
@@ -47,21 +37,5 @@ export function createDelegator({ agents, connected, blockedUntil, windows = () 
     }
     return null;
   }
-  return { eligible, nextModel, hasUsage, available, defaultModel };
-}
-
-// Auto Delegate preview (the composer summary): the start model plus the owner's fallback list, each with its usage.
-// all: [{agent, model, label}] every model of a connected agent; usage(agent, model) → {status, until?, note?} where
-// status is available | near | limited | unavailable (a listed model its agent doesn't report is unavailable).
-export function previewDelegation({ current, all = [], usage, fallbacks = null }) {
-  const labelOf = (a, m) => all.find((x) => x.agent === a && x.model === m)?.label || m;
-  const list = parseFallbacks(fallbacks);
-  const key = (x) => `${x.agent}/${x.model}`;
-  const candidates = (list || []).filter((f) => key(f) !== key(current)).map((f) => {
-    const u = usage(f.agent, f.model);
-    const known = all.some((m) => key(m) === key(f));
-    return { agent: f.agent, model: f.model, label: labelOf(f.agent, f.model), rank: list.findIndex((x) => key(x) === key(f)) + 1,
-      ...(known || u.status === 'unavailable' ? u : { status: 'unavailable', until: null, note: 'model not listed' }) };
-  });
-  return { start: { ...current, label: labelOf(current.agent, current.model), ...usage(current.agent, current.model) }, fallbacks: list, candidates };
+  return { nextModel, hasUsage, available, defaultModel };
 }

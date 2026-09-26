@@ -13,3 +13,7 @@ Replace the confusing Auto Delegate / fallback UX with one simple model (see BRI
 ## Done when
 
 `npm test` passes with fallback-move and empty-list-waits tests, `! grep -n "Auto Delegate" public/app.js public/index.html` finds nothing, and the reflection fallback sheet renders without any fetch (asserted in test/ui-fallbacks.test.mjs)
+
+## Result — done (check passed) (2026-09-26 04:50)
+
+AGENT-ORCH-STATUS: done — Fallback lists replace Auto Delegate everywhere; 189 tests pass

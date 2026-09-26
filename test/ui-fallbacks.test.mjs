@@ -1,6 +1,7 @@
-// Auto Delegate fallback editor in a real browser: boots server.mjs (stub codex/agy CLIs, CW_NO_ORCHESTRATOR=1, temp
-// data dir) on a spare port, opens the composer popup and checks that remove, undo, reorder (Alt+↑ and drag), add and
-// reset each persist through PUT /api/convos/:id/fallbacks. Skips when Playwright's cached Chromium can't launch.
+// The fallback sheet in a real browser: boots server.mjs (stub codex/agy CLIs, CW_NO_ORCHESTRATOR=1, temp data dir) on a
+// spare port. Chat: the composer's Fallbacks button opens it, and remove, undo, reorder (Alt+↑ and drag) and add each
+// persist through PUT /api/convos/:id/fallbacks. Reflection: the settings popover opens the same sheet at once, without
+// any request, and saves via PUT /api/orch/projects/:id/reflect-fallbacks. Skips when Playwright's Chromium can't launch.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -22,7 +23,8 @@ const START = [
 ];
 let browser, skip = false;
 try { browser = await chromium.launch(); } catch (e) { skip = `cached Chromium unavailable: ${e.message.split('\n')[0]}`; }
-let child, base, dataDir, home, cookie;
+let child, base, dataDir, home, cookie, db, pid;
+const PROJECT = () => path.join(dataDir, 'no-such-project');
 
 const freePort = () => new Promise((resolve, reject) => {
   const s = net.createServer().listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); });
@@ -35,7 +37,7 @@ before(async () => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-fbui-home-'));
   const salt = crypto.randomBytes(16).toString('hex');
   fs.writeFileSync(path.join(dataDir, 'auth.json'), JSON.stringify({ salt, hash: crypto.scryptSync(PASSWORD, salt, 64).toString('hex') }));
-  fs.writeFileSync(path.join(dataDir, 'convos.json'), JSON.stringify([{ id: CID, title: 'Fallbacks', cwd: path.join(dataDir, 'no-such-project'), mode: 'chat',
+  fs.writeFileSync(path.join(dataDir, 'convos.json'), JSON.stringify([{ id: CID, title: 'Fallbacks', cwd: PROJECT(), mode: 'orchestrator',
     agent: 'codex', model: 'gpt-5.5', createdAt: 1, updatedAt: 1, fullAccess: true, fallbacks: START }]));
   const bin = path.join(home, '.local/bin');
   fs.mkdirSync(bin, { recursive: true });
@@ -65,9 +67,17 @@ before(async () => {
     if (i > 100) assert.fail('model discovery never finished');
     await new Promise((res) => setTimeout(res, 200));
   }
+  // The chat's project (reflection fallbacks live on it) and a codex usage limit (the limited dot).
+  const { DatabaseSync } = await import('node:sqlite');
+  db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
+  db.exec('PRAGMA busy_timeout=5000');
+  pid = Number(db.prepare("INSERT INTO projects(path,name,status,convo_id,reflect_fallbacks,created_at) VALUES(?,?,'paused',?,?,0)")
+    .run(PROJECT(), 'fb', CID, JSON.stringify([{ agent: 'antigravity', model: 'gemini-3.1-pro-high' }])).lastInsertRowid);
+  db.prepare('INSERT OR REPLACE INTO kv(key,value) VALUES(?,?)').run('blocked_until:codex', String(Math.floor(Date.now() / 1000) + 3600));
 });
 
 after(async () => {
+  db?.close();
   await browser?.close();
   child?.kill('SIGKILL');
   for (const d of [dataDir, home]) if (d) fs.rmSync(d, { recursive: true, force: true });
@@ -85,27 +95,37 @@ async function until(want, what) {
   assert.deepEqual(got, want, what);
 }
 
-test('fallback editor: remove, undo, Alt+↑, drag, add and reset persist via PUT /api/convos/:id/fallbacks', { skip, timeout: 90000 }, async () => {
+test('chat fallbacks: the picker has no Auto Delegate; the sheet removes, undoes, reorders and adds via PUT /api/convos/:id/fallbacks', { skip, timeout: 90000 }, async () => {
   const [name, value] = cookie.split('=');
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
   await ctx.addCookies([{ name, value, url: base }]);
-  await ctx.addInitScript((cid) => localStorage.setItem(`cw.auto.${cid}`, '1'), CID);
+  // A chat that had the old Auto Delegate flag: the flag is dropped (its list was already set, so it stays).
+  await ctx.addInitScript((cid) => { if (!sessionStorage.seeded) { localStorage.setItem(`cw.auto.${cid}`, '1'); sessionStorage.seeded = 1; } }, CID);
   const page = await ctx.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto(`${base}/#${CID}`);
-  await page.locator('#apChip').click();
-  const rows = page.locator('#apModal .fe-list .fe-row');
+  const chip = page.locator('#fbChip');
+  await page.waitForFunction(() => document.querySelector('#fbChip')?.textContent === 'Fallbacks · 3');
+  assert.equal(await page.evaluate(() => [...document.querySelectorAll('#model option')].some((o) => /auto/i.test(o.value + o.textContent))), false);
+  assert.equal(await page.evaluate((cid) => localStorage.getItem(`cw.auto.${cid}`), CID), null);
+  await chip.click();
+  assert.equal(await page.locator('#fbTitle').innerText(), 'If GPT-5.5 hits its limit');
+  const rows = page.locator('#fbModal .fe-list .fe-row');
   const names = () => rows.locator('.fe-model').allInnerTexts();
   await assert.doesNotReject(rows.nth(2).waitFor());
   assert.deepEqual(await names(), ['GPT-6-Sol', 'Gemini 3.1 Pro (High)', 'Claude Sonnet 4.6 (Thinking)']);
   assert.deepEqual(await rows.locator('.fe-pos').allInnerTexts(), ['1', '2', '3']);
+  assert.deepEqual(await rows.locator('.fe-agent').allInnerTexts(), ['Codex', 'Antigravity', 'Antigravity']);
+  // Only codex is limited: one small dot, nothing else about usage.
+  assert.deepEqual(await rows.evaluateAll((els) => els.map((e) => !!e.querySelector('.fe-lim'))), [true, false, false]);
+  assert.equal(await page.locator('#fbModal .fe-reset').count(), 0);
 
-  // Remove the second model: saved at once, the composer summary follows.
+  // Remove the second model: saved at once, the composer button follows.
   await rows.nth(1).locator('.fe-rm').click();
   await until(['gpt-6-sol', 'claude-sonnet-4-6'], 'remove persisted');
   assert.deepEqual(await names(), ['GPT-6-Sol', 'Claude Sonnet 4.6 (Thinking)']);
-  assert.doesNotMatch(await page.locator('#apChip').getAttribute('title'), /Gemini 3\.1 Pro/);
+  assert.equal(await chip.innerText(), 'Fallbacks · 2');
   // Undo from the toast puts it back in place.
   await page.locator('#toast .toast-act').click();
   await until(['gpt-6-sol', 'gemini-3.1-pro-high', 'claude-sonnet-4-6'], 'undo persisted');
@@ -119,8 +139,7 @@ test('fallback editor: remove, undo, Alt+↑, drag, add and reset persist via PU
   assert.equal(await page.evaluate(() => document.activeElement?.dataset.key), 'antigravity/claude-sonnet-4-6');
 
   // Drag the second row above the first by its handle (pointer events, mouse).
-  // Let the post-save refetch settle first so the rows aren't replaced mid-gesture.
-  await page.waitForFunction(() => document.querySelector('#apModal .fe-list .fe-row')?.dataset.key === 'antigravity/claude-sonnet-4-6');
+  await page.waitForFunction(() => document.querySelector('#fbModal .fe-list .fe-row')?.dataset.key === 'antigravity/claude-sonnet-4-6');
   await page.waitForTimeout(300);
   const grip = await rows.nth(1).locator('.fe-grip').boundingBox(), first = await rows.nth(0).boundingBox();
   await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
@@ -130,14 +149,55 @@ test('fallback editor: remove, undo, Alt+↑, drag, add and reset persist via PU
   await page.mouse.up();
   await until(['gpt-6-sol', 'claude-sonnet-4-6'], 'drag persisted');
 
-  // Add from the searchable list, then clear the list.
-  await page.locator('#apModal .fe-add-btn').click();
-  await page.locator('#apModal .fe-search').fill('flash');
-  await page.locator('#apModal .fe-opt', { hasText: 'Gemini 3.8 Flash' }).click();
+  // Add from the searchable picker; the primary model can't be added.
+  await page.locator('#fbModal .fe-add-btn').click();
+  await page.locator('#fbModal .fe-search').fill('gpt-5.5');
+  assert.equal(await page.locator('#fbModal .fe-opt', { hasText: 'GPT-5.5' }).first().isDisabled(), true);
+  await page.locator('#fbModal .fe-search').fill('flash');
+  await page.locator('#fbModal .fe-opt', { hasText: 'Gemini 3.8 Flash' }).click();
   await until(['gpt-6-sol', 'claude-sonnet-4-6', 'gemini-3.8-flash-high'], 'add persisted');
-  await page.locator('#apModal .fe-reset').click();
-  await until(null, 'clear persisted');
-  await page.locator('#apModal .fe-hint', { hasText: 'No fallbacks' }).waitFor();
+  // Removing every model leaves an empty list: tasks wait.
+  for (let i = 0; i < 3; i++) await rows.nth(0).locator('.fe-rm').click();
+  await until([], 'empty list persisted');
+  await page.locator('#fbModal .fe-hint', { hasText: 'No fallbacks' }).waitFor();
+  assert.equal(await chip.innerText(), 'No fallbacks');
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test('reflection fallbacks: the settings popover opens the same sheet instantly, without any request, and saves', { skip, timeout: 90000 }, async () => {
+  const [name, value] = cookie.split('=');
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
+  await ctx.addCookies([{ name, value, url: base }]);
+  const page = await ctx.newPage();
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  await page.goto(`${base}/#${CID}`);
+  await page.waitForFunction(() => document.querySelector('#obReflectBtn')?.textContent === 'Fallbacks · 1');
+  await page.waitForLoadState('networkidle');
+  const requests = [];
+  page.on('request', (r) => requests.push(r.url()));
+  await page.locator('#obSettingsBtn').click();
+  // Rendered in the same task as the click: no fetch, no loading state.
+  const shown = await page.evaluate(() => {
+    document.querySelector('#obReflectBtn').click();
+    return { open: !document.querySelector('#fbModal').hidden, title: document.querySelector('#fbTitle').textContent,
+      rows: [...document.querySelectorAll('#fbModal .fe-row .fe-model')].map((e) => e.textContent) };
+  });
+  assert.equal(shown.open, true);
+  assert.match(shown.title, /^If .+ hits its limit$/);
+  assert.deepEqual(shown.rows, ['Gemini 3.1 Pro (High)']);
+  await page.waitForTimeout(300);
+  assert.deepEqual(requests, [], 'opening the reflection sheet fetches nothing');
+
+  await page.locator('#fbModal .fe-add-btn').click();
+  await page.locator('#fbModal .fe-search').fill('sol');
+  await page.locator('#fbModal .fe-opt', { hasText: 'GPT-6-Sol' }).click();
+  const stored = () => db.prepare('SELECT reflect_fallbacks FROM projects WHERE id=?').get(pid).reflect_fallbacks;
+  for (let i = 0; i < 50 && JSON.parse(stored()).length < 2; i++) await new Promise((r) => setTimeout(r, 100));
+  assert.deepEqual(JSON.parse(stored()), [{ agent: 'antigravity', model: 'gemini-3.1-pro-high' }, { agent: 'codex', model: 'gpt-6-sol' }]);
+  assert.ok(requests.some((u) => u.endsWith(`/api/orch/projects/${pid}/reflect-fallbacks`)));
+  assert.equal(await page.locator('#obReflectBtn').innerText(), 'Fallbacks · 2');
   assert.deepEqual(errors, []);
   await ctx.close();
 });

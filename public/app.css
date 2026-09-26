@@ -678,11 +678,6 @@ code, pre, kbd { font-family: var(--mono); }
 .ob-routes { border-top: 1px solid var(--border); margin-top: 4px; padding: 10px; font-size: 13.5px; }
 .ob-routes > small { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
 .orch-bar .pop-wrap .popover { max-height: min(72vh, 620px); overflow-y: auto; overscroll-behavior: contain; }
-.ob-reflect { border-top: 1px solid var(--border); padding: 10px; font-size: 13.5px; }
-.ob-reflect > small { display: block; color: var(--muted); font-size: 12px; line-height: 1.4; margin: 2px 0 8px; }
-.ob-reflect .fe-start { margin-bottom: 6px; }
-.ob-forecast { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
-.ob-forecast:empty { display: none; }
 .ob-route { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
 .ob-route > span { flex: 1; overflow-wrap: anywhere; }
 .ob-route small { display: block; color: var(--muted); font-size: 12px; }
@@ -1014,32 +1009,15 @@ pre.copy-cmd:hover::after { opacity: .7; }
 .lb-stage .shot-missing { flex: 1; align-self: stretch; }
 .lb-nav { width: 44px; height: 44px; border-radius: 99px; }
 
-/* composer: Auto Delegate preview (start model → likely fallbacks); nothing when a specific model is picked */
-.ap-chip { align-self: center; display: inline-flex; align-items: center; min-width: 0; max-width: min(100%, 460px); min-height: 28px; font: inherit; font-size: 12px;
-  padding: 0 10px; border-radius: 99px; border: 1px solid var(--border); color: var(--text); background: var(--raised); cursor: pointer; white-space: nowrap; overflow: hidden; }
-.ap-chip:hover { border-color: var(--accent); }
-.ap-chip[hidden] { display: none; }
-.ap-full, .ap-short { display: inline-flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden; }
-.ap-short { display: none; }
-.ap-e { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
-.ap-full .ap-e:not(:first-child) .ap-n { max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
-.ap-arrow, .ap-more { color: var(--faint); }
-.ap-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
-.ap-e.st-available .ap-dot { background: var(--ok); }
-.ap-e.st-near .ap-dot { background: var(--warn); }
-.ap-e.st-limited .ap-dot, .ap-e.st-unavailable .ap-dot { background: var(--danger); }
-.ap-chip .ap-e.st-limited, .ap-chip .ap-e.st-unavailable { color: var(--faint); text-decoration: line-through; text-decoration-color: color-mix(in srgb, currentColor 50%, transparent); }
-.ap-row .ap-e { font-size: 12px; color: var(--muted); white-space: nowrap; }
-.ap-pop .modal-backdrop { background: transparent; }
-.modal-panel.ap { width: min(440px, calc(100vw - 24px)); }
+/* Fallbacks button (composer, next to the model picker; reflection settings) and its sheet (#fbModal). */
+.fb-chip { flex: none; font: inherit; font-size: 13px; }
+.fb-chip:not(.none) { color: var(--text); }
+.fb-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.fb-pop .modal-backdrop { background: transparent; }
+.modal-panel.fb { width: min(440px, calc(100vw - 24px)); }
 @media (min-width: 801px) {
-  .ap-pop .modal-panel.ap { position: fixed; max-height: min(70dvh, 560px); }
-  .ap-pop .m-head h2 { font-size: 17px; }
-}
-@media (max-width: 420px) {
-  .ap-full { display: none; }
-  .ap-short { display: inline-flex; }
-  .ap-short .ap-n { max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
+  .fb-pop .modal-panel.fb { position: fixed; max-height: min(70dvh, 560px); }
+  .fb-pop .m-head h2 { font-size: 17px; }
 }
 .tc-tag.deleg { color: var(--chart-2); border-color: currentColor; }
 
@@ -1115,11 +1093,8 @@ button.dg-row:disabled { opacity: .6; cursor: progress; }
   max-width: min(92vw, 480px); padding: 10px 14px; border-radius: 10px; background: var(--text); color: var(--bg); font-size: 13.5px;
   box-shadow: 0 8px 24px rgba(0,0,0,.25); animation: fade .15s ease; }
 
-/* Auto Delegate: starting model and the owner's fallback order. */
-#apBody, .ap-pop .m-head > div { min-width: 0; overflow-wrap: anywhere; }
-.ap-action { min-height: 44px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--raised); color: var(--text); cursor: pointer; font: inherit; }
-.ap-pop .icon-btn { min-width: 44px; min-height: 44px; flex: none; }
-.ap-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#fbBody, .fb-pop .m-head > div { min-width: 0; overflow-wrap: anywhere; }
+.fb-pop .icon-btn { min-width: 44px; min-height: 44px; flex: none; }
 
 /* Fallback editor (app.js renderFallbackEditor): numbered rows in one bordered list, like the Connections list. */
 .fe-hint { margin: 0 0 8px; font-size: 12.5px; color: var(--muted); }
@@ -1138,13 +1113,10 @@ button.dg-row:disabled { opacity: .6; cursor: progress; }
 .fe-name { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .fe-model { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; color: var(--text); }
 .fe-agent { flex: none; font-size: 12px; color: var(--faint); }
-.fe-meta { display: flex; align-items: center; gap: 10px; min-width: 0; font-size: 12px; color: var(--muted); }
-.fe-meta .ap-e { min-width: 0; }
-.fe-meta .ap-e span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fe-lim { flex: none; align-self: center; width: 7px; height: 7px; border-radius: 50%; background: var(--danger); }
 .fe-rm { flex: none; width: 32px; height: 32px; display: grid; place-items: center; border: 0; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; }
 .fe-rm:hover { background: var(--raised); color: var(--danger); }
-.fe-rm:focus-visible, .fe-opt:focus-visible, .fe-reset:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.fe-start { min-height: 48px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--raised); }
+.fe-rm:focus-visible, .fe-opt:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .fe-row.fe-press { background: var(--raised); transition: background .35s; }
 .fe-list.dragging { cursor: grabbing; }
 .fe-list.dragging .fe-row { transition: transform .15s ease; }
@@ -1161,13 +1133,12 @@ button.dg-row:disabled { opacity: .6; cursor: progress; }
 .fe-opt:hover:not(:disabled) { background: var(--raised); }
 .fe-opt:disabled { cursor: default; }
 .fe-opt:disabled .fe-model { color: var(--faint); }
-.fe-reset { display: block; margin: 6px 0 0 -6px; }
 .toast-act { margin: -4px -6px -4px 12px; padding: 4px 8px; border: 0; border-radius: 6px; background: transparent; color: inherit; font: inherit; font-weight: 600; text-decoration: underline; cursor: pointer; }
 @media (pointer: coarse) {
   .fe-rm { width: 44px; height: 44px; }
   .fe-grip { height: 44px; }
   .fe-opt { min-height: 44px; }
-  .fe-reset, .toast-act { min-height: 44px; }
+  .toast-act { min-height: 44px; }
   .fe-add-btn { height: 44px; }
 }
 

@@ -195,14 +195,20 @@ const CLAUDE = {
 
 // ---------------------------------------------------------------- codex (OpenAI Codex CLI, `codex exec --json`)
 
-const CODEX_LIMIT_RE = /usage limit|usage_limit_reached|usage_not_included|quota_exceeded|\b429\b|rate.?limit/i;
+// A limit is only read from the CLI's structured failure (turn.failed, a final `error` event, or a non-zero exit whose
+// stderr names a known code), never from assistant text or tool output, which may quote these phrases.
+const CODEX_LIMIT_RE = /usage limit|usage_limit_(?:reached|exceeded)|usage_not_included|quota_exceeded|\b429\b|rate.?limit/i;
+const CODEX_LIMIT_CODE_RE = /usage_limit_(?:reached|exceeded)|usage_not_included|quota_exceeded|you(?:'|’)ve hit your usage limit/i;
+// `error` events that are retry notices ("Reconnecting... 1/5 (… 429 …)"), not failures.
+const codexRetryNotice = (msg) => /^\s*reconnecting\b/i.test(msg || '');
 const CODEX_AUTH_RE = /401 Unauthorized|not logged in|missing bearer|please (?:log ?in|sign in)|codex login|token (?:expired|revoked)/i;
 
 // "…Try again at 3:05 PM." / "try again at 2026-09-25T15:05:00Z" -> epoch seconds (null if unparseable).
 export function codexResetsAt(msg, now = new Date()) {
   const m = /try again (?:at|after) ([^.()\n]+(?:\.\d+)?)/i.exec(msg || '');
   if (!m) return null;
-  let t = Date.parse(m[1].trim());
+  // "Sep 26th, 2026 1:20 AM": drop the ordinal so Date.parse reads it (local time, like the CLI prints it).
+  let t = Date.parse(m[1].trim().replace(/\b(\d{1,2})(?:st|nd|rd|th)\b/i, '$1'));
   if (Number.isNaN(t)) {
     const hm = /^(\d{1,2}):(\d{2})\s*([ap]\.?m\.?)?/i.exec(m[1].trim());
     if (!hm) return null;
@@ -229,37 +235,81 @@ export function codexWindows(rl, now = Date.now()) {
   }
   return out;
 }
-// rate_limits of a token_count event: bare, a rollout `event_msg` payload, or a protocol `{msg}` envelope.
-const codexRateLimits = (m) => [m, m?.payload, m?.msg].find((x) => x?.type === 'token_count' && x.rate_limits)?.rate_limits || null;
+// rate_limits of a token_count event: bare, a rollout `event_msg` payload, or a protocol `{msg}` envelope. Snapshots
+// without windows (e.g. `limit_id: "premium"` with null primary/secondary, written next to the plan's) are skipped.
+const codexRateLimits = (m) => {
+  const rl = [m, m?.payload, m?.msg].find((x) => x?.type === 'token_count' && x.rate_limits)?.rate_limits;
+  return rl && (rl.primary || rl.secondary) ? rl : null;
+};
+// The window a hit limit belongs to: a full one (the later-resetting if both are), else the fullest.
+export function codexExhausted(windows) {
+  const ws = (windows || []).filter((w) => Number.isFinite(w.pct));
+  const full = ws.filter((w) => w.pct >= 100).sort((a, b) => (b.resetsAt || 0) - (a.resetsAt || 0))[0];
+  return full || ws.sort((a, b) => b.pct - a.pct)[0] || null;
+}
 
+// Where the rollouts are read from (CW_CODEX_HOME points tests at a fixture dir; the CLI itself always uses ~/.codex).
+const CODEX_HOME = () => process.env.CW_CODEX_HOME || path.join(HOME, '.codex');
 // `codex exec --json` (0.157) doesn't stream rate limits, but the thread's rollout file
-// (<codexHome>/sessions/YYYY/MM/DD/rollout-…-<thread id>.jsonl) records a token_count snapshot per turn. Returns
-// the windows of the latest snapshot written since `since` (epoch ms), searching the newest 14 day dirs.
-export function codexRolloutWindows(threadId, since = 0, codexHome = path.join(HOME, '.codex')) {
-  if (!threadId) return null;
+// (<codexHome>/sessions/YYYY/MM/DD/rollout-…-<thread id>.jsonl) records a token_count snapshot per turn.
+// Rollout files, newest day dir first (and newest file first within a day), searching the newest 14 day dirs.
+function* codexRollouts(codexHome) {
   const desc = (d) => { try { return fs.readdirSync(d).filter((n) => /^\d+$/.test(n)).sort().reverse(); } catch { return []; } };
   const root = path.join(codexHome, 'sessions');
-  let file = null, days = 0;
-  search: for (const y of desc(root)) for (const mo of desc(path.join(root, y))) for (const d of desc(path.join(root, y, mo))) {
-    if (days++ >= 14) break search;
+  let days = 0;
+  for (const y of desc(root)) for (const mo of desc(path.join(root, y))) for (const d of desc(path.join(root, y, mo))) {
+    if (days++ >= 14) return;
     const dir = path.join(root, y, mo, d);
     let names = [];
-    try { names = fs.readdirSync(dir); } catch {}
-    const hit = names.find((n) => n.endsWith(`-${threadId}.jsonl`));
-    if (hit) { file = path.join(dir, hit); break search; }
+    try { names = fs.readdirSync(dir).filter((n) => n.endsWith('.jsonl')); } catch {}
+    const withTime = names.map((n) => { try { return [n, fs.statSync(path.join(dir, n)).mtimeMs]; } catch { return [n, 0]; } });
+    for (const [n] of withTime.sort((a, b) => b[1] - a[1])) yield path.join(dir, n);
   }
-  if (!file) return null;
+}
+// A rollout's latest plan snapshot written since `since` (epoch ms) -> { windows, t (epoch ms) }, plus `limit`
+// ({ t, message, resetsAt }) when a later turn ended with the CLI's usage-limit error (task_complete / error
+// events carrying codex_error_info). Read-only.
+export function codexRolloutState(file, since = 0) {
   let text = '';
   try { text = fs.readFileSync(file, 'utf8'); } catch { return null; }
-  let latest = null;
+  let snap = null, limit = null;
   for (const line of text.split('\n')) {
-    if (!line.includes('rate_limits')) continue;
+    if (!line.includes('rate_limits') && !line.includes('error')) continue;
     try {
-      const m = JSON.parse(line), rl = codexRateLimits(m), t = Date.parse(m.timestamp);
-      if (rl && !(t < since)) latest = codexWindows(rl, Number.isFinite(t) ? t : Date.now());
+      const m = JSON.parse(line), t = Date.parse(m.timestamp), rl = codexRateLimits(m);
+      if (rl) {
+        if (t < since) continue;
+        const windows = codexWindows(rl, Number.isFinite(t) ? t : Date.now());
+        if (windows.length) { snap = { windows, t: Number.isFinite(t) ? t : Date.now() }; limit = null; }
+        continue;
+      }
+      const err = m.payload?.error || (m.payload?.type === 'error' ? m.payload : null);
+      const code = `${err?.codex_error_info || ''} ${err?.message || ''}`;
+      if (err && CODEX_LIMIT_CODE_RE.test(code) && !(t < since)) limit = { t, message: err.message || '', resetsAt: codexResetsAt(err.message) };
     } catch {}
   }
-  return latest?.length ? latest : null;
+  if (!snap && !limit) return null;
+  return { windows: snap?.windows || null, t: snap?.t ?? null, ...(limit && { limit }) };
+}
+// The windows of the thread's latest snapshot written since `since` (epoch ms), or null.
+export function codexRolloutWindows(threadId, since = 0, codexHome = CODEX_HOME()) {
+  if (!threadId) return null;
+  for (const file of codexRollouts(codexHome)) {
+    if (!file.endsWith(`-${threadId}.jsonl`)) continue;
+    return codexRolloutState(file, since)?.windows || null;
+  }
+  return null;
+}
+// The newest plan snapshot across all recent rollouts (any thread, including interactive sessions): the latest
+// file that has one wins. { windows, t, limit? } or null. Used to poll usage while codex is idle.
+export function codexLatestSnapshot(codexHome = CODEX_HOME(), maxFiles = 40) {
+  let n = 0;
+  for (const file of codexRollouts(codexHome)) {
+    if (n++ >= maxFiles) break;
+    const st = codexRolloutState(file);
+    if (st?.windows) return st;
+  }
+  return null;
 }
 
 const clip = (t) => (t.length > 6000 ? t.slice(0, 6000) + '\n…' : t);
@@ -346,7 +396,8 @@ function* codexEvents(m, started = new Set()) {
     if (windows.length) yield { k: 'windows', windows };
   } else if (m.type === 'turn.failed' || m.type === 'error') {
     const msg = m.error?.message || m.message || '';
-    if (CODEX_LIMIT_RE.test(msg) && (m.type === 'turn.failed' || /usage limit/i.test(msg))) yield { k: 'limit', resetsAt: codexResetsAt(msg) };
+    if (codexRetryNotice(msg)) return;
+    if (CODEX_LIMIT_RE.test(msg) && (m.type === 'turn.failed' || CODEX_LIMIT_CODE_RE.test(msg))) yield { k: 'limit', resetsAt: codexResetsAt(msg) };
   }
 }
 
@@ -372,7 +423,7 @@ async function runCodex({ model, prompt, cwd, resume, systemAppend, signal, onEv
     else if (m.type === 'turn.started') res.numTurns++;
     else if (m.type === 'turn.completed') { completed = true; res.usage = m.usage || {}; }
     else if (m.type === 'turn.failed') failMsg = m.error?.message || 'turn failed';
-    else if (m.type === 'error') lastError = m.message || '';
+    else if (m.type === 'error' && !codexRetryNotice(m.message)) lastError = m.message || '';
     for (const e of codexEvents(m, started)) {
       if (e.k === 'windows') res.windows = e.windows;
       if (onEvent) { try { onEvent(e); } catch {} }
@@ -390,11 +441,13 @@ async function runCodex({ model, prompt, cwd, resume, systemAppend, signal, onEv
   if (completed && !failMsg && exitCode === 0) { res.outcome = 'ok'; return res; }
   const hay = `${errMsg}\n${res.stderr}`;
   if (!res.text) res.text = errMsg || res.stderr.trim();
-  if (CODEX_LIMIT_RE.test(errMsg) || (!errMsg && /usage limit/i.test(res.stderr))) {
+  // stderr counts only on a failed exit and only for the CLI's own limit codes/notice (it may echo tool output).
+  if (CODEX_LIMIT_RE.test(errMsg) || (!errMsg && exitCode !== 0 && CODEX_LIMIT_CODE_RE.test(res.stderr))) {
     res.outcome = 'rate_limited';
     res.errorCode = 'rate_limit';
-    res.resetsAt = codexResetsAt(hay);
-    const full = (res.windows || []).filter((w) => w.pct >= 100).sort((a, b) => (b.resetsAt || 0) - (a.resetsAt || 0))[0];
+    res.resetsAt = codexResetsAt(errMsg || res.stderr);
+    // The exhausted window's snapshot gives the reset when the error has no 'try again at'.
+    const full = codexExhausted(res.windows);
     if (full) { res.limitType = full.window; res.resetsAt ??= full.resetsAt; }
   } else if (CODEX_AUTH_RE.test(hay)) { res.outcome = 'auth_error'; res.errorCode = 'authentication_failed'; }
   else {

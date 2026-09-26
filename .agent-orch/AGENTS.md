@@ -113,7 +113,10 @@ shapes come from codex-rs `exec_events.rs`, and their field names are confirmed 
   `usage_not_included`, `quota_exceeded`, `rate_limit`, and `workspace_{owner,member}_usage_limit_reached`.
 - Transient 429s show up as `Reconnecting... n/5` error events before the turn fails.
 - Adapter rule: match `/usage limit|usage_limit_reached|quota_exceeded|429|rate limit/i` in `turn.failed` or the
-  final `error` and treat it like Claude's rate-limit pause. Parse "try again at" when present.
+  final `error` (never tool output, assistant text or `Reconnecting…` retry notices) and treat it like Claude's
+  rate-limit pause. Parse "try again at" when present. Real 2026-09-25 message: "You’ve hit your usage limit. … or try
+  again at Sep 26th, 2026 1:20 AM." (local time, ordinal day); the rollout records it as a `task_complete` error with
+  `codex_error_info: "usage_limit_exceeded"`, after a `limit_id:"premium"` token_count whose primary/secondary are null.
 - **Plan windows (verified 2026-09-25, codex-cli 0.157.0, Plus plan):** `exec --json` does **not** stream rate
   limits. The thread's rollout `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<thread_id>.jsonl` gets one
   `{"type":"event_msg","payload":{"type":"token_count","info":{…},"rate_limits":{"limit_id":"codex","primary":{"used_percent":0.0,"window_minutes":300,"resets_at":1790361203},"secondary":{"used_percent":17.0,"window_minutes":10080,"resets_at":1790454622},"credits":{…},"plan_type":"plus","rate_limit_reached_type":null}}}`

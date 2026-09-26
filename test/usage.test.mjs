@@ -131,3 +131,21 @@ test('usageHistory groups by agent with limit events and current status', () => 
   assert.equal(usageHistory([], 'bogus', at).range, '24h');
   assert.equal(usageHistory([], '30d', at).bucketMs, D);
 });
+
+test('a polled window reading keeps its snapshot time and reads as stale once older than its window', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-at-'));
+  let t = Date.UTC(2026, 8, 26, 0, 0);
+  const log = createUsageLog(dir, { now: () => t });
+  const s = t / 1000;
+  log.window('codex', '5h', 37, s + 3600, t - 10 * 60e3);
+  log.window('codex', 'weekly', 22, s + 5 * 86400, t - 6 * 3600e3); // a 6 h old weekly reading is still current
+  let w = log.history('6h').agents.codex.status.windows;
+  assert.deepEqual(w['5h'], { pct: 37, resetsAt: s + 3600, t: t - 10 * 60e3, stale: false });
+  assert.equal(w.weekly.stale, false);
+  t += 2 * 3600e3; // the 5h window has reset since that reading
+  w = log.history('6h').agents.codex.status.windows;
+  assert.equal(w['5h'].stale, true);
+  assert.equal(w.weekly.stale, false);
+  assert.equal(usageHistory([{ t, agent: 'codex', kind: 'window', window: '5h', pct: 5, resetsAt: null, at: t - 6 * 3600e3 }], '6h', t).agents.codex.status.windows['5h'].stale, true);
+  fs.rmSync(dir, { recursive: true, force: true });
+});

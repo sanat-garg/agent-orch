@@ -12,3 +12,7 @@ The UI shows 'Limit hit · reset time unknown' for Codex (public/app.js ~line 26
 ## Done when
 
 `npm test` passes with a codex false-positive regression test and a snapshot-parsing test yielding 5h and weekly windows with resets_at, and GET /api/usage/history?range=6h on the live data shows codex windows with non-null resetsAt
+
+## Result — done (check passed) (2026-09-26 00:15)
+
+AGENT-ORCH-STATUS: done — Codex limit was real; reset times now parsed from snapshots/errors

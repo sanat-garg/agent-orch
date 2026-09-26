@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AGENTS, runAgentCli, codexResetsAt, codexWindows, isMissingSession } from '../agents.mjs';
+import { AGENTS, runAgentCli, codexResetsAt, codexWindows, codexRolloutState, codexLatestSnapshot, isMissingSession } from '../agents.mjs';
 import { createUsageLog } from '../usage.mjs';
 
 const fakeQuery = (msgs, seen = {}) => (args) => { Object.assign(seen, args); return (async function* () { for (const m of msgs) yield m; })(); };
@@ -191,7 +191,58 @@ test('codex: a streamed token_count snapshot is used as is; a full window names 
     [{ window: '1h', pct: 5, resetsAt: 1 }, { window: '45m', pct: 1, resetsAt: null }]);
 });
 
+// #146: tool output, assistant text, retry notices and stderr quoting limit phrases are not a limit.
+test('codex: limit phrases in tool output or assistant text are not a limit (false-positive regression)', async () => {
+  const events = [];
+  const ok = await runAgentCli({ agent: 'codex', bin: STUB, prompt: 'hi', cwd: tmp(), codexHome: tmp(),
+    env: { PATH: process.env.PATH, CODEX_STUB: 'toolmention' }, onEvent: (e) => events.push(e) });
+  assert.equal(ok.outcome, 'ok');
+  assert.equal(ok.errorCode, null);
+  assert.equal(ok.resetsAt, null);
+  assert.ok(events.some((e) => e.k === 'tool_result' && /usage limit/.test(e.text)));
+  assert.ok(!events.some((e) => e.k === 'limit'));
+  const fail = await runAgentCli({ agent: 'codex', bin: STUB, prompt: 'hi', cwd: tmp(), codexHome: tmp(),
+    env: { PATH: process.env.PATH, CODEX_STUB: 'toolfail' }, onEvent: (e) => events.push(e) });
+  assert.equal(fail.outcome, 'error'); // a network failure, even though stderr and tool output say "usage limit"
+  assert.notEqual(fail.errorCode, 'rate_limit');
+  assert.ok(!events.some((e) => e.k === 'limit'));
+});
+
+// test/fixtures/codex-rollout-real-limit.jsonl: recorded from the rollout of a real 5h-limit hit (codex-cli 0.157.0,
+// 2026-09-25): 97% and 99% snapshots, an assistant message mentioning usage limits, a windowless `premium` snapshot
+// and the task_complete usage_limit_exceeded error.
+const REAL = fileURLToPath(new URL('./fixtures/codex-rollout-real-limit.jsonl', import.meta.url));
+test('codex: rollout snapshot parsing yields 5h and weekly windows with resets_at; windowless snapshots are skipped', () => {
+  const s = codexRolloutState(REAL);
+  assert.deepEqual(s.windows, [{ window: '5h', pct: 99, resetsAt: 1790385621 }, { window: 'weekly', pct: 32, resetsAt: 1790454622 }]);
+  assert.equal(s.t, Date.parse('2026-09-25T20:58:59.343Z'));
+  assert.equal(s.limit.resetsAt, Math.floor(new Date(2026, 8, 26, 1, 20).getTime() / 1000));
+  assert.match(s.limit.message, /hit your usage limit/);
+  // The newest rollout with a snapshot wins across threads.
+  const home = tmp(), day = path.join(home, 'sessions/2026/09/25');
+  fs.mkdirSync(day, { recursive: true });
+  fs.copyFileSync(REAL, path.join(day, 'rollout-a.jsonl'));
+  fs.writeFileSync(path.join(day, 'rollout-b.jsonl'), '{"type":"session_meta","payload":{}}\n'); // newer, no snapshot
+  assert.deepEqual(codexLatestSnapshot(home).windows, s.windows);
+  assert.equal(codexLatestSnapshot(tmp()), null);
+});
+
+test('codex: a real limit takes its reset from the error, else from the exhausted window snapshot', async () => {
+  const home = tmp();
+  const real = await runAgentCli({ agent: 'codex', bin: STUB, prompt: 'hi', cwd: tmp(), codexHome: home, env: { PATH: process.env.PATH, CODEX_STUB: 'limitreal', CODEX_STUB_HOME: home } });
+  assert.equal(real.outcome, 'rate_limited');
+  assert.equal(real.resetsAt, Math.floor(new Date(2026, 8, 26, 1, 20).getTime() / 1000)); // "try again at Sep 26th, 2026 1:20 AM"
+  assert.equal(real.limitType, '5h');
+  assert.deepEqual(real.windows.map((w) => w.window), ['5h', 'weekly']); // the later `premium` snapshot has no windows
+  const home2 = tmp();
+  const bare = await runAgentCli({ agent: 'codex', bin: STUB, prompt: 'hi', cwd: tmp(), codexHome: home2, env: { PATH: process.env.PATH, CODEX_STUB: 'limitbare', CODEX_STUB_HOME: home2 } });
+  assert.equal(bare.outcome, 'rate_limited');
+  assert.equal(bare.limitType, '5h');
+  assert.equal(bare.resetsAt, 1790385621);
+});
+
 test('codex: resetsAt parsing handles clock times and missing hints', () => {
+  assert.equal(codexResetsAt('or try again at Sep 26th, 2026 1:20 AM.'), Math.floor(new Date(2026, 8, 26, 1, 20).getTime() / 1000));
   const now = new Date(2026, 8, 25, 10, 0, 0);
   assert.equal(codexResetsAt('try again at 3:05 PM.', now), new Date(2026, 8, 25, 15, 5).getTime() / 1000);
   assert.equal(codexResetsAt('Try again at 9:00 AM', now), new Date(2026, 8, 26, 9, 0).getTime() / 1000);

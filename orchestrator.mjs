@@ -16,7 +16,7 @@ import path from 'node:path';
 import { spawn, execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
-import { AGENTS, agentStatus, isMissingSession, modelCatalog, modelNames, runAgentCli, toolInputSummary } from './agents.mjs';
+import { AGENTS, agentStatus, codexExhausted, codexLatestSnapshot, isMissingSession, modelCatalog, modelNames, runAgentCli, toolInputSummary } from './agents.mjs';
 import { mediaCollector } from './media.mjs';
 import { createUsageLog } from './usage.mjs';
 import { CATEGORIES, DELEGATE_CFG, createDelegator, eligible as delegationEligible, parseFallbacks, previewDelegation, rankCandidates, taskCategory } from './delegate.mjs';
@@ -808,7 +808,8 @@ function takeLock(file) {
 }
 
 export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLimits, onSubscription, emitChat, broadcast, convoExists, refreshUsage,
-  onCommit = () => {}, projectReady = () => true, disabled = false, usageLog = createUsageLog(dataDir), modelMetrics = () => null }) {
+  onCommit = () => {}, projectReady = () => true, disabled = false, usageLog = createUsageLog(dataDir), modelMetrics = () => null,
+  codexSnapshot = () => codexLatestSnapshot() }) {
   const dir = path.join(dataDir, 'orchestrator');
   const runsDir = path.join(dir, 'runs');
   fs.mkdirSync(runsDir, { recursive: true });
@@ -1194,6 +1195,30 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       kvSet(key('unknown_limit_streak'), 0);
       if (kvGet(key('blocked_until'), '0') !== '0') { kvSet(key('blocked_until'), 0); pushState(); }
     }
+  }
+
+  // A codex limit held without a reset time (e.g. an unparsed 'try again at'): the newest rollout decides at startup.
+  // A usage-limit error after its last snapshot confirms the hit and gives the reset ('try again at', else the
+  // exhausted window's resets_at); otherwise, with every window under 100% (or reset since), the block is dropped.
+  function reconcileCodexLimit() {
+    const hit = usageLog.lastLimit?.('codex');
+    const unknown = (hit?.status === 'hit' && hit.resetsAt == null) || (blockedUntilFor('codex') && kvGet(limitKey('blocked_known', 'codex'), '0') !== '1');
+    if (!unknown) return null;
+    let s = null;
+    try { s = codexSnapshot(); } catch {}
+    if (!s?.windows) return null;
+    const full = codexExhausted(s.windows), resetsAt = s.limit && (s.limit.resetsAt ?? full?.resetsAt);
+    if (resetsAt > now()) {
+      recordGovernor({ outcome: 'rate_limited', resetsAt, limitType: full?.window || null }, 'codex');
+      return 'confirmed';
+    }
+    if (!s.windows.every((w) => w.pct < 100 || (w.resetsAt && w.resetsAt <= now()))) return null;
+    kvSet(limitKey('blocked_until', 'codex'), 0);
+    kvSet(limitKey('unknown_limit_streak', 'codex'), 0);
+    usageLog.limitCleared('codex');
+    logEvent(`Cleared a Codex usage limit with no reset time: its latest snapshot shows ${s.windows.map((w) => `${w.window} ${Math.round(w.pct)}%`).join(', ')}`);
+    pushState();
+    return 'cleared';
   }
 
   let decisionCache = null;
@@ -2219,6 +2244,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const orphans = run("UPDATE tasks SET status='queued' WHERE status='running'").changes;
     run("UPDATE runs SET outcome='error', finished_at=:t WHERE finished_at IS NULL", { t: now() });
     if (orphans) logEvent(`requeued ${orphans} interrupted task(s) after a restart`);
+    reconcileCodexLimit();
     setInterval(tick, CFG.pollMs);
     setTimeout(tick, 5000);
     // A limit that has passed: capacity is back, so refresh usage for pacing.
@@ -2252,7 +2278,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   return {
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
     planTurn, abortPlan, candidates, eligible: delegationEligible, delegateOptions, delegatePreview, delegateTask, taskAction, moveTask, changeMessage, projectAction, setReflectFallbacks, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
-    drain, undrain, chatPlanning, stateView, limitResetFor, recordLimit: recordGovernor, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
+    drain, undrain, chatPlanning, stateView, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     unwatch: (ws) => { for (const set of runSubs.values()) set.delete(ws); },
   };
 }

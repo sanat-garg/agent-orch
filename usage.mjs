@@ -1,7 +1,8 @@
 // Usage history: an append-only log at <DATA>/metrics/usage.jsonl, one JSON record per line (t = epoch ms,
 // resetsAt = epoch s or null), kept for 30 days:
-//   {t, agent, kind:'window', window, pct, resetsAt}           a plan window reading (dedupe: unchanged within 5 min);
-//     claude: five_hour/seven_day/…, codex: 5h/weekly (from window_minutes), antigravity: <group>-5h/<group>-weekly
+//   {t, agent, kind:'window', window, pct, resetsAt, at?}      a plan window reading (dedupe: unchanged within 5 min);
+//     claude: five_hour/seven_day/…, codex: 5h/weekly (from window_minutes), antigravity: <group>-5h/<group>-weekly;
+//     at = when the reading was taken (epoch ms) if earlier than t, e.g. a polled codex rollout snapshot
 //   {t, agent, kind:'tokens', input, output, cached, source, ref}  one chat turn ('chat', ref = convo id) or run ('task', ref = task id)
 //   {t, agent, kind:'limit', status:'hit'|'cleared', resetsAt, window?}
 // `input` is uncached input (Claude: input + cache writes; codex/agy report input including the cached part).
@@ -70,9 +71,9 @@ export function createUsageLog(dataDir, { now = Date.now } = {}) {
 
   return {
     file,
-    window(agent, window, pct, resetsAt) {
+    window(agent, window, pct, resetsAt, at) {
       if (pct == null || !Number.isFinite(Number(pct))) return null;
-      const r = { agent, kind: 'window', window, pct: Number(pct), resetsAt: toEpochSec(resetsAt) };
+      const r = { agent, kind: 'window', window, pct: Number(pct), resetsAt: toEpochSec(resetsAt), ...(Number.isFinite(at) && at < now() && { at: Math.round(at) }) };
       const last = load().windows.get(`${agent}\n${window}`);
       if (last && last.pct === r.pct && last.resetsAt === r.resetsAt && now() - last.t < DEDUPE_MS) return null;
       return append(r);
@@ -96,6 +97,7 @@ export function createUsageLog(dataDir, { now = Date.now } = {}) {
       if (last?.status === 'hit' && last.resetsAt === at) return null;
       return append({ agent, kind: 'limit', status: 'hit', resetsAt: at, ...(window && { window }) });
     },
+    lastLimit(agent) { return load().limits.get(agent) || null; },
     limitCleared(agent) {
       const last = load().limits.get(agent);
       if (last?.status !== 'hit') return null;
@@ -140,6 +142,10 @@ export function bucketTokens(records, from, to, size) {
   return buckets;
 }
 
+// Window lengths by name, for staleness (a reading older than its window says nothing about the current one).
+const WINDOW_MS = { '5h': 5 * 3600e3, five_hour: 5 * 3600e3, weekly: 7 * 86400e3, seven_day: 7 * 86400e3 };
+const windowMs = (w) => WINDOW_MS[w] ?? (/(?:^|-)5h$/.test(w) ? 5 * 3600e3 : /weekly$/.test(w) ? 7 * 86400e3 : null);
+
 // The /api/usage/history payload: per agent, window series, token buckets, limit events and current status.
 export function usageHistory(records, rangeKey, at = Date.now()) {
   const range = RANGES[rangeKey] ? rangeKey : '24h';
@@ -159,7 +165,9 @@ export function usageHistory(records, rangeKey, at = Date.now()) {
     let lastLimit = null;
     for (const r of recs) {
       if (r.kind === 'window') {
-        a.status.windows[r.window] = { pct: r.pct, resetsAt: r.resetsAt ?? null, t: r.t };
+        const read = r.at ?? r.t, len = windowMs(r.window);
+        a.status.windows[r.window] = { pct: r.pct, resetsAt: r.resetsAt ?? null, t: read,
+          stale: (r.resetsAt != null && r.resetsAt * 1000 <= at) || (len != null && at - read > len) };
         if (r.t >= from) (a.windows[r.window] ||= []).push({ t: r.t, pct: r.pct, resetsAt: r.resetsAt ?? null });
       } else if (r.kind === 'limit') {
         lastLimit = r;

@@ -2505,7 +2505,7 @@ async function loadSidebarUsage() {
 function sidebarUsage() {
   if (usageSlides.agent === 'claude') return M.usage;
   const windows = Object.entries(usageSlides.data?.[usageSlides.agent]?.status?.windows || {});
-  const active = windows.filter(([, w]) => !w.resetsAt || w.resetsAt * 1000 > Date.now());
+  const active = windows.filter(([, w]) => !w.stale && (!w.resetsAt || w.resetsAt * 1000 > Date.now()));
   return {
     available: !!active.length,
     updatedAt: windows.length ? Math.max(...windows.map(([, w]) => w.t)) : null,
@@ -2695,8 +2695,8 @@ function usageChips(a) {
   for (const w of Object.keys(a.status.windows).sort(byWin)) {
     const s = a.status.windows[w], reset = s.resetsAt ? s.resetsAt * 1000 : null;
     const c = el('span', `ug-chip ${reset && reset <= now ? '' : level(s.pct)[0]}`,
-      reset && reset <= now ? `${winLabel(w)} · reset ${fmtWhen(reset)}` : `${winLabel(w)} ${Math.round(s.pct)}% · ${reset ? `resets ${fmtWhen(reset)}` : 'reset time unknown'}`);
-    c.title = `Read ${fmtWhen(s.t)}`;
+      reset && reset <= now ? `${winLabel(w)} · reset ${fmtWhen(reset)}` : `${winLabel(w)} ${Math.round(s.pct)}% · ${reset ? `resets ${fmtWhen(reset)}` : 'reset time unknown'}${s.stale ? ' · stale' : ''}`);
+    c.title = `Read ${fmtWhen(s.t)}${s.stale ? ' (older than the window)' : ''}`;
     box.append(c);
   }
   return box;

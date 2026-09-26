@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Stand-in for `codex exec --json`: prints recorded JSONL events and never touches the network.
-// CODEX_STUB=ok|limit|auth|hang|nosession picks the script; CODEX_STUB_LOG, if set, receives {argv, env, cwd} as JSON.
+// CODEX_STUB=ok|limit|limitreal|limitbare|toolmention|toolfail|auth|hang|nosession picks the script; CODEX_STUB_LOG, if set, receives {argv, env, cwd} as JSON.
 // `login status` answers like the real CLI: logged in unless CODEX_STUB_LOGIN=out. `debug models` prints a catalog.
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
@@ -32,9 +32,13 @@ const tid = '01a0d699-1efd-7d72-b9f4-2616f4bf739a';
 // as the real CLI does in ~/.codex/sessions; CODEX_STUB_STREAM_LIMITS: also stream a token_count event.
 if (process.env.CODEX_STUB_HOME) {
   const dir = `${process.env.CODEX_STUB_HOME}/sessions/2026/09/25`;
-  const src = new URL(`./codex-rollout${mode === 'limit' ? '-limit' : ''}.jsonl`, import.meta.url);
+  // limitreal/limitbare: a real rollout that hit the 5h limit (codex-rollout-real-limit.jsonl), every line stamped now.
+  const real = mode === 'limitreal' || mode === 'limitbare';
+  const src = new URL(`./codex-rollout${real ? '-real-limit' : mode === 'limit' ? '-limit' : ''}.jsonl`, import.meta.url);
+  let text = fs.readFileSync(src, 'utf8').replace('__NOW__', new Date().toISOString());
+  if (real) text = text.replace(/"timestamp":"[^"]+"/g, `"timestamp":"${new Date().toISOString()}"`);
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(`${dir}/rollout-2026-09-25T13-33-21-${tid}.jsonl`, fs.readFileSync(src, 'utf8').replace('__NOW__', new Date().toISOString()));
+  fs.writeFileSync(`${dir}/rollout-2026-09-25T13-33-21-${tid}.jsonl`, text);
 }
 out({ type: 'thread.started', thread_id: tid });
 if (process.env.CODEX_STUB_STREAM_LIMITS) out({ type: 'token_count', info: null,
@@ -61,6 +65,28 @@ if (mode === 'ok') {
   out({ type: 'error', message: msg });
   out({ type: 'turn.failed', error: { message: msg } });
   process.exitCode = 1;
+} else if (mode === 'limitreal' || mode === 'limitbare') {
+  // The message codex-cli 0.157.0 recorded on 2026-09-25 (limitbare: without the 'try again at' hint).
+  const msg = mode === 'limitreal'
+    ? 'You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 26th, 2026 1:20 AM.'
+    : 'You’ve hit your usage limit.';
+  out({ type: 'error', message: msg });
+  out({ type: 'turn.failed', error: { message: msg } });
+  process.exitCode = 1;
+} else if (mode === 'toolmention' || mode === 'toolfail') {
+  // Tool output and assistant text quoting limit phrases (the agent read .agent-orch/AGENTS.md and agents.mjs).
+  const quoted = "- Adapter rule: match `/usage limit|usage_limit_reached|quota_exceeded|429|rate limit/i` in `turn.failed`\n  contains **`You've hit your usage limit`**, internal codes `usage_limit_reached`, `quota_exceeded`\n";
+  process.stderr.write(quoted);
+  out({ type: 'error', message: 'Reconnecting... 1/5 (stream disconnected before completion: 429 Too Many Requests; rate limit)' });
+  out({ type: 'item.started', item: { id: 'item_0', type: 'command_execution', command: "bash -lc 'grep -n usage .agent-orch/AGENTS.md'", status: 'in_progress' } });
+  out({ type: 'item.completed', item: { id: 'item_0', type: 'command_execution', command: "bash -lc 'grep -n usage .agent-orch/AGENTS.md'", aggregated_output: quoted, exit_code: 0, status: 'completed' } });
+  out({ type: 'item.completed', item: { id: 'item_1', type: 'agent_message', text: "The adapter treats \"You've hit your usage limit\" (usage_limit_reached, 429) as a rate limit." } });
+  if (mode === 'toolmention') out({ type: 'turn.completed', usage: { input_tokens: 1000, cached_input_tokens: 800, output_tokens: 50 } });
+  else {
+    out({ type: 'error', message: 'stream disconnected before completion: error sending request for url (https://chatgpt.com/backend-api/codex/responses)' });
+    out({ type: 'turn.failed', error: { message: 'stream disconnected before completion: error sending request for url (https://chatgpt.com/backend-api/codex/responses)' } });
+    process.exitCode = 1;
+  }
 } else if (mode === 'auth') {
   out({ type: 'error', message: 'unexpected status 401 Unauthorized: Missing bearer or basic authentication in header' });
   out({ type: 'turn.failed', error: { message: 'unexpected status 401 Unauthorized' } });

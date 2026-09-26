@@ -11,7 +11,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createOrchestrator, parseJsonl, SHOT_HINT } from './orchestrator.mjs';
 import { createGitHub } from './github.mjs';
 import { retireRuntime, chatIdle, whenIdle } from './runtimes.mjs';
-import { AGENTS, runAgentCli, clearLoginCache, isMissingSession, modelCatalog } from './agents.mjs';
+import { AGENTS, runAgentCli, clearLoginCache, isMissingSession, modelCatalog, codexLatestSnapshot } from './agents.mjs';
 import { createModelStore } from './models.mjs';
 import { createAAStore } from './aa.mjs';
 import { createConnections, SPECS, codexAccount, agyAccount, onPath } from './connections.mjs';
@@ -514,6 +514,20 @@ function refreshUsageSoon(liveQuery) {
 }
 refreshClaudeAuth().then(() => refreshUsage()).catch((e) => console.error('[usage] refresh failed', e));
 setInterval(() => refreshUsage().catch((e) => console.error('[usage] refresh failed', e)), 3 * 60e3);
+
+// Codex plan windows while codex is idle (its runs and chat turns record their own): the newest rollout snapshot,
+// every 5 min, recorded only when it changed; `at` keeps the snapshot's time so an old one reads as stale.
+let codexSnapAt = 0;
+function pollCodexUsage() {
+  const busy = [...agentTurns.keys()].some((cid) => findConvo(cid)?.agent === 'codex') || orch?.stateView().activeUsage.some((a) => a.agent === 'codex');
+  if (busy) return;
+  const s = codexLatestSnapshot();
+  if (!s?.windows || s.t <= codexSnapAt) return;
+  codexSnapAt = s.t;
+  for (const w of s.windows) usageLog.window('codex', w.window, w.pct, w.resetsAt, s.t);
+}
+setTimeout(() => { try { pollCodexUsage(); } catch (e) { console.error('[usage] codex poll failed', e); } }, 2000);
+setInterval(() => { try { pollCodexUsage(); } catch (e) { console.error('[usage] codex poll failed', e); } }, 5 * 60e3);
 
 let instance = null;
 fetch('http://169.254.169.254/opc/v2/instance/', { headers: { Authorization: 'Bearer Oracle' }, signal: AbortSignal.timeout(3000) })

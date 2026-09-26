@@ -425,3 +425,7 @@ fallback editor rebuilt, interactions persist; npm test passes
 ## 2026-09-26 00:03 — #142 Orchestrator settings: fallback hierarchy for reflection tasks [done (check passed)]
 
 Reflection fallbacks editor added to #obPop, saved and snapshotted per project, npm test passes
+
+## 2026-09-26 00:15 — #146 Codex: fix false 'limit hit' and use real reset times from rate-limit snapshots [done (check passed)]
+
+Codex limit was real; reset times now parsed from snapshots/errors

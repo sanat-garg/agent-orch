@@ -493,3 +493,7 @@ Three CLI research sections documented; all help checks passed.
 ## 2026-09-26 08:50 — #160 OpenCode CLI: adapter, model discovery, connection and smoke test [done (check passed)]
 
 OpenCode added; tests and API pass; smoke awaits sign-in
+
+## 2026-09-26 09:08 — #161 Kiro CLI: adapter, model discovery, connection and smoke test [done (check passed)]
+
+Kiro integrated; live smoke awaits owner sign-in

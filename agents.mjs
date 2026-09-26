@@ -3,7 +3,8 @@
 //   {k:'image',tool,mediaType,data} (raw base64 from a tool result; callers store it via media.mjs and log {k:'image',id,name})
 //   {k:'windows',windows:[{window,pct,resetsAt}]} (plan-window readings, pct used; codex and agy also leave the latest in res.windows)
 // (adapters may add fields such as a tool id). Adapters: claude (Agent SDK), codex (`codex exec --json`),
-// antigravity (`agy -p --output-format stream-json`), opencode (`opencode run --format json`). Every adapter strips its `envFilter` vars from the env so
+// antigravity (`agy -p --output-format stream-json`), opencode (`opencode run --format json`),
+// kiro (`kiro-cli chat --output-format stream-json`). Every adapter strips its `envFilter` vars from the env so
 // billing stays on the owner's subscription login, never an API key. See .agent-orch/AGENTS.md.
 
 import fs from 'node:fs';
@@ -796,6 +797,120 @@ const OPENCODE = {
   events: opencodeEvents, run: runOpencode,
 };
 
+// ---------------------------------------------------------------- kiro (browser-authenticated Kiro CLI)
+
+export function kiroAuth(out) {
+  try {
+    const j = JSON.parse(String(out || ''));
+    // Signed-out releases return {account:null}; authenticated ones may put accountType/email at the top level.
+    const account = j?.account && typeof j.account === 'object' ? j.account : j;
+    const type = String(account?.accountType || account?.account_type || account?.type || account?.authMethod || account?.auth_method || '');
+    if (!account || j?.account === null || !type || /api.?key/i.test(type)) return { ok: false, account: null };
+    return { ok: true, account: account.email || account.name || account.username || null };
+  } catch { return { ok: false, account: null }; }
+}
+export function kiroModels(out) {
+  const j = JSON.parse(String(out || ''));
+  const rows = Array.isArray(j) ? j : j.models;
+  if (!Array.isArray(rows)) throw new Error('Kiro returned no model list');
+  return rows.filter((m) => typeof m === 'string' || m?.id || m?.modelId || m?.model_id).map((m) => {
+    const id = typeof m === 'string' ? m : m.id || m.modelId || m.model_id;
+    return { id, label: typeof m === 'string' ? m : m.model_name || m.name || m.displayName || id,
+      ...(m.description && { description: m.description }), ...((m.default === true || id === j.default_model) && { default: true }) };
+  });
+}
+const KIRO_LIMIT_RE = /\b429\b|rate.?limit|quota|credits? (?:exhausted|depleted)|(?:exhausted|insufficient) credits|usage limit|throttl/i;
+const KIRO_AUTH_RE = /not authenticated|not logged in|sign in|login --use-device-flow|authentication required|api key required/i;
+const KIRO_NO_SESSION_RE = /session.*(?:not found|does not exist)|no such session/i;
+const kiroError = (m) => {
+  const e = m?.error || m?.params?.error || m?.data?.error;
+  return e && [e.code, e.type, e.message, e.data?.message].filter((v) => v != null).join(' ');
+};
+const kiroReset = (m) => {
+  const e = m?.error || m?.params?.error || m?.data?.error || {};
+  const v = e.resetsAt ?? e.resetAt ?? e.reset_at ?? e.retryAfter ?? e.retry_after ?? e.data?.resetsAt;
+  if (v != null) {
+    const n = Number(v);
+    if (Number.isFinite(n)) return Math.round(n > 1e12 ? n / 1000 : n < 86400 ? Date.now() / 1000 + n : n);
+    const parsed = Date.parse(v);
+    if (Number.isFinite(parsed)) return Math.round(parsed / 1000);
+  }
+  return codexResetsAt(kiroError(m) || '');
+};
+// stream-json is an ACP event stream. Tool output and assistant prose never classify a provider limit.
+export function* kiroEvents(m, st = { tools: new Set() }) {
+  const u = m.params?.update || m.update || m;
+  const kind = u.sessionUpdate || u.type || m.type;
+  if (kind === 'agent_message_chunk') {
+    const value = u.content?.text;
+    if (value) yield { k: 'text', text: value };
+  } else if (kind === 'tool_call' || kind === 'tool_call_update') {
+    const id = u.toolCallId || u.id || u.title;
+    if (kind === 'tool_call' && !st.tools.has(id)) {
+      st.tools.add(id);
+      const name = u.title || u.kind || 'Tool';
+      yield { k: 'tool', id, name, input: toolInputSummary(name, u.rawInput || {}) };
+    }
+    if (kind === 'tool_call_update' && ['completed', 'failed'].includes(u.status)) {
+      const value = (u.content || []).map((c) => c.text || '').filter(Boolean).join('\n') || u.rawOutput || '';
+      const s = typeof value === 'string' ? value : JSON.stringify(value);
+      yield { k: 'tool_result', id, text: clip(s), isError: u.status === 'failed', lines: s.split('\n').length };
+    }
+  } else if (kind === 'result' && m.usage) yield { k: 'result', usage: m.usage };
+  else if ((m.type === 'error' || m.method === 'error') && KIRO_LIMIT_RE.test(kiroError(m) || '')) yield { k: 'limit', resetsAt: kiroReset(m) };
+}
+async function runKiro({ model, prompt, cwd, resume, systemAppend, signal, onEvent, onMessage, bin, env = process.env, autonomous = true }) {
+  const res = { outcome: 'error', text: '', sessionId: resume || null, usage: {}, numTurns: 0, resetsAt: null,
+    limitType: null, stderr: '', errorCode: null, windows: null };
+  const args = ['chat', '--no-interactive', '--agent-engine', 'v2', '--output-format', 'stream-json'];
+  if (autonomous) args.push('--trust-all-tools');
+  if (model) args.push('--model', model);
+  if (resume) args.push('--resume-id', resume);
+  args.push(systemAppend ? `${systemAppend}\n\n${prompt}` : prompt);
+  let failure = null, terminal = false;
+  const st = { tools: new Set() };
+  const handle = (m) => {
+    res.sessionId = m.sessionId || m.session_id || m.params?.sessionId || res.sessionId;
+    if (m.type === 'error' || m.method === 'error') failure = m;
+    if (m.type === 'result' || m.type === 'interrupted' || m.method === 'session/end') terminal = true;
+    if (m.usage && m.type === 'result') res.usage = m.usage;
+    for (const e of kiroEvents(m, st)) {
+      if (e.k === 'text') res.text += e.text;
+      if (onEvent) { try { onEvent(e); } catch {} }
+    }
+    try { onMessage?.(m); } catch {}
+  };
+  const { aborted, exitCode } = await spawnJsonl({ bin: bin || KIRO.bin, args, cwd, env: stripEnv(env, KIRO.envFilter), signal, res, handle });
+  if (aborted) { res.outcome = 'aborted'; return res; }
+  const message = kiroError(failure) || res.stderr.trim();
+  if (exitCode === 0 && !failure && (terminal || res.text)) { res.outcome = 'ok'; return res; }
+  if (!res.text) res.text = message;
+  if (failure && KIRO_LIMIT_RE.test(kiroError(failure) || '')) {
+    res.outcome = 'rate_limited'; res.errorCode = 'rate_limit'; res.resetsAt = kiroReset(failure);
+  } else if (KIRO_AUTH_RE.test(message)) { res.outcome = 'auth_error'; res.errorCode = 'authentication_failed'; }
+  else if (resume && KIRO_NO_SESSION_RE.test(message)) res.errorCode = 'no_session';
+  return res;
+}
+const KIRO = {
+  id: 'kiro', label: 'Kiro CLI', bin: path.join(HOME, '.local/bin/kiro-cli'),
+  available() { return onPath(this.bin); },
+  loggedIn() {
+    return cachedLogin(this, () => {
+      const r = spawnSync(this.bin, ['whoami', '--format', 'json'], { env: stripEnv(process.env, this.envFilter), encoding: 'utf8', timeout: 5000 });
+      const a = r.status === 0 ? kiroAuth(r.stdout) : { ok: false, account: null };
+      this.identity = a.account;
+      return a.ok;
+    });
+  },
+  account() { return this.loggedIn() ? this.identity : null; },
+  login: 'Connect from the sidebar',
+  async listModels({ bin, env = process.env, timeoutMs = 20_000 } = {}) {
+    return kiroModels(await execOut(bin || this.bin, ['chat', '--list-models', '--format', 'json'], { env: stripEnv(env, this.envFilter), cwd: HOME, timeout: timeoutMs }));
+  },
+  envFilter: /^KIRO_API_KEY$/,
+  events: kiroEvents, run: runKiro,
+};
+
 // ---------------------------------------------------------------- model discovery
 
 // Each CLI's models as {id, label, description?, default?} (claude adds `resolved`, the full id an alias maps to).
@@ -857,7 +972,7 @@ export async function discoverModels(id, opts = {}) {
 export const isMissingSession = (res) => res.outcome === 'error' &&
   (res.errorCode === 'no_session' || /no conversation found/i.test(`${res.text || ''}\n${res.stderr || ''}`));
 
-export const AGENTS = { claude: CLAUDE, codex: CODEX, antigravity: ANTIGRAVITY, opencode: OPENCODE };
+export const AGENTS = { claude: CLAUDE, codex: CODEX, antigravity: ANTIGRAVITY, opencode: OPENCODE, kiro: KIRO };
 
 // Runs one turn on `agent` (default 'claude'). Returns at least {outcome, text, sessionId, usage, resetsAt, errorCode};
 // outcome is ok | aborted | rate_limited | auth_error | max_turns | error.

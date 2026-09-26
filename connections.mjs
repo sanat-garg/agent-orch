@@ -57,6 +57,14 @@ export const SPECS = {
     successRe: /credential added|logged in|authentication successful/i,
     logout: ['opencode', 'auth', 'logout', 'openai'],
   },
+  kiro: {
+    start: [path.join(BIN, 'kiro-cli'), 'login', '--use-device-flow'],
+    url: /(https:\/\/[^\s]+\/\S+)/,
+    code: /^Code:\s*([A-Z0-9]+(?:-[A-Z0-9]+)*)/im,
+    needsPastedCode: false,
+    successRe: /successfully (?:logged in|authenticated)|login successful/i,
+    logout: [path.join(BIN, 'kiro-cli'), 'logout'],
+  },
   github: {
     start: ['gh', 'auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web'],
     url: /(https:\/\/github\.com\/login\/device)/,

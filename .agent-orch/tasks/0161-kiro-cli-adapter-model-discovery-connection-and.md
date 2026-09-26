@@ -13,3 +13,7 @@ Add a 'kiro' agent following the Kiro section of .agent-orch/AGENTS.md and the p
 ## Done when
 
 `npm test` passes with kiro adapter tests, and GET /api/connections lists kiro
+
+## Result — done (check passed) (2026-09-26 09:08)
+
+AGENT-ORCH-STATUS: done — Kiro integrated; live smoke awaits owner sign-in

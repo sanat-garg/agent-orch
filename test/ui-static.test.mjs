@@ -12,7 +12,7 @@ const appJs = read('public/app.js');
 const indexHtml = read('public/index.html');
 
 // Ids that app.js creates itself before looking them up with $(): qList is the queue sheet's list (renderQueue).
-const DYNAMIC_IDS = new Set(['qList']);
+const DYNAMIC_IDS = new Set(['qList', 'qLanes']);
 
 test('public/app.js parses', () => {
   assert.doesNotThrow(() => new vm.Script(appJs, { filename: 'public/app.js' }));

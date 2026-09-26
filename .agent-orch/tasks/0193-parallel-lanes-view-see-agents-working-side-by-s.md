@@ -14,3 +14,7 @@ Make parallel work visible. Add a 'Lanes' strip at the top of the Queue modal (a
 ## Done when
 
 `node --check public/app.js && npm test` passes, and the Queue modal renders a lanes strip with one lane per running agent (verified by a seeded UI test)
+
+## Result — done (check passed) (2026-09-26 15:44)
+
+That was the old monitor timing out. I'm still waiting for the new run to finish.

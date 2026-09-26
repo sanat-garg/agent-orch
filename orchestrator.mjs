@@ -1402,6 +1402,14 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const log = logPath ? fs.createWriteStream(logPath, { flags: 'a' }) : null;
     const writeEntry = (e) => {
       log?.write(JSON.stringify(e) + '\n');
+      if (e.k === 'tool' && taskId) {
+        const input = e.input || {};
+        const detail = input.command || input.file_path || input.pattern || input.url || input.query || input.path || input.description || '';
+        const activity = `${e.name || 'Tool'} · ${String(detail).replace(/\s+/g, ' ').slice(0, 240)}`;
+        const lane = running.get(taskId);
+        if (lane) lane.activity = activity;
+        broadcast({ t: 'olane', taskId, activity });
+      }
       const subs = runSubs.get(taskId);
       if (subs?.size) {
         const msg = JSON.stringify({ t: 'orun', taskId, runId, e });
@@ -2460,7 +2468,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const lanes = [...running.entries()].map(([id, r]) => {
       const t = getTask(id);
       return { agent: r.agent, task: id, title: t.title, model: t.ran_model || t.model || delegator.defaultModel(r.agent),
-        started_at: r.startedAt, elapsed: Math.max(0, now() - r.startedAt) };
+        activity: r.activity || null, started_at: r.startedAt, elapsed: Math.max(0, now() - r.startedAt) };
     });
     return { activeUsage, blocks, blockedUntil: blockedUntil(), blockedReason: kvGet('blocked_reason'),
       pacing: d?.reason || kvGet('budget_reason'), slots: slotCount(d), parallel, lanes,

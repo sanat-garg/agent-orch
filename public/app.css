@@ -1223,3 +1223,20 @@ button.dg-row:disabled { opacity: .6; cursor: progress; }
 }
 
 .ob-opt > label[for="obSound"] { flex: 1; font-size: 13.5px; cursor: pointer; }
+
+/* Agent lanes remain a horizontal collection on compact sheets. */
+.lanes { min-width: 0; margin-bottom: 20px; }
+.lanes h3 { margin: 0 0 6px; font-size: 16px; }
+.lanes-summary { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
+.lanes-row { display: flex; gap: 10px; overflow-x: auto; padding: 2px 2px 10px; scroll-snap-type: x proximity; }
+.lane-card { flex: 0 0 252px; min-width: 0; border: 1px solid var(--border); border-radius: 12px; padding: 12px; scroll-snap-align: start; }
+.lane-card > strong { display: block; margin-bottom: 8px; font-size: 14px; }
+.lane-task { display: flex; flex-direction: column; gap: 7px; text-align: left; width: 100%; min-height: 44px; padding: 4px 0; background: transparent; color: inherit; border: 0; cursor: pointer; }
+.lane-title { font-weight: 600; overflow-wrap: anywhere; }
+.lane-task small, .lane-status, .lane-activity { color: var(--muted); font-size: 12px; }
+.lane-activity { width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lane-group { color: var(--accent); }
+.lanes-compact { display: flex; gap: 6px; overflow-x: auto; max-width: 100%; min-width: 0; }
+.lanes-compact:empty { display: none; }
+.lanes-compact .chip { flex-shrink: 0; min-height: 44px; }
+@media (max-width: 600px) { .lanes-compact { flex-basis: 100%; } }

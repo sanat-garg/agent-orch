@@ -577,3 +577,6 @@ Merge conflicts resolved; tests pass; no hardcoded OpenAI provider remains
 ## 2026-09-26 15:15 — #185 OpenCode: free Zen models available without sign-in [done (check passed)]
 
 OpenCode is ready with free Zen models, no sign-in needed
+## 2026-09-26 15:44 — #193 Parallel lanes view: see agents working side by side [done (check passed)]
+
+That was the old monitor timing out. I'm still waiting for the new run to finish.

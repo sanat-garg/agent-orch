@@ -2085,7 +2085,7 @@ function send(msg) {
 
 function onServer(msg) {
   if (msg.t === 'mtick' || msg.t === 'mhist' || msg.t === 'mdetail' || msg.t === 'usage') return onMetrics(msg);
-  if (['otask', 'oproject', 'ostate', 'orun', 'oorder'].includes(msg.t)) return onOrch(msg);
+  if (['otask', 'oproject', 'ostate', 'orun', 'oorder', 'olane'].includes(msg.t)) return onOrch(msg);
   if (msg.t === 'connections') return applyConnections(msg.connections);
   if (msg.t === 'models') return api('/api/agents').then((d) => { AGENT_LIST = d.agents || []; renderAgentPicker(); }).catch(() => {});
   if (msg.t === 'status') { upd.pending = !!msg.restartPending; return renderUpdateBanner(); }
@@ -3129,6 +3129,9 @@ function fillCard(b, id) {
   title.textContent = title.title = displayTitle(t);
   sub.textContent = '';
   sub.append(el('span', 'id', `#${t.id}`));
+  const info = parallelInfo(t);
+  if (info.group) sub.append(el('span', 'lane-group', ` · Group ${info.group}`));
+  if (info.integrates.length) sub.append(el('span', '', ` · Integrates ${info.integrates.map(id => `#${id}`).join(' ')}`));
   // A queued task with prerequisites shows them ('after #N, #M'), so the queue's dependencies are visible.
   const deps = t.status === 'queued' ? taskDeps(t) : [];
   if (deps.length) {
@@ -3170,6 +3173,11 @@ function applyOrchSnapshot(s) {
 }
 
 function onOrch(msg) {
+  if (msg.t === 'olane') { laneActivity.set(msg.taskId, msg.activity); renderLanes(); return; }
+  if (msg.t === 'orun' && msg.e?.k === 'tool') {
+    laneActivity.set(msg.taskId, `${msg.e.name || 'Tool'} · ${toolLine(msg.e)}`);
+    renderLanes();
+  }
   if (msg.t === 'otask') {
     observeTaskCompletion(msg.task);
     const edit = taskFallbackEdits.get(msg.task.id);
@@ -3209,6 +3217,7 @@ function onOrch(msg) {
 const limitedAgents = (s, nowS) => Object.entries(s.blocks || {}).filter(([, b]) => b.until > nowS);
 function renderOrchBar() {
   renderConnFoot(); // routing rules decide whether a signed-out agent warrants the footer's warning
+  renderLanes();
   const on = $('mode').value === 'orchestrator';
   $('orchBar').hidden = !on;
   if (!on) return;
@@ -3935,6 +3944,102 @@ function toastLift() {
   if (!r || !r.width || r.right < innerWidth - 16 - 360) return 0;
   return Math.max(0, innerHeight - r.top - 4);
 }
+// Retain accounts seen in this session; historical tasks cover reloads (last 24 hours).
+const laneAccounts = new Map(), laneActivity = new Map();
+function parallelInfo(t) {
+  const deps = taskDeps(t);
+  const integrates = t.integrates ? (Array.isArray(t.integrates) ? t.integrates : [t.integrates]) : deps.length > 1 ? deps : [];
+  const parent = [...O.tasks.values()].find(p => p.project_id === t.project_id && taskDeps(p).length > 1 && taskDeps(p).includes(t.id));
+  return { group: t.parallel_group || (parent ? `#${parent.id}` : integrates.length > 1 ? `#${t.id}` : ''), integrates };
+}
+function visibleLanes() {
+  const now = Date.now() / 1000;
+  const live = new Map();
+  for (const t of O.tasks.values()) {
+    if (t.status !== 'running' && !(t.finished_at > now - 86400)) continue;
+    const agent = t.ran_agent || t.agent || 'claude';
+    const key = `${agent}:${t.account_id || ''}`;
+    laneAccounts.set(key, { agent, account_label: t.account_label || t.account_id, seen: t.status === 'running' ? now : t.finished_at });
+    if (t.status === 'running') live.set(t.id, { agent, task: t.id, title: t.title, model: t.ran_model || t.model, started_at: t.started_at, account_id: t.account_id, account_label: t.account_label });
+  }
+  for (const lane of O.state?.lanes || []) {
+    const t = O.tasks.get(lane.task);
+    if (t && t.status !== 'running') continue;
+    live.set(lane.task, { ...live.get(lane.task), ...lane });
+  }
+  const rows = new Map();
+  for (const lane of live.values()) {
+    const key = `${lane.agent}:${lane.account_id || ''}`;
+    if (!rows.has(key)) rows.set(key, { ...lane, tasks: [] });
+    rows.get(key).tasks.push(lane);
+    laneAccounts.set(key, { agent: lane.agent, account_label: lane.account_label || lane.account_id, seen: now });
+  }
+  for (const [key, a] of laneAccounts) {
+    if (a.seen < now - 86400) { laneAccounts.delete(key); continue; }
+    if (!rows.has(key)) rows.set(key, { ...a, tasks: [] });
+  }
+  return [...rows.values()];
+}
+function renderLanes() {
+  const rows = visibleLanes(), compact = $('obLaneStrip');
+  const focused = document.activeElement?.dataset.laneTask;
+  const compactFocus = document.activeElement?.closest('#obLaneStrip') ? [...compact.children].indexOf(document.activeElement) : -1;
+  const compactScroll = compact.scrollLeft;
+  const scroll = $('qLanes')?.querySelector('.lanes-row')?.scrollLeft || 0;
+  compact.replaceChildren();
+  const section = el('section', 'lanes'); section.id = 'qLanes';
+  section.append(el('h3', '', 'Lanes'));
+  const running = rows.reduce((n, r) => n + r.tasks.length, 0);
+  const ready = [...O.tasks.values()].filter(t => t.project_id === O.project?.id && t.status === 'queued' && taskState(t).cls === 'queued').length;
+  section.append(el('p', 'lanes-summary', `Running ${running} in parallel · ${ready} queued ready`));
+  const strip = el('div', 'lanes-row');
+  for (const lane of rows) {
+    const name = ({ claude: 'Claude', codex: 'Codex', antigravity: 'Antigravity', opencode: 'OpenCode', kiro: 'Kiro', copilot: 'Copilot' })[lane.agent] || lane.agent;
+    const account = lane.account_label || lane.account_id;
+    const label = name + (account ? ` · ${account}` : '');
+    const conn = CONN.list.find(c => c.id === lane.agent);
+    // Antigravity limits are per model group (antigravity:gemini / antigravity:3p); show the soonest reset.
+    const block = Object.entries(O.state?.blocks || {}).filter(([k, b]) => (k === lane.agent || k.startsWith(lane.agent + ':')) && b.until > Date.now()/1000)
+      .map(([, b]) => b).sort((a, b) => a.until - b.until)[0];
+    const status = conn?.signedIn === false ? 'Signed out' : block?.until > Date.now()/1000 ? `Limited until ${fmtClock(block.until)}` : 'Idle';
+    const card = el('div', 'lane-card');
+    card.append(el('strong', '', label));
+    if (!lane.tasks.length) card.append(el('span', 'lane-status', status));
+    for (const task of lane.tasks) {
+      const b = el('button', 'lane-task'); b.type = 'button'; b.dataset.laneTask = task.task;
+      b.onclick = () => { closeQueue(false); openTask(task.task); };
+      b.append(el('span', 'lane-title', `#${task.task} ${task.title}`));
+      const since = task.started_at || Date.now()/1000 - (task.elapsed || 0);
+      const meta = el('small', '', laneMeta(task.model, since)); meta.dataset.laneSince = since; meta.dataset.laneModel = task.model || '';
+      b.append(meta);
+      const info = parallelInfo(O.tasks.get(task.task) || {});
+      if (info.group) b.append(el('small', 'lane-group', `Group ${info.group}`));
+      if (info.integrates.length) b.append(el('small', '', `Integrates ${info.integrates.map(id => `#${id}`).join(' ')}`));
+      b.append(el('span', 'lane-activity', laneActivity.get(task.task) || task.activity || 'Waiting for activity…'));
+      card.append(b);
+    }
+    strip.append(card);
+    const chip = el('button', 'chip', `${label} · ${lane.tasks.length ? lane.tasks.map(t => `#${t.task}`).join(' ') : status}`);
+    chip.type = 'button'; chip.onclick = lane.tasks.length === 1 ? () => openTask(lane.tasks[0].task) : openQueue;
+    compact.append(chip);
+  }
+  compact.scrollLeft = compactScroll;
+  if (compactFocus >= 0) compact.children[compactFocus]?.focus({ preventScroll: true });
+  if (!rows.length) strip.append(el('p', 'muted', 'No recent agent activity.'));
+  section.append(strip);
+  if (!$('queueModal').hidden) {
+    if ($('qLanes')) $('qLanes').replaceWith(section); else $('qBody').prepend(section);
+    strip.scrollLeft = scroll;
+    if (focused) section.querySelector(`[data-lane-task="${focused}"]`)?.focus({ preventScroll: true });
+  }
+}
+function laneMeta(model, since) { return `${model || 'Default model'} · ${fmtDur(Math.max(0, Date.now()/1000 - since))}`; }
+// Tick only the elapsed timers, so a tap on a lane is never lost to a rebuild mid-click.
+setInterval(() => {
+  if (document.hidden || $('queueModal').hidden) return;
+  for (const m of document.querySelectorAll('#qLanes [data-lane-since]')) m.textContent = laneMeta(m.dataset.laneModel, +m.dataset.laneSince);
+}, 1000);
+
 function openQueue() {
   if ($('queueModal').hidden) Q.lastFocus = document.activeElement;
   $('queueModal').hidden = false;
@@ -3982,6 +4087,7 @@ function renderQueue() {
     list.append(b);
   }
   body.append(list);
+  renderLanes();
   qLines();
   if (focused) body.querySelector(`.tcard[data-task="${focused}"]`)?.focus({ preventScroll: true });
 }

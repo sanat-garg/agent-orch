@@ -47,3 +47,4 @@ _Durable knowledge for every agent session: architecture, conventions, decisions
 - The screenshot lightbox `#lbView` needs `contain: size` or huge images widen the modal.
 - Don't commit macOS `._*` files.
 - /tmp is a small tmpfs with a per-user quota that other tasks' test homes (cw-*-home-*) fill; run heavy tests/smokes with `TMPDIR=` on the home disk.
+- 2026-09-26: The owner wants the orchestrator bar above the composer (#orchBar) kept minimal: one short status line plus exactly three buttons (Queue, Settings, Pause/Resume). Don't add chips, lanes, counts or limit text to it; put new info in the Queue modal, the Settings popover or Server details.

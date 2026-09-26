@@ -2700,7 +2700,7 @@ setInterval(() => { if (M.usage) renderUsage(); }, 30e3); // keep the "in 2h 9m"
 // ---------- usage window ----------
 // Per-agent plan windows, tokens and limit hits over time (GET /api/usage/history, see usage.mjs).
 const U = { range: { '6h': 1, '24h': 1, '7d': 1, '30d': 1 }[store.get('cw.urange')] ? store.get('cw.urange') : '24h', data: null, err: '', at: 0, timer: null, lastFocus: null, draws: [] };
-const USAGE_AGENTS = ['claude', 'codex', 'antigravity'];
+const USAGE_AGENTS = ['claude', 'codex', 'antigravity', 'copilot'];
 const WIN_NAMES = { five_hour: '5-hour', seven_day: 'Weekly', '5h': '5-hour', weekly: 'Weekly' };
 const SERIES = ['var(--accent)', 'var(--chart-2)', 'var(--chart-3)', 'var(--faint)'];
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -2870,7 +2870,7 @@ function usageLineChart(host, wins, from, to) {
 function usageBarChart(host, buckets, bucketMs, from, to) {
   const c = usageChart(host, 'ug-bars', '<g class="bars"></g>');
   const sum = (k) => buckets.reduce((a, b) => a + b[k], 0);
-  c.lStat.textContent = `in ${fmtTok(sum('input'))} · out ${fmtTok(sum('output'))}`;
+  c.lStat.textContent = `in ${fmtTok(sum('input'))} · out ${fmtTok(sum('output'))}${sum('premiumRequests') ? ` · ${sum('premiumRequests')} premium requests` : ''}`;
   const daily = bucketMs >= 864e5;
   const when = (t) => daily ? new Date(t).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })
     : `${fmtWhen(t)}–${new Date(t + bucketMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
@@ -2901,7 +2901,7 @@ function usageBarChart(host, buckets, bucketMs, from, to) {
     pg.replaceChildren();
     if (hi < 0) { c.showTip(''); return; }
     const b = buckets[hi];
-    c.showTip(`${when(b.t)} · in ${fmtTok(b.input)} · out ${fmtTok(b.output)}${b.cached ? ` · cached ${fmtTok(b.cached)}` : ''} · ${b.turns} ${b.turns === 1 ? 'turn' : 'turns'}`,
+    c.showTip(`${when(b.t)} · in ${fmtTok(b.input)} · out ${fmtTok(b.output)}${b.cached ? ` · cached ${fmtTok(b.cached)}` : ''}${b.premiumRequests ? ` · ${b.premiumRequests} premium requests` : ''} · ${b.turns} ${b.turns === 1 ? 'turn' : 'turns'}`,
       x(b.t) + bw / 2, w);
   };
 }
@@ -2965,7 +2965,7 @@ function usageSection(id, a, conn, d) {
     usageLineChart(host, a.windows, d.from, d.to);
   } else lc.append(el('p', 'na', 'No window readings in this range.'));
   const bc = col(d.bucketMs >= 864e5 ? 'Tokens per day' : d.bucketMs < 3600e3 ? 'Tokens per 15 min' : 'Tokens per hour');
-  if (a.tokens.some((b) => b.input || b.output)) {
+  if (a.tokens.some((b) => b.input || b.output || b.premiumRequests)) {
     const legend = el('div', 'ug-legend');
     for (const [k, t] of [['in', 'Input'], ['out', 'Output']]) { const s = el('span', k, t); legend.append(s); }
     bc.append(legend);

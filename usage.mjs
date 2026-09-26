@@ -4,7 +4,7 @@
 //     claude: five_hour/seven_day/…, codex: 5h/weekly (from window_minutes), antigravity: <group>-5h/<group>-weekly;
 //     OpenCode currently exposes per-turn tokens but no live subscription windows or reset times.
 //     at = when the reading was taken (epoch ms) if earlier than t, e.g. a polled codex rollout snapshot
-//   {t, agent, kind:'tokens', input, output, cached, source, ref}  one chat turn ('chat', ref = convo id) or run ('task', ref = task id)
+//   {t, agent, kind:'tokens', input, output, cached, premiumRequests?, source, ref}  one chat turn or task run
 //   {t, agent, kind:'limit', status:'hit'|'cleared', resetsAt, window?}
 // `input` is uncached input (Claude: input + cache writes; codex/agy report input including the cached part).
 
@@ -94,8 +94,9 @@ export function createUsageLog(dataDir, { now = Date.now } = {}) {
     windows(agent, list) { return (list || []).map((w) => this.window(agent, w.window, w.pct, w.resetsAt)).filter(Boolean); },
     tokens(agent, usage, source, ref) {
       const u = normUsage(agent, usage);
-      if (!u.input && !u.output && !u.cached) return null;
-      return append({ agent, kind: 'tokens', ...u, source, ref: ref ?? null });
+      const premiumRequests = agent === 'copilot' && Number.isFinite(Number(usage?.premiumRequests)) ? Number(usage.premiumRequests) : null;
+      if (!u.input && !u.output && !u.cached && !premiumRequests) return null;
+      return append({ agent, kind: 'tokens', ...u, ...(premiumRequests != null && { premiumRequests }), source, ref: ref ?? null });
     },
     // A repeated hit with the same reset is skipped; 'cleared' is only written while the agent is marked hit.
     // `group` (antigravity's 'gemini'/'3p') keeps each model group's limit separate.
@@ -139,12 +140,12 @@ export function downsample(points, max = MAX_POINTS) {
 export function bucketTokens(records, from, to, size) {
   const start = Math.floor(from / size) * size;
   const buckets = [];
-  for (let b = start; b <= to; b += size) buckets.push({ t: b, input: 0, output: 0, cached: 0, turns: 0 });
+  for (let b = start; b <= to; b += size) buckets.push({ t: b, input: 0, output: 0, cached: 0, premiumRequests: 0, turns: 0 });
   for (const r of records) {
     if (r.kind !== 'tokens' || r.t < from || r.t > to) continue;
     const b = buckets[Math.floor((r.t - start) / size)];
     if (!b) continue;
-    b.input += num(r.input); b.output += num(r.output); b.cached += num(r.cached); b.turns++;
+    b.input += num(r.input); b.output += num(r.output); b.cached += num(r.cached); b.premiumRequests += num(r.premiumRequests); b.turns++;
   }
   return buckets;
 }

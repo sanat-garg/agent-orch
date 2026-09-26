@@ -13,3 +13,7 @@ Add a 'copilot' agent following the Copilot section of .agent-orch/AGENTS.md and
 ## Done when
 
 `npm test` passes with copilot adapter tests, and GET /api/connections lists copilot
+
+## Result — done (check passed) (2026-09-26 09:37)
+
+AGENT-ORCH-STATUS: done — Copilot smoke 10/10, npm tests pass, connection listed

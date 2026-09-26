@@ -200,7 +200,7 @@ test('boot discovery caches every agent in models.json; a signed-out agent is st
   }
   assert.ok(saved, 'models.json written');
   assert.ok(saved.saved > 0);
-  assert.deepEqual(Object.keys(saved.agents).sort(), ['antigravity', 'claude', 'codex', 'kiro', 'opencode']);
+  assert.deepEqual(Object.keys(saved.agents).sort(), ['antigravity', 'claude', 'codex', 'copilot', 'kiro', 'opencode']);
   assert.deepEqual(saved.agents.codex.models, []);
   assert.equal(saved.agents.codex.error, 'not signed in');
   assert.equal(saved.agents.opencode.error, 'not signed in');
@@ -217,7 +217,7 @@ test('GET /api/connections lists coding agents and github; actions are login-pro
   const r = await get('/api/connections', { cookie });
   assert.equal(r.status, 200);
   const { connections } = await r.json();
-  assert.deepEqual(connections.map((c) => c.id), ['claude', 'codex', 'antigravity', 'opencode', 'kiro', 'github']);
+  assert.deepEqual(connections.map((c) => c.id), ['claude', 'codex', 'antigravity', 'opencode', 'kiro', 'copilot', 'github']);
   for (const c of connections) {
     assert.equal(typeof c.installed, 'boolean', `${c.id} reports installed`);
     assert.equal(typeof c.signedIn, 'boolean', `${c.id} reports signedIn`);

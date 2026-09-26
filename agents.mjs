@@ -13,6 +13,7 @@ import path from 'node:path';
 import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process';
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import { toolResultImages } from './media.mjs';
+import { CopilotClient, RuntimeConnection } from '@github/copilot-sdk';
 
 const HOME = os.homedir();
 
@@ -911,6 +912,97 @@ const KIRO = {
   events: kiroEvents, run: runKiro,
 };
 
+// ---------------------------------------------------------------- copilot (GitHub Copilot CLI)
+
+const COPILOT_LIMIT_RE = /\b429\b|rate.?limit|quota(?: exceeded| exhausted)?|(?:premium requests?|credits?) (?:exhausted|depleted)|usage limit/i;
+const COPILOT_AUTH_RE = /\b401\b|unauthorized|not authenticated|sign in|login required|copilot subscription/i;
+const COPILOT_NO_SESSION_RE = /session.*(?:not found|does not exist)|no such session/i;
+const copilotErrorText = (m) => {
+  const e = m?.data?.error || m?.error || m?.data;
+  return [e?.code, e?.type, e?.message, typeof e === 'string' ? e : null].filter(Boolean).join(' ');
+};
+export function* copilotEvents(m) {
+  const d = m.data || {};
+  if (m.type === 'assistant.message' && d.content?.trim()) yield { k: 'text', text: d.content };
+  else if (m.type === 'tool.execution_start') {
+    const name = d.toolName === 'bash' ? 'Bash' : d.toolName || 'Tool';
+    yield { k: 'tool', id: d.toolCallId, name, input: toolInputSummary(name, d.arguments || {}) };
+  } else if (m.type === 'tool.execution_complete') {
+    const value = d.result?.content ?? d.result?.text ?? d.error ?? '';
+    const s = typeof value === 'string' ? value : JSON.stringify(value);
+    yield { k: 'tool_result', id: d.toolCallId, text: clip(s), isError: d.success === false, lines: s.split('\n').length };
+  } else if (m.type === 'result') yield { k: 'result', usage: m.usage || {} };
+  else if (m.type === 'error' && COPILOT_LIMIT_RE.test(copilotErrorText(m))) yield { k: 'limit', resetsAt: null };
+}
+async function runCopilot({ model, prompt, cwd, resume, systemAppend, signal, onEvent, onMessage, bin, env = process.env, autonomous = true }) {
+  const res = { outcome: 'error', text: '', sessionId: resume || null, usage: {}, numTurns: 0, resetsAt: null,
+    limitType: null, stderr: '', errorCode: null, windows: null };
+  // Copilot settings can select a custom (BYOK) provider regardless of the env. Never run that billing path.
+  for (const file of [path.join(HOME, '.copilot/settings.json'), path.join(cwd, '.copilot/settings.json')]) {
+    try {
+      const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (cfg.provider || cfg.providers || cfg.modelProvider || cfg.customProvider) {
+        res.outcome = 'auth_error'; res.errorCode = 'authentication_failed';
+        res.text = `${file} configures a custom provider; Copilot requires the GitHub subscription.`;
+        return res;
+      }
+    } catch (e) { if (e.code !== 'ENOENT') { res.text = `Could not inspect ${file}: ${e.message}`; return res; } }
+  }
+  const args = ['-C', cwd, '-p', systemAppend ? `${systemAppend}\n\n${prompt}` : prompt, '--output-format', 'json', '--no-ask-user'];
+  if (model) args.push('--model', model);
+  if (resume) args.push(`--resume=${resume}`);
+  if (autonomous) args.push('--allow-all');
+  let failure = null, terminal = null;
+  const handle = (m) => {
+    if (m.type === 'error') failure = m;
+    if (m.type === 'result') { terminal = m; res.sessionId = m.sessionId || res.sessionId; res.usage = m.usage || {}; res.numTurns++; }
+    for (const e of copilotEvents(m)) {
+      if (e.k === 'text') res.text = e.text;
+      if (onEvent) { try { onEvent(e); } catch {} }
+    }
+    try { onMessage?.(m); } catch {}
+  };
+  const cleanEnv = { ...stripEnv(env, COPILOT.envFilter), COPILOT_HOME: path.join(HOME, '.copilot') };
+  const { aborted, exitCode } = await spawnJsonl({ bin: bin || COPILOT.bin, args, cwd, env: cleanEnv, signal, res, handle });
+  if (aborted) { res.outcome = 'aborted'; return res; }
+  const message = copilotErrorText(failure) || copilotErrorText(terminal?.error) || res.stderr.trim();
+  if (exitCode === 0 && terminal?.exitCode === 0 && !failure) { res.outcome = 'ok'; return res; }
+  if (!res.text) res.text = message;
+  if (failure && COPILOT_LIMIT_RE.test(copilotErrorText(failure))) {
+    res.outcome = 'rate_limited'; res.errorCode = 'rate_limit';
+  } else if (COPILOT_AUTH_RE.test(message)) { res.outcome = 'auth_error'; res.errorCode = 'authentication_failed'; }
+  else if (resume && COPILOT_NO_SESSION_RE.test(message)) res.errorCode = 'no_session';
+  return res;
+}
+export function copilotModels(rows) {
+  if (!Array.isArray(rows)) throw new Error('Copilot returned no model list');
+  return rows.filter((m) => m?.id && !String(m.id).includes('/')).map((m) => ({ id: m.id, label: m.name || m.id, ...(m.id === 'auto' && { default: true }) }));
+}
+const COPILOT = {
+  id: 'copilot', label: 'GitHub Copilot CLI', bin: 'copilot',
+  available() { return onPath(this.bin); },
+  loggedIn() { return cachedLogin(this, () => {
+    const r = spawnSync('gh', ['auth', 'status'], { env: stripEnv(process.env, this.envFilter), encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] });
+    return r.status === 0;
+  }); },
+  account() {
+    if (!this.loggedIn()) return null;
+    const r = spawnSync('gh', ['api', 'user', '--jq', '.login'], { env: stripEnv(process.env, this.envFilter), encoding: 'utf8', timeout: 5000 });
+    return r.status === 0 ? r.stdout.trim() || null : null;
+  },
+  login: 'Connect from the sidebar',
+  async listModels({ bin, env = process.env, timeoutMs = 20_000, clientFactory } = {}) {
+    const cleanEnv = { ...stripEnv(env, this.envFilter), COPILOT_HOME: path.join(HOME, '.copilot') };
+    const client = clientFactory ? clientFactory() : new CopilotClient({ connection: RuntimeConnection.forStdio({
+      path: bin || execFileSync('which', [this.bin], { env: cleanEnv, encoding: 'utf8' }).trim(), env: cleanEnv,
+    }) });
+    try { await withTimeout(client.start(), timeoutMs, 'copilot'); return copilotModels(await withTimeout(client.listModels(), timeoutMs, 'copilot models')); }
+    finally { await client.stop(); }
+  },
+  envFilter: /^(?:COPILOT_(?:GITHUB_TOKEN|PROVIDER_.*|HOME)|GH_TOKEN|GITHUB_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY|GEMINI_API_KEY|GOOGLE_API_KEY)$/,
+  events: copilotEvents, run: runCopilot,
+};
+
 // ---------------------------------------------------------------- model discovery
 
 // Each CLI's models as {id, label, description?, default?} (claude adds `resolved`, the full id an alias maps to).
@@ -972,7 +1064,7 @@ export async function discoverModels(id, opts = {}) {
 export const isMissingSession = (res) => res.outcome === 'error' &&
   (res.errorCode === 'no_session' || /no conversation found/i.test(`${res.text || ''}\n${res.stderr || ''}`));
 
-export const AGENTS = { claude: CLAUDE, codex: CODEX, antigravity: ANTIGRAVITY, opencode: OPENCODE, kiro: KIRO };
+export const AGENTS = { claude: CLAUDE, codex: CODEX, antigravity: ANTIGRAVITY, opencode: OPENCODE, kiro: KIRO, copilot: COPILOT };
 
 // Runs one turn on `agent` (default 'claude'). Returns at least {outcome, text, sessionId, usage, resetsAt, errorCode};
 // outcome is ok | aborted | rate_limited | auth_error | max_turns | error.

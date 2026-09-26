@@ -497,3 +497,7 @@ OpenCode added; tests and API pass; smoke awaits sign-in
 ## 2026-09-26 09:08 — #161 Kiro CLI: adapter, model discovery, connection and smoke test [done (check passed)]
 
 Kiro integrated; live smoke awaits owner sign-in
+
+## 2026-09-26 09:37 — #162 GitHub Copilot CLI: adapter, model discovery, connection and smoke test [done (check passed)]
+
+Copilot smoke 10/10, npm tests pass, connection listed

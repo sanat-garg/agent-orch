@@ -1,0 +1,2 @@
+{"type":"error","data":{"error":{"code":"quota_exceeded","message":"Premium requests exhausted"}}}
+{"type":"result","sessionId":"copilot-session","exitCode":1,"usage":{"premiumRequests":0}}

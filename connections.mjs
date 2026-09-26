@@ -76,6 +76,8 @@ export const SPECS = {
     logout: ['gh', 'auth', 'logout', '--hostname', 'github.com'],
   },
 };
+// Copilot falls back to gh OAuth, so both cards operate on the same credential and account.
+SPECS.copilot = { ...SPECS.github, logoutWarning: 'Copilot shares this GitHub login. Disconnecting also signs out GitHub repository access.' };
 
 // agy's TUI breaks the OAuth URL into hard lines; rejoin the lines that are nothing but URL characters.
 export function agyUrl(text) {

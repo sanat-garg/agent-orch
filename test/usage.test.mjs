@@ -96,7 +96,7 @@ test('tokens bucket per hour/day and window series downsample to 300 points', ()
   const hours = bucketTokens(recs, at - D, at, H);
   assert.equal(hours.length, 25);
   assert.equal(hours.at(-1).t, Date.UTC(2026, 8, 25, 12));
-  assert.deepEqual(hours.at(-1), { t: Date.UTC(2026, 8, 25, 12), input: 10, output: 2, cached: 4, turns: 2 });
+  assert.deepEqual(hours.at(-1), { t: Date.UTC(2026, 8, 25, 12), input: 10, output: 2, cached: 4, premiumRequests: 0, turns: 2 });
   assert.equal(hours.at(-4).input, 7);
   assert.equal(hours.reduce((s, b) => s + b.input, 0), 17);
   const days = bucketTokens(recs, at - 7 * D, at, D);
@@ -124,7 +124,7 @@ test('6h range buckets tokens per 15 minutes', () => {
   const b = h.agents.claude.tokens;
   assert.equal(b.length, 25);
   assert.ok(b.every((x, i) => i === 0 || x.t - b[i - 1].t === 15 * 60e3));
-  assert.deepEqual(b.at(-1), { t: Date.UTC(2026, 8, 25, 12, 30), input: 3, output: 1, cached: 0, turns: 1 });
+  assert.deepEqual(b.at(-1), { t: Date.UTC(2026, 8, 25, 12, 30), input: 3, output: 1, cached: 0, premiumRequests: 0, turns: 1 });
   assert.equal(b.at(-2).input, 4);
   assert.equal(b.find((x) => x.t === Date.UTC(2026, 8, 25, 7, 30)).input, 9);
   assert.equal(b.reduce((s, x) => s + x.input, 0), 16);

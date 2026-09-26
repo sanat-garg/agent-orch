@@ -13,3 +13,7 @@ Read .agent-orch/AUDIT.md finding #28 (Round 4) first. Bug in orchestrator.mjs: 
 ## Done when
 
 `node --test test/integrator-fail.test.mjs` passes and `node --test test/scheduling.test.mjs test/parallel.test.mjs` still passes.
+
+## Result — done (check passed) (2026-09-26 10:35)
+
+AGENT-ORCH-STATUS: done — Failed/cancelled integrators now release their owners; tests pass

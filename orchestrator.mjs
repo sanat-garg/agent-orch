@@ -1175,6 +1175,20 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return blocked;
   }
   const blockedPrefix = (root) => `blocked: #${root} `;
+  // An integrator that ends failed or cancelled takes the task it integrates along: the owner leaves 'needs_integration'
+  // with the same status (so it can be retried), its worktree is parked on its branch and its dependents are blocked.
+  function releaseOwner(integ, status, why) {
+    const owner = integ.integrates ? getTask(integ.integrates) : null;
+    if (owner?.status !== 'needs_integration') return;
+    const result = status === 'failed' ? `integrator #${integ.id} failed: ${String(why).slice(0, 1500)}` : `cancelled with integrator #${integ.id}`;
+    updateTask(owner.id, { status, finished_at: now(), result });
+    const blocked = cascadeBlock(owner.id, status, status === 'failed' ? `${blockedPrefix(owner.id)}(integration)` : `cancelled with #${owner.id}`);
+    logEvent(`${status === 'failed' ? '✖' : '■'} #${owner.id} ${status}: its integrator #${integ.id} ${status}${blocked.length ? `; blocked ${blocked.map((b) => `#${b}`).join(', ')}` : ''}`,
+      { level: status === 'failed' ? 'error' : 'warn', projectId: owner.project_id, taskId: owner.id });
+    // A running integrator's worktree is parked by execute() once it stops.
+    const project = getProject(owner.project_id);
+    if (!running.has(integ.id) && worktreeCapable(project)) parkTask(project, owner.id, `agent-orch #${owner.id} ${status}: ${owner.title} (partial work)`);
+  }
   function reviveBlocked(rootId) {
     const revived = [];
     const frontier = [rootId];
@@ -1999,6 +2013,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       const st = getTask(task.id)?.status;
       if (wt && wt.owner === task.id && (st === 'failed' || st === 'cancelled')) {
         await parkTask(project, task.id, `agent-orch #${task.id} ${st}: ${task.title} (partial work)`);
+      } else if (wt && wt.owner !== task.id && ['failed', 'cancelled'].includes(getTask(wt.owner)?.status)) {
+        const owner = getTask(wt.owner);
+        await parkTask(project, owner.id, `agent-orch #${owner.id} ${owner.status}: ${owner.title} (partial work)`);
       }
     }
   }
@@ -2212,6 +2229,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const blocked = cascadeBlock(tid, 'failed', `${blockedPrefix(tid)}(${outcome})`);
     logEvent(`✖ #${tid} failed (${outcome}): ${String(detail).slice(0, 200)}${blocked.length ? `; blocked ${blocked.map((b) => `#${b}`).join(', ')}` : ''}`,
       { level: 'error', projectId: project.id, taskId: tid });
+    releaseOwner(task, 'failed', `(${outcome}) ${detail}`);
   }
 
   async function finishReflection(task, project, res) {
@@ -2283,6 +2301,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         }
         const blocked = cascadeBlock(id, 'cancelled', `cancelled with #${id}`);
         logEvent(`■ #${id} cancelled${blocked.length ? `; also ${blocked.map((b) => `#${b}`).join(', ')}` : ''}`, { projectId: task.project_id, taskId: id });
+        releaseOwner(task, 'cancelled');
         return { ok: true };
       }
       case 'retry': {

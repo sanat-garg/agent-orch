@@ -526,3 +526,6 @@ Declared paths without wildcards now cover their whole contents
 ## 2026-09-26 10:34 — #174 Fix AUDIT #32: OpenCode subscription guard checks global config and OPENCODE_CONFIG_CONTENT [done (check passed)]
 
 OpenCode guard now checks global, parent configs; strips OPENCODE_CONFIG*
+## 2026-09-26 10:35 — #172 Fix AUDIT #28: a failed or cancelled integrator releases its needs_integration owner [done (check passed)]
+
+Failed/cancelled integrators now release their owners; tests pass

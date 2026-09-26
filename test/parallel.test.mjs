@@ -1,5 +1,6 @@
 // Parallel planning (#156): glob-aware file-overlap gating, multi-dependencies ("after": [...]), agent spreading across
-// the fallback list, and an integrator task that starts only after all its parts.
+// the fallback list, and an integrator task that starts only after all its parts. #207: one task at a time by default,
+// a second only with the setting and memory headroom (/proc/meminfo fixture), and the low-memory pause.
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -8,12 +9,15 @@ import path from 'node:path';
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { filesOverlap, parseFiles, spreadAssign, computeSlots } from '../parallel.mjs';
+import { filesOverlap, parseFiles, spreadAssign, readMemInfo, taskSlots } from '../parallel.mjs';
 import { extractTasks, resolveAfter, TASKS_FORMAT } from '../orchestrator.mjs';
 
 const url = (f) => JSON.stringify(new URL(`../${f}`, import.meta.url).href);
 const fixture = (f) => fileURLToPath(new URL(`./fixtures/${f}`, import.meta.url));
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+// A /proc/meminfo with `availMB` available and `swapUsedMB` of a 4 GB swap in use.
+const meminfo = (availMB, swapUsedMB = 0) => `MemTotal:       6000000 kB\nMemFree:  100000 kB\nMemAvailable:   ${availMB * 1024} kB\n` +
+  `SwapTotal:      ${4096 * 1024} kB\nSwapFree:       ${(4096 - swapUsedMB) * 1024} kB\n`;
 
 describe('file overlap', () => {
   test('plain paths, directories and globs', () => {
@@ -82,7 +86,8 @@ describe('agent spreading (spreadAssign)', () => {
 
 // A temp git repo (worktrees on) plus a HOME with the codex stub. The fake Claude query answers planner turns
 // ('[Owner says]') with globalThis.PLAN as a tasks block, and work prompts by writing `WRITE <file> <text>` lines
-// into its cwd after a short hold, or after the scenario releases a named WAIT gate.
+// into its cwd after a short hold, or after the scenario releases a named WAIT gate. `setMem(MB, swapMB)` rewrites
+// the scenario's meminfo (ample by default).
 async function scenario(body, { config = {} } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-par-'))), repo = path.join(root, 'proj');
   const dataDir = path.join(root, 'data'), home = path.join(root, 'home');
@@ -92,6 +97,8 @@ async function scenario(body, { config = {} } = {}) {
   git(repo, 'config', 'user.email', 't@t'); git(repo, 'config', 'user.name', 't');
   fs.writeFileSync(path.join(repo, 'README.md'), 'x\n');
   git(repo, 'add', '-A'); git(repo, 'commit', '-qm', 'init');
+  const mem = path.join(root, 'meminfo');
+  fs.writeFileSync(mem, meminfo(12000));
   try {
     const script = `import { createOrchestrator } from ${url('orchestrator.mjs')};
       import { setModelCatalog } from ${url('agents.mjs')};
@@ -100,6 +107,8 @@ async function scenario(body, { config = {} } = {}) {
       import fs from 'node:fs';
       import path from 'node:path';
       const [dataDir, repo] = process.argv.slice(1);
+      const meminfo = ${meminfo.toString()};
+      const setMem = (mb, swap = 0) => fs.writeFileSync(${JSON.stringify(mem)}, meminfo(mb, swap));
       setModelCatalog('claude', { models: [{ id: 'opus', default: true }], error: null, at: Date.now() });
       setModelCatalog('codex', { models: [{ id: 'gpt-a', default: true }], error: null, at: Date.now() });
       globalThis.PLAN = [];
@@ -118,7 +127,7 @@ async function scenario(body, { config = {} } = {}) {
       })();
       const convo = { id: 'c1', cwd: repo, fallbacks: [{ agent: 'codex', model: 'gpt-a' }] };
       const o = createOrchestrator({ query, dataDir, claudeEnv: { PATH: process.env.PATH, HOME: process.env.HOME }, getLimits: () => [], onSubscription: () => true,
-        broadcast() {}, emitChat() {}, convoExists: () => true, config: ${JSON.stringify({ pollMs: 100, machineCores: 8, machineMemory: 16 * 1024 ** 3, ...config })} });
+        broadcast() {}, emitChat() {}, convoExists: () => true, config: ${JSON.stringify({ pollMs: 100, meminfo: mem, ...config })} });
       const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
       const all = () => db.prepare("SELECT * FROM tasks WHERE kind='work' ORDER BY id").all();
       const byTitle = (t) => all().find((r) => r.title === t);
@@ -147,7 +156,7 @@ describe('parallel scheduling', { concurrency: true, timeout: 120000 }, () => {
         { title: 'D', prompt: 'WRITE d.txt D' },
       ]);
       await until(() => all().length === 4 && all().every((t) => t.status === 'done'));
-      return { spans: spans(), statuses: all().map((t) => t.status), files: all().map((t) => JSON.parse(t.files)) };`, { config: { concurrency: 4, maxParallel: 4, agentSlots: 4 } });
+      return { spans: spans(), statuses: all().map((t) => t.status), files: all().map((t) => JSON.parse(t.files)) };`, { config: { concurrency: 4, parallelTasks: 4, agentSlots: 4 } });
     assert.deepEqual(r.statuses, ['done', 'done', 'done', 'done']);
     assert.deepEqual(r.files, [['src/a.js'], ['src/b.js'], ['src/*.js'], null]);
     const s = r.spans;
@@ -184,7 +193,7 @@ describe('parallel scheduling', { concurrency: true, timeout: 120000 }, () => {
       released.add('x'); released.add('y');
       await until(() => ['x', 'y', 'z'].every((t) => byTitle(t).status === 'done'));
       return { ids, deps, after: view.after.map((t) => t.id), zDeps: view.task.deps, spans: spans(), whenPart1Done, cancelled, revived,
-        statuses: all().map((t) => t.status) };`, { config: { concurrency: 3, maxParallel: 3, agentSlots: 3 } });
+        statuses: all().map((t) => t.status) };`, { config: { concurrency: 3, parallelTasks: 3, agentSlots: 3 } });
     const [p1, p2, it] = r.ids;
     assert.deepEqual(r.deps, [{ task_id: it, depends_on: p1 }, { task_id: it, depends_on: p2 }]);
     assert.deepEqual(r.after, [p1, p2]);
@@ -211,7 +220,7 @@ describe('parallel scheduling', { concurrency: true, timeout: 120000 }, () => {
       released.add('s1');
       await until(() => all().every((t) => t.status === 'done'));
       return { state, spans: spans(), rows: all().map((t) => ({ title: t.title, ran: t.ran_agent, agent: t.agent, moves: JSON.parse(t.moves || '[]'), reason: t.delegated_reason })) };`,
-    { config: {} });
+    { config: { parallelTasks: 2 } });
     assert.equal(r.state.slots, 2);
     assert.deepEqual(r.state.lanes.map(l => l.agent).sort(), ['claude', 'codex']);
     assert.ok(r.state.lanes.every(l => l.task > 0 && l.model && l.elapsed >= 0));
@@ -223,26 +232,78 @@ describe('parallel scheduling', { concurrency: true, timeout: 120000 }, () => {
     assert.match(s2.reason, /^spread: Claude already runs 1 task/);
     assert.ok(overlaps(r.spans.S1, r.spans.S2), 'both ran at once, on two agents');
   });
+
+  test('one work task at a time by default; the setting of 2 counts only with memory headroom, re-checked per claim', async () => {
+    const r = await scenario(`
+      const two = (a, b) => [{ title: a, prompt: 'WAIT ' + a + '\\nWRITE ' + a + '.txt x', files: [a + '.txt'] }, { title: b, prompt: 'WRITE ' + b + '.txt y', files: [b + '.txt'] }];
+      const phase = async (a, b) => {
+        await plan(two(a, b));
+        await until(() => byTitle(a)?.status === 'running');
+        for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 150)); // several scheduler polls
+        const seen = { second: byTitle(b).status, slots: o.stateView().slots };
+        released.add(a);
+        await until(() => [a, b].every((t) => byTitle(t).status === 'done'));
+        return seen;
+      };
+      const byDefault = await phase('d1', 'd2');
+      const bad = o.setParallelSettings({ parallelTasks: 3 }).error;
+      o.setParallelSettings({ parallelTasks: 2 });
+      setMem(2000); // under 2.5 GB available
+      const lowMem = await phase('l1', 'l2');
+      setMem(8000, 2048); // half the swap in use
+      const swap = await phase('s1', 's2');
+      setMem(8000);
+      const headroom = await phase('h1', 'h2');
+      return { byDefault, bad, lowMem, swap, headroom, setting: o.stateView().parallel.parallelTasks, spans: spans() };`);
+    assert.deepEqual(r.byDefault, { second: 'queued', slots: 1 }, 'default: the second task waits');
+    assert.ok(!overlaps(r.spans.d1, r.spans.d2));
+    assert.match(r.bad, /1 or 2/);
+    assert.equal(r.setting, 2);
+    assert.deepEqual(r.lowMem, { second: 'queued', slots: 1 }, 'setting 2 without 2.5 GB free runs one');
+    assert.deepEqual(r.swap, { second: 'queued', slots: 1 }, 'setting 2 with swap over 25% runs one');
+    assert.equal(r.headroom.slots, 2);
+    assert.notEqual(r.headroom.second, 'queued', 'setting 2 with headroom runs a second task');
+    assert.ok(overlaps(r.spans.h1, r.spans.h2));
+  });
+
+  test('low memory: nothing is claimed under 800 MB; 30 s under 300 MB pauses the newest task, which resumes later', async () => {
+    const r = await scenario(`
+      await plan([{ title: 'M', prompt: 'WAIT m\\nWRITE m.txt m', files: ['m.txt'] }]);
+      await until(() => byTitle('M')?.status === 'running');
+      setMem(200);
+      await until(() => byTitle('M').status === 'queued');
+      const events = db.prepare("SELECT message FROM events WHERE message LIKE 'Paused #%' ORDER BY id").all().map((e) => e.message);
+      for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 150));
+      const whileLow = { status: byTitle('M').status, slots: o.stateView().slots,
+        waiting: db.prepare("SELECT 1 AS x FROM events WHERE message LIKE 'waiting: server memory low%'").get()?.x === 1 };
+      setMem(12000); released.add('m');
+      await until(() => byTitle('M').status === 'done');
+      return { events, whileLow, runs: db.prepare('SELECT COUNT(*) AS n FROM runs WHERE task_id=?').get(byTitle('M').id).n, status: byTitle('M').status };`,
+    { config: { memCheckMs: 100, memLowPauseSec: 0.5 } });
+    assert.match(r.events[0], /^Paused #\d+: server memory low$/);
+    assert.deepEqual(r.whileLow, { status: 'queued', slots: 0, waiting: true });
+    assert.equal(r.status, 'done');
+    assert.ok(r.runs >= 2, 'the paused task ran again');
+  });
 });
 
-test('dynamic slots count distinct accounts with headroom, per-account overrides, machine and pacing caps', () => {
-  const base = { accounts: ['claude', 'codex', 'codex', 'kiro'], hasUsage: a => a !== 'kiro', cpuCores: 8, freeMemory: 16 * 1024 ** 3 };
-  assert.equal(computeSlots(base), 2);
-  assert.equal(computeSlots({ ...base, accounts: ['a', 'b', 'c', 'd', 'e', 'f', 'g'] }), 6);
-  assert.equal(computeSlots({ ...base, agentSlots: { claude: 3, codex: 2 } }), 5);
-  assert.equal(computeSlots({ ...base, agentSlots: 3, maxParallel: 4 }), 4);
-  assert.equal(computeSlots({ ...base, cpuCores: 1 }), 1);
-  assert.equal(computeSlots({ ...base, freeMemory: 0.5 * 1024 ** 3 }), 0);
-  assert.equal(computeSlots({ ...base, pacingLimit: 1 }), 1);
-  assert.equal(computeSlots({ ...base, hasUsage: () => false }), 0);
+test('taskSlots: one by default, two only with the setting, >2.5 GB available and <25% swap; none under 800 MB', () => {
+  const GB = 1024 ** 3, ok = { avail: 4 * GB, swapPct: 0 };
+  assert.equal(taskSlots({ mem: ok }), 1);
+  assert.equal(taskSlots({ setting: 2, mem: ok }), 2);
+  assert.equal(taskSlots({ setting: 2, mem: { avail: 2.4 * GB, swapPct: 0 } }), 1);
+  assert.equal(taskSlots({ setting: 2, mem: { avail: 4 * GB, swapPct: 0.3 } }), 1);
+  assert.equal(taskSlots({ setting: 2, mem: ok, pacingLimit: 1 }), 1);
+  assert.equal(taskSlots({ setting: 2, mem: { avail: 0.7 * GB, swapPct: 0 } }), 0);
+  const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-mem-')), 'meminfo');
+  fs.writeFileSync(f, meminfo(3000, 1024));
+  assert.deepEqual(readMemInfo(f), { avail: 3000 * 1024 ** 2, swapPct: 0.25 });
+  fs.rmSync(path.dirname(f), { recursive: true });
+  assert.ok(readMemInfo(f).avail > 0, 'unreadable → os.freemem()');
 });
-test('planner parallel-group example parses into disjoint parts and an integrator', () => {
-  const example = TASKS_FORMAT.slice(TASKS_FORMAT.indexOf('Compact parallel-group example'));
-  const [, payload] = extractTasks(example);
-  assert.equal(payload.tasks.length, 3);
-  const [a, b, integrator] = payload.tasks;
-  assert.equal(filesOverlap(a.files, b.files), false);
-  assert.deepEqual(integrator.after, [0, 1]);
-  assert.deepEqual(resolveAfter(integrator.after, [21, 22]), [21, 22]);
-  assert.match(integrator.done_when, /npm test/);
+
+test('planner prompt asks for sequential chains, not parallel groups', () => {
+  assert.match(TASKS_FORMAT, /Plan sequential chains; use `after` only for true prerequisites; the machine runs one task at a time\./);
+  assert.doesNotMatch(TASKS_FORMAT, /parallel-group|decompose EVERY|Spread parts/);
+  assert.match(TASKS_FORMAT, /`files` \(optional metadata\)/);
 });

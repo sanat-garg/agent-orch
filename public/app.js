@@ -3235,22 +3235,11 @@ function renderOrchBar() {
       counts.append(span);
     }
   }
-  $('obParallel').value = s.parallel?.maxParallel ?? 'auto';
-  const agentSlots = $('obAgentSlots');
-  agentSlots.textContent = '';
-  for (const ag of AGENT_LIST) {
-    const row = el('label', 'ob-opt');
-    row.append(el('span', '', `${ag.label || ag.id} concurrent tasks`));
-    const select = el('select');
-    select.setAttribute('aria-label', `${ag.label || ag.id} concurrent tasks`);
-    for (const n of [1, 2, 3]) { const option = el('option', '', String(n)); option.value = n; select.append(option); }
-    select.value = s.parallel?.agentSlots?.[ag.id] ?? 1;
-    select.onchange = () => saveParallel({ agentSlots: { ...(O.state?.parallel?.agentSlots || {}), [ag.id]: Number(select.value) } });
-    row.append(select); agentSlots.append(row);
-  }
+  $('obParallel').value = String(s.parallel?.parallelTasks ?? 1);
   const lanes = $('obLanes');
   lanes.textContent = '';
-  lanes.append(el('strong', '', `${s.running || 0} running · ${s.slots ?? 0} total slots`));
+  const memGB = s.parallel?.memAvailable ? ` · ${(s.parallel.memAvailable / 1024 ** 3).toFixed(1)} GB memory free` : '';
+  lanes.append(el('strong', '', s.slots === 0 ? `Waiting: server memory low${memGB}` : `${s.workRunning ?? s.running ?? 0} of ${s.slots ?? 1} running${memGB}`));
   for (const lane of s.lanes || []) lanes.append(el('small', '', `${lane.agent} · #${lane.task} ${lane.title} · ${lane.model || 'default'} · ${fmtDur(lane.started_at ? Math.max(0, nowS - lane.started_at) : lane.elapsed)}`));
   const routes = $('obRoutes');
   routes.textContent = '';
@@ -3302,11 +3291,11 @@ async function orchProject(fields) {
 }
 async function saveParallel(fields) {
   try {
-    const result = await api('/api/orch/parallel', 'PUT', { maxParallel: O.state?.parallel?.maxParallel ?? null, agentSlots: O.state?.parallel?.agentSlots || {}, ...fields });
+    const result = await api('/api/orch/parallel', 'PUT', fields);
     O.state = result.state; renderOrchBar();
   } catch (e) { toast(e.message, { kind: 'error' }); renderOrchBar(); }
 }
-$('obParallel').addEventListener('change', (e) => saveParallel({ maxParallel: e.target.value === 'auto' ? null : Number(e.target.value) }));
+$('obParallel').addEventListener('change', (e) => saveParallel({ parallelTasks: Number(e.target.value) }));
 $('obPause').addEventListener('click', async () => {
   const p = O.project;
   if (!p || obTogglePending) return;
@@ -3996,7 +3985,7 @@ function renderLanes() {
   section.append(el('h3', '', 'Lanes'));
   const running = rows.reduce((n, r) => n + r.tasks.length, 0);
   const ready = [...O.tasks.values()].filter(t => t.project_id === O.project?.id && t.status === 'queued' && taskState(t).cls === 'queued').length;
-  section.append(el('p', 'lanes-summary', `Running ${running} in parallel · ${ready} queued ready`));
+  section.append(el('p', 'lanes-summary', `Running ${running} · ${ready} queued`));
   const strip = el('div', 'lanes-row');
   for (const lane of rows) {
     const name = ({ claude: 'Claude', codex: 'Codex', antigravity: 'Antigravity', opencode: 'OpenCode', kiro: 'Kiro', copilot: 'Copilot' })[lane.agent] || lane.agent;

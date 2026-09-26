@@ -85,7 +85,7 @@ test('seeded parallel lanes render and update at 390px', { skip }, async () => {
   await page.locator('#obQueue').click();
   if (process.env.CW_LANES_KEEP) return;
   await page.waitForFunction(() => document.querySelectorAll('#qLanes .lane-card').length === 3);
-  assert.match(await page.locator('#qLanes').innerText(), /Running 3 in parallel/);
+  assert.match(await page.locator('#qLanes').innerText(), /Running 3 · \d+ queued/);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   assert.equal(await page.locator('#qLanes .lanes-row').evaluate(e => e.scrollWidth > e.clientWidth), true);
   await page.evaluate(() => onOrch({ t: 'olane', taskId: 1, activity: 'Bash · npm test' }));

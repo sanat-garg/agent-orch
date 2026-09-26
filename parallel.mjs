@@ -3,6 +3,9 @@
 //   A task declares the files it will modify (`tasks.files`: JSON [path or glob]). Two tasks may run together only
 //   if no path can match both declarations. No declaration means "everything": the task runs alone.
 
+import fs from 'node:fs';
+import os from 'node:os';
+
 // A task's declared files: trimmed, deduplicated relative paths/globs ('./' dropped), or null (= everything).
 export function parseFiles(v) {
   if (v == null || v === '') return null;
@@ -77,9 +80,28 @@ export function spreadAssign(ready, { slotsFree, hasUsage }) {
   return out;
 }
 
-// One connected account per adapter today. Keep account identity separate from model identity.
-export function computeSlots({ accounts, hasUsage, agentSlots = 1, maxParallel = 6, cpuCores, freeMemory, pacingLimit = Infinity }) {
-  const capacity = [...new Set(accounts)].reduce((n, a) => n + (hasUsage(a) ? (typeof agentSlots === 'number' ? agentSlots : agentSlots[a] ?? 1) : 0), 0);
-  // Reserve 1 GiB per worker; zero slots is valid when the machine has no headroom.
-  return Math.max(0, Math.min(capacity, maxParallel, Math.max(1, Math.floor(cpuCores)), Math.floor(freeMemory / 1024 ** 3), pacingLimit));
+// Server memory from /proc/meminfo: MemAvailable (free plus reclaimable) and the fraction of swap in use, in bytes.
+// Unreadable (not Linux) → os.freemem() and no swap.
+export function readMemInfo(file = '/proc/meminfo') {
+  try {
+    const kb = (k) => Number(new RegExp(`^${k}:\\s+(\\d+)`, 'm').exec(text)?.[1]) * 1024;
+    const text = fs.readFileSync(file, 'utf8'), avail = kb('MemAvailable'), swap = kb('SwapTotal');
+    if (!Number.isFinite(avail)) throw new Error('no MemAvailable');
+    return { avail, swapPct: swap > 0 ? (swap - (kb('SwapFree') || 0)) / swap : 0 };
+  } catch { return { avail: os.freemem(), swapPct: 0 }; }
+}
+
+export const MEM = {
+  claimFloor: 800 * 1024 ** 2,   // below this nothing new is claimed (plan tasks included)
+  pauseBelow: 300 * 1024 ** 2,   // sustained below this, the newest running task is paused
+  secondSlot: 2.5 * 1024 ** 3,   // a second task needs more than this available...
+  secondSlotSwap: 0.25,          // ...and under 25% of swap in use
+};
+
+// Work-task slots (BRIEF goal 9): one by default. The owner's 'Parallel tasks: 2' setting only counts while the server
+// has headroom, re-checked before every claim; pacing can still drop it to one; 0 = memory too low to claim anything.
+export function taskSlots({ setting = 1, mem, pacingLimit = Infinity }) {
+  if (mem.avail < MEM.claimFloor) return 0;
+  const n = setting > 1 && mem.avail > MEM.secondSlot && mem.swapPct < MEM.secondSlotSwap ? setting : 1;
+  return Math.max(1, Math.min(n, pacingLimit));
 }

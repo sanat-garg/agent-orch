@@ -21,15 +21,18 @@ import { AGENTS, AGY_GROUPS, agentStatus, codexExhausted, codexLatestSnapshot, i
 import { mediaCollector } from './media.mjs';
 import { createUsageLog } from './usage.mjs';
 import { DELEGATE_CFG, createDelegator, parseFallbacks } from './delegate.mjs';
-import { filesOverlap, parseFiles, spreadAssign, computeSlots } from './parallel.mjs';
+import { filesOverlap, parseFiles, spreadAssign, readMemInfo, taskSlots, MEM } from './parallel.mjs';
 import { commitAll, ensureWorktree, isMerged, listWorktrees, mergeBack, parkWorktree, removeWorktree, repoInfo, startIntegration, unresolvedFiles, worktreesRoot } from './worktrees.mjs';
 
 // ---------------------------------------------------------------- config
 
 const CFG = {
-  concurrency: 2,               // pacing reference; actual capacity is computed from accounts and machine headroom
-  maxParallel: 6,               // machine ceiling (also bounded by CPU and free memory)
-  agentSlots: 1,                // default concurrent tasks per connected account (or map by agent)
+  concurrency: 2,               // pacing reference (pacing may drop work to one slot)
+  parallelTasks: 1,             // work tasks at once unless the owner's setting says 2 (parallel.mjs taskSlots)
+  agentSlots: 1,                // concurrent tasks per connected account (or map by agent)
+  meminfo: process.env.AGENT_ORCH_MEMINFO || '/proc/meminfo', // the memory guard's source (tests point it at a fixture)
+  memCheckMs: 5000,             // memory guard interval while tasks run
+  memLowPauseSec: 30,           // MemAvailable under MEM.pauseBelow this long → pause the newest running task
   maxAttempts: 3,               // non-limit failures before a task is marked failed
   maxContinuations: 4,          // times a worker may say "not finished yet"
   resetBufferSec: 20,           // added after a reported reset time
@@ -98,35 +101,18 @@ export const TASKS_FORMAT = `Emit work as a fenced block exactly like this (stri
 - One deliverable per task. A task should change a handful of files and be provable by ONE check.
   Aim for 15–45 minutes of agent work. If you are tempted to write "and also", split it.
 - Never emit a task like "build the app", "implement the feature end to end", or "set everything up".
-  Default to a parallel group of independently verifiable parts; serial chains require true prerequisites.
 - \`done_when\` must be checkable by a machine or by looking at one specific thing. No "works well".
   When a command proves it, put that command in backticks, e.g. \`npm test\`. Every command-like backticked
   snippet is run, joined with &&. Absence checks use \`! grep …\` (a bare grep exits 1 when nothing matches).
 - \`after\` is for TRUE prerequisites only: tasks whose output this task needs. It is one reference or an array
   of them: the 0-based index of an earlier task in THIS block, or "#12" for an existing task id. The task starts
   only once ALL of them have finished, and cancelling or failing one cancels everything after it. Never chain
-  tasks just to keep them apart or in order: \`files\` does that. Omit \`after\` when nothing is needed first.
-- \`files\` lists the paths or globs (\`src/**/*.css\`, \`test/\`) the task will create or modify. Tasks whose
-  lists don't overlap run in parallel, each in its own git worktree and possibly on different agents; a task
-  without \`files\` counts as touching everything, so it runs alone. Be accurate and specific: an under-declared
-  list risks merge conflicts, an over-broad one serialises work.
-- By default decompose EVERY multi-part request into concurrent tasks with DISJOINT declared files.
-  Spread parts across different agents/models from the owner's fallback list, respecting explicit routing preferences.
-  Never invent fallback models. Serial chains are only for true prerequisites. Give each part its
-  \`files\`, and end with an integrator task whose \`after\` lists every part: it integrates and reconciles
-  their results when they must be combined and runs the full test suite (its \`done_when\` is that suite, e.g. \`npm test\`).
+  tasks just to keep them in order: tasks already run in queue order. Omit \`after\` when nothing is needed first.
+- Plan sequential chains; use \`after\` only for true prerequisites; the machine runs one task at a time.
+- \`files\` (optional metadata) lists the paths or globs (\`src/**/*.css\`, \`test/\`) the task will create or modify.
 - Each task is run by a FRESH Claude Code session with no memory of this conversation. It will read
   .agent-orch/BRIEF.md and .agent-orch/CONTEXT.md, so put durable context there and keep each prompt self-contained.
 - Never repeat work that is already queued, running, or done.
-
-Compact parallel-group example (choose agent/model values from the supplied fallback list):
-\`\`\`agent-orch-tasks
-{"tasks":[
- {"title":"API part","prompt":"Implement the endpoint and its tests.","files":["src/api.mjs","test/api.test.mjs"],"done_when":"Endpoint tests pass"},
- {"title":"UI part","prompt":"Implement the screen against the agreed API contract.","files":["public/app.js","public/app.css"],"done_when":"Screen checks pass"},
- {"title":"Integrate and verify","prompt":"Combine both parts, reconcile their contract, and run the full suite.","after":[0,1],"files":["src/api.mjs","public/app.js","test/integration.test.mjs"],"done_when":"\`npm test\` passes"}
-]}
-\`\`\`
 
 **Urgency decides what runs first, so set it honestly:**
 - \`urgent\` — has a real deadline or someone is blocked (assignments due, broken production, a demo).
@@ -140,7 +126,7 @@ is "build" (has an end) or "maintain" (ongoing upkeep). Only include \`project\`
 
 **Which agent and model run a task.** The context lists the coding agents, their suggested models and the
 current routing rules. A task runs on, in order: its own \`agent\`/\`model\` (omit both unless this one task
-needs something special or spreads a parallel group), else the first matching project route, else the first matching global route, else
+needs something special), else the first matching project route, else the first matching global route, else
 Claude on the chat's model. A route's \`match\` is a task kind (\`work\`, \`reflect\`, \`plan\`) or a keyword
 looked for in task titles (\`tests\`, \`ui\`, \`docs\`, \`refactor\`, …), so title tasks with that word.
 When the owner states a lasting preference ("use codex for writing tests", "use opus for planning", "gemini for
@@ -166,8 +152,8 @@ How to behave:
 - Keep the project memory current: write/refresh .agent-orch/BRIEF.md (vision, goals, constraints, definition
   of done) and .agent-orch/CONTEXT.md (architecture, conventions, decisions). Only write inside .agent-orch/; code changes
   are the workers' job, so queue them as tasks rather than making them yourself.
-- Queue a small first parallel group of steps as soon as the intent is clear — you don't need the whole plan up
-  front, and you can add the next steps after these finish. Reply in one or two lines: why this group,
+- Queue a short first chain of steps as soon as the intent is clear — you don't need the whole plan up
+  front, and you can add the next steps after these finish. Reply in one or two lines: why these steps,
   not what's in it — the owner sees the queued tasks as cards under your reply.
 - Tokens are precious: don't queue speculative busywork, and don't re-read things you already know.
 
@@ -852,7 +838,7 @@ function takeLock(file) {
 export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLimits, onSubscription, emitChat, broadcast, convoExists, refreshUsage,
   convoFallbacks = () => null, onCommit = () => {}, projectReady = () => true, disabled = false, usageLog = createUsageLog(dataDir),
   codexSnapshot = () => codexLatestSnapshot(), config = {} }) {
-  Object.assign(CFG, config); // tests tune slots (concurrency, maxParallel, agentSlots)
+  Object.assign(CFG, config); // tests tune slots (concurrency, parallelTasks, agentSlots, meminfo)
   const dir = path.join(dataDir, 'orchestrator');
   const runsDir = path.join(dir, 'runs');
   fs.mkdirSync(runsDir, { recursive: true });
@@ -1136,27 +1122,27 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       throw e;
     }
   }
+  // kv parallel_settings { parallelTasks: 1 | 2 } (older shapes read as the default of one).
   function parallelSettings() {
-    return JSON.parse(kvGet('parallel_settings') || '{"maxParallel":null,"agentSlots":{}}');
+    let s = {};
+    try { s = JSON.parse(kvGet('parallel_settings') || '{}') || {}; } catch {}
+    return { parallelTasks: [1, 2].includes(s.parallelTasks) ? s.parallelTasks : CFG.parallelTasks };
   }
-  const slotsFor = (a) => parallelSettings().agentSlots[a] ?? (typeof CFG.agentSlots === 'number' ? CFG.agentSlots : CFG.agentSlots[a] ?? 1);
-  function slotCount(d) {
-    return computeSlots({ accounts: Object.keys(AGENTS),
-      hasUsage: (a) => { const ms = modelCatalog(a).models || []; return (ms.length ? ms : [{ id: null }]).some((m) => delegator.hasUsage(a, m.id)); },
-      agentSlots: Object.fromEntries(Object.keys(AGENTS).map((a) => [a, slotsFor(a)])),
-      maxParallel: Math.min(CFG.maxParallel, parallelSettings().maxParallel ?? CFG.maxParallel),
-      cpuCores: CFG.machineCores ?? os.availableParallelism(), freeMemory: CFG.machineMemory ?? os.freemem(),
+  const slotsFor = (a) => typeof CFG.agentSlots === 'number' ? CFG.agentSlots : CFG.agentSlots[a] ?? 1;
+  // Read fresh before every claim: the second slot and claiming at all depend on the memory available right now.
+  function slotCount(d, mem = readMemInfo(CFG.meminfo)) {
+    return taskSlots({ setting: parallelSettings().parallelTasks, mem,
       pacingLimit: d && (d.scarce || d.concurrency < CFG.concurrency) ? d.concurrency : Infinity });
   }
   function setParallelSettings(value) {
-    if (!value || (value.maxParallel !== null && (!Number.isInteger(value.maxParallel) || value.maxParallel < 1 || value.maxParallel > 6)) ||
-        !value.agentSlots || typeof value.agentSlots !== 'object' || Array.isArray(value.agentSlots) ||
-        Object.entries(value.agentSlots).some(([a, n]) => !Object.hasOwn(AGENTS, a) || !Number.isInteger(n) || n < 1 || n > 3)) return { error: 'Expected maxParallel null or 1–6 and per-agent slots 1–3' };
-    kvSet('parallel_settings', JSON.stringify({ maxParallel: value.maxParallel, agentSlots: value.agentSlots }));
+    if (![1, 2].includes(value?.parallelTasks)) return { error: 'Expected parallelTasks 1 or 2' };
+    kvSet('parallel_settings', JSON.stringify({ parallelTasks: value.parallelTasks }));
     pushState(); setTimeout(tick, 0);
     return { ok: true, state: stateView() };
   }
   const runningOn = (agent) => [...running.values()].filter((r) => r.agent === agent).length;
+  // Work slots hold work, reflect and integrator tasks; plan tasks (the owner's messages) run beside them as before.
+  const workRunning = () => [...running.values()].filter((r) => r.kind !== 'plan').length;
   const listedModel = (agent, model) => !!AGENTS[agent] && (modelCatalog(agent).models || []).some((m) => m.id === model);
   // A ready task whose agent has no free slot moves to the fallback spreadAssign picked (recorded like a delegation).
   function spread(task, to) {
@@ -1167,14 +1153,14 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       moves: addMove(task, { from: { agent: from.agent, model: fromModel }, to: { agent: to.agent, model: to.model }, until: null, by: 'spread' }) });
     logEvent(`#${task.id} spread from ${fromName} (busy) to ${to.agent}/${to.model} to run in parallel`, { projectId: task.project_id, taskId: task.id });
   }
-  function claimNext(allowed) {
+  function claimNext(allowed, workSlot = true) {
     // Mandatory GitHub protocol: a project's work only starts once its repo exists.
     // A plan task waits while the owner's chat turn holds the planner session (AUDIT #5).
     // A task whose agent is at its usage limit waits; others (e.g. codex-routed while Claude is limited) still run.
     // A waiting task that may be delegated moves to the owner's first fallback with usage left (delegate.mjs) and runs now.
     // Agent spreading (parallel.mjs spreadAssign): each task takes its own route while that agent has a free slot
     // (CFG.agentSlots); one that would otherwise wait spills to its first fallback with a free slot and usage left.
-    let rows = runnable(allowed, true, 25).filter((r) => !(r.kind === 'plan' && planningProjects.has(r.project_id)) && projectReady(getProject(r.project_id)?.path));
+    let rows = runnable(allowed, true, 25).filter((r) => (workSlot || r.kind === 'plan') && !(r.kind === 'plan' && planningProjects.has(r.project_id)) && projectReady(getProject(r.project_id)?.path));
     for (const r of rows) if (waitsForLimit(r)) delegate(r);
     rows = rows.map((r) => getTask(r.id));
     const ready = rows.filter((r) => !waitsForLimit(r)).map((r) => {
@@ -1879,7 +1865,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   const setPlannerSession = (project, agent, id) => (agent === 'claude' ? updateProject(project.id, { chat_session_id: id }) : kvSet(`planner_session:${project.id}:${agent}`, id || ''));
 
   async function plannerRun(project, text, convoId, signal, fromChat = false, { agent = 'claude', model = null, origin = { origin: 'chat' } } = {}) {
-    const prompt = plannerTurnPrompt(project, listTasks(project.id, 25), text, `${ENVIRONMENT}\n${routesText(project.id)}\nOwner fallback list for parallel assignment: ${JSON.stringify(origin.fallbacks || [])}`);
+    const prompt = plannerTurnPrompt(project, listTasks(project.id, 25), text, `${ENVIRONMENT}\n${routesText(project.id)}\nOwner fallback list (used when a model hits its limit): ${JSON.stringify(origin.fallbacks || [])}`);
     // Claude streams SDK messages into the chat, so a 'plan' route can only change the Claude planner's model.
     // Other agents show their tool calls as they happen and the reply at the end.
     const route = resolveRoute({ kind: 'plan', title: '' }, project, listRoutes(project.id), () => true);
@@ -1933,10 +1919,15 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       kvSet('announced_auth', 0);
       const d = decision();
       considerPreemption(d);
-      const slots = slotCount(d);
-      while (running.size < slots) {
-        const task = claimNext(d.allowed);
-        if (!task) { if (scheduleReflections()) continue; break; }
+      for (;;) {
+        const mem = readMemInfo(CFG.meminfo), slots = slotCount(d, mem);
+        if (!slots) {
+          if (kvGet('announced_mem') !== '1') { kvSet('announced_mem', 1); logEvent(`waiting: server memory low (${Math.round(mem.avail / 1024 ** 2)} MB available)`, { level: 'warn' }); }
+          break;
+        }
+        kvSet('announced_mem', 0);
+        const free = workRunning() < slots, task = claimNext(d.allowed, free);
+        if (!task) { if (free && scheduleReflections()) continue; break; }
         startTask(task);
       }
     } catch (e) {
@@ -1949,7 +1940,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   function startTask(task) {
     const abort = new AbortController();
     const project = getProject(task.project_id);
-    running.set(task.id, { abort, projectId: task.project_id, startedAt: now(), wt: task.kind === 'work' && worktreeCapable(project), agent: routeNow(task, project).agent });
+    running.set(task.id, { abort, kind: task.kind, projectId: task.project_id, startedAt: now(), wt: task.kind === 'work' && worktreeCapable(project), agent: routeNow(task, project).agent });
     pushState();
     execute(task, abort.signal)
       .catch((e) => console.error('[orchestrator] task crashed', e))
@@ -1989,8 +1980,25 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return added;
   }
 
+  // Memory guard: MemAvailable under MEM.pauseBelow for CFG.memLowPauseSec pauses the newest running work task (a
+  // graceful abort: it requeues and resumes its session later); another pause needs another full low stretch.
+  // Claiming stays off until memory is back above MEM.claimFloor.
+  let memLowSince = 0;
+  function memGuard() {
+    if (readMemInfo(CFG.meminfo).avail >= MEM.pauseBelow) { memLowSince = 0; return; }
+    memLowSince ||= Date.now();
+    if (Date.now() - memLowSince < CFG.memLowPauseSec * 1000) return;
+    const [id, r] = [...running.entries()].filter(([, r]) => r.kind !== 'plan' && !r.paused && !r.abort.signal.aborted).pop() || [];
+    if (!r) return;
+    memLowSince = Date.now();
+    r.paused = true;
+    const t = getTask(id);
+    logEvent(`Paused #${id}: server memory low`, { level: 'warn', projectId: t?.project_id, taskId: id });
+    r.abort.abort();
+  }
+
   function considerPreemption(d) {
-    if (running.size < Math.max(1, slotCount(d))) return;
+    if (workRunning() < Math.max(1, slotCount(d))) return;
     const best = runnable(d.allowed, false, 1)[0];
     if (!best) return;
     const runningRows = qa(`SELECT t.*, ${EFFECTIVE_SQL} AS eff FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.status='running' ORDER BY eff ASC`, { now: now() });
@@ -2082,7 +2090,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       const oc = q1(`SELECT SUM(status='done') AS done, SUM(status='failed') AS failed FROM tasks WHERE project_id=:p AND source='reflection' AND kind='work' AND finished_at>=:s`,
         { p: project.id, s: now() - 7 * 86400 }) || {};
       body = reflectPrompt(project, listTasks(project.id, 20), recentJournal(project.path), contextOverage(project.path),
-        limitsRows(), decision().reason, failures, { done: oc.done || 0, failed: oc.failed || 0 }, `${ENVIRONMENT}\nOwner fallback list for parallel assignment: ${JSON.stringify(parseFallbacks(project.reflect_fallbacks) || [])}`);
+        limitsRows(), decision().reason, failures, { done: oc.done || 0, failed: oc.failed || 0 }, `${ENVIRONMENT}\nOwner fallback list (used when a model hits its limit): ${JSON.stringify(parseFallbacks(project.reflect_fallbacks) || [])}`);
       system = REFLECT_SYSTEM;
       tools = [...PLANNER_TOOLS, ...CFG.safeTools.filter((t) => t.startsWith('Bash('))];
       autonomous = false;
@@ -2464,15 +2472,15 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       if (u) blocks[id] = { until: u, known: kvGet(limitKey('blocked_known', id), '0') === '1', reason: kvGet(limitKey('blocked_reason', id)) || 'usage limit' };
     }
     const activeUsage = qa("SELECT DISTINCT CASE WHEN kind='plan' THEN COALESCE(agent, 'claude') ELSE COALESCE(ran_agent, agent, 'claude') END AS agent FROM tasks WHERE status='running'");
-    const parallel = { ...parallelSettings(), agentSlots: Object.fromEntries(Object.keys(AGENTS).map((a) => [a, slotsFor(a)])) };
+    const mem = readMemInfo(CFG.meminfo), parallel = { ...parallelSettings(), memAvailable: mem.avail, swapPct: mem.swapPct };
     const lanes = [...running.entries()].map(([id, r]) => {
       const t = getTask(id);
       return { agent: r.agent, task: id, title: t.title, model: t.ran_model || t.model || delegator.defaultModel(r.agent),
         activity: r.activity || null, started_at: r.startedAt, elapsed: Math.max(0, now() - r.startedAt) };
     });
     return { activeUsage, blocks, blockedUntil: blockedUntil(), blockedReason: kvGet('blocked_reason'),
-      pacing: d?.reason || kvGet('budget_reason'), slots: slotCount(d), parallel, lanes,
-      running: running.size, draining, subscription: onSubscription() };
+      pacing: d?.reason || kvGet('budget_reason'), slots: slotCount(d, mem), parallel, lanes,
+      running: running.size, workRunning: workRunning(), draining, subscription: onSubscription() };
   }
   function pushTask(id) {
     const t = taskView(getTask(id));
@@ -2540,6 +2548,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     cleanupWorktrees(); // per-project merge lock: a claim in the same project waits for it
     reconcileCodexLimit();
     setInterval(tick, CFG.pollMs);
+    setInterval(memGuard, CFG.memCheckMs);
     setTimeout(tick, 5000);
     // A limit that has passed: capacity is back, so refresh usage for pacing.
     setInterval(() => {

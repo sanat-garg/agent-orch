@@ -592,3 +592,7 @@ Command: node --check public/app.js && npm test && ! grep -n "reached · re" pub
 ## 2026-09-26 19:29 — #204 Orchestrator dock: remove limit text, make Pause/Resume prominent [done (check passed)]
 
 Temporary fixture isolation fixed; exact verification passes all 267 tests.
+
+## 2026-09-26 20:07 — #207 Stop parallel runs: one task at a time, memory guard, free disk space [done (check passed)]
+
+one task by default, memory guard added, disk and worktrees cleaned

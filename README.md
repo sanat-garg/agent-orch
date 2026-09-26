@@ -218,15 +218,18 @@ In a project that is a git repository, each work task runs in its own git worktr
 `<repo>/../.agent-orch-worktrees/<repo>-task-<id>` on branch `agent-orch/task-<id>`, so several tasks can edit
 at once without seeing each other's changes. Projects outside git (or on a detached HEAD) run in the main tree.
 
-- **`files`**: the planner gives each task the paths or globs it will change (`src/**/*.css`, `test/`). Tasks
-  whose lists can't match the same file run in parallel, possibly on different agents. A task without `files`
-  counts as touching everything and runs alone.
+- **One task at a time**: by default exactly one work task runs across all projects (plan tasks and chat turns
+  run beside it). Orchestrator settings → **Parallel tasks: 2** allows a second one only while `/proc/meminfo`
+  shows over 2.5 GB `MemAvailable` and under 25% swap in use, re-checked before every claim; the second task
+  runs on another agent from the fallback list. The planner plans sequential chains.
+- **Memory guard**: nothing is claimed while `MemAvailable` is under 800 MB. If it stays under 300 MB for 30 s,
+  the newest running task is paused (`Paused #N: server memory low`) and resumes its session later.
+- **`files`** (optional): paths or globs the task will change. When two tasks may run, overlapping lists
+  (or a task without `files`) keep them apart.
 - **`after`**: true prerequisites only. A task starts once all of them are done, and cancelling or failing one
-  cancels everything after it. Use `files`, not `after`, to keep work apart.
-- **Integrator tasks**: the planner ends a split feature with a task whose `after` lists every part; it
-  reconciles their results and runs the full test suite.
-- **Slots**: up to `maxParallel` (5) tasks run at once while usage isn't scarce, at most `agentSlots` (3) per
-  agent. A task that would otherwise wait for a busy agent spills to its first fallback with a free slot.
+  cancels everything after it.
+- **Cheap worktrees**: `node_modules` is a symlink to the main checkout's, and a worktree is removed right after
+  its merge.
 
 When a task passes its check, the orchestrator squashes its branch to one commit, rebases it onto the main
 tree's branch, fast-forwards the main tree and syncs it to GitHub. Only this merge step touches the main tree, one task at

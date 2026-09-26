@@ -410,6 +410,7 @@ Every async throw in `handleRequest` becomes a 500, and the process keeps runnin
 - **Fix:** After parsing, `if (!msg || typeof msg !== 'object') return;`. Also wrap the body of the message handler in
   `try/catch` that logs the error, so a future sync throw (e.g. in `answerPermission` or `orch.setConvoMode`) can't
   take the process down.
+- **Fixed** (task #180): the `ws` message handler ignores any frame that isn't a plain non-array object and runs the rest in `handleMessage` under try/catch (logs, replies `{t:'error', text:'bad request'}`); test/ws-robust.test.mjs.
 
 ### 34. [med] Every other `*.sslip.io` site is same-site: it can frame the signed-in app (clickjacking) and toss a cookie that signs the owner out (server.mjs:103-106, :1159-1161, :88-96)
 - **What:** The live host is `129-154-229-134.sslip.io`. `sslip.io` is not on the Public Suffix List (checked against

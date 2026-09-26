@@ -1499,6 +1499,15 @@ wss.on('connection', (ws, req) => {
   ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return;
+    // A sync throw in a 'message' listener is uncaught and would exit the process.
+    try { handleMessage(msg); } catch (e) {
+      console.error('[ws] message handler failed', e);
+      send(ws, { t: 'error', text: 'bad request' });
+    }
+  });
+
+  function handleMessage(msg) {
     if (msg.t === 'metrics_sub') {
       ws.metricsSub = !!msg.on;
       if (ws.metricsSub) metrics(Infinity).then((d) => send(ws, { t: 'mdetail', d })).catch(() => {});
@@ -1581,7 +1590,7 @@ wss.on('connection', (ws, req) => {
         break;
       }
     }
-  });
+  }
 
   ws.on('close', () => {
     clearInterval(alive);

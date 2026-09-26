@@ -546,3 +546,7 @@ Round 5 audit adds three verified findings (#33–#35)
 ## 2026-09-26 10:51 — #176 Fix AUDIT #30: retrying two failed prerequisites in either order revives their dependent [done (check passed)]
 
 retrying failed prerequisites in either order revives dependents
+
+## 2026-09-26 10:54 — #180 Fix AUDIT #33: malformed WebSocket frames must not crash the server [done (check passed)]
+
+malformed WebSocket frames no longer crash the server; tests pass

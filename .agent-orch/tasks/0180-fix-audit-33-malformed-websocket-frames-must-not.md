@@ -13,3 +13,7 @@ Read .agent-orch/AUDIT.md finding #33. In server.mjs the `ws.on('message')` hand
 ## Done when
 
 `node --test test/ws-robust.test.mjs test/server.test.mjs` passes
+
+## Result — done (check passed) (2026-09-26 10:54)
+
+AGENT-ORCH-STATUS: done — malformed WebSocket frames no longer crash the server; tests pass

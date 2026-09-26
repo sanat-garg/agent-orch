@@ -562,3 +562,7 @@ Kiro login methods, prompt safeguards, timeout, and tests pass
 ## 2026-09-26 13:59 — #191 Edit a task's fallback agents from its side panel [done (check passed)]
 
 Task fallback editing verified; all 248 tests pass.
+
+## 2026-09-26 14:18 — #192 Parallel-first planning and scheduling [done (check passed)]
+
+Parallel planning, dynamic scheduling, settings verified; all 251 tests pass.

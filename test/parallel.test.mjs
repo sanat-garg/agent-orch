@@ -8,8 +8,8 @@ import path from 'node:path';
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { filesOverlap, parseFiles, spreadAssign } from '../parallel.mjs';
-import { extractTasks, resolveAfter } from '../orchestrator.mjs';
+import { filesOverlap, parseFiles, spreadAssign, computeSlots } from '../parallel.mjs';
+import { extractTasks, resolveAfter, TASKS_FORMAT } from '../orchestrator.mjs';
 
 const url = (f) => JSON.stringify(new URL(`../${f}`, import.meta.url).href);
 const fixture = (f) => fileURLToPath(new URL(`./fixtures/${f}`, import.meta.url));
@@ -118,7 +118,7 @@ async function scenario(body, { config = {} } = {}) {
       })();
       const convo = { id: 'c1', cwd: repo, fallbacks: [{ agent: 'codex', model: 'gpt-a' }] };
       const o = createOrchestrator({ query, dataDir, claudeEnv: { PATH: process.env.PATH, HOME: process.env.HOME }, getLimits: () => [], onSubscription: () => true,
-        broadcast() {}, emitChat() {}, convoExists: () => true, config: ${JSON.stringify({ pollMs: 100, ...config })} });
+        broadcast() {}, emitChat() {}, convoExists: () => true, config: ${JSON.stringify({ pollMs: 100, machineCores: 8, machineMemory: 16 * 1024 ** 3, ...config })} });
       const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
       const all = () => db.prepare("SELECT * FROM tasks WHERE kind='work' ORDER BY id").all();
       const byTitle = (t) => all().find((r) => r.title === t);
@@ -205,11 +205,16 @@ describe('parallel scheduling', { concurrency: true, timeout: 120000 }, () => {
         { title: 'S1', prompt: 'WAIT s1\\nWRITE s1.txt one', files: ['s1.txt'] },
         { title: 'S2', prompt: 'WRITE s2.txt two', files: ['s2.txt'] },
       ]);
+      await until(() => o.stateView().lanes.length === 2);
+      const state = o.stateView();
       await until(() => byTitle('S2')?.status === 'done');
       released.add('s1');
       await until(() => all().every((t) => t.status === 'done'));
-      return { spans: spans(), rows: all().map((t) => ({ title: t.title, ran: t.ran_agent, agent: t.agent, moves: JSON.parse(t.moves || '[]'), reason: t.delegated_reason })) };`,
-    { config: { concurrency: 2, maxParallel: 2, agentSlots: 1 } });
+      return { state, spans: spans(), rows: all().map((t) => ({ title: t.title, ran: t.ran_agent, agent: t.agent, moves: JSON.parse(t.moves || '[]'), reason: t.delegated_reason })) };`,
+    { config: {} });
+    assert.equal(r.state.slots, 2);
+    assert.deepEqual(r.state.lanes.map(l => l.agent).sort(), ['claude', 'codex']);
+    assert.ok(r.state.lanes.every(l => l.task > 0 && l.model && l.elapsed >= 0));
     const [s1, s2] = r.rows;
     assert.equal(s1.ran, 'claude', 'the first task keeps its primary model');
     assert.deepEqual(s1.moves, []);
@@ -218,4 +223,26 @@ describe('parallel scheduling', { concurrency: true, timeout: 120000 }, () => {
     assert.match(s2.reason, /^spread: Claude already runs 1 task/);
     assert.ok(overlaps(r.spans.S1, r.spans.S2), 'both ran at once, on two agents');
   });
+});
+
+test('dynamic slots count distinct accounts with headroom, per-account overrides, machine and pacing caps', () => {
+  const base = { accounts: ['claude', 'codex', 'codex', 'kiro'], hasUsage: a => a !== 'kiro', cpuCores: 8, freeMemory: 16 * 1024 ** 3 };
+  assert.equal(computeSlots(base), 2);
+  assert.equal(computeSlots({ ...base, accounts: ['a', 'b', 'c', 'd', 'e', 'f', 'g'] }), 6);
+  assert.equal(computeSlots({ ...base, agentSlots: { claude: 3, codex: 2 } }), 5);
+  assert.equal(computeSlots({ ...base, agentSlots: 3, maxParallel: 4 }), 4);
+  assert.equal(computeSlots({ ...base, cpuCores: 1 }), 1);
+  assert.equal(computeSlots({ ...base, freeMemory: 0.5 * 1024 ** 3 }), 0);
+  assert.equal(computeSlots({ ...base, pacingLimit: 1 }), 1);
+  assert.equal(computeSlots({ ...base, hasUsage: () => false }), 0);
+});
+test('planner parallel-group example parses into disjoint parts and an integrator', () => {
+  const example = TASKS_FORMAT.slice(TASKS_FORMAT.indexOf('Compact parallel-group example'));
+  const [, payload] = extractTasks(example);
+  assert.equal(payload.tasks.length, 3);
+  const [a, b, integrator] = payload.tasks;
+  assert.equal(filesOverlap(a.files, b.files), false);
+  assert.deepEqual(integrator.after, [0, 1]);
+  assert.deepEqual(resolveAfter(integrator.after, [21, 22]), [21, 22]);
+  assert.match(integrator.done_when, /npm test/);
 });

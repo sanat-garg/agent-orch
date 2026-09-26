@@ -30,7 +30,7 @@ async function scenario(body, { fiveHour = false } = {}) {
       })();
       const getLimits = () => ${fiveHour} ? [{ limit_type: 'five_hour', status: 'allowed', utilization: 0.95, resets_at: now() + 3600, observed_at: now() }] : [];
       let subscriptionChecks = 0;
-      const o = createOrchestrator({ config: { pollMs: 100 }, query, dataDir, claudeEnv: {}, getLimits, onSubscription: () => { subscriptionChecks++; return true; },
+      const o = createOrchestrator({ config: { pollMs: 100, agentSlots: 2, machineCores: 2, machineMemory: 4 * 1024 ** 3 }, query, dataDir, claudeEnv: {}, getLimits, onSubscription: () => { subscriptionChecks++; return true; },
         broadcast() {}, emitChat() {}, convoExists: () => false });
       const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
       let n = 0;

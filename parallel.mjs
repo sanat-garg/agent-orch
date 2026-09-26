@@ -76,3 +76,10 @@ export function spreadAssign(ready, { slotsFree, hasUsage }) {
   }
   return out;
 }
+
+// One connected account per adapter today. Keep account identity separate from model identity.
+export function computeSlots({ accounts, hasUsage, agentSlots = 1, maxParallel = 6, cpuCores, freeMemory, pacingLimit = Infinity }) {
+  const capacity = [...new Set(accounts)].reduce((n, a) => n + (hasUsage(a) ? (typeof agentSlots === 'number' ? agentSlots : agentSlots[a] ?? 1) : 0), 0);
+  // Reserve 1 GiB per worker; zero slots is valid when the machine has no headroom.
+  return Math.max(0, Math.min(capacity, maxParallel, Math.max(1, Math.floor(cpuCores)), Math.floor(freeMemory / 1024 ** 3), pacingLimit));
+}

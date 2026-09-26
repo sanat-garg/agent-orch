@@ -13,3 +13,7 @@ Put much more emphasis on parallel agents (BRIEF goal 9). 1) The planner and ref
 ## Done when
 
 `npm test` passes with dynamic-slot and multi-agent slot-filling tests, and the planner prompt text includes the parallel-group example
+
+## Result — done (check passed) (2026-09-26 14:18)
+
+AGENT-ORCH-STATUS: done — Parallel planning, dynamic scheduling, settings verified; all 251 tests pass.

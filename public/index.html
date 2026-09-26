@@ -138,6 +138,12 @@
               <button type="button" class="btn small" id="obSoundTest">Test</button>
               <input type="checkbox" id="obSound" checked>
             </div>
+            <label class="ob-opt">
+              <span><strong>Parallel agents</strong><small>Across all projects, within machine and usage limits.</small></span>
+              <select id="obParallel"><option value="auto">Auto</option><option value="1">Max 1</option><option value="2">Max 2</option><option value="3">Max 3</option><option value="4">Max 4</option><option value="5">Max 5</option><option value="6">Max 6</option></select>
+            </label>
+            <div id="obAgentSlots"></div>
+            <div class="ob-routes" id="obLanes" aria-live="polite"></div>
             <div class="ob-routes" id="obRoutes"></div>
             <div class="ob-opt" id="obReflect">
               <span><strong>Reflection fallbacks</strong><small>Where reflection tasks go when their model hits its limit.</small></span>

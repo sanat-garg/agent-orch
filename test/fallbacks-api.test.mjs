@@ -179,3 +179,23 @@ test('PATCH task fallbacks validates models, isolates the snapshot and rejects f
     assert.equal((await patch(add('queued', 'plan'), list)).status, 409);
   } finally { db.close(); }
 });
+
+test('parallel settings validate, persist, and appear in state', async () => {
+  const url = '/api/orch/parallel';
+  const unauth = await fetch(base + url, { method: 'PUT', body: '{}' });
+  assert.equal(unauth.status, 401); await unauth.arrayBuffer();
+  for (const value of [null, {}, { maxParallel: 7, agentSlots: {} }, { maxParallel: 1, agentSlots: { codex: 4 } }, { maxParallel: null, agentSlots: { unknown: 1 } }]) {
+    assert.equal((await put(url, value)).status, 400);
+  }
+  const value = { maxParallel: 3, agentSlots: { claude: 2, codex: 3 } };
+  const r = await put(url, value);
+  assert.equal(r.status, 200);
+  assert.equal(r.body.state.parallel.maxParallel, 3);
+  assert.equal(r.body.state.parallel.agentSlots.codex, 3);
+  assert.deepEqual(r.body.state.lanes, []);
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
+  assert.deepEqual(JSON.parse(db.prepare("SELECT value FROM kv WHERE key='parallel_settings'").get().value), value);
+  db.close();
+  assert.equal((await put(url, { maxParallel: null, agentSlots: {} })).body.state.parallel.maxParallel, null);
+});

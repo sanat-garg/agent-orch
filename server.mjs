@@ -1321,6 +1321,10 @@ async function handleRequest(req, res) {
       return json(res, 200, c);
     }
   }
+  if (p === '/api/orch/parallel' && req.method === 'PUT') {
+    const result = orch.setParallelSettings(await readBody(req));
+    return json(res, result.error ? 400 : 200, result);
+  }
   const tf = p.match(/^\/api\/orch\/tasks\/(\d+)\/fallbacks$/);
   if (tf && req.method === 'PATCH') {
     const { list, error } = checkFallbacks((await readBody(req)).fallbacks);

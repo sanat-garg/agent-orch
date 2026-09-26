@@ -64,8 +64,9 @@ test('a queued task moves to its first available fallback when its primary is li
       setModelCatalog('antigravity', { models: [], error: null, at: 1 });
       let claude = 0;
       const query = () => (async function* () { claude++; yield { type: 'result', subtype: 'success', result: 'AGENT-ORCH-STATUS: done — ok', session_id: 's', num_turns: 1 }; })();
+      const chat = [];
       const o = createOrchestrator({ query, dataDir, claudeEnv: { PATH: process.env.PATH, HOME: process.env.HOME }, getLimits: () => [], onSubscription: () => true,
-        broadcast() {}, emitChat() {}, convoExists: () => true });
+        broadcast() {}, emitChat: (cid, ev) => ev.t === 'moved' && chat.push({ cid, ...ev }), convoExists: () => true });
       const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
       db.prepare('INSERT OR REPLACE INTO kv(key,value) VALUES(?,?)').run('blocked_until', String(Date.now() / 1000 + 3600));
       const pid = (n) => { const p = path.join(root, n); fs.mkdirSync(p); return Number(db.prepare("INSERT INTO projects(path,name,status,perpetual,created_at) VALUES(?,?,'active',0,0)").run(p, n).lastInsertRowid); };
@@ -75,6 +76,7 @@ test('a queued task moves to its first available fallback when its primary is li
       // curated: its first fallback (antigravity) is not connected, so it moves to the second.
       const ids = { reflect: task('a', 'reflection', list), chat: task('b', 'chat', list), nolist: task('g', 'chat'), empty: task('f', 'chat', '[]'),
         curated: task('e', 'chat', JSON.stringify([{ agent: 'antigravity', model: 'gemini-x' }, { agent: 'codex', model: 'gpt-mini' }])) };
+      db.prepare("UPDATE projects SET convo_id='cb' WHERE name='b'").run();
       const get = (id) => db.prepare('SELECT * FROM tasks WHERE id=?').get(id);
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       for (let i = 0; i < 300 && !['reflect', 'chat', 'curated'].every((k) => get(ids[k]).status === 'done'); i++) await sleep(100);
@@ -82,7 +84,9 @@ test('a queued task moves to its first available fallback when its primary is li
       const out = Object.fromEntries(Object.entries(ids).map(([k, id]) => { const t = get(id); return [k, { status: t.status, agent: t.agent, model: t.model, from: t.delegated_from, reason: t.delegated_reason, view: o.taskDetail(id).task.delegated_from }]; }));
       out.claude = claude;
       out.cols = db.prepare('PRAGMA table_info(tasks)').all().map((c) => c.name).filter((c) => ['auto_delegate', 'pinned_model'].includes(c));
-      out.events = db.prepare("SELECT message FROM events WHERE message LIKE '%delegated%'").all().map((e) => e.message);
+      out.events = db.prepare("SELECT message FROM events WHERE message LIKE '%moved to%'").all().map((e) => e.message);
+      out.notices = chat;
+      out.moves = o.taskDetail(ids.chat).task.moves;
       console.log(JSON.stringify(out));
       process.exit(0);`;
     const env = { ...process.env, HOME: home, PATH: `${path.join(home, '.local/bin')}:${process.env.PATH}` };
@@ -99,6 +103,10 @@ test('a queued task moves to its first available fallback when its primary is li
     assert.deepEqual(r.cols, [], 'auto_delegate and pinned_model are gone');
     assert.equal(r.claude, 0);
     assert.equal(r.events.length, 3);
+    assert.match(r.events[0], /^#\d+ claude\/opus hit its limit → moved to codex\/gpt-a$/);
+    // Each move is recorded with the limit's reset; the chat's own task posts one compact notice in that chat.
+    assert.deepEqual(r.moves.map((m) => [m.from, m.to, m.by, m.until > 0]), [[{ agent: 'claude', model: 'opus' }, { agent: 'codex', model: 'gpt-a' }, 'limit', true]]);
+    assert.deepEqual(r.notices.map((e) => [e.cid, e.from.model, e.to.model, e.until === r.moves[0].until]), [['cb', 'opus', 'gpt-a', true]]);
   } finally {
     for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
   }

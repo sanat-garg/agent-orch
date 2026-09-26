@@ -13,3 +13,7 @@ Make it obvious which model a task is on and what happens on a limit (BRIEF goal
 ## Done when
 
 `npm test` passes with modelStatus() tests for the four states, and taskCard and the drawer both use modelStatus()
+
+## Result — done (check passed) (2026-09-26 05:05)
+
+AGENT-ORCH-STATUS: done — modelStatus() drives task cards, drawer and chat notices; tests pass

@@ -859,7 +859,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     db.exec('ALTER TABLE tasks ADD COLUMN origin TEXT');
     db.exec("UPDATE tasks SET origin=CASE source WHEN 'reflection' THEN 'reflection' WHEN 'planner' THEN 'chat' END");
   }
-  for (const col of ['category', 'delegated_from', 'delegated_reason', 'fallbacks']) {
+  // tasks.moves: JSON [{at, from: {agent, model}, to: {agent, model}, until, by: 'limit' | 'owner'}], one per delegation.
+  for (const col of ['category', 'delegated_from', 'delegated_reason', 'fallbacks', 'moves']) {
     if (!db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === col)) db.exec(`ALTER TABLE tasks ADD COLUMN ${col} TEXT`);
   }
   // #153 removed Auto Delegate and model pins: a task's fallbacks snapshot alone decides whether it moves.
@@ -1434,11 +1435,20 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const from = intendedRoute(task, getProject(task.project_id));
     const top = delegator.nextModel(task, from);
     if (!top) return false;
-    const fromName = `${from.agent}/${from.model || delegator.defaultModel(from.agent) || 'default'}`;
-    updateTask(task.id, { agent: top.agent, model: top.model, session_id: null, delegated_from: task.delegated_from || fromName, delegated_reason: top.reason });
-    logEvent(`#${task.id} delegated from ${fromName} (at its usage limit) to ${top.agent}/${top.model}: ${top.reason}`, { projectId: task.project_id, taskId: task.id });
+    const fromModel = from.model || delegator.defaultModel(from.agent), fromName = `${from.agent}/${fromModel || 'default'}`;
+    const until = agentUsage(from.agent, fromModel).until || null;
+    updateTask(task.id, { agent: top.agent, model: top.model, session_id: null, delegated_from: task.delegated_from || fromName, delegated_reason: top.reason,
+      moves: addMove(task, { from: { agent: from.agent, model: fromModel }, to: { agent: top.agent, model: top.model }, until, by: 'limit' }) });
+    logEvent(`#${task.id} ${fromName} hit its limit → moved to ${top.agent}/${top.model}`, { projectId: task.project_id, taskId: task.id });
+    // A chat's task: one compact notice in that chat (app.js renders it from the models, with the reset in the browser's timezone).
+    const convoId = task.origin === 'chat' && getProject(task.project_id)?.convo_id;
+    if (convoId && convoExists(convoId)) emitChat(convoId, { t: 'moved', taskId: task.id, from: { agent: from.agent, model: fromModel, label: labelOf(from.agent, fromModel) },
+      to: { agent: top.agent, model: top.model, label: labelOf(top.agent, top.model) }, until });
     return true;
   }
+  const addMove = (task, m) => JSON.stringify([...(parseJsonList(task.moves)), { at: now(), ...m }]);
+  const parseJsonList = (v) => { try { const a = JSON.parse(v || '[]'); return Array.isArray(a) ? a : []; } catch { return []; } };
+  const labelOf = (agent, model) => (modelCatalog(agent).models || []).find((m) => m.id === model)?.label || model || agent;
   // Manual delegation (the task drawer's "Delegate…" sheet). The owner is choosing, so the fallback list doesn't apply;
   // every model of a connected agent is listed with its status, available ones first.
   function agentUsage(agent, model) {
@@ -1472,7 +1482,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const project = getProject(task.project_id);
     const from = intendedRoute(task, project);
     const fromName = `${from.agent}/${from.model || 'default'}`;
-    updateTask(id, { agent, model, session_id: null, delegated_from: task.delegated_from || fromName, delegated_reason: 'chosen by the owner' });
+    updateTask(id, { agent, model, session_id: null, delegated_from: task.delegated_from || fromName, delegated_reason: 'chosen by the owner',
+      moves: addMove(task, { from: { agent: from.agent, model: from.model || delegator.defaultModel(from.agent) }, to: { agent, model: model || delegator.defaultModel(agent) }, until: null, by: 'owner' }) });
     logEvent(`#${id} delegated by the owner from ${fromName} to ${agent}/${model || 'default'}`, { projectId: task.project_id, taskId: id });
     setTimeout(tick, 100);
     return { ok: true, task: taskView(getTask(id)) };
@@ -2115,9 +2126,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       origin: t.origin ?? null, delegated_from: t.delegated_from ?? null, delegated_reason: t.delegated_reason ?? null, fallbacks: parseFallbacks(t.fallbacks), has_verify_failure: t.verify_output != null,
       // The agent a queued task would run on now: the UI shows it waiting only while its limit scope (limit_scope, a
       // state.blocks key: the agent, or antigravity:gemini / antigravity:3p) is limited.
-      ...(() => { if (t.status !== 'queued') return { runs_on: null, limit_scope: null };
+      // runs_model: that route's model (the agent's default when the route names none). moves: every delegation, oldest first.
+      moves: parseJsonList(t.moves),
+      ...(() => { if (t.status !== 'queued') return { runs_on: null, runs_model: null, limit_scope: null };
         const r = routeNow(t, getProject(t.project_id));
-        return { runs_on: r.agent, limit_scope: limitScope(r.agent, r.model) }; })(),
+        return { runs_on: r.agent, runs_model: r.model || delegator.defaultModel(r.agent), limit_scope: limitScope(r.agent, r.model) }; })(),
       summary: t.status === 'done' ? parseStatus(t.result)[1] || null : t.status === 'failed' || t.status === 'cancelled' ? String(t.result || '').slice(0, 200) : null,
     };
   }

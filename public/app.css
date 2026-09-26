@@ -696,12 +696,20 @@ code, pre, kbd { font-family: var(--mono); }
 .tc-title { display: block; font-weight: 550; font-size: 14.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tc-sub { display: block; font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
 .tc-sub .id { font-family: var(--mono); font-size: 12px; color: var(--faint); }
-.tc-tags { display: flex; gap: 6px; flex: none; }
+.tc-tags { display: flex; gap: 6px; flex: 0 1 auto; min-width: 0; max-width: 55%; }
 .tc-tag { font-size: 11.5px; padding: 1px 8px; border-radius: 99px; border: 1px solid var(--border); background: var(--raised); color: var(--muted); white-space: nowrap; }
 .tc-tag.urgent { color: var(--danger); border-color: currentColor; background: var(--danger-soft); }
-.tc-tag.due, .tc-tag.agent.warn { color: var(--warn); border-color: currentColor; background: var(--warn-soft); }
-.tc-tag.agent { font-family: var(--mono); font-size: 11px; }
-#drKicker .tc-tag { margin-left: 4px; }
+.tc-tag.due, .tc-tag.model.waiting { color: var(--warn); border-color: currentColor; background: var(--warn-soft); }
+/* The model chip (app.js modelChip): tinted when the task is off its primary model. */
+.tc-tag.model { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tc-tag.model.delegated { color: var(--chart-2); border-color: currentColor; }
+.tc-tag.model svg { vertical-align: -1px; margin-right: 4px; }
+.dr-sec > .tc-tag.model { display: inline-block; font-size: 13px; padding: 3px 10px; white-space: normal; }
+.dr-fallbacks { margin: 4px 0 8px; padding-left: 22px; font-size: 13px; color: var(--muted); }
+.dr-fallbacks li { padding: 2px 0; }
+.dr-fallbacks li.current { color: var(--text); font-weight: 550; }
+.dr-fallbacks li .muted { font-weight: 400; }
+.notice.moved { cursor: pointer; }
 .tcard .chev { color: var(--faint); flex: none; }
 
 /* status glyph: one shape per state */
@@ -799,7 +807,8 @@ details.dr-prompt summary { cursor: pointer; font-size: 13px; color: var(--muted
   .ob-counts { display: none; }
   .orch-bar .pop-wrap .popover { position: fixed; left: 10px; right: 10px; top: auto; bottom: 180px; width: auto; }
   .drawer { width: 100vw; border-left: 0; }
-  .tc-tags { display: none; }
+  .tc-tags { max-width: 45%; }
+  .tc-tags > :not(.model) { display: none; }
 }
 
 /* GitHub */
@@ -1019,7 +1028,6 @@ pre.copy-cmd:hover::after { opacity: .7; }
   .fb-pop .modal-panel.fb { position: fixed; max-height: min(70dvh, 560px); }
   .fb-pop .m-head h2 { font-size: 17px; }
 }
-.tc-tag.deleg { color: var(--chart-2); border-color: currentColor; }
 
 /* delegate sheet */
 .modal-panel.dg { width: min(640px, 100%); }

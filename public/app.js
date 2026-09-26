@@ -900,6 +900,16 @@ function renderEvent(ev, replay) {
       if (ev.msgId) markPending(ev.msgId, n);
       break;
     }
+    case 'moved': {
+      // '#152 moved to Astra — Opus is limited until 5:00 AM' (labels from the live model list, else the server's).
+      endLive();
+      const nm = (m) => (AGENT_LIST.some((a) => a.id === m.agent) ? modelName(m.agent, m.model) : m.label || m.model || m.agent);
+      const n = el('div', 'notice moved', `#${ev.taskId} moved to ${nm(ev.to)} — ${nm(ev.from)} is limited${ev.until ? ` until ${fmtWhen(ev.until * 1000)}` : ''}`);
+      n.setAttribute('role', 'link');
+      n.addEventListener('click', () => showTask(ev.taskId));
+      add(n);
+      break;
+    }
     case 'msg_edit': {
       const p = pendingMsgs.get(ev.msgId);
       if (p && !p.editing) p.bubble.textContent = ev.text;
@@ -1707,21 +1717,52 @@ function renderAgentPicker() {
   setPick(keep);
 }
 api('/api/agents').then((d) => { AGENT_LIST = d.agents || []; renderAgentPicker(); }).catch(() => {});
-// "codex · gpt-5-codex": the agent and model a task last ran on (or was assigned).
-function agentBadge(t) {
-  const agent = t.ran_agent || t.agent, model = t.ran_model || t.model;
-  if (!agent && !model) return null;
-  const b = el('span', 'tc-tag agent', [agent || 'claude', model].filter(Boolean).join(' · '));
-  b.title = t.ran_agent ? 'Agent and model it ran on' : 'Agent and model it will run on';
-  if (t.route_note) { b.classList.add('warn'); b.title += ` — ${t.route_note}`; }
-  if (t.delegated_from) { b.textContent = `↪ ${b.textContent}`; b.title += ` — delegated from ${t.delegated_from}${t.delegated_reason ? `: ${t.delegated_reason}` : ''}`; }
-  return b;
+// Which model a task is on and what happens at a limit: the one vocabulary for cards, the drawer and the chat.
+//   normal:    'Opus'                     (running, done, or queued with no fallbacks)
+//   next:      'Opus · then Astra'        (queued with fallbacks; the full list is in `tip` and the drawer)
+//   waiting:   'Waiting for Opus · 5:00 AM' (queued while its limit is hit and no fallback has usage)
+//   delegated: 'Astra · moved from Opus (limit until 5:00 AM)'
+// ctx: { blocks (state.blocks), name(agent, model), clock(epoch s), now (epoch s) }; defaults to the app's live state.
+function modelStatus(t, ctx = modelCtx()) {
+  const { blocks = {}, name, clock, now = Date.now() / 1000 } = ctx;
+  const queued = t.status === 'queued';
+  // Queued: the route it would take now (runs_on/runs_model); otherwise what it ran on, else what it was given.
+  const [agent, model] = queued && t.runs_on ? [t.runs_on, t.runs_model || null]
+    : t.ran_agent ? [t.ran_agent, t.ran_model || null] : [t.agent || 'claude', t.model || null];
+  const cur = name(agent, model), key = `${agent}/${model}`;
+  const list = (t.fallbacks || []).map((f) => ({ ...f, name: name(f.agent, f.model), current: `${f.agent}/${f.model}` === key }));
+  const moves = t.moves || [];
+  const move = moves[moves.length - 1] || null;
+  const fromRaw = move ? move.from : t.delegated_from ? { agent: t.delegated_from.split('/')[0], model: t.delegated_from.split('/').slice(1).join('/') || null } : null;
+  const from = fromRaw && name(fromRaw.agent, fromRaw.model);
+  const lim = queued && blocks[t.limit_scope || agent];
+  const tip = list.length ? `Fallbacks: ${list.map((f) => f.name).join(' → ')}` : 'No fallbacks: waits at a limit';
+  const base = { model: cur, agent, from, list, until: null, tip };
+  if (lim && lim.until > now) return { ...base, kind: 'waiting', until: lim.until, text: `Waiting for ${cur} · ${clock(lim.until)}` };
+  if (from) {
+    const why = move?.until ? ` (limit until ${clock(move.until)})` : move?.by === 'owner' ? ' (by you)' : '';
+    return { ...base, kind: 'delegated', until: move?.until || null, text: `${cur} · moved from ${from}${why}` };
+  }
+  const next = queued && list.find((f) => !f.current);
+  if (next) return { ...base, kind: 'next', next: next.name, text: `${cur} · then ${next.name}` };
+  return { ...base, kind: 'normal', text: cur };
 }
-// "delegated from claude/opus": shown next to the agent badge.
-function delegatedBadge(t) {
-  if (!t.delegated_from) return null;
-  const b = el('span', 'tc-tag deleg', `delegated from ${t.delegated_from}`);
-  b.title = t.delegated_reason || '';
+function modelCtx() {
+  return { blocks: O.state?.blocks || {}, name: modelName, clock: (sec) => fmtWhen(sec * 1000), now: Date.now() / 1000 };
+}
+// A model's display name: its label from the CLI's list, else the agent's default model, else the agent.
+function modelName(agent, model) {
+  const a = AGENT_LIST.find((x) => x.id === agent);
+  if (!model) { const d = a?.models.find((m) => m.default) || a?.models[0]; return d ? d.label || d.id : agentLabel(agent); }
+  return modelLabel(agent, model);
+}
+const MOVED_SVG = '<svg viewBox="0 0 24 24" width="11" height="11" aria-hidden="true"><path d="M5 5v6a4 4 0 0 0 4 4h10m-4-4 4 4-4 4" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+// The model chip: modelStatus text, tinted when it is not the primary (delegated) or waiting on a limit.
+function modelChip(t, ms = modelStatus(t)) {
+  const b = el('span', `tc-tag model ${ms.kind}`);
+  if (ms.kind === 'delegated') b.innerHTML = MOVED_SVG;
+  b.append(document.createTextNode(ms.text));
+  b.title = [ms.tip, t.route_note].filter(Boolean).join(' — ');
   return b;
 }
 
@@ -3016,9 +3057,8 @@ function taskState(t) {
       return { cls: 'cancelled', label: m ? `Cancelled with #${m[1]}` : 'Cancelled' };
     }
   }
-  const s = O.state;
-  const scope = t.limit_scope || t.runs_on || 'claude', lim = s?.blocks?.[scope];
-  if (lim && lim.until > nowS) return { cls: 'limited', label: `Waiting for ${limitName(scope)} ${lim.reason || 'usage limit'} reset · ${fmtClock(lim.until)}` };
+  const ms = modelStatus(t);
+  if (ms.kind === 'waiting') return { cls: 'limited', label: ms.text };
   if (O.project && O.project.id === t.project_id && O.project.status === 'paused') return { cls: 'waiting', label: 'Paused' };
   if (t.depends_on) {
     const dep = O.tasks.get(t.depends_on);
@@ -3060,16 +3100,15 @@ function fillCard(b, id) {
     a.addEventListener('click', (e) => { e.stopPropagation(); showTask(dep); });
     sub.append(document.createTextNode(' · '), a);
   }
-  sub.append(document.createTextNode(` · ${dep && s.label === `Waits for #${dep}` ? 'Waiting' : s.label}`));
+  // A limit wait is spelled out by the model chip; the sub line keeps just the time (the chip is clipped on phones).
+  const wait = s.cls === 'limited' && modelStatus(t);
+  sub.append(document.createTextNode(` · ${wait ? `Waiting until ${fmtWhen(wait.until * 1000)}` : dep && s.label === `Waits for #${dep}` ? 'Waiting' : s.label}`));
   tags.textContent = '';
   const open = t.status === 'queued' || t.status === 'running';
   if (open && t.urgency === 'urgent') tags.append(el('span', 'tc-tag urgent', 'Urgent'));
   if (open && t.urgency === 'background') tags.append(el('span', 'tc-tag', 'Later'));
   if (open && t.deadline) tags.append(el('span', 'tc-tag due', `Due ${fmtDue(t.deadline)}`));
-  const badge = agentBadge(t);
-  if (badge) tags.append(badge);
-  const deleg = delegatedBadge(t);
-  if (deleg) tags.append(deleg);
+  if (t.kind !== 'plan') tags.append(modelChip(t));
   b.classList.toggle('active', O.drawer === id);
 }
 const refreshCards = (id) => document.querySelectorAll(`.tcard[data-task="${id}"]`).forEach((b) => fillCard(b, id));
@@ -3280,11 +3319,34 @@ function renderDrawerHead() {
   const t = O.tasks.get(id) || O.detail?.task;
   $('drGlyph').className = `tc-glyph ${t ? taskState(t).cls : 'queued'}`;
   $('drKicker').textContent = t ? `#${t.id} · ${kindLabel(t)}` : `#${id}`;
-  const badge = t && agentBadge(t);
-  if (badge) $('drKicker').append(' ', badge);
-  const deleg = t && delegatedBadge(t);
-  if (deleg) $('drKicker').append(' ', deleg);
   $('drTitle').textContent = t ? displayTitle(t) : 'Loading…';
+}
+
+function modelSection(t) {
+  const ms = modelStatus(t), c = section('Model');
+  c.append(modelChip(t, ms));
+  if (ms.list.length) {
+    const ol = el('ol', 'dr-fallbacks');
+    ol.setAttribute('aria-label', 'Fallbacks, in order');
+    for (const f of ms.list) {
+      const li = el('li', f.current ? 'current' : '', f.name);
+      if (f.current) { li.append(el('span', 'muted', ' · on it now')); li.setAttribute('aria-current', 'true'); }
+      ol.append(li);
+    }
+    c.append(el('div', 'dr-check', 'Fallbacks at a limit, in order'), ol);
+  } else c.append(el('div', 'dr-check', 'No fallbacks: at a limit it waits for the reset.'));
+  if (t.moves?.length) {
+    const ul = el('ul', 'dr-events');
+    for (const m of t.moves) {
+      const li = el('li');
+      li.append(el('time', '', fmtClock(m.at)), el('span', '', m.by === 'owner'
+        ? `You moved it from ${modelName(m.from.agent, m.from.model)} → ${modelName(m.to.agent, m.to.model)}`
+        : `${modelName(m.from.agent, m.from.model)} hit its limit → moved to ${modelName(m.to.agent, m.to.model)}`));
+      ul.append(li);
+    }
+    c.append(ul);
+  }
+  return c;
 }
 
 function section(title) {
@@ -3313,7 +3375,7 @@ function renderDrawer(fromLive = false) {
 
   // 1. Where it stands, and the few things you can do about it.
   const top = section('');
-  const sum = el('div', 'dr-summary', st.label);
+  const sum = el('div', 'dr-summary', st.cls === 'limited' ? 'Waiting for the limit to reset' : st.label); // the Model row says which
   const meta = [];
   if (t.attempts) meta.push(`attempt ${t.attempts + (isOpen ? 1 : 0)} of 3`);
   if (t.continuations) meta.push(`continued ${t.continuations}×`);
@@ -3357,6 +3419,9 @@ function renderDrawer(fromLive = false) {
   if (row.children.length) top.append(row);
   if (O.err) top.append(el('div', 'dr-err', O.err));
   body.append(top);
+
+  // Model: the same text as the card's chip, the ordered fallbacks (current one marked) and every move.
+  if (t.kind !== 'plan') body.append(modelSection(t));
 
   // 2. The instructions it was given.
   if (t.kind === 'work') {

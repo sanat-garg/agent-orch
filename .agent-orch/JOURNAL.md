@@ -465,3 +465,7 @@ benchmark scoring gone; delegation uses owner fallback lists only
 ## 2026-09-26 04:50 — #153 Simple, foolproof fallbacks: one clean list per chat and for reflection [done (check passed)]
 
 Fallback lists replace Auto Delegate everywhere; 189 tests pass
+
+## 2026-09-26 05:05 — #154 Clear delegation status on task cards, drawer and chat [done (check passed)]
+
+modelStatus() drives task cards, drawer and chat notices; tests pass

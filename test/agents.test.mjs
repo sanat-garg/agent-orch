@@ -349,6 +349,23 @@ test('antigravity: recorded file tools retain paths, native errors and successfu
   assert.match(res.text, /ANTIGRAVITY_READ_OK_134/);
 });
 
+test('antigravity: recorded write/edit tools keep their TargetFile path; search tools keep theirs', async () => {
+  // Live gemini-3.1-pro-high run (2026-09-26, #148): write_to_file and replace_file_content only carry TargetFile.
+  const events = [];
+  const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'edit', cwd: tmp(), settingsPath: noSettings, usageProbe: false,
+    env: { PATH: process.env.PATH, AGY_STUB: 'edit-tools' }, onEvent: (e) => events.push(e) });
+  assert.equal(res.outcome, 'ok');
+  assert.deepEqual(events.filter((e) => e.k === 'tool'), [
+    { k: 'tool', id: '4', name: 'write_to_file', input: { file_path: '/workspace/notes/new.txt' } },
+    { k: 'tool', id: '5', name: 'replace_file_content', input: { file_path: '/workspace/math.mjs' } },
+  ]);
+  assert.deepEqual(events.filter((e) => e.k === 'tool_result').map((e) => [e.id, e.isError]), [['4', false], ['5', false]]);
+  const tool = (tool_name, parameters) => [...AGENTS.antigravity.events({ event: 'step_update', step_update: { step_index: 1, state: 'ACTIVE', step_type: 'tool', tool_name, tool_info: { parameters } } })][0].input;
+  assert.deepEqual(tool('grep_search', { SearchPath: '/w/src', Query: 'export', IsRegex: false }), { path: '/w/src', query: 'export' });
+  assert.deepEqual(tool('find_by_name', { SearchDirectory: '/w', Pattern: '*.mjs' }), { path: '/w', pattern: '*.mjs' });
+  assert.deepEqual(tool('list_dir', { DirectoryPath: '/w' }), { path: '/w' });
+});
+
 test('antigravity: resuming a missing conversation is errorCode no_session', async () => {
   const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'more', cwd: tmp(), resume: '9', settingsPath: noSettings,
     env: { PATH: process.env.PATH, AGY_STUB: 'nosession' } });

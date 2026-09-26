@@ -12,3 +12,7 @@ The owner reports that Antigravity 'can barely access files, view_file fails and
 ## Done when
 
 `node bin/agent-smoke.mjs --agent antigravity --model gemini-3.1-pro-high` and `--model claude-sonnet-4-6` both exit 0 with every check passing, and `npm test` passes
+
+## Result — done (check passed) (2026-09-26 01:32)
+
+AGENT-ORCH-STATUS: done — agy smoke passes 10/10 on both models; edit-path bug fixed

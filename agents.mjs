@@ -492,11 +492,15 @@ const AGY_NO_SESSION_RE = /(conversation|session).*not found|no such (conversati
 const AGY_DONE = new Set(['DONE', 'ERROR', 'FAILED', 'CANCELED', 'CANCELLED', 'INTERRUPTED']);
 
 const snakeKeys = (o = {}) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase(), v]));
+// agy's native path parameters (view_file AbsolutePath, write_to_file/replace_file_content TargetFile, grep_search
+// SearchPath, find_by_name SearchDirectory, list_dir DirectoryPath) -> the file_path/path fields toolInputSummary keeps.
+const AGY_PATH_KEYS = { AbsolutePath: 'file_path', TargetFile: 'file_path', FilePath: 'file_path', SearchPath: 'path', SearchDirectory: 'path', DirectoryPath: 'path' };
 function agyTool(u) {
   const name = u.tool_name || u.tool_info?.name || 'tool', p = u.tool_info?.parameters || {};
   if (name === 'run_command') return { name: 'Bash', input: { command: p.CommandLine ?? p.command ?? '' } };
-  if (name === 'view_file' && p.AbsolutePath != null) return { name, input: toolInputSummary(name, { file_path: p.AbsolutePath }) };
-  return { name, input: toolInputSummary(name, snakeKeys(p)) };
+  const input = snakeKeys(p);
+  for (const [k, to] of Object.entries(AGY_PATH_KEYS)) if (p[k] != null && input[to] == null) input[to] = p[k];
+  return { name, input: toolInputSummary(name, input) };
 }
 
 // `agy -p /usage` data ({groups:[{name, buckets:[{id, window, remaining_fraction, reset_time}]}]}) -> window points.

@@ -429,3 +429,7 @@ Reflection fallbacks editor added to #obPop, saved and snapshotted per project, 
 ## 2026-09-26 00:15 — #146 Codex: fix false 'limit hit' and use real reset times from rate-limit snapshots [done (check passed)]
 
 Codex limit was real; reset times now parsed from snapshots/errors
+
+## 2026-09-26 01:32 — #148 Antigravity: reproduce and fix file/tool failures with a real smoke suite [done (check passed)]
+
+agy smoke passes 10/10 on both models; edit-path bug fixed

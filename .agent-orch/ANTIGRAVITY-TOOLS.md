@@ -142,3 +142,79 @@ provider quota exhaustion remain explicitly distinguished. No evidence
 supports a broader execution/configuration or permission change; the
 investigation is complete within that boundary. This does not claim that
 the owner's alleged historical file-read failure was reproduced or repaired.
+
+# End-to-end smoke suite — task #148 (2026-09-26)
+
+`bin/agent-smoke.mjs --agent <id> [--model <m>]` runs ten prompts through the real CLI via `runAgentCli`
+(the orchestrator's launch: same adapter args, autonomous, cwd = project, the systemd unit's minimal env
+`HOME/USER/LOGNAME/SHELL/LANG/PATH`, a worker-style systemAppend), each in a fresh scratch git project with
+a `node --test` suite. Every check is verified on disk or by a random token the agent can only learn through
+its tools: quote line 3; list `src/**/*.mjs`; grep a string (with a near-miss decoy); fix `add()` so the
+suite passes (test file hash unchanged, suite re-run by the harness); create `docs/guide/NOTE.md`; run
+`npm test` (the test file appends to `.test-runs`, plus the shell tool call and pass/fail counts); read by
+relative and by absolute path; quote line 2750 of a 3000-line file; resume a conversation and recall a
+codeword. It stops at the first rate limit. `--verbose` prints every normalised event.
+
+## Findings
+
+1. **Adapter bug (fixed): write/edit tool paths lost.** Live `write_to_file` and `replace_file_content`
+   events carry only `{TargetFile}` (no content). `snakeKeys` made it `target_file`, which
+   `toolInputSummary` drops, so every edit/write showed `input: {}` in the UI/run log — the same class of bug
+   as #134's `view_file.AbsolutePath`. `agyTool` now maps agy's path parameters (`AbsolutePath`,
+   `TargetFile`, `FilePath` → `file_path`; `SearchPath`, `SearchDirectory`, `DirectoryPath` → `path`).
+   Regression: `test/fixtures/agy-edit-tools.jsonl` (recorded gemini-3.1-pro-high run, temp root →
+   `/workspace`) + test "recorded write/edit tools keep their TargetFile path" (fails on the old code).
+2. **agy exposes a reduced toolset to the model (agy design, not our launch).** `init.tools` lists
+   `grep_search`, `find_by_name`, `list_dir` etc., but asked for its callable tools both models name only
+   `view_file, run_command, write_to_file, replace_file_content, manage_task, send_message, schedule,
+   invoke_subagent, define_subagent, manage_subagents, generate_image, read_url_content, search_web,
+   ask_question`. Same result with cwd inside the trusted workspace `/home/ubuntu/workspace`, so it's not
+   workspace trust. Told not to use `run_command`, Gemini declines to search. Workaround: none needed —
+   glob/grep go through `run_command` (`find`, `grep -rl`) and pass; never forbid the shell in agy prompts.
+3. **Model tool-call errors recover inside the turn.** One gemini run called `run_command {"command":"npm
+   test"}` and got `invalid arguments: missing property 'WaitMsBeforeAsync'`; it retried correctly and the
+   check passed. Native schema validation, not the adapter (the error text is preserved in `tool_result`).
+4. **Provider quota, not tools.** The first claude-sonnet-4-6 runs ended `rate_limited` ("Individual quota
+   reached … Resets in 42m36s") after ~150 s of agy-internal retries; `/usage` showed `3p-5h` at 0 remaining
+   until 01:02:43Z. The adapter classified it correctly. Codex was likewise limited (until 01:20).
+5. **No sandbox/bwrap/env/cwd/path/resume problem.** bwrap isn't installed and our launch never passes
+   agy's `--sandbox`; `run_command` runs `npm`/`node`/`git` fine under the service env. Relative and absolute
+   reads, a 3000-line file, a new subdirectory and `--conversation` resume all work on both models. agy's
+   log lines "You are not logged into Antigravity" at startup appear in successful runs too (token load race).
+6. (Harness bug found on the first run, fixed in the script: `node --test test/` isn't valid on node 22.)
+
+## Final results
+
+`node bin/agent-smoke.mjs --agent antigravity --model gemini-3.1-pro-high` — exit 0:
+
+| check | result | secs | tools used |
+|---|---|---|---|
+| read-line3 | pass | 18 | view_file |
+| glob | pass | 19 | Bash |
+| grep | pass | 19 | Bash |
+| edit-fix | pass | 34 | Bash view_file replace_file_content |
+| create-subdir | pass | 19 | write_to_file |
+| npm-test | pass | 18 | Bash |
+| read-relative | pass | 16 | view_file |
+| read-absolute | pass | 17 | view_file |
+| large-file | pass | 17 | view_file |
+| resume | pass | 22 | - |
+
+`node bin/agent-smoke.mjs --agent antigravity --model claude-sonnet-4-6` — exit 0:
+
+| check | result | secs | tools used |
+|---|---|---|---|
+| read-line3 | pass | 22 | view_file |
+| glob | pass | 19 | Bash |
+| grep | pass | 18 | Bash |
+| edit-fix | pass | 30 | Bash replace_file_content |
+| create-subdir | pass | 19 | write_to_file |
+| npm-test | pass | 18 | Bash |
+| read-relative | pass | 16 | view_file |
+| read-absolute | pass | 13 | view_file |
+| large-file | pass | 18 | view_file |
+| resume | pass | 21 | - |
+
+`--agent claude` (default model): 10/10 pass (Read, Write, Bash). `--agent codex` (default model): 10/10 pass
+(Bash, Edit) after the large-file prompt stopped forbidding the shell (codex has no separate file viewer);
+that reworded check was re-run on both agy models and still passes via `view_file`. `npm test`: 198/198.

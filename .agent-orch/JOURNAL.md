@@ -437,3 +437,7 @@ agy smoke passes 10/10 on both models; edit-path bug fixed
 ## 2026-09-26 01:52 — #149 Verify Antigravity runs a real orchestrator task end to end [done (check passed)]
 
 both antigravity orchestrator runs finish done; three bugs fixed, tested
+
+## 2026-09-26 02:12 — #147 Antigravity: show all four limits (Gemini 5h/weekly, third-party 5h/weekly) with clear names [done (check passed)]
+
+Four named limits, independent group blocking; all 208 tests pass

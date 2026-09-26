@@ -12,3 +12,7 @@ Antigravity has four independent rate limits: 5-hour and weekly for Gemini model
 ## Done when
 
 `npm test` passes with antigravity group-mapping and independent-block tests, and `! grep -n "'3p" public/app.js` finds no user-visible 3p labels
+
+## Result — done (check passed) (2026-09-26 02:12)
+
+AGENT-ORCH-STATUS: done — Four named limits, independent group blocking; all 208 tests pass

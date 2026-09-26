@@ -11,7 +11,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createOrchestrator, parseJsonl, SHOT_HINT } from './orchestrator.mjs';
 import { createGitHub } from './github.mjs';
 import { retireRuntime, chatIdle, whenIdle } from './runtimes.mjs';
-import { AGENTS, runAgentCli, clearLoginCache, isMissingSession, modelCatalog, codexLatestSnapshot } from './agents.mjs';
+import { AGENTS, runAgentCli, clearLoginCache, isMissingSession, modelCatalog, codexLatestSnapshot, windowLabel, AGY_GROUPS, agyGroup } from './agents.mjs';
 import { createModelStore } from './models.mjs';
 import { createAAStore } from './aa.mjs';
 import { createConnections, SPECS, codexAccount, agyAccount, onPath } from './connections.mjs';
@@ -935,9 +935,9 @@ async function agentChatTurn(convo, text) {
   for (let next = text; next;) {
     const agent = chatAgent(convo), a = AGENTS[agent], ac = new AbortController();
     // Only this chat's own agent's limit matters (never Claude's): while it's limited, say so and skip the turn.
-    const lim = orch.limitResetFor(agent);
+    const lim = orch.limitResetFor(agent, convo.model);
     if (lim) {
-      emit(cid, { t: 'error', until: lim.at, untilKnown: lim.known, text: `Not sent: ${a.label} is at its usage limit${lim.known ? ' until {until}' : "; the reset time isn't known yet. Try again around {until}"}.` });
+      emit(cid, { t: 'error', until: lim.at, untilKnown: lim.known, text: `Not sent: ${lim.name} is at its ${agent === 'antigravity' ? lim.reason : 'usage limit'}${lim.known ? ' until {until}' : "; the reset time isn't known yet. Try again around {until}"}.` });
       emit(cid, { t: 'result', ok: false, text: 'rate_limited', ms: 0 });
       next = agentQueue.get(cid)?.splice(0).join('\n\n') || null;
       continue;
@@ -974,9 +974,9 @@ async function agentChatTurn(convo, text) {
     emitShots(cid, media);
     usageLog.tokens(agent, res.usage, 'chat', cid);
     usageLog.windows(agent, res.windows);
-    orch.recordLimit(res, agent); // blocks/unblocks only this agent (tasks routed to it follow) and logs usage history
+    orch.recordLimit(res, agent, convo.model); // blocks/unblocks only this agent (antigravity: its model group; tasks routed to it follow) and logs usage history
     if (res.outcome === 'auth_error') emit(cid, { t: 'error', text: `${a.label} is not signed in on this server. ${a.login}.` });
-    else if (res.outcome === 'rate_limited') emit(cid, { t: 'error', text: `${a.label} hit its usage limit${res.resetsAt ? '; it resets {until}' : ''}.`, ...(res.resetsAt && { until: res.resetsAt, untilKnown: true }) });
+    else if (res.outcome === 'rate_limited') emit(cid, { t: 'error', text: `${a.label} hit its ${res.limitType ? windowLabel(res.limitType) : agent === 'antigravity' ? AGY_GROUPS[agyGroup(convo.model)] : 'usage'} limit${res.resetsAt ? '; it resets {until}' : ''}.`, ...(res.resetsAt && { until: res.resetsAt, untilKnown: true }) });
     else if (res.outcome === 'aborted') emit(cid, { t: 'notice', text: 'Interrupted' });
     else if (res.outcome !== 'ok') emit(cid, { t: 'error', text: `${a.label} failed: ${String(res.text || res.stderr || res.outcome).trim().slice(-600)}` });
     emit(cid, { t: 'result', ok: res.outcome === 'ok', text: res.outcome === 'ok' ? '' : res.outcome, ms: Date.now() - started, turns: res.numTurns });

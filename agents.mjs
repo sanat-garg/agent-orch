@@ -503,6 +503,29 @@ function agyTool(u) {
   return { name, input: toolInputSummary(name, input) };
 }
 
+// Antigravity's four limits: a 5-hour and a weekly one per model group. Gemini models ('gemini-*', and agy's default
+// when no model is named) count against the 'gemini' group, everything else (Claude, GPT-OSS) against '3p'.
+export const AGY_GROUPS = { gemini: 'Gemini', '3p': 'Third-party' };
+export const agyGroup = (model) => (!model || /^gemini-/i.test(String(model).trim()) ? 'gemini' : '3p');
+// The group a window id belongs to ('3p-weekly' → '3p'), or null for windows without one.
+export const windowGroup = (w) => /^(gemini|3p)-/.exec(String(w || ''))?.[1] || null;
+// What a usage limit blocks: the agent, or for antigravity the agent + model group ('antigravity:3p'). kv keys and
+// state.blocks use it, so a Gemini limit never blocks third-party models and vice versa.
+export const limitScope = (agent, model) => (agent === 'antigravity' ? `antigravity:${agyGroup(model)}` : agent || 'claude');
+export const scopeGroup = (scope) => String(scope || '').split(':')[1] || null;
+// Every scope that can be blocked.
+export const limitScopes = (agents) => agents.flatMap((a) => (a === 'antigravity' ? Object.keys(AGY_GROUPS).map((g) => `${a}:${g}`) : [a]));
+// A scope's windows among an agent's: only its group's for antigravity.
+export const scopeWindows = (scope, list) => { const g = scopeGroup(scope); return (list || []).filter((w) => !g || windowGroup(w.window) === g); };
+
+// A plan window's display name ('3p-5h' → 'Third-party · 5-hour'); public/app.js winLabel matches it.
+const WIN_NAMES = { '5h': '5-hour', weekly: 'Weekly', five_hour: '5-hour', seven_day: 'Weekly' };
+export function windowLabel(w) {
+  const g = windowGroup(w), rest = g ? String(w).slice(g.length + 1) : String(w || '');
+  const name = WIN_NAMES[rest] || rest.charAt(0).toUpperCase() + rest.slice(1).replace(/_/g, ' ');
+  return g ? `${AGY_GROUPS[g]} · ${name}` : name;
+}
+
 // `agy -p /usage` data ({groups:[{name, buckets:[{id, window, remaining_fraction, reset_time}]}]}) -> window points.
 // Each model group has its own 5h and weekly limit, so the window is the bucket id ('gemini-5h', '3p-weekly').
 export function agyWindows(data) {
@@ -621,7 +644,7 @@ async function runAntigravity({ model, prompt, cwd, resume, systemAppend, signal
   else if (AGY_LIMIT_RE.test(errMsg)) {
     res.outcome = 'rate_limited'; res.errorCode = 'rate_limit'; res.resetsAt = codexResetsAt(errMsg);
     await probe();
-    const full = (res.windows || []).filter((w) => w.pct >= 100).sort((a, b) => (b.resetsAt || 0) - (a.resetsAt || 0))[0];
+    const full = (res.windows || []).filter((w) => w.pct >= 100 && windowGroup(w.window) === agyGroup(model)).sort((a, b) => (b.resetsAt || 0) - (a.resetsAt || 0))[0];
     if (full) { res.limitType = full.window; res.resetsAt ??= full.resetsAt; }
   }
   else {

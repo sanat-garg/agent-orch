@@ -90,6 +90,19 @@ test('delegator: blocked, disconnected and ≥90% windows exclude an agent; defa
   assert.deepEqual(r.candidates.map((c) => c.model), ['gpt-a', 'gpt-b']);
 });
 
+test('delegator: antigravity groups are independent: a Gemini block or full Gemini window keeps third-party models', () => {
+  const models = { claude: [{ id: 'opus', default: true }], codex: [{ id: 'gpt-a' }], antigravity: [{ id: 'gemini-x' }, { id: 'claude-sonnet-4-6' }] };
+  const grp = (m) => (/^gemini/.test(m || '') ? 'gemini' : '3p');
+  const mk = (over = {}) => createDelegator({ agents: () => Object.keys(models), models: (id) => models[id], metrics: () => ({ entries }),
+    connected: () => true, blockedUntil: () => 0, windows: () => [], ...over });
+  const ids = (d) => d.available().map((m) => `${m.agent}/${m.model}`);
+  let d = mk({ blockedUntil: (id, m) => (id === 'antigravity' && grp(m) === 'gemini' ? 123 : 0) });
+  assert.deepEqual(ids(d), ['claude/opus', 'codex/gpt-a', 'antigravity/claude-sonnet-4-6']);
+  assert.equal(d.hasUsage('antigravity', 'gemini-x'), false);
+  d = mk({ windows: (id, m) => (id === 'antigravity' ? [{ window: `${grp(m)}-5h`, pct: grp(m) === '3p' ? 95 : 10 }] : []) });
+  assert.deepEqual(ids(d), ['claude/opus', 'codex/gpt-a', 'antigravity/gemini-x']);
+});
+
 test('preview: start model plus top 3; a limited agent\'s models are marked and ranked after usable ones', () => {
   const all = avail('opus', 'haiku', 'gpt-a', 'gpt-b', 'gpt-mini', 'gemini-x').map((m) => ({ ...m, label: entries.find((e) => e.model === m.model).label }));
   const usage = (a) => (a === 'codex' ? { status: 'limited', until: 999, note: 'usage limit' } : a === 'antigravity' ? { status: 'near', until: null, note: '5h window at 80%' } : { status: 'available', until: null, note: null });

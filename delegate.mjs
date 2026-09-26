@@ -130,12 +130,12 @@ export function curatedCandidates({ current, list = [], entries = [], usable = (
 }
 
 // Live wiring. agents() → ids; connected(id) → bool (installed, signed in, on the subscription);
-// blockedUntil(id) → epoch s | 0; windows(id) → [{window, pct}] current plan windows; models(id) → [{id, default?}];
-// metrics() → aa view ({entries}). A window reading can't say which models it covers, so any window ≥ maxWindowPct
-// makes the whole agent unavailable (conservative).
+// blockedUntil(id, model) → epoch s | 0; windows(id, model) → [{window, pct}] the plan windows that model counts against
+// (antigravity: its group's); models(id) → [{id, default?}]; metrics() → aa view ({entries}). Any such window
+// ≥ maxWindowPct makes the model unavailable, so a full Gemini window never hides antigravity's third-party models.
 export function createDelegator({ agents, connected, blockedUntil, windows = () => [], models, metrics, cfg = DELEGATE_CFG }) {
-  const hasUsage = (id) => connected(id) && !blockedUntil(id) && !(windows(id) || []).some((w) => Number(w.pct) >= cfg.maxWindowPct);
-  const available = () => agents().filter(hasUsage).flatMap((a) => (models(a) || []).map((m) => ({ agent: a, model: m.id })));
+  const hasUsage = (id, model) => connected(id) && !blockedUntil(id, model) && !(windows(id, model) || []).some((w) => Number(w.pct) >= cfg.maxWindowPct);
+  const available = () => agents().filter((a) => connected(a)).flatMap((a) => (models(a) || []).filter((m) => hasUsage(a, m.id)).map((m) => ({ agent: a, model: m.id })));
   // The model a route with no model runs: the agent's default (else its first) model.
   const defaultModel = (agent) => { const ms = models(agent) || []; return (ms.find((m) => m.default) || ms[0])?.id || null; };
   function candidates(task, current) {
@@ -153,7 +153,7 @@ export function createDelegator({ agents, connected, blockedUntil, windows = () 
 }
 
 // Auto Delegate preview (the composer summary): the start model plus the comparable models most likely used after it.
-// all: [{agent, model, label}] every model of a connected agent, limited or not; usage(agent) → {status, until?, note?}
+// all: [{agent, model, label}] every model of a connected agent, limited or not; usage(agent, model) → {status, until?, note?}
 // where status is available | near | limited | unavailable. Limited candidates stay listed (the UI greys them) but rank
 // after every usable one. → {category, start, fallbacks, candidates: [≤limit rankCandidates rows + usage + full metrics], suggested}
 // With a curated `fallbacks` list, candidates are that whole list in the owner's order, each with its usage (a model
@@ -162,20 +162,20 @@ export function previewDelegation({ current, entries = [], all = [], usage, cate
   const ranked = rankCandidates({ current, entries, available: all, category, cfg });
   const full = (a, m) => entries.find((e) => e.agent === a && e.model === m)?.metrics || null;
   const usable = (s) => s === 'available' || s === 'near';
-  const rows = ranked.candidates.map((c, i) => ({ ...c, i, used: c.metrics, metrics: full(c.agent, c.model), ...usage(c.agent) }));
+  const rows = ranked.candidates.map((c, i) => ({ ...c, i, used: c.metrics, metrics: full(c.agent, c.model), ...usage(c.agent, c.model) }));
   rows.sort((a, b) => usable(b.status) - usable(a.status) || a.i - b.i);
   const labelOf = (a, m) => all.find((x) => x.agent === a && x.model === m)?.label || entries.find((e) => e.agent === a && e.model === m)?.label || m;
   const suggested = rows.slice(0, limit).map(({ i, similarity, ...r }) => r);
   const list = parseFallbacks(fallbacks);
   const curated = list && curatedCandidates({ current, list, entries, category, cfg }).candidates.map((c) => {
-    const u = usage(c.agent);
+    const u = usage(c.agent, c.model);
     const listed = all.some((m) => m.agent === c.agent && m.model === c.model);
     return { ...c, label: labelOf(c.agent, c.model), used: c.metrics, metrics: full(c.agent, c.model),
       ...(listed || u.status === 'unavailable' ? u : { status: 'unavailable', until: null, note: 'model not listed' }) };
   });
   return {
     category: ranked.category,
-    start: { ...current, label: labelOf(current.agent, current.model), score: ranked.original?.score ?? null, metrics: full(current.agent, current.model), ...usage(current.agent) },
+    start: { ...current, label: labelOf(current.agent, current.model), score: ranked.original?.score ?? null, metrics: full(current.agent, current.model), ...usage(current.agent, current.model) },
     fallbacks: list, candidates: curated || suggested, suggested,
   };
 }

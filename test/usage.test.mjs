@@ -42,6 +42,28 @@ test('the store round-trips window, token and limit records with dedupe', () => 
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('antigravity limits are kept per model group in the log and in history status', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-usage-g-'));
+  let t = Date.UTC(2026, 8, 25, 12);
+  const log = createUsageLog(dir, { now: () => t });
+  try {
+    const at = t / 1000 + 3600;
+    assert.ok(log.limitHit('antigravity', at, 'gemini-5h', 'gemini'));
+    assert.ok(log.limitHit('antigravity', at + 60, '3p-weekly', '3p'));
+    assert.equal(log.limitHit('antigravity', at, 'gemini-5h', 'gemini'), null); // same hit, same reset
+    assert.equal(log.lastLimit('antigravity', 'gemini').window, 'gemini-5h');
+    assert.ok(log.limitCleared('antigravity', '3p'));
+    assert.equal(log.lastLimit('antigravity', 'gemini').status, 'hit'); // clearing third-party leaves Gemini hit
+    for (const [w, pct] of [['gemini-5h', 100], ['gemini-weekly', 20], ['3p-5h', 40], ['3p-weekly', 60]]) log.window('antigravity', w, pct, at);
+    const s = log.history('24h').agents.antigravity.status;
+    assert.deepEqual(Object.keys(s.windows).sort(), ['3p-5h', '3p-weekly', 'gemini-5h', 'gemini-weekly']);
+    assert.equal(s.blocked, true);
+    assert.deepEqual(s.groups, { gemini: at });
+    t += 2 * 3600e3; // past the reset
+    assert.equal(log.history('24h').agents.antigravity.status.blocked, false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('compact drops records older than 30 days', () => {
   const dir = tmp();
   const t = Date.UTC(2026, 8, 25);

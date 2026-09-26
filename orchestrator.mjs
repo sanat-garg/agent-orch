@@ -16,7 +16,7 @@ import path from 'node:path';
 import { spawn, execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
-import { AGENTS, agentStatus, codexExhausted, codexLatestSnapshot, isMissingSession, modelCatalog, modelNames, runAgentCli, toolInputSummary } from './agents.mjs';
+import { AGENTS, AGY_GROUPS, agentStatus, codexExhausted, codexLatestSnapshot, isMissingSession, limitScope, limitScopes, modelCatalog, modelNames, runAgentCli, scopeGroup, scopeWindows, toolInputSummary, windowLabel } from './agents.mjs';
 import { mediaCollector } from './media.mjs';
 import { createUsageLog } from './usage.mjs';
 import { CATEGORIES, DELEGATE_CFG, createDelegator, eligible as delegationEligible, parseFallbacks, previewDelegation, rankCandidates, taskCategory } from './delegate.mjs';
@@ -493,7 +493,7 @@ export function routeMatches(match, task) {
 // Resolution order: the task's own agent/model, the first matching project route, the first matching
 // global route, then the project default (Claude on project.model). An agent that isn't installed or
 // logged in falls back to Claude; `fellBack` names it and `reason` says why, so the caller can log it.
-// isAvailable(id) returns true, or false / a reason string.
+// isAvailable(id, model) returns true, or false / a reason string (the model matters for antigravity's per-group limits).
 export function resolveRoute(task, project, routes = [], isAvailable = agentStatus) {
   // A model from another agent's family is dropped (`dropped` names it) in favour of the agent's default.
   const pick = (agent, model, source) => {
@@ -513,7 +513,7 @@ export function resolveRoute(task, project, routes = [], isAvailable = agentStat
     r = route ? { ...pick(route.agent, route.model, route.project_id == null ? 'global' : 'project'), routeId: route.id }
       : { agent: 'claude', model: project?.model || null, source: 'default' };
   }
-  const ok = r.agent === 'claude' || isAvailable(r.agent);
+  const ok = r.agent === 'claude' || isAvailable(r.agent, r.model);
   // The fallback always runs Claude's default model, never the unavailable agent's (e.g. gemini-2.5-pro).
   if (ok !== true) return { agent: 'claude', model: project?.model || null, source: r.source, fellBack: r.agent, reason: typeof ok === 'string' ? ok : 'not available',
     ...(r.dropped && { dropped: r.dropped }) };
@@ -1152,36 +1152,40 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     for (const l of getLimits() || []) upsertLimit(l.limit_type, l.status || 'allowed', l.resets_at, l.utilization, l.observed_at);
   }
   const limitsRows = () => qa('SELECT * FROM limits');
-  // Every agent's usage limit is independent. Claude keeps the original kv keys (blocked_until, blocked_known,
-  // blocked_reason); other agents use the same keys suffixed with :<agent>.
-  const limitKey = (k, agent) => (agent === 'claude' ? k : `${k}:${agent}`);
-  function blockedUntilFor(agent = 'claude') {
-    const u = parseFloat(kvGet(limitKey('blocked_until', agent), '0')) || 0;
-    return u > now() ? u : null;
-  }
+  // Every agent's usage limit is independent, and antigravity's per model group (agents.mjs limitScope: a Gemini
+  // limit never blocks its third-party models). Claude keeps the original kv keys (blocked_until, blocked_known,
+  // blocked_reason); other scopes use the same keys suffixed with :<scope> (blocked_until:antigravity:3p).
+  // `model` only matters for antigravity; without one it's agy's default (a Gemini model).
+  const limitKey = (k, scope) => (scope === 'claude' ? k : `${k}:${scope}`);
+  const blockedUntilOf = (scope) => { const u = parseFloat(kvGet(limitKey('blocked_until', scope), '0')) || 0; return u > now() ? u : null; };
+  const blockedUntilFor = (agent = 'claude', model) => blockedUntilOf(limitScope(agent, model));
   const blockedUntil = () => blockedUntilFor('claude');
   const agentName = (agent) => (agent === 'claude' ? 'Claude' : AGENTS[agent]?.label || agent);
+  // 'Antigravity CLI (third-party models)' for a group scope.
+  const scopeName = (scope) => { const g = scopeGroup(scope), a = agentName(scope.split(':')[0]); return g ? `${a} (${AGY_GROUPS[g].toLowerCase()} models)` : a; };
+  const limitName = (agent, model) => scopeName(limitScope(agent, model));
   // When `agent`'s current limit really resets, for display: { at, known, reason }, or null when it isn't blocked.
-  function limitResetFor(agent = 'claude') {
-    const until = blockedUntilFor(agent);
+  function limitResetFor(agent = 'claude', model) {
+    const scope = limitScope(agent, model), until = blockedUntilOf(scope);
     if (!until) return null;
     if (agent === 'claude') syncUsageLimits();
-    const reason = kvGet(limitKey('blocked_reason', agent));
-    const r = limitReset(agent === 'claude' ? limitsRows() : [], { reason, blockedUntil: until, known: kvGet(limitKey('blocked_known', agent), '0') === '1', bufferSec: CFG.resetBufferSec, t: now() });
-    return { ...r, reason: reason || 'usage limit' };
+    const reason = kvGet(limitKey('blocked_reason', scope));
+    const r = limitReset(agent === 'claude' ? limitsRows() : [], { reason, blockedUntil: until, known: kvGet(limitKey('blocked_known', scope), '0') === '1', bufferSec: CFG.resetBufferSec, t: now() });
+    return { ...r, reason: reason || 'usage limit', name: scopeName(scope), notice: agent === 'antigravity' && reason ? reason : 'usage limit' };
   }
-  // Only a Claude limit blocks Claude; a codex/agy limit sets kv blocked_until:<agent>, and while that is in the
-  // future routeFor sends the agent's tasks to Claude (or they wait if Claude is blocked too). An ok run clears only
-  // its own agent's block.
-  function recordGovernor(res, agent = 'claude') {
+  // Only a Claude limit blocks Claude; a codex/agy limit sets kv blocked_until:<scope>, and while that is in the
+  // future routeFor sends the scope's tasks to Claude (or they wait if Claude is blocked too). An ok run clears only
+  // its own scope's block.
+  function recordGovernor(res, agent = 'claude', model) {
     // Status and reset time only: pacing takes utilization from the verified /usage reading,
     // whose scale is known, rather than from these live events.
     for (const l of res.limits || []) { // only the Claude adapter reports these
       upsertLimit(l.rateLimitType || 'unknown', l.status || 'allowed', l.resetsAt ? Number(l.resetsAt) : null, null);
     }
-    const key = (k) => limitKey(k, agent);
-    if (res.outcome === 'rate_limited') usageLog.limitHit(agent, res.resetsAt, res.limitType || undefined);
-    else if (res.outcome === 'ok') usageLog.limitCleared(agent);
+    const scope = limitScope(agent, model), group = scopeGroup(scope) || undefined;
+    const key = (k) => limitKey(k, scope);
+    if (res.outcome === 'rate_limited') usageLog.limitHit(agent, res.resetsAt, res.limitType || undefined, group);
+    else if (res.outcome === 'ok') usageLog.limitCleared(agent, group);
     if (res.outcome === 'rate_limited') {
       let resetsAt = res.resetsAt;
       if (resetsAt) kvSet(key('unknown_limit_streak'), 0);
@@ -1192,8 +1196,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       }
       kvSet(key('blocked_until'), resetsAt + CFG.resetBufferSec);
       kvSet(key('blocked_known'), res.resetsAt ? 1 : 0);
-      kvSet(key('blocked_reason'), res.limitType || 'usage limit');
-      if (agent !== 'claude') logEvent(`${agentName(agent)} usage limit reached; its tasks run on Claude until ${fmtAt(resetsAt + CFG.resetBufferSec)}`, { level: 'warn' });
+      // Claude's reason names its limit row (limitReset matches it); other agents' is the window's display name.
+      kvSet(key('blocked_reason'), res.limitType ? (agent !== 'antigravity' ? res.limitType : `${windowLabel(res.limitType)} limit`) : 'usage limit');
+      if (agent !== 'claude') logEvent(`${scopeName(scope)} usage limit reached; its tasks run on Claude until ${fmtAt(resetsAt + CFG.resetBufferSec)}`, { level: 'warn' });
       else logEvent(`Claude usage limit reached (${res.limitType || 'unknown'}); ${res.resetsAt ? 'resuming' : 'reset time unknown, retrying'} at ${fmtAt(resetsAt + CFG.resetBufferSec)}`, { level: 'warn' });
       pushState();
     } else if (res.outcome === 'ok') {
@@ -1388,18 +1393,19 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // A non-Claude auth_error marks just that agent unusable for 10 min (kv agent_auth_failed:<id>), and a non-Claude
   // usage limit until its reset (kv blocked_until:<id>), so its routes fall back to Claude.
   const kvTime = (k) => parseFloat(kvGet(k, '0')) || 0;
-  const agentAvailable = (id) => {
+  const agentAvailable = (id, model) => {
     if (kvTime(`agent_auth_failed:${id}`) > now()) return 'sign-in failed';
-    const u = blockedUntilFor(id);
+    const u = blockedUntilFor(id, model);
     return u ? `usage limit until ${fmtAt(u)}` : agentStatus(id);
   };
-  // The agent a queued task would run on right now (no logging). Plan tasks run the planner on their own agent.
-  const agentFor = (task, project) => (task.kind === 'plan' ? plannerAgent(task.agent) : resolveRoute(task, project, listRoutes(project.id), agentAvailable).agent);
-  // A task waits only while the agent it would run on is at its limit (routeFor never falls back onto a blocked Claude).
-  // A plan task also waits while its (non-Claude) agent's sign-in recently failed.
+  // The agent/model a queued task would run on right now (no logging). Plan tasks run the planner on their own agent.
+  const routeNow = (task, project) => (task.kind === 'plan' ? { agent: plannerAgent(task.agent), model: task.agent && task.agent !== 'claude' ? task.model : null }
+    : resolveRoute(task, project, listRoutes(project.id), agentAvailable));
+  // A task waits only while the limit scope it would run on is at its limit (routeFor never falls back onto a blocked
+  // Claude). A plan task also waits while its (non-Claude) agent's sign-in recently failed.
   const waitsForLimit = (task, project) => {
-    const a = agentFor(task, project || getProject(task.project_id));
-    return !!blockedUntilFor(a) || (task.kind === 'plan' && a !== 'claude' && kvTime(`agent_auth_failed:${a}`) > now());
+    const { agent: a, model } = routeNow(task, project || getProject(task.project_id));
+    return !!blockedUntilFor(a, model) || (task.kind === 'plan' && a !== 'claude' && kvTime(`agent_auth_failed:${a}`) > now());
   };
   function routeFor(task, project) {
     const r = resolveRoute(task, project, listRoutes(project.id), agentAvailable);
@@ -1411,9 +1417,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // fallback, tasks.fallbacks), if policy allows
   const delegator = createDelegator({
     agents: () => Object.keys(AGENTS),
-    connected: (id) => (id === 'claude' ? onSubscription() : agentAvailable(id) === true),
-    blockedUntil: (id) => blockedUntilFor(id),
-    windows: (id) => usageLog.current?.(id) || [],
+    connected: (id) => (id === 'claude' ? onSubscription() : agentStatus(id) === true && !(kvTime(`agent_auth_failed:${id}`) > now())),
+    blockedUntil: (id, model) => blockedUntilFor(id, model),
+    windows: (id, model) => scopeWindows(limitScope(id, model), usageLog.current?.(id)),
     models: (id) => modelCatalog(id).models || [],
     metrics: modelMetrics,
     cfg: CFG.delegate,
@@ -1440,10 +1446,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
   // Manual delegation (the task drawer's "Delegate…" sheet). The owner is choosing, so policy and pins don't apply;
   // every model of a connected agent is listed with its status, comparable candidates (delegate.mjs ranking) first.
-  function agentUsage(agent) {
-    const until = blockedUntilFor(agent);
+  function agentUsage(agent, model) {
+    const until = blockedUntilFor(agent, model);
     if (until) return { status: 'limited', until };
-    const hot = (usageLog.current?.(agent) || []).filter((w) => Number(w.pct) >= CFG.delegate.maxWindowPct);
+    const hot = scopeWindows(limitScope(agent, model), usageLog.current?.(agent)).filter((w) => Number(w.pct) >= CFG.delegate.maxWindowPct);
     if (hot.length) return { status: 'limited', until: Math.max(0, ...hot.map((w) => w.resetsAt || 0)) || null, window: hot[0].window };
     return { status: 'available', until: null };
   }
@@ -1454,7 +1460,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     let view = null;
     try { view = modelMetrics(); } catch {}
     const entries = view?.entries || [];
-    const connected = Object.keys(AGENTS).filter((a) => (a === 'claude' ? onSubscription() : agentAvailable(a) === true));
+    const connected = Object.keys(AGENTS).filter((a) => (a === 'claude' ? onSubscription() : agentStatus(a) === true && !(kvTime(`agent_auth_failed:${a}`) > now())));
     const all = connected.flatMap((a) => (modelCatalog(a).models || []).map((m) => ({ agent: a, model: m.id, label: m.label || m.id, default: !!m.default })));
     const current = { agent: cur.agent, model: cur.model || all.find((m) => m.agent === cur.agent && m.default)?.model || null };
     const ranked = rankCandidates({ current, entries, available: all, category: taskCategory(task), cfg: CFG.delegate });
@@ -1462,27 +1468,27 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const metricsOf = (a, m) => entries.find((e) => e.agent === a && e.model === m)?.metrics || null;
     const rows = all.filter((m) => !(m.agent === current.agent && m.model === current.model)).map((m) => {
       const c = byKey.get(`${m.agent}/${m.model}`);
-      return { agent: m.agent, model: m.model, label: m.label, ...agentUsage(m.agent), comparable: !!c, score: c?.score ?? null, ratio: c?.ratio ?? null,
+      return { agent: m.agent, model: m.model, label: m.label, ...agentUsage(m.agent, m.model), comparable: !!c, score: c?.score ?? null, ratio: c?.ratio ?? null,
         reason: c?.reason || (ranked.original ? 'not comparable on the metrics' : 'no metrics for the current model'), metrics: metricsOf(m.agent, m.model) };
     });
     const rank = new Map(ranked.candidates.map((c, i) => [`${c.agent}/${c.model}`, i]));
     rows.sort((a, b) => (rank.get(`${a.agent}/${a.model}`) ?? 1e9) - (rank.get(`${b.agent}/${b.model}`) ?? 1e9) || (a.status === 'available' ? 0 : 1) - (b.status === 'available' ? 0 : 1));
     return { task: taskView(task), category: ranked.category, source: view?.source || 'manual', fetched_at: view?.fetched_at ?? null, attribution: view?.attribution || null,
       current: { ...current, label: all.find((m) => m.agent === current.agent && m.model === current.model)?.label || current.model, score: ranked.original?.score ?? null,
-        metrics: metricsOf(current.agent, current.model), ...agentUsage(current.agent) }, candidates: rows };
+        metrics: metricsOf(current.agent, current.model), ...agentUsage(current.agent, current.model) }, candidates: rows };
   }
   // Auto Delegate preview for the composer (GET /api/delegate/preview): the chat's start model plus the top comparable
   // candidates, each with its agent's usage status. Near = a plan window at ≥75%; limited agents rank last.
-  function previewUsage(agent) {
+  function previewUsage(agent, model) {
     const connected = agent === 'claude' ? onSubscription() : agentStatus(agent) === true;
     if (!connected) return { status: 'unavailable', until: null, note: agent === 'claude' ? 'not on the subscription' : 'not signed in' };
     if (kvTime(`agent_auth_failed:${agent}`) > now()) return { status: 'unavailable', until: null, note: 'sign-in failed' };
-    const until = blockedUntilFor(agent);
-    if (until) return { status: 'limited', until, note: kvGet(limitKey('blocked_reason', agent)) || 'usage limit' };
-    const ws = (usageLog.current?.(agent) || []).filter((w) => Number.isFinite(Number(w.pct))).sort((a, b) => b.pct - a.pct);
+    const scope = limitScope(agent, model), until = blockedUntilOf(scope);
+    if (until) return { status: 'limited', until, note: kvGet(limitKey('blocked_reason', scope)) || 'usage limit' };
+    const ws = scopeWindows(scope, usageLog.current?.(agent)).filter((w) => Number.isFinite(Number(w.pct))).sort((a, b) => b.pct - a.pct);
     const w = ws[0];
-    if (w && w.pct >= CFG.delegate.maxWindowPct) return { status: 'limited', until: w.resetsAt || null, note: `${w.window} window at ${Math.round(w.pct)}%` };
-    if (w && w.pct >= 75) return { status: 'near', until: w.resetsAt || null, note: `${w.window} window at ${Math.round(w.pct)}%` };
+    if (w && w.pct >= CFG.delegate.maxWindowPct) return { status: 'limited', until: w.resetsAt || null, note: `${windowLabel(w.window)} window at ${Math.round(w.pct)}%` };
+    if (w && w.pct >= 75) return { status: 'near', until: w.resetsAt || null, note: `${windowLabel(w.window)} window at ${Math.round(w.pct)}%` };
     return { status: 'available', until: null, note: null };
   }
   // fallbacks: the chat's curated list (null = automatic); the reply then lists it and still `suggested`s the automatic top 3.
@@ -1665,18 +1671,19 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       return;
     }
     // While the chat's agent is limited, save the message; a plan task answers it the moment that agent's capacity returns.
-    const r = limitResetFor(agent);
+    const r = limitResetFor(agent, model);
     if (r) {
+      // Another agent (its default model) that isn't limited; for antigravity, its default must be in an unblocked group.
       const alt = opts.autoDelegate && ['claude', ...Object.keys(AGENTS)].find((a) => a !== agent && !blockedUntilFor(a) && (a === 'claude' ? onSubscription() : agentAvailable(a) === true));
       if (alt) {
-        emitChat(convo.id, { t: 'notice', until: r.at, untilKnown: r.known, text: `${agentName(agent)} is at its usage limit until {until}; ${agentName(alt)} answers this instead (Auto Delegate).` });
+        emitChat(convo.id, { t: 'notice', until: r.at, untilKnown: r.known, text: `${r.name} is at its ${r.notice} until {until}; ${agentName(alt)} answers this instead (Auto Delegate).` });
         agent = alt; model = null;
       } else {
         const msgId = deferMessage(project.id, text, 0, agent, model);
         // The browser replaces {until} with `until` in its own timezone.
         emitChat(convo.id, { t: 'notice', msgId, until: r.at, untilKnown: r.known, agent, text: r.known
-          ? `Saved. ${agentName(agent)} is at its usage limit until {until}; the orchestrator answers then.`
-          : `Saved. ${agentName(agent)} is at its usage limit; the reset time isn't known yet. Retrying around {until}.` });
+          ? `Saved. ${r.name} is at its ${r.notice} until {until}; the orchestrator answers then.`
+          : `Saved. ${r.name} is at its ${r.notice}; the reset time isn't known yet. Retrying around {until}.` });
         return;
       }
     }
@@ -1718,12 +1725,12 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       setPlannerSession(project, agent, null);
       res = await attempt(null);
     }
-    recordGovernor(res, agent);
+    recordGovernor(res, agent, claude ? null : model);
     if (res.sessionId && ['ok', 'max_turns'].includes(res.outcome)) setPlannerSession(project, agent, res.sessionId);
     if (convoId && !claude && res.outcome === 'ok') { const shown = stripTasksBlock(res.text || ''); if (shown) emitChat(convoId, { t: 'text', text: shown }); }
     if (!['ok'].includes(res.outcome)) {
       if (convoId) {
-        const why = res.outcome === 'rate_limited' ? `${agentName(agent)} hit its usage limit. The message is saved and will be answered after the reset.`
+        const why = res.outcome === 'rate_limited' ? `${limitName(agent, model)} hit its ${res.limitType ? windowLabel(res.limitType) : 'usage'} limit. The message is saved and will be answered after the reset.`
           : res.outcome === 'aborted' ? 'Stopped.' : `The planner couldn't finish (${res.outcome}). ${String(res.stderr || res.text).trim().slice(-300)}`;
         // A plan task's messages go back to pending and the task itself is requeued.
         const msgId = res.outcome === 'rate_limited' && fromChat ? deferMessage(project.id, text, 0, agent, model) : null;
@@ -1917,7 +1924,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   async function handle(task, project, res, signal) {
     // Plan tasks record their own limits in plannerRun and run the planner on their own agent.
     const ran = task.kind === 'plan' ? plannerAgent(task.agent) : task.ran_agent || 'claude';
-    if (task.kind !== 'plan') recordGovernor(res, ran);
+    const ranModel = task.kind === 'plan' ? task.model : task.ran_model;
+    if (task.kind !== 'plan') recordGovernor(res, ran, ranModel);
     const tid = task.id, pid = project.id;
     if (task.status !== 'running') return; // cancelled while it ran
     if (res.outcome === 'ok') {
@@ -1928,7 +1936,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     }
     if (res.outcome === 'rate_limited') {
       requeueIfRunning(tid, { session_id: res.sessionId || task.session_id });
-      if (ran !== 'claude') return logEvent(`#${tid} hit the ${agentName(ran)} usage limit; ${task.kind === 'plan' ? `resumes ${fmtAt(blockedUntilFor(ran) || now())}` : 'retrying on Claude'}`, { level: 'warn', projectId: pid, taskId: tid });
+      if (ran !== 'claude') return logEvent(`#${tid} hit the ${limitName(ran, ranModel)} usage limit; ${task.kind === 'plan' ? `resumes ${fmtAt(blockedUntilFor(ran, ranModel) || now())}` : 'retrying on Claude'}`, { level: 'warn', projectId: pid, taskId: tid });
       const u = blockedUntil();
       return logEvent(`⏸ #${tid} hit the Claude ${res.limitType || 'usage'} limit; resumes ${u ? fmtAt(u) : 'soon'}`, { level: 'warn', projectId: pid, taskId: tid });
     }
@@ -2161,8 +2169,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       started_at: t.started_at, finished_at: t.finished_at, commit_sha: t.commit_sha,
       agent: t.agent, model: t.model, ran_agent: t.ran_agent, ran_model: t.ran_model, route_note: t.route_note ?? null,
       origin: t.origin ?? null, auto_delegate: !!t.auto_delegate, delegated_from: t.delegated_from ?? null, delegated_reason: t.delegated_reason ?? null, fallbacks: parseFallbacks(t.fallbacks), has_verify_failure: t.verify_output != null,
-      // The agent a queued task would run on now: the UI shows it waiting only while that agent is limited (state.blocks).
-      runs_on: t.status === 'queued' ? agentFor(t, getProject(t.project_id)) : null,
+      // The agent a queued task would run on now: the UI shows it waiting only while its limit scope (limit_scope, a
+      // state.blocks key: the agent, or antigravity:gemini / antigravity:3p) is limited.
+      ...(() => { if (t.status !== 'queued') return { runs_on: null, limit_scope: null };
+        const r = routeNow(t, getProject(t.project_id));
+        return { runs_on: r.agent, limit_scope: limitScope(r.agent, r.model) }; })(),
       summary: t.status === 'done' ? parseStatus(t.result)[1] || null : t.status === 'failed' || t.status === 'cancelled' ? String(t.result || '').slice(0, 200) : null,
     };
   }
@@ -2180,11 +2191,12 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
   function stateView() {
     const d = decisionCache?.d;
-    // blocks: every agent currently at its usage limit → { until, known, reason } (`until` is when it really resets).
+    // blocks: every limit scope (agent, or antigravity:gemini / antigravity:3p) currently at its usage limit →
+    // { until, known, reason } (`until` is when it really resets).
     const blocks = {};
-    for (const id of Object.keys(AGENTS)) {
-      const r = blockedUntilFor(id) && { until: blockedUntilFor(id), known: kvGet(limitKey('blocked_known', id), '0') === '1', reason: kvGet(limitKey('blocked_reason', id)) || 'usage limit' };
-      if (r) blocks[id] = r;
+    for (const id of limitScopes(Object.keys(AGENTS))) {
+      const u = blockedUntilOf(id);
+      if (u) blocks[id] = { until: u, known: kvGet(limitKey('blocked_known', id), '0') === '1', reason: kvGet(limitKey('blocked_reason', id)) || 'usage limit' };
     }
     const activeUsage = qa("SELECT DISTINCT CASE WHEN kind='plan' THEN COALESCE(agent, 'claude') ELSE COALESCE(ran_agent, agent, 'claude') END AS agent FROM tasks WHERE status='running'");
     return { activeUsage, blocks, blockedUntil: blockedUntil(), blockedReason: kvGet('blocked_reason'), pacing: d?.reason || kvGet('budget_reason'), slots: d?.concurrency ?? CFG.concurrency, running: running.size, draining, subscription: onSubscription() };
@@ -2256,10 +2268,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     setTimeout(tick, 5000);
     // A limit that has passed: capacity is back, so refresh usage for pacing.
     setInterval(() => {
-      for (const id of Object.keys(AGENTS)) {
+      for (const id of limitScopes(Object.keys(AGENTS))) {
         const key = limitKey('blocked_until', id);
-        if (blockedUntilFor(id) || kvGet(key, '0') === '0') continue;
-        kvSet(key, 0); usageLog.limitCleared(id); pushState();
+        if (blockedUntilOf(id) || kvGet(key, '0') === '0') continue;
+        kvSet(key, 0); usageLog.limitCleared(id.split(':')[0], scopeGroup(id) || undefined); pushState();
         if (id === 'claude') refreshUsage?.();
       }
     }, 15000);

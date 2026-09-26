@@ -2506,10 +2506,13 @@ function sidebarUsage() {
   if (usageSlides.agent === 'claude') return M.usage;
   const windows = Object.entries(usageSlides.data?.[usageSlides.agent]?.status?.windows || {});
   const active = windows.filter(([, w]) => !w.stale && (!w.resetsAt || w.resetsAt * 1000 > Date.now()));
+  const shown = usageSlides.agent === 'antigravity'
+    ? ['gemini-5h', 'gemini-weekly', "3p-5h", "3p-weekly"].map((id) => active.find(([w]) => w === id) || [id, { pct: null }])
+    : active;
   return {
     available: !!active.length,
     updatedAt: windows.length ? Math.max(...windows.map(([, w]) => w.t)) : null,
-    windows: active.map(([id, w]) => ({ ...w, label: winLabel(id), resetsAt: w.resetsAt ? new Date(w.resetsAt * 1000).toISOString() : null })),
+    windows: shown.sort(([a], [b]) => byWin(a, b)).map(([id, w]) => ({ ...w, id, label: winLabel(id), tip: winTip(id), resetsAt: w.resetsAt ? new Date(w.resetsAt * 1000).toISOString() : null })),
   };
 }
 function renderUsage(fresh = false) {
@@ -2523,23 +2526,36 @@ function renderUsage(fresh = false) {
   $('usageCard').title = `${name} subscription limits · open usage over time`;
   $('usRefresh').setAttribute('aria-label', `Refresh ${name} usage limits`);
   const windows = id === 'claude' ? [{ ...u?.session, label: '5-hour' }, { ...u?.weekly, label: 'Weekly' }] : (u?.windows || []);
-  for (const [i, key] of ['Session', 'Weekly'].entries()) {
-    const w = windows[i];
-    blurSwap($(`us${key}Row`).firstElementChild, w?.label || (i ? 'Weekly' : '5-hour'));
-    blurSwap($(`us${key}`), w?.pct != null ? fmtPct(w.pct) : '–', fresh);
-    setBar($(`us${key}Bar`), w?.pct ?? 0);
-    $(`us${key}Row`).title = w?.resetsAt ? fmtReset(w.resetsAt) : '';
+  // Two fixed rows; windows past those (antigravity's four: Gemini and third-party, 5-hour and weekly) get compact
+  // rows in #usMore, and grouped labels widen the label column.
+  const more = $('usMore'), rows = [$('usSessionRow'), $('usWeeklyRow')];
+  while (more.children.length < windows.length - 2) {
+    const r = el('div', 'ms-row');
+    r.append(el('span'), el('span', 'ms-bar'), el('span', 'ms-val'));
+    r.children[1].append(el('i'));
+    more.append(r);
   }
+  while (more.children.length > Math.max(0, windows.length - 2)) more.lastChild.remove();
+  rows.push(...more.children);
+  $('usageCard').classList.toggle('groups', windows.some((w) => w.id && winGroup(w.id)));
+  rows.forEach((row, i) => {
+    const w = windows[i], [lab, bar, val] = row.children;
+    blurSwap(lab, w?.label || (i ? 'Weekly' : '5-hour'));
+    blurSwap(val, w?.pct != null ? fmtPct(w.pct) : '–', fresh);
+    setBar(bar.firstElementChild, w?.pct ?? 0);
+    row.title = [w?.tip, w?.resetsAt ? fmtReset(w.resetsAt) : ''].filter(Boolean).join('\n');
+  });
   let note;
   if (id === 'claude' && !u?.updatedAt) note = 'Checking plan limits…';
   else if (!u?.available) note = id === 'claude'
     ? (u?.error ? `Couldn't read limits: ${u.error}` : 'Plan limits unavailable')
     : usageSlides.error ? "Couldn't refresh limits" : 'No current limits reported by this agent';
   else {
-    note = windows.map((w, i) => `${i > 1 ? `${w.label}: ${fmtPct(w.pct)} · ` : ''}${w.resetsAt ? `${w.label} resets ${fmtResetAt(w.resetsAt)}` : i > 1 ? 'reset unknown' : ''}`).filter(Boolean).join('\n');
+    note = windows.map((w) => (w.resetsAt ? `${w.label} resets ${fmtResetAt(w.resetsAt)}` : '')).filter(Boolean).join('\n');
     if (u.extraUsage === true) note += ' ⚠ Extra usage is ON: it can bill beyond your plan';
   }
-  blurSwap($('usNote'), note.trim(), fresh);
+  $('usNote').title = note.trim();
+  blurSwap($('usNote'), id === 'antigravity' && u?.available ? 'Four independent model-group limits' : note.trim(), fresh);
   renderUsageAge();
 }
 setInterval(() => {
@@ -2665,17 +2681,35 @@ const USAGE_AGENTS = ['claude', 'codex', 'antigravity'];
 const WIN_NAMES = { five_hour: '5-hour', seven_day: 'Weekly', '5h': '5-hour', weekly: 'Weekly' };
 const SERIES = ['var(--accent)', 'var(--chart-2)', 'var(--chart-3)', 'var(--faint)'];
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
-// claude five_hour/seven_day_opus, codex 5h/weekly, agy gemini-5h/3p-weekly.
+// Antigravity has a 5-hour and a weekly limit per model group: Gemini models, and third-party ones (agents.mjs agyGroup).
+const AGY_GROUPS = { gemini: 'Gemini', "3p": 'Third-party' };
+const winGroup = (w) => /^(gemini|3p)-/.exec(w)?.[1] || null;
+// claude five_hour/seven_day_opus, codex 5h/weekly, agy gemini-5h … 3p-weekly ('Third-party · Weekly').
 function winLabel(w) {
+  const g = winGroup(w);
+  if (g) return `${AGY_GROUPS[g]} · ${winLabel(w.slice(g.length + 1))}`;
   if (WIN_NAMES[w]) return WIN_NAMES[w];
   let m = w.match(/^seven_day_(.+)$/);
   if (m) return `Weekly ${cap(m[1].replace(/_/g, ' '))}`;
   m = w.match(/^(.+)-(5h|weekly)$/);
-  if (m) return `${cap(m[1])} ${WIN_NAMES[m[2]].toLowerCase()}`;
+  if (m) return `${cap(m[1].replace(/-/g, ' '))} · ${WIN_NAMES[m[2]]}`;
   return cap(w.replace(/_/g, ' '));
 }
+// Which models count against an antigravity group ('' for other windows), for tooltips.
+function groupModels(g) {
+  const ms = (AGENT_LIST.find((a) => a.id === 'antigravity')?.models || []).filter((m) => (/^gemini-/i.test(m.id) ? 'gemini' : "3p") === g).map((m) => m.id);
+  return `${AGY_GROUPS[g]} models: ${ms.length ? ms.join(', ') : g === "3p" ? 'claude-sonnet-4-6, claude-opus-4-6-thinking, gpt-oss-120b-medium' : 'Gemini Flash, Gemini Pro'}`;
+}
+const winTip = (w) => (winGroup(w) ? groupModels(winGroup(w)) : '');
 const winRank = (w) => (/(^|-)5h$|five_hour/.test(w) ? 0 : /(^|-)weekly$|^seven_day$/.test(w) ? 1 : 2);
-const byWin = (a, b) => winRank(a) - winRank(b) || a.localeCompare(b);
+const groupRank = (w) => ({ gemini: 0, "3p": 1 })[winGroup(w)] ?? -1;
+const byWin = (a, b) => groupRank(a) - groupRank(b) || winRank(a) - winRank(b) || a.localeCompare(b);
+// A limit scope (state.blocks key / task limit_scope: 'claude', 'codex', 'antigravity:3p') as a name.
+const limitName = (id) => {
+  const [a, g] = String(id).split(':');
+  const name = a === 'claude' ? 'Claude' : agentLabel(a);
+  return g ? `${name} (${AGY_GROUPS[g]?.toLowerCase() || g} models)` : name;
+};
 const fmtTok = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(n >= 1e4 ? 0 : 1)}k` : String(Math.round(n)));
 // Browser-local: "3:10 PM" today, "Tue 3:10 PM" within a week, else "Sep 20 3:10 PM".
 function fmtWhen(ms, now = Date.now()) {
@@ -2689,14 +2723,15 @@ const agentLabel = (id) => AGENT_LIST.find((a) => a.id === id)?.label || CONN.li
 // Current reading per window: "5-hour 42% · resets 3:10 PM".
 function usageChips(a) {
   const box = el('div', 'ug-chips'), now = Date.now();
-  if (a.status.blocked) {
-    box.append(el('span', 'ug-chip crit', `Limit hit · ${a.status.resetsAt ? `until ${fmtWhen(a.status.resetsAt * 1000)}` : 'reset time unknown'}`));
-  }
+  const hit = (label, at) => { const c = el('span', 'ug-chip crit', `${label} · ${at ? `until ${fmtWhen(at * 1000)}` : 'reset time unknown'}`); box.append(c); return c; };
+  // Antigravity: one chip per blocked model group.
+  if (a.status.groups) for (const [g, at] of Object.entries(a.status.groups)) hit(`${AGY_GROUPS[g] || g} limit hit`, at).title = groupModels(g);
+  else if (a.status.blocked) hit('Limit hit', a.status.resetsAt);
   for (const w of Object.keys(a.status.windows).sort(byWin)) {
     const s = a.status.windows[w], reset = s.resetsAt ? s.resetsAt * 1000 : null;
     const c = el('span', `ug-chip ${reset && reset <= now ? '' : level(s.pct)[0]}`,
       reset && reset <= now ? `${winLabel(w)} · reset ${fmtWhen(reset)}` : `${winLabel(w)} ${Math.round(s.pct)}% · ${reset ? `resets ${fmtWhen(reset)}` : 'reset time unknown'}${s.stale ? ' · stale' : ''}`);
-    c.title = `Read ${fmtWhen(s.t)}${s.stale ? ' (older than the window)' : ''}`;
+    c.title = `${winTip(w) ? `${winTip(w)}\n` : ''}Read ${fmtWhen(s.t)}${s.stale ? ' (older than the window)' : ''}`;
     box.append(c);
   }
   return box;
@@ -2848,21 +2883,23 @@ function usageBarChart(host, buckets, bucketMs, from, to) {
   };
 }
 
-// Limit hits (newest first), each with when it cleared.
+// Limit hits (newest first), each with when it cleared (paired per antigravity model group).
 function usageLimits(a) {
-  const rows = [];
-  let open = null;
+  const rows = [], open = new Map();
   for (const e of a.limits) {
-    if (e.status === 'hit') { if (open) rows.push({ hit: open }); open = e; }
-    else { rows.push({ hit: open, cleared: e }); open = null; }
+    const g = e.group || '';
+    if (e.status === 'hit') { if (open.has(g)) rows.push({ hit: open.get(g) }); open.set(g, e); }
+    else { rows.push({ hit: open.get(g) || null, cleared: e }); open.delete(g); }
   }
-  if (open) rows.push({ hit: open, still: a.status.blocked });
+  for (const [g, e] of open) rows.push({ hit: e, still: g ? g in (a.status.groups || {}) : a.status.blocked });
+  rows.sort((x, y) => (x.hit || x.cleared).t - (y.hit || y.cleared).t);
   if (!rows.length) return el('p', 'na', 'No limits hit in this range.');
   const ul = el('ul', 'm-list ug-limits');
   for (const r of rows.reverse()) {
     const li = el('li');
-    const win = (r.hit || r.cleared).window;
-    li.append(el('span', 'k', `${r.hit ? `Hit ${fmtWhen(r.hit.t)}` : 'Hit before this range'}${win ? ` · ${winLabel(win)}` : ''}`));
+    const { window: win, group } = r.hit || r.cleared;
+    const what = win ? winLabel(win) : group ? `${AGY_GROUPS[group] || group} models` : '';
+    li.append(el('span', 'k', `${r.hit ? `Hit ${fmtWhen(r.hit.t)}` : 'Hit before this range'}${what ? ` · ${what}` : ''}`));
     const reset = r.hit?.resetsAt ? ` · resets ${fmtWhen(r.hit.resetsAt * 1000)}` : '';
     li.append(el('span', `v${r.still ? ' crit' : ''}`, r.cleared
       ? `Cleared ${fmtWhen(r.cleared.t)}${r.hit ? ` · after ${fmtDur((r.cleared.t - r.hit.t) / 1000)}` : ''}`
@@ -2898,7 +2935,7 @@ function usageSection(id, a, conn, d) {
   const names = Object.keys(a.windows).sort(byWin);
   if (names.some((n) => a.windows[n].length)) {
     const legend = el('div', 'ug-legend');
-    names.forEach((n, i) => { const s = el('span', '', winLabel(n)); s.style.setProperty('--c', SERIES[i % SERIES.length]); legend.append(s); });
+    names.forEach((n, i) => { const s = el('span', '', winLabel(n)); s.style.setProperty('--c', SERIES[i % SERIES.length]); s.title = winTip(n); legend.append(s); });
     lc.append(legend);
     const host = el('div');
     lc.append(host);
@@ -3033,8 +3070,8 @@ function taskState(t) {
     }
   }
   const s = O.state;
-  const lim = s?.blocks?.[t.runs_on || 'claude'];
-  if (lim && lim.until > nowS) return { cls: 'limited', label: `Waiting for ${limitName(t.runs_on || 'claude')} usage reset · ${fmtClock(lim.until)}` };
+  const scope = t.limit_scope || t.runs_on || 'claude', lim = s?.blocks?.[scope];
+  if (lim && lim.until > nowS) return { cls: 'limited', label: `Waiting for ${limitName(scope)} ${lim.reason || 'usage limit'} reset · ${fmtClock(lim.until)}` };
   if (O.project && O.project.id === t.project_id && O.project.status === 'paused') return { cls: 'waiting', label: 'Paused' };
   if (t.depends_on) {
     const dep = O.tasks.get(t.depends_on);
@@ -3134,8 +3171,8 @@ function onOrch(msg) {
 }
 
 // ----- the status bar above the chat
-// Each agent's usage limit is independent: state.blocks = { claude: { until, known, reason }, codex: … }.
-const limitName = (id) => (id === 'claude' ? 'Claude' : agentLabel(id));
+// Each agent's usage limit is independent (antigravity's per model group): state.blocks = { claude: { until, known,
+// reason }, codex: …, 'antigravity:3p': … }.
 const limitedAgents = (s, nowS) => Object.entries(s.blocks || {}).filter(([, b]) => b.until > nowS);
 function renderOrchBar() {
   renderConnFoot(); // routing rules decide whether a signed-out agent warrants the footer's warning
@@ -3146,7 +3183,7 @@ function renderOrchBar() {
   let status;
   if (!p) status = 'Describe what you want. The planner breaks it into small, verified tasks.';
   else if (s.subscription === false) status = 'Waiting: Claude Code is not signed in with your subscription';
-  else if (limitedAgents(s, nowS).length) status = limitedAgents(s, nowS).map(([id, b]) => `${limitName(id)}: usage limit reached · resumes ${fmtClock(b.until)}`).join(' · ');
+  else if (limitedAgents(s, nowS).length) status = limitedAgents(s, nowS).map(([id, b]) => `${limitName(id)}: ${b.reason || 'usage limit'} reached · resumes ${fmtClock(b.until)}`).join(' · ');
   else if (p.ready === false) status = GH.linked ? 'Setting up the GitHub repo… work starts once it exists' : 'Waiting for GitHub: link it and work starts (every task is pushed)';
   else if (p.status === 'paused') status = 'Paused. Tasks keep their progress.';
   else if (p.counts.running) status = `Working on ${p.counts.running} task${p.counts.running > 1 ? 's' : ''}`;

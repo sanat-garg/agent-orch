@@ -202,7 +202,8 @@ cd /path/to/workdir &&            # no --cd flag: the working dir is the process
   event plus a `result` with 0 tokens (no model call). Each model group (Gemini; Claude/GPT-OSS) has its own 5h
   and weekly limit, consumed in proportion to token cost. `agy -p /credits` prints `Remaining credits	0`. Stream
   events of normal runs carry only token `usage`, no quota. The adapter runs `/usage` after every ok or
-  rate-limited run (`agyUsage`) and records the buckets as windows named by bucket id (`gemini-5h`, `3p-weekly`).
+  rate-limited run (`agyUsage`) and records all four bucket ids through `usageLog.windows` in usage.mjs, with percent used = `(1 - remaining_fraction) * 100` and `resetsAt` parsed as epoch seconds.
+- Rechecked read-only `/usage --output-format stream-json` on 2026-09-26: `gemini-5h` 0%, reset 1790405582; `gemini-weekly` 2.64%, reset 1790463533; `3p-5h` 16.86%, reset 1790402563; `3p-weekly` 39.25%, reset 1790971363. These are independent windows, not per-model quotas. `gemini-*` counts as Gemini; all other ids count as third-party (currently claude-sonnet-4-6, claude-opus-4-6-thinking, gpt-oss-120b-medium). Display names are Gemini / Third-party · 5-hour / Weekly; raw ids remain storage keys only.
 
 ---
 

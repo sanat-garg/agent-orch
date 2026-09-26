@@ -48,9 +48,11 @@ export function readRecords(file, since = 0) {
   return out;
 }
 
+const limitId = (agent, group) => (group ? `${agent}\n${group}` : agent);
+
 export function createUsageLog(dataDir, { now = Date.now } = {}) {
   const file = path.join(dataDir, 'metrics', 'usage.jsonl');
-  let state = null; // agent/window -> last window record; agent -> last limit record
+  let state = null; // agent/window -> last window record; agent(/group) -> last limit record
   const load = () => {
     if (state) return state;
     state = { windows: new Map(), limits: new Map() };
@@ -59,7 +61,7 @@ export function createUsageLog(dataDir, { now = Date.now } = {}) {
   };
   const note = (r) => {
     if (r.kind === 'window') state.windows.set(`${r.agent}\n${r.window}`, r);
-    else if (r.kind === 'limit') state.limits.set(r.agent, r);
+    else if (r.kind === 'limit') state.limits.set(limitId(r.agent, r.group), r);
   };
   const append = (r) => {
     load();
@@ -95,16 +97,17 @@ export function createUsageLog(dataDir, { now = Date.now } = {}) {
       return append({ agent, kind: 'tokens', ...u, source, ref: ref ?? null });
     },
     // A repeated hit with the same reset is skipped; 'cleared' is only written while the agent is marked hit.
-    limitHit(agent, resetsAt, window) {
-      const last = load().limits.get(agent), at = toEpochSec(resetsAt);
+    // `group` (antigravity's 'gemini'/'3p') keeps each model group's limit separate.
+    limitHit(agent, resetsAt, window, group) {
+      const last = load().limits.get(limitId(agent, group)), at = toEpochSec(resetsAt);
       if (last?.status === 'hit' && last.resetsAt === at) return null;
-      return append({ agent, kind: 'limit', status: 'hit', resetsAt: at, ...(window && { window }) });
+      return append({ agent, kind: 'limit', status: 'hit', resetsAt: at, ...(window && { window }), ...(group && { group }) });
     },
-    lastLimit(agent) { return load().limits.get(agent) || null; },
-    limitCleared(agent) {
-      const last = load().limits.get(agent);
+    lastLimit(agent, group) { return load().limits.get(limitId(agent, group)) || null; },
+    limitCleared(agent, group) {
+      const last = load().limits.get(limitId(agent, group));
       if (last?.status !== 'hit') return null;
-      return append({ agent, kind: 'limit', status: 'cleared', resetsAt: last.resetsAt, ...(last.window && { window: last.window }) });
+      return append({ agent, kind: 'limit', status: 'cleared', resetsAt: last.resetsAt, ...(last.window && { window: last.window }), ...(group && { group }) });
     },
     // Drops records older than 30 days (and unparseable lines); run on startup.
     compact() {
@@ -165,7 +168,7 @@ export function usageHistory(records, rangeKey, at = Date.now()) {
   for (const [id, recs] of byAgent) {
     recs.sort((a, b) => a.t - b.t);
     const a = of(id);
-    let lastLimit = null;
+    const lastLimit = new Map(); // group ('' for the whole agent) -> latest limit record
     for (const r of recs) {
       if (r.kind === 'window') {
         const read = r.at ?? r.t, len = windowMs(r.window);
@@ -173,16 +176,19 @@ export function usageHistory(records, rangeKey, at = Date.now()) {
           stale: (r.resetsAt != null && r.resetsAt * 1000 <= at) || (len != null && at - read > len) };
         if (r.t >= from) (a.windows[r.window] ||= []).push({ t: r.t, pct: r.pct, resetsAt: r.resetsAt ?? null });
       } else if (r.kind === 'limit') {
-        lastLimit = r;
-        if (r.t >= from) a.limits.push({ t: r.t, status: r.status, resetsAt: r.resetsAt ?? null, ...(r.window && { window: r.window }) });
+        lastLimit.set(r.group || '', r);
+        if (r.t >= from) a.limits.push({ t: r.t, status: r.status, resetsAt: r.resetsAt ?? null, ...(r.window && { window: r.window }), ...(r.group && { group: r.group }) });
       }
     }
     for (const w of Object.keys(a.windows)) a.windows[w] = downsample(a.windows[w]);
     a.tokens = bucketTokens(recs, from, at, bucket);
-    // Blocked while the latest limit event is a hit whose reset (if known) is still ahead.
-    if (lastLimit?.status === 'hit' && (lastLimit.resetsAt == null || lastLimit.resetsAt * 1000 > at)) {
+    // Blocked while the latest limit event (per group) is a hit whose reset (if known) is still ahead.
+    // status.groups: antigravity's blocked groups → resetsAt; blocked/resetsAt cover any of them.
+    for (const [g, l] of lastLimit) {
+      if (l.status !== 'hit' || (l.resetsAt != null && l.resetsAt * 1000 <= at)) continue;
       a.status.blocked = true;
-      a.status.resetsAt = lastLimit.resetsAt ?? null;
+      a.status.resetsAt = Math.max(a.status.resetsAt ?? 0, l.resetsAt ?? 0) || null;
+      if (g) (a.status.groups ||= {})[g] = l.resetsAt ?? null;
     }
   }
   return { range, from, to: at, bucketMs: bucket, agents };

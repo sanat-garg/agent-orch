@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AGENTS, runAgentCli, codexResetsAt, codexWindows, codexRolloutState, codexLatestSnapshot, isMissingSession } from '../agents.mjs';
+import { AGENTS, runAgentCli, codexResetsAt, codexWindows, codexRolloutState, codexLatestSnapshot, isMissingSession, agyGroup, windowGroup, limitScope, limitScopes, scopeWindows } from '../agents.mjs';
 import { createUsageLog } from '../usage.mjs';
 
 const fakeQuery = (msgs, seen = {}) => (args) => { Object.assign(seen, args); return (async function* () { for (const m of msgs) yield m; })(); };
@@ -444,4 +444,29 @@ test('antigravity: abort kills the process group and ends with outcome aborted',
   const g = Number(fs.readFileSync(pids, 'utf8'));
   for (let i = 0; i < 50 && alive(g); i++) await new Promise((r) => setTimeout(r, 20));
   assert.ok(!alive(g), 'grandchild survived the abort');
+});
+
+test('antigravity: the model id picks the limit group (gemini-* → Gemini, anything else → third-party)', () => {
+  for (const m of ['gemini-3.8-flash-high', 'gemini-3.1-pro-low', 'Gemini-2.5-pro', null, undefined, '']) assert.equal(agyGroup(m), 'gemini', String(m));
+  for (const m of ['geminix', 'claude-sonnet-4-6', 'claude-opus-4-6-thinking', 'gpt-oss-120b-medium']) assert.equal(agyGroup(m), '3p', m);
+  assert.equal(limitScope('antigravity', 'claude-sonnet-4-6'), 'antigravity:3p');
+  assert.equal(limitScope('antigravity', 'gemini-3.8-flash-high'), 'antigravity:gemini');
+  assert.equal(limitScope('antigravity'), 'antigravity:gemini');
+  // Other agents have one limit whatever the model (Claude's own claude-sonnet-4-6 is not "third-party").
+  assert.equal(limitScope('claude', 'claude-sonnet-4-6'), 'claude');
+  assert.equal(limitScope('codex', 'gpt-6-sol'), 'codex');
+  assert.deepEqual(limitScopes(['claude', 'codex', 'antigravity']), ['claude', 'codex', 'antigravity:gemini', 'antigravity:3p']);
+  assert.deepEqual(['gemini-5h', 'gemini-weekly', '3p-5h', '3p-weekly', '5h', 'five_hour'].map(windowGroup), ['gemini', 'gemini', '3p', '3p', null, null]);
+  assert.deepEqual(scopeWindows('antigravity:3p', AGY_WINDOWS).map((w) => w.window), ['3p-weekly', '3p-5h']);
+  assert.deepEqual(scopeWindows('antigravity:gemini', AGY_WINDOWS).map((w) => w.window), ['gemini-weekly', 'gemini-5h']);
+  assert.deepEqual(scopeWindows('codex', [{ window: '5h' }]), [{ window: '5h' }]);
+});
+
+test('antigravity: a limit names only an exhausted window in the model\'s own group', async () => {
+  // The recorded exhausted /usage has gemini-5h at 100%: a third-party run's limit isn't blamed on it.
+  const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'hi', cwd: tmp(), settingsPath: noSettings, model: 'claude-sonnet-4-6',
+    env: { PATH: process.env.PATH, AGY_STUB: 'limit', AGY_STUB_USAGE: 'exhausted' } });
+  assert.equal(res.outcome, 'rate_limited');
+  assert.equal(res.limitType, null);
+  assert.equal(res.windows.length, 4);
 });

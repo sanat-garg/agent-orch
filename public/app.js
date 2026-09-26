@@ -1507,14 +1507,10 @@ function renderAutoPreview() {
     return;
   }
   const isCurated = d.fallbacks != null;
-  const dataMessage = d.data_status === 'loading' ? 'Loading Artificial Analysis metrics… This updates automatically.'
-    : d.data_status === 'unconfigured' ? 'Connect Artificial Analysis to compare models.'
-    : d.data_status === 'error' ? 'Could not refresh metrics. Check Artificial Analysis in Connections.' : '';
+  const dataMessage = d.data_status === 'loading' ? 'Loading LiveBench scores… This updates automatically.'
+    : d.data_status !== 'ready' ? 'LiveBench unavailable. Using non-benchmark fallback order.' : '';
   if (dataMessage) body.append(el('p', 'dg-why', dataMessage));
-  if (d.stale) body.append(el('p', 'dg-why', 'Showing cached scores.'));
-  if (d.data_status === 'unconfigured' || d.data_status === 'error') {
-    action('Open Connections', () => { closeAutoPreview(); openConnections('aa'); });
-  }
+  if (d.stale) body.append(el('p', 'dg-why', 'LiveBench data is stale. Using non-benchmark fallback order.'));
   const scoreLabel = d.category[0].toUpperCase() + d.category.slice(1);
   body.append(el('h3', 'dg-group', 'Starting model'), apStartRow(d.start, scoreLabel));
   body.append(el('h3', 'dg-group', 'Fallbacks'));
@@ -1535,7 +1531,7 @@ function renderAutoPreview() {
     const row = el('div', 'ap-score-row');
     row.append(el('div', 'dg-name', apName(r)));
     const grid = el('div', 'dg-metrics ap-metrics');
-    const fields = [...DG_METRICS, ['Intelligence Index', m => m.intelligence_index, v => v.toFixed(1)]];
+    const fields = DG_METRICS;
     let present = false;
     for (const [label, read, fmt] of fields) {
       const v = r.metrics && dgNum(read(r.metrics));
@@ -1550,8 +1546,8 @@ function renderAutoPreview() {
   }
   details.append(el('p', 'dg-why', '— means the provider did not supply that score.'));
   body.append(details);
-  if (d.source === 'artificialanalysis' || d.source === 'manual') {
-    const src = el('p', 'dg-src', d.source === 'artificialanalysis' ? 'Score source: Artificial Analysis' : 'Score source: manual data');
+  if (d.source === 'livebench') {
+    const src = el('p', 'dg-src', `Score source: LiveBench${d.release ? ' · ' + d.release : ''}`);
     if (d.attribution?.url) {
       const link = el('a', '', d.attribution.text);
       link.href = d.attribution.url; link.target = '_blank'; link.rel = 'noopener'; src.append(' · ', link);
@@ -3698,14 +3694,8 @@ async function orchAction(action, value) {
 const DG = { id: null, data: null, err: '', busy: false, lastFocus: null };
 // [label, read(metrics), format, higher is better]
 const DG_METRICS = [
-  ['Coding Index', (m) => m.coding_index, (v) => v.toFixed(1), true],
-  ['Agentic Index', (m) => m.agentic_index, (v) => v.toFixed(1), true],
-  ['Terminal-Bench', (m) => m.benchmarks?.terminalbench_hard, (v) => `${(v <= 1 ? v * 100 : v).toFixed(1)}%`, true],
-  ['SciCode', (m) => m.benchmarks?.scicode, (v) => `${(v <= 1 ? v * 100 : v).toFixed(1)}%`, true],
-  ['TTFT', (m) => m.ttft_s, (v) => `${v.toFixed(2)} s`, false],
-  ['Speed', (m) => m.tokens_per_s, (v) => `${Math.round(v)} tok/s`, true],
-  ['Context', (m) => m.context_window, (v) => (v >= 1e6 ? `${+(v / 1e6).toFixed(1)}M` : `${Math.round(v / 1e3)}k`), true],
-  ['Price', (m) => m.pricing?.blended ?? m.pricing?.output, (v) => `$${v.toFixed(2)}/M`, false],
+  ...['Coding', 'Agentic Coding', 'Reasoning', 'Mathematics', 'Data Analysis', 'Language', 'IF'].map(c => [c, m => m.categories?.[c], v => v.toFixed(1), true]),
+  ['Global average', m => m.global_average, v => v.toFixed(1), true],
 ];
 const dgNum = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 function openDelegate(id) {
@@ -3752,7 +3742,7 @@ function renderDelegate() {
   if (DG.err) body.append(el('div', 'dr-err', DG.err));
   if (!d) { if (!DG.err) body.append(el('div', 'out-live', 'Loading…')); return; }
   const src = el('p', 'dg-src');
-  src.append(d.source === 'artificialanalysis' ? 'Metrics from Artificial Analysis' : 'Metrics entered manually (.agent-orch/model-metrics.json)',
+  src.append(`Scores from LiveBench${d.release ? ' · ' + d.release : ''}`,
     d.fetched_at ? ` · updated ${relTime(d.fetched_at)}` : ' · never updated', ` · ranked for ${d.category} work`);
   if (d.attribution?.url) {
     const a = el('a', '', d.attribution.text);

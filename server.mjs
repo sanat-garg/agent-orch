@@ -14,6 +14,7 @@ import { retireRuntime, chatIdle, whenIdle } from './runtimes.mjs';
 import { AGENTS, runAgentCli, clearLoginCache, isMissingSession, modelCatalog, codexLatestSnapshot, windowLabel, AGY_GROUPS, agyGroup } from './agents.mjs';
 import { createModelStore } from './models.mjs';
 import { createAAStore } from './aa.mjs';
+import { createLiveBenchStore } from './livebench.mjs';
 import { createConnections, SPECS, codexAccount, agyAccount, onPath } from './connections.mjs';
 import { mediaCollector, MEDIA_ID_RE, MEDIA_TYPES, toolResultImages } from './media.mjs';
 import { createUsageLog, RANGES as USAGE_RANGES } from './usage.mjs';
@@ -635,8 +636,8 @@ const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
   onCommit: (dir) => syncGit(dir).catch((e) => console.error('[github] sync failed', dir, e)),
   projectReady: (dir) => gh.status().linked && !!convos.find((c) => c.cwd === dir)?.repo,
   disabled: NO_ORCH,
-  // Delegation ranks models on the /api/models/metrics view (aaStore is created below; called lazily).
-  modelMetrics: () => aaStore.view(),
+  // Delegation uses only the LiveBench store (created below; called lazily).
+  modelMetrics: () => livebenchStore.view(),
 });
 
 // ---------- GitHub protocol ----------
@@ -651,6 +652,10 @@ modelStore.start().catch((e) => console.error('[models] discovery failed', e));
 const aaStore = createAAStore({ dataDir: DATA, metaDir: path.join(ROOT, '.agent-orch'), base: process.env.CW_AA_BASE || undefined, log: (m) => console.log(`[aa] ${m}`),
   catalog: () => Object.fromEntries(Object.keys(AGENTS).map((id) => [id, modelCatalog(id).models || []])) });
 aaStore.start().catch((e) => console.error('[aa] refresh failed', e));
+const livebenchStore = createLiveBenchStore({ dataDir: DATA, metaDir: path.join(ROOT, '.agent-orch'),
+  site: process.env.CW_LIVEBENCH_SITE || undefined, releasesApi: process.env.CW_LIVEBENCH_RELEASES_API || undefined,
+  catalog: () => Object.fromEntries(Object.keys(AGENTS).map((id) => [id, modelCatalog(id).models || []])) });
+livebenchStore.start().catch((e) => console.error('[livebench] refresh failed', e));
 // A sign-in or sign-out re-checks the login and rediscovers that agent's models (in the background).
 const signInChanged = (id) => () => { clearLoginCache(); modelStore.refresh([id]).catch(() => {}); };
 const agentEntry = (a, extra = {}) => ({ id: a.id, label: a.label, installed: () => a.available(), signedIn: () => a.loggedIn(), envFilter: a.envFilter, afterChange: signInChanged(a.id), ...extra });

@@ -1,22 +1,21 @@
 // Delegation (BRIEF goal 8): a queued task whose agent is at its usage limit may move to another agent/model that
-// still has usage left and whose Artificial Analysis metrics (aa.mjs view) are comparable on what the task needs.
+// still has usage left and whose LiveBench scores from one release are comparable on what the task needs.
 //   eligible(task)  the policy: reflection tasks yes; the owner's chat tasks only when that message was sent with
 //                   Auto Delegate (tasks.auto_delegate); never when the owner pinned a model for it (tasks.pinned_model).
 //   rankCandidates  pure ranking of available models against the task's current model, by category-weighted metrics.
 //   createDelegator wires both to live state (connections, blocks, usage windows, model catalog, metrics).
 
 export const DELEGATE_CFG = {
-  minRatio: 0.95,    // comparable: weighted score ≥ 95% of the original's …
-  rankWindow: 2,     // … or within 2 ranks of it among the available models
+  maxScoreDrop: 5,   // LiveBench percentage points; no rank-window shortcut
   maxWindowPct: 90,  // an agent with any plan window at or above this is treated as limited
 };
 
-// Metric weights per task category. Keys are aa.mjs metrics fields or `benchmarks` entries.
+// Task → actual LiveBench categories. Scientific requires both categories; never reweight missing values.
 export const CATEGORY_WEIGHTS = {
-  coding: { coding_index: 0.6, terminalbench_hard: 0.4 },
-  agentic: { agentic_index: 1 },
-  scientific: { scicode: 1 },
-  general: { intelligence_index: 1 },
+  coding: { Coding: 1 },
+  agentic: { 'Agentic Coding': 1 },
+  scientific: { Mathematics: 0.5, 'Data Analysis': 0.5 },
+  general: { global_average: 1 },
 };
 export const CATEGORIES = Object.keys(CATEGORY_WEIGHTS);
 const CATEGORY_WORDS = {
@@ -46,61 +45,48 @@ export function eligible(task = {}) {
   return false;
 }
 
-// A metric on a 0–100 scale (AA benchmarks are fractions).
-function metricValue(m, key) {
-  const v = m?.[key] ?? m?.benchmarks?.[key];
-  if (typeof v !== 'number' || !Number.isFinite(v)) return null;
-  return v <= 1 ? v * 100 : v;
-}
-// Weighted mean over the keys the model has → {score, used} | null.
-export function weightedScore(metrics, weights) {
-  let sum = 0, w = 0;
+// LiveBench already uses 0–100, including values below one. All requested metrics must exist.
+export function weightedScore(scores, weights) {
+  let sum = 0, total = 0;
   const used = {};
-  for (const [k, wt] of Object.entries(weights)) {
-    const v = metricValue(metrics, k);
-    if (v == null) continue;
-    sum += v * wt; w += wt; used[k] = Math.round(v * 10) / 10;
+  for (const [key, weight] of Object.entries(weights)) {
+    const v = key === 'global_average' ? scores?.global_average : scores?.categories?.[key];
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 100) return null;
+    sum += v * weight; total += weight; used[key] = v;
   }
-  return w ? { score: sum / w, used } : null;
+  return total ? { score: sum / total, used } : null;
 }
-
-const LABELS = { coding_index: 'Coding Index', terminalbench_hard: 'Terminal-Bench', agentic_index: 'Agentic Index', scicode: 'SciCode', intelligence_index: 'Intelligence Index' };
 const r1 = (x) => Math.round(x * 10) / 10;
-
-// current: {agent, model}; entries: aa view entries ({agent, model, label, metrics}); available: [{agent, model}].
-// → {category, original: {…, score} | null, candidates: [{agent, model, label, score, ratio, rank, metrics, reason}]}
-// Candidates are the comparable available models, most similar to the original first (ties: higher score).
+// Stale data is displayable but never used to assert comparability. No AA compatibility fallback.
+export function rankingEntries(view) {
+  return view?.source === 'livebench' && view.data_status === 'ready' && !view.stale
+    ? (view.entries || []).filter((e) => e.livebench?.release === view.release) : [];
+}
 export function rankCandidates({ current, entries = [], available = [], category = 'general', cfg = DELEGATE_CFG }) {
   const same = (a, b) => a.agent === b.agent && a.model === b.model;
+  const weights = CATEGORY_WEIGHTS[category] || CATEGORY_WEIGHTS.general;
   const orig = entries.find((e) => same(e, current));
-  let weights = CATEGORY_WEIGHTS[category] || CATEGORY_WEIGHTS.general;
-  // Compare only on metrics the original has; without any of the category's, fall back to the Intelligence Index.
-  let o = orig?.metrics && weightedScore(orig.metrics, weights);
-  if (!o && category !== 'general') { weights = CATEGORY_WEIGHTS.general; o = orig?.metrics && weightedScore(orig.metrics, weights); }
-  if (!o) return { category, original: null, candidates: [] };
-  weights = Object.fromEntries(Object.entries(weights).filter(([k]) => k in o.used));
-  const pool = [];
+  const o = orig?.livebench?.release && weightedScore(orig.scores, weights);
+  const fallback = [], scored = [];
   for (const a of available) {
     if (same(a, current)) continue;
-    const e = entries.find((x) => same(x, a));
-    const s = e?.metrics && weightedScore(e.metrics, weights);
-    if (s) pool.push({ agent: a.agent, model: a.model, label: e.label || a.model, score: s.score, metrics: s.used });
+    const e = entries.find((e) => same(e, a));
+    const score = o && e?.livebench?.release === orig.livebench.release && weightedScore(e.scores, weights);
+    const c = { ...a, label: e?.label || a.label || a.model };
+    if (!score) {
+      fallback.push({ ...c, score: null, ratio: null, metrics: null, benchmark: false,
+        reason: 'non-benchmark fallback: no fresh comparable LiveBench score; same agent first, then agent/model ID' });
+    } else if (score.score >= o.score - (cfg.maxScoreDrop ?? DELEGATE_CFG.maxScoreDrop)) {
+      scored.push({ ...c, score: r1(score.score), ratio: o.score ? score.score / o.score : null,
+        metrics: score.used, benchmark: true, release: orig.livebench.release, distance: Math.abs(score.score - o.score),
+        reason: `LiveBench ${orig.livebench.release} ${category}: ${r1(score.score)} vs ${orig.label || current.model} ${r1(o.score)}` });
+    }
   }
-  const ordered = [...pool, { self: true, score: o.score }].sort((a, b) => b.score - a.score);
-  const origRank = ordered.findIndex((x) => x.self);
-  const origName = orig.label || current.model;
-  const candidates = [];
-  for (const c of pool) {
-    const rank = ordered.indexOf(c), ratio = c.score / o.score;
-    const byScore = ratio >= cfg.minRatio, byRank = Math.abs(rank - origRank) <= cfg.rankWindow;
-    if (!byScore && !byRank) continue;
-    const keys = Object.entries(c.metrics).map(([k, v]) => `${LABELS[k] || k} ${v}`).join(', ');
-    candidates.push({ agent: c.agent, model: c.model, label: c.label, score: r1(c.score), ratio: Math.round(ratio * 1000) / 1000, rank: rank + 1,
-      metrics: c.metrics, similarity: 1 - Math.abs(c.score - o.score) / o.score,
-      reason: `${category}: ${r1(c.score)} vs ${origName} ${r1(o.score)} (${Math.round(ratio * 100)}%${byScore ? '' : `, rank ${rank + 1} vs ${origRank + 1}`}); ${keys}` });
-  }
-  candidates.sort((a, b) => b.similarity - a.similarity || b.score - a.score);
-  return { category, original: { ...current, label: origName, score: r1(o.score), metrics: o.used }, candidates };
+  const lexical = (a, b) => { const x = `${a.agent}/${a.model}`, y = `${b.agent}/${b.model}`; return x < y ? -1 : x > y ? 1 : 0; };
+  scored.sort((a, b) => a.distance - b.distance || b.score - a.score || lexical(a, b));
+  fallback.sort((a, b) => Number(b.agent === current.agent) - Number(a.agent === current.agent) || lexical(a, b));
+  return { category, original: o ? { ...current, label: orig.label || current.model, score: r1(o.score), metrics: o.used } : null,
+    candidates: [...scored, ...fallback].map((c, i) => ({ ...c, rank: i + 1 })) };
 }
 
 // Owner-curated fallbacks (a chat's `fallbacks`, snapshotted into tasks.fallbacks as JSON): [{agent, model}] in the
@@ -115,7 +101,7 @@ export function parseFallbacks(v) {
 // `usable` accepts, in the owner's order. Score/metrics against the current model are for display only (null without
 // metrics); rank is the 1-based position in the owner's list.
 export function curatedCandidates({ current, list = [], entries = [], usable = () => true, category = 'general', cfg = DELEGATE_CFG }) {
-  const scored = rankCandidates({ current, entries, available: list, category, cfg: { ...cfg, minRatio: -Infinity, rankWindow: Infinity } });
+  const scored = rankCandidates({ current, entries, available: list, category, cfg: { ...cfg, maxScoreDrop: Infinity } });
   const key = (x) => `${x.agent}/${x.model}`;
   const byKey = new Map(scored.candidates.map((c) => [key(c), c]));
   const seen = new Set([key(current)]), candidates = [];
@@ -131,7 +117,7 @@ export function curatedCandidates({ current, list = [], entries = [], usable = (
 
 // Live wiring. agents() → ids; connected(id) → bool (installed, signed in, on the subscription);
 // blockedUntil(id, model) → epoch s | 0; windows(id, model) → [{window, pct}] the plan windows that model counts against
-// (antigravity: its group's); models(id) → [{id, default?}]; metrics() → aa view ({entries}). Any such window
+// (antigravity: its group's); models(id) → [{id, default?}]; metrics() → LiveBench view ({entries}). Any such window
 // ≥ maxWindowPct makes the model unavailable, so a full Gemini window never hides antigravity's third-party models.
 export function createDelegator({ agents, connected, blockedUntil, windows = () => [], models, metrics, cfg = DELEGATE_CFG }) {
   const hasUsage = (id, model) => connected(id) && !blockedUntil(id, model) && !(windows(id, model) || []).some((w) => Number(w.pct) >= cfg.maxWindowPct);
@@ -145,9 +131,9 @@ export function createDelegator({ agents, connected, blockedUntil, windows = () 
     const list = parseFallbacks(task.fallbacks);
     if (list) {
       const ok = new Set(available().map((m) => `${m.agent}/${m.model}`));
-      return curatedCandidates({ current: cur, list, entries: view?.entries || [], usable: (f) => ok.has(`${f.agent}/${f.model}`), category: taskCategory(task), cfg });
+      return curatedCandidates({ current: cur, list, entries: rankingEntries(view), usable: (f) => ok.has(`${f.agent}/${f.model}`), category: taskCategory(task), cfg });
     }
-    return rankCandidates({ current: cur, entries: view?.entries || [], available: available(), category: taskCategory(task), cfg });
+    return rankCandidates({ current: cur, entries: rankingEntries(view), available: available(), category: taskCategory(task), cfg });
   }
   return { eligible, candidates, hasUsage, available };
 }
@@ -160,7 +146,7 @@ export function createDelegator({ agents, connected, blockedUntil, windows = () 
 // that isn't listed for a connected agent is unavailable); `suggested` is always the automatic top `limit`.
 export function previewDelegation({ current, entries = [], all = [], usage, category = 'coding', limit = 3, fallbacks = null, cfg = DELEGATE_CFG }) {
   const ranked = rankCandidates({ current, entries, available: all, category, cfg });
-  const full = (a, m) => entries.find((e) => e.agent === a && e.model === m)?.metrics || null;
+  const full = (a, m) => entries.find((e) => e.agent === a && e.model === m)?.scores || null;
   const usable = (s) => s === 'available' || s === 'near';
   const rows = ranked.candidates.map((c, i) => ({ ...c, i, used: c.metrics, metrics: full(c.agent, c.model), ...usage(c.agent, c.model) }));
   rows.sort((a, b) => usable(b.status) - usable(a.status) || a.i - b.i);

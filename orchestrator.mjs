@@ -19,7 +19,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { AGENTS, AGY_GROUPS, agentStatus, codexExhausted, codexLatestSnapshot, isMissingSession, limitScope, limitScopes, modelCatalog, modelNames, runAgentCli, scopeGroup, scopeWindows, toolInputSummary, windowLabel } from './agents.mjs';
 import { mediaCollector } from './media.mjs';
 import { createUsageLog } from './usage.mjs';
-import { CATEGORIES, DELEGATE_CFG, createDelegator, eligible as delegationEligible, parseFallbacks, previewDelegation, rankCandidates, taskCategory } from './delegate.mjs';
+import { CATEGORIES, DELEGATE_CFG, createDelegator, eligible as delegationEligible, parseFallbacks, previewDelegation, rankCandidates, rankingEntries, taskCategory } from './delegate.mjs';
 
 // ---------------------------------------------------------------- config
 
@@ -40,7 +40,7 @@ const CFG = {
   sessionMaxContextTokens: 120000,
   sessionMaxTasks: 6,
   contextBudgetBytes: 8000,
-  delegate: { ...DELEGATE_CFG }, // comparable = score ≥ minRatio × original's or within rankWindow ranks; maxWindowPct
+  delegate: { ...DELEGATE_CFG }, // LiveBench percentage-point tolerance; maxWindowPct
   // Tools a worker may use without full autonomy. Anything else is refused, never prompted.
   // File changes are limited to the project folder (./** is relative to the session's cwd).
   safeTools: [
@@ -1459,21 +1459,21 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const cur = intendedRoute(task, getProject(task.project_id));
     let view = null;
     try { view = modelMetrics(); } catch {}
-    const entries = view?.entries || [];
+    const entries = rankingEntries(view);
     const connected = Object.keys(AGENTS).filter((a) => (a === 'claude' ? onSubscription() : agentStatus(a) === true && !(kvTime(`agent_auth_failed:${a}`) > now())));
     const all = connected.flatMap((a) => (modelCatalog(a).models || []).map((m) => ({ agent: a, model: m.id, label: m.label || m.id, default: !!m.default })));
-    const current = { agent: cur.agent, model: cur.model || all.find((m) => m.agent === cur.agent && m.default)?.model || null };
+    const current = { agent: cur.agent, model: cur.model || (all.find((m) => m.agent === cur.agent && m.default) || all.find((m) => m.agent === cur.agent))?.model || null };
     const ranked = rankCandidates({ current, entries, available: all, category: taskCategory(task), cfg: CFG.delegate });
     const byKey = new Map(ranked.candidates.map((c) => [`${c.agent}/${c.model}`, c]));
-    const metricsOf = (a, m) => entries.find((e) => e.agent === a && e.model === m)?.metrics || null;
+    const metricsOf = (a, m) => entries.find((e) => e.agent === a && e.model === m)?.scores || null;
     const rows = all.filter((m) => !(m.agent === current.agent && m.model === current.model)).map((m) => {
       const c = byKey.get(`${m.agent}/${m.model}`);
-      return { agent: m.agent, model: m.model, label: m.label, ...agentUsage(m.agent, m.model), comparable: !!c, score: c?.score ?? null, ratio: c?.ratio ?? null,
+      return { agent: m.agent, model: m.model, label: m.label, ...agentUsage(m.agent, m.model), comparable: !!c?.benchmark, score: c?.score ?? null, ratio: c?.ratio ?? null,
         reason: c?.reason || (ranked.original ? 'not comparable on the metrics' : 'no metrics for the current model'), metrics: metricsOf(m.agent, m.model) };
     });
     const rank = new Map(ranked.candidates.map((c, i) => [`${c.agent}/${c.model}`, i]));
-    rows.sort((a, b) => (rank.get(`${a.agent}/${a.model}`) ?? 1e9) - (rank.get(`${b.agent}/${b.model}`) ?? 1e9) || (a.status === 'available' ? 0 : 1) - (b.status === 'available' ? 0 : 1));
-    return { task: taskView(task), category: ranked.category, source: view?.source || 'manual', fetched_at: view?.fetched_at ?? null, attribution: view?.attribution || null,
+    rows.sort((a, b) => (a.status === 'available' ? 0 : 1) - (b.status === 'available' ? 0 : 1) || (rank.get(`${a.agent}/${a.model}`) ?? 1e9) - (rank.get(`${b.agent}/${b.model}`) ?? 1e9));
+    return { task: taskView(task), category: ranked.category, data_status: view?.data_status || 'unavailable', stale: !!view?.stale, data_error: view?.data_error || null, source: 'livebench', release: view?.release || null, fetched_at: view?.fetched_at ?? null, attribution: view?.attribution || null,
       current: { ...current, label: all.find((m) => m.agent === current.agent && m.model === current.model)?.label || current.model, score: ranked.original?.score ?? null,
         metrics: metricsOf(current.agent, current.model), ...agentUsage(current.agent, current.model) }, candidates: rows };
   }
@@ -1509,8 +1509,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const all = connected.flatMap((a) => (modelCatalog(a).models || []).map((m) => ({ agent: a, model: m.id, label: m.label || m.id })));
     const ms = modelCatalog(agent).models || [];
     const current = { agent, model: model || (ms.find((m) => m.default) || ms[0])?.id || null };
-    const r = previewDelegation({ current, entries: view?.entries || [], all, usage: previewUsage, category: CATEGORIES.includes(category) ? category : 'coding', fallbacks, cfg: CFG.delegate });
-    return { ...r, data_status: view?.data_status || 'error', data_error: view?.data_error || null, stale: !!view?.stale, source: view?.source || 'manual', fetched_at: view?.fetched_at ?? null, attribution: view?.attribution || null };
+    const r = previewDelegation({ current, entries: rankingEntries(view), all, usage: previewUsage, category: CATEGORIES.includes(category) ? category : 'coding', fallbacks, cfg: CFG.delegate });
+    return { ...r, data_status: view?.data_status || 'error', data_error: view?.data_error || null, stale: !!view?.stale, source: 'livebench', release: view?.release || null, fetched_at: view?.fetched_at ?? null, attribution: view?.attribution || null };
   }
   function delegateTask(id, { agent, model } = {}) {
     const task = getTask(id);

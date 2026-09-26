@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
-import { ensureWorktree, listWorktrees, mergeBack, repoInfo, worktreePath } from '../worktrees.mjs';
+import { ensureWorktree, listWorktrees, mergeBack, repoInfo, startIntegration, unresolvedFiles, worktreePath } from '../worktrees.mjs';
 
 const ORCH = JSON.stringify(new URL('../orchestrator.mjs', import.meta.url).href);
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -210,6 +210,37 @@ describe('worktrees', { concurrency: true, timeout: 120000 }, () => {
       assert.equal(git(repo, 'rev-parse', 'HEAD'), head);
       assert.equal(fs.readFileSync(path.join(wt.cwd, 'a.txt'), 'utf8'), 'one\nmine\nthree\n');
       assert.equal(git(wt.dir, 'status', '--porcelain'), ''); // squashed into one commit, rebase aborted
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test('a setext ======= heading merged in from main is not an unresolved conflict', async () => {
+    const { root, repo } = makeRepo();
+    try {
+      const info = await repoInfo(repo);
+      const wt = await ensureWorktree(info, 8);
+      fs.writeFileSync(path.join(wt.cwd, 'a.txt'), 'one\nmine\nthree\n');
+      git(wt.cwd, 'commit', '-qam', 'task work');
+      fs.writeFileSync(path.join(repo, 'README.md'), 'x\n\nInstall\n=======\n\nrun it\n');
+      git(repo, 'add', 'README.md'); git(repo, 'commit', '-qm', 'readme');
+      assert.deepEqual(await startIntegration(info, wt.dir), []);
+      assert.deepEqual(await unresolvedFiles(wt.dir), []);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test('a real integration conflict stays unresolved until its markers are removed', async () => {
+    const { root, repo } = makeRepo();
+    try {
+      const info = await repoInfo(repo);
+      const wt = await ensureWorktree(info, 9);
+      fs.writeFileSync(path.join(wt.cwd, 'a.txt'), 'one\nmine\nthree\n');
+      git(wt.cwd, 'commit', '-qam', 'task work');
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'one\ntheirs\nthree\n');
+      fs.writeFileSync(path.join(repo, 'README.md'), 'Install\n=======\n');
+      git(repo, 'add', '-A'); git(repo, 'commit', '-qm', 'main moved');
+      assert.deepEqual(await startIntegration(info, wt.dir), ['a.txt']);
+      assert.deepEqual(await unresolvedFiles(wt.dir), ['a.txt']);
+      fs.writeFileSync(path.join(wt.cwd, 'a.txt'), 'one\nmine\ntheirs\nthree\n'); // edited, not `git add`ed
+      assert.deepEqual(await unresolvedFiles(wt.dir), []);
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 });

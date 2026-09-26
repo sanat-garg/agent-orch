@@ -13,3 +13,7 @@ Read .agent-orch/AUDIT.md finding #29 (Round 4) first. Bug: worktrees.mjs `unres
 ## Done when
 
 `node --test test/worktree.test.mjs` passes, including a new test where a README with a setext ======= heading is not reported as unresolved.
+
+## Result — done (check passed) (2026-09-26 10:38)
+
+AGENT-ORCH-STATUS: done — Setext ======= headings are no longer flagged as unresolved conflicts

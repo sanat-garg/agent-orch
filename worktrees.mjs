@@ -104,15 +104,16 @@ async function prepareRepo(top) {
   add(path.join(common, 'info', 'exclude'), ['node_modules']);
 }
 
-// Files that still hold conflict markers (unmerged in the index, or flagged by `git diff --check`). An agent resolves
-// a file by editing it, without `git add`, so the index alone can't tell.
+// Files that still hold a conflict block: a `<<<<<<< ` line followed later by a `>>>>>>> ` line, checked in files
+// unmerged in the index or flagged by `git diff --check`. An agent resolves a file by editing it, without `git add`, so
+// the index alone can't tell; a lone `=======` line (a setext heading underline) never counts.
 export async function unresolvedFiles(dir) {
   const files = new Set((await git(dir, ['ls-files', '-u'])).split('\n').map((l) => l.split('\t')[1]).filter(Boolean));
   let check = '';
   try { await git(dir, ['diff', 'HEAD', '--check']); } catch (e) { check = e.stdout || ''; }
   for (const l of check.split('\n')) { const m = /^(.+?):\d+: leftover conflict marker/.exec(l); if (m) files.add(m[1]); }
   return [...files].filter((f) => {
-    try { return /^(<{7}|>{7})( |$)|^={7}$/m.test(fs.readFileSync(path.join(dir, f), 'utf8')); } catch { return false; }
+    try { return /^<{7}(?: |$)[\s\S]*?^>{7}(?: |$)/m.test(fs.readFileSync(path.join(dir, f), 'utf8')); } catch { return false; }
   });
 }
 

@@ -532,3 +532,7 @@ Failed/cancelled integrators now release their owners; tests pass
 ## 2026-09-26 10:37 — #170 Fix AUDIT #27: re-attach detached-HEAD task worktrees instead of deleting them [done (check passed)]
 
 Detached-HEAD task worktrees re-attach and keep work; tests pass
+
+## 2026-09-26 10:38 — #171 Fix AUDIT #29: unresolvedFiles must not flag setext ======= headings [done (check passed)]
+
+Setext ======= headings are no longer flagged as unresolved conflicts

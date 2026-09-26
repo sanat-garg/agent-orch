@@ -130,14 +130,14 @@ test('fallback editor: remove, undo, Alt+↑, drag, add and reset persist via PU
   await page.mouse.up();
   await until(['gpt-6-sol', 'claude-sonnet-4-6'], 'drag persisted');
 
-  // Add from the searchable list, then reset to automatic.
+  // Add from the searchable list, then clear the list.
   await page.locator('#apModal .fe-add-btn').click();
   await page.locator('#apModal .fe-search').fill('flash');
   await page.locator('#apModal .fe-opt', { hasText: 'Gemini 3.8 Flash' }).click();
   await until(['gpt-6-sol', 'claude-sonnet-4-6', 'gemini-3.8-flash-high'], 'add persisted');
   await page.locator('#apModal .fe-reset').click();
-  await until(null, 'reset persisted');
-  await page.locator('#apModal .fe-hint', { hasText: 'Automatic' }).waitFor();
+  await until(null, 'clear persisted');
+  await page.locator('#apModal .fe-hint', { hasText: 'No fallbacks' }).waitFor();
   assert.deepEqual(errors, []);
   await ctx.close();
 });

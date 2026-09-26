@@ -13,8 +13,6 @@ import { createGitHub } from './github.mjs';
 import { retireRuntime, chatIdle, whenIdle } from './runtimes.mjs';
 import { AGENTS, runAgentCli, clearLoginCache, isMissingSession, modelCatalog, codexLatestSnapshot, windowLabel, AGY_GROUPS, agyGroup } from './agents.mjs';
 import { createModelStore } from './models.mjs';
-import { createAAStore } from './aa.mjs';
-import { createLiveBenchStore } from './livebench.mjs';
 import { createConnections, SPECS, codexAccount, agyAccount, onPath } from './connections.mjs';
 import { mediaCollector, MEDIA_ID_RE, MEDIA_TYPES, toolResultImages } from './media.mjs';
 import { createUsageLog, RANGES as USAGE_RANGES } from './usage.mjs';
@@ -171,7 +169,7 @@ function readLog(id) {
     return parseJsonl(fs.readFileSync(logPath(id), 'utf8'));
   } catch { return []; }
 }
-// A curated fallback list from a request body: null = automatic ranking; an array (even empty) is used as-is, in order,
+// A fallback list from a request body: null = none; an array (even empty) is used as-is, in order,
 // deduplicated. Every entry must be a discovered model of a known agent. → {list} | {error}
 function checkFallbacks(v) {
   if (v !== null && !Array.isArray(v)) return { error: 'fallbacks must be an array of {agent, model} or null' };
@@ -636,8 +634,6 @@ const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
   onCommit: (dir) => syncGit(dir).catch((e) => console.error('[github] sync failed', dir, e)),
   projectReady: (dir) => gh.status().linked && !!convos.find((c) => c.cwd === dir)?.repo,
   disabled: NO_ORCH,
-  // Delegation uses only the LiveBench store (created below; called lazily).
-  modelMetrics: () => livebenchStore.view(),
 });
 
 // ---------- GitHub protocol ----------
@@ -648,14 +644,6 @@ const gh = createGitHub({ env: CLAUDE_ENV, log: (m) => console.log(`[github] ${m
 const modelStore = createModelStore({ file: path.join(DATA, 'models.json'), log: (m) => console.log(`[models] ${m}`),
   onChange: () => { for (const ws of allClients) send(ws, { t: 'models' }); } });
 modelStore.start().catch((e) => console.error('[models] discovery failed', e));
-// Artificial Analysis metrics for those models (aa.mjs); falls back to .agent-orch/model-metrics.json without a key.
-const aaStore = createAAStore({ dataDir: DATA, metaDir: path.join(ROOT, '.agent-orch'), base: process.env.CW_AA_BASE || undefined, log: (m) => console.log(`[aa] ${m}`),
-  catalog: () => Object.fromEntries(Object.keys(AGENTS).map((id) => [id, modelCatalog(id).models || []])) });
-aaStore.start().catch((e) => console.error('[aa] refresh failed', e));
-const livebenchStore = createLiveBenchStore({ dataDir: DATA, metaDir: path.join(ROOT, '.agent-orch'),
-  site: process.env.CW_LIVEBENCH_SITE || undefined, releasesApi: process.env.CW_LIVEBENCH_RELEASES_API || undefined,
-  catalog: () => Object.fromEntries(Object.keys(AGENTS).map((id) => [id, modelCatalog(id).models || []])) });
-livebenchStore.start().catch((e) => console.error('[livebench] refresh failed', e));
 // A sign-in or sign-out re-checks the login and rediscovers that agent's models (in the background).
 const signInChanged = (id) => () => { clearLoginCache(); modelStore.refresh([id]).catch(() => {}); };
 const agentEntry = (a, extra = {}) => ({ id: a.id, label: a.label, installed: () => a.available(), signedIn: () => a.loggedIn(), envFilter: a.envFilter, afterChange: signInChanged(a.id), ...extra });
@@ -1323,7 +1311,7 @@ async function handleRequest(req, res) {
     const r = orch.setReflectFallbacks(Number(rf[1]), list);
     return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r);
   }
-  // Auto Delegate fallbacks the owner curates for a chat: {fallbacks: [{agent, model}] | null}. null = automatic ranking;
+  // Auto Delegate fallbacks the owner sets for a chat: {fallbacks: [{agent, model}] | null}. null = none;
   // an array (even empty) is used as-is, in order. Every entry must be a discovered model of a known agent.
   const cf = p.match(/^\/api\/convos\/([\w-]+)\/fallbacks$/);
   if (cf && req.method === 'PUT') {
@@ -1378,21 +1366,21 @@ async function handleRequest(req, res) {
     const d = orch.taskDetail(id);
     return d ? json(res, 200, d) : json(res, 404, { error: 'No such task' });
   }
-  // Auto Delegate preview for the composer: ?agent=&model=&category= (default coding) → start model + top 3 candidates.
-  // ?convo=<id> with a curated fallback list: candidates are that list (with usage + metrics); `suggested` = automatic top 3.
+  // Auto Delegate preview for the composer: ?agent=&model= → start model; ?convo=<id>: candidates = the chat's fallback
+  // list in order, each with its usage status.
   // ?project=<id>: the same for the project's reflection tasks (its reflect_fallbacks, starting on its default route).
   if (p === '/api/delegate/preview' && req.method === 'GET') {
     const q = url.searchParams;
     const convo = q.get('convo') ? findConvo(q.get('convo')) : null;
     if (q.get('convo') && !convo) return json(res, 404, { error: 'No such chat' });
     if (q.get('project')) {
-      const v = orch.delegatePreview({ projectId: Number(q.get('project')), agent: q.get('agent') || null, model: q.get('model') || null, category: q.get('category') || 'coding' });
+      const v = orch.delegatePreview({ projectId: Number(q.get('project')), agent: q.get('agent') || null, model: q.get('model') || null });
       return v ? json(res, 200, v) : json(res, 404, { error: 'No such project' });
     }
-    const v = orch.delegatePreview({ agent: q.get('agent') || 'claude', model: q.get('model') || null, category: q.get('category') || 'coding', fallbacks: convo?.fallbacks ?? null });
+    const v = orch.delegatePreview({ agent: q.get('agent') || 'claude', model: q.get('model') || null, fallbacks: convo?.fallbacks ?? null });
     return v ? json(res, 200, v) : json(res, 400, { error: 'Unknown agent' });
   }
-  // Manual delegation: GET lists the options (delegate.mjs ranking + usage status), POST {agent, model} reassigns a queued task.
+  // Manual delegation: GET lists the options (every connected model + usage status), POST {agent, model} reassigns a queued task.
   const od = p.match(/^\/api\/orch\/tasks\/(\d+)\/delegate$/);
   if (od) {
     const id = Number(od[1]);
@@ -1440,15 +1428,6 @@ async function handleRequest(req, res) {
     const { status, ...body } = r;
     return json(res, status, body);
   }
-  // The Artificial Analysis key: write-only; GET answers only whether one is configured.
-  if (p === '/api/aa/key') {
-    if (req.method === 'GET') return json(res, 200, aaStore.status());
-    if (req.method === 'POST') {
-      try { return json(res, 200, await aaStore.setKey((await readBody(req)).key)); } catch (e) { if (e.status !== 400) throw e; return json(res, 400, { error: e.message }); }
-    }
-    if (req.method === 'DELETE') return json(res, 200, aaStore.removeKey());
-  }
-  if (p === '/api/models/metrics' && req.method === 'GET') return json(res, 200, aaStore.view());
   if (p.startsWith('/api/media/') && req.method === 'GET') {
     const id = p.slice('/api/media/'.length);
     if (!MEDIA_ID_RE.test(id)) return json(res, 400, { error: 'Bad media id' });

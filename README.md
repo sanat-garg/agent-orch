@@ -179,6 +179,11 @@ reason is logged. The Routing rules list marks such a rule "not logged in, falls
 installed"). Login status is checked at most once a minute, so after signing in it can take a minute to be
 picked up. Each task shows the agent and model its latest run used.
 
+**Delegation.** There is no benchmark scoring or automatic ranking. Each chat (Auto Delegate in the model
+picker) and each project's reflection tasks have an ordered fallback list that you enter by hand. When a
+queued task's model is at its usage limit, it moves to the first model in that list whose agent is signed in
+and has usage left. With no list, the task waits for its own model.
+
 ## Screenshots
 
 `bin/shot.mjs` screenshots a page with Playwright's Chromium (`playwright-core` is pinned to the version

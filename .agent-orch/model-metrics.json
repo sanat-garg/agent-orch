@@ -1,5 +1,0 @@
-{
-  "_comment": "Hand-maintained model metrics, used only when no Artificial Analysis API key is set (source 'manual'). Keys: \"agent:modelId\" or \"modelId\". Fields: intelligence_index, coding_index, agentic_index, benchmarks {terminalbench_hard, scicode, ...}, tokens_per_s, ttft_s, context_window, pricing {input, output} (USD per 1M tokens). Only enter numbers you have a source for.",
-  "updated": null,
-  "models": {}
-}

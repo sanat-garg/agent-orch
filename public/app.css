@@ -1031,7 +1031,6 @@ pre.copy-cmd:hover::after { opacity: .7; }
 .ap-chip .ap-e.st-limited, .ap-chip .ap-e.st-unavailable { color: var(--faint); text-decoration: line-through; text-decoration-color: color-mix(in srgb, currentColor 50%, transparent); }
 .ap-row .ap-e { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .ap-pop .modal-backdrop { background: transparent; }
-.ap-metrics { grid-template-columns: repeat(3, 1fr); }
 .modal-panel.ap { width: min(440px, calc(100vw - 24px)); }
 @media (min-width: 801px) {
   .ap-pop .modal-panel.ap { position: fixed; max-height: min(70dvh, 560px); }
@@ -1047,8 +1046,6 @@ pre.copy-cmd:hover::after { opacity: .7; }
 /* delegate sheet */
 .modal-panel.dg { width: min(640px, 100%); }
 .sheet-grip { display: none; }
-.dg-src { margin: 0 0 12px; font-size: 12.5px; color: var(--muted); }
-.dg-src a { color: var(--accent); }
 .dg-group { margin: 18px 0 8px; font-size: 12px; font-weight: 600; color: var(--faint); text-transform: uppercase; letter-spacing: .04em; }
 .dg-row { display: block; width: 100%; text-align: left; font: inherit; color: inherit; margin: 0 0 10px; padding: 12px 14px; min-height: 44px;
   border: 1px solid var(--border); border-radius: 12px; background: var(--panel); cursor: pointer; }
@@ -1058,28 +1055,17 @@ button.dg-row:disabled { opacity: .6; cursor: progress; }
 .dg-row.limited .dg-name { color: var(--muted); }
 .dg-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
 .dg-name { flex: 1; min-width: 0; font-weight: 600; font-size: 14px; overflow-wrap: anywhere; }
-.dg-st, .dg-delta { font-size: 11.5px; padding: 1px 8px; border-radius: 99px; border: 1px solid currentColor; white-space: nowrap; }
+.dg-st { font-size: 11.5px; padding: 1px 8px; border-radius: 99px; border: 1px solid currentColor; white-space: nowrap; }
 .dg-st.ok { color: var(--ok); }
 .dg-st.lim { color: var(--warn); background: var(--warn-soft); }
-.dg-delta.up { color: var(--ok); }
-.dg-delta.down { color: var(--danger); }
-.dg-metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px 12px; margin-top: 10px; }
-.dg-m { display: flex; flex-direction: column; min-width: 0; font-variant-numeric: tabular-nums; }
-.dg-m .k { font-size: 11px; color: var(--faint); }
-.dg-m .v { font-size: 13px; font-weight: 550; }
-.dg-m .d { font-size: 11px; }
-.dg-m .d.up { color: var(--ok); }
-.dg-m .d.down { color: var(--danger); }
 .dg-why { margin-top: 8px; font-size: 12px; color: var(--muted); }
 @media (max-width: 800px) {
   /* A bottom sheet, not a full-screen window. */
   .modal.sheet { align-items: end; }
   .modal.sheet .modal-panel { height: auto; max-height: 88dvh; border-radius: 16px 16px 0 0; border-top: 1px solid var(--border); padding-top: 0; animation: sheet-up .22s ease; }
   .sheet-grip { display: block; width: 36px; height: 5px; border-radius: 3px; background: var(--border-strong); margin: 8px auto 0; flex: none; }
-  .dg-metrics { grid-template-columns: repeat(2, 1fr); }
   .modal-panel.ap { width: 100%; }
-  .ap-metrics { grid-template-columns: repeat(3, 1fr); }
-}
+  }
 @keyframes sheet-up { from { transform: translateY(100%); } }
 
 /* queue sheet: drag to reorder (app.js Q) */
@@ -1129,15 +1115,11 @@ button.dg-row:disabled { opacity: .6; cursor: progress; }
   max-width: min(92vw, 480px); padding: 10px 14px; border-radius: 10px; background: var(--text); color: var(--bg); font-size: 13.5px;
   box-shadow: 0 8px 24px rgba(0,0,0,.25); animation: fade .15s ease; }
 
-/* Auto Delegate: compact order first, one optional score disclosure. */
+/* Auto Delegate: starting model and the owner's fallback order. */
 #apBody, .ap-pop .m-head > div { min-width: 0; overflow-wrap: anywhere; }
-.ap-details { margin-top: 14px; border-top: 1px solid var(--border); }
-.ap-details summary { min-height: 44px; padding: 12px 0; cursor: pointer; font-size: 13px; font-weight: 600; }
-.ap-score-row { padding: 10px 0; border-top: 1px solid var(--border); }
-.ap-details .ap-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .ap-action { min-height: 44px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--raised); color: var(--text); cursor: pointer; font: inherit; }
 .ap-pop .icon-btn { min-width: 44px; min-height: 44px; flex: none; }
-.ap-details summary:focus-visible, .ap-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ap-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* Fallback editor (app.js renderFallbackEditor): numbered rows in one bordered list, like the Connections list. */
 .fe-hint { margin: 0 0 8px; font-size: 12.5px; color: var(--muted); }
@@ -1159,7 +1141,6 @@ button.dg-row:disabled { opacity: .6; cursor: progress; }
 .fe-meta { display: flex; align-items: center; gap: 10px; min-width: 0; font-size: 12px; color: var(--muted); }
 .fe-meta .ap-e { min-width: 0; }
 .fe-meta .ap-e span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.fe-score { flex: none; font-variant-numeric: tabular-nums; }
 .fe-rm { flex: none; width: 32px; height: 32px; display: grid; place-items: center; border: 0; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; }
 .fe-rm:hover { background: var(--raised); color: var(--danger); }
 .fe-rm:focus-visible, .fe-opt:focus-visible, .fe-reset:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }

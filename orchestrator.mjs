@@ -19,7 +19,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { AGENTS, AGY_GROUPS, agentStatus, codexExhausted, codexLatestSnapshot, isMissingSession, limitScope, limitScopes, modelCatalog, modelNames, runAgentCli, scopeGroup, scopeWindows, toolInputSummary, windowLabel } from './agents.mjs';
 import { mediaCollector } from './media.mjs';
 import { createUsageLog } from './usage.mjs';
-import { CATEGORIES, DELEGATE_CFG, createDelegator, eligible as delegationEligible, parseFallbacks, previewDelegation, rankCandidates, rankingEntries, taskCategory } from './delegate.mjs';
+import { DELEGATE_CFG, createDelegator, eligible as delegationEligible, parseFallbacks, previewDelegation } from './delegate.mjs';
 
 // ---------------------------------------------------------------- config
 
@@ -40,7 +40,7 @@ const CFG = {
   sessionMaxContextTokens: 120000,
   sessionMaxTasks: 6,
   contextBudgetBytes: 8000,
-  delegate: { ...DELEGATE_CFG }, // LiveBench percentage-point tolerance; maxWindowPct
+  delegate: { ...DELEGATE_CFG }, // maxWindowPct
   // Tools a worker may use without full autonomy. Anything else is refused, never prompted.
   // File changes are limited to the project folder (./** is relative to the session's cwd).
   safeTools: [
@@ -82,8 +82,7 @@ const TASKS_FORMAT = `Emit work as a fenced block exactly like this (strict JSON
     "deadline": "2026-09-19T18:00 or null",
     "after": 0,
     "agent": "optional: claude | codex | antigravity",
-    "model": "optional model id",
-    "category": "optional: coding | agentic | scientific | general (which model metrics matter if it is delegated)"}
+    "model": "optional model id"}
  ],
  "routes": [{"match": "tests", "agent": "codex", "model": null, "scope": "project"}, {"remove": 3}]}
 \`\`\`
@@ -122,7 +121,7 @@ When the owner states a lasting preference ("use codex for writing tests", "use 
 UI work"), save it in \`routes\`: \`agent\` and/or \`model\`, \`scope\` "project" (default) or "global" (every
 project), optional \`note\`. A new route with the same match and scope replaces the old one; \`{"remove": id}\`
 deletes one. A \`plan\` route may only pick a Claude model. Unavailable agents fall back to Claude.
-While a task's agent is at its usage limit, reflection tasks may be delegated to a comparable model with usage left;
+While a task's agent is at its usage limit, reflection tasks may move to the owner's fallback list;
 the owner's chat tasks only when the message was sent with Auto Delegate, never when the owner picked a model.
 A block may contain only \`routes\` (with \`"tasks": []\`).`;
 
@@ -420,7 +419,6 @@ export function extractTasks(text) {
       priority: t.priority != null ? clamp(t.priority, 1, 90, null) : null,
       agent: normalizeAgent(t.agent),
       model: t.model ? String(t.model).trim().slice(0, 100) || null : null,
-      category: CATEGORIES.includes(String(t.category || '').toLowerCase()) ? String(t.category).toLowerCase() : null,
     });
     const last = tasks[tasks.length - 1];
     last.model = fitModel(last.agent, last.model, `task '${last.title}'`);
@@ -813,7 +811,7 @@ function takeLock(file) {
 }
 
 export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLimits, onSubscription, emitChat, broadcast, convoExists, refreshUsage,
-  onCommit = () => {}, projectReady = () => true, disabled = false, usageLog = createUsageLog(dataDir), modelMetrics = () => null,
+  onCommit = () => {}, projectReady = () => true, disabled = false, usageLog = createUsageLog(dataDir),
   codexSnapshot = () => codexLatestSnapshot() }) {
   const dir = path.join(dataDir, 'orchestrator');
   const runsDir = path.join(dir, 'runs');
@@ -855,9 +853,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} TEXT`);
   }
   // Delegation (delegate.mjs): tasks.origin ('reflection' | 'chat' | null), tasks.auto_delegate (the chat message was sent
-  // with Auto Delegate), tasks.pinned_model (the model the owner picked for it), tasks.category (planner-provided),
+  // with Auto Delegate), tasks.pinned_model (the model the owner picked for it), tasks.category (legacy, unused),
   // tasks.delegated_from ("agent/model" it was moved off), tasks.delegated_reason and tasks.fallbacks (JSON [{agent, model}]:
-  // the chat's owner-curated fallback list when the message was sent; NULL = automatic ranking). Existing rows get an origin from source.
+  // the chat's owner-curated fallback list when the message was sent; NULL = none). Existing rows get an origin from source.
   if (!db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === 'origin')) {
     db.exec('ALTER TABLE tasks ADD COLUMN origin TEXT');
     db.exec("UPDATE tasks SET origin=CASE source WHEN 'reflection' THEN 'reflection' WHEN 'planner' THEN 'chat' END");
@@ -866,8 +864,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   for (const col of ['pinned_model', 'category', 'delegated_from', 'delegated_reason', 'fallbacks']) {
     if (!db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === col)) db.exec(`ALTER TABLE tasks ADD COLUMN ${col} TEXT`);
   }
-  // projects.reflect_fallbacks: JSON [{agent, model}] the owner curates for reflection-queued tasks (NULL = automatic
-  // ranking); queuePayload snapshots it into their tasks.fallbacks.
+  // projects.reflect_fallbacks: JSON [{agent, model}] the owner curates for reflection-queued tasks (NULL = none);
+  // queuePayload snapshots it into their tasks.fallbacks.
   if (!db.prepare('PRAGMA table_info(projects)').all().some((c) => c.name === 'reflect_fallbacks')) db.exec('ALTER TABLE projects ADD COLUMN reflect_fallbacks TEXT');
   // messages.task_id: the plan task that took a saved message (status 'taken'); it is 'done' once answered.
   if (!db.prepare('PRAGMA table_info(messages)').all().some((c) => c.name === 'task_id')) db.exec('ALTER TABLE messages ADD COLUMN task_id INTEGER');
@@ -923,17 +921,17 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
 
   function addTask(projectId, { title, prompt, kind = 'work', source = 'user', priority = null, urgency = 'normal', deadline = null, dependsOn = null, doneWhen = null, agent = null, model = null,
-    origin = source === 'reflection' ? 'reflection' : null, autoDelegate = false, pinnedModel = null, category = null, fallbacks = null }) {
+    origin = source === 'reflection' ? 'reflection' : null, autoDelegate = false, pinnedModel = null, fallbacks = null }) {
     deadline = parseDeadline(deadline);
     if (priority == null) {
       priority = kind === 'plan' ? PRIORITY.plan : kind === 'reflect' ? PRIORITY.reflect
         : urgency !== 'normal' && URGENCY[urgency] ? URGENCY[urgency] : PRIORITY[source] ?? 50;
     }
     const pos = insertPosition(projectId, effectivePriority({ priority, deadline }, getProject(projectId)), dependsOn);
-    const r = run(`INSERT INTO tasks(project_id,kind,title,prompt,priority,urgency,deadline,depends_on,done_when,source,agent,model,origin,auto_delegate,pinned_model,category,fallbacks,position,created_at)
-      VALUES(:p,:k,:ti,:pr,:pri,:u,:d,:dep,:dw,:s,:ag,:mo,:or,:ad,:pm,:cat,:fb,:pos,:c)`,
+    const r = run(`INSERT INTO tasks(project_id,kind,title,prompt,priority,urgency,deadline,depends_on,done_when,source,agent,model,origin,auto_delegate,pinned_model,fallbacks,position,created_at)
+      VALUES(:p,:k,:ti,:pr,:pri,:u,:d,:dep,:dw,:s,:ag,:mo,:or,:ad,:pm,:fb,:pos,:c)`,
       { p: projectId, k: kind, ti: title, pr: prompt, pri: priority, u: urgency, d: deadline, dep: dependsOn, dw: doneWhen, s: source, ag: agent, mo: model,
-        or: origin, ad: autoDelegate ? 1 : 0, pm: pinnedModel, cat: category, fb: fallbacks ? JSON.stringify(fallbacks) : null, pos, c: now() });
+        or: origin, ad: autoDelegate ? 1 : 0, pm: pinnedModel, fb: fallbacks ? JSON.stringify(fallbacks) : null, pos, c: now() });
     const id = Number(r.lastInsertRowid);
     pushTask(id);
     return id;
@@ -1058,7 +1056,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     // Mandatory GitHub protocol: a project's work only starts once its repo exists.
     // A plan task waits while the owner's chat turn holds the planner session (AUDIT #5).
     // A task whose agent is at its usage limit waits; others (e.g. codex-routed while Claude is limited) still run.
-    // A waiting task that may be delegated moves to a comparable model with usage left (delegate.mjs) and runs now.
+    // A waiting task that may be delegated moves to the owner's first fallback with usage left (delegate.mjs) and runs now.
     const rows = runnable(allowed, true, 25).filter((r) => !(r.kind === 'plan' && planningProjects.has(r.project_id)) && projectReady(getProject(r.project_id)?.path));
     const row = rows.find((r) => !waitsForLimit(r)) || rows.find((r) => delegate(r) && !waitsForLimit(getTask(r.id)));
     if (!row) return null;
@@ -1413,39 +1411,34 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (r.fellBack) logEvent(`${r.fellBack} ${/^not /.test(r.reason) ? 'is ' : ''}${r.reason}; #${task.id || task.kind} runs on Claude instead`, { level: 'warn', projectId: project.id, taskId: task.id || null });
     return r;
   }
-  // ---- delegation: a task whose agent is limited moves to the top comparable candidate (or its first usable curated
-  // fallback, tasks.fallbacks), if policy allows
+  // ---- delegation: a task whose agent is limited moves to its first usable fallback (tasks.fallbacks), if policy allows
   const delegator = createDelegator({
     agents: () => Object.keys(AGENTS),
     connected: (id) => (id === 'claude' ? onSubscription() : agentStatus(id) === true && !(kvTime(`agent_auth_failed:${id}`) > now())),
     blockedUntil: (id, model) => blockedUntilFor(id, model),
     windows: (id, model) => scopeWindows(limitScope(id, model), usageLog.current?.(id)),
     models: (id) => modelCatalog(id).models || [],
-    metrics: modelMetrics,
     cfg: CFG.delegate,
   });
   // The model the task asked for, before any fallback (a blocked codex route falls back onto Claude and waits there).
   const intendedRoute = (task, project) => resolveRoute(task, project, listRoutes(project.id), () => true);
-  function candidates(task) {
-    const project = getProject(task.project_id);
-    return delegator.candidates(task, intendedRoute(task, project));
+  function nextModel(task) {
+    return delegator.nextModel(task, intendedRoute(task, getProject(task.project_id)));
   }
-  const delegateTried = new Map(); // task id -> last attempt (s): a task with no candidate is rechecked once a minute
+  const delegateTried = new Map(); // task id -> last attempt (s): a task with no usable fallback is rechecked once a minute
   function delegate(task) {
     if (!delegationEligible(task) || now() - (delegateTried.get(task.id) || 0) < 60) return false;
     delegateTried.set(task.id, now());
-    const project = getProject(task.project_id);
-    const from = intendedRoute(task, project);
-    const { original, candidates: list } = delegator.candidates(task, from);
-    const top = list[0];
+    const from = intendedRoute(task, getProject(task.project_id));
+    const top = delegator.nextModel(task, from);
     if (!top) return false;
-    const fromName = `${from.agent}/${original?.model || from.model || 'default'}`;
+    const fromName = `${from.agent}/${from.model || delegator.defaultModel(from.agent) || 'default'}`;
     updateTask(task.id, { agent: top.agent, model: top.model, session_id: null, delegated_from: task.delegated_from || fromName, delegated_reason: top.reason });
     logEvent(`#${task.id} delegated from ${fromName} (at its usage limit) to ${top.agent}/${top.model}: ${top.reason}`, { projectId: task.project_id, taskId: task.id });
     return true;
   }
   // Manual delegation (the task drawer's "Delegate…" sheet). The owner is choosing, so policy and pins don't apply;
-  // every model of a connected agent is listed with its status, comparable candidates (delegate.mjs ranking) first.
+  // every model of a connected agent is listed with its status, available ones first.
   function agentUsage(agent, model) {
     const until = blockedUntilFor(agent, model);
     if (until) return { status: 'limited', until };
@@ -1457,28 +1450,17 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const task = getTask(id);
     if (!task) return null;
     const cur = intendedRoute(task, getProject(task.project_id));
-    let view = null;
-    try { view = modelMetrics(); } catch {}
-    const entries = rankingEntries(view);
     const connected = Object.keys(AGENTS).filter((a) => (a === 'claude' ? onSubscription() : agentStatus(a) === true && !(kvTime(`agent_auth_failed:${a}`) > now())));
     const all = connected.flatMap((a) => (modelCatalog(a).models || []).map((m) => ({ agent: a, model: m.id, label: m.label || m.id, default: !!m.default })));
     const current = { agent: cur.agent, model: cur.model || (all.find((m) => m.agent === cur.agent && m.default) || all.find((m) => m.agent === cur.agent))?.model || null };
-    const ranked = rankCandidates({ current, entries, available: all, category: taskCategory(task), cfg: CFG.delegate });
-    const byKey = new Map(ranked.candidates.map((c) => [`${c.agent}/${c.model}`, c]));
-    const metricsOf = (a, m) => entries.find((e) => e.agent === a && e.model === m)?.scores || null;
-    const rows = all.filter((m) => !(m.agent === current.agent && m.model === current.model)).map((m) => {
-      const c = byKey.get(`${m.agent}/${m.model}`);
-      return { agent: m.agent, model: m.model, label: m.label, ...agentUsage(m.agent, m.model), comparable: !!c?.benchmark, score: c?.score ?? null, ratio: c?.ratio ?? null,
-        reason: c?.reason || (ranked.original ? 'not comparable on the metrics' : 'no metrics for the current model'), metrics: metricsOf(m.agent, m.model) };
-    });
-    const rank = new Map(ranked.candidates.map((c, i) => [`${c.agent}/${c.model}`, i]));
-    rows.sort((a, b) => (a.status === 'available' ? 0 : 1) - (b.status === 'available' ? 0 : 1) || (rank.get(`${a.agent}/${a.model}`) ?? 1e9) - (rank.get(`${b.agent}/${b.model}`) ?? 1e9));
-    return { task: taskView(task), category: ranked.category, data_status: view?.data_status || 'unavailable', stale: !!view?.stale, data_error: view?.data_error || null, source: 'livebench', release: view?.release || null, fetched_at: view?.fetched_at ?? null, attribution: view?.attribution || null,
-      current: { ...current, label: all.find((m) => m.agent === current.agent && m.model === current.model)?.label || current.model, score: ranked.original?.score ?? null,
-        metrics: metricsOf(current.agent, current.model), ...agentUsage(current.agent, current.model) }, candidates: rows };
+    const rows = all.filter((m) => !(m.agent === current.agent && m.model === current.model))
+      .map((m) => ({ agent: m.agent, model: m.model, label: m.label, ...agentUsage(m.agent, m.model) }));
+    rows.sort((a, b) => (a.status === 'available' ? 0 : 1) - (b.status === 'available' ? 0 : 1));
+    return { task: taskView(task),
+      current: { ...current, label: all.find((m) => m.agent === current.agent && m.model === current.model)?.label || current.model, ...agentUsage(current.agent, current.model) }, candidates: rows };
   }
-  // Auto Delegate preview for the composer (GET /api/delegate/preview): the chat's start model plus the top comparable
-  // candidates, each with its agent's usage status. Near = a plan window at ≥75%; limited agents rank last.
+  // Auto Delegate preview for the composer (GET /api/delegate/preview): the chat's start model plus its fallback list,
+  // each with its agent's usage status. Near = a plan window at ≥75%.
   function previewUsage(agent, model) {
     const connected = agent === 'claude' ? onSubscription() : agentStatus(agent) === true;
     if (!connected) return { status: 'unavailable', until: null, note: agent === 'claude' ? 'not on the subscription' : 'not signed in' };
@@ -1491,9 +1473,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (w && w.pct >= 75) return { status: 'near', until: w.resetsAt || null, note: `${windowLabel(w.window)} window at ${Math.round(w.pct)}%` };
     return { status: 'available', until: null, note: null };
   }
-  // fallbacks: the chat's curated list (null = automatic); the reply then lists it and still `suggested`s the automatic top 3.
-  // projectId: preview for the project's reflection tasks instead: its reflect_fallbacks list, starting on its default route.
-  function delegatePreview({ agent, model, category, fallbacks = null, projectId = null } = {}) {
+  // fallbacks: the chat's list (null = none). projectId: preview for the project's reflection tasks instead: its
+  // reflect_fallbacks list, starting on its default route.
+  function delegatePreview({ agent, model, fallbacks = null, projectId = null } = {}) {
     if (projectId != null) {
       const project = getProject(projectId);
       if (!project) return null;
@@ -1503,14 +1485,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     }
     agent = agent || 'claude';
     if (agent !== 'claude' && !AGENTS[agent]) return null;
-    let view = null;
-    try { view = modelMetrics(); } catch {}
     const connected = Object.keys(AGENTS).filter((a) => previewUsage(a).status !== 'unavailable');
     const all = connected.flatMap((a) => (modelCatalog(a).models || []).map((m) => ({ agent: a, model: m.id, label: m.label || m.id })));
     const ms = modelCatalog(agent).models || [];
     const current = { agent, model: model || (ms.find((m) => m.default) || ms[0])?.id || null };
-    const r = previewDelegation({ current, entries: rankingEntries(view), all, usage: previewUsage, category: CATEGORIES.includes(category) ? category : 'coding', fallbacks, cfg: CFG.delegate });
-    return { ...r, data_status: view?.data_status || 'error', data_error: view?.data_error || null, stale: !!view?.stale, source: 'livebench', release: view?.release || null, fetched_at: view?.fetched_at ?? null, attribution: view?.attribution || null };
+    return previewDelegation({ current, all, usage: previewUsage, fallbacks });
   }
   function delegateTask(id, { agent, model } = {}) {
     const task = getTask(id);
@@ -1523,9 +1502,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const project = getProject(task.project_id);
     const from = intendedRoute(task, project);
     const fromName = `${from.agent}/${from.model || 'default'}`;
-    const opt = delegateOptions(id)?.candidates.find((c) => c.agent === agent && c.model === model);
-    const reason = `chosen by the owner${opt?.comparable ? `; ${opt.reason}` : ''}`;
-    updateTask(id, { agent, model, session_id: null, delegated_from: task.delegated_from || fromName, delegated_reason: reason });
+    updateTask(id, { agent, model, session_id: null, delegated_from: task.delegated_from || fromName, delegated_reason: 'chosen by the owner' });
     logEvent(`#${id} delegated by the owner from ${fromName} to ${agent}/${model || 'default'}`, { projectId: task.project_id, taskId: id });
     setTimeout(tick, 100);
     return { ok: true, task: taskView(getTask(id)) };
@@ -1553,8 +1530,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       if (dup) { logEvent(`skipped duplicate: ${t.title} (already #${dup.id})`, { projectId: project.id }); batch.push(dup.id); continue; }
       let dependsOn = resolveAfter(t.after, batch);
       if (dependsOn != null && !getTask(dependsOn)) dependsOn = null;
-      const id = addTask(project.id, { title: t.title, prompt: t.prompt, kind: 'work', source, priority: t.priority, urgency: t.urgency, deadline: t.deadline, dependsOn, doneWhen: t.done_when, agent: t.agent, model: t.model,
-        category: t.category, ...origin });
+      const id = addTask(project.id, { title: t.title, prompt: t.prompt, kind: 'work', source, priority: t.priority, urgency: t.urgency, deadline: t.deadline, dependsOn, doneWhen: t.done_when, agent: t.agent, model: t.model, ...origin });
       writeTaskSpec(project.path, getTask(id));
       ids.push(id);
       batch.push(id);
@@ -2124,11 +2100,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     setTimeout(tick, 100);
     return { ok: true };
   }
-  // Reflection fallbacks (list already validated by the server): [{agent, model}] or null = automatic ranking.
+  // Reflection fallbacks (list already validated by the server): [{agent, model}] or null = none.
   function setReflectFallbacks(id, list) {
     if (!getProject(id)) return { error: 'No such project', status: 404 };
     updateProject(id, { reflect_fallbacks: list == null ? null : JSON.stringify(list) });
-    logEvent(`reflection fallbacks: ${list == null ? 'automatic' : list.map((f) => `${f.agent}/${f.model}`).join(' → ') || 'none'}`, { projectId: id });
+    logEvent(`reflection fallbacks: ${list == null ? 'none' : list.map((f) => `${f.agent}/${f.model}`).join(' → ') || 'none'}`, { projectId: id });
     return { ok: true, project: projectView(getProject(id)) };
   }
   function pauseProject(id) {
@@ -2296,7 +2272,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   return {
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
-    planTurn, abortPlan, candidates, eligible: delegationEligible, delegateOptions, delegatePreview, delegateTask, taskAction, moveTask, changeMessage, projectAction, setReflectFallbacks, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
+    planTurn, abortPlan, nextModel, eligible: delegationEligible, delegateOptions, delegatePreview, delegateTask, taskAction, moveTask, changeMessage, projectAction, setReflectFallbacks, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
     drain, undrain, chatPlanning, stateView, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     unwatch: (ws) => { for (const set of runSubs.values()) set.delete(ws); },
   };

@@ -32,12 +32,16 @@ Immediate goals (owner, tasks #132–133): restore missing Artificial Analysis d
    keyboard-aware composer, sheets instead of popovers, and smooth performance on iOS Safari.
 7. Honest data: model selectors list only the models each CLI actually reports, never hardcoded guesses. Each
    agent's rate limits are fully independent: one agent's limit never blocks or mislabels another's.
-8. Delegation policy (owner, 2026-09-25): a queued task may be delegated to another agent/model that still has
-   usage available and whose benchmark scores are comparable. Source (owner, #136): **LiveBench** (livebench.ai
-   category scores: Coding, Agentic Coding, Reasoning, …) replaces the planned reliance on Artificial Analysis; models
-   without an exact LiveBench identity have no score rather than a borrowed one. Reflection-generated tasks: delegation is allowed automatically. Tasks from the owner's
-   chat: delegate only if that chat message was sent with "Auto Delegate" chosen in the model selector. If the
-   owner picked a specific model (e.g. Opus), never swap it for a "comparable" one.
+8. Delegation (owner, revised 2026-09-26): no benchmarks or automatic ranking (LiveBench and Artificial Analysis
+   are removed). The owner enters fallbacks by hand as an ordered list, per chat, plus one list for reflection tasks.
+   When a task's model is rate-limited, it moves to the first fallback that has usage left. With an empty list the
+   task waits. The UI must make it obvious which model a task is on, whether it was delegated, and what happens
+   when a limit hits. Keep it simple and foolproof.
+9. Parallel agents (owner, 2026-09-26): rate limits are per agent and token-based, so split work into tasks that
+   touch disjoint files and run them in parallel across agents (each in its own git worktree), with an integrator
+   task that merges and verifies their results.
+10. More agent CLIs (owner, 2026-09-26): OpenCode CLI, Kiro CLI and GitHub Copilot CLI, each fully runnable
+   (headless commands, model discovery, limits) and connectable from the Connections modal.
 
 ## Constraints & Preferences
 - Chat and agents must run on the Claude subscription, never on API credits (see API_ENV stripping in

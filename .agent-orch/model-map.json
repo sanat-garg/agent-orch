@@ -1,3 +1,0 @@
-{
-  "_comment": "Manual Artificial Analysis matches for CLI models (aa.mjs): \"agent:modelId\" or \"modelId\" -> AA slug, or null to mark a model as having no AA entry."
-}

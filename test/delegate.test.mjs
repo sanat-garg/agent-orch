@@ -1,5 +1,5 @@
-// delegate.mjs: the delegation policy matrix, task categories and ranking on fixture metrics; plus the orchestrator
-// moving a waiting reflection task (but not a default chat task) off a limited Claude.
+// delegate.mjs: the delegation policy matrix and the owner's fallback list; plus the orchestrator moving a waiting
+// reflection task (but not a default chat task) off a limited Claude onto its first usable fallback.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -8,7 +8,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { eligible, taskCategory, rankCandidates, createDelegator, weightedScore, previewDelegation, parseFallbacks, rankingEntries } from '../delegate.mjs';
+import { eligible, createDelegator, previewDelegation, parseFallbacks } from '../delegate.mjs';
 
 test('policy matrix: reflect / chat+auto / chat+pinned / chat default', () => {
   assert.equal(eligible({ kind: 'work', origin: 'reflection' }), true);
@@ -21,81 +21,54 @@ test('policy matrix: reflect / chat+auto / chat+pinned / chat default', () => {
   assert.equal(eligible({ kind: 'plan', origin: 'reflection' }), false, 'only work tasks move');
 });
 
-test('task category: planner-provided wins, else keywords, else general', () => {
-  assert.equal(taskCategory({ category: 'scientific', title: 'Fix the API bug' }), 'scientific');
-  assert.equal(taskCategory({ title: 'Fix the login bug', prompt: 'Add a test for the endpoint' }), 'coding');
-  assert.equal(taskCategory({ title: 'Automate the deploy pipeline', prompt: 'multi-step workflow' }), 'agentic');
-  assert.equal(taskCategory({ title: 'Analyze the survey dataset', prompt: 'statistics and plots' }), 'scientific');
-  assert.equal(taskCategory({ title: 'Write the README intro', prompt: 'Explain what it is.' }), 'general');
-});
-
-// Exact-identity LiveBench view fixtures; conflicting AA metrics must be ignored.
-const entry = (agent, model, coding, agentic = coding, math = coding, data = math) => ({ agent, model, label: model,
-  livebench: { model, release: '2026-06-25' }, scores: { global_average: coding, categories: { Coding: coding, 'Agentic Coding': agentic, Mathematics: math, 'Data Analysis': data } }, metrics: { coding_index: 100 } });
-const entries = [entry('claude', 'opus', 60, 70, 80), entry('codex', 'gpt-a', 59, 40, 79), entry('codex', 'gpt-b', 65, 69, 30), entry('codex', 'gpt-mini', 10), entry('antigravity', 'gemini-x', 40, 75, 85), { agent: 'antigravity', model: 'gemini-none' }];
+const models = { claude: [{ id: 'opus', default: true }], codex: [{ id: 'gpt-a' }, { id: 'gpt-mini' }], antigravity: [{ id: 'gemini-x' }, { id: 'claude-sonnet-4-6' }] };
+const mk = (over = {}) => createDelegator({ agents: () => Object.keys(models), models: (id) => models[id], connected: () => true, blockedUntil: () => 0, windows: () => [], ...over });
 const current = { agent: 'claude', model: 'opus' };
-const view = (over = {}) => ({ source: 'livebench', data_status: 'ready', stale: false, release: '2026-06-25', entries, ...over });
-const all = entries.map(({ agent, model }) => ({ agent, model }));
-const names = r => r.candidates.map(c => c.model);
-const mk = (over = {}) => createDelegator({ agents: () => ['claude', 'codex', 'antigravity'], connected: () => true,
-  blockedUntil: () => 0, models: a => all.filter(m => m.agent === a).map(m => ({ id: m.model })), metrics: () => view(), ...over });
+const pick = (d, fallbacks, cur = current) => d.nextModel({ fallbacks }, cur)?.model ?? null;
 
-test('LiveBench categories, percentage-point threshold, missing categories and same-release comparison', () => {
-  const rank = category => rankCandidates({ current, entries, available: all, category });
-  assert.deepEqual(names(rank('coding')), ['gpt-a', 'gpt-b', 'gemini-none']);
-  assert.deepEqual(names(rank('agentic')), ['gpt-b', 'gemini-x', 'gemini-none']);
-  assert.deepEqual(names(rank('scientific')), ['gpt-a', 'gemini-x', 'gemini-none']);
-  assert.deepEqual(names(rank('general')), names(rank('coding')));
-  assert.equal(weightedScore({ categories: { Coding: 0.5 } }, { Coding: 1 }).score, 0.5);
-  assert.equal(weightedScore({ categories: { Mathematics: 80 } }, { Mathematics: .5, 'Data Analysis': .5 }), null);
-  const mixed = structuredClone(entries); mixed[1].livebench.release = '2025-01-01';
-  const r = rankCandidates({ current, entries: mixed, available: all, category: 'coding' });
-  assert.equal(r.candidates.find(c => c.model === 'gpt-a').score, null);
-  assert.equal(rank('coding').candidates.find(c => c.model === 'gemini-none').benchmark, false);
-});
-
-test('preview and execution agree across categories, exhausted usage, unavailable agents, stale/unavailable data', () => {
-  for (const category of ['coding', 'agentic', 'scientific', 'general']) {
-    for (const state of [{}, { stale: true }, { data_status: 'unavailable' }, { source: 'artificialanalysis' }]) {
-      const v = view(state);
-      const usage = (a, m) => ({ status: a === 'claude' || m === 'gpt-b' ? 'limited' : a === 'antigravity' ? 'unavailable' : 'available' });
-      const d = mk({ metrics: () => v, connected: a => a !== 'antigravity', blockedUntil: a => a === 'claude' ? 123 : 0,
-        windows: (a, m) => m === 'gpt-b' ? [{ pct: 90 }] : [] });
-      const execution = d.candidates({ category }, current);
-      const preview = previewDelegation({ current, entries: rankingEntries(v), all: all.filter(m => m.agent !== 'antigravity'), usage, category, limit: 100 });
-      assert.deepEqual(preview.candidates.filter(c => c.status === 'available').map(c => [c.model, c.score, c.reason]), execution.candidates.map(c => [c.model, c.score, c.reason]));
-      if (Object.keys(state).length) assert.ok(execution.candidates.every(c => c.score === null && /non-benchmark/.test(c.reason)));
-    }
-  }
-});
-
-test('unmatched deterministic fallback prefers current agent; explicit owner order and empty override win', () => {
-  const d = mk({ metrics: () => view({ stale: true }) });
-  assert.deepEqual(names(d.candidates({}, { agent: 'codex', model: 'gpt-a' })), ['gpt-b', 'gpt-mini', 'gemini-none', 'gemini-x', 'opus']);
-  const list = [{ agent: 'codex', model: 'gpt-mini' }, { agent: 'codex', model: 'gpt-a' }];
-  assert.deepEqual(names(d.candidates({ fallbacks: JSON.stringify(list) }, current)), ['gpt-mini', 'gpt-a']);
-  assert.deepEqual(names(d.candidates({ fallbacks: '[]' }, current)), []);
-  assert.deepEqual(names(mk({ windows: (a, m) => m === 'gpt-mini' ? [{ pct: 95 }] : [] }).candidates({ fallbacks: list }, current)), ['gpt-a']);
-  assert.deepEqual(names(mk().candidates({ fallbacks: [{ agent: 'codex', model: 'gone' }] }, current)), []);
+test('nextModel: the first listed model with usage left, in the owner\'s order; none without a list', () => {
+  const list = [{ agent: 'codex', model: 'gpt-mini' }, { agent: 'codex', model: 'gpt-a' }, { agent: 'antigravity', model: 'gemini-x' }];
+  const d = mk();
+  assert.deepEqual(d.nextModel({ fallbacks: JSON.stringify(list) }, current), { agent: 'codex', model: 'gpt-mini', rank: 1, reason: "owner's fallback #1" });
+  assert.equal(pick(d, null), null, 'no list: the task waits');
+  assert.equal(pick(d, '[]'), null, 'empty list: the task waits');
+  assert.equal(pick(d, 'bad'), null);
+  assert.equal(pick(d, [{ agent: 'claude', model: 'opus' }, ...list]), 'gpt-mini', 'the current model is skipped');
+  assert.equal(pick(d, [{ agent: 'claude', model: 'opus' }], { agent: 'claude', model: null }), null, "a route without a model is the agent's default");
+  assert.equal(pick(mk({ windows: (a, m) => m === 'gpt-mini' ? [{ pct: 95 }] : [] }), list), 'gpt-a', 'a window at ≥90% counts as limited');
+  assert.equal(pick(mk({ blockedUntil: (a) => a === 'codex' ? 123 : 0 }), list), 'gemini-x');
+  assert.equal(pick(mk({ connected: (a) => a !== 'codex' }), list), 'gemini-x');
+  assert.equal(pick(d, [{ agent: 'codex', model: 'gone' }, { agent: 'nope', model: 'x' }]), null, 'unknown models and agents are skipped');
   assert.equal(parseFallbacks('bad'), null);
 });
 
 test('delegator: antigravity groups are independent: a Gemini block or full Gemini window keeps third-party models', () => {
-  const models = { claude: [{ id: 'opus', default: true }], codex: [{ id: 'gpt-a' }], antigravity: [{ id: 'gemini-x' }, { id: 'claude-sonnet-4-6' }] };
   const grp = (m) => (/^gemini/.test(m || '') ? 'gemini' : '3p');
-  const mk = (over = {}) => createDelegator({ agents: () => Object.keys(models), models: (id) => models[id], metrics: () => view(),
-    connected: () => true, blockedUntil: () => 0, windows: () => [], ...over });
   const ids = (d) => d.available().map((m) => `${m.agent}/${m.model}`);
+  const list = [{ agent: 'antigravity', model: 'gemini-x' }, { agent: 'antigravity', model: 'claude-sonnet-4-6' }];
   let d = mk({ blockedUntil: (id, m) => (id === 'antigravity' && grp(m) === 'gemini' ? 123 : 0) });
-  assert.deepEqual(ids(d), ['claude/opus', 'codex/gpt-a', 'antigravity/claude-sonnet-4-6']);
+  assert.deepEqual(ids(d), ['claude/opus', 'codex/gpt-a', 'codex/gpt-mini', 'antigravity/claude-sonnet-4-6']);
   assert.equal(d.hasUsage('antigravity', 'gemini-x'), false);
+  assert.equal(pick(d, list), 'claude-sonnet-4-6');
   d = mk({ windows: (id, m) => (id === 'antigravity' ? [{ window: `${grp(m)}-5h`, pct: grp(m) === '3p' ? 95 : 10 }] : []) });
-  assert.deepEqual(ids(d), ['claude/opus', 'codex/gpt-a', 'antigravity/gemini-x']);
+  assert.deepEqual(ids(d), ['claude/opus', 'codex/gpt-a', 'codex/gpt-mini', 'antigravity/gemini-x']);
+  assert.equal(pick(d, list.slice(1)), null);
+});
+
+test('previewDelegation: start model, then the owner\'s list with usage; nothing without a list', () => {
+  const all = [{ agent: 'claude', model: 'opus', label: 'Opus' }, { agent: 'codex', model: 'gpt-a', label: 'GPT A' }];
+  const usage = (a) => ({ status: a === 'codex' ? 'limited' : 'available', until: a === 'codex' ? 9 : null });
+  const list = [{ agent: 'codex', model: 'gpt-a' }, { agent: 'claude', model: 'opus' }, { agent: 'codex', model: 'gone' }];
+  const r = previewDelegation({ current, all, usage, fallbacks: list });
+  assert.deepEqual(r.start, { agent: 'claude', model: 'opus', label: 'Opus', status: 'available', until: null });
+  assert.deepEqual(r.fallbacks, list);
+  assert.deepEqual(r.candidates.map((c) => [c.model, c.label, c.rank, c.status]), [['gpt-a', 'GPT A', 1, 'limited'], ['gone', 'gone', 3, 'unavailable']]);
+  assert.deepEqual(previewDelegation({ current, all, usage }).candidates, []);
 });
 
 // ---- orchestrator integration: a child process (createOrchestrator starts timers) with Claude blocked.
 const fixture = (f) => fileURLToPath(new URL(`./fixtures/${f}`, import.meta.url));
-test('a waiting reflection task moves to the top candidate; chat default and pinned tasks keep waiting', { timeout: 60000 }, async () => {
+test('a waiting reflection task moves to its first usable fallback; chat default, pinned and list-less tasks keep waiting', { timeout: 60000 }, async () => {
   const dirs = ['cw-del-', 'cw-del-p-', 'cw-del-home-'].map((p) => fs.mkdtempSync(path.join(os.tmpdir(), p)));
   const [dataDir, root, home] = dirs;
   try {
@@ -111,17 +84,17 @@ test('a waiting reflection task moves to the top candidate; chat default and pin
       setModelCatalog('claude', { models: [{ id: 'opus', default: true }], error: null, at: 1 });
       setModelCatalog('codex', { models: [{ id: 'gpt-a' }, { id: 'gpt-mini' }], error: null, at: 1 });
       setModelCatalog('antigravity', { models: [], error: null, at: 1 });
-      const entries = ${JSON.stringify(entries)};
       let claude = 0;
       const query = () => (async function* () { claude++; yield { type: 'result', subtype: 'success', result: 'AGENT-ORCH-STATUS: done — ok', session_id: 's', num_turns: 1 }; })();
       const o = createOrchestrator({ query, dataDir, claudeEnv: { PATH: process.env.PATH, HOME: process.env.HOME }, getLimits: () => [], onSubscription: () => true,
-        broadcast() {}, emitChat() {}, convoExists: () => true, modelMetrics: () => ({ source: 'livebench', data_status: 'ready', stale: false, release: '2026-06-25', entries }) });
+        broadcast() {}, emitChat() {}, convoExists: () => true });
       const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
       db.prepare('INSERT OR REPLACE INTO kv(key,value) VALUES(?,?)').run('blocked_until', String(Date.now() / 1000 + 3600));
       const pid = (n) => { const p = path.join(root, n); fs.mkdirSync(p); return Number(db.prepare("INSERT INTO projects(path,name,status,perpetual,created_at) VALUES(?,?,'active',0,0)").run(p, n).lastInsertRowid); };
       const task = (n, origin, auto, pinned, fallbacks = null) => Number(db.prepare('INSERT INTO tasks(project_id,title,prompt,origin,auto_delegate,pinned_model,fallbacks,created_at) VALUES(?,?,?,?,?,?,?,0)')
         .run(pid(n), 'Fix the parser bug', 'code', origin, auto, pinned, fallbacks).lastInsertRowid);
-      const ids = { reflect: task('a', 'reflection', 0, null), auto: task('b', 'chat', 1, null), pinned: task('c', 'chat', 0, 'opus'), plain: task('d', 'chat', 0, null),
+      const list = JSON.stringify([{ agent: 'codex', model: 'gpt-a' }]);
+      const ids = { reflect: task('a', 'reflection', 0, null, list), auto: task('b', 'chat', 1, null, list), nolist: task('g', 'chat', 1, null), pinned: task('c', 'chat', 0, 'opus'), plain: task('d', 'chat', 0, null),
         curated: task('e', 'chat', 1, null, JSON.stringify([{ agent: 'codex', model: 'gpt-mini' }])), empty: task('f', 'chat', 1, null, '[]') };
       const get = (id) => db.prepare('SELECT * FROM tasks WHERE id=?').get(id);
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -138,12 +111,12 @@ test('a waiting reflection task moves to the top candidate; chat default and pin
     for (const k of ['reflect', 'auto']) {
       assert.equal(r[k].status, 'done', JSON.stringify(r));
       assert.deepEqual([r[k].agent, r[k].model, r[k].from, r[k].view], ['codex', 'gpt-a', 'claude/opus', 'claude/opus']);
-      assert.match(r[k].reason, /^LiveBench 2026-06-25 coding: 59 vs opus 60/);
+      assert.equal(r[k].reason, "owner's fallback #1");
     }
-    // The chat's curated list is used as-is (gpt-mini is far from comparable); an empty list never delegates.
+    // The chat's list is used as-is; no list or an empty list never delegates.
     assert.deepEqual([r.curated.status, r.curated.agent, r.curated.model, r.curated.from], ['done', 'codex', 'gpt-mini', 'claude/opus']);
     assert.match(r.curated.reason, /^owner's fallback #1/);
-    for (const k of ['pinned', 'plain', 'empty']) assert.deepEqual([r[k].status, r[k].agent, r[k].from], ['queued', null, null]);
+    for (const k of ['pinned', 'plain', 'empty', 'nolist']) assert.deepEqual([r[k].status, r[k].agent, r[k].from], ['queued', null, null]);
     assert.equal(r.claude, 0);
     assert.equal(r.events.length, 3);
   } finally {

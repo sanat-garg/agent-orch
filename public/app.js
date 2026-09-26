@@ -1334,7 +1334,7 @@ let AGENT_LIST = [];
 // A model's display name as its CLI reports it (the id when the agent's list doesn't name it).
 const modelLabel = (agent, id) => AGENT_LIST.find((a) => a.id === agent)?.models.find((m) => m.id === id || m.resolved === id)?.label || id;
 const CONNECT_PICK = '__connect'; // the picker's last option: opens the Connections window
-// The picker's first option: agent-orch may move this chat's queued tasks to a comparable model with usage left
+// The picker's first option: agent-orch may move this chat's queued tasks to the first fallback with usage left
 // (BRIEF goal 8). It is a per-chat flag sent with each message; the chat keeps its agent/model as the starting point.
 // Any specific model pins the tasks to it.
 const AUTO_PICK = '__auto';
@@ -1367,8 +1367,7 @@ function fitPick() {
 }
 document.fonts?.ready.then(fitPick);
 // Auto Delegate preview (GET /api/delegate/preview), next to the picker only while Auto Delegate is chosen: the start
-// model and the comparable models most likely used after it, each with a status dot. A specific model shows nothing.
-// The popup previews saved order or automatic ranking; score details are optional.
+// model and the chat's fallback list, each with a status dot. A specific model shows nothing.
 const AP = { data: null, key: '', seq: 0, timer: 0, lastFocus: null, error: '', fe: {}, saving: Promise.resolve(), saveSeq: 0, pending: 0, confirmed: null };
 const AP_ST = { available: 'available', near: 'near limit', limited: 'limited', unavailable: 'unavailable' };
 function apStatusText(r) {
@@ -1392,15 +1391,14 @@ function renderPickChip() {
 function loadAutoPreview() {
   if (!AP.key) return;
   const [agent, model] = AP.key.split('|'), seq = ++AP.seq;
-  // Use ?convo= when the current chat has an id so the backend returns curated fallbacks + suggested.
+  // Use ?convo= when the current chat has an id so the backend returns its fallback list.
   const cid = state.cid;
   const url = cid
-    ? `/api/delegate/preview?convo=${encodeURIComponent(cid)}&agent=${encodeURIComponent(agent)}&model=${encodeURIComponent(model)}&category=coding`
-    : `/api/delegate/preview?agent=${encodeURIComponent(agent)}&model=${encodeURIComponent(model)}&category=coding`;
+    ? `/api/delegate/preview?convo=${encodeURIComponent(cid)}&agent=${encodeURIComponent(agent)}&model=${encodeURIComponent(model)}`
+    : `/api/delegate/preview?agent=${encodeURIComponent(agent)}&model=${encodeURIComponent(model)}`;
   api(url).then((d) => {
     if (seq !== AP.seq || AP.pending) return;
     AP.data = d; AP.error = ''; AP.confirmed = d.fallbacks ?? null;
-    if (d.data_status === 'loading') { clearTimeout(AP.timer); AP.timer = setTimeout(loadAutoPreview, 1500); }
     renderApChip();
     if (!$('apModal').hidden) renderAutoPreview();
   }).catch(() => {
@@ -1414,17 +1412,16 @@ function refreshAutoPreview() {
   clearTimeout(AP.timer);
   if (AP.key) AP.timer = setTimeout(loadAutoPreview, 400);
 }
-// Save the fallback list (null = automatic): optimistic, so the popup and composer chip update at once. PUTs run in
+// Save the fallback list (null = none): optimistic, so the popup and composer chip update at once. PUTs run in
 // order; if the latest one fails, the last list the server confirmed comes back.
 function apApplyFallbacks(list) {
   const d = AP.data;
   const convo = currentConvo();
   if (convo) convo.fallbacks = list;
   if (!d) return;
-  const info = new Map([d.start, ...(d.suggested || []), ...d.candidates].map((r) => [apKey(r), r]));
+  const info = new Map([d.start, ...d.candidates].map((r) => [apKey(r), r]));
   d.fallbacks = list;
-  d.candidates = list == null ? d.suggested || []
-    : list.filter((f) => apKey(f) !== apKey(d.start)).map((f) => ({ ...(info.get(apKey(f)) || { label: modelLabel(f.agent, f.model), status: null }), agent: f.agent, model: f.model }));
+  d.candidates = (list || []).filter((f) => apKey(f) !== apKey(d.start)).map((f) => ({ ...(info.get(apKey(f)) || { label: modelLabel(f.agent, f.model), status: null }), agent: f.agent, model: f.model }));
   renderApChip();
   if (!$('apModal').hidden) renderAutoPreview();
 }
@@ -1490,7 +1487,6 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('apMo
 function renderAutoPreview() {
   if (AP.fe.busy) { AP.fe.stale = true; return; } // a pressed/dragged row would be detached mid-gesture
   const body = $('apBody'), d = AP.data;
-  const expanded = body.querySelector('details')?.open || false;
   // Re-renders (save, refetch) keep keyboard focus on the same fallback row.
   const focused = document.activeElement?.closest?.('#apBody .fe-row')?.dataset.key;
   if (focused && !AP.fe.focusKey) AP.fe.focusKey = focused;
@@ -1506,78 +1502,35 @@ function renderAutoPreview() {
     if (AP.error) action('Retry', loadAutoPreview);
     return;
   }
-  const isCurated = d.fallbacks != null;
-  const orderNote = isCurated ? 'Using your saved order; unavailable models are skipped when running.' : 'Using non-benchmark fallback order: same agent first, then agent/model ID.';
-  const dataMessage = d.data_status === 'loading' ? 'Loading LiveBench scores… This updates automatically.'
-    : d.data_status !== 'ready' ? `LiveBench unavailable. ${orderNote}` : '';
-  if (dataMessage) body.append(el('p', 'dg-why', dataMessage));
-  if (d.stale) body.append(el('p', 'dg-why', `LiveBench data is stale; scores are not used. ${orderNote}`));
-  const scoreLabel = ({coding: 'Coding', agentic: 'Agentic Coding', scientific: 'Mathematics / Data Analysis', general: 'Global average'})[d.category] || 'Score';
-  body.append(el('h3', 'dg-group', 'Starting model'), apStartRow(d.start, scoreLabel));
+  body.append(el('h3', 'dg-group', 'Starting model'), apStartRow(d.start));
   body.append(el('h3', 'dg-group', 'Fallbacks'));
-  if (!isCurated && !d.candidates.length && d.start.score == null && !dataMessage) body.append(el('p', 'dg-why', 'No comparable scores for the starting model.'));
   const info = new Map([d.start, ...d.candidates].map((r) => [apKey(r), r]));
   const editor = body.appendChild(el('div'));
   renderFallbackEditor(editor, {
-    list: isCurated ? d.fallbacks.map((f) => ({ ...(info.get(apKey(f)) || {}), agent: f.agent, model: f.model })) : null,
-    suggested: d.candidates, exclude: [d.start], scoreLabel,
-    onChange: apSaveFallbacks, ui: AP.fe,
+    list: (d.fallbacks || []).map((f) => ({ ...(info.get(apKey(f)) || {}), agent: f.agent, model: f.model })),
+    exclude: [d.start], onChange: apSaveFallbacks, ui: AP.fe,
   });
-  const details = el('details', 'ap-details'); details.open = expanded;
-  details.append(el('summary', '', 'Scores and ranking details'));
-  details.append(el('p', 'dg-why', isCurated ? 'Uses your saved order; scores do not change it. Unavailable models are skipped when running.'
-    : `For ${d.category} work, fresh same-release LiveBench scores at least the starting score minus 5 points qualify. Closest score first, then higher score, then agent/model ID. Unscored fallbacks follow, same agent first then agent/model ID. Unavailable models follow usable models and are skipped when running.`));
-  if (d.data_error) details.append(el('p', 'dg-why', d.data_error));
-  for (const r of [d.start, ...d.candidates]) {
-    const row = el('div', 'ap-score-row');
-    row.append(el('div', 'dg-name', apName(r)));
-    const grid = el('div', 'dg-metrics ap-metrics');
-    const fields = DG_METRICS;
-    let present = false;
-    for (const [label, read, fmt] of fields) {
-      const v = r.metrics && dgNum(read(r.metrics));
-      if (v != null) present = true;
-      const cell = el('div', 'dg-m');
-      cell.append(el('span', 'k', label), el('span', 'v', v == null ? '—' : fmt(v))); grid.append(cell);
-    }
-    if (present) row.append(grid);
-    else row.append(el('p', 'dg-why', 'No metrics available for this model.'));
-    if (r !== d.start) row.append(el('p', 'dg-why', isCurated ? `Your saved fallback #${d.candidates.indexOf(r) + 1}; score does not determine position.` : r.reason || 'No fresh comparable LiveBench score.'));
-    if (r.score == null) row.append(el('p', 'dg-why', 'Unscored for ranking; no fresh comparable LiveBench score.'));
-    details.append(row);
-  }
-  details.append(el('p', 'dg-why', 'Scores use a 0–100 scale. — means LiveBench did not supply that category score.'));
-  body.append(details);
-  if (d.source === 'livebench') {
-    const src = el('p', 'dg-src', `Score source: LiveBench · ${d.release ? 'benchmark release ' + d.release : 'release unavailable'} · ${d.stale ? 'stale' : d.data_status === 'ready' ? 'fresh' : d.data_status}${d.fetched_at ? ' · fetched ' + relTime(d.fetched_at) : ' · not fetched'}`);
-    if (d.attribution?.url) {
-      const link = el('a', '', d.attribution.text);
-      link.href = d.attribution.url; link.target = '_blank'; link.rel = 'noopener'; src.append(' · ', link);
-    }
-    body.append(src);
-  }
 }
 // The starting model, laid out like an editor row (no handle, position or remove).
-function apStartRow(r, scoreLabel) {
+function apStartRow(r) {
   const box = el('div', 'fe-row fe-start');
-  box.append(feMain(r, scoreLabel));
+  box.append(feMain(r));
   return box;
 }
-// Reusable fallback-order editor. list: [{agent, model, label?, status?, until?, note?, score?}] in order, or null for
-// automatic (shows `suggested`; the first edit pins that order). onChange(next) gets [{agent, model}] or null (reset).
+// Reusable fallback-order editor. list: [{agent, model, label?, status?, until?, note?}] in order (null = none).
+// onChange(next) gets [{agent, model}] or null (cleared).
 // catalog: agents with models for '+ Add model' (AGENT_LIST shape); exclude: [{agent, model}] that can't be added;
 // ui: a host-owned object that keeps add-panel, search and focus state across re-renders. While a row is pressed or
 // dragged ui.busy is set: the host should skip re-rendering, set ui.stale, and provide ui.refresh to catch up after.
 function renderFallbackEditor(container, opts) {
-  const { list, onChange, suggested = [], catalog = AGENT_LIST, exclude = [], scoreLabel = 'Score', ui = {} } = opts;
-  const auto = list == null, rows = auto ? suggested : list;
+  const { list, onChange, catalog = AGENT_LIST, exclude = [], ui = {} } = opts;
+  const rows = list || [];
   const plain = (xs) => xs.map(({ agent, model }) => ({ agent, model }));
   const name = (r) => r.label || modelLabel(r.agent, r.model);
   const change = (next) => { ui.rows = next; onChange(next && plain(next)); };
   ui.rows = rows;
   container.textContent = '';
   container.classList.add('fe');
-  if (auto) container.append(el('p', 'fe-hint', rows.length ? 'Automatic fallback order. Any change saves this order as your own.' : 'No automatic fallback right now.'));
   const ol = el('ol', 'fe-list');
   ol.setAttribute('aria-label', 'Fallback order. Alt+Up or Alt+Down moves the focused model; Delete removes it.');
   const move = (i, j) => {
@@ -1616,7 +1569,7 @@ function renderFallbackEditor(container, opts) {
     rm.setAttribute('aria-label', `Remove ${name(r)}`);
     rm.title = 'Remove';
     rm.addEventListener('click', () => remove(i));
-    li.append(grip, el('span', 'fe-pos', String(i + 1)), feMain(r, scoreLabel), rm);
+    li.append(grip, el('span', 'fe-pos', String(i + 1)), feMain(r), rm);
     li.addEventListener('keydown', (e) => {
       if (e.target !== li) return;
       if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) { e.preventDefault(); move(i, i + (e.key === 'ArrowUp' ? -1 : 1)); }
@@ -1629,7 +1582,7 @@ function renderFallbackEditor(container, opts) {
   // A long-pressed row must not scroll the sheet on iOS (touchmove is the only cancelable hook there).
   ol.addEventListener('touchmove', (e) => { if (ui.dragging) e.preventDefault(); }, { passive: false });
   if (rows.length) container.append(ol);
-  else if (!auto) container.append(el('p', 'fe-hint', 'No fallbacks. Tasks wait for the starting model.'));
+  else container.append(el('p', 'fe-hint', 'No fallbacks. Tasks wait for the starting model.'));
 
   const foot = el('div', 'fe-foot');
   const addBtn = el('button', 'btn small fe-add-btn', '+ Add model');
@@ -1674,8 +1627,8 @@ function renderFallbackEditor(container, opts) {
     container.append(panel);
     if (!ui.focusKey) setTimeout(() => input.isConnected && document.activeElement !== input && input.focus(), 0);
   }
-  if (!auto) {
-    const reset = el('button', 'link-btn fe-reset', 'Reset to automatic');
+  if (rows.length) {
+    const reset = el('button', 'link-btn fe-reset', 'Clear list');
     reset.type = 'button';
     reset.addEventListener('click', () => { ui.addOpen = false; change(null); });
     container.append(reset);
@@ -1689,8 +1642,8 @@ function renderFallbackEditor(container, opts) {
     addBtn.focus();
   }
 }
-// A row's text: model name with a small agent label; status dot + short status and one key score below.
-function feMain(r, scoreLabel) {
+// A row's text: model name with a small agent label; status dot + short status below.
+function feMain(r) {
   const main = el('div', 'fe-main'), top = el('div', 'fe-name'), meta = el('div', 'fe-meta'), st = feStatus(r);
   top.append(el('span', 'fe-model', r.label || modelLabel(r.agent, r.model)), el('span', 'fe-agent', shortLabel(r.agent)));
   if (st) {
@@ -1698,7 +1651,6 @@ function feMain(r, scoreLabel) {
     s.append(el('span', 'ap-dot'), el('span', '', st));
     meta.append(s);
   }
-  if (r.score != null) meta.append(el('span', 'fe-score', `${scoreLabel} ${Number(r.score).toFixed(1)}`));
   main.append(top);
   if (meta.children.length) main.append(meta);
   return main;
@@ -1782,7 +1734,7 @@ function renderAgentPicker() {
   sel.textContent = '';
   const auto = el('option', '', 'Auto Delegate');
   auto.value = AUTO_PICK;
-  auto.title = 'agent-orch picks, and may reassign to a comparable model with usage left while this message\'s tasks wait';
+  auto.title = 'Starts on this chat\'s model; while it is at its usage limit, this message\'s tasks move to the first fallback with usage left';
   sel.append(auto);
   for (const a of AGENT_LIST) {
     const g = document.createElement('optgroup');
@@ -3321,8 +3273,8 @@ $('obSettingsBtn').addEventListener('click', (e) => {
 });
 
 // Reflection fallbacks (settings popover): the project's ordered list for reflection-queued tasks, edited with
-// renderFallbackEditor and saved via PUT /api/orch/projects/:id/reflect-fallbacks (null = automatic ranking). The
-// preview is GET /api/delegate/preview?project=: start route, the list with usage status, and the automatic suggestion.
+// renderFallbackEditor and saved via PUT /api/orch/projects/:id/reflect-fallbacks (null = none). The
+// preview is GET /api/delegate/preview?project=: start route and the list with usage status.
 const RF = { pid: null, data: null, error: '', seq: 0, timer: 0, fe: {}, saving: Promise.resolve(), saveSeq: 0, pending: 0, confirmed: null };
 function openReflect() {
   if (RF.pid !== O.project?.id) { RF.pid = O.project?.id ?? null; RF.data = null; RF.error = ''; }
@@ -3336,7 +3288,6 @@ function loadReflect() {
   api(`/api/delegate/preview?project=${pid}`).then((d) => {
     if (seq !== RF.seq || RF.pending || pid !== RF.pid) return;
     RF.data = d; RF.error = ''; RF.confirmed = d.fallbacks ?? null;
-    if (d.data_status === 'loading') { clearTimeout(RF.timer); RF.timer = setTimeout(loadReflect, 1500); }
     renderReflect();
   }).catch(() => {
     if (seq !== RF.seq) return;
@@ -3352,10 +3303,9 @@ function refreshReflect() {
 function rfApply(list) {
   const d = RF.data;
   if (!d) return;
-  const info = new Map([d.start, ...(d.suggested || []), ...d.candidates].map((r) => [apKey(r), r]));
+  const info = new Map([d.start, ...d.candidates].map((r) => [apKey(r), r]));
   d.fallbacks = list;
-  d.candidates = list == null ? d.suggested || []
-    : list.filter((f) => apKey(f) !== apKey(d.start)).map((f) => ({ ...(info.get(apKey(f)) || { label: modelLabel(f.agent, f.model), status: null }), agent: f.agent, model: f.model }));
+  d.candidates = (list || []).filter((f) => apKey(f) !== apKey(d.start)).map((f) => ({ ...(info.get(apKey(f)) || { label: modelLabel(f.agent, f.model), status: null }), agent: f.agent, model: f.model }));
   renderReflect();
 }
 // Optimistic, like apSaveFallbacks: PUTs run in order; if the latest fails, the last confirmed list comes back.
@@ -3378,13 +3328,12 @@ function renderReflect() {
   const body = $('obReflectBody'), fc = $('obReflectForecast'), d = RF.data;
   body.textContent = ''; fc.textContent = '';
   if (!d) { body.append(el('p', 'fe-hint', RF.error || 'Loading…')); return; }
-  const scoreLabel = ({coding: 'Coding', agentic: 'Agentic Coding', scientific: 'Mathematics / Data Analysis', general: 'Global average'})[d.category] || 'Score';
-  body.append(apStartRow(d.start, scoreLabel));
+  body.append(apStartRow(d.start));
   const info = new Map([d.start, ...d.candidates].map((r) => [apKey(r), r]));
   const editor = body.appendChild(el('div'));
   renderFallbackEditor(editor, {
-    list: d.fallbacks != null ? d.fallbacks.map((f) => ({ ...(info.get(apKey(f)) || {}), agent: f.agent, model: f.model })) : null,
-    suggested: d.candidates, exclude: [d.start], scoreLabel, onChange: rfSave, ui: RF.fe,
+    list: (d.fallbacks || []).map((f) => ({ ...(info.get(apKey(f)) || {}), agent: f.agent, model: f.model })),
+    exclude: [d.start], onChange: rfSave, ui: RF.fe,
   });
   fc.textContent = reflectForecast(d);
 }
@@ -3751,12 +3700,6 @@ async function orchAction(action, value) {
 
 // ----- the "Delegate…" sheet: move a queued task to another agent/model (GET/POST /api/orch/tasks/:id/delegate)
 const DG = { id: null, data: null, err: '', busy: false, lastFocus: null };
-// [label, read(metrics), format, higher is better]
-const DG_METRICS = [
-  ...['Coding', 'Agentic Coding', 'Reasoning', 'Mathematics', 'Data Analysis', 'Language', 'IF'].map(c => [c, m => m.categories?.[c], v => v.toFixed(1), true]),
-  ['Global average', m => m.global_average, v => v.toFixed(1), true],
-];
-const dgNum = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 function openDelegate(id) {
   if ($('delegModal').hidden) DG.lastFocus = document.activeElement;
   Object.assign(DG, { id, data: null, err: '', busy: false });
@@ -3777,21 +3720,6 @@ function dgStatus(r) {
   if (r.status === 'available') return el('span', 'dg-st ok', 'available');
   return el('span', 'dg-st lim', r.until ? `limited until ${fmtUntil(r.until)}` : 'limited');
 }
-function dgMetrics(m, base) {
-  const g = el('div', 'dg-metrics');
-  for (const [label, read, fmt, up] of DG_METRICS) {
-    const v = m && dgNum(read(m)), b = base && dgNum(read(base));
-    const cell = el('div', 'dg-m');
-    cell.append(el('span', 'k', label), el('span', 'v', v == null ? '—' : fmt(v)));
-    if (v != null && b != null && b !== 0 && v !== b) {
-      const pct = ((v - b) / Math.abs(b)) * 100;
-      const better = up ? v > b : v < b;
-      cell.append(el('span', `d ${better ? 'up' : 'down'}`, `${pct > 0 ? '+' : ''}${Math.abs(pct) < 10 ? pct.toFixed(1) : Math.round(pct)}%`));
-    }
-    g.append(cell);
-  }
-  return g;
-}
 function renderDelegate() {
   const body = $('dgBody'), d = DG.data;
   body.textContent = '';
@@ -3800,35 +3728,20 @@ function renderDelegate() {
   $('dgSub').textContent = t ? displayTitle(t) : '';
   if (DG.err) body.append(el('div', 'dr-err', DG.err));
   if (!d) { if (!DG.err) body.append(el('div', 'out-live', 'Loading…')); return; }
-  const src = el('p', 'dg-src');
-  src.append(`Scores from LiveBench${d.release ? ' · ' + d.release : ''}`,
-    d.fetched_at ? ` · updated ${relTime(d.fetched_at)}` : ' · never updated', ` · ranked for ${d.category} work`);
-  if (d.attribution?.url) {
-    const a = el('a', '', d.attribution.text);
-    a.href = d.attribution.url; a.target = '_blank'; a.rel = 'noopener';
-    src.append(' · ', a);
-  }
-  body.append(src);
   const cur = el('div', 'dg-row current');
   const ch = el('div', 'dg-head');
   ch.append(el('span', 'dg-name', `Now: ${d.current.agent} · ${d.current.label || d.current.model || 'default model'}`), dgStatus(d.current));
-  cur.append(ch, dgMetrics(d.current.metrics, null));
+  cur.append(ch);
   body.append(cur);
   if (!d.candidates.length) body.append(el('p', 'muted', 'No other signed-in agent or model to move it to.'));
-  let shownOther = false;
   for (const r of d.candidates) {
-    if (!r.comparable && !shownOther) { body.append(el('h3', 'dg-group', 'Other models')); shownOther = true; }
     const row = el('button', `dg-row${r.status === 'available' ? '' : ' limited'}`);
     row.type = 'button';
     row.disabled = DG.busy;
     const h = el('div', 'dg-head');
     h.append(el('span', 'dg-name', `${r.agent} · ${r.label || r.model}`));
-    if (r.ratio != null) {
-      const pct = Math.round((r.ratio - 1) * 100);
-      h.append(el('span', `dg-delta ${pct >= 0 ? 'up' : 'down'}`, `${pct >= 0 ? '+' : ''}${pct}% vs now`));
-    }
     h.append(dgStatus(r));
-    row.append(h, dgMetrics(r.metrics, d.current.metrics), el('div', 'dg-why', r.reason));
+    row.append(h);
     row.onclick = () => pickDelegate(r);
     body.append(row);
   }

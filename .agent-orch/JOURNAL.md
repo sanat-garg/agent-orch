@@ -457,3 +457,7 @@ Background completion sounds verified; all 207 tests pass.
 ## 2026-09-26 02:43 — #144 Revert to the original system font stack; remove bundled fonts [done]
 
 Original fonts restored; required checks and tests pass
+
+## 2026-09-26 04:33 — #152 Remove all benchmark scoring (LiveBench, Artificial Analysis) and automatic ranking [done (check passed)]
+
+benchmark scoring gone; delegation uses owner fallback lists only

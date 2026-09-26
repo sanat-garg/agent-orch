@@ -1,3 +1,0 @@
-{
-  "_comment": "Explicit LiveBench aliases for CLI models (livebench.mjs): \"agent:modelId\" or \"modelId\" -> exact LiveBench model name (table_<release>.csv first column), or null for no entry. Add one only when the CLI is verified to run that exact version AND reasoning configuration; never point at another version or effort level."
-}

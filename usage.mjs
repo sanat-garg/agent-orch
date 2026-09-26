@@ -199,12 +199,19 @@ export function usageHistory(records, rangeKey, at = Date.now()) {
 // Plan-limit checks per agent (agents.mjs `fetchLimits`), for the health view: <DATA>/limits.json keeps each agent's
 // {source, exposed, windows, error, at (last successful reading), checkedAt}; readings also go to the usage log.
 // Refreshed on start, every 6 h, after a sign-in change and from the Connections modal's Refresh; `note` takes a
-// reading made elsewhere (the server's 3-minute Claude poll). fetch(id) is injectable for tests.
+// reading made elsewhere (the server's 3-minute Claude poll). fetch(id) is injectable for tests. Reads (get) never check;
+// like the model store, one check per agent per minGapMs (earlier requests are deferred to the gap's end, coalesced).
 export const LIMITS_TTL = 6 * 3600e3;
-export function createLimitStore({ file, ids, fetch, usageLog = null, intervalMs = LIMITS_TTL, onChange = () => {}, log = () => {}, now = Date.now }) {
-  const status = new Map(), inflight = new Map();
+export function createLimitStore({ file, ids, fetch, usageLog = null, intervalMs = LIMITS_TTL, minGapMs = 60_000, onChange = () => {}, log = () => {}, now = Date.now }) {
+  const status = new Map(), inflight = new Map(), last = new Map(), deferred = new Map();
   let timer = null;
-  try { for (const [id, e] of Object.entries(JSON.parse(fs.readFileSync(file, 'utf8')).agents || {})) if (ids.includes(id)) status.set(id, e); } catch {}
+  try {
+    for (const [id, e] of Object.entries(JSON.parse(fs.readFileSync(file, 'utf8')).agents || {})) {
+      if (!ids.includes(id)) continue;
+      status.set(id, e);
+      if (e?.checkedAt) last.set(id, e.checkedAt);
+    }
+  } catch {}
   const save = () => {
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -221,9 +228,19 @@ export function createLimitStore({ file, ids, fetch, usageLog = null, intervalMs
     if (ok && usageLog) for (const w of r.windows || []) usageLog.window(id, w.window, w.pct, w.resetsAt, r.at ?? undefined);
   }
   async function refresh(only = ids) {
-    const want = only.filter((id) => ids.includes(id));
+    const want = [];
+    for (const id of only.filter((x) => ids.includes(x))) {
+      const wait = (last.get(id) ?? -Infinity) + minGapMs - now();
+      if (inflight.has(id) || wait <= 0) want.push(id);
+      else if (!deferred.has(id)) {
+        deferred.set(id, setTimeout(() => { deferred.delete(id); refresh([id]).catch(() => {}); }, wait));
+        deferred.get(id).unref?.();
+      }
+    }
+    if (!want.length) return;
     await Promise.all(want.map((id) => {
       if (!inflight.has(id)) {
+        last.set(id, now());
         inflight.set(id, (async () => {
           let r;
           try { r = await fetch(id); } catch (e) { r = { error: String(e?.message || e) }; }
@@ -241,6 +258,6 @@ export function createLimitStore({ file, ids, fetch, usageLog = null, intervalMs
     note(id, r) { if (!ids.includes(id)) return; set(id, { ...status.get(id), ...r, error: null }); save(); },
     get: (id) => status.get(id) || null,
     start() { const p = refresh(); timer = setInterval(() => refresh().catch(() => {}), intervalMs); timer.unref?.(); return p; },
-    stop: () => clearInterval(timer),
+    stop: () => { clearInterval(timer); for (const t of deferred.values()) clearTimeout(t); deferred.clear(); },
   };
 }

@@ -13,3 +13,7 @@ Observed on 2026-09-26 at 19:42: orphaned `opencode models --verbose` processes 
 ## Done when
 
 `npm test` passes with the helper-timeout-kills-tree and single-flight tests, and after two runs of `node bin/agent-health.mjs`, `ps -eo ppid,args | awk '$1==1' | grep -c 'opencode models'` prints 0
+
+## Result — done (check passed) (2026-09-26 21:32)
+
+AGENT-ORCH-STATUS: done — Discovery helpers run group-killed and single-flight; no orphans remain

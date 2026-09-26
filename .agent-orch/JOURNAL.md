@@ -603,3 +603,7 @@ empty events fixed; fixtures pass; smoke runs show zero unexplained empties
 ## 2026-09-26 20:44 — #208 Resource analyzer and safe reaper for leftover processes [done (check passed)]
 
 resources.mjs classifier, safe reaper, /api/resources, and tests all pass
+
+## 2026-09-26 21:32 — #211 Fix leaking CLI model-discovery processes (opencode models orphans) [done (check passed)]
+
+Discovery helpers run group-killed and single-flight; no orphans remain

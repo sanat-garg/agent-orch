@@ -131,18 +131,25 @@ test('claudeWindows: SDK rate_limits become window points with epoch resets', ()
 test('createLimitStore: saves checks, records readings, keeps the last good reading when a check fails', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ao-limits-')), file = path.join(dir, 'limits.json');
   const logged = [];
-  let fail = false, t = 1000;
+  let fail = false, t = 1000, calls = 0;
   const store = createLimitStore({ file, ids: ['codex', 'kiro'], now: () => t,
     usageLog: { window: (...a) => logged.push(a) },
-    fetch: async (id) => (id === 'kiro' ? { source: null, exposed: false, windows: [], error: null, at: t }
+    fetch: async (id) => (calls++, id === 'kiro' ? { source: null, exposed: false, windows: [], error: null, at: t }
       : fail ? { source: 's', exposed: true, windows: [], error: 'boom', at: null }
       : { source: 's', exposed: true, windows: [{ window: '5h', pct: 5, resetsAt: 99 }], error: null, at: 900 }) });
   await store.refresh();
   assert.deepEqual(store.get('codex'), { source: 's', exposed: true, windows: [{ window: '5h', pct: 5, resetsAt: 99 }], error: null, at: 900, checkedAt: 1000 });
   assert.deepEqual(logged, [['codex', '5h', 5, 99, 900]]);
-  fail = true; t = 2000;
+  // Within a minute of the last check, a refresh answers from the cache (the check is deferred to the gap's end).
+  fail = true; t = 30_000;
   await store.refresh(['codex']);
-  assert.deepEqual(store.get('codex'), { source: 's', exposed: true, windows: [{ window: '5h', pct: 5, resetsAt: 99 }], error: 'boom', at: 900, checkedAt: 2000 });
+  assert.equal(calls, 2);
+  assert.equal(store.get('codex').checkedAt, 1000);
+  store.stop();
+  t = 61_000;
+  await store.refresh(['codex']);
+  assert.equal(calls, 3);
+  assert.deepEqual(store.get('codex'), { source: 's', exposed: true, windows: [{ window: '5h', pct: 5, resetsAt: 99 }], error: 'boom', at: 900, checkedAt: 61_000 });
   assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).agents.kiro.exposed, false);
   // A restart starts from the saved checks.
   const again = createLimitStore({ file, ids: ['codex'], fetch: async () => ({}) });

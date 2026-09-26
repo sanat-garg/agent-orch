@@ -13,6 +13,7 @@ import { createGitHub } from './github.mjs';
 import { retireRuntime, chatIdle, whenIdle } from './runtimes.mjs';
 import { AGENTS, runAgentCli, clearLoginCache, isMissingSession, modelCatalog, codexLatestSnapshot, claudeWindows, fetchLimits, agentVersion, readVersion, windowLabel, AGY_GROUPS, agyGroup, opencodeProviders } from './agents.mjs';
 import { createModelStore } from './models.mjs';
+import { runHelper, claudeHelperSpawn } from './helpers.mjs';
 import { createConnections, SPECS, codexAccount, agyAccount, onPath } from './connections.mjs';
 import { mediaCollector, MEDIA_ID_RE, MEDIA_TYPES, toolResultImages } from './media.mjs';
 import { createUsageLog, createLimitStore, RANGES as USAGE_RANGES } from './usage.mjs';
@@ -253,16 +254,14 @@ function safeCwd(p) {
 // ---------- Claude account (subscription check) ----------
 let claudeAuth = { loggedIn: false, authMethod: null, plan: null, checkedAt: 0 };
 function refreshClaudeAuth() {
-  return new Promise((resolve) => {
-    execFile(CLAUDE_BIN, ['auth', 'status'], { env: CLAUDE_ENV, timeout: 15000 }, (err, stdout) => {
-      try {
-        const s = JSON.parse(stdout);
-        claudeAuth = { loggedIn: !!s.loggedIn, authMethod: s.authMethod || null, plan: s.subscriptionType || null, checkedAt: Date.now() };
-      } catch {
-        claudeAuth = { loggedIn: false, authMethod: null, plan: null, checkedAt: Date.now() };
-      }
-      resolve(claudeAuth);
-    });
+  return runHelper(CLAUDE_BIN, ['auth', 'status'], { env: CLAUDE_ENV, timeoutMs: 15000 }).then(({ stdout }) => {
+    try {
+      const s = JSON.parse(stdout);
+      claudeAuth = { loggedIn: !!s.loggedIn, authMethod: s.authMethod || null, plan: s.subscriptionType || null, checkedAt: Date.now() };
+    } catch {
+      claudeAuth = { loggedIn: false, authMethod: null, plan: null, checkedAt: Date.now() };
+    }
+    return claudeAuth;
   });
 }
 const onSubscription = () => claudeAuth.loggedIn && claudeAuth.authMethod === 'claude.ai';
@@ -499,7 +498,7 @@ async function refreshUsageNow(liveQuery) {
     if (!q) {
       probe = query({
         prompt: (async function* idle() { await new Promise(() => {}); })(),
-        options: { pathToClaudeCodeExecutable: CLAUDE_BIN, env: CLAUDE_ENV, cwd: WORKSPACE },
+        options: { pathToClaudeCodeExecutable: CLAUDE_BIN, env: CLAUDE_ENV, cwd: WORKSPACE, spawnClaudeCodeProcess: claudeHelperSpawn },
       });
       q = probe;
     }

@@ -10,12 +10,13 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import { toolResultImages } from './media.mjs';
 import { toEpochSec } from './usage.mjs';
 import { CopilotClient, RuntimeConnection } from '@github/copilot-sdk';
+import { runHelper, runHelperSync, helperOut, claudeHelperSpawn, killGroup, trackGroup, singleFlight } from './helpers.mjs';
 
 const HOME = os.homedir();
 
@@ -244,7 +245,7 @@ const CLAUDE = {
   // (subscription) login counts; an API key or Console login would bill API credits.
   loggedIn() {
     return cachedLogin(this, () => {
-      const r = spawnSync(this.bin, ['auth', 'status', '--json'], { env: stripEnv(process.env, this.envFilter), encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] });
+      const r = runHelperSync(this.bin, ['auth', 'status', '--json'], { env: stripEnv(process.env, this.envFilter) });
       const st = parseClaudeAuth(r.stdout);
       this.email = st.ok ? st.email : null;
       return st.ok;
@@ -258,7 +259,7 @@ const CLAUDE = {
     const ac = new AbortController();
     const idle = (async function* () { await new Promise((r) => ac.signal.addEventListener('abort', r, { once: true })); })();
     try {
-      const q = query({ prompt: idle, options: { cwd: HOME, abortController: ac, pathToClaudeCodeExecutable: bin || this.bin, env: stripEnv(env, this.envFilter) } });
+      const q = query({ prompt: idle, options: { cwd: HOME, abortController: ac, pathToClaudeCodeExecutable: bin || this.bin, env: stripEnv(env, this.envFilter), spawnClaudeCodeProcess: claudeHelperSpawn } });
       return claudeModels(await withTimeout(q.supportedModels(), timeoutMs, 'claude'));
     } finally { ac.abort(); }
   },
@@ -268,7 +269,7 @@ const CLAUDE = {
     const ac = new AbortController();
     const idle = (async function* () { await new Promise((r) => ac.signal.addEventListener('abort', r, { once: true })); })();
     try {
-      const q = query({ prompt: idle, options: { cwd: HOME, abortController: ac, pathToClaudeCodeExecutable: bin || this.bin, env: stripEnv(env, this.envFilter) } });
+      const q = query({ prompt: idle, options: { cwd: HOME, abortController: ac, pathToClaudeCodeExecutable: bin || this.bin, env: stripEnv(env, this.envFilter), spawnClaudeCodeProcess: claudeHelperSpawn } });
       const u = await withTimeout(q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }), timeoutMs, 'claude usage');
       if (!u?.rate_limits_available) throw new Error('Claude reported no plan limits');
       return { windows: claudeWindows(u.rate_limits) };
@@ -573,7 +574,7 @@ const CODEX = {
   // would bill API credits, so it counts as logged out.
   loggedIn() {
     return cachedLogin(this, () => {
-      const r = spawnSync(this.bin, ['login', 'status'], { env: stripEnv(process.env, this.envFilter), encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] });
+      const r = runHelperSync(this.bin, ['login', 'status'], { env: stripEnv(process.env, this.envFilter) });
       const out = `${r.stdout || ''}\n${r.stderr || ''}`;
       return r.status === 0 && /logged in/i.test(out) && !/not logged in|api key/i.test(out);
     });
@@ -581,7 +582,7 @@ const CODEX = {
   login: 'Connect from the sidebar',
   // `codex debug models` prints the model catalog as JSON (refreshed from the account; hidden models skipped).
   async listModels({ bin, env = process.env, timeoutMs = 30_000 } = {}) {
-    const out = await execOut(bin || this.bin, ['debug', 'models'], { env: stripEnv(env, this.envFilter), cwd: HOME, timeout: timeoutMs });
+    const out = await helperOut(bin || this.bin, ['debug', 'models'], { env: stripEnv(env, this.envFilter), cwd: HOME, timeoutMs });
     return codexModels(JSON.parse(out));
   },
   // `codex exec --json` streams no limits; the newest rollout rate_limits snapshot is the only reading (at = when written).
@@ -753,11 +754,14 @@ function* agyEvents(m, st = { text: new Map(), started: new Set() }) {
 // The plan windows from `agy -p /usage --output-format stream-json` (a local command: no model call, no tokens);
 // null if it fails or takes over 20 s.
 export async function agyUsage({ bin, env = process.env, cwd = HOME } = {}) {
-  const res = { stderr: '' };
   let windows = null;
-  const handle = (m) => { if (m.event === 'command_result' && agyUsageData(m)) windows = agyWindows(agyUsageData(m)); };
-  await spawnJsonl({ bin: bin || ANTIGRAVITY.bin, args: ['-p', '/usage', '--output-format', 'stream-json', '--print-timeout', '0'], cwd,
-    env: stripEnv(env, ANTIGRAVITY.envFilter), signal: AbortSignal.timeout(20_000), res, handle, stopOn: AGY_AUTH_PROMPT_RE });
+  const r = await runHelper(bin || ANTIGRAVITY.bin, ['-p', '/usage', '--output-format', 'stream-json', '--print-timeout', '0'], { cwd,
+    env: stripEnv(env, ANTIGRAVITY.envFilter), timeoutMs: 20_000, stopOn: AGY_AUTH_PROMPT_RE });
+  for (const line of r.stdout.split('\n')) {
+    let m;
+    try { m = JSON.parse(line); } catch { continue; }
+    if (m.event === 'command_result' && agyUsageData(m)) windows = agyWindows(agyUsageData(m));
+  }
   return windows?.length ? windows : null;
 }
 
@@ -837,18 +841,18 @@ const ANTIGRAVITY = {
   // `agy models` prints the model list when signed in, and exits 1 with "Please sign in …" right away when not
   // (the token's location varies: keyring or a file). API-key env vars are stripped, so only the Google login counts.
   loggedIn() {
-    return cachedLogin(this, () => agyModelsOk(spawnSync(this.bin, ['models'], { ...this.modelsOpts(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })));
+    return cachedLogin(this, () => agyModelsOk(runHelperSync(this.bin, ['models'], this.modelsOpts())));
   },
   // The same check, uncached and async (connections.mjs polls it while a sign-in is waiting).
-  probe() {
-    return new Promise((resolve) => execFile(this.bin, ['models'], this.modelsOpts(), (err, stdout, stderr) =>
-      resolve(agyModelsOk({ status: err ? 1 : 0, stdout, stderr }))));
+  async probe() {
+    const r = await runHelper(this.bin, ['models'], this.modelsOpts());
+    return agyModelsOk({ status: r.code === 0 && !r.error && !r.timedOut ? 0 : 1, stdout: r.stdout, stderr: r.stderr });
   },
-  modelsOpts() { return { env: stripEnv(process.env, this.envFilter), cwd: HOME, timeout: 8000 }; },
+  modelsOpts() { return { env: stripEnv(process.env, this.envFilter), cwd: HOME, timeoutMs: 8000 }; },
   login: 'Connect from the sidebar',
   // `agy models` prints one `<id>\t<display name>` line per model (progress goes to stderr).
   async listModels({ bin, env = process.env, timeoutMs = 20_000 } = {}) {
-    return agyModels(await execOut(bin || this.bin, ['models'], { env: stripEnv(env, this.envFilter), cwd: HOME, timeout: timeoutMs }));
+    return agyModels(await helperOut(bin || this.bin, ['models'], { env: stripEnv(env, this.envFilter), cwd: HOME, timeoutMs }));
   },
   limitSource: 'agy -p /usage',
   async limits({ bin, env = process.env } = {}) {
@@ -1040,7 +1044,7 @@ const OPENCODE = {
   // neutral cwd (no project config) with the billing env stripped.
   // 60 s: it refreshes the models.dev catalog first, which ran past 30 s while every agent was being checked at boot.
   async listModels({ bin, env = process.env, home = HOME, timeoutMs = 60_000 } = {}) {
-    const out = await execOut(bin || this.bin, ['models', '--verbose'], { env: stripEnv(env, this.envFilter), cwd: HOME, timeout: timeoutMs });
+    const out = await helperOut(bin || this.bin, ['models', '--verbose'], { env: stripEnv(env, this.envFilter), cwd: HOME, timeoutMs });
     return opencodeModels(out, opencodeProviders(home).map((p) => p.id), { zenKey: opencodeZenKey(home) });
   },
   envFilter: /^(?:.*(?:_API_KEY|_TOKEN)|OPENAI_(?:BASE_URL|ORG_ID|ORGANIZATION|PROJECT_ID)|AZURE_OPENAI_.*|OPENCODE_(?:AUTH|CONFIG.*))$/,
@@ -1153,7 +1157,7 @@ const KIRO = {
   available() { return onPath(this.bin); },
   loggedIn() {
     return cachedLogin(this, () => {
-      const r = spawnSync(this.bin, ['whoami', '--format', 'json'], { env: stripEnv(process.env, this.envFilter), encoding: 'utf8', timeout: 5000 });
+      const r = runHelperSync(this.bin, ['whoami', '--format', 'json'], { env: stripEnv(process.env, this.envFilter) });
       const a = r.status === 0 ? kiroAuth(r.stdout) : { ok: false, account: null };
       this.identity = a.account;
       return a.ok;
@@ -1164,7 +1168,7 @@ const KIRO = {
   // Credits show only in the interactive chat's /usage; no headless command or stream event reports them.
   limitSource: null,
   async listModels({ bin, env = process.env, timeoutMs = 20_000 } = {}) {
-    return kiroModels(await execOut(bin || this.bin, ['chat', '--list-models', '--format', 'json'], { env: stripEnv(env, this.envFilter), cwd: HOME, timeout: timeoutMs }));
+    return kiroModels(await helperOut(bin || this.bin, ['chat', '--list-models', '--format', 'json'], { env: stripEnv(env, this.envFilter), cwd: HOME, timeoutMs }));
   },
   envFilter: /^KIRO_API_KEY$/,
   events: kiroEvents, run: runKiro,
@@ -1256,28 +1260,36 @@ const COPILOT = {
   id: 'copilot', label: 'GitHub Copilot CLI', bin: 'copilot',
   available() { return onPath(this.bin); },
   loggedIn() { return cachedLogin(this, () => {
-    const r = spawnSync('gh', ['auth', 'status'], { env: stripEnv(process.env, this.envFilter), encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] });
+    const r = runHelperSync('gh', ['auth', 'status'], { env: stripEnv(process.env, this.envFilter) });
     return r.status === 0;
   }); },
   account() {
     if (!this.loggedIn()) return null;
-    const r = spawnSync('gh', ['api', 'user', '--jq', '.login'], { env: stripEnv(process.env, this.envFilter), encoding: 'utf8', timeout: 5000 });
+    const r = runHelperSync('gh', ['api', 'user', '--jq', '.login'], { env: stripEnv(process.env, this.envFilter) });
     return r.status === 0 ? r.stdout.trim() || null : null;
   },
   login: 'Connect from the sidebar',
   // One SDK session over stdio: fn(client) runs after start and a signed-in check (which also names the account).
+  // The SDK spawns the CLI in our process group, so it runs under setsid (same pid, its own group) as a tracked helper.
   async withClient({ bin, env = process.env, timeoutMs = 20_000, clientFactory } = {}, fn) {
     const cleanEnv = { ...stripEnv(env, this.envFilter), COPILOT_HOME: path.join(HOME, '.copilot') };
-    const client = clientFactory ? clientFactory() : new CopilotClient({ connection: RuntimeConnection.forStdio({
-      path: bin || execFileSync('which', [this.bin], { env: cleanEnv, encoding: 'utf8' }).trim(), env: cleanEnv,
-    }) });
+    const cli = clientFactory ? null : bin || execFileSync('which', [this.bin], { env: cleanEnv, encoding: 'utf8' }).trim();
+    const client = clientFactory ? clientFactory() : new CopilotClient({ connection: fs.existsSync('/usr/bin/setsid')
+      ? RuntimeConnection.forStdio({ path: '/usr/bin/setsid', args: [cli], env: cleanEnv }) : RuntimeConnection.forStdio({ path: cli, env: cleanEnv }) });
+    let untrack = () => {};
     try {
       await withTimeout(client.start(), timeoutMs, 'copilot');
+      if (client.cliProcess?.pid) untrack = trackGroup(client.cliProcess.pid);
       const auth = client.getAuthStatus ? await withTimeout(client.getAuthStatus(), timeoutMs, 'copilot auth') : null;
       if (auth?.isAuthenticated === false) throw new Error(auth.statusMessage || 'Copilot is not signed in');
       if (auth?.login) this.identity = auth.login;
       return await fn(client);
-    } finally { await client.stop(); }
+    } finally {
+      const pid = client.cliProcess?.pid;
+      await withTimeout(Promise.resolve(client.stop()), 5000, 'copilot stop').catch(() => client.forceStop?.().catch(() => {}));
+      if (pid) killGroup(pid);
+      untrack();
+    }
   },
   listModels(opts = {}) { return this.withClient(opts, async (c) => copilotModels(await withTimeout(c.listModels(), opts.timeoutMs || 20_000, 'copilot models'))); },
   limitSource: 'Copilot SDK account quota_snapshots',
@@ -1324,9 +1336,6 @@ function withTimeout(p, ms, what) {
   let timer;
   return Promise.race([p, new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`${what} took over ${ms / 1000} s`)), ms); })]).finally(() => clearTimeout(timer));
 }
-// stdout of a command; rejects with the last stderr line (or the exec error) when it fails.
-const execOut = (bin, args, opts) => new Promise((resolve, reject) => execFile(bin, args, { maxBuffer: 64 << 20, encoding: 'utf8', ...opts },
-  (err, stdout, stderr) => (err ? reject(new Error(String(stderr || '').trim().split('\n').pop() || (err.killed ? 'timed out' : err.message))) : resolve(stdout))));
 
 // The discovered model list per agent: {models, error, at}. Filled by models.mjs (cached in <DATA>/models.json);
 // empty with an error until then, when discovery fails, or when the agent is signed out.
@@ -1336,8 +1345,11 @@ export const modelCatalog = (id) => catalog.get(id) || none('loading', null);
 export const setModelCatalog = (id, entry) => { catalog.set(id, entry); };
 // Every id a model can be named by on this agent (ids plus the full ids aliases resolve to).
 export const modelNames = (id) => modelCatalog(id).models.flatMap((m) => (m.resolved ? [m.id, m.resolved] : [m.id]));
+// Concurrent discoveries / limit checks of one agent and account (bin, home, PATH) share one in-flight helper.
+const flightKey = (what, id, opts) => [what, id, opts.bin || AGENTS[id]?.bin, opts.home || HOME, opts.env?.PATH ?? process.env.PATH].join('\0');
 // One agent's discovery: {models, error, at}; opts go to its listModels (bin, env, query for tests).
-export async function discoverModels(id, opts = {}) {
+export const discoverModels = (id, opts = {}) => singleFlight(flightKey('models', id, opts), () => discoverNow(id, opts));
+async function discoverNow(id, opts) {
   const a = AGENTS[id], at = Date.now();
   if (!a) return none('unknown agent', at);
   if (!a.available()) return none('not installed', at);
@@ -1360,10 +1372,11 @@ export function readVersion(id) {
   if (!a) return Promise.resolve(null);
   const e = { key: versionKey(a), at: Date.now(), value: versions.get(id)?.value ?? null };
   versions.set(id, e);
-  return new Promise((resolve) => execFile(a.bin, ['--version'], { env: stripEnv(process.env, a.envFilter), encoding: 'utf8', timeout: 20_000 }, (err, out) => {
-    e.value = err ? null : /\d+\.\d+[\w.+-]*/.exec(out || '')?.[0]?.replace(/\.$/, '') || null;
-    resolve(e.value);
-  }));
+  return singleFlight(`version\0${e.key}`, async () => {
+    const r = await runHelper(a.bin, ['--version'], { env: stripEnv(process.env, a.envFilter), timeoutMs: 20_000 });
+    e.value = r.code !== 0 ? null : /\d+\.\d+[\w.+-]*/.exec(r.stdout || '')?.[0]?.replace(/\.$/, '') || null;
+    return e.value;
+  });
 }
 export function agentVersion(id) {
   const a = AGENTS[id], hit = versions.get(id);
@@ -1375,7 +1388,8 @@ export function agentVersion(id) {
 export const LIMITS_NOT_EXPOSED = 'not exposed by CLI';
 // One agent's plan windows, read live: {source, exposed, windows: [{window, pct, resetsAt}], error, at} (at = when the
 // reading was taken, null on failure). Agents whose CLI exposes nothing: exposed false, source null, no error.
-export async function fetchLimits(id, opts = {}) {
+export const fetchLimits = (id, opts = {}) => singleFlight(flightKey('limits', id, opts), () => fetchLimitsNow(id, opts));
+async function fetchLimitsNow(id, opts) {
   const a = AGENTS[id], at = Date.now();
   if (!a) return { source: null, exposed: false, windows: [], error: 'unknown agent', at: null };
   if (!a.limitSource) return { source: null, exposed: false, windows: [], error: null, at };

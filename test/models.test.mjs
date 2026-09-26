@@ -94,7 +94,7 @@ test('model store: caches to models.json with a timestamp, reloads it, and refre
   const lists = { codex: [{ id: 'gpt-6-sol', label: 'GPT-6-Sol' }], antigravity: [] };
   const discover = async (id) => { n++; return lists[id].length ? { models: lists[id], error: null, at: 1000 + n } : { models: [], error: 'not signed in', at: 1000 + n }; };
   const changes = [];
-  const store = createModelStore({ file, ids: ['codex', 'antigravity'], discover, intervalMs: 40, onChange: (ids) => changes.push(ids) });
+  const store = createModelStore({ file, ids: ['codex', 'antigravity'], discover, intervalMs: 40, minGapMs: 0, onChange: (ids) => changes.push(ids) });
   assert.equal(modelCatalog('codex').error, 'loading');
   await store.start();
   t.after(() => store.stop());
@@ -118,4 +118,27 @@ test('model store: caches to models.json with a timestamp, reloads it, and refre
   setModelCatalog('codex', { models: [], error: 'loading', at: null });
   assert.ok(createModelStore({ file, ids: ['codex'], discover }).load());
   assert.deepEqual(modelCatalog('codex').models, lists.codex);
+});
+
+test('model store: at most one discovery per agent per minimum gap; an early request runs at the gap\'s end', async (t) => {
+  const dir = tmp(), file = path.join(dir, 'models.json');
+  t.after(() => { setModelCatalog('codex', { models: [], error: 'loading', at: null }); fs.rmSync(dir, { recursive: true, force: true }); });
+  let n = 0;
+  const discover = async () => { n++; return { models: [{ id: `m${n}`, label: 'M' }], error: null, at: Date.now() }; };
+  const store = createModelStore({ file, ids: ['codex'], discover, minGapMs: 300 });
+  t.after(() => store.stop());
+  await Promise.all([store.start(), store.refresh(), store.refresh(['codex'])]);
+  assert.equal(n, 1, 'boot + concurrent requests share one discovery');
+  await store.refresh(['codex']);
+  await store.refresh(['codex']);
+  assert.equal(n, 1, 'too soon: served from the cache');
+  assert.deepEqual(modelCatalog('codex').models.map((m) => m.id), ['m1']);
+  await new Promise((r) => setTimeout(r, 450));
+  assert.equal(n, 2, 'the deferred request ran once, after the gap');
+  // A restart within the gap of the cached lists doesn't rediscover at boot right away.
+  store.stop();
+  const again = createModelStore({ file, ids: ['codex'], discover, minGapMs: 60_000 });
+  await again.start();
+  again.stop();
+  assert.equal(n, 2);
 });

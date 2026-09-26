@@ -3052,6 +3052,8 @@ function taskState(t) {
       const m = /^blocked: #(\d+)/.exec(t.summary || '');
       return { cls: 'failed', label: m ? `Blocked because #${m[1]} failed` : `Failed${t.summary ? ` · ${t.summary}` : ''}` };
     }
+    case 'needs_integration': // its branch conflicted with main; an integrator task merges it (worktrees.mjs)
+      return { cls: 'waiting', label: `Needs integration${t.summary ? ` · ${t.summary}` : ''}` };
     case 'cancelled': {
       const m = /^cancelled with #(\d+)/.exec(t.summary || '');
       return { cls: 'cancelled', label: m ? `Cancelled with #${m[1]}` : 'Cancelled' };
@@ -3407,7 +3409,7 @@ function renderDrawer(fromLive = false) {
       row.append(dg);
     }
   }
-  if (isOpen) {
+  if (isOpen || t.status === 'needs_integration') {
     const cancel = el('button', 'btn small danger', 'Cancel');
     cancel.onclick = () => { if (confirm(`Cancel #${t.id}? Tasks waiting on it are cancelled too.`)) orchAction('cancel'); };
     row.append(cancel);
@@ -3435,6 +3437,7 @@ function renderDrawer(fromLive = false) {
   for (const run of d.runs) for (const e of run.entries) if (e.k === 'text') said.push(e.text);
   const s3 = section(t.kind === 'reflect' ? 'What it found' : 'What happened');
   if (t.status === 'failed' && d.task.result) s3.append(el('pre', 'dr-pre err', d.task.result));
+  else if (t.status === 'needs_integration' && d.task.result) s3.append(el('pre', 'dr-pre', d.task.result));
   else if (t.kind === 'reflect' && t.status === 'done' && d.task.result) {
     const div = el('div', 'dr-said');
     div.innerHTML = md(d.task.result);

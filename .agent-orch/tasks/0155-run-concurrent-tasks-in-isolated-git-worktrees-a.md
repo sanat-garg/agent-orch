@@ -12,3 +12,7 @@ CFG.concurrency is already 2-3 (orchestrator.mjs ~line 27), but concurrent tasks
 ## Done when
 
 `npm test` passes with worktree tests (parallel merge of disjoint edits, conflict → needs integration, cleanup)
+
+## Result — done (check passed) (2026-09-26 05:20)
+
+AGENT-ORCH-STATUS: done — work tasks run in isolated worktrees and merge back safely

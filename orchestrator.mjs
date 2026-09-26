@@ -20,6 +20,7 @@ import { AGENTS, AGY_GROUPS, agentStatus, codexExhausted, codexLatestSnapshot, i
 import { mediaCollector } from './media.mjs';
 import { createUsageLog } from './usage.mjs';
 import { DELEGATE_CFG, createDelegator, parseFallbacks } from './delegate.mjs';
+import { commitAll, ensureWorktree, isMerged, listWorktrees, mergeBack, parkWorktree, removeWorktree, repoInfo, startIntegration, unresolvedFiles, worktreesRoot } from './worktrees.mjs';
 
 // ---------------------------------------------------------------- config
 
@@ -35,6 +36,7 @@ const CFG = {
   taskTimeoutSec: 3 * 3600,
   pollMs: 3000,
   autoCommit: true,
+  worktrees: true,             // work tasks in git projects run in their own worktree (worktrees.mjs) and merge back
   reuseSessions: true,
   sessionReuseMaxIdleSec: 900,
   sessionMaxContextTokens: 120000,
@@ -253,6 +255,8 @@ function taskBody(task, header) {
   return parts.join('\n') + '\n';
 }
 const workerTaskPrompt = (project, task, environment) => taskBody(task, [`Project: ${project.name} (${project.path})`, environment, '']);
+const worktreeNote = (wt, project) => `You are in an isolated git worktree of ${project.path} (branch ${wt.branch}), so tasks running at ` +
+  `the same time can't clobber your edits. Work only in ${wt.cwd}, never in ${project.path}: the orchestrator merges this branch back when you finish.`;
 const nextTaskPrompt = (task) => taskBody(task, [
   'The previous task in this session is finished and closed. Drop any of its files, plans, or working state ' +
   'from your mind — this is a new, unrelated task.', '']);
@@ -870,6 +874,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // projects.reflect_fallbacks: JSON [{agent, model}] the owner curates for reflection-queued tasks (NULL = none);
   // queuePayload snapshots it into their tasks.fallbacks.
   if (!db.prepare('PRAGMA table_info(projects)').all().some((c) => c.name === 'reflect_fallbacks')) db.exec('ALTER TABLE projects ADD COLUMN reflect_fallbacks TEXT');
+  // tasks.worktree: the task's live git worktree (worktrees.mjs), NULL once merged or parked. tasks.integrates: the
+  // 'needs_integration' task whose worktree this integrator task resolves and merges.
+  if (!db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === 'worktree')) db.exec('ALTER TABLE tasks ADD COLUMN worktree TEXT');
+  if (!db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === 'integrates')) db.exec('ALTER TABLE tasks ADD COLUMN integrates INTEGER');
   // messages.task_id: the plan task that took a saved message (status 'taken'); it is 'done' once answered.
   if (!db.prepare('PRAGMA table_info(messages)').all().some((c) => c.name === 'task_id')) db.exec('ALTER TABLE messages ADD COLUMN task_id INTEGER');
   // tasks.position: the owner's manual queue order within a project (lower runs first; see `runnable`). Existing rows
@@ -889,7 +897,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   const getProject = (id) => q1('SELECT * FROM projects WHERE id=:id', { id });
   const getTask = (id) => q1('SELECT * FROM tasks WHERE id=:id', { id });
-  const running = new Map(); // task id -> { abort: AbortController, projectId, startedAt, runId }
+  const running = new Map(); // task id -> { abort: AbortController, projectId, startedAt, runId, wt: runs in its own worktree }
+  const taskWts = new Map(); // task id -> its worktree while it runs: { dir, cwd, branch, info, owner }
   const runSubs = new Map(); // task id -> Set<ws> watching its live output
 
   function logEvent(message, { level = 'info', projectId = null, taskId = null } = {}) {
@@ -961,9 +970,21 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       sql += ` AND (t.urgency IN (${allowed.map((_, i) => `:u${i}`).join(',')}) OR t.urgency='urgent')`;
       allowed.forEach((u, i) => (p[`u${i}`] = u));
     }
-    // Never two running tasks in one project: they'd race on the same checkout and its git commits.
-    if (exclusive) sql += " AND NOT EXISTS(SELECT 1 FROM tasks r WHERE r.project_id=t.project_id AND r.status='running')";
-    return queueOrder(qa(sql, p)).slice(0, limit);
+    let rows = queueOrder(qa(sql, p));
+    // Two tasks share a project only if both are work tasks in their own worktrees; anything else would race on the
+    // same checkout and its commits. A waiting plan/reflect task also stops more work from starting in its project.
+    if (exclusive) {
+      const busy = qa("SELECT id, project_id FROM tasks WHERE status='running'");
+      const blocked = new Set();
+      rows = rows.filter((r) => {
+        if (blocked.has(r.project_id)) return false;
+        const others = busy.filter((b) => b.project_id === r.project_id);
+        const ok = !others.length || (r.kind === 'work' && worktreeCapable(getProject(r.project_id)) && others.every((b) => running.get(b.id)?.wt));
+        if (!ok && r.kind !== 'work') blocked.add(r.project_id);
+        return ok;
+      });
+    }
+    return rows.slice(0, limit);
   }
 
   // ---- queue order. Within a project the owner's manual `position` is the primary order and effective priority
@@ -1346,18 +1367,84 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     tail.then(() => { if (gitChains.get(p) === tail) gitChains.delete(p); });
     return next;
   }
+  // Commit the main tree now; only call it inside serialGit(p).
+  async function commitNow(p, message) {
+    try {
+      const sha = await commitAll(p, message);
+      if (sha) onCommit(p, sha, message); // pushed to GitHub by the owner's protocol
+      return sha;
+    } catch { return ''; }
+  }
   function gitCommit(p, message) {
     if (!CFG.autoCommit || !fs.existsSync(path.join(p, '.git'))) return Promise.resolve('');
-    return serialGit(p, async () => {
-      try {
-        if (!(await git(p, ['status', '--porcelain'])).trim()) return '';
-        await git(p, ['add', '-A']);
-        await git(p, [...GIT_ID, 'commit', '-q', '-m', message]);
-        const sha = (await git(p, ['rev-parse', '--short', 'HEAD'])).trim();
-        onCommit(p, sha, message); // pushed to GitHub by the owner's protocol
-        return sha;
-      } catch { return ''; }
+    return serialGit(p, () => commitNow(p, message));
+  }
+
+  // ---- worktrees (worktrees.mjs). A work task in a git project runs in <repo>/../.agent-orch-worktrees/<repo>-task-<id>;
+  // the main tree (which the live server itself may be running from) only ever receives merged commits. serialGit on the
+  // project path is the per-project merge lock: worktree creation, merges and cleanup all go through it.
+  const worktreeCapable = (p) => !!p && CFG.worktrees && CFG.autoCommit && fs.existsSync(path.join(p.path, '.git'));
+  // Acquire (create or reuse) a work task's worktree; an integrator gets the worktree of the task it integrates.
+  function taskWorktree(task, project) {
+    const owner = task.integrates || task.id;
+    return serialGit(project.path, async () => {
+      const info = await repoInfo(project.path);
+      if (!info) return null;
+      // A fresh worktree starts from what the main tree shows, so commit what the planner or a chat left there first.
+      if (!(await listWorktrees(info.top)).some((w) => w.id === owner)) await commitNow(project.path, `agent-orch: uncommitted changes before #${task.id}`);
+      const wt = { ...(await ensureWorktree(info, owner)), info, owner };
+      if (task.integrates) await startIntegration(info, wt.dir);
+      return wt;
+    }).catch((e) => {
+      logEvent(`#${task.id}: couldn't set up a worktree: ${String(e?.stderr || e?.message || e).trim().slice(0, 300)}`, { level: 'warn', projectId: project.id, taskId: task.id });
+      return null;
     });
+  }
+  // Land a finished worktree on the main branch: commit whatever sits in the main tree, squash + rebase + fast-forward,
+  // push, then drop the worktree and its branch. { sha } or { conflict: [files] } (worktree kept).
+  function mergeTask(task, project, wt, message) {
+    return serialGit(project.path, async () => {
+      await commitNow(project.path, `agent-orch: uncommitted changes before merging #${task.id}`);
+      const info = (await repoInfo(project.path)) || wt.info;
+      const r = await mergeBack(info, wt.owner, message);
+      if (r.conflict) return r;
+      if (r.sha) onCommit(project.path, r.sha, message);
+      await removeWorktree(info, wt.owner);
+      run('UPDATE tasks SET worktree=NULL WHERE id=:id', { id: wt.owner });
+      return r;
+    });
+  }
+  // A failed or cancelled task: its unfinished work is committed to its branch (kept for a retry) and the checkout removed.
+  function parkTask(project, id, message) {
+    return serialGit(project.path, async () => {
+      const info = await repoInfo(project.path);
+      if (!info) return;
+      await parkWorktree(info, id, message);
+      run('UPDATE tasks SET worktree=NULL WHERE id=:id', { id });
+      logEvent(`#${id}: worktree removed; its work stays on branch agent-orch/task-${id}`, { projectId: project.id, taskId: id });
+    }).catch((e) => console.error('[orchestrator] parking worktree failed', id, e));
+  }
+  // At boot: worktrees of tasks that are no longer queued, running or waiting for integration are parked (merged
+  // branches deleted). Those of interrupted tasks stay and are reused when the task runs again.
+  async function cleanupWorktrees() {
+    for (const p of qa('SELECT * FROM projects')) {
+      if (!worktreeCapable(p)) continue;
+      await serialGit(p.path, async () => {
+        const info = await repoInfo(p.path);
+        if (!info) return;
+        for (const w of await listWorktrees(info.top)) {
+          if (path.dirname(w.dir) !== worktreesRoot(info.top)) continue;
+          const t = getTask(w.id);
+          if (t && t.project_id !== p.id) continue;
+          if (t && ['queued', 'running', 'needs_integration'].includes(t.status)) continue;
+          await parkWorktree(info, w.id, `agent-orch #${w.id}: unfinished work`);
+          const merged = await isMerged(info, w.id);
+          if (merged) await removeWorktree(info, w.id);
+          if (t) run('UPDATE tasks SET worktree=NULL WHERE id=:id', { id: w.id });
+          logEvent(`removed the orphaned worktree of #${w.id}${merged ? '' : ` (work kept on branch agent-orch/task-${w.id})`}`, { projectId: p.id, taskId: w.id });
+        }
+      }).catch((e) => console.error('[orchestrator] worktree cleanup failed', p.path, e));
+    }
   }
   function ensureGit(p) {
     if (fs.existsSync(path.join(p, '.git'))) return Promise.resolve();
@@ -1727,7 +1814,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   function startTask(task) {
     const abort = new AbortController();
-    running.set(task.id, { abort, projectId: task.project_id, startedAt: now() });
+    running.set(task.id, { abort, projectId: task.project_id, startedAt: now(), wt: task.kind === 'work' && worktreeCapable(getProject(task.project_id)) });
     pushState();
     execute(task, abort.signal)
       .catch((e) => console.error('[orchestrator] task crashed', e))
@@ -1820,12 +1907,34 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       const attempts = task.attempts + 1;
       if (attempts >= CFG.maxAttempts) await fail(getTask(task.id), project, 'crash', String(e?.message || e));
       else requeueIfRunning(task.id, { attempts, not_before: now() + Math.min(300 * 2 ** (attempts - 1), 3600), last_error: `[crash] ${e?.message || e}`.slice(0, 2000) });
+    } finally {
+      const wt = taskWts.get(task.id);
+      taskWts.delete(task.id);
+      // A task's own worktree outlives a requeue (the next run reuses it) and 'needs_integration'; an integrator's
+      // belongs to the task it integrates.
+      const st = getTask(task.id)?.status;
+      if (wt && wt.owner === task.id && (st === 'failed' || st === 'cancelled')) {
+        await parkTask(project, task.id, `agent-orch #${task.id} ${st}: ${task.title} (partial work)`);
+      }
     }
   }
 
   async function runTask(task, project, signal) {
-    initProject(project.path);
-    writeTaskSpec(project.path, task);
+    let wt = null;
+    if (running.get(task.id)?.wt) {
+      wt = await taskWorktree(task, project);
+      if (wt) {
+        taskWts.set(task.id, wt);
+        run('UPDATE tasks SET worktree=:w WHERE id=:id', { w: wt.dir, id: wt.owner });
+      } else {
+        running.get(task.id).wt = false;
+        // Without a worktree it may only share the main tree with nobody.
+        if (qa("SELECT id FROM tasks WHERE status='running' AND project_id=:p AND id!=:id", { p: project.id, id: task.id }).length) throw new Error('no worktree while other tasks run in this project');
+      }
+    }
+    const cwd = wt?.cwd || project.path;
+    initProject(cwd);
+    writeTaskSpec(cwd, task);
     const route = routeFor(task, project);
     // A session id only resumes on the agent that created it.
     let resume = task.session_id && lastRunAgent(task.id) === route.agent ? task.session_id : null, reused = false, body, system, tools, autonomous;
@@ -1840,8 +1949,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       tools = [...PLANNER_TOOLS, ...CFG.safeTools.filter((t) => t.startsWith('Bash('))];
       autonomous = false;
     } else {
-      if (!resume && route.agent === 'claude') { resume = pickSession(task); reused = !!resume; }
-      body = reused ? nextTaskPrompt(task) : workerTaskPrompt(project, task, ENVIRONMENT);
+      // A warm session from another task was made in another checkout, so worktree tasks always start fresh.
+      if (!resume && route.agent === 'claude' && !wt) { resume = pickSession(task); reused = !!resume; }
+      body = reused ? nextTaskPrompt(task) : workerTaskPrompt(wt ? { ...project, path: cwd } : project, task, wt ? `${ENVIRONMENT}\n${worktreeNote(wt, project)}` : ENVIRONMENT);
       system = WORKER_SYSTEM;
       tools = CFG.safeTools;
       // agy has no sandboxed middle mode (codex keeps workspace-write): without skip-permissions headless agy denies
@@ -1861,7 +1971,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const r = running.get(task.id);
     if (r) r.runId = runId;
     const res = await runAgent({
-      agent: route.agent, prompt, cwd: project.path, resume, model: route.model, append: resume ? null : system, tools, autonomous,
+      agent: route.agent, prompt, cwd, resume, model: route.model, append: resume ? null : system, tools, autonomous,
       signal, timeoutSec: CFG.taskTimeoutSec, taskId: task.id, runId, logPath,
     });
     finishRun(runId, res);
@@ -1925,20 +2035,25 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   async function finishWork(task, project, res, signal) {
     const tid = task.id;
+    const wt = taskWts.get(tid), dir = wt?.cwd || project.path;
     const [status, note] = parseStatus(res.text);
     if (status === 'continue' && task.continuations < CFG.maxContinuations) {
-      recordResult(project.path, task, `in progress (${task.continuations + 1})`, res.text);
-      await gitCommit(project.path, `agent-orch #${tid} (in progress): ${task.title}`);
+      recordResult(dir, task, `in progress (${task.continuations + 1})`, res.text);
+      if (!wt) await gitCommit(project.path, `agent-orch #${tid} (in progress): ${task.title}`); // a worktree just stays as it is
       requeueIfRunning(tid, { continuations: task.continuations + 1, session_id: res.sessionId || task.session_id, result: res.text });
       return logEvent(`↻ #${tid} not finished yet: ${note.slice(0, 160) || 'continuing'}`, { projectId: project.id, taskId: tid });
     }
     if (status === 'continue') return fail(task, project, 'unfinished', `still not done after ${CFG.maxContinuations} sessions: ${note}`);
+    if (task.integrates && wt) {
+      const left = await unresolvedFiles(wt.dir);
+      if (left.length) return verifyFailed(task, project, res, 'resolve every merge conflict', `Still conflicted: ${left.join(', ')}`);
+    }
     const command = extractCommand(task.done_when);
     let checked = '';
     if (command) {
       logEvent(`checking #${tid}: ${command}`, { projectId: project.id, taskId: tid });
       let ok, output, code;
-      try { [ok, output, code] = await runCheck(command, project.path, agentEnv, CFG.verifyTimeoutSec, signal); }
+      try { [ok, output, code] = await runCheck(command, dir, agentEnv, CFG.verifyTimeoutSec, signal); }
       catch (e) { ok = false; output = `verification crashed: ${e?.message || e}`; }
       if (getTask(tid)?.status !== 'running') return;
       if (signal?.aborted) { // paused or preempted mid-check: same as an interrupted run
@@ -1954,10 +2069,39 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       } else if (!ok) return verifyFailed(task, project, res, command, output);
       else checked = ' (check passed)';
     }
-    recordResult(project.path, task, `done${checked}`, res.text);
-    const sha = await gitCommit(project.path, `agent-orch #${tid}: ${task.title}`);
+    recordResult(dir, task, `done${checked}`, res.text);
+    let sha;
+    if (wt) {
+      const merged = await mergeTask(task, project, wt, `agent-orch #${tid}: ${task.title}`);
+      if (merged.conflict) {
+        // An integrator whose base moved on again just goes another round in the same worktree.
+        if (task.integrates) return verifyFailed(task, project, res, `merge ${wt.info.branch} again`, `${wt.info.branch} changed meanwhile; conflicts in: ${merged.conflict.join(', ')}`);
+        return needsIntegration(task, project, res, wt, merged.conflict);
+      }
+      sha = merged.sha;
+    } else sha = await gitCommit(project.path, `agent-orch #${tid}: ${task.title}`);
     if (!updateTask(tid, { status: 'done', finished_at: now(), result: res.text, session_id: res.sessionId, verify_output: null, commit_sha: sha || null }, true)) return;
     logEvent(`✔ #${tid} done${checked}: ${task.title}${sha ? ` (commit ${sha})` : ''}`, { projectId: project.id, taskId: tid });
+    if (task.integrates && updateTask(task.integrates, { status: 'done', finished_at: now(), commit_sha: sha || null, result: `Merged by integrator #${tid}.` })) {
+      logEvent(`✔ #${task.integrates} merged by integrator #${tid}`, { projectId: project.id, taskId: task.integrates });
+    }
+  }
+
+  // The rebase onto the main branch conflicted: keep the worktree, mark the task and queue an integrator for it.
+  function needsIntegration(task, project, res, wt, files) {
+    const tid = task.id, branch = wt.info.branch;
+    const note = `Its branch ${wt.branch} conflicts with ${branch} in: ${files.join(', ')}. The work is kept in ${wt.dir}.`;
+    if (!updateTask(tid, { status: 'needs_integration', finished_at: now(), result: note, session_id: res.sessionId, verify_output: null }, true)) return;
+    const prompt = `Task #${tid} ("${task.title}") finished in its own git worktree, but its branch \`${wt.branch}\` conflicts with ` +
+      `\`${branch}\`, which changed meanwhile (conflicting files: ${files.join(', ')}). You are in that worktree, and the orchestrator ` +
+      `has started merging \`${branch}\` into it: the conflicted files contain <<<<<<< markers. Resolve every conflict so both ` +
+      `${branch}'s changes and task #${tid}'s intent survive, then verify the result still works. Don't commit, and don't abort the merge.\n\n` +
+      `Task #${tid}'s instructions were:\n\n${task.prompt}`;
+    const iid = addTask(project.id, { title: `Integrate #${tid}: ${task.title}`.slice(0, 200), prompt, source: task.source, priority: task.priority + 10,
+      doneWhen: task.done_when, agent: task.agent, model: task.model, origin: task.origin, fallbacks: parseFallbacks(task.fallbacks) });
+    run('UPDATE tasks SET integrates=:t WHERE id=:id', { t: tid, id: iid });
+    updateTask(tid, { result: `${note} Integrator #${iid} merges it.` });
+    logEvent(`⚠ #${tid} needs integration: conflicts with ${branch} in ${files.join(', ')}; queued integrator #${iid}`, { level: 'warn', projectId: project.id, taskId: tid });
   }
 
   async function verifyFailed(task, project, res, command, output) {
@@ -1966,8 +2110,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (task.continuations >= CFG.maxContinuations) {
       return fail(task, project, 'verification', `\`${command}\` still failing after ${CFG.maxContinuations} sessions:\n${output.slice(-1500)}`);
     }
-    recordResult(project.path, task, `verify failed (${task.continuations + 1})`, `Command: ${command}\n\n${output}`);
-    await gitCommit(project.path, `agent-orch #${tid} (in progress): ${task.title}`);
+    const wt = taskWts.get(tid);
+    recordResult(wt?.cwd || project.path, task, `verify failed (${task.continuations + 1})`, `Command: ${command}\n\n${output}`);
+    if (!wt) await gitCommit(project.path, `agent-orch #${tid} (in progress): ${task.title}`);
     requeueIfRunning(tid, { continuations: task.continuations + 1, session_id: res.sessionId || task.session_id, result: res.text, verify_output: output });
     logEvent(`↻ #${tid} done-when check failed: ${command}\n${output.slice(0, 300)}`, { projectId: project.id, taskId: tid });
   }
@@ -1976,8 +2121,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const tid = task.id;
     if (!updateTask(tid, { status: 'failed', attempts: task.attempts + 1, finished_at: now(), result: detail }, true)) return;
     if (task.kind === 'work') {
-      recordResult(project.path, task, `failed (${outcome})`, detail);
-      await gitCommit(project.path, `agent-orch #${tid} failed: ${task.title} (partial work)`);
+      const wt = taskWts.get(tid);
+      recordResult(wt?.cwd || project.path, task, `failed (${outcome})`, detail);
+      if (!wt) await gitCommit(project.path, `agent-orch #${tid} failed: ${task.title} (partial work)`); // else execute() parks the worktree
     }
     const blocked = cascadeBlock(tid, 'failed', `${blockedPrefix(tid)}(${outcome})`);
     logEvent(`✖ #${tid} failed (${outcome}): ${String(detail).slice(0, 200)}${blocked.length ? `; blocked ${blocked.map((b) => `#${b}`).join(', ')}` : ''}`,
@@ -2039,9 +2185,18 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         return { ok: true };
       }
       case 'cancel': {
-        if (!['queued', 'running'].includes(task.status)) return { error: 'Only waiting or running tasks can be cancelled' };
+        if (!['queued', 'running', 'needs_integration'].includes(task.status)) return { error: 'Only waiting or running tasks can be cancelled' };
         updateTask(id, { status: 'cancelled', finished_at: now() });
         running.get(id)?.abort.abort();
+        if (task.status === 'needs_integration') {
+          // Its integrators go too, and the worktree is parked on its branch.
+          for (const r of qa("SELECT id FROM tasks WHERE integrates=:id AND status IN ('queued','running')", { id })) {
+            updateTask(r.id, { status: 'cancelled', finished_at: now(), result: `cancelled with #${id}` });
+            running.get(r.id)?.abort.abort();
+          }
+          const project = getProject(task.project_id);
+          setTimeout(() => { if (!qa("SELECT id FROM tasks WHERE integrates=:id AND status='running'", { id }).length) parkTask(project, id, `agent-orch #${id} cancelled: ${task.title}`); }, 1000);
+        }
         const blocked = cascadeBlock(id, 'cancelled', `cancelled with #${id}`);
         logEvent(`■ #${id} cancelled${blocked.length ? `; also ${blocked.map((b) => `#${b}`).join(', ')}` : ''}`, { projectId: task.project_id, taskId: id });
         return { ok: true };
@@ -2131,7 +2286,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       ...(() => { if (t.status !== 'queued') return { runs_on: null, runs_model: null, limit_scope: null };
         const r = routeNow(t, getProject(t.project_id));
         return { runs_on: r.agent, runs_model: r.model || delegator.defaultModel(r.agent), limit_scope: limitScope(r.agent, r.model) }; })(),
-      summary: t.status === 'done' ? parseStatus(t.result)[1] || null : t.status === 'failed' || t.status === 'cancelled' ? String(t.result || '').slice(0, 200) : null,
+      summary: t.status === 'done' ? parseStatus(t.result)[1] || null : ['failed', 'cancelled', 'needs_integration'].includes(t.status) ? String(t.result || '').slice(0, 200) : null,
+      worktree: t.worktree ?? null, integrates: t.integrates ?? null,
     };
   }
   function projectView(p) {
@@ -2222,6 +2378,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const orphans = run("UPDATE tasks SET status='queued' WHERE status='running'").changes;
     run("UPDATE runs SET outcome='error', finished_at=:t WHERE finished_at IS NULL", { t: now() });
     if (orphans) logEvent(`requeued ${orphans} interrupted task(s) after a restart`);
+    cleanupWorktrees(); // per-project merge lock: a claim in the same project waits for it
     reconcileCodexLimit();
     setInterval(tick, CFG.pollMs);
     setTimeout(tick, 5000);

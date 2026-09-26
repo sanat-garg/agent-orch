@@ -469,3 +469,7 @@ Fallback lists replace Auto Delegate everywhere; 189 tests pass
 ## 2026-09-26 05:05 — #154 Clear delegation status on task cards, drawer and chat [done (check passed)]
 
 modelStatus() drives task cards, drawer and chat notices; tests pass
+
+## 2026-09-26 05:20 — #155 Run concurrent tasks in isolated git worktrees and merge back safely [done (check passed)]
+
+work tasks run in isolated worktrees and merge back safely

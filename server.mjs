@@ -1106,7 +1106,7 @@ async function listTerminals() {
 }
 
 // ---------- HTTP ----------
-const MIME = { '.woff2': 'font/woff2', '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json', '.webmanifest': 'application/manifest+json' };
+const MIME = { '.mp3': 'audio/mpeg', '.woff2': 'font/woff2', '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json', '.webmanifest': 'application/manifest+json' };
 const VENDOR = {
   '/vendor/marked.js': 'node_modules/marked/lib/marked.umd.js',
   '/vendor/purify.js': 'node_modules/dompurify/dist/purify.min.js',
@@ -1199,6 +1199,10 @@ async function handleRequest(req, res) {
     const t = parseCookies(req)[COOKIE];
     if (t) { delete sessions[t]; writeJSON('sessions.json', sessions); }
     return json(res, 200, { ok: true }, { 'Set-Cookie': sessionCookie('', 0) });
+  }
+
+  if (p === '/sounds/task-done.mp3') {
+    return serveFile(res, path.join(PUBLIC, p), { 'Cache-Control': 'public, max-age=31536000, immutable' });
   }
 
   if (/^\/fonts\/[A-Za-z0-9][A-Za-z0-9.-]*\.woff2$/.test(p)) {

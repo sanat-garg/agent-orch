@@ -449,3 +449,7 @@ LiveBench delegation ranking verified with availability and owner overrides pres
 ## 2026-09-26 02:25 — #138 Show LiveBench in the simplified delegation popup [done]
 
 LiveBench popup verified at desktop and mobile widths.
+
+## 2026-09-26 02:34 — #145 Play a completion sound when a task finishes while the tab is in the background [done (check passed)]
+
+Background completion sounds verified; all 207 tests pass.

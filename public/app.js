@@ -2029,10 +2029,64 @@ async function renderRecentProjects() {
   }
 }
 
+// ---------- task completion sound ----------
+const taskSound = new Audio('/sounds/task-done.mp3');
+taskSound.preload = 'auto';
+taskSound.volume = 0.6;
+const completionSound = { synced: false, statuses: new Map(), done: new Set(), lastPlayed: -Infinity, unlocking: null };
+function resetCompletionSync() {
+  completionSound.synced = false;
+  completionSound.statuses.clear();
+}
+async function playTaskSound() {
+  try {
+    await completionSound.unlocking;
+    taskSound.currentTime = 0;
+    await taskSound.play();
+  } catch {} // Browser autoplay policy may still disallow background audio.
+}
+function unlockTaskSound() {
+  document.removeEventListener('pointerdown', unlockTaskSound);
+  document.removeEventListener('keydown', unlockTaskSound);
+  taskSound.muted = true;
+  completionSound.unlocking = (async () => {
+    try { await taskSound.play(); } catch {}
+    taskSound.pause();
+    taskSound.currentTime = 0;
+    taskSound.muted = false;
+  })();
+}
+document.addEventListener('pointerdown', unlockTaskSound);
+document.addEventListener('keydown', unlockTaskSound);
+$('obSound').checked = store.get('cw.taskSound') !== 'off';
+$('obSound').addEventListener('change', (e) => store.set('cw.taskSound', e.target.checked ? 'on' : 'off'));
+$('obSoundTest').addEventListener('click', playTaskSound);
+function syncCompletionSound(tasks) {
+  if (!completionSound.synced) completionSound.statuses.clear();
+  for (const t of tasks || []) {
+    completionSound.statuses.set(t.id, t.status);
+    if (t.status === 'done') completionSound.done.add(t.id);
+  }
+  completionSound.synced = true;
+}
+function observeTaskCompletion(t) {
+  const previous = completionSound.statuses.get(t.id);
+  completionSound.statuses.set(t.id, t.status);
+  if (t.status !== 'done' || completionSound.done.has(t.id)) return;
+  completionSound.done.add(t.id);
+  if (!completionSound.synced || !previous || previous === 'done' || !['work', 'reflect'].includes(t.kind)) return;
+  if (!$('obSound').checked || (document.visibilityState !== 'hidden' && document.hasFocus())) return;
+  const now = performance.now();
+  if (now - completionSound.lastPlayed < 3000) return;
+  completionSound.lastPlayed = now;
+  void playTaskSound();
+}
+
 // ---------- WebSocket ----------
 let retry = 0; // failed attempts since the last open: 0 before the first open reads as "Connecting…"
 const CONN = { list: [], sig: '', drafts: {}, sent: {}, dismissed: {}, justDone: {}, lastFocus: null };
 function connect() {
+  resetCompletionSync();
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
   state.ws = ws;
   ws.onopen = () => {
@@ -2045,6 +2099,7 @@ function connect() {
     if (O.drawer) { send({ t: 'owatch', taskId: O.drawer, on: true }); loadDetail(); }
   };
   ws.onclose = (e) => {
+    resetCompletionSync();
     updateLive();
     if (e.code === 4001) { location.href = '/login'; return; }
     // A failed upgrade usually means the login expired; check before retrying.
@@ -3127,6 +3182,7 @@ const refreshCards = (id) => document.querySelectorAll(`.tcard[data-task="${id}"
 const refreshAllCards = () => document.querySelectorAll('.tcard[data-task]').forEach((b) => fillCard(b, Number(b.dataset.task)));
 
 function applyOrchSnapshot(s) {
+  syncCompletionSound(s?.tasks);
   O.project = s?.project || null;
   if (s?.state) O.state = s.state;
   for (const t of s?.tasks || []) O.tasks.set(t.id, t);
@@ -3139,6 +3195,7 @@ function applyOrchSnapshot(s) {
 
 function onOrch(msg) {
   if (msg.t === 'otask') {
+    observeTaskCompletion(msg.task);
     O.tasks.set(msg.task.id, msg.task);
     renderUsage();
     refreshCards(msg.task.id);

@@ -1188,3 +1188,5 @@ button.dg-row:disabled { opacity: .6; cursor: progress; }
   .fe-reset, .toast-act { min-height: 44px; }
   .fe-add-btn { height: 44px; }
 }
+
+.ob-opt > label[for="obSound"] { flex: 1; font-size: 13.5px; cursor: pointer; }

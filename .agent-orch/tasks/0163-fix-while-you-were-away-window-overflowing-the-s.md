@@ -12,3 +12,7 @@ On iPhone, the 'While you were away' modal (public/index.html #awayModal ~line 2
 ## Done when
 
 A Playwright check at 375x667 and 390x844 shows #awayModal's panel fully inside the viewport with no horizontal scroll (scrollWidth <= innerWidth), and `npm test` passes
+
+## Result — done (check passed) (2026-09-26 06:10)
+
+AGENT-ORCH-STATUS: done — Away sheet and all modals fit phone screens; tests pass

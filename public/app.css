@@ -558,7 +558,7 @@ code, pre, kbd { font-family: var(--mono); }
 .live-pill strong { color: var(--text); font-weight: 600; }
 
 /* server window */
-.modal { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 24px; }
+.modal { position: fixed; inset: 0; z-index: 60; display: grid; grid-template-columns: minmax(0, 100%); place-items: center; padding: 24px; } /* a definite track, so width: min(Npx, 100%) panels shrink to the screen */
 .modal-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,.45); animation: fade .15s ease; }
 .modal-panel {
   position: relative; width: min(1120px, 100%); max-height: calc(100dvh - 48px);
@@ -826,20 +826,29 @@ details.dr-prompt summary { cursor: pointer; font-size: 13px; color: var(--muted
 .gh-row svg { flex: none; }
 
 /* while you were away */
-.modal-panel.away { width: min(560px, 100%); }
-.aw-body { padding: 0 20px 20px; overflow-y: auto; min-height: 0; }
-.aw-proj { margin: 0 0 16px; }
-.aw-proj h3 { display: flex; align-items: baseline; gap: 8px; margin: 0 0 6px; font-size: 15px; }
+.modal-panel.away { width: min(560px, 100%); max-width: calc(100vw - 24px);
+  max-height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 24px); }
+.aw-body { flex: 1 1 auto; min-height: 0; min-width: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
+  padding: 0 20px max(20px, env(safe-area-inset-bottom)); }
+.aw-proj { margin: 0 0 16px; min-width: 0; }
+.aw-proj h3 { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; margin: 0 0 6px; font-size: 15px; min-width: 0; overflow-wrap: anywhere; }
+.aw-proj h3 > * { min-width: 0; }
 .aw-proj h3 a { font-size: 12px; font-weight: 400; color: var(--muted); }
 .aw-proj h3 small { font-weight: 400; color: var(--faint); font-size: 12.5px; }
 .aw-list { list-style: none; margin: 0; padding: 0; }
-.aw-list li { display: flex; gap: 10px; padding: 6px 0; border-top: 1px solid var(--border); font-size: 13.5px; }
+.aw-list li { display: flex; align-items: baseline; gap: 10px; padding: 6px 0; border-top: 1px solid var(--border); font-size: 13.5px; min-width: 0; }
 .aw-list li:first-child { border-top: 0; }
 .aw-list .mk { flex: none; width: 16px; text-align: center; font-weight: 700; color: var(--ok); }
 .aw-list li.failed .mk { color: var(--danger); }
-.aw-list .tx { flex: 1; min-width: 0; }
-.aw-list .tx small { display: block; color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.aw-list time { flex: none; font-size: 12px; color: var(--faint); font-family: var(--mono); }
+.aw-list .tx { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.aw-list .tx .tt, .aw-list .tx small { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; line-height: 1.4; }
+.aw-list .tx small { color: var(--muted); font-size: 12.5px; }
+.aw-list time { flex: none; white-space: nowrap; font-size: 12px; color: var(--faint); font-family: var(--mono); }
+@media (max-width: 800px) {
+  .modal-panel.away { width: 100%; max-width: none; } /* a bottom sheet (.modal.sheet) */
+  .aw-body { padding: 0 14px max(16px, env(safe-area-inset-bottom)); }
+}
+@media (max-width: 600px) { .aw-proj h3 > a:first-child { flex-basis: 100%; } } /* change count + GitHub link go under the name */
 
 /* charts: soften the switch between time ranges */
 .sline svg { transition: opacity .25s ease, filter .25s ease; }

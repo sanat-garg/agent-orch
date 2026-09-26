@@ -4371,7 +4371,10 @@ async function showAway(since) {
     const ul = el('ul', 'aw-list');
     for (const t of g.tasks) {
       const li = el('li', t.status);
-      const tx = el('div', 'tx', t.title);
+      const tx = el('div', 'tx');
+      const tt = el('span', 'tt', t.title);
+      tt.title = t.title;
+      tx.append(tt);
       if (t.summary) tx.append(el('small', '', t.summary));
       li.append(el('span', 'mk', t.status === 'done' ? '✓' : '✗'), tx, el('time', '', fmtClock(t.finished_at)));
       ul.append(li);

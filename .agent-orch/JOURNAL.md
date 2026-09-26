@@ -481,3 +481,7 @@ parallel scheduling with file gating, multi-deps, spreading and integrators; tes
 ## 2026-09-26 05:56 — #157 Screenshots: uniform thumbnails; click opens the image at original size [done (check passed)]
 
 Fixed 160×100 thumbnails; lightbox opens images at original size; tests pass
+
+## 2026-09-26 06:10 — #163 Fix 'While you were away' window overflowing the screen on iPhone [done (check passed)]
+
+Away sheet and all modals fit phone screens; tests pass

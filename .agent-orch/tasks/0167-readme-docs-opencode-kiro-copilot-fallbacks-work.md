@@ -13,3 +13,7 @@ README.md's 'Coding agents' section covers Claude, Codex and Antigravity only. A
 ## Done when
 
 `grep -qi kiro README.md` `grep -qi copilot README.md` `grep -qi opencode README.md` `grep -qi worktree README.md`
+
+## Result — done (check passed) (2026-09-26 09:58)
+
+AGENT-ORCH-STATUS: done — README documents new agents, fallbacks, worktrees and parallel tasks

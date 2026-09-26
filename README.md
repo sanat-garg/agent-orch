@@ -134,7 +134,7 @@ action without doing it. Because it restarts the app, don't run it from inside a
 
 ## Coding agents
 
-Chats and orchestrator tasks can run on three coding agent CLIs. The adapters live in `agents.mjs`, and
+Chats and orchestrator tasks can run on six coding agent CLIs. The adapters live in `agents.mjs`, and
 research notes on each CLI are in `.agent-orch/AGENTS.md`.
 
 | Agent | Binary | Install | Subscription login (once, over SSH or `/shell/`) |
@@ -142,6 +142,22 @@ research notes on each CLI are in `.agent-orch/AGENTS.md`.
 | Claude Code (default) | `~/.local/bin/claude` | see Requirements | `claude`, then `/login` |
 | OpenAI Codex CLI | `codex` on `PATH` | `sudo npm i -g @openai/codex` | `codex login --device-auth`, then open the URL and enter the code. You may first need to enable device code authorization for Codex in ChatGPT's security settings. `codex login status` should say "Logged in using ChatGPT". |
 | Google Antigravity CLI | `~/.local/bin/agy` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | run `agy` with no arguments, open the Google OAuth URL it prints, sign in, and paste the code back |
+| OpenCode CLI | `opencode` on `PATH` | `sudo npm i -g opencode-ai` | Connections modal (ChatGPT Pro/Plus device flow: `opencode auth login --provider openai --method 'ChatGPT Pro/Plus (headless)'`) |
+| Kiro CLI | `~/.local/bin/kiro-cli` | `curl -fsSL https://cli.kiro.dev/install \| bash` (needs `unzip`) | Connections modal (`kiro-cli login --use-device-flow`) |
+| GitHub Copilot CLI | `copilot` on `PATH` | `sudo npm i -g @github/copilot` | Connections modal; it shares the GitHub (`gh`) login, so disconnecting one signs out both |
+
+**Connections.** The button at the foot of the sidebar (or **Connections…** at the end of the model picker)
+opens the Connections modal. It runs each CLI's login in a hidden tmux pane and shows the URL and one-time
+code to enter elsewhere; Antigravity asks you to paste its code back. Signing in there works for every agent above.
+
+**Models.** Model lists come only from the CLIs themselves, never a hardcoded list. They are cached in
+`data/models.json` and refreshed at boot, every 6 hours and after a sign-in change. OpenCode lists
+`opencode models openai` (only its OAuth-backed `openai/…` models), Kiro lists `kiro-cli chat --list-models --format json`
+for the signed-in account, and Copilot asks the Copilot SDK's `listModels()`.
+
+**Known limits.** Kiro isn't signed in on this server, so its authenticated headless use and stream format are
+unverified. Copilot's model list currently returns only `auto`, and Copilot reports no remaining usage or reset
+time, so its limit is only known when a run hits it. OpenCode limits are tracked per provider (`openai`).
 
 **Subscription only, never API keys.** Each adapter removes its billing variables from the environment
 before starting the CLI:
@@ -154,6 +170,13 @@ before starting the CLI:
   `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_CLOUD_PROJECT(_ID)`, `GOOGLE_CLOUD_LOCATION`, `AGY_ADC_AUTH` and
   `AGY_BUSINESS_PAYGO_TIER`. A run is refused if `~/.gemini/antigravity-cli/settings.json` sets
   `"modelProvider": "gemini"` (API-key mode).
+- OpenCode: every `*_API_KEY` and `*_TOKEN`, `OPENAI_BASE_URL|ORG_ID|ORGANIZATION|PROJECT_ID`, every `AZURE_OPENAI_*`
+  and `OPENCODE_AUTH|CONFIG|CONFIG_DIR`. It counts as logged in only with an `openai` OAuth credential, and a run is
+  refused if the project's `opencode.json`, `opencode.jsonc` or `.env` sets an API key or custom endpoint.
+- Kiro: `KIRO_API_KEY`. An API-key account from `kiro-cli whoami` counts as logged out.
+- Copilot: `COPILOT_GITHUB_TOKEN`, `COPILOT_PROVIDER_*`, `GH_TOKEN`, `GITHUB_TOKEN` and the OpenAI, Anthropic, Gemini and
+  Google API keys; `COPILOT_HOME` is pinned to `~/.copilot`. A run is refused if `~/.copilot/settings.json` or the
+  project's `.copilot/settings.json` sets a custom (BYOK) provider.
 
 **Chat picker.** The model menu in a chat is grouped by agent (fed by `GET /api/agents`). Pick an agent's
 default model or a specific one. Groups for agents that aren't installed or logged in are disabled and show
@@ -179,10 +202,37 @@ reason is logged. The Routing rules list marks such a rule "not logged in, falls
 installed"). Login status is checked at most once a minute, so after signing in it can take a minute to be
 picked up. Each task shows the agent and model its latest run used.
 
-**Delegation.** There is no benchmark scoring or automatic ranking. Each chat (Auto Delegate in the model
-picker) and each project's reflection tasks have an ordered fallback list that you enter by hand. When a
-queued task's model is at its usage limit, it moves to the first model in that list whose agent is signed in
-and has usage left. With no list, the task waits for its own model.
+**Delegation.** There is no benchmark scoring or automatic ranking. You enter ordered fallback lists by hand:
+one per chat (Auto Delegate in the model picker), used by the tasks that chat plans, and one per project for
+reflection tasks (**Settings → Reflection fallbacks** in the orchestrator bar). Each task keeps a copy of its list.
+When a queued task's model is at its usage limit, it moves to the first model in that list whose agent is
+signed in, still lists that model, isn't blocked and has no usage window at 90% or more. Each move is
+recorded on the task. With an empty list, the task waits for its own model. Limits are per agent (Antigravity:
+per model group), so one agent's limit never blocks another's.
+
+## Parallel tasks and git worktrees
+
+In a project that is a git repository, each work task runs in its own git worktree at
+`<repo>/../.agent-orch-worktrees/<repo>-task-<id>` on branch `agent-orch/task-<id>`, so several tasks can edit
+at once without seeing each other's changes. Projects outside git (or on a detached HEAD) run in the main tree.
+
+- **`files`**: the planner gives each task the paths or globs it will change (`src/**/*.css`, `test/`). Tasks
+  whose lists can't match the same file run in parallel, possibly on different agents. A task without `files`
+  counts as touching everything and runs alone.
+- **`after`**: true prerequisites only. A task starts once all of them are done, and cancelling or failing one
+  cancels everything after it. Use `files`, not `after`, to keep work apart.
+- **Integrator tasks**: the planner ends a split feature with a task whose `after` lists every part; it
+  reconciles their results and runs the full test suite.
+- **Slots**: up to `maxParallel` (5) tasks run at once while usage isn't scarce, at most `agentSlots` (3) per
+  agent. A task that would otherwise wait for a busy agent spills to its first fallback with a free slot.
+
+When a task passes its check, the orchestrator squashes its branch to one commit, rebases it onto the main
+tree's branch, fast-forwards the main tree and syncs it to GitHub. Only this merge step touches the main tree, one task at
+a time. `JOURNAL.md` uses a union merge, so shared appends never conflict. If the rebase conflicts, the task
+becomes **needs integration**: its worktree is kept and an `Integrate #<id>` task is queued in the same
+worktree. That task merges the main branch in, resolves the conflict markers, re-runs the check and lands the
+work, which marks the original task done. Failed or cancelled work is committed to its branch and the worktree
+removed, so a retry can pick it up.
 
 ## Screenshots
 

@@ -505,3 +505,7 @@ Copilot smoke 10/10, npm tests pass, connection listed
 ## 2026-09-26 09:49 — #158 Themed, non-blocking toasts at the side [done (check passed)]
 
 themed stacked toasts with kinds; tests pass; screenshots captured
+
+## 2026-09-26 09:58 — #167 README docs: OpenCode, Kiro, Copilot, fallbacks, worktrees and parallel tasks [done (check passed)]
+
+README documents new agents, fallbacks, worktrees and parallel tasks

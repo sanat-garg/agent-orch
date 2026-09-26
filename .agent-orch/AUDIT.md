@@ -319,6 +319,7 @@ agent that is unconnected, unlisted, blocked or has a window ≥90%, and an empt
   their HEAD. When reusing a worktree, re-attach it: abort a leftover rebase (`rebase --abort` if `rebase-merge` or
   `rebase-apply` exists), then `git switch agent-orch/task-N` if HEAD is detached (commit first). Never `rmSync` a
   directory that `git worktree list` still has registered.
+- **Fixed** (task #170): `listWorktrees` also recognises `<repo>-task-<id>` directories whatever their HEAD; a reused worktree is `reattach`ed (leftover rebase aborted, detached work committed onto the task branch, a diverged tip kept as `…-before-<sha>`); a registered directory is never `rmSync`ed; test/worktree.test.mjs.
 
 ### 28. [med] A `needs_integration` task is stuck for good when its integrator fails or is cancelled (orchestrator.mjs:2175-2190, 2204-2215, 2272-2283)
 - **What:** Only the integrator finishing `done` moves the owner out of `needs_integration` (finishWork, 2169).
@@ -330,6 +331,7 @@ agent that is unconnected, unlisted, blocked or has a window ≥90%, and an empt
 - **Fix:** When an integrator ends failed or cancelled, move its owner to the same status (the owner's worktree is then
   parked on its branch by `parkTask`) and cascade to the owner's dependents. Retrying the owner or the integrator then
   revives the chain. At minimum, log a warning on the owner.
+- **Fixed** (task #172): `releaseOwner` moves a `needs_integration` owner to failed/cancelled with its integrator, cascades to the owner's dependents and parks its worktree; test/integrator-fail.test.mjs.
 
 ### 29. [med] An integrator never passes when the merged-in branch adds a Markdown heading underlined with exactly 7 `=` (worktrees.mjs:80-91)
 - **What:** `unresolvedFiles` flags every file that `git diff HEAD --check` reports as a "leftover conflict marker", then
@@ -343,6 +345,7 @@ agent that is unconnected, unlisted, blocked or has a window ≥90%, and an empt
 - **Fix:** Only check files that were unmerged when the integration started (keep that list, e.g. in the task row).
   Count a file as unresolved only if it has a `<<<<<<<` line followed later by a `>>>>>>>` line, rather than any
   `=======` line.
+- **Fixed** (task #171): `unresolvedFiles` counts a file only if a `<<<<<<<` line is followed later by a `>>>>>>>` line; a lone `=======` never counts; test/worktree.test.mjs.
 
 ### 30. [low] With two failed prerequisites, retrying them in one order leaves the dependent failed (orchestrator.mjs:1178-1195)
 - **What:** C depends on A and B. A fails, so `cascadeBlock` marks C `failed` with `blocked: #A (…)`. B then fails, and
@@ -361,6 +364,7 @@ agent that is unconnected, unlisted, blocked or has a window ≥90%, and an empt
 - **Fix:** Also treat a plain path without wildcards as a directory when it has no extension-like suffix after its last
   non-leading dot, or simply always let a non-glob path cover `path/**` too. Being conservative here only costs
   parallelism.
+- **Fixed** (task #173): a declared path without wildcards covers its whole contents, dotted names included; test/parallel.test.mjs.
 
 ### 32. [low] OpenCode's subscription-only guard doesn't check the global config or `OPENCODE_CONFIG_CONTENT` (agents.mjs:746-756, 797)
 - **What:** `runOpencode` refuses to run only when `opencode.json`/`opencode.jsonc`/`.env` **in the cwd** sets
@@ -373,3 +377,4 @@ agent that is unconnected, unlisted, blocked or has a window ≥90%, and an empt
 - **Fix:** Add `OPENCODE_CONFIG_CONTENT` to `envFilter`. Run the same `apiKey`/`baseURL` check on the global config
   files and on every `opencode.json[c]` from the cwd up to the repo top. Alternatively, run with
   `OPENCODE_CONFIG_CONTENT` set to a pinned config that forces the `openai` OAuth provider.
+- **Fixed** (task #174): `envFilter` strips `OPENCODE_CONFIG_CONTENT`; the apiKey/baseURL guard checks the global config and every `opencode.json[c]` from the cwd up to the repo top; test/opencode.test.mjs.

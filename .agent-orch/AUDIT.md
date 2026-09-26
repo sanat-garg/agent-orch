@@ -288,3 +288,88 @@ seconds on both paths, and codex/agy `resetsAt` are epoch seconds like `withUnti
 - **Fix:** When `until` is in the past, render the absolute time (e.g. "until Thu 3:10 PM") without the relative
   part, or add "(passed)".
 - **Fixed** (task #78): `withUntil` uses `fmtUntil`, which shows only the absolute time ("Thu 3:10 PM") for a past `until`; test/limit-reset.test.mjs evaluates it from app.js.
+
+## Round 4 (2026-09-26, task #165): worktrees, parallel scheduling, delegation, opencode/kiro/copilot
+
+Checked and found no issue: `serialGit` chains every main-tree operation per project path (worktree creation, merge,
+park, boot cleanup, `gitCommit`), and `mergeTask` commits the main tree before `mergeBack`, so the fast-forward never
+lands on a dirty tree it would overwrite. A failed `--ff-only` throws before anything is removed, and the rebased branch
+is kept. A restart mid-integration resumes correctly: `startIntegration` sees `MERGE_HEAD` and leaves the merge alone. `spreadAssign`
+honours `agentSlots`. At default settings (`concurrency` 2 < `agentSlots` 3), the non-boost `delegate()` fallback in
+`claimNext` can't run when every slot is full. delegate.mjs is clean: `nextModel` skips the current model and any
+agent that is unconnected, unlisted, blocked or has a window ≥90%, and an empty or null snapshot means the task waits.
+`spawnJsonl` kills the process group on abort and on exit for all three new CLIs. Each new adapter strips its
+`envFilter` from `CLAUDE_ENV`, in chat and in orchestrator runs.
+
+### 27. [high] A task worktree with a detached HEAD is deleted with its uncommitted work, and the next run uses the live main tree (worktrees.mjs:47-56, 148-157)
+- **What:** `listWorktrees` only lists worktrees whose porcelain block has `branch refs/heads/agent-orch/task-N`. A
+  worktree on a detached HEAD isn't listed. That happens after a rebase killed mid-`mergeBack` (a crash or restart), or
+  when an agent runs `git checkout <sha>`, `git switch --detach` or an interactive rebase (`Bash(git:*)` is a safe tool).
+  On the next run, `ensureWorktree` doesn't find the worktree, so it runs `worktree prune`. The directory still exists,
+  so git keeps the registration. `ensureWorktree` then `rm -rf`s the directory as a "stray directory", and
+  `worktree add` fails ("missing but already registered worktree"). `taskWorktree` returns null. If nothing else runs in
+  the project, `runTask` runs the task in the **live main tree** and ignores the commits on its branch. Otherwise the run
+  throws and uses up an attempt. `cleanupWorktrees` never sees the worktree either. `taskWorktree` also commits
+  whatever sits in the main tree first, because it thinks no worktree exists.
+- **Repro (verified):** Create a worktree with `ensureWorktree(info, 7)`, commit a file in it, run
+  `git checkout --detach` there and write an uncommitted `wip.txt`. `listWorktrees` → `[]`. `ensureWorktree(info, 7)`
+  throws `'…/repo-task-7' is a missing but already registered worktree`, and the directory (with `wip.txt`) is gone.
+  A second call succeeds with a fresh checkout of the branch.
+- **Fix:** In `listWorktrees`, also list entries by directory name (`<repo>-task-<id>` under `worktreesRoot`), whatever
+  their HEAD. When reusing a worktree, re-attach it: abort a leftover rebase (`rebase --abort` if `rebase-merge` or
+  `rebase-apply` exists), then `git switch agent-orch/task-N` if HEAD is detached (commit first). Never `rmSync` a
+  directory that `git worktree list` still has registered.
+
+### 28. [med] A `needs_integration` task is stuck for good when its integrator fails or is cancelled (orchestrator.mjs:2175-2190, 2204-2215, 2272-2283)
+- **What:** Only the integrator finishing `done` moves the owner out of `needs_integration` (finishWork, 2169).
+  Suppose the integrator fails (verification, `maxAttempts` or `maxContinuations`, including the loop in #29), or the
+  owner cancels just the integrator. `fail`/`cancel` then cascade from the integrator's id, but nothing depends on the
+  integrator, so nothing happens. The owner stays `needs_integration`, `cleanupWorktrees` keeps its worktree forever,
+  and its `after` dependents stay queued with no notice (RUNNABLE waits for `done`). The owner can't be retried
+  (retry only accepts failed/cancelled). The only ways out are to find and retry the integrator by hand, or to cancel the owner.
+- **Fix:** When an integrator ends failed or cancelled, move its owner to the same status (the owner's worktree is then
+  parked on its branch by `parkTask`) and cascade to the owner's dependents. Retrying the owner or the integrator then
+  revives the chain. At minimum, log a warning on the owner.
+
+### 29. [med] An integrator never passes when the merged-in branch adds a Markdown heading underlined with exactly 7 `=` (worktrees.mjs:80-91)
+- **What:** `unresolvedFiles` flags every file that `git diff HEAD --check` reports as a "leftover conflict marker", then
+  confirms it with `/^={7}$/m`. A setext heading like `Install\n=======` or `Summary\n=======` matches both. During
+  integration the diff against HEAD includes everything the main branch changed, so such a heading added on main
+  since the task branched gets reported as "Still conflicted" on every attempt. The integrator then fails, and #28 leaves
+  its owner stuck.
+- **Repro (verified):** In the task worktree commit `a.txt`. On main, commit `README.md` with
+  `x\n\nInstall\n=======\n\nrun it\n`, then run `startIntegration`. It returns `['README.md']` (auto-merged,
+  no real conflict), and so does `unresolvedFiles`.
+- **Fix:** Only check files that were unmerged when the integration started (keep that list, e.g. in the task row).
+  Count a file as unresolved only if it has a `<<<<<<<` line followed later by a `>>>>>>>` line, rather than any
+  `=======` line.
+
+### 30. [low] With two failed prerequisites, retrying them in one order leaves the dependent failed (orchestrator.mjs:1178-1195)
+- **What:** C depends on A and B. A fails, so `cascadeBlock` marks C `failed` with `blocked: #A (…)`. B then fails, and
+  its cascade skips C because C is no longer queued. Retry A: `reviveBlocked(A)` leaves C alone because B is still down.
+  Retry B: `reviveBlocked(B)` only revives rows whose result starts with `blocked: #B`, so C (blocked by #A) stays
+  failed, along with its own dependents. Retrying B first and then A works.
+- **Fix:** In `reviveBlocked(root)`, revive any failed/cancelled dependent whose result has the blocked prefix of **any**
+  of its direct prerequisites, once none of them is failed or cancelled. Alternatively, keep a `blocked_by` list.
+
+### 31. [low] A declared directory whose name contains a dot (`.agent-orch`, `.github`, `fixtures.v2`) only covers itself (parallel.mjs:46-50)
+- **What:** `segs` treats a pattern as a directory only if it ends in `/` or its last segment has no `.`. So
+  `filesOverlap(['.agent-orch'], ['.agent-orch/AUDIT.md'])` is `false`, and two tasks that both change files under
+  `.agent-orch/` run in parallel. They then conflict at merge and need an integrator.
+- **Repro (verified):** `filesOverlap(['.agent-orch'], ['.agent-orch/AUDIT.md'])` → false,
+  `filesOverlap(['test/fixtures.v2'], ['test/fixtures.v2/x.js'])` → false, and `filesOverlap(['public'], ['public/app.js'])` → true.
+- **Fix:** Also treat a plain path without wildcards as a directory when it has no extension-like suffix after its last
+  non-leading dot, or simply always let a non-glob path cover `path/**` too. Being conservative here only costs
+  parallelism.
+
+### 32. [low] OpenCode's subscription-only guard doesn't check the global config or `OPENCODE_CONFIG_CONTENT` (agents.mjs:746-756, 797)
+- **What:** `runOpencode` refuses to run only when `opencode.json`/`opencode.jsonc`/`.env` **in the cwd** sets
+  `apiKey`/`baseURL`. OpenCode also loads `~/.config/opencode/{config.json,opencode.json,opencode.jsonc}`, project
+  configs in parent directories up to the git root, and inline JSON from `OPENCODE_CONFIG_CONTENT`. The installed
+  binary checks `OPENCODE_CONFIG_CONTENT` next to `OPENCODE_CONFIG`/`OPENCODE_CONFIG_DIR` and reads `.config/opencode`.
+  `envFilter` strips only `OPENCODE_(AUTH|CONFIG|CONFIG_DIR)`. A provider `apiKey` or `baseURL` in the global config
+  (which exists on this VM, currently with only `$schema`), or in that env var, would switch chats and tasks to
+  API-key billing without any warning.
+- **Fix:** Add `OPENCODE_CONFIG_CONTENT` to `envFilter`. Run the same `apiKey`/`baseURL` check on the global config
+  files and on every `opencode.json[c]` from the cwd up to the repo top. Alternatively, run with
+  `OPENCODE_CONFIG_CONTENT` set to a pinned config that forces the `openai` OAuth provider.

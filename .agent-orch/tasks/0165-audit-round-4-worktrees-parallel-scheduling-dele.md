@@ -13,3 +13,7 @@ Review, don't fix. Find real bugs in the code added since AUDIT round 3 (2026-09
 ## Done when
 
 `grep -q 'Round 4' .agent-orch/AUDIT.md`
+
+## Result — done (check passed) (2026-09-26 10:03)
+
+AGENT-ORCH-STATUS: done — AUDIT.md Round 4 lists six verified findings (#27–32)

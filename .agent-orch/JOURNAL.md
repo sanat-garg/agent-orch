@@ -485,3 +485,7 @@ Fixed 160×100 thumbnails; lightbox opens images at original size; tests pass
 ## 2026-09-26 06:10 — #163 Fix 'While you were away' window overflowing the screen on iPhone [done (check passed)]
 
 Away sheet and all modals fit phone screens; tests pass
+
+## 2026-09-26 08:29 — #159 Research OpenCode, Kiro and GitHub Copilot CLIs for headless use [done]
+
+Three CLI research sections documented; all help checks passed.

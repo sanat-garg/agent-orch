@@ -12,6 +12,9 @@ Summary:
 | OpenAI Codex CLI | `/usr/bin/codex` | codex-cli 0.157.0 | `codex exec --json` | `codex exec resume <id>` | JSONL `thread.*`/`turn.*`/`item.*` |
 | Google Antigravity CLI | `~/.local/bin/agy` | 1.2.10 | `agy -p … --output-format stream-json` | `--conversation <id>` / `-c` | NDJSON `init`/`step_update`/`result` |
 | Google Gemini CLI (fallback) | `/usr/bin/gemini` | 0.61.0 | `gemini -p … -o stream-json` | `-r latest\|<index>` | NDJSON `init`/`message`/`tool_use`/`tool_result`/`error`/`result` |
+| OpenCode | `/usr/bin/opencode` | 1.18.32 | `opencode run --format json` | `-s <id>` / `-c` | JSONL `step_start`/`text`/`tool_use`/`step_finish`/`error` |
+| Kiro CLI | `~/.local/bin/kiro-cli` | 2.24.1 | `kiro-cli chat --no-interactive --output-format stream-json` | `--resume-id <id>` | JSONL (V2/V3; live payload unverified) |
+| GitHub Copilot CLI | `/usr/bin/copilot` | 1.0.88 | `copilot -p … --output-format json` | `--resume=<id>` / `--continue` | JSONL `assistant.*`/`tool.*`/`result` |
 
 **Antigravity vs Gemini:** Antigravity **does** ship a headless CLI, `agy`, with a native linux_arm64 build, so
 use it as the "Google" agent. The Gemini CLI is also installed and documented below as a fallback, and for Gemini
@@ -258,3 +261,96 @@ gemini -p "PROMPT" -o stream-json \          # text | json | stream-json
   this model" / "exhausted your capacity") and `RetryableQuotaError` (per-minute 429, retried internally). A
   terminal quota error ends the run with `result.status:"error"`, where `error.type` is the class name. On free
   or personal tiers, the CLI may also fall back to a Flash model on quota, and `init.model` doesn't show that.
+
+---
+
+## 4. OpenCode (`opencode`)
+
+### Install and subscription login
+- Verified 2026-09-26 on linux/arm64: `sudo npm i -g opencode-ai` installed **1.18.32** at `/usr/bin/opencode`; `opencode --help` and `opencode run --help` exit 0. [CLI reference](https://opencode.ai/docs/cli/).
+- `opencode auth login` (select OpenAI → **ChatGPT Plus/Pro**), or TUI `/connect` with the same choices, is the subscription OAuth route. The TUI is terminal based and can be launched in a Connections tmux pane. The [provider guide](https://opencode.ai/docs/providers/#openai) says it opens a browser; it does **not** document a guaranteed device-code or pasted-code fallback for a remote SSH host. Here `opencode auth login openai` failed with `Failed to load auth provider metadata from openai: fetch() URL is invalid`; plain `auth login` opened a provider picker but timed out with zero matches. Verify that this build can load the provider and displays a transferable URL/code before treating it as a working Connections flow. Do not select “Manually enter API Key.” GitHub Copilot subscription is another supported provider via `/connect` → GitHub Copilot, with `github.com/login/device` and a one-time code ([guide](https://opencode.ai/docs/providers/#github-copilot)); it would consume Copilot's allowance, not an independent OpenCode allowance.
+- `opencode auth list` is the status check: on this VM it reports **0 credentials** (exit 0). The docs locate provider OAuth/key records at `~/.local/share/opencode/auth.json`; sessions live in `~/.local/share/opencode/opencode.db` (observed). `auth list` reports provider names, not a reliable account email or billing mode. Inspect the `openai` credential **type** without logging its secret before enabling routing. No subscription login was performed in this unattended task.
+- OpenCode also loads provider keys from environment and project `.env` files. Strip at least `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_ORG_ID`, `OPENAI_ORGANIZATION`, `OPENAI_PROJECT_ID`, `AZURE_OPENAI_*`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GITHUB_TOKEN`, `GH_TOKEN`, `COPILOT_GITHUB_TOKEN`, and provider-specific `*_API_KEY`/`*_TOKEN` when using a chosen OAuth provider. Inspect project `opencode.json` and `.env` for `provider.*.options.apiKey` / `baseURL`; environment stripping alone cannot guarantee subscription billing. Do not route to OpenCode Zen/Go (separate billing) unless explicitly configured by the owner.
+
+### Headless, sessions, models
+```sh
+opencode run --dir /path/to/workdir --format json \
+  --model openai/<id-from-models> --auto 'PROMPT' </dev/null
+opencode run --dir /path/to/workdir --format json \
+  --session ses_... --auto 'follow-up' </dev/null
+```
+- `--dir` or process cwd chooses the workspace; `--model` takes `provider/model`, `--variant` selects provider-specific reasoning. `--auto` approves permissions not explicitly denied (current `run --help` calls it dangerous). Explicit deny rules in config still apply. `--continue` resumes the latest session; `--session` resumes an exact ID; `--fork` branches it. `opencode session list --format json` discovers saved IDs.
+- `opencode models openai` lists configured OpenAI model IDs as `provider/model`; `opencode models github-copilot` does likewise after that provider is connected. `--refresh` refreshes Models.dev's catalog. This is **catalog/config discovery**, so filter by the connected OAuth provider and verify plan access; it is not a quota or entitlement endpoint. Both provider-specific commands currently fail `Provider not found` because this VM has no OpenCode credentials.
+
+### Stream and limits
+- `--format json` writes newline-delimited objects to stdout, with `type`, `timestamp` (epoch ms), `sessionID`, and often `part`. [OpenCode's own JSON-stream issue](https://github.com/anomalyco/opencode/issues/26855) shows real success rows (shortened here):
+```jsonl
+{"type":"step_start","sessionID":"ses_…","part":{"type":"step-start"}}
+{"type":"text","sessionID":"ses_…","part":{"type":"text","text":"Hello"}}
+{"type":"tool_use","sessionID":"ses_…","part":{"type":"tool","tool":"bash","state":{"status":"running","input":{"command":"pwd"}}}}
+{"type":"tool_use","sessionID":"ses_…","part":{"type":"tool","tool":"bash","state":{"status":"completed","output":"/tmp\n"}}}
+{"type":"step_finish","sessionID":"ses_…","part":{"type":"step-finish","reason":"stop","tokens":{"input":209,"output":209,"reasoning":0,"cache":{"read":18944,"write":0}},"cost":0}}
+```
+- The `tool_use` examples above are **schema sketches**, not captured output on this account; the `step_start`/`text`/`step_finish` shapes are shortened from the linked upstream sample. Tool call and result are updates to one tool part (`state.status`), not necessarily separate event types. The final text is the last text part; completion is process exit and normally `step_finish`. An upstream [bug report](https://github.com/anomalyco/opencode/issues/26855) documents that `step_finish` can be absent even after a successful run; do not require it for success or assume usage is complete. `opencode stats --models` reads local historical tokens/cost, not live plan windows. Signed-out test here emitted `{"type":"error","sessionID":"ses_…","error":{"name":"UnknownError","data":{"message":"Unexpected server error. Check server logs for details.","ref":"err_…"}}}` and exited 1.
+- No live provider 429/quota sample or reset time was available. Check `type:"error"` and process exit, then classify provider-specific `429`, `rate_limit`, `quota`, and “usage limit” messages; preserve any `retry-after`/reset text, otherwise reset is unknown. OpenCode routes to different subscriptions, so limits must be keyed by **provider**, not one global OpenCode bucket. A real limit hit is needed to validate the parser before routing tasks.
+
+---
+
+## 5. AWS Kiro CLI (`kiro-cli`)
+
+### Install and account login
+- Verified 2026-09-26: the [official installer](https://kiro.dev/docs/cli/) `curl -fsSL https://cli.kiro.dev/install | bash` installed native linux/arm64 **2.24.1** at `~/.local/bin/kiro-cli`; `kiro-cli --help` exits 0. The installer requires `unzip` (installed on this VM). Use the absolute path if the service PATH omits `~/.local/bin`.
+- [Authentication docs](https://kiro.dev/docs/cli/authentication/) support AWS Builder ID, GitHub, Google and IAM Identity Center. On SSH use `kiro-cli login --use-device-flow` (optionally `--social github` or `--social google`), then open its URL elsewhere and enter the one-time code. This is suitable for the existing tmux-driven Connections pane; a plain `kiro-cli login` may try and fail to open a local browser. A Builder ID is **one option**, not a requirement. No account was authenticated in this unattended task.
+- `kiro-cli whoami --format json` is the status/identity check; here it returned `{"account":null}` (exit 0). Browser session credentials take precedence over `KIRO_API_KEY`. The exact secret file/keyring path after successful login could not be verified without signing in. Kiro settings/sessions use `~/.kiro/` (`KIRO_HOME` overrides); do not mistake `~/.kiro/settings/cli.json` for the credential store. Strip `KIRO_API_KEY` from child environments to force browser subscription auth, and reject `whoami.account == null` or an API-key account. The [docs](https://kiro.dev/docs/cli/authentication/) say API-key consumption still draws subscription credits, but the owner's constraint is browser login.
+
+### Headless, sessions, models
+```sh
+cd /path/to/workdir
+~/.local/bin/kiro-cli chat --no-interactive --agent-engine v2 \
+  --output-format stream-json --trust-all-tools \
+  --model <id-from-list-models> 'PROMPT' </dev/null
+~/.local/bin/kiro-cli chat --no-interactive --agent-engine v2 \
+  --output-format stream-json --trust-all-tools \
+  --resume-id <session-id> 'follow-up' </dev/null
+```
+- Cwd selects the project. `--trust-tools=fs_read,fs_write` can limit approvals; `--trust-all-tools` permits autonomous work. V2 is the current default and V2/V3 are required for `stream-json` ([headless guide](https://kiro.dev/docs/cli/headless/)). `--resume` is latest in this directory, `--resume-id` is exact, `chat --list-sessions --format json` lists IDs. `chat --list-models --format json` is account-specific discovery, and `--model` selects an ID. Here model listing tried to open a browser and failed because `whoami` is null; never treat a signed-out list as empty entitlements.
+- The headless guide says **API key is required** while the authentication guide says an active browser session takes precedence and can be used by the CLI. This conflict remains untested until subscription login. Signed-out `chat --no-interactive --output-format stream-json 'Say hi'` printed browser-auth diagnostics and exited 1, with no JSONL. Do not claim subscription headless viability yet.
+
+### Stream and limits
+- Official [headless docs](https://kiro.dev/docs/cli/headless/) promise one JSON object per stdout line for V2/V3, including a terminal interruption record in V3, but publish **no event schema**. Without a login, this VM yielded no text/tool/result/usage/error JSON events. Therefore exact sample keys for those events cannot be supplied honestly. Capture one read-only and one tool-using authenticated run before writing an adapter; do not assume Claude's `stream-json` schema. Stderr may contain ANSI progress and auth errors even with JSON output. Treat nonzero exit and absent terminal record as failure; inspect raw JSONL once available.
+- `/usage` in an interactive chat shows credits ([command reference](https://kiro.dev/docs/cli/reference/slash-commands/)); no documented non-interactive quota JSON command or reset field was found. [Billing docs](https://kiro.dev/docs/billing/) say credits renew at the start of the next billing cycle. Watch stderr/JSON errors for exhausted credits, 429 and throttling, but a real error string/reset timestamp was unavailable. Keep reset unknown rather than infer a date from installation or generic monthly cadence.
+
+---
+
+## 6. GitHub Copilot CLI (`copilot`)
+
+### Install and subscription login
+- Verified 2026-09-26: `sudo npm i -g @github/copilot` installed **1.0.88** at `/usr/bin/copilot`; `copilot --help` exits 0. [Official reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference).
+- `copilot login --device-code` displays a browser URL and one-time code; its CLI help says remote/headless Linux defaults to device flow. This command fits a tmux Connections pane. `copilot login` stores an OAuth token in the system credential store, or plaintext under `~/.copilot/` if unavailable ([auth docs](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/authenticate-copilot-cli)). `COPILOT_HOME` overrides the directory. `/user show` and `/user list` in interactive CLI identify the account; there is **no `copilot auth status`** (it exits 1, invalid command). `gh auth status` checks the fallback GitHub CLI token, not a Copilot license by itself.
+- On this machine `gh auth status` shows the owner's `sanat-garg` account, and `copilot -p 'Say hi' --output-format json` succeeded using that fallback, returning `Hi!` and a `result` with exitCode 0. No separate Copilot credential was required. [GitHub's auth docs](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/authenticate-copilot-cli) explicitly say the `gh` token is the lowest-priority fallback. The working subscription/account was verified by a real run, though plan tier was not exposed.
+- Strip `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, `COPILOT_PROVIDER_API_KEY`, `COPILOT_PROVIDER_API_KEY_COMMAND`, `COPILOT_PROVIDER_BEARER_TOKEN`, and custom-provider endpoint vars/settings. The first three override stored/`gh` OAuth credentials; they are not inherently paid API billing, but can silently change identity. The provider vars activate BYOK/custom-provider routing. Inspect `~/.copilot/settings.json` for a custom provider and use `--model` from the authenticated Copilot list. `COPILOT_HOME` should be fixed to the intended auth home, not inherited from a task environment.
+
+### Headless, sessions, models
+```sh
+copilot -C /path/to/workdir -p 'PROMPT' --output-format json \
+  --model <id-from-model-picker> --allow-all --no-ask-user </dev/null
+copilot -C /path/to/workdir -p 'follow-up' --output-format json \
+  --resume=<session-id> --allow-all --no-ask-user </dev/null
+```
+- `-p` exits after the response; piped stdin is ignored when `-p` is supplied. `-C` sets cwd. `--allow-all` grants tools, paths and URLs; `--allow-all-tools` only grants tools. `--allow-tool='read,write,shell(npm:*)'` grants a subset. `--no-ask-user` removes the clarifying-question tool. `--continue` resumes latest; `--resume=<id>` resumes exact; bare `--resume` needs a TTY picker and errors with multiple sessions in prompt mode ([reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference)). The final `result.sessionId` is the resume ID (observed).
+- `--model` selects one model or `auto`. The authenticated interactive `/model` or `/models` picker is GitHub's documented current entitlement discovery; this CLI version has **no documented non-interactive machine-readable model-list command**. `copilot --help` and the public supported-models page are only catalogs, not account-specific proof. The JSON stream's `session.tools_updated.data.model` and `assistant.message.data.model` show the selected/resolved model (our run used `gpt-5.6-luna`), but do not enumerate choices. Model discovery for an adapter remains blocked until the picker can be scraped safely or another official API is verified.
+
+### JSONL, usage and limits
+- `--output-format json` streams JSONL on stdout. These shortened examples are from **successful runs on this VM**; every real event also carries `id`, `timestamp` and `parentId`. Copilot emits delta and completed tool rows; `assistant.message` is the complete final text. `result` is the terminal envelope:
+```jsonl
+{"type":"session.tools_updated","data":{"model":"gpt-5.6-luna"}}
+{"type":"assistant.tool_call_delta","data":{"toolCallId":"call_…","toolName":"bash","inputDelta":"{\"command\":\"pwd\"}"}}
+{"type":"tool.execution_start","data":{"toolCallId":"call_…","toolName":"bash","arguments":{"command":"pwd"}}}
+{"type":"tool.execution_complete","data":{"toolCallId":"call_…","success":true,"result":{"content":"/tmp\n"},"shellExecution":{"exitCode":0}}}
+{"type":"assistant.message_delta","data":{"deltaContent":"Hi"}}
+{"type":"assistant.message","data":{"model":"gpt-5.6-luna","content":"Hi!","phase":"final_answer"}}
+{"type":"session.usage_checkpoint","data":{"totalPremiumRequests":1,"totalNanoAiu":277497000}}
+{"type":"result","sessionId":"711a…","exitCode":0,"usage":{"premiumRequests":1,"totalApiDurationMs":2317,"sessionDurationMs":8599}}
+```
+- The `tool_call_delta` was combined here for readability; real input arrived in many small deltas. `session.usage_checkpoint` may be enormous and includes internal cache state; extract only the counters needed. `result.usage.premiumRequests` is per run; `session.usage_checkpoint.totalPremiumRequests` is session cumulative. `/usage` shows session token and credit statistics, **not** remaining account allowance or its reset time. No real quota/error event occurred. Preserve `type:error`/failure payloads and nonzero `result.exitCode`; classify explicit 429/rate-limit/credit-exhausted messages only after a sample is seen. Do not treat a `tool.execution_complete` failure as provider quota.
+- GitHub billing may use AI credits or legacy premium requests depending on plan. A [legacy-plan reference](https://docs.github.com/en/copilot/reference/copilot-billing/request-based-billing-legacy/copilot-requests) says legacy counters reset at 00:00 UTC on the first of each month; this is **not** evidence of this account's reset. No current remaining-quota/reset command was verified. The Connections status can prove usable auth with a prompt, but not promise a live remaining allowance from CLI output alone.

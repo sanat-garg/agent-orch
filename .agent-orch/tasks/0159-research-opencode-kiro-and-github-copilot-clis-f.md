@@ -12,3 +12,7 @@ Research and install three more coding-agent CLIs (BRIEF goal 10) and document t
 ## Done when
 
 .agent-orch/AGENTS.md has OpenCode, Kiro and Copilot sections covering install, login, headless command, output format, models and limits, and each binary's `--help` exits 0
+
+## Result — done (2026-09-26 08:29)
+
+AGENT-ORCH-STATUS: done — Three CLI research sections documented; all help checks passed.

@@ -1,0 +1,15 @@
+# Task #207: Stop parallel runs: one task at a time, memory guard, free disk space
+
+- kind: work  
+- source: planner  
+- priority: 85 (urgent)  
+- created: 2026-09-26 19:39  
+- files: orchestrator.mjs, delegate.mjs, server.mjs, public/app.js, .agent-orch/CONTEXT.md, test/parallel*.test.mjs, test/scheduler*.test.mjs, test/memory*.test.mjs
+
+## Prompt
+
+URGENT. The owner reversed the parallel-agents direction (see .agent-orch/BRIEF.md goal 9): running agents in parallel keeps the VPS RAM at 100%. The disk or temp quota is also full: Claude Code reports EDQUOT on /tmp/claude-1001/…, so shell output is being lost. Do this in order. 1) Free disk space first, checking `df -h`, `du -xh --max-depth=2 / 2>/dev/null | sort -h | tail -30` and `quota` if it exists: remove orphaned task worktrees (`git worktree list`; delete the ones for done/failed/cancelled tasks, keeping any in needs_integration or running state, plus their merged agent-orch/task-* branches), node_modules copies inside worktrees, old /tmp test dirs (CW_DATA_DIR temps, smoke-test scratch projects, Playwright artifacts, /tmp/claude-*/…/tasks output older than 1 day), old .agent-orch/shots (keep the newest 50), the npm cache (`npm cache clean --force`), and rotated logs. Never delete data/ contents except old run logs over 14 days, if they're large. Record the before/after `df` in .agent-orch/CONTEXT.md Gotchas in one line. 2) Concurrency: change the scheduler (orchestrator.mjs, including the dynamic-slot logic from task #192) so the DEFAULT is exactly 1 running work task at a time across all projects. The plan and chat turns run as before. Keep the setting in orchestrator settings as 'Parallel tasks: 1 (recommended) / 2', where 2 is allowed only when available memory (os.freemem plus reclaimable, read from /proc/meminfo MemAvailable) exceeds 2.5 GB AND the swap in use is under 25%, re-checked before every claim. 3) Memory guard for every run: before claiming, if MemAvailable is under 800 MB, wait. During runs, if MemAvailable stays under 300 MB for 30 s, pause the newest running task (graceful abort, resumable) and log 'Paused #N: server memory low'. 4) Worktrees: make them cheap. Symlink node_modules from the main checkout instead of copying, and remove each worktree right after merge. 5) The planner and reflection prompts: remove the 'decompose for parallelism / spread across agents' instructions and the parallel-group example added in #192, and replace them with 'plan sequential chains; use after only for true prerequisites; the machine runs one task at a time'. Keep 'files' as optional metadata. 6) The UI lanes view (#193) may stay, but its header should say 'Running 1 · N queued'. Tests: the default of 1 slot, 2 only with the setting AND memory headroom (mock /proc/meminfo), and the low-memory pause. Run only the targeted test files while the disk is tight, then the full `npm test` at the end.
+
+## Done when
+
+`npm test` passes with one-slot default and memory-guard tests, `df -h /` shows free space, and `git worktree list` shows no worktrees for finished tasks

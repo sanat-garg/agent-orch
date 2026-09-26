@@ -37,9 +37,11 @@ was retired when benchmark ranking was removed in #152/#153. Current work harden
    When a task's model is rate-limited, it moves to the first fallback that has usage left. With an empty list the
    task waits. The UI must make it obvious which model a task is on, whether it was delegated, and what happens
    when a limit hits. Keep it simple and foolproof.
-9. Parallel agents (owner, 2026-09-26): rate limits are per agent and token-based, so split work into tasks that
-   touch disjoint files and run them in parallel across agents (each in its own git worktree), with an integrator
-   task that merges and verifies their results.
+9. Parallel agents: resource-aware (owner, 2026-09-26 19:40). Parallel runs had kept the VPS RAM at 100%. Now a
+   resource monitor measures CPU and RAM per process, reaps leftover processes (orphaned agent CLIs, stale test
+   servers, headless browsers, dead login sessions), and grants extra task slots only while there's measured
+   headroom. The default is one task at a time. Plan sequential chains with true prerequisites; the scheduler adds
+   parallelism only when the machine can afford it. Worktrees must stay cheap on disk and memory.
 10. More agent CLIs (owner, 2026-09-26): OpenCode CLI, Kiro CLI and GitHub Copilot CLI, each fully runnable
    (headless commands, model discovery, limits) and connectable from the Connections modal.
 

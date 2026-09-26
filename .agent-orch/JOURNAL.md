@@ -536,3 +536,7 @@ Detached-HEAD task worktrees re-attach and keep work; tests pass
 ## 2026-09-26 10:38 — #171 Fix AUDIT #29: unresolvedFiles must not flag setext ======= headings [done (check passed)]
 
 Setext ======= headings are no longer flagged as unresolved conflicts
+
+## 2026-09-26 10:48 — #178 Mobile HIG review: screenshot the main screens at 390x844 and list prioritised UI findings [done (check passed)]
+
+UI-REVIEW.md has 17 HIG findings; 15 screenshots saved

@@ -3212,9 +3212,7 @@ function onOrch(msg) {
 }
 
 // ----- the status bar above the chat
-// Each agent's usage limit is independent (antigravity's per model group): state.blocks = { claude: { until, known,
-// reason }, codex: …, 'antigravity:3p': … }.
-const limitedAgents = (s, nowS) => Object.entries(s.blocks || {}).filter(([, b]) => b.until > nowS);
+let obTogglePending = null;
 function renderOrchBar() {
   renderConnFoot(); // routing rules decide whether a signed-out agent warrants the footer's warning
   renderLanes();
@@ -3222,22 +3220,15 @@ function renderOrchBar() {
   $('orchBar').hidden = !on;
   if (!on) return;
   const p = O.project, s = O.state || {}, nowS = Date.now() / 1000;
-  let status;
-  if (!p) status = 'Describe what you want. The planner breaks it into small, verified tasks.';
-  else if (s.subscription === false) status = 'Waiting: Claude Code is not signed in with your subscription';
-  else if (limitedAgents(s, nowS).length) status = limitedAgents(s, nowS).map(([id, b]) => `${limitName(id)}: ${b.reason || 'usage limit'} reached · resumes ${fmtClock(b.until)}`).join(' · ');
-  else if (p.ready === false) status = GH.linked ? 'Setting up the GitHub repo… work starts once it exists' : 'Waiting for GitHub: link it and work starts (every task is pushed)';
-  else if (p.status === 'paused') status = 'Paused. Tasks keep their progress.';
-  else if (p.counts.running) status = `Working on ${p.counts.running} task${p.counts.running > 1 ? 's' : ''}`;
-  else if (p.counts.queued) status = `${p.counts.queued} task${p.counts.queued > 1 ? 's' : ''} waiting to start`;
-  else if (p.perpetual) status = p.next_reflect_at > nowS + 90 ? `All done · next improvement check at ${fmtClock(p.next_reflect_at)}` : 'All done · looking for improvements shortly';
-  else status = 'All tasks done';
+  const paused = (obTogglePending && obTogglePending.id === p?.id ? obTogglePending.status : p?.status) === 'paused';
+  const running = p?.counts?.running || 0, queued = p?.counts?.queued || 0;
+  const status = paused ? 'Paused' : running || queued ? `Running ${running} · ${queued} queued` : 'Idle';
   blurSwap($('obStatus'), status);
   $('obStatus').title = s.pacing ? `Pacing: ${s.pacing}` : '';
   const counts = $('obCounts');
   counts.textContent = '';
   if (p) {
-    for (const [k, label] of [['queued', 'queued'], ['done', 'done'], ['failed', 'failed']]) {
+    for (const [k, label] of [['done', 'done'], ['failed', 'failed']]) {
       if (!p.counts[k]) continue;
       const span = el('span');
       span.append(el('b', '', String(p.counts[k])), document.createTextNode(` ${label}`));
@@ -3293,7 +3284,10 @@ function renderOrchBar() {
   $('obQueue').hidden = !p;
   $('obSettingsBtn').parentElement.hidden = !p;
   if (p) {
-    $('obPause').textContent = p.status === 'paused' ? 'Resume' : 'Pause';
+    $('obPause').textContent = paused ? '▶ Resume' : '⏸ Pause';
+    $('obPause').classList.toggle('primary', paused);
+    $('obPause').disabled = obTogglePending?.id === p.id;
+    $('obPause').setAttribute('aria-busy', String(obTogglePending?.id === p.id));
     $('obPerpetual').checked = p.perpetual;
     $('obPriority').value = p.priority >= 65 ? '80' : p.priority <= 35 ? '25' : '50';
     renderReflectBtn();
@@ -3313,7 +3307,18 @@ async function saveParallel(fields) {
   } catch (e) { toast(e.message, { kind: 'error' }); renderOrchBar(); }
 }
 $('obParallel').addEventListener('change', (e) => saveParallel({ maxParallel: e.target.value === 'auto' ? null : Number(e.target.value) }));
-$('obPause').addEventListener('click', () => orchProject({ status: O.project?.status === 'paused' ? 'active' : 'paused' }));
+$('obPause').addEventListener('click', async () => {
+  const p = O.project;
+  if (!p || obTogglePending) return;
+  const status = p.status === 'paused' ? 'active' : 'paused';
+  obTogglePending = { id: p.id, status };
+  renderOrchBar();
+  try {
+    await api(`/api/orch/project/${p.id}`, 'POST', { status });
+    if (O.project?.id === p.id) O.project.status = status;
+  } catch (e) { toast(e.message, { kind: 'error' }); }
+  finally { obTogglePending = null; renderOrchBar(); }
+});
 $('obPerpetual').addEventListener('change', (e) => orchProject({ perpetual: e.target.checked }));
 $('obPriority').addEventListener('change', (e) => orchProject({ priority: Number(e.target.value) }));
 $('obSettingsBtn').addEventListener('click', (e) => {

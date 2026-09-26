@@ -135,7 +135,9 @@ for (const vp of VIEWPORTS) {
     const { ctx, page, errors } = await open(vp);
     for (const id of MODALS.filter((x) => x !== 'awayModal')) {
       await page.evaluate((id) => { for (const m of document.querySelectorAll('.modal')) m.hidden = m.id !== id; }, id);
-      await page.waitForTimeout(350);
+      await page.evaluate(async (id) => {
+        await Promise.all(document.querySelector(`#${id} .modal-panel`).getAnimations().map((a) => a.finished.catch(() => {})));
+      }, id);
       inside(await measure(page, id), id);
     }
     await ctx.close();

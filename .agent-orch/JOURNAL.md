@@ -584,3 +584,11 @@ That was the old monitor timing out. I'm still waiting for the new run to finish
 ## 2026-09-26 15:48 — #195 Agent health check: verify models and rate limits for all six CLIs [done (check passed)]
 
 agent-health exits 0; all six agents report health; tests pass
+
+## 2026-09-26 19:10 — #204 Orchestrator dock: remove limit text, make Pause/Resume prominent [verify failed (1)]
+
+Command: node --check public/app.js && npm test && ! grep -n "reached · re" public/app.js
+
+## 2026-09-26 19:29 — #204 Orchestrator dock: remove limit text, make Pause/Resume prominent [done (check passed)]
+
+Temporary fixture isolation fixed; exact verification passes all 267 tests.

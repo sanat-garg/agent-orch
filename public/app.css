@@ -683,6 +683,21 @@ code, pre, kbd { font-family: var(--mono); }
 .ob-counts { display: flex; gap: 6px; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .ob-counts span b { color: var(--text); font-weight: 600; }
 .orch-bar .chip { height: 28px; }
+.ob-pause { flex: none; min-height: 36px; white-space: nowrap; }
+.ob-pause:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ob-pause:disabled { cursor: progress; }
+#obLaneStrip { order: 1; flex-basis: 100%; }
+@media (pointer: coarse) { .ob-pause { min-height: 44px; } }
+@media (max-width: 600px) {
+  .orch-bar { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 6px; }
+  .orch-bar .ob-icon, .orch-bar .ob-title { display: none; }
+  .ob-status { grid-column: 1 / 3; min-width: 0; }
+  .ob-pause { grid-column: 3; grid-row: 1; min-height: 44px; }
+  #obQueue { grid-column: 1; justify-self: start; }
+  .orch-bar > .pop-wrap { grid-column: 2 / 4; justify-self: end; }
+  .orch-bar .chip { min-height: 44px; }
+  #obLaneStrip { grid-column: 1 / -1; }
+}
 .orch-bar .pop-wrap .popover { bottom: calc(100% + 6px); top: auto; left: auto; right: 0; width: 320px; padding: 6px; }
 /* keep the "scroll to latest" button clear of the bar */
 .chat:has(.orch-bar:not([hidden])) .jump { bottom: 196px; }

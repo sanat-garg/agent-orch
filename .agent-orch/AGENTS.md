@@ -208,6 +208,11 @@ cd /path/to/workdir &&            # no --cd flag: the working dir is the process
 ```
 - Text: `step_update` with `step_type=="agent_response"` and `text_delta`. Tool calls: `step_type=="tool"`, with
   `tool_name` and `tool_info` (parameters and output). `user_input` and `checkpoint` steps also appear.
+- The stream is lossy (checked 2026-09-26): run_command has no exit code and no `output` when silent, edit tools
+  (write_to_file, replace_file_content) have no output and only their path parameter. agy saves the full step:
+  `~/.gemini/antigravity-cli/brain/<conversation>/.system_generated/steps/<step_index>/output.txt` ("The command exited
+  with code N.\nStdout:…") and `conversations/<conversation>.db` table `steps` (idx = step_index; `step_payload` is a
+  protobuf whose field 5.4.3 is the call's JSON args and 140.2.1 its output). `agyStepNative` reads both read-only.
 - Final result: `event=="result"`, with `status` one of SUCCESS | ERROR | CANCELED | INTERRUPTED | INVALID |
   WAITING | RUNNING, plus `response` and `usage`. `--output-format json` prints only that result envelope.
 

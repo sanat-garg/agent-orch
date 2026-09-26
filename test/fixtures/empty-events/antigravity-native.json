@@ -1,0 +1,89 @@
+{
+ "agy-empty-fixture": {
+  "2": {
+   "output": "\nThe command exited with code 0.\nStdout:\n\nStderr:\n\n",
+   "args": {
+    "CommandLine": "true",
+    "Cwd": "/workspace",
+    "WaitMsBeforeAsync": 2000,
+    "toolAction": "Running true command",
+    "toolSummary": "Run true command"
+   }
+  },
+  "4": {
+   "output": "\nThe command exited with code 1.\nStdout:\n\nStderr:\n\n",
+   "args": {
+    "CommandLine": "false",
+    "Cwd": "/workspace",
+    "WaitMsBeforeAsync": 2000,
+    "toolAction": "Running false command",
+    "toolSummary": "Run false command"
+   }
+  },
+  "8": {
+   "output": "Created file file:///workspace/b.txt with requested content.\nIf relevant, proactively run terminal commands to execute this code for the USER. Don't ask for permission.",
+   "args": {
+    "CodeContent": "x\n",
+    "Description": "Create b.txt with content x",
+    "Overwrite": true,
+    "TargetFile": "/workspace/b.txt",
+    "toolAction": "Creating b.txt",
+    "toolSummary": "Create file b.txt"
+   }
+  },
+  "10": {
+   "output": "The following changes were made by the replace_file_content tool to: /workspace/a.txt. If relevant, proactively run terminal commands to execute this code for the USER. Don't ask for permission.\n[diff_block_start]\n@@ -1,3 +1,3 @@\n-hello\n+hi\n world\n \n[diff_block_end]\n\nPlease note that the above snippet only shows the MODIFIED lines from the last change. It shows up to 3 lines of unchanged lines before and after the modified lines. The actual file contents may have many more lines not shown.",
+   "args": {
+    "AllowMultiple": false,
+    "Description": "Replace hello with hi in a.txt",
+    "EndLine": 2,
+    "Instruction": "Replace 'hello' with 'hi'",
+    "ReplacementContent": "hi",
+    "StartLine": 1,
+    "TargetContent": "hello",
+    "TargetFile": "/workspace/a.txt",
+    "toolAction": "Editing a.txt",
+    "toolSummary": "Replace text in a.txt"
+   }
+  },
+  "12": {
+   "output": "\nThe command exited with code 0.\nOutput:\ntotal 20\r\ndrwxr-xr-x     3 ubuntu ubuntu    140 Sep 26 15:52 .\r\ndrwxrwxrwt 10510 root   root   215760 Sep 26 15:53 ..\r\ndrwxr-xr-x     6 ubuntu ubuntu    180 Sep 26 15:50 .git\r\n-rw-r--r--     1 ubuntu ubuntu      9 Sep 26 15:53 a.txt\r\n-rw-r--r--     1 ubuntu ubuntu   6184 Sep 26 15:53 agy1.jsonl\r\n-rw-r--r--     1 ubuntu ubuntu      2 Sep 26 15:52 b.txt\r\n-rw-r--r--     1 ubuntu ubuntu    531 Sep 26 15:50 codex1.jsonl\r\n\n",
+   "args": {
+    "CommandLine": "ls -la",
+    "Cwd": "/workspace",
+    "WaitMsBeforeAsync": 2000,
+    "toolAction": "Listing directory contents",
+    "toolSummary": "List directory"
+   }
+  }
+ },
+ "agy-run136-fixture": {
+  "2": {
+   "output": "File Path: `file:///workspace/.agent-orch/BRIEF.md`\nTotal Lines: 51\nTotal Bytes: 3734\nShowing lines 1 to 51\nThe following code has been modified to include a line number before every line, in the format: <line_number>: <original_line>. Please note that any changes targeting the original code should remove the line number, colon, and leading space.\n1: # Project Brief\n2: \n3: _Maintained",
+   "args": {
+    "AbsolutePath": "/workspace/.agent-orch/BRIEF.md",
+    "toolAction": "Reading project brief",
+    "toolSummary": "Project brief"
+   }
+  },
+  "87": {
+   "output": "Task: agy-run136-fixture/task-75\nStatus: RUNNING\nLog: /home/ubuntu/.gemini/antigravity-cli/brain/agy-run136-fixture/.system_generated/tasks/task-75.log\nLog output:\n<truncated 93 lines>\nntal feature and might change at any time\r\n(Use `node --trace-warnings ...` to show where the warning was created)\r\n✔ initMemory moves .ao2/ to .agent-orch/ (354.468993ms)\r\n✔ migr",
+   "args": {
+    "Action": "status",
+    "TaskId": "agy-run136-fixture/task-75",
+    "toolAction": "Checking test status",
+    "toolSummary": "Test status check"
+   }
+  },
+  "89": {
+   "output": "Timer cancelled early: its early-termination condition (agy-run136-fixture/task-75) was met by a message from agy-run136-fixture/task-75.",
+   "args": {
+    "DurationSeconds": 90,
+    "Prompt": "Check on npm test results",
+    "TimerCondition": "agy-run136-fixture/task-75",
+    "toolAction": "Setting test timer",
+    "toolSummary": "Test completion timer"
+   }
+  }
+ }
+}

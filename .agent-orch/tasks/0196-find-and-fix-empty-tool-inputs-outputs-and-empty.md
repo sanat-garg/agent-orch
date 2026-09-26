@@ -13,3 +13,7 @@ The owner sees agents' commands or results come back as "" or {} when they shoul
 ## Done when
 
 `npm test` passes with the per-agent empty-event regression fixtures, and .agent-orch/EMPTY-EVENTS.md shows the before/after counts, with zero unexplained empties in the new smoke runs
+
+## Result — done (check passed) (2026-09-26 20:27)
+
+AGENT-ORCH-STATUS: done — empty events fixed; fixtures pass; smoke runs show zero unexplained empties

@@ -353,10 +353,7 @@ test('antigravity: recorded file tools retain paths, native errors and successfu
   assert.equal(results.length, 2);
   assert.equal(results[0].id, '2');
   assert.equal(results[0].isError, true);
-  assert.deepEqual(JSON.parse(results[0].text), {
-    type: 'TOOL_ERROR',
-    message: 'declaring permissions: cortex tool view_file: convert tool call for permissions: model output error: invalid tool call error (invalid_args) failed to read file: stat /workspace/missing.txt: no such file or directory',
-  });
+  assert.equal(results[0].text, 'declaring permissions: cortex tool view_file: convert tool call for permissions: model output error: invalid tool call error (invalid_args) failed to read file: stat /workspace/missing.txt: no such file or directory');
   assert.deepEqual(results[1], { k: 'tool_result', id: '4', text: '2 lines, 24 bytes', isError: false, lines: 1 });
   assert.match(res.text, /ANTIGRAVITY_READ_OK_134/);
 });

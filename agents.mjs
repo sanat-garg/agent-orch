@@ -44,14 +44,87 @@ export function agentStatus(id) {
 }
 export const stripEnv = (env, filter) => Object.fromEntries(Object.entries(env).filter(([k]) => !filter.test(k)));
 
-// Tool input trimmed to the fields the UI shows.
+// Native field names (snake_cased) -> the ones the UI knows. agy: AbsolutePath, TargetFile, CommandLine, SearchPath,
+// SearchDirectory, DirectoryPath, CodeContent; opencode: filePath, oldString; codex: cmd; copilot: paths; ACP: oldText.
+const INPUT_ALIASES = {
+  absolute_path: 'file_path', target_file: 'file_path', filepath: 'file_path', file: 'file_path', filename: 'file_path',
+  command_line: 'command', cmd: 'command', search_path: 'path', search_directory: 'path', directory_path: 'path',
+  directory: 'path', dir: 'path', paths: 'path', code_content: 'content', old_str: 'old_string', old_text: 'old_string',
+  new_str: 'new_string', new_text: 'new_string', q: 'query', search_query: 'query', queries: 'query',
+};
+const WRAPPERS = ['parameters', 'arguments', 'rawInput', 'raw_input', 'input'];
+const isEmptyValue = (v) => v == null || v === '' || (Array.isArray(v) && !v.length) || (typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length);
+// A CLI's tool arguments in whatever shape it sends them (object, JSON-encoded string, raw string such as an apply_patch
+// body, nested under parameters/arguments/input) -> one flat object with snake_case keys and the aliases above applied.
+export function nativeInput(raw) {
+  let v = raw;
+  if (typeof v === 'string') {
+    const s = v.trim();
+    if (/^\{[\s\S]*\}$/.test(s)) { try { v = JSON.parse(s); } catch {} }
+    if (typeof v === 'string') return s ? { input: v } : {};
+  }
+  if (v == null) return {};
+  if (typeof v !== 'object' || Array.isArray(v)) return isEmptyValue(v) ? {} : { input: v };
+  const out = {};
+  for (const [k, val] of Object.entries(v)) {
+    if (isEmptyValue(val)) continue;
+    // Wrapped arguments ({parameters:{…}}, {arguments:'{"a":1}'}) merge in; a plain `input` string stays as is.
+    if (WRAPPERS.includes(k) && (typeof val === 'object' ? !Array.isArray(val) : /^\s*\{/.test(val))) {
+      for (const [k2, v2] of Object.entries(nativeInput(val))) out[k2] ??= v2;
+      continue;
+    }
+    const snake = k.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+    const to = INPUT_ALIASES[snake] || snake;
+    const value = Array.isArray(val) && val.every((x) => typeof x !== 'object') && (to === 'command' || to === 'path' || to === 'query') ? val.join(to === 'command' ? ' ' : ', ') : val;
+    out[to] ??= value;
+  }
+  return out;
+}
+
+const clip4k = (v) => (typeof v === 'string' && v.length > 4000 ? v.slice(0, 4000) + '\n…' : v);
+// Tool input trimmed to the fields the UI shows. A tool with none of them keeps all its fields, so an input is never
+// {} when the native call had arguments.
 export function toolInputSummary(name, input = {}) {
   const keep = {};
   for (const k of ['command', 'description', 'file_path', 'path', 'pattern', 'url', 'query', 'old_string', 'new_string', 'content', 'todos']) {
     if (input[k] == null) continue;
-    keep[k] = typeof input[k] === 'string' && input[k].length > 4000 ? input[k].slice(0, 4000) + '\n…' : input[k];
+    keep[k] = clip4k(input[k]);
+  }
+  if (Object.keys(keep).length || !input || typeof input !== 'object') return keep;
+  for (const [k, v] of Object.entries(input)) {
+    if (isEmptyValue(v)) continue;
+    keep[k] = typeof v === 'object' ? clip4k(JSON.stringify(v)) : clip4k(v);
   }
   return keep;
+}
+// A tool's native arguments (any shape) -> the normalised input.
+export const toolInput = (name, raw) => toolInputSummary(name, nativeInput(raw));
+
+// Tool output from wherever a CLI puts it: a string, content blocks ([{type:'text',text}], ACP's nested
+// {type:'content',content:{text}}), {stdout,stderr}, {output}, {content}, {message} -> text.
+export function outputText(v) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v !== 'object') return String(v);
+  if (Array.isArray(v)) {
+    return v.map((c) => (typeof c === 'string' ? c : c?.type === 'tool_reference' ? `Loaded tool ${c.tool_name}` : c?.type === 'image' ? '(image)'
+      : c?.type === 'diff' && c.path ? `edited ${c.path}` : outputText(c?.text ?? c?.content ?? c?.output ?? c?.snippet ?? ''))).filter((s) => s.trim()).join('\n');
+  }
+  const streams = [v.stdout, v.stderr].filter((s) => typeof s === 'string' && s.trim()).join('\n');
+  if (streams) return streams;
+  for (const k of ['aggregated_output', 'aggregatedOutput', 'formatted_output', 'output', 'content', 'text', 'detailedContent', 'result', 'message']) {
+    const t = outputText(v[k]);
+    if (t.trim()) return t;
+  }
+  // An exit code alone isn't output (toolResult reports it).
+  const rest = Object.fromEntries(Object.entries(v).filter(([k, x]) => !isEmptyValue(x) && k !== 'exit_code' && k !== 'exitCode'));
+  return Object.keys(rest).length ? JSON.stringify(rest) : '';
+}
+// A normalised tool_result. An empty output says so, with the exit code when the command failed, instead of ''.
+export function toolResult(id, value, isError = false, exitCode = null) {
+  let text = outputText(value);
+  if (!text.trim()) text = exitCode != null && exitCode !== 0 ? `(exit code ${exitCode}, no output)` : isError ? '(failed, no output)' : '(no output)';
+  return { k: 'tool_result', id, text: clip(text), isError: !!isError, lines: text.split('\n').length };
 }
 
 // ---------------------------------------------------------------- claude (Claude Code via the Agent SDK)
@@ -93,16 +166,13 @@ function* claudeEvents(m) {
   if (m.type === 'assistant' && !m.parent_tool_use_id) {
     for (const b of m.message?.content || []) {
       if (b.type === 'text' && b.text.trim()) yield { k: 'text', text: b.text };
-      else if (b.type === 'tool_use') yield { k: 'tool', id: b.id, name: b.name, input: toolInputSummary(b.name, b.input) };
+      else if (b.type === 'tool_use') yield { k: 'tool', id: b.id, name: b.name, input: toolInput(b.name, b.input) };
     }
   } else if (m.type === 'user' && Array.isArray(m.message?.content)) {
     for (const b of m.message.content) {
       if (b.type !== 'tool_result') continue;
-      let text = typeof b.content === 'string' ? b.content
-        : Array.isArray(b.content) ? b.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n') : '';
-      const lines = text.split('\n').length;
-      if (text.length > 6000) text = text.slice(0, 6000) + '\n…';
-      yield { k: 'tool_result', id: b.tool_use_id, text, isError: !!b.is_error, lines };
+      // Content blocks: text, image (Read of a picture; the image itself follows as an image event), tool_reference (ToolSearch).
+      yield toolResult(b.tool_use_id, b.content, !!b.is_error);
       for (const img of toolResultImages(b.content)) yield { k: 'image', tool: b.tool_use_id, ...img };
     }
   } else if (m.type === 'rate_limit_event' && m.rate_limit_info?.status === 'rejected') {
@@ -384,34 +454,45 @@ async function spawnJsonl({ bin, args, cwd, env, signal, res, handle, stopOn }) 
   return { aborted, stopped, exitCode };
 }
 
+// A web_search item's query lives in `query` or, when that's empty, in its action (search: query/queries, open_page: url,
+// find_in_page: url + pattern).
+const codexSearch = (it) => {
+  const a = it.action || {};
+  return toolInputSummary('WebSearch', nativeInput({ query: it.query || a.query || a.queries, url: a.url, pattern: a.pattern }));
+};
 function codexTool(it) {
   switch (it.type) {
-    case 'command_execution': return { name: 'Bash', input: { command: it.command } };
+    case 'command_execution': return { name: 'Bash', input: toolInput('Bash', { command: it.command }) };
     case 'file_change': return { name: 'Edit', input: { file_path: (it.changes || []).map((c) => `${c.kind || 'update'} ${c.path}`).join('\n') } };
-    case 'mcp_tool_call': return { name: `mcp__${it.server}__${it.tool}`, input: toolInputSummary(it.tool, it.arguments || {}) };
-    case 'web_search': return { name: 'WebSearch', input: { query: it.query } };
+    case 'mcp_tool_call': return { name: `mcp__${it.server}__${it.tool}`, input: toolInput(it.tool, it.arguments) };
+    case 'web_search': return { name: 'WebSearch', input: codexSearch(it) };
     default: return null;
   }
 }
+const codexSearchResult = (it) => {
+  const r = (it.results || []).map((x) => [x.title, x.url, x.snippet].filter(Boolean).join(' — ')).filter(Boolean).join('\n');
+  const a = it.action || {}, q = codexSearch(it);
+  return r || (a.type === 'open_page' || a.type === 'openPage' ? `opened ${a.url}` : q.query ? `searched: ${q.query}` : '');
+};
 
 // JSONL event -> normalised events. `started` (a Set of item ids) lets a tool be announced once, whether or not
-// Codex sent item.started for it.
+// Codex sent item.started for it; a tool whose item.started has no arguments yet (web_search) is announced on completion.
 function* codexEvents(m, started = new Set()) {
   const it = m.item;
   if (m.type === 'item.completed' && it?.type === 'agent_message') {
     if (it.text?.trim()) yield { k: 'text', text: it.text };
   } else if ((m.type === 'item.started' || m.type === 'item.completed') && it && codexTool(it)) {
-    if (!started.has(it.id)) { started.add(it.id); yield { k: 'tool', id: it.id, ...codexTool(it) }; }
+    const tool = codexTool(it);
+    if (!started.has(it.id) && (m.type === 'item.completed' || !isEmptyValue(tool.input))) { started.add(it.id); yield { k: 'tool', id: it.id, ...tool }; }
     if (m.type !== 'item.completed') return;
-    let text = '', isError = it.status === 'failed';
-    if (it.type === 'command_execution') { text = it.aggregated_output || ''; isError ||= it.exit_code != null && it.exit_code !== 0; }
-    else if (it.type === 'file_change') text = (it.changes || []).map((c) => `${c.kind || 'update'} ${c.path}`).join('\n');
-    else if (it.type === 'mcp_tool_call') {
-      const r = it.result?.content;
-      text = Array.isArray(r) ? r.map((c) => c.text || '').join('\n') : it.error?.message || '';
-      isError ||= !!it.error;
-    }
-    yield { k: 'tool_result', id: it.id, text: clip(text), isError, lines: text.split('\n').length };
+    let out = '', isError = it.status === 'failed', exit = null;
+    if (it.type === 'command_execution') { out = it.aggregated_output ?? ''; if (!String(out).trim()) out = it; exit = it.exit_code ?? null; isError ||= exit != null && exit !== 0; }
+    else if (it.type === 'file_change') out = (it.changes || []).map((c) => `${c.kind || 'update'} ${c.path}`).join('\n');
+    else if (it.type === 'mcp_tool_call') { out = it.error?.message || it.result?.content || it.result?.structured_content || ''; isError ||= !!it.error; }
+    else if (it.type === 'web_search') out = codexSearchResult(it);
+    // A command item without output text would otherwise stringify whole: keep only its streams.
+    if (out === it) out = { stdout: it.stdout, stderr: it.stderr, formatted_output: it.formatted_output };
+    yield toolResult(it.id, out, isError, exit);
   } else if (m.type === 'turn.completed') yield { k: 'result', usage: m.usage || {} };
   else if (codexRateLimits(m)) {
     const windows = codexWindows(codexRateLimits(m));
@@ -516,17 +597,65 @@ const AGY_AUTH_PROMPT_RE = /waiting for authentication|paste the authorization c
 const AGY_NO_SESSION_RE = /(conversation|session).*not found|no such (conversation|session)/i;
 const AGY_DONE = new Set(['DONE', 'ERROR', 'FAILED', 'CANCELED', 'CANCELLED', 'INTERRUPTED']);
 
-const snakeKeys = (o = {}) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase(), v]));
-// agy's native path parameters (view_file AbsolutePath, write_to_file/replace_file_content TargetFile, grep_search
-// SearchPath, find_by_name SearchDirectory, list_dir DirectoryPath) -> the file_path/path fields toolInputSummary keeps.
-const AGY_PATH_KEYS = { AbsolutePath: 'file_path', TargetFile: 'file_path', FilePath: 'file_path', SearchPath: 'path', SearchDirectory: 'path', DirectoryPath: 'path' };
-function agyTool(u) {
-  const name = u.tool_name || u.tool_info?.name || 'tool', p = u.tool_info?.parameters || {};
-  if (name === 'run_command') return { name: 'Bash', input: { command: p.CommandLine ?? p.command ?? '' } };
-  const input = snakeKeys(p);
-  for (const [k, to] of Object.entries(AGY_PATH_KEYS)) if (p[k] != null && input[to] == null) input[to] = p[k];
+// agy's native parameter names (AbsolutePath, TargetFile, CommandLine, SearchPath…) map in nativeInput. Its stream
+// sends only some parameters (write_to_file without CodeContent) and some tools' output (none for run_command's exit
+// code or a silent command, none for edits): agyStepNative fills both in from the conversation it saved.
+function agyTool(u, native) {
+  const name = u.tool_name || u.tool_info?.name || 'tool';
+  let input = nativeInput(u.tool_info?.parameters);
+  if (native?.args) input = { ...nativeInput(native.args), ...input };
+  if (name === 'run_command') return { name: 'Bash', input: toolInputSummary('Bash', input) };
   return { name, input: toolInputSummary(name, input) };
 }
+
+// Protobuf wire format, just enough to walk a step: field number -> [raw bytes of each length-delimited value].
+function pbFields(buf) {
+  const out = new Map();
+  let i = 0;
+  const varint = () => { let v = 0, sh = 0, c; do { if (i >= buf.length) throw new Error('truncated'); c = buf[i++]; v += (c & 0x7f) * 2 ** sh; sh += 7; } while (c & 0x80); return v; };
+  while (i < buf.length) {
+    const tag = varint(), wire = tag % 8, field = Math.floor(tag / 8);
+    if (wire === 0) varint();
+    else if (wire === 1) i += 8;
+    else if (wire === 5) i += 4;
+    else if (wire === 2) { const n = varint(); if (i + n > buf.length) throw new Error('truncated'); (out.get(field) || out.set(field, []).get(field)).push(buf.subarray(i, i + n)); i += n; }
+    else throw new Error(`wire type ${wire}`);
+  }
+  return out;
+}
+const pbPath = (buf, ...fields) => {
+  try { for (const f of fields) { buf = pbFields(buf).get(f)?.[0]; if (!buf) return null; } return buf.toString('utf8'); } catch { return null; }
+};
+export const AGY_HOME = () => process.env.CW_AGY_HOME || path.join(HOME, '.gemini/antigravity-cli');
+// A saved step's native data, read-only: `output` (brain/<id>/.system_generated/steps/<i>/output.txt, else the step's
+// tool result text in conversations/<id>.db) and `args` (the tool call's JSON arguments, step_payload field 5.4.3).
+// null parts when agy hasn't written them.
+export function agyStepNative(conversationId, stepIndex, { home = AGY_HOME(), args = false } = {}) {
+  if (!/^[\w-]+$/.test(String(conversationId || '')) || !Number.isInteger(Number(stepIndex))) return { output: null, args: null };
+  let output = null, argJson = null, payload = null;
+  try { output = fs.readFileSync(path.join(home, 'brain', conversationId, '.system_generated/steps', String(stepIndex), 'output.txt'), 'utf8'); } catch {}
+  if (output == null || args) {
+    const file = path.join(home, 'conversations', `${conversationId}.db`);
+    if (fs.existsSync(file)) {
+      let db;
+      try {
+        db = new (process.getBuiltinModule('node:sqlite').DatabaseSync)(file, { readOnly: true });
+        payload = db.prepare('SELECT step_payload FROM steps WHERE idx = ?').get(Number(stepIndex))?.step_payload;
+      } catch {} finally { try { db?.close(); } catch {} }
+    }
+    if (payload) {
+      const buf = Buffer.from(payload);
+      output ??= pbPath(buf, 140, 2, 1);
+      if (args) { try { argJson = JSON.parse(pbPath(buf, 5, 4, 3) || 'null'); } catch {} }
+    }
+  }
+  return { output, args: argJson };
+}
+// run_command's saved output: "The command exited with code N.\nStdout:\n…\nStderr:\n…" (or "Output:\n…").
+const agyCommandOutput = (saved) => {
+  const t = String(saved || ''), m = /The command exited with code (-?\d+)\.?/.exec(t);
+  return m && { exitCode: Number(m[1]), text: t.slice(m.index + m[0].length).replace(/^[ \t]*(?:Stdout|Stderr|Output):[ \t]*$/gm, '').trim() };
+};
 
 // Antigravity's four limits: a 5-hour and a weekly one per model group. Gemini models ('gemini-*', and agy's default
 // when no model is named) count against the 'gemini' group, everything else (Claude, GPT-OSS) against '3p'.
@@ -582,12 +711,25 @@ function* agyEvents(m, st = { text: new Map(), started: new Set() }) {
       if (u.text_delta) st.text.set(i, (st.text.get(i) || '') + u.text_delta);
       if (AGY_DONE.has(u.state)) yield* flush();
     } else if (u.step_type === 'tool') {
-      if (!st.started.has(i)) { st.started.add(i); yield { k: 'tool', id: String(i), ...agyTool(u) }; }
-      if (!AGY_DONE.has(u.state)) return;
-      const ti = u.tool_info || {};
-      const out = ti.output ?? ti.error ?? '';
-      const text = typeof out === 'string' ? out : JSON.stringify(out);
-      yield { k: 'tool_result', id: String(i), text: clip(text), isError: u.state !== 'DONE' || !!ti.error, lines: text.split('\n').length };
+      const done = AGY_DONE.has(u.state), ti = u.tool_info || {};
+      // Announced once it has arguments, or when it finishes (then with the saved call's arguments if the stream had none).
+      if (!st.started.has(i)) {
+        let tool = agyTool(u);
+        if (isEmptyValue(tool.input) && !done) return;
+        if (isEmptyValue(tool.input)) tool = agyTool(u, agyStepNative(u.conversation_id, i, { home: st.home, args: true }));
+        st.started.add(i);
+        yield { k: 'tool', id: String(i), ...tool };
+      }
+      if (!done) return;
+      const name = u.tool_name || ti.name;
+      let out = ti.output ?? ti.error?.message ?? ti.error ?? '', isError = u.state !== 'DONE' || !!ti.error, exit = null;
+      if (name === 'run_command' || !outputText(out).trim()) {
+        const saved = agyStepNative(u.conversation_id, i, { home: st.home }).output;
+        const cmd = name === 'run_command' ? agyCommandOutput(saved) : null;
+        if (cmd) { exit = cmd.exitCode; isError ||= exit !== 0; if (!outputText(out).trim()) out = cmd.text; }
+        else if (!outputText(out).trim() && saved) out = saved.replace(/\s*If relevant, proactively run terminal commands[^\n]*/g, '').trim();
+      }
+      yield toolResult(String(i), out, isError, exit);
     }
   } else if (m.event === 'command_result' && agyUsageData(m)) {
     const windows = agyWindows(agyUsageData(m));
@@ -620,7 +762,7 @@ export async function agyUsage({ bin, env = process.env, cwd = HOME } = {}) {
 // API-key mode), onMessage (raw NDJSON events), usageProbe (default true: after an ok or rate-limited run, read the
 // plan windows with agyUsage into res.windows). agy has no system-prompt append flag, so systemAppend is prepended.
 async function runAntigravity({ model, prompt, cwd, resume, systemAppend, signal, onEvent, bin, env = process.env, autonomous = true, onMessage,
-  settingsPath = path.join(HOME, '.gemini/antigravity-cli/settings.json'), usageProbe = true }) {
+  settingsPath = path.join(HOME, '.gemini/antigravity-cli/settings.json'), usageProbe = true, agyHome }) {
   const res = { outcome: 'error', text: '', sessionId: resume || null, usage: {}, numTurns: 0, resetsAt: null, limitType: null, stderr: '', errorCode: null, windows: null };
   // `"modelProvider": "gemini"` switches agy to GEMINI_API_KEY billing; refuse rather than spend API credits.
   let settings = {};
@@ -637,7 +779,7 @@ async function runAntigravity({ model, prompt, cwd, resume, systemAppend, signal
   if (resume) args.push('--conversation', resume);
 
   let result = null;
-  const st = { text: new Map(), started: new Set() };
+  const st = { text: new Map(), started: new Set(), home: agyHome };
   const handle = (m) => {
     const id = m.conversation_id || m.step_update?.conversation_id || m.result?.conversation_id;
     if (id) res.sessionId = id;
@@ -797,18 +939,16 @@ export function* opencodeEvents(m, st = { tools: new Set() }) {
   else if (m.type === 'tool_use' && p.type === 'tool') {
     const id = p.callID || p.id || p.toolID || m.id || p.tool;
     const s = p.state || {};
-    if (!st.tools.has(id)) {
+    const done = ['completed', 'error'].includes(s.status);
+    // A pending part has no input yet: announce the tool once it has some, or when it ends.
+    if (!st.tools.has(id) && (done || !isEmptyValue(s.input))) {
       st.tools.add(id);
-      const input = { ...(s.input || {}) };
-      if (input.filePath != null && input.file_path == null) input.file_path = input.filePath;
-      if (input.targetFile != null && input.file_path == null) input.file_path = input.targetFile;
       const name = p.tool === 'bash' ? 'Bash' : p.tool;
-      yield { k: 'tool', id, name, input: toolInputSummary(name, input) };
+      yield { k: 'tool', id, name, input: toolInput(name, s.input) };
     }
-    if (['completed', 'error'].includes(s.status)) {
-      const output = s.output ?? s.error ?? '';
-      const value = typeof output === 'string' ? output : JSON.stringify(output);
-      yield { k: 'tool_result', id, text: clip(value), isError: s.status === 'error', lines: value.split('\n').length };
+    if (done) {
+      const exit = s.metadata?.exit ?? null;
+      yield toolResult(id, s.output ?? s.error ?? s.metadata?.output ?? '', s.status === 'error' || (exit != null && exit !== 0), exit);
     }
   } else if (m.type === 'step_finish' && p.tokens) {
     const t = p.tokens;
@@ -952,15 +1092,22 @@ export function* kiroEvents(m, st = { tools: new Set() }) {
     if (value) yield { k: 'text', text: value };
   } else if (kind === 'tool_call' || kind === 'tool_call_update') {
     const id = u.toolCallId || u.id || u.title;
-    if (kind === 'tool_call' && !st.tools.has(id)) {
+    const done = kind === 'tool_call_update' && ['completed', 'failed'].includes(u.status);
+    // ACP may send the call before its rawInput (it follows in an update); `locations` names the files it touches.
+    st.inputs ??= new Map(); st.names ??= new Map();
+    if (!st.names.has(id)) st.names.set(id, u.title || u.kind || 'Tool');
+    const raw = { ...(st.inputs.get(id) || {}), ...nativeInput(u.rawInput) };
+    if (isEmptyValue(raw) && u.locations?.length) raw.file_path = u.locations.map((l) => l.path).filter(Boolean).join(', ');
+    st.inputs.set(id, raw);
+    if (!st.tools.has(id) && (done || !isEmptyValue(raw))) {
       st.tools.add(id);
-      const name = u.title || u.kind || 'Tool';
-      yield { k: 'tool', id, name, input: toolInputSummary(name, u.rawInput || {}) };
+      const name = st.names.get(id);
+      yield { k: 'tool', id, name, input: toolInputSummary(name, raw) };
     }
-    if (kind === 'tool_call_update' && ['completed', 'failed'].includes(u.status)) {
-      const value = (u.content || []).map((c) => c.text || '').filter(Boolean).join('\n') || u.rawOutput || '';
-      const s = typeof value === 'string' ? value : JSON.stringify(value);
-      yield { k: 'tool_result', id, text: clip(s), isError: u.status === 'failed', lines: s.split('\n').length };
+    if (done) {
+      const exit = u.rawOutput?.exit_code ?? u.rawOutput?.exitCode ?? null;
+      const content = outputText(u.content);
+      yield toolResult(id, content.trim() ? content : u.rawOutput ?? '', u.status === 'failed' || (exit != null && exit !== 0), exit);
     }
   } else if (kind === 'result' && m.usage) yield { k: 'result', usage: m.usage };
   else if ((m.type === 'error' || m.method === 'error') && KIRO_LIMIT_RE.test(kiroError(m) || '')) yield { k: 'limit', resetsAt: kiroReset(m) };
@@ -1033,11 +1180,16 @@ export function* copilotEvents(m) {
   if (m.type === 'assistant.message' && d.content?.trim()) yield { k: 'text', text: d.content };
   else if (m.type === 'tool.execution_start') {
     const name = d.toolName === 'bash' ? 'Bash' : d.toolName || 'Tool';
-    yield { k: 'tool', id: d.toolCallId, name, input: toolInputSummary(name, d.arguments || {}) };
+    // apply_patch's arguments are the raw patch text; the rest are objects.
+    const input = typeof d.arguments === 'string' && d.toolName === 'apply_patch'
+      ? { file_path: [...d.arguments.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)].map((x) => x[1]).join(', ') || undefined, content: d.arguments }
+      : d.arguments;
+    yield { k: 'tool', id: d.toolCallId, name, input: toolInput(name, input) };
   } else if (m.type === 'tool.execution_complete') {
-    const value = d.result?.content ?? d.result?.text ?? d.error ?? '';
-    const s = typeof value === 'string' ? value : JSON.stringify(value);
-    yield { k: 'tool_result', id: d.toolCallId, text: clip(s), isError: d.success === false, lines: s.split('\n').length };
+    const exit = d.shellExecution?.exitCode ?? null;
+    const r = d.result || {};
+    const out = outputText(r.content).trim() ? r.content : outputText(r.detailedContent).trim() ? r.detailedContent : d.error?.message ?? d.error ?? '';
+    yield toolResult(d.toolCallId, out, d.success === false || (exit != null && exit !== 0), exit);
   } else if (m.type === 'result') yield { k: 'result', usage: m.usage || {} };
   else if (m.type === 'error' && COPILOT_LIMIT_RE.test(copilotErrorText(m))) yield { k: 'limit', resetsAt: null };
 }
@@ -1241,8 +1393,34 @@ export const AGENTS = { claude: CLAUDE, codex: CODEX, antigravity: ANTIGRAVITY, 
 
 // Runs one turn on `agent` (default 'claude'). Returns at least {outcome, text, sessionId, usage, resetsAt, errorCode};
 // outcome is ok | aborted | rate_limited | auth_error | max_turns | error.
+// An ok run without a final reply keeps the last assistant text; if there was none but tools ran, it gets a synthesized
+// summary of them (marked as such, and emitted as a text event); a run with neither is an error, not a success.
 export function runAgentCli(opts) {
   const a = AGENTS[opts.agent || 'claude'];
   if (!a) throw new Error(`unknown agent: ${opts.agent}`);
-  return a.run(opts);
+  let lastText = '';
+  const tools = [];
+  const onEvent = (e) => {
+    if (e.k === 'text' && String(e.text || '').trim()) lastText = e.text;
+    if (e.k === 'tool') tools.push(e.name || 'tool');
+    opts.onEvent?.(e);
+  };
+  return a.run({ ...opts, onEvent }).then((res) => finishEmpty(res, { agent: a, lastText, tools, onEvent }));
+}
+export function finishEmpty(res, { agent, lastText, tools, onEvent }) {
+  if (res?.outcome !== 'ok' || String(res.text || '').trim()) return res;
+  if (lastText.trim()) { res.text = lastText; return res; }
+  if (tools.length) {
+    const counts = new Map();
+    for (const t of tools) counts.set(t, (counts.get(t) || 0) + 1);
+    res.text = `(No final reply from ${agent.label}; summary synthesized by agent-orch) Used ${tools.length} tool call${tools.length > 1 ? 's' : ''}: ` +
+      [...counts].map(([n, c]) => (c > 1 ? `${n} ×${c}` : n)).join(', ') + '.';
+    res.synthesized = true;
+    try { onEvent({ k: 'text', text: res.text, synthesized: true }); } catch {}
+    return res;
+  }
+  res.outcome = 'error';
+  res.errorCode = 'empty_response';
+  res.text = `${agent.label} returned an empty response: no reply and no tool calls.`;
+  return res;
 }

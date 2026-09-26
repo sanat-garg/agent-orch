@@ -4,7 +4,9 @@
 // service's minimal env), each in a fresh scratch git project, and checks every outcome on disk or against a random
 // token the agent can only know by using its tools. Prints a pass/fail table plus the failing tool events.
 //   node bin/agent-smoke.mjs --agent antigravity --model gemini-3.1-pro-high [--only read-line3,grep] [--timeout 300]
-//        [--env service|inherit] [--keep] [--verbose]
+//        [--env service|inherit] [--keep] [--verbose] [--log <dir>]
+// --log writes each check's normalised events as a run log (<dir>/run-<check>.jsonl, the orchestrator's format, for
+// bin/empty-scan.mjs --runs <dir>) and the CLI's native events (<dir>/native-<check>.jsonl).
 // Exit 0 only when every check passes.
 
 import fs from 'node:fs';
@@ -17,7 +19,7 @@ import { AGENTS, runAgentCli } from '../agents.mjs';
 
 const { values: opt } = parseArgs({ options: {
   agent: { type: 'string', default: 'antigravity' }, model: { type: 'string' }, only: { type: 'string' },
-  timeout: { type: 'string', default: '300' }, env: { type: 'string', default: 'service' }, keep: { type: 'boolean' }, verbose: { type: 'boolean' },
+  timeout: { type: 'string', default: '300' }, env: { type: 'string', default: 'service' }, keep: { type: 'boolean' }, verbose: { type: 'boolean' }, log: { type: 'string' },
 } });
 if (!AGENTS[opt.agent]) { console.error(`unknown agent: ${opt.agent}`); process.exit(2); }
 
@@ -113,17 +115,23 @@ const CHECKS = [
 ];
 
 const TIMEOUT = Number(opt.timeout) * 1000;
+if (opt.log) fs.mkdirSync(opt.log, { recursive: true });
+const logTo = (id, kind, e) => { if (opt.log) fs.appendFileSync(path.join(opt.log, `${kind}-${id}.jsonl`), JSON.stringify(e) + '\n'); };
 async function turn(t, prompt, resume) {
   const r = { tools: [], results: [], errors: [], texts: [] };
   const started = Date.now();
+  logTo(t.check, 'run', { k: 'start', at: started / 1000, resumed: !!resume, agent: opt.agent, model: opt.model || null });
   const res = await runAgentCli({ agent: opt.agent, model: opt.model, prompt, cwd: t.dir, resume, systemAppend: APPEND, env,
     signal: AbortSignal.timeout(TIMEOUT), usageProbe: false,
+    onMessage: (m) => logTo(t.check, 'native', m),
     onEvent: (e) => {
+      if (['text', 'tool', 'tool_result'].includes(e.k)) logTo(t.check, 'run', e.k === 'tool_result' ? { ...e, k: 'result' } : e);
       if (e.k === 'tool') r.tools.push(e);
       if (e.k === 'tool_result') { r.results.push(e); if (e.isError) r.errors.push({ tool: r.tools.find((x) => x.id != null && x.id === e.id) || r.tools.at(-1), text: e.text }); }
       if (e.k === 'text') r.texts.push(e.text);
       if (opt.verbose) console.error(`  [${e.k}]`, JSON.stringify(e).slice(0, 300));
     } });
+  logTo(t.check, 'run', { k: 'end', at: Date.now() / 1000, outcome: res.outcome, turns: res.numTurns, text: res.text });
   return { ...r, res, secs: Math.round((Date.now() - started) / 1000) };
 }
 
@@ -133,6 +141,7 @@ console.log(`agent-smoke: agent=${opt.agent} model=${opt.model || '(default)'} e
 for (const c of CHECKS) {
   if (only && !only.has(c.id)) continue;
   const t = scratch();
+  t.check = c.id;
   let r, reason;
   try {
     if (c.turns) {

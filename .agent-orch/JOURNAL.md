@@ -596,3 +596,6 @@ Temporary fixture isolation fixed; exact verification passes all 267 tests.
 ## 2026-09-26 20:07 — #207 Stop parallel runs: one task at a time, memory guard, free disk space [done (check passed)]
 
 one task by default, memory guard added, disk and worktrees cleaned
+## 2026-09-26 20:27 — #196 Find and fix empty tool inputs/outputs and empty responses from CLI agents [done (check passed)]
+
+empty events fixed; fixtures pass; smoke runs show zero unexplained empties

@@ -1,0 +1,9 @@
+{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"toolu_01XUChDFJjWgrtxd6P7KodTL","name":"Skill","input":{"skill":"run"},"caller":{"type":"direct"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_01XUChDFJjWgrtxd6P7KodTL","content":"Launching skill: run"}]}}
+{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"toolu_0125zhWGz2sK5cXuswm8UBT3","name":"TaskStop","input":{"task_id":"bqmdii41d"},"caller":{"type":"direct"}}]}}
+{"type":"user","message":{"content":[{"tool_use_id":"toolu_0125zhWGz2sK5cXuswm8UBT3","type":"tool_result","content":"{\"message\":\"Successfully stopped task: bqmdii41d\",\"task_id\":\"bqmdii41d\",\"task_type\":\"local_bash\"}"}]}}
+{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"toolu_01MzAfDayitkYcyxUjQhwnEy","name":"ToolSearch","input":{"query":"select:WebSearch,WebFetch","max_results":2}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_01MzAfDayitkYcyxUjQhwnEy","content":[{"type":"tool_reference","tool_name":"WebSearch"},{"type":"tool_reference","tool_name":"WebFetch"}]}]}}
+{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"toolu_011T9NcvnKbUV8dEGvfpwDLa","name":"Read","input":{"file_path":"/tmp/pw/2.png"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_011T9NcvnKbUV8dEGvfpwDLa","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}}]}]}}
+{"type":"result","subtype":"success","is_error":false,"result":"","num_turns":4,"usage":{"input_tokens":10,"output_tokens":5}}

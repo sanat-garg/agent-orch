@@ -791,7 +791,7 @@ function inputQueue() {
 function toolResultText(content) {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
-    return content.map((b) => (b.type === 'text' ? b.text : b.type === 'image' ? '[image]' : '')).join('\n');
+    return content.map((b) => (b.type === 'text' ? b.text : b.type === 'image' ? '[image]' : b.type === 'tool_reference' ? `Loaded tool ${b.tool_name}` : '')).join('\n');
   }
   return content == null ? '' : JSON.stringify(content);
 }

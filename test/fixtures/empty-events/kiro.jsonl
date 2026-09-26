@@ -1,0 +1,8 @@
+{"type":"session","sessionId":"kiro-empty-fixture"}
+{"method":"session/update","params":{"sessionId":"kiro-empty-fixture","update":{"sessionUpdate":"tool_call","toolCallId":"call_1","title":"read","kind":"read","status":"pending","locations":[{"path":"/workspace/notes/a.txt"}]}}}
+{"method":"session/update","params":{"sessionId":"kiro-empty-fixture","update":{"sessionUpdate":"tool_call_update","toolCallId":"call_1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"hello\n"}}]}}}
+{"method":"session/update","params":{"sessionId":"kiro-empty-fixture","update":{"sessionUpdate":"tool_call","toolCallId":"call_2","title":"shell","kind":"execute","status":"pending"}}}
+{"method":"session/update","params":{"sessionId":"kiro-empty-fixture","update":{"sessionUpdate":"tool_call_update","toolCallId":"call_2","status":"in_progress","rawInput":{"command":"false"}}}}
+{"method":"session/update","params":{"sessionId":"kiro-empty-fixture","update":{"sessionUpdate":"tool_call_update","toolCallId":"call_2","status":"completed","rawOutput":{"exit_code":1,"stdout":"","stderr":""}}}}
+{"method":"session/update","params":{"sessionId":"kiro-empty-fixture","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Done"}}}}
+{"type":"result","sessionId":"kiro-empty-fixture","usage":{"input_tokens":10,"output_tokens":5}}

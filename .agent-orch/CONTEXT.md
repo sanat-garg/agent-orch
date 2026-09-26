@@ -39,7 +39,7 @@ _Durable knowledge for every agent session: architecture, conventions, decisions
 - Server/orchestrator edits go live only on restart ("Restart when idle" banner). A failing "Done when" check may be stale running code, not the task.
 - The verifier runs every command-like backtick snippet in "Done when", joined with ` && `. Commands containing `>` (incl. `2>&1`) or `curl` are refused. Absence checks use `! grep …`.
 - Claude logout needs `confirm: true` — never send it in tests. `agyLogout` deletes `~/.gemini/antigravity-cli/antigravity-oauth-token` — never call it on the real home.
-- agy: native path params need `AGY_PATH_KEYS` mapping; headless agy without `--dangerously-skip-permissions` silently denies run_command, so agy work runs autonomous. `bin/agent-smoke.mjs --agent X --model Y` and `bin/orch-e2e.mjs --agent X --model Y` are live checks (cost quota).
+- agy: native path params need `AGY_PATH_KEYS` mapping; headless agy without `--dangerously-skip-permissions` silently denies run_command, so agy work runs autonomous. `bin/agent-smoke.mjs --agent X --model Y` and `bin/orch-e2e.mjs --agent X --model Y [--parallel]` are live checks (cost quota).
 - Kiro is signed out on this VM; its authenticated event schema is unverified. Copilot `listModels()` currently returns only `auto`; no remaining/reset reading exists for Copilot.
 - The screenshot lightbox `#lbView` needs `contain: size` or huge images widen the modal.
 - Don't commit macOS `._*` files.

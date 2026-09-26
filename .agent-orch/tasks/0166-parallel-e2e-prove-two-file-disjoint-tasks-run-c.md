@@ -13,3 +13,7 @@ bin/orch-e2e.mjs runs one real orchestrator task on a throwaway server and scrat
 ## Done when
 
 `grep -q 'overlap: yes' .agent-orch/PARALLEL-E2E.md`
+
+## Result — done (check passed) (2026-09-26 09:59)
+
+AGENT-ORCH-STATUS: done — parallel e2e passed live on haiku: tasks overlapped, both merged

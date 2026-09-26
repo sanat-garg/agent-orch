@@ -509,3 +509,6 @@ themed stacked toasts with kinds; tests pass; screenshots captured
 ## 2026-09-26 09:58 — #167 README docs: OpenCode, Kiro, Copilot, fallbacks, worktrees and parallel tasks [done (check passed)]
 
 README documents new agents, fallbacks, worktrees and parallel tasks
+## 2026-09-26 09:59 — #166 Parallel e2e: prove two file-disjoint tasks run concurrently and both merge [done (check passed)]
+
+parallel e2e passed live on haiku: tasks overlapped, both merged

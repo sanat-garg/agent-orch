@@ -6,6 +6,10 @@
 // Prints the task/run ids, the run log's tool events, the usage records and a live-DB isolation check as JSON.
 //   node bin/orch-e2e.mjs --agent antigravity --model gemini-3.1-pro-high [--timeout 900] [--keep]
 // Exit 0 only when the task ends 'done' with its check passing and every tool event on a file carries a path.
+// --parallel instead queues two work tasks with disjoint `files` and no `after`, and checks that they ran at the same
+// time, each in its own worktree under ../.agent-orch-worktrees, both merged onto main and pushed, and nothing was left
+// behind (worktrees, agent-orch/task-* branches). Prints a summary line block including 'overlap: yes|no'.
+//   node bin/orch-e2e.mjs --parallel --agent claude --model haiku
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -20,7 +24,7 @@ import WebSocket from 'ws';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const { values: opt } = parseArgs({ options: {
-  agent: { type: 'string', default: 'antigravity' }, model: { type: 'string' }, timeout: { type: 'string', default: '900' }, keep: { type: 'boolean' },
+  agent: { type: 'string', default: 'antigravity' }, model: { type: 'string' }, timeout: { type: 'string', default: '900' }, keep: { type: 'boolean' }, parallel: { type: 'boolean' },
 } });
 const HOME = os.homedir();
 // The live service's minimal env (systemd unit), so the agent inherits no shell setup.
@@ -98,6 +102,11 @@ try {
   const project = await waitFor(() => db.prepare('SELECT * FROM projects WHERE path=?').get(proj), 15e3, 'project registered');
   ws.close();
   await api(`/api/orch/project/${project.id}`, { perpetual: false });
+  if (opt.parallel) {
+    result = await parallelRun(db, api, project);
+    db.close();
+    throw null; // skip the single-task path; `finally` still stops the server
+  }
   // No HTTP route queues an owner task directly (the planner does), so insert it the way addTask does.
   const now = Date.now() / 1000;
   const taskId = Number(db.prepare(`INSERT INTO tasks(project_id,kind,title,prompt,priority,urgency,done_when,source,agent,model,position,created_at)
@@ -143,7 +152,7 @@ try {
   result.ok = t.status === 'done' && npmTest.status === 0 && fileTools.length > 0 && fileTools.every((x) => x.input?.file_path || x.input?.path)
     && !/Antigravity denied/.test(t.result || '') && !result.live.projectsHaveScratch && !result.delegated_from && !result.route_note;
 } catch (e) {
-  result.error = e.message;
+  if (e) result.error = e.message;
 } finally {
   child.kill('SIGTERM');
   await new Promise((r) => setTimeout(r, 1500));
@@ -152,6 +161,7 @@ try {
   if (!opt.keep && result.ok) fs.rmSync(tmp, { recursive: true, force: true });
 }
 console.log(JSON.stringify(result, null, 2));
+if (opt.parallel) console.log(result.summary || `parallel e2e failed: ${result.error}`);
 process.exit(result.ok ? 0 : 1);
 
 async function waitFor(fn, ms, what, every = 500) {
@@ -162,4 +172,79 @@ async function waitFor(fn, ms, what, every = 500) {
     if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
     await new Promise((r) => setTimeout(r, every));
   }
+}
+
+// Two file-disjoint tasks queued together; their worktrees are sampled from the DB while they run (tasks.worktree is
+// cleared once merged).
+async function parallelRun(db, api, project) {
+  const now = Date.now() / 1000;
+  const spec = (n, fn, body) => ({ n, title: `Add ${n}.mjs with ${fn}() and its test`, files: [`src/${n}.mjs`, `test/${n}.test.mjs`],
+    prompt: `Create src/${n}.mjs exporting ${body}, and test/${n}.test.mjs with node:test tests for it (at least three cases). ` +
+      `Touch no other files. Make \`npm test\` pass.`,
+    doneWhen: `\`node --test test/${n}.test.mjs\` passes` });
+  const specs = [spec('a', 'double', '`double(x)` that returns 2 * x'), spec('b', 'reverse', '`reverse(s)` that returns the string s reversed')];
+  const ids = specs.map((t) => Number(db.prepare(`INSERT INTO tasks(project_id,kind,title,prompt,priority,urgency,done_when,source,agent,model,files,position,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(project.id, 'work', t.title, t.prompt, 80, 'normal', t.doneWhen, 'user', opt.agent, opt.model,
+    JSON.stringify(t.files), 0, now).lastInsertRowid));
+  await api(`/api/orch/task/${ids[0]}/action`, { action: 'next' }); // wakes the tick loop
+  const wts = Object.fromEntries(ids.map((id) => [id, new Set()]));
+  const seen = new Set();
+  let bothRunning = false;
+  const views = await waitFor(async () => {
+    const vs = [];
+    for (const id of ids) {
+      const d = await api(`/api/orch/task/${id}`);
+      const s = d.task?.status ?? d.status;
+      if (!seen.has(`${id}:${s}`)) { seen.add(`${id}:${s}`); console.error(`[orch-e2e] #${id} ${s} (${Math.round((Date.now() - t0) / 1000)}s)`); }
+      const w = db.prepare('SELECT worktree FROM tasks WHERE id=?').get(id)?.worktree;
+      if (w) wts[id].add(w);
+      vs.push({ id, s, d });
+    }
+    if (vs.every((v) => v.s === 'running')) bothRunning = true;
+    return vs.every((v) => ['done', 'failed', 'cancelled', 'blocked', 'needs_integration'].includes(v.s)) ? vs : null;
+  }, Number(opt.timeout) * 1000, 'both tasks to finish', 2000);
+  // Let the merge/cleanup that follows 'done' settle before looking at the repo.
+  await new Promise((r) => setTimeout(r, 3000));
+  const rows = ids.map((id) => db.prepare('SELECT id,status,started_at,finished_at,worktree,commit_sha,agent,model,route_note,delegated_from,result FROM tasks WHERE id=?').get(id));
+  const runs = ids.map((id) => db.prepare('SELECT id,task_id,purpose,outcome,started_at,finished_at FROM runs WHERE task_id=? ORDER BY id').all(id));
+  const events = db.prepare(`SELECT task_id,message FROM events WHERE task_id IN (${ids.join(',')}) ORDER BY id`).all().map((e) => `#${e.task_id} ${e.message}`);
+  const [x, y] = rows;
+  // Task intervals (started → finished, which includes the merge), and the agent runs themselves.
+  const overlap = x.started_at < y.finished_at && y.started_at < x.finished_at;
+  const workRuns = runs.map((rs) => rs.filter((r) => r.purpose === 'work'));
+  const runOverlap = workRuns[0].some((r) => workRuns[1].some((q) => r.started_at < (q.finished_at ?? Infinity) && q.started_at < (r.finished_at ?? Infinity)));
+  const wtRoot = path.join(tmp, '.agent-orch-worktrees');
+  const wtList = ids.map((id) => [...wts[id]]);
+  const ownWorktrees = ids.every((id, i) => wtList[i].length === 1 && wtList[i][0] === path.join(wtRoot, `project-task-${id}`))
+    && wtList[0][0] !== wtList[1][0];
+  const mainLog = sh('git', ['log', '--format=%h %s', 'main'], proj).split('\n');
+  const originLog = sh('git', ['--git-dir', bare, 'log', '--format=%h %s', 'main']).split('\n');
+  const onMain = ids.every((id) => mainLog.some((l) => l.includes(`#${id}:`)));
+  const pushed = sh('git', ['rev-parse', 'main'], proj) === sh('git', ['--git-dir', bare, 'rev-parse', 'main']);
+  const filesOnMain = specs.every((t) => t.files.every((f) => fs.existsSync(path.join(proj, f))));
+  const leftWorktrees = sh('git', ['worktree', 'list', '--porcelain'], proj).split('\n').filter((l) => l.startsWith('worktree ')).map((l) => l.slice(9)).filter((d) => d !== proj);
+  const leftDirs = fs.existsSync(wtRoot) ? fs.readdirSync(wtRoot) : [];
+  const leftBranches = sh('git', ['branch', '--list', 'agent-orch/task-*', '--format=%(refname:short)'], proj).split('\n').filter(Boolean);
+  const npmTest = spawnSync('npm', ['test'], { cwd: proj, encoding: 'utf8', env: SERVICE_ENV });
+  const allDone = rows.every((r) => r.status === 'done');
+  const clean = !leftWorktrees.length && !leftDirs.length && !leftBranches.length;
+  const iso = (t) => (t ? new Date(t * 1000).toISOString().slice(11, 19) : '-');
+  const summary = [
+    `parallel e2e (${opt.agent}/${opt.model})`,
+    ...rows.map((r, i) => `  #${r.id} ${r.status}  ${iso(r.started_at)} → ${iso(r.finished_at)}  worktree: ${wtList[i].join(', ') || '(none seen)'}  commit: ${r.commit_sha || '-'}`),
+    `overlap: ${overlap ? 'yes' : 'no'} (task intervals; agent runs overlap: ${runOverlap ? 'yes' : 'no'}; both seen running at once: ${bothRunning ? 'yes' : 'no'})`,
+    `own worktrees under ../.agent-orch-worktrees: ${ownWorktrees ? 'yes' : 'no'}`,
+    `both done: ${allDone ? 'yes' : 'no'}; both on main: ${onMain && filesOnMain ? 'yes' : 'no'}; pushed to origin: ${pushed ? 'yes' : 'no'}; npm test on main: ${npmTest.status === 0 ? 'pass' : 'FAIL'}`,
+    `leftovers: worktrees ${leftWorktrees.length + leftDirs.length}, agent-orch/task-* branches ${leftBranches.length}${clean ? ' (clean)' : `: ${[...leftWorktrees, ...leftDirs, ...leftBranches].join(', ')}`}`,
+  ].join('\n');
+  const liveAfter = liveSnapshot();
+  const projectsHaveScratch = !!liveAfter?.projects.some((p) => p.startsWith(tmp));
+  const ok = overlap && ownWorktrees && allDone && onMain && filesOnMain && pushed && clean && npmTest.status === 0 && !projectsHaveScratch
+    && rows.every((r) => !r.route_note && !r.delegated_from);
+  return {
+    ok, parallel: true, agent: opt.agent, model: opt.model, ids, overlap, runOverlap, bothRunning, ownWorktrees, worktrees: wtList, allDone, onMain, filesOnMain, pushed,
+    leftWorktrees, leftDirs, leftBranches, tasks: rows.map((r) => ({ ...r, result: String(r.result || '').slice(0, 300) })), runs, events,
+    mainLog: mainLog.slice(0, 6), originLog: originLog.slice(0, 6), npmTestExit: npmTest.status,
+    live: { before: liveBefore?.maxTask, projectsHaveScratch }, tmp, summary,
+  };
 }

@@ -90,9 +90,31 @@ test('login rejects a wrong password and accepts the right one', async () => {
   assert.equal(ok.status, 200);
   const cookie = ok.headers.get('set-cookie').split(';')[0];
   assert.match(cookie, /^cw_session=./);
+  assert.doesNotMatch(ok.headers.get('set-cookie'), /Secure/); // plain http: no Secure flag
   const home = await get('/', { cookie });
   assert.equal(home.status, 200);
   await home.arrayBuffer();
+});
+
+test('behind HTTPS the session cookie is __Host-cw_session and logout clears it (AUDIT #34)', async () => {
+  const ok = await fetch(base + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-proto': 'https' }, body: JSON.stringify({ password: PASSWORD }) });
+  assert.equal(ok.status, 200);
+  const set = ok.headers.get('set-cookie');
+  assert.match(set, /^__Host-cw_session=[^;]+; Path=\/; HttpOnly; Secure; SameSite=Lax/);
+  assert.doesNotMatch(set, /Domain/i);
+  const cookie = set.split(';')[0];
+  // A shadowing plain cw_session sent alongside doesn't beat the __Host- cookie.
+  const home = await get('/', { cookie: `cw_session=bogus; ${cookie}` });
+  assert.equal(home.status, 200);
+  await home.arrayBuffer();
+  const out = await fetch(base + '/api/logout', { method: 'POST', headers: { cookie, 'x-forwarded-proto': 'https' } });
+  assert.equal(out.status, 200);
+  const cleared = out.headers.getSetCookie();
+  assert.ok(cleared.some((c) => /^__Host-cw_session=; .*Max-Age=0/.test(c)), cleared.join(' | '));
+  assert.ok(cleared.some((c) => /^cw_session=; .*Max-Age=0/.test(c)), cleared.join(' | '));
+  const after = await get('/api/status', { cookie });
+  assert.equal(after.status, 401);
+  await after.arrayBuffer();
 });
 
 test('a parallel burst of wrong passwords cannot bypass the login lockout (AUDIT #8)', async () => {

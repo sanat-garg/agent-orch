@@ -294,8 +294,9 @@ the repo was restarted with fresh history.
   permission prompts, and no tool is refused, including edits to this app's own code. Roles are enforced
   by prompt instructions only. New chats also default to `bypassPermissions`. Run this only on a
   disposable server you're willing to hand to an autonomous agent.
-- **Login.** There is a single password, stored as a scrypt hash. The session cookie `cw_session` is
-  `HttpOnly; Secure; SameSite=Lax` and lasts up to 30 days. After 5 failed logins, an IP is locked out for
+- **Login.** There is a single password, stored as a scrypt hash. Over HTTPS the session cookie is
+  `__Host-cw_session` (`HttpOnly; Secure; SameSite=Lax`, so no other host can set or shadow it); plain-http
+  local use gets a non-Secure `cw_session`. It lasts up to 30 days. Every response forbids framing. After 5 failed logins, an IP is locked out for
   15 minutes. POST requests and WebSocket upgrades must be same-origin. `set-password` signs out every
   session.
 - **Loopback only.** The app listens on `127.0.0.1`, and ttyd should too. The client IP used for lockout

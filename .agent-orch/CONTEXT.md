@@ -3,7 +3,7 @@
 _Durable knowledge for every agent session: architecture, conventions, decisions, gotchas. History lives in JOURNAL.md._
 
 ## Architecture
-- `server.mjs`: node:http + `ws`. Login/sessions (cookie `cw_session`), chat via the Agent SDK `query()`, serves `public/`. PORT defaults to 3000. Chat runtimes: always `retireRuntime` (runtimes.mjs), never `q.close()` + `runtimes.delete`.
+- `server.mjs`: node:http + `ws`. Login/sessions (cookie `__Host-cw_session` over HTTPS via `X-Forwarded-Proto`, plain `cw_session` on http), chat via the Agent SDK `query()`, serves `public/`. PORT defaults to 3000. Chat runtimes: always `retireRuntime` (runtimes.mjs), never `q.close()` + `runtimes.delete`.
 - `orchestrator.mjs`: node:sqlite DB at data/orchestrator/agent-orch.db; planner/worker/reflection loop; `runAgent()` wraps adapters with timeout + run log. Prompts live inline. `createOrchestrator({config})` overrides CFG in tests.
 - `agents.mjs`: adapter registry (`AGENTS`, `runAgentCli`) emitting normalised events (text/tool/tool_result/result/limit). Adapters: claude (SDK), codex (`codex exec --json`), antigravity (`~/.local/bin/agy -p --output-format stream-json`), opencode (`opencode run --format json`), kiro (`~/.local/bin/kiro-cli`, ACP stream-json), copilot (`copilot -p --output-format json`, shares the gh account). CLI adapters share `spawnJsonl` (detached process group, killed on abort/exit). `agentStatus` (on PATH + logged in, cached 60 s) gates routing. CLI flags and stream formats: `.agent-orch/AGENTS.md`.
 - `models.mjs`: every model list comes from its CLI (`discoverModels`), cached in `<DATA>/models.json`, refreshed at boot, every 6 h and after sign-in changes. Read via `modelCatalog(id)`/`modelNames(id)`; never hardcode model lists.

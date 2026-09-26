@@ -434,6 +434,7 @@ Every async throw in `handleRequest` becomes a 500, and the process keeps runnin
   (ttyd) is covered too. Rename the cookie `__Host-cw_session` (it already has Secure, Path=/ and no Domain), so no
   other host can set or shadow it, and read the first occurrence in `parseCookies`. The lasting fix is a hostname under
   a domain the owner controls, or one on the PSL.
+- **Fixed** (task #181): every response sends `Content-Security-Policy: frame-ancestors 'none'` + `X-Frame-Options: DENY`; over HTTPS (`X-Forwarded-Proto: https`) the cookie is `__Host-cw_session` (plain http keeps a non-Secure `cw_session`), reads prefer it and take the first cookie of a name, logout clears both; test/security-headers.test.mjs, test/server.test.mjs. The Caddyfile is outside the repo (`/etc/caddy/Caddyfile`), not edited; suggested for `/shell/*`: `header Content-Security-Policy "frame-ancestors 'none'"` and `header X-Frame-Options DENY` inside `handle /shell/* { … }`.
 
 ### 35. [low] Prototype names pass the `AGENTS[x]` checks, and chat modes aren't validated (server.mjs:1573, :1276, :1079; orchestrator.mjs:1660)
 - **What:** `AGENTS` is a plain object, so `AGENTS['constructor']`, `AGENTS['toString']` and `AGENTS['__proto__']` are

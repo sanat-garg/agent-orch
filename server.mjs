@@ -28,7 +28,8 @@ const HOME = os.homedir();
 const WORKSPACE = path.join(HOME, 'workspace');
 const PORT = Number(process.env.PORT || 3000);
 const CLAUDE_BIN = path.join(HOME, '.local/bin/claude');
-const COOKIE = 'cw_session';
+// Over HTTPS the cookie is `__Host-` prefixed so no other (same-site *.sslip.io) host can set or shadow it (AUDIT #34).
+const COOKIE = 'cw_session', HOST_COOKIE = '__Host-cw_session';
 const SESSION_DAYS = 30;
 const DEVICE_NAME = process.env.CW_DEVICE_NAME || 'Oracle VM';
 
@@ -90,19 +91,28 @@ function parseCookies(req) {
   for (const part of (req.headers.cookie || '').split(';')) {
     const i = part.indexOf('=');
     if (i <= 0) continue;
-    try { out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim()); } catch {} // skip malformed %-escapes
+    const k = part.slice(0, i).trim();
+    if (k in out) continue; // the first cookie of a name is the most specific (host-only) one
+    try { out[k] = decodeURIComponent(part.slice(i + 1).trim()); } catch {} // skip malformed %-escapes
   }
   return out;
 }
+function sessionToken(req) {
+  const c = parseCookies(req);
+  return c[HOST_COOKIE] || c[COOKIE];
+}
+// Only Caddy on loopback talks to us, so its X-Forwarded-Proto is trustworthy.
+const isHttps = (req) => !!req.socket.encrypted || (req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
 function isAuthed(req) {
   syncSessions();
-  const t = parseCookies(req)[COOKIE];
+  const t = sessionToken(req);
   const s = t && sessions[t];
   return !!(s && s.exp > Date.now());
 }
-function sessionCookie(token, maxAgeSec) {
+function sessionCookie(req, token, maxAgeSec) {
   const age = maxAgeSec == null ? '' : `; Max-Age=${maxAgeSec}`;
-  return `${COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Lax${age}`;
+  return isHttps(req) ? `${HOST_COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Lax${age}`
+    : `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax${age}`;
 }
 
 // Brute-force protection: 5 misses per IP locks it for 15 minutes.
@@ -1158,6 +1168,8 @@ async function handleRequest(req, res) {
   const url = new URL(req.url, 'http://x');
   const p = url.pathname;
   res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
+  res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'same-origin');
 
   // Caddy asks this before letting a request through to the terminal.
@@ -1184,12 +1196,15 @@ async function handleRequest(req, res) {
     }
     attempts.delete(ip);
     const s = newSession(!!body.remember);
-    return json(res, 200, { ok: true }, { 'Set-Cookie': sessionCookie(s.token, s.remember ? s.ttl / 1000 : null) });
+    return json(res, 200, { ok: true }, { 'Set-Cookie': sessionCookie(req, s.token, s.remember ? s.ttl / 1000 : null) });
   }
   if (p === '/api/logout' && req.method === 'POST') {
-    const t = parseCookies(req)[COOKIE];
+    const t = sessionToken(req);
     if (t) { delete sessions[t]; writeJSON('sessions.json', sessions); }
-    return json(res, 200, { ok: true }, { 'Set-Cookie': sessionCookie('', 0) });
+    // Over HTTPS also expire the pre-#34 Secure `cw_session` so it can't linger.
+    const clear = [sessionCookie(req, '', 0)];
+    if (isHttps(req)) clear.push(`${COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`);
+    return json(res, 200, { ok: true }, { 'Set-Cookie': clear });
   }
 
   if (p === '/sounds/task-done.mp3') {
@@ -1484,7 +1499,7 @@ function handleUpgrade(req, socket, head) {
 wss.on('connection', (ws, req) => {
   allClients.add(ws);
   let current = null;
-  const token = parseCookies(req)[COOKIE];
+  const token = sessionToken(req);
   const alive = setInterval(() => {
     syncSessions();
     const s = sessions[token];

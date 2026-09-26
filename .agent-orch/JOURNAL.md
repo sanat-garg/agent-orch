@@ -550,3 +550,7 @@ retrying failed prerequisites in either order revives dependents
 ## 2026-09-26 10:54 — #180 Fix AUDIT #33: malformed WebSocket frames must not crash the server [done (check passed)]
 
 malformed WebSocket frames no longer crash the server; tests pass
+
+## 2026-09-26 10:58 — #181 Fix AUDIT #34: forbid framing and harden the session cookie against same-site sslip.io hosts [done (check passed)]
+
+Every response now forbids framing; HTTPS sessions use __Host-cw_session

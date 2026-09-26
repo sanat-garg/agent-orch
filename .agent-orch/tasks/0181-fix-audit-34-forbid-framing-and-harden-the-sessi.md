@@ -13,3 +13,7 @@ Read .agent-orch/AUDIT.md finding #34. In server.mjs `handleRequest`, next to th
 ## Done when
 
 `node --test test/security-headers.test.mjs test/server.test.mjs` passes
+
+## Result — done (check passed) (2026-09-26 10:58)
+
+AGENT-ORCH-STATUS: done — Every response now forbids framing; HTTPS sessions use __Host-cw_session

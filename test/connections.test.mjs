@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
-import { parsePane, createConnections, SPECS, agyAccount, agyLogout, agyTokenFile } from '../connections.mjs';
+import { parsePane, kiroMethodKeys, createConnections, SPECS, agyAccount, agyLogout, agyTokenFile } from '../connections.mjs';
 
 const pane = (f) => fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures/panes', f), 'utf8');
 
@@ -71,6 +71,22 @@ test('agy panes (recorded): picks Google OAuth, rejoins the wrapped URL, reads t
 
 test('an empty pane yields nothing yet', () => {
   assert.deepEqual(parsePane(SPECS.codex, ''), { url: null, code: null, prompts: [], exited: false, exitCode: null, ok: false, error: null });
+});
+
+test('Kiro menu sends Down until the highlighted method is confirmed', () => {
+  const menu = pane('kiro-menu.txt');
+  assert.deepEqual([0, 1, 2, 3].map((target) => kiroMethodKeys(menu, target)), [['Enter'], ['Down'], ['Down'], ['Down']]);
+});
+
+test('unknown CLI prompts are surfaced instead of waiting forever', async () => {
+  const t = fakeTmux();
+  const conn = createConnections({ entries: [{ id: 'x', label: 'X', installed: () => true, signedIn: () => false, spec: SPECS.codex }],
+    tmux: t.run, pollMs: 1, promptTimeoutMs: 0 });
+  await conn.start('x');
+  t.screen = 'Continue setup? (y/N)';
+  await until(() => conn.list()[0].login?.prompt);
+  assert.match(conn.list()[0].login.prompt, /Continue setup/);
+  await conn.cancel('x');
 });
 
 // A fake tmux: records every call and serves pane text from `screen`; `failSend` makes send-keys fail; `delay` (ms)

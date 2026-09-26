@@ -1426,7 +1426,7 @@ async function handleRequest(req, res) {
   const cn = p.match(/^\/api\/connections\/([\w-]+)\/(start|code|cancel|logout)$/);
   if (cn && req.method === 'POST') {
     const [, id, action] = cn;
-    const r = action === 'start' ? await connections.start(id)
+    const r = action === 'start' ? await connections.start(id, await readBody(req))
       : action === 'code' ? await connections.submitCode(id, (await readBody(req)).code)
       : action === 'cancel' ? await connections.cancel(id) : await connections.logout(id, await readBody(req));
     const { status, ...body } = r;

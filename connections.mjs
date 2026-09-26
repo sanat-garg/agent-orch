@@ -8,7 +8,8 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 
 export const SOCKET = 'agent-orch-login';
-export const LOGIN_TIMEOUT = 10 * 60_000;
+export const LOGIN_TIMEOUT = 3 * 60_000;
+export const LOGIN_PROMPT_TIMEOUT = 10_000;
 const EXIT_RE = /__AO_EXIT:(\d+)/;
 
 // Per-agent login specs. start: argv run in the pane. url/code: regexes (group 1) or functions over the captured pane
@@ -58,7 +59,13 @@ export const SPECS = {
     logout: ['opencode', 'auth', 'logout', 'openai'],
   },
   kiro: {
-    start: [path.join(BIN, 'kiro-cli'), 'login', '--use-device-flow'],
+    start: [path.join(BIN, 'kiro-cli'), 'login', '--use-device-flow', '--license', 'free'],
+    methods: {
+      builder: { label: 'Builder ID', args: ['--license', 'free'], menu: 0 },
+      google: { label: 'Google', args: ['--license', 'free'], menu: 1 },
+      github: { label: 'GitHub', args: ['--license', 'free'], menu: 2 },
+      organization: { label: 'Your organization', args: ['--license', 'pro'], menu: 3 },
+    },
     url: /(https:\/\/[^\s]+\/\S+)/,
     code: /^Code:\s*([A-Z0-9]+(?:-[A-Z0-9]+)*)/im,
     needsPastedCode: false,
@@ -89,6 +96,27 @@ export function agyUrl(text) {
 }
 
 const grab = (re, text) => (typeof re === 'function' ? re(text) : text.match(re)?.[1]) || null;
+const KIRO_METHODS = ['Builder ID', 'Google', 'GitHub', 'Your organization'];
+export function kiroMethodPrompt(text) {
+  const m = String(text || '').match(/\?\s*Select login method[\s\S]*?(?=\n\s*\n|$)/i);
+  if (!m) return null;
+  const lines = m[0].split('\n').map((l) => l.trim()).filter(Boolean);
+  const highlighted = lines.find((l) => /^[❯>]\s*/.test(l));
+  const label = highlighted?.replace(/^[❯>]\s*/, '').replace(/^Use with\s+/i, '').trim();
+  const index = KIRO_METHODS.findIndex((x) => label?.toLowerCase().startsWith(x.toLowerCase()));
+  return { index, lines: lines.slice(-6).join('\n') };
+}
+export function kiroMethodKeys(text, target) {
+  const p = kiroMethodPrompt(text);
+  if (!p || p.index < 0 || !Number.isInteger(target)) return [];
+  if (p.index === target) return ['Enter'];
+  return ['Down'];
+}
+function genericPrompt(text) {
+  const lines = String(text || '').split('\n').map((l) => l.trimEnd()).filter(Boolean);
+  const prompt = lines.findIndex((l) => /^\s*\?/.test(l) || /^\s*[❯›>]\s*\S/.test(l) || /\(y\/N\)\s*$/.test(l));
+  return prompt < 0 ? null : lines.slice(Math.max(0, lines.length - 12)).join('\n');
+}
 
 // What the pane shows so far: {url, code, prompts (indices of `answers` visible), exited, exitCode, ok, error}.
 export function parsePane(spec, text) {
@@ -96,19 +124,21 @@ export function parsePane(spec, text) {
   const url = grab(spec.url, text) || spec.defaultUrl || null;
   const code = spec.code ? grab(spec.code, text) : null;
   const prompts = (spec.answers || []).flatMap(([re], i) => (re.test(text) ? [i] : []));
+  const method = spec.methods ? kiroMethodPrompt(text) : null;
+  const promptText = genericPrompt(text);
   const ex = text.match(EXIT_RE);
   if (!ex) {
     // A TUI that stays open: its success/failure text ends the login (exitCode stays null).
     const fail = spec.liveFailRe && text.match(spec.liveFailRe);
     if (fail) return { url, code, prompts, exited: true, exitCode: null, ok: false, error: (fail[1] || fail[0]).trim().slice(0, 300) };
     if (spec.liveSuccessRe?.test(text)) return { url, code, prompts, exited: true, exitCode: null, ok: true, error: null };
-    return { url, code, prompts, exited: false, exitCode: null, ok: false, error: null };
+    return { url, code, prompts, ...(method ? { method } : {}), ...(promptText ? { prompt: promptText } : {}), exited: false, exitCode: null, ok: false, error: null };
   }
   const exitCode = Number(ex[1]);
   const ok = exitCode === 0 || !!spec.successRe?.test(text);
   const before = text.slice(0, ex.index).split('\n').map((l) => l.trim()).filter(Boolean);
   const error = ok ? null : (before.filter((l) => /error|fail|expired|denied|cancel/i.test(l)).pop() || before.pop() || `exited with code ${exitCode}`).slice(0, 300);
-  return { url, code, prompts, exited: true, exitCode, ok, error };
+  return { url, code, prompts, ...(method ? { method } : {}), ...(promptText ? { prompt: promptText } : {}), exited: true, exitCode, ok, error };
 }
 
 export const onPath = (bin, env = process.env) => String(env.PATH || '').split(':').some((d) => {
@@ -123,14 +153,14 @@ export const tmuxRunner = (args) => new Promise((resolve) => {
 // uncached async sign-in check, run every probeMs while a login waits; true ends it as done (for CLIs whose success
 // screen isn't known). onChange(list) fires on every state change (the server broadcasts it). tmux/pollMs/probeMs/
 // timeoutMs are injectable for tests.
-export function createConnections({ entries, env = process.env, onChange = () => {}, tmux = tmuxRunner, pollMs = 1000, probeMs = 5000, timeoutMs = LOGIN_TIMEOUT }) {
+export function createConnections({ entries, env = process.env, onChange = () => {}, tmux = tmuxRunner, pollMs = 1000, probeMs = 5000, timeoutMs = LOGIN_TIMEOUT, promptTimeoutMs = LOGIN_PROMPT_TIMEOUT }) {
   const byId = new Map(entries.map((e) => [e.id, e]));
   const logins = new Map(); // id -> {state, url, code, needsPastedCode, error, startedAt, timer, answered}
   const session = (id) => `login-${id}`;
   // Logins live in memory, so sessions left on the socket by a previous server process are orphans (AUDIT #23).
   const booted = Promise.resolve().then(() => tmux(['kill-server'])).catch(() => {});
 
-  const view = (l) => l && { state: l.state, url: l.url, code: l.code, needsPastedCode: l.needsPastedCode, error: l.error, startedAt: l.startedAt };
+  const view = (l) => l && { state: l.state, url: l.url, code: l.code, needsPastedCode: l.needsPastedCode, error: l.error, ...(l.prompt ? { prompt: l.prompt } : {}), startedAt: l.startedAt };
   function list() {
     return entries.map((e) => {
       let installed = false, signedIn = false, account = null;
@@ -166,8 +196,22 @@ export function createConnections({ entries, env = process.env, onChange = () =>
         l.answered.add(i);
         await tmux(['send-keys', '-t', `=${session(id)}:`, ...e.spec.answers[i][1]]);
       }
+      if (p.method && l.methodIndex != null) {
+        if (p.method.index === l.methodIndex) {
+          if (!l.methodConfirmed) {
+            l.methodConfirmed = true;
+            await tmux(['send-keys', '-t', `=${session(id)}:`, 'Enter']);
+          }
+        } else if (p.method.index >= 0) {
+          await tmux(['send-keys', '-t', `=${session(id)}:`, 'Down']);
+        }
+      }
       if (p.exited) return finish(id, p.ok ? 'done' : 'failed', p.error, l);
       if (p.url !== l.url || p.code !== l.code) { l.url = p.url; l.code = p.code; changed(); }
+      if (!l.url && !l.code && p.prompt && Date.now() - l.startedAt >= promptTimeoutMs && l.prompt !== p.prompt) {
+        l.prompt = p.prompt;
+        changed();
+      }
       if (e.probe && Date.now() - l.probedAt >= probeMs) {
         l.probedAt = Date.now();
         if (await e.probe().catch(() => false)) return finish(id, 'done', null, l);
@@ -175,17 +219,25 @@ export function createConnections({ entries, env = process.env, onChange = () =>
     } finally { l.polling = false; }
   }
 
-  async function start(id) {
+  async function start(id, options = {}) {
     const e = byId.get(id);
     if (!e) return { status: 404, error: 'No such connection' };
     if (!e.spec) return { status: 400, error: `${e.label} can't be signed in from here yet` };
     if (!e.installed()) return { status: 409, error: `${e.label} is not installed` };
     if (logins.get(id)?.state === 'waiting') return { status: 200, login: view(logins.get(id)) };
     // Strip the API-billing env vars (a login must end on the subscription), and keep the exit status visible.
+    const method = e.spec.methods?.[options.method || 'builder'];
+    if (e.spec.methods && !method) return { status: 400, error: 'Unknown login method' };
+    if (options.method === 'organization' && (!String(options.startUrl || '').startsWith('https://') || !/^[A-Za-z0-9.-]+$/.test(String(options.region || '')))) {
+      return { status: 400, error: 'Organization login needs an HTTPS start URL and region' };
+    }
+    const argv = e.spec.methods ? [path.join(BIN, 'kiro-cli'), 'login', '--use-device-flow', ...method.args,
+      ...(options.method === 'organization' ? ['--identity-provider', options.startUrl, '--region', options.region] : [])] : e.spec.start;
     const unset = e.envFilter ? Object.keys(env).filter((k) => e.envFilter.test(k)) : [];
-    const cmd = `${unset.length ? `unset ${unset.join(' ')}; ` : ''}${e.spec.start.map(shq).join(' ')}; printf '\\n__AO_EXIT:%s\\n' $?; sleep 3600`;
+    const cmd = `${unset.length ? `unset ${unset.join(' ')}; ` : ''}${argv.map(shq).join(' ')}; printf '\\n__AO_EXIT:%s\\n' $?; sleep 3600`;
     // The entry goes in before the first await, so a second start returns it and a cancel can reach it (AUDIT #22).
-    const l = { state: 'waiting', url: null, code: null, needsPastedCode: !!e.spec.needsPastedCode, error: null, startedAt: Date.now(), probedAt: Date.now(), answered: new Set() };
+    const l = { state: 'waiting', url: null, code: null, prompt: null, needsPastedCode: !!e.spec.needsPastedCode, error: null, startedAt: Date.now(), probedAt: Date.now(), answered: new Set(),
+      methodIndex: method?.menu, methodConfirmed: false };
     logins.set(id, l);
     await booted;
     await tmux(['kill-session', '-t', `=${session(id)}`]);

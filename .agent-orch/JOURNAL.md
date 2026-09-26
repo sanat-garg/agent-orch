@@ -554,3 +554,7 @@ malformed WebSocket frames no longer crash the server; tests pass
 ## 2026-09-26 10:58 — #181 Fix AUDIT #34: forbid framing and harden the session cookie against same-site sslip.io hosts [done (check passed)]
 
 Every response now forbids framing; HTTPS sessions use __Host-cw_session
+
+## 2026-09-26 13:18 — #186 Kiro Connect: pick the login method; never hang on an unanswered CLI prompt [done (check passed)]
+
+Kiro login methods, prompt safeguards, timeout, and tests pass

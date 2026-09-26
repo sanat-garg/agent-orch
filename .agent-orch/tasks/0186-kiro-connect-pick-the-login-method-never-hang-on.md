@@ -21,3 +21,7 @@ Bug: Kiro's Connect hangs on 'Waiting for the sign-in link…'. connections.mjs 
 ## Done when
 
 `npm test` passes with Kiro menu-driving and prompt-safeguard tests, and on a test server starting Kiro with Builder ID yields a device URL (GET /api/connections shows kiro login with a url)
+
+## Result — done (check passed) (2026-09-26 13:18)
+
+AGENT-ORCH-STATUS: done — Kiro login methods, prompt safeguards, timeout, and tests pass

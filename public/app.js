@@ -4273,10 +4273,10 @@ async function connAction(c, action, body) {
     return r;
   } catch (e) { alert(`${c.label}: ${e.message}`); return null; }
 }
-async function connStart(c) {
+async function connStart(c, body = {}) {
   delete CONN.sent[c.id];
   delete CONN.drafts[c.id];
-  await connAction(c, 'start');
+  await connAction(c, 'start', body);
 }
 async function connLogout(c) {
   if (!confirm(c.logoutWarning ? `Sign out of ${c.label}?\n\n${c.logoutWarning}` : `Sign out of ${c.label} on this server?`)) return;
@@ -4306,6 +4306,15 @@ function connPanel(c) {
   }
   let n = 0;
   const step = (text) => el('div', 'cn-step', `${++n}. ${text}`);
+  if (l.prompt) {
+    box.classList.add('cn-prompt');
+    box.append(step('The CLI is asking:'), el('pre', 'cn-prompt-text', l.prompt));
+    const cancel = el('button', 'link-btn', 'Cancel');
+    cancel.type = 'button';
+    cancel.onclick = () => connAction(c, 'cancel');
+    const acts = el('div', 'cn-acts'); acts.append(cancel); box.append(acts);
+    return box;
+  }
   if (l.url) {
     box.append(step('Open the sign-in page'));
     let host = l.url;
@@ -4389,10 +4398,26 @@ function renderConnections(force) {
       b.onclick = () => connLogout(c);
       main.append(b);
     } else if (c.installed && !c.signedIn && c.canLogin && !waiting) {
-      const b = el('button', 'btn small primary cn-btn', 'Connect');
-      b.type = 'button';
-      b.onclick = () => connStart(c);
-      main.append(b);
+      if (c.id === 'kiro') {
+        const picker = el('div', 'cn-kiro-picker');
+        const select = el('select');
+        [['builder', 'Builder ID'], ['google', 'Google'], ['github', 'GitHub'], ['organization', 'Your organization']].forEach(([value, label]) => {
+          const o = el('option'); o.value = value; o.textContent = label; select.append(o);
+        });
+        const startUrl = el('input'); startUrl.placeholder = 'Organization start URL'; startUrl.hidden = true;
+        const region = el('input'); region.placeholder = 'Region (e.g. us-east-1)'; region.hidden = true;
+        select.onchange = () => { const org = select.value === 'organization'; startUrl.hidden = region.hidden = !org; };
+        const b = el('button', 'btn small primary cn-btn', 'Connect');
+        b.type = 'button';
+        b.onclick = () => connStart(c, { method: select.value, startUrl: startUrl.value, region: region.value });
+        picker.append(select, startUrl, region, b);
+        main.append(picker);
+      } else {
+        const b = el('button', 'btn small primary cn-btn', 'Connect');
+        b.type = 'button';
+        b.onclick = () => connStart(c);
+        main.append(b);
+      }
     }
     row.append(main);
     const l = c.login;

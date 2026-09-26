@@ -30,6 +30,9 @@ export function normUsage(agent, u = {}) {
   if (agent === 'claude' || u.cache_read_input_tokens != null) {
     return { input: num(u.input_tokens) + num(u.cache_creation_input_tokens), output: num(u.output_tokens), cached: num(u.cache_read_input_tokens) };
   }
+  // agy reports cache reads beside input (total_tokens = input + output; live runs read more cached than input);
+  // codex's cached_input_tokens are part of input_tokens.
+  if (agent === 'antigravity') return { input: num(u.input_tokens), output: num(u.output_tokens), cached: num(u.cache_read_tokens) };
   const cached = num(u.cached_input_tokens ?? u.cache_read_tokens ?? u.cached);
   return { input: Math.max(0, num(u.input_tokens) - cached), output: num(u.output_tokens), cached };
 }

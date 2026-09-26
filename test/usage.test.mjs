@@ -57,7 +57,9 @@ test('compact drops records older than 30 days', () => {
 });
 
 test('normUsage maps every adapter to uncached input, output and cached', () => {
-  assert.deepEqual(normUsage('antigravity', { input_tokens: 10418, output_tokens: 589, cache_read_tokens: 8113 }), { input: 2305, output: 589, cached: 8113 });
+  // agy's cache reads are not part of input_tokens: recorded live (#149) with 19071 input and 56618 cached.
+  assert.deepEqual(normUsage('antigravity', { input_tokens: 19071, output_tokens: 1635, cache_read_tokens: 56618, total_tokens: 20706 }), { input: 19071, output: 1635, cached: 56618 });
+  assert.deepEqual(normUsage('antigravity', { input_tokens: 10418, output_tokens: 589, cache_read_tokens: 8113 }), { input: 10418, output: 589, cached: 8113 });
   assert.deepEqual(normUsage('codex', null), { input: 0, output: 0, cached: 0 });
 });
 

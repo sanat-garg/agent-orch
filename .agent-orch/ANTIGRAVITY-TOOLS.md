@@ -218,3 +218,54 @@ codeword. It stops at the first rate limit. `--verbose` prints every normalised 
 `--agent claude` (default model): 10/10 pass (Read, Write, Bash). `--agent codex` (default model): 10/10 pass
 (Bash, Edit) after the large-file prompt stopped forbidding the shell (codex has no separate file viewer);
 that reworded check was re-run on both agy models and still passes via `view_file`. `npm test`: 198/198.
+
+# Orchestrator verification — task #149 (2026-09-26)
+
+`bin/orch-e2e.mjs --agent antigravity --model <m>` runs one real orchestrator task end to end: server.mjs on a spare
+port with `CW_DATA_DIR` = a fresh temp dir (the systemd unit's minimal env), a scratch git project registered by
+switching its chat to Orchestrator Mode (its `origin` is a local bare repo under `<tmp>/github.com/scratch/…`, so
+`projectReady` holds and the task's push stays on disk: no GitHub repo is created), `perpetual` off (no Claude
+reflection afterwards), then one queued work task: *add an exported `clamp(x, lo, hi)` to src/math.mjs plus tests
+below/inside/above the range, keep add()'s test, make `npm test` pass*, done_when `` `npm test` passes … ``, with
+`agent=antigravity` and the model set on the task. It waits for claim → agent run → check → done and exits 0 only if
+the task is 'done', `npm test` passes in the project, every file tool event carries a path, there was no route note,
+delegation or denial, and the live DB has no scratch project.
+
+## Final runs (all fixes below applied)
+
+| model | task / run | agy conversation | result | check | tools (run log) | usage records |
+|---|---|---|---|---|---|---|
+| gemini-3.1-pro-high | #1 / run 1, 45 s | `80f344aa-c28f-461a-bfc9-3d576b786c2c` | **done**, `AGENT-ORCH-STATUS: done — clamp function and tests added and passing`, commit 9542f76 pushed | `npm test` passed (4/4) | view_file BRIEF.md, CONTEXT.md, src/math.mjs, test/math.test.mjs; replace_file_content src/math.mjs, test/math.test.mjs (all `file_path` = absolute path); Bash `npm test` | tokens 27887 in / 2031 out / 48529 cached; `gemini-5h` 14.63→15.07 %, `3p-5h` unchanged 16.86 % |
+| claude-sonnet-4-6 | #1 / run 1, 45 s | `5c681f4a-31c8-46b9-830d-899f3d6945d4` | **done**, `AGENT-ORCH-STATUS: done — clamp added, all 4 tests pass`, commit 95cc839 pushed | `npm test` passed (4/4) | Bash `cat …` (reads); replace_file_content src/math.mjs, test/math.test.mjs (`file_path` set); Bash `npm test` | tokens 20409 in / 1536 out / 78283 cached; `3p-5h` 14.44→16.86 %, `3p-weekly` 38.45→39.25 %, `gemini-5h` unchanged 14.63 % |
+
+Each run used its own temp data dir, so both are task #1 / run 1 there. No limit was hit, so no limit record or
+`blocked*` kv was written; the window readings (from the post-run `agy -p /usage`) moved only in the group of the
+model that ran. Live isolation: the live service kept PID 735243 (up since 2026-09-25 20:34 UTC), the live DB's
+newest task stayed #149 with no `/tmp` project and no new antigravity run, and live `data/metrics/usage.jsonl` got
+no antigravity record.
+
+## What broke on the first runs, and the fixes
+
+1. **agy workers could not run any shell command (fixed).** New projects have `autonomous = 0`; for Claude that is
+   irrelevant (always bypassPermissions) and codex keeps its workspace-write sandbox, but for agy it dropped
+   `--dangerously-skip-permissions`, and headless agy then *auto-denies* every `run_command`. The first gemini run
+   (conversation `512d8ea3-…`) edited the files, tried `npm test`, got soft-denied (native log: `Print mode:
+   soft-denying tool confirmation "RunCommand" at step 10`) and ended `SUCCESS` with an empty response: the task
+   still passed the check but recorded "(no report)". Reproduced in isolation (`9e5b3e76-…`): the denied step
+   reports `DONE` with no output; only `result.denied_actions:[{action:"command",display_name:"RunCommand"}]` says
+   so. Fixes: orchestrator work tasks routed to antigravity always run autonomous (planner/reflection unchanged);
+   the adapter turns `denied_actions` into a text event + `res.text` ("Antigravity denied RunCommand without
+   asking …"). Tests: `test/agy-worker.test.mjs` (orchestrator child process with the agy stub as
+   `~/.local/bin/agy`; fails on the old code), agents.test "a tool headless agy denied is reported" (recorded
+   `test/fixtures/agy-denied.jsonl`).
+2. **`claude-sonnet-4-6` on antigravity silently ran Gemini (fixed).** The model is in both Claude's and agy's
+   discovered lists; `agentForModel` picks the first (claude), so `resolveRoute` treated the explicit
+   antigravity pairing as foreign, dropped the model and ran agy's default (route_note "model claude-sonnet-4-6 is
+   not a antigravity model"; `gemini-5h` moved, `3p-*` didn't). `foreignModel` now accepts any model the explicit
+   agent's own list names. Test: routing.test "an explicit agent keeps a model its own list names …".
+3. **agy input tokens were recorded as 0 (fixed).** `normUsage` subtracted `cache_read_tokens` from
+   `input_tokens` (codex semantics), but agy reports cache reads beside input (`total_tokens = input + output`;
+   live runs read more cached than input, e.g. 19071 vs 56618), so every agy token record had `input: 0`. agy
+   now records `input_tokens` as is. usage.test updated with the live numbers.
+
+`npm test`: 201/201 pass.

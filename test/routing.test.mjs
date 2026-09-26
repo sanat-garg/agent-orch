@@ -88,6 +88,21 @@ test('discovered model lists decide the agent and drop a model the agent does no
   assert.deepEqual(resolveRoute(task('x', { agent: 'codex', model: 'gpt-6-sol' }), project, [], all), { agent: 'codex', model: 'gpt-6-sol', source: 'task' });
 });
 
+test('an explicit agent keeps a model its own list names, even when another agent lists it too', (t) => {
+  // #149: claude-sonnet-4-6 is in both Claude's and agy's lists; an antigravity task asking for it ran agy's default model.
+  const at = Date.now();
+  setModelCatalog('claude', { models: [{ id: 'sonnet' }, { id: 'claude-sonnet-4-6' }], error: null, at });
+  setModelCatalog('antigravity', { models: [{ id: 'gemini-3.1-pro-high' }, { id: 'claude-sonnet-4-6' }], error: null, at });
+  t.after(() => { for (const id of ['claude', 'antigravity']) setModelCatalog(id, { models: [], error: 'loading', at: null }); });
+  const r = resolveRoute(task('x', { agent: 'antigravity', model: 'claude-sonnet-4-6' }), project, [], all);
+  assert.deepEqual(r, { agent: 'antigravity', model: 'claude-sonnet-4-6', source: 'task' });
+  assert.equal(routeNote(r), null);
+  assert.deepEqual(resolveRoute(task('x', { agent: 'claude', model: 'claude-sonnet-4-6' }), project, [], all), { agent: 'claude', model: 'claude-sonnet-4-6', source: 'task' });
+  // A model-only route still goes to the first agent that lists it; a Gemini model on Claude is still dropped.
+  assert.equal(resolveRoute(task('x', { model: 'claude-sonnet-4-6' }), project, [], all).agent, 'claude');
+  assert.equal(resolveRoute(task('x', { agent: 'claude', model: 'gemini-3.1-pro-high' }), project, [], all).dropped, 'gemini-3.1-pro-high');
+});
+
 test('extractTasks strips a model that belongs to another agent, with a reason', () => {
   const block = { tasks: [{ title: 'T', prompt: 'p', agent: 'codex', model: 'opus' }],
     routes: [{ match: 'ui', agent: 'codex', model: 'gemini-2.5-pro' }, { match: 'docs', model: 'gemini-2.5-pro' }] };

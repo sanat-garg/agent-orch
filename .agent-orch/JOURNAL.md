@@ -433,3 +433,7 @@ Codex limit was real; reset times now parsed from snapshots/errors
 ## 2026-09-26 01:32 — #148 Antigravity: reproduce and fix file/tool failures with a real smoke suite [done (check passed)]
 
 agy smoke passes 10/10 on both models; edit-path bug fixed
+
+## 2026-09-26 01:52 — #149 Verify Antigravity runs a real orchestrator task end to end [done (check passed)]
+
+both antigravity orchestrator runs finish done; three bugs fixed, tested

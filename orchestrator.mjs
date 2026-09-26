@@ -470,7 +470,12 @@ function agentForModel(model) {
   return fam && AGENTS[fam] ? fam : null;
 }
 // An explicit agent paired with another agent's model keeps the agent and drops the model (null when they fit).
-const foreignModel = (agent, model) => { const fam = agentForModel(model); return agent && fam && fam !== agent ? fam : null; };
+// The agent's own list wins: agy also serves claude-sonnet-4-6, which Claude's list names too.
+const foreignModel = (agent, model) => {
+  if (agent && modelNames(agent).includes(model)) return null;
+  const fam = agentForModel(model);
+  return agent && fam && fam !== agent ? fam : null;
+};
 // A model the agent's discovered list doesn't name (only judged once the list is known).
 const unlistedModel = (agent, model) => { const names = modelNames(agent); return !!model && names.length > 0 && !names.includes(model); };
 
@@ -1877,7 +1882,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       body = reused ? nextTaskPrompt(task) : workerTaskPrompt(project, task, ENVIRONMENT);
       system = WORKER_SYSTEM;
       tools = CFG.safeTools;
-      autonomous = !!project.autonomous;
+      // agy has no sandboxed middle mode (codex keeps workspace-write): without skip-permissions headless agy denies
+      // every shell command, so a worker couldn't even run its check. Claude always bypasses anyway.
+      autonomous = !!project.autonomous || route.agent === 'antigravity';
     }
     let prompt = body;
     if (resume && !reused) {

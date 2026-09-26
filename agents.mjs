@@ -516,6 +516,9 @@ export function agyWindows(data) {
 }
 const agyUsageData = (m) => { const c = m.command || m.result?.command; return c?.name === 'usage' || c?.name === 'quota' ? c.data : null; };
 
+export const agyDeniedNote = (names) => `Antigravity denied ${[...new Set(names)].join(', ')} without asking: headless agy can't prompt for ` +
+  'permission and only runs these tools with --dangerously-skip-permissions (autonomous).';
+
 // NDJSON event -> normalised events. `st` carries the text_delta buffers (per step) and the announced tool steps
 // across calls; a step's text is emitted once the step is DONE, another step starts, or the result arrives.
 function* agyEvents(m, st = { text: new Map(), started: new Set() }) {
@@ -542,6 +545,10 @@ function* agyEvents(m, st = { text: new Map(), started: new Set() }) {
   } else if (m.event === 'result' && m.result) {
     yield* flush();
     const r = m.result;
+    // Without --dangerously-skip-permissions, headless agy auto-denies every tool that needs a prompt (run_command…) and
+    // still reports SUCCESS, the denied step looking DONE with no output: say so, or the turn just ends silently.
+    const denied = (r.denied_actions || []).map((d) => d.display_name || d.action).filter(Boolean);
+    if (denied.length) yield { k: 'text', text: agyDeniedNote(denied) };
     if (r.status === 'SUCCESS') yield { k: 'result', usage: r.usage || {} };
     else if (AGY_LIMIT_RE.test(r.error || '')) yield { k: 'limit', resetsAt: codexResetsAt(r.error) };
   }

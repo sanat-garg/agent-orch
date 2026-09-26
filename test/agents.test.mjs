@@ -326,6 +326,18 @@ test('antigravity: resume passes --conversation; non-autonomous drops the skip-p
   assert.deepEqual(JSON.parse(fs.readFileSync(log, 'utf8')).argv, ['-p', 'more', '--output-format', 'stream-json', '--print-timeout', '0', '--conversation', 'abc']);
 });
 
+test('antigravity: a tool headless agy denied is reported, not a silent empty success', async () => {
+  // Recorded live (2026-09-26, gemini-3.1-pro-high, autonomous: false): the denied run_command looks DONE with no output
+  // and the turn ends SUCCESS with an empty response; only result.denied_actions says what happened.
+  const events = [];
+  const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'run echo', cwd: tmp(), autonomous: false,
+    settingsPath: noSettings, usageProbe: false, env: { PATH: process.env.PATH, AGY_STUB: 'denied' }, onEvent: (e) => events.push(e) });
+  assert.equal(res.outcome, 'ok');
+  assert.match(res.text, /^Antigravity denied RunCommand without asking: .*--dangerously-skip-permissions/);
+  assert.deepEqual(events.filter((e) => e.k === 'text').map((e) => e.text), [res.text]);
+  assert.deepEqual(events.find((e) => e.k === 'tool'), { k: 'tool', id: '2', name: 'Bash', input: { command: 'echo DENY_PROBE_42' } });
+});
+
 test('antigravity: recorded file tools retain paths, native errors and successful reads', async () => {
   // Live read-only control: absent file followed by an existing file (2026-09-25).
   const events = [];

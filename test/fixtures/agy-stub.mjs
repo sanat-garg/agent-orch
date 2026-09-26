@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Stand-in for `agy -p … --output-format stream-json`: prints recorded NDJSON events and never touches the network.
-// AGY_STUB=ok|file-tools|edit-tools|limit|quota-log|auth|hang|nosession picks the script; AGY_STUB_LOG, if set, receives {argv, env, cwd} as JSON.
+// AGY_STUB=ok|file-tools|edit-tools|denied|limit|quota-log|auth|hang|nosession picks the script; AGY_STUB_LOG, if set, receives {argv, env, cwd} as JSON.
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 
@@ -25,7 +25,7 @@ const mode = process.env.AGY_STUB || 'ok';
 const cid = '3f0c9a2e-agy';
 const step = (o) => out({ event: 'step_update', step_update: { conversation_id: cid, ...o } });
 
-if (mode === 'file-tools' || mode === 'edit-tools') {
+if (mode === 'file-tools' || mode === 'edit-tools' || mode === 'denied') {
   process.stdout.write(fs.readFileSync(new URL(`./agy-${mode}.jsonl`, import.meta.url), 'utf8'));
 } else if (mode === 'nosession') {
   out({ event: 'result', result: { status: 'ERROR', error: 'conversation 9 not found' } });

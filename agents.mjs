@@ -741,19 +741,33 @@ export function* opencodeEvents(m, st = { tools: new Set() }) {
     yield { k: 'limit', resetsAt: opencodeReset(m.error) };
   }
 }
+// OpenCode merges the global config (~/.config/opencode), every opencode.json[c] from the cwd up to the git root,
+// and the cwd's .env. Returns the first file that sets an API key or custom endpoint, else null.
+export function opencodeBillingConfig(cwd, env = process.env) {
+  const globalDir = path.join(env.XDG_CONFIG_HOME || path.join(env.HOME || HOME, '.config'), 'opencode');
+  const files = ['config.json', 'opencode.json', 'opencode.jsonc'].map((f) => path.join(globalDir, f));
+  files.push(path.join(cwd, '.env'));
+  for (let dir = path.resolve(cwd); ; dir = path.dirname(dir)) {
+    files.push(path.join(dir, 'opencode.json'), path.join(dir, 'opencode.jsonc'));
+    if (fs.existsSync(path.join(dir, '.git')) || path.dirname(dir) === dir) break;
+  }
+  for (const file of files) {
+    let cfg;
+    try { cfg = fs.readFileSync(file, 'utf8'); } catch { continue; }
+    if (path.basename(file) === '.env' ? /^\s*(?:[A-Z][A-Z0-9_]*(?:_API_KEY|_TOKEN)|OPENAI_BASE_URL)\s*=/m.test(cfg)
+      : /"(?:apiKey|baseURL)"\s*:/.test(cfg)) return path.dirname(file) === path.resolve(cwd) ? path.basename(file) : file;
+  }
+  return null;
+}
 async function runOpencode({ model, prompt, cwd, resume, systemAppend, signal, onEvent, onMessage, bin, env = process.env, autonomous = true }) {
   const res = { outcome: 'error', text: '', sessionId: resume || null, usage: {}, numTurns: 0, resetsAt: null,
     limitType: null, stderr: '', errorCode: null, windows: null };
-  // A project config can override OAuth with an API key or custom endpoint; don't risk another billing route.
-  for (const file of ['opencode.json', 'opencode.jsonc', '.env']) {
-    try {
-      const cfg = fs.readFileSync(path.join(cwd, file), 'utf8');
-      if (/"(?:apiKey|baseURL)"\s*:/.test(cfg) || file === '.env' && /^\s*(?:[A-Z][A-Z0-9_]*(?:_API_KEY|_TOKEN)|OPENAI_BASE_URL)\s*=/m.test(cfg)) {
-        res.outcome = 'auth_error'; res.errorCode = 'authentication_failed';
-        res.text = `${file} configures an API key or custom endpoint; OpenCode requires subscription OAuth.`;
-        return res;
-      }
-    } catch {}
+  // Any config OpenCode loads can override OAuth with an API key or custom endpoint; don't risk another billing route.
+  const bad = opencodeBillingConfig(cwd, env);
+  if (bad) {
+    res.outcome = 'auth_error'; res.errorCode = 'authentication_failed';
+    res.text = `${bad} configures an API key or custom endpoint; OpenCode requires subscription OAuth.`;
+    return res;
   }
   const args = ['run', '--dir', cwd, '--format', 'json'];
   if (model) args.push('--model', model);
@@ -794,7 +808,7 @@ const OPENCODE = {
   async listModels({ bin, env = process.env, timeoutMs = 30_000 } = {}) {
     return opencodeModels(await execOut(bin || this.bin, ['models', 'openai'], { env: stripEnv(env, this.envFilter), cwd: HOME, timeout: timeoutMs }));
   },
-  envFilter: /^(?:.*(?:_API_KEY|_TOKEN)|OPENAI_(?:BASE_URL|ORG_ID|ORGANIZATION|PROJECT_ID)|AZURE_OPENAI_.*|OPENCODE_(?:AUTH|CONFIG|CONFIG_DIR))$/,
+  envFilter: /^(?:.*(?:_API_KEY|_TOKEN)|OPENAI_(?:BASE_URL|ORG_ID|ORGANIZATION|PROJECT_ID)|AZURE_OPENAI_.*|OPENCODE_(?:AUTH|CONFIG.*))$/,
   events: opencodeEvents, run: runOpencode,
 };
 

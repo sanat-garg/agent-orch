@@ -13,3 +13,7 @@ Read .agent-orch/AUDIT.md finding #32 (Round 4) and the OpenCode section of .age
 ## Done when
 
 `node --test test/opencode.test.mjs` passes, including new tests for a global-config apiKey refusal and OPENCODE_CONFIG_CONTENT being stripped.
+
+## Result — done (check passed) (2026-09-26 10:34)
+
+AGENT-ORCH-STATUS: done — OpenCode guard now checks global, parent configs; strips OPENCODE_CONFIG*

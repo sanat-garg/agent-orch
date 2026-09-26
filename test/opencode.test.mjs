@@ -83,6 +83,38 @@ test('project API billing configuration is rejected before spawning', async () =
   assert.match(res.text, /API key/);
 });
 
+test('global config with a provider apiKey is rejected before spawning', async () => {
+  const home = tmp(), dir = tmp(), log = path.join(dir, 'log.json');
+  fs.mkdirSync(path.join(home, '.config/opencode'), { recursive: true });
+  const cfg = path.join(home, '.config/opencode/opencode.json');
+  fs.writeFileSync(cfg, '{"provider":{"openai":{"options":{"apiKey":"secret"}}}}');
+  const res = await runAgentCli({ agent: 'opencode', bin: stub, cwd: dir, prompt: 'hi', env: env('success', { HOME: home, OPENCODE_STUB_LOG: log }) });
+  assert.equal(res.outcome, 'auth_error');
+  assert.ok(res.text.startsWith(`${cfg} configures an API key`), res.text);
+  assert.ok(!fs.existsSync(log));
+});
+
+test('parent-directory config up to the git root is checked', async () => {
+  const root = tmp(), cwd = path.join(root, 'pkg/sub');
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.mkdirSync(path.join(root, '.git'));
+  fs.writeFileSync(path.join(root, 'opencode.json'), '{"provider":{"openai":{"options":{"baseURL":"https://proxy"}}}}');
+  const res = await runAgentCli({ agent: 'opencode', bin: stub, cwd, prompt: 'hi', env: env('success', { HOME: tmp() }) });
+  assert.equal(res.outcome, 'auth_error');
+  assert.match(res.text, new RegExp(`^${path.join(root, 'opencode.json')} configures`));
+});
+
+test('clean global config runs and OPENCODE_CONFIG* vars never reach OpenCode', async () => {
+  const home = tmp(), dir = tmp(), log = path.join(dir, 'log.json');
+  fs.mkdirSync(path.join(home, '.config/opencode'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.config/opencode/opencode.jsonc'), '{\n  "$schema": "https://opencode.ai/config.json"\n}');
+  const res = await runAgentCli({ agent: 'opencode', bin: stub, cwd: dir, prompt: 'hi', env: env('success', { HOME: home, OPENCODE_STUB_LOG: log,
+    OPENCODE_CONFIG_CONTENT: '{"provider":{"openai":{"options":{"apiKey":"secret"}}}}', OPENCODE_CONFIG: '/x.json', OPENCODE_CONFIG_DIR: '/x' }) });
+  assert.equal(res.outcome, 'ok');
+  const seen = JSON.parse(fs.readFileSync(log, 'utf8')).env;
+  for (const k of ['OPENCODE_CONFIG_CONTENT', 'OPENCODE_CONFIG', 'OPENCODE_CONFIG_DIR']) assert.ok(!(k in seen), k);
+});
+
 test('limits come only from structured error events, not tool output', async () => {
   const events = [];
   const ok = await runAgentCli({ agent: 'opencode', bin: stub, cwd: tmp(), prompt: 'hi', env: env('toolmention'), onEvent: (e) => events.push(e) });

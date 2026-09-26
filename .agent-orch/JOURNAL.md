@@ -522,3 +522,7 @@ full suite now ~198 s from 278 s, stable
 ## 2026-09-26 10:33 — #173 Fix AUDIT #31: dotted directory names in task files cover their contents [done (check passed)]
 
 Declared paths without wildcards now cover their whole contents
+
+## 2026-09-26 10:34 — #174 Fix AUDIT #32: OpenCode subscription guard checks global config and OPENCODE_CONFIG_CONTENT [done (check passed)]
+
+OpenCode guard now checks global, parent configs; strips OPENCODE_CONFIG*

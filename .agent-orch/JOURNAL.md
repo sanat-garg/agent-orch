@@ -453,3 +453,7 @@ LiveBench popup verified at desktop and mobile widths.
 ## 2026-09-26 02:34 — #145 Play a completion sound when a task finishes while the tab is in the background [done (check passed)]
 
 Background completion sounds verified; all 207 tests pass.
+
+## 2026-09-26 02:43 — #144 Revert to the original system font stack; remove bundled fonts [done]
+
+Original fonts restored; required checks and tests pass

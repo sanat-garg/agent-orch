@@ -37,7 +37,7 @@ html, body { height: 100%; margin: 0; }
 body {
   background: radial-gradient(1200px 600px at 50% -10%, var(--bg-glow), transparent 60%), var(--bg);
   color: var(--text);
-  font: 15px/1.5 var(--sans);
+  font: 15px/1.5 ui-sans-serif, -apple-system, "Segoe UI", system-ui, Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 .wrap {
@@ -59,7 +59,7 @@ body {
 .brand img { flex: none; }
 h1 { font-size: 22px; line-height: 1.2; margin: 0 0 2px; font-weight: 650; letter-spacing: -0.01em; }
 .sub { margin: 0; color: var(--muted); font-size: 14px; }
-.sub span { font-family: var(--mono); font-size: 13px; }
+.sub span { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
 label { display: block; font-weight: 550; font-size: 14px; margin-bottom: 6px; }
 .field { position: relative; }
 .field input {
@@ -131,5 +131,3 @@ label { display: block; font-weight: 550; font-size: 14px; margin-bottom: 6px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes shake { 20%, 60% { transform: translateX(-6px); } 40%, 80% { transform: translateX(6px); } }
 @media (prefers-reduced-motion: reduce) { .shake { animation: none; } }
-
-code, pre, kbd { font-family: var(--mono); }

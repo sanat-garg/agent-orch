@@ -7,8 +7,6 @@
 <title>Sign in · agent-orch</title>
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="manifest" href="/manifest.webmanifest">
-<link rel="preload" href="/fonts/InterVariable-4.1.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="/fonts.css">
 <link rel="stylesheet" href="/login.css">
 </head>
 <body>
@@ -78,16 +76,16 @@ function showError(text) {
 function lockout(sec) {
   const btn = $('submit');
   btn.disabled = true;
-  clearInterval(lockTimer);
+  clearTimeout(lockTimer);
   const tick = () => {
-    if (sec <= 0) { clearInterval(lockTimer); btn.disabled = false; $('error').hidden = true; pw.focus(); return; }
+    if (sec <= 0) { clearTimeout(lockTimer); btn.disabled = false; $('error').hidden = true; pw.focus(); return; }
     const m = Math.floor(sec / 60), s = String(sec % 60).padStart(2, '0');
     $('error').textContent = `Too many attempts. Try again in ${m}:${s}.`;
     $('error').hidden = false;
     sec--;
+    lockTimer = setTimeout(tick, 1000);
   };
   tick();
-  lockTimer = setInterval(tick, 1000);
 }
 
 $('form').addEventListener('submit', async (e) => {

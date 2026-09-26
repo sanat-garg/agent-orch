@@ -518,3 +518,7 @@ AUDIT.md Round 4 lists six verified findings (#27–32)
 ## 2026-09-26 10:27 — #168 Speed up the tests: cut fixed waits in the slowest test files [done (check passed)]
 
 full suite now ~198 s from 278 s, stable
+
+## 2026-09-26 10:33 — #173 Fix AUDIT #31: dotted directory names in task files cover their contents [done (check passed)]
+
+Declared paths without wildcards now cover their whole contents

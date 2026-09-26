@@ -13,3 +13,7 @@ Read .agent-orch/AUDIT.md finding #31 (Round 4) first. Bug in parallel.mjs `segs
 ## Done when
 
 `node --test test/parallel.test.mjs` passes, including a new assertion that filesOverlap(['.agent-orch'], ['.agent-orch/AUDIT.md']) is true.
+
+## Result — done (check passed) (2026-09-26 10:33)
+
+AGENT-ORCH-STATUS: done — Declared paths without wildcards now cover their whole contents

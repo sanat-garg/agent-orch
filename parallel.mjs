@@ -41,11 +41,11 @@ function intersects(a, b, { anyTok, oneTok, fits }) {
 }
 const segChars = (s) => [...s].map((c) => (c === '*' ? '\0*' : c === '?' ? '\0?' : c));
 const segmentsMeet = (x, y) => x === y || intersects(segChars(x), segChars(y), { anyTok: '\0*', oneTok: '\0?', fits: (c, d) => c === d });
-// A pattern's segments. A directory ('src/', or a plain path whose last part has no extension, like 'public')
-// also covers everything under it.
+// A pattern's segments. Any path without wildcards ('src/', 'public', '.agent-orch', even 'src/a.mjs') may be a
+// directory, so it also covers everything under it; a real file has no children, so this only costs parallelism.
 function segs(p) {
-  const s = p.split('/').filter((x) => x && x !== '.'), last = s[s.length - 1] || '';
-  return p.endsWith('/') || (!/[*?]/.test(p) && !last.includes('.')) ? [...s, '**'] : s;
+  const s = p.split('/').filter((x) => x && x !== '.');
+  return p.endsWith('/') || !/[*?]/.test(p) ? [...s, '**'] : s;
 }
 const pathsMeet = (a, b) => intersects(segs(a), segs(b), { anyTok: '**', oneTok: null, fits: segmentsMeet });
 

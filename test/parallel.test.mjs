@@ -23,9 +23,14 @@ describe('file overlap', () => {
       [['src/*.js'], ['src/*.css'], false],
       [['src/*.js'], ['src/app.js'], true],
       [['src/**/*.js'], ['src/deep/x/a.js'], true],
-      [['src/**/*.js'], ['src/a.css'], false],
+      [['src/**/*.js'], ['src/**/*.css'], false],
+      [['src/**/*.js'], ['src/a.css'], true],      // conservative: 'src/a.css' might be a directory holding .js files
       [['src/**'], ['src/a.css'], true],
-      [['public'], ['public/app.js'], true],       // a plain path without an extension may be a directory
+      [['public'], ['public/app.js'], true],       // a plain path may be a directory
+      [['.agent-orch'], ['.agent-orch/AUDIT.md'], true], // ...even with a dot in its name (AUDIT #31)
+      [['test/fixtures.v2'], ['test/fixtures.v2/x.js'], true],
+      [['src/a.mjs'], ['src/b.mjs'], false],
+      [['.agent-orch/ROADMAP.md'], ['.agent-orch/AUDIT.md'], false],
       [['src/a/'], ['src/b/c.js'], false],
       [['test/*.test.mjs'], ['test/fixtures/x.mjs'], false],
       [['test/?.mjs'], ['test/a.mjs'], true],

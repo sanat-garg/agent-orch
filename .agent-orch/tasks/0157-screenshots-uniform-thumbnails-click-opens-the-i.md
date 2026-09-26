@@ -12,3 +12,7 @@ Agent screenshots in chat and in the task drawer render as thumbnails of differe
 ## Done when
 
 `node --check public/app.js && npm test` passes, and app.css defines a single fixed thumbnail size used by both the chat and drawer image grids
+
+## Result — done (check passed) (2026-09-26 05:56)
+
+AGENT-ORCH-STATUS: done — Fixed 160×100 thumbnails; lightbox opens images at original size; tests pass

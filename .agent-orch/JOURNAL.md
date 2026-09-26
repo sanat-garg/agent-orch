@@ -477,3 +477,7 @@ work tasks run in isolated worktrees and merge back safely
 ## 2026-09-26 05:44 — #156 Parallel planning: file-scoped tasks, multi-dependencies, integrator tasks, agent spreading [done (check passed)]
 
 parallel scheduling with file gating, multi-deps, spreading and integrators; tests pass
+
+## 2026-09-26 05:56 — #157 Screenshots: uniform thumbnails; click opens the image at original size [done (check passed)]
+
+Fixed 160×100 thumbnails; lightbox opens images at original size; tests pass

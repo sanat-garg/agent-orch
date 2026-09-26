@@ -1000,23 +1000,42 @@ pre.copy-cmd:hover::after { opacity: .7; }
 .copy-tip { position: fixed; z-index: 1000; transform: translateX(-50%); padding: 3px 8px; border-radius: 6px; background: var(--text); color: var(--bg); font-size: 12px; pointer-events: none; animation: copy-tip 1.2s ease forwards; }
 @keyframes copy-tip { 0%, 75% { opacity: 1; } 100% { opacity: 0; } }
 
-/* screenshots */
-.shots { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; max-width: 660px; margin: 0 0 10px; }
-.shots:has(> .shot:only-child) { grid-template-columns: minmax(0, 320px); }
+/* screenshots: one fixed 16:10 thumbnail size for the chat and the task drawer (.shots grids); click opens the lightbox */
+.shots { --thumb-w: 160px; --thumb-h: 100px; display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 10px; }
 .messages > .shots { margin-bottom: 18px; }
-.shot { margin: 0; min-width: 0; max-width: 320px; }
-.shot button { display: block; width: 100%; padding: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--raised); cursor: zoom-in; }
+.shot { flex: none; width: var(--thumb-w); min-width: 0; margin: 0; }
+.shot button, .shot .shot-missing { display: block; width: 100%; height: var(--thumb-h); padding: 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--raised); cursor: zoom-in; }
 .shot button:hover { border-color: var(--accent); }
-.shot img { display: block; width: 100%; height: auto; max-height: 360px; object-fit: cover; object-position: top; }
+.shot img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top; }
+.shot .shot-missing { display: grid; min-height: 0; padding: 8px; cursor: default; }
 .shot figcaption { margin-top: 4px; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Phones: two per row filling the width, same 16:10 frame. */
+@media (max-width: 800px) {
+  .shot { width: calc((100% - 8px) / 2); }
+  .shot button, .shot .shot-missing { height: auto; aspect-ratio: 16 / 10; }
+}
 .shot-missing { display: grid; place-items: center; min-height: 90px; padding: 12px; border: 1px dashed var(--border-strong); border-radius: 10px; color: var(--faint); font-size: 12.5px; text-align: center; }
 .shots-more { font-size: 12.5px; margin: -4px 0 8px; }
+/* Lightbox: the image at its natural pixel size, scrolling (or mouse-drag panning) both ways when larger than the view;
+   'Fit to screen' shrinks it to fit (never upscales). Pinch-zoom stays allowed. */
 .modal-panel.lb { width: min(1200px, 100%); height: calc(100dvh - 48px); }
 .lb-open { display: inline-flex; align-items: center; text-decoration: none; color: inherit; }
-.lb-stage { flex: 1; min-height: 0; display: flex; align-items: center; gap: 8px; padding: 0 12px 16px; }
-.lb-stage img { flex: 1; align-self: stretch; min-width: 0; min-height: 0; width: 100%; height: 100%; object-fit: contain; }
+.lb-stage { position: relative; flex: 1; min-height: 0; display: flex; align-items: center; gap: 8px; padding: 0 12px 16px; }
+.lb-view { position: relative; flex: 1; align-self: stretch; min-width: 0; min-height: 0; display: flex; overflow: auto; overscroll-behavior: contain;
+  contain: size; touch-action: pan-x pan-y pinch-zoom; border-radius: 8px; background: var(--raised); cursor: grab; } /* contain: a huge image must not widen the modal */
+.lb-view.panning { cursor: grabbing; user-select: none; }
+.lb-view img { flex: none; margin: auto; width: auto; height: auto; max-width: none; max-height: none; -webkit-user-drag: none; }
+.lb-view.fit { overflow: hidden; cursor: default; }
+.lb-view.fit img { position: absolute; inset: 0; max-width: 100%; max-height: 100%; }
 .lb-stage .shot-missing { flex: 1; align-self: stretch; }
-.lb-nav { width: 44px; height: 44px; border-radius: 99px; }
+.lb-nav { flex: none; width: 44px; height: 44px; border-radius: 99px; }
+@media (max-width: 800px) {
+  .lb-stage { padding: 0 0 env(safe-area-inset-bottom); }
+  .lb-view { border-radius: 0; }
+  .lb-nav { position: absolute; top: 50%; z-index: 1; transform: translateY(-50%); background: color-mix(in srgb, var(--bg) 80%, transparent); box-shadow: 0 1px 6px rgba(0,0,0,.25); }
+  #lbPrev { left: 8px; }
+  #lbNext { right: 8px; }
+}
 
 /* Fallbacks button (composer, next to the model picker; reflection settings) and its sheet (#fbModal). */
 .fb-chip { flex: none; font: inherit; font-size: 13px; }

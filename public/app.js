@@ -765,6 +765,7 @@ function shotNode(img) {
   b.onclick = () => openShot(fig);
   fig.dataset.id = img.id;
   fig.dataset.name = img.name || '';
+  if (img.w && img.h) { fig.dataset.w = img.w; fig.dataset.h = img.h; }
   fig.append(b, el('figcaption', '', img.name || 'image'));
   return fig;
 }
@@ -777,36 +778,69 @@ function shotGrid(imgs = []) {
 function openShot(fig) {
   let list;
   if (fig.closest('#drBody') && O.detail) list = O.detail.runs.flatMap((r) => r.entries.filter((e) => e.k === 'image'));
-  else list = [...$('messages').querySelectorAll('.shot')].map((f) => ({ id: f.dataset.id, name: f.dataset.name }));
+  else list = [...$('messages').querySelectorAll('.shot')].map((f) => ({ id: f.dataset.id, name: f.dataset.name, w: +f.dataset.w || 0, h: +f.dataset.h || 0 }));
   const seen = new Set();
   list = list.filter((i) => i.id && !seen.has(i.id) && seen.add(i.id));
   LB.list = list;
   LB.lastFocus = document.activeElement;
+  setShotFit(false); // every open starts at actual size
   showShot(Math.max(0, list.findIndex((i) => i.id === fig.dataset.id)));
   $('lightbox').hidden = false;
   $('lightbox').querySelector('[data-close].icon-btn').focus();
 }
-const LB = { list: [], i: 0, lastFocus: null };
+const LB = { list: [], i: 0, lastFocus: null, fit: false, size: '' };
 function showShot(i) {
   const n = LB.list.length;
   if (!n) return;
   LB.i = (i + n) % n;
   const img = LB.list[LB.i];
   $('lbTitle').textContent = img.name || 'Screenshot';
-  $('lbSub').textContent = n > 1 ? `${LB.i + 1} of ${n} · use ← → to browse` : '';
+  LB.size = img.w && img.h ? `${img.w} × ${img.h} px` : '';
+  shotCaption();
   $('lbOpen').href = mediaUrl(img.id);
   $('lbMissing').hidden = true;
-  $('lbImg').hidden = false;
+  $('lbView').hidden = false;
   $('lbImg').alt = img.name || 'Screenshot';
   $('lbImg').src = mediaUrl(img.id);
+  $('lbView').scrollTo(0, 0);
   $('lbPrev').hidden = $('lbNext').hidden = n < 2;
+}
+function shotCaption() {
+  const n = LB.list.length;
+  $('lbSub').textContent = [LB.size, n > 1 ? `${LB.i + 1} of ${n} · use ← → to browse` : ''].filter(Boolean).join(' · ');
+}
+// Actual size (default) shows the natural pixel dimensions and scrolls; Fit to screen only ever shrinks.
+function setShotFit(fit) {
+  LB.fit = fit;
+  $('lbView').classList.toggle('fit', fit);
+  $('lbFit').textContent = fit ? 'Actual size' : 'Fit to screen';
+  $('lbFit').setAttribute('aria-pressed', String(fit));
 }
 function closeShot() {
   $('lightbox').hidden = true;
   $('lbImg').removeAttribute('src');
   LB.lastFocus?.focus?.();
 }
-$('lbImg').addEventListener('error', () => { if ($('lbImg').getAttribute('src')) { $('lbImg').hidden = true; $('lbMissing').hidden = false; } });
+$('lbImg').addEventListener('load', () => {
+  const im = $('lbImg');
+  if (im.naturalWidth) { LB.size = `${im.naturalWidth} × ${im.naturalHeight} px`; shotCaption(); }
+});
+$('lbImg').addEventListener('error', () => { if ($('lbImg').getAttribute('src')) { $('lbView').hidden = true; $('lbMissing').hidden = false; } });
+$('lbFit').addEventListener('click', () => setShotFit(!LB.fit));
+// Mouse drag pans a large image (touch scrolls natively, and pinch-zoom stays allowed).
+$('lbView').addEventListener('pointerdown', (e) => {
+  const v = $('lbView');
+  if (e.pointerType !== 'mouse' || e.button !== 0 || LB.fit) return;
+  const x = e.clientX + v.scrollLeft, y = e.clientY + v.scrollTop;
+  v.setPointerCapture(e.pointerId);
+  v.classList.add('panning');
+  const move = (m) => v.scrollTo(x - m.clientX, y - m.clientY);
+  const up = () => { v.classList.remove('panning'); v.removeEventListener('pointermove', move); v.removeEventListener('pointerup', up); v.removeEventListener('pointercancel', up); };
+  v.addEventListener('pointermove', move);
+  v.addEventListener('pointerup', up);
+  v.addEventListener('pointercancel', up);
+  e.preventDefault();
+});
 $('lbPrev').addEventListener('click', () => showShot(LB.i - 1));
 $('lbNext').addEventListener('click', () => showShot(LB.i + 1));
 $('lightbox').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeShot(); });

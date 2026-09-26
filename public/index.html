@@ -362,6 +362,7 @@
         <h2 id="lbTitle"></h2>
         <p class="m-sub" id="lbSub"></p>
       </div>
+      <button class="btn small" id="lbFit" type="button" aria-pressed="false">Fit to screen</button>
       <a class="btn small lb-open" id="lbOpen" target="_blank" rel="noopener">Open original</a>
       <button class="icon-btn" data-close aria-label="Close">
         <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
@@ -371,7 +372,7 @@
       <button class="icon-btn lb-nav" id="lbPrev" aria-label="Previous image">
         <svg viewBox="0 0 24 24" width="22" height="22"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
       </button>
-      <img id="lbImg" alt="">
+      <div class="lb-view" id="lbView"><img id="lbImg" alt=""></div>
       <div class="shot-missing" id="lbMissing" hidden>Image unavailable</div>
       <button class="icon-btn lb-nav" id="lbNext" aria-label="Next image">
         <svg viewBox="0 0 24 24" width="22" height="22"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>

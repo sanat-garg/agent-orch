@@ -142,7 +142,7 @@ research notes on each CLI are in `.agent-orch/AGENTS.md`.
 | Claude Code (default) | `~/.local/bin/claude` | see Requirements | `claude`, then `/login` |
 | OpenAI Codex CLI | `codex` on `PATH` | `sudo npm i -g @openai/codex` | `codex login --device-auth`, then open the URL and enter the code. You may first need to enable device code authorization for Codex in ChatGPT's security settings. `codex login status` should say "Logged in using ChatGPT". |
 | Google Antigravity CLI | `~/.local/bin/agy` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | run `agy` with no arguments, open the Google OAuth URL it prints, sign in, and paste the code back |
-| OpenCode CLI | `opencode` on `PATH` | `sudo npm i -g opencode-ai` | Connections modal (ChatGPT Pro/Plus device flow: `opencode auth login --provider openai --method 'ChatGPT Pro/Plus (headless)'`) |
+| OpenCode CLI | `opencode` on `PATH` | `sudo npm i -g opencode-ai` | Connections modal: pick a provider (ChatGPT Plus/Pro, GitHub Copilot or SuperGrok), then its device flow (`opencode auth login --provider <id> --method <subscription method>`) |
 | Kiro CLI | `~/.local/bin/kiro-cli` | `curl -fsSL https://cli.kiro.dev/install \| bash` (needs `unzip`) | Connections modal (`kiro-cli login --use-device-flow`) |
 | GitHub Copilot CLI | `copilot` on `PATH` | `sudo npm i -g @github/copilot` | Connections modal; it shares the GitHub (`gh`) login, so disconnecting one signs out both |
 
@@ -152,12 +152,12 @@ code to enter elsewhere; Antigravity asks you to paste its code back. Signing in
 
 **Models.** Model lists come only from the CLIs themselves, never a hardcoded list. They are cached in
 `data/models.json` and refreshed at boot, every 6 hours and after a sign-in change. OpenCode lists
-`opencode models openai` (only its OAuth-backed `openai/…` models), Kiro lists `kiro-cli chat --list-models --format json`
+`opencode models <provider>` for each signed-in subscription provider (only those `provider/…` models), Kiro lists `kiro-cli chat --list-models --format json`
 for the signed-in account, and Copilot asks the Copilot SDK's `listModels()`.
 
 **Known limits.** Kiro isn't signed in on this server, so its authenticated headless use and stream format are
 unverified. Copilot's model list currently returns only `auto`, and Copilot reports no remaining usage or reset
-time, so its limit is only known when a run hits it. OpenCode limits are tracked per provider (`openai`).
+time, so its limit is only known when a run hits it. OpenCode limits are tracked per provider (`openai`, `github-copilot`, `xai`).
 
 **Subscription only, never API keys.** Each adapter removes its billing variables from the environment
 before starting the CLI:
@@ -171,7 +171,7 @@ before starting the CLI:
   `AGY_BUSINESS_PAYGO_TIER`. A run is refused if `~/.gemini/antigravity-cli/settings.json` sets
   `"modelProvider": "gemini"` (API-key mode).
 - OpenCode: every `*_API_KEY` and `*_TOKEN`, `OPENAI_BASE_URL|ORG_ID|ORGANIZATION|PROJECT_ID`, every `AZURE_OPENAI_*`
-  and `OPENCODE_AUTH|CONFIG|CONFIG_DIR`. It counts as logged in only with an `openai` OAuth credential, and a run is
+  and `OPENCODE_AUTH|CONFIG|CONFIG_DIR`. It counts as logged in only with an OAuth credential for `openai`, `github-copilot` or `xai` (API-key providers never count), and a run is
   refused if the project's `opencode.json`, `opencode.jsonc` or `.env` sets an API key or custom endpoint.
 - Kiro: `KIRO_API_KEY`. An API-key account from `kiro-cli whoami` counts as logged out.
 - Copilot: `COPILOT_GITHUB_TOKEN`, `COPILOT_PROVIDER_*`, `GH_TOKEN`, `GITHUB_TOKEN` and the OpenAI, Anthropic, Gemini and

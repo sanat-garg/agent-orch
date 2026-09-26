@@ -2052,7 +2052,7 @@ function observeTaskCompletion(t) {
 
 // ---------- WebSocket ----------
 let retry = 0; // failed attempts since the last open: 0 before the first open reads as "Connecting…"
-const CONN = { list: [], sig: '', drafts: {}, sent: {}, dismissed: {}, justDone: {}, lastFocus: null };
+const CONN = { list: [], sig: '', drafts: {}, sent: {}, dismissed: {}, justDone: {}, picking: {}, lastFocus: null };
 function connect() {
   resetCompletionSync();
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
@@ -4352,20 +4352,62 @@ async function connAction(c, action, body) {
     return r;
   } catch (e) { alert(`${c.label}: ${e.message}`); return null; }
 }
+// A harness with `providers` (OpenCode) signs into one of them: Connect opens a picker first.
 async function connStart(c, body = {}) {
   delete CONN.sent[c.id];
   delete CONN.drafts[c.id];
+  delete CONN.picking[c.id];
   await connAction(c, 'start', body);
 }
-async function connLogout(c) {
-  if (!confirm(c.logoutWarning ? `Sign out of ${c.label}?\n\n${c.logoutWarning}` : `Sign out of ${c.label} on this server?`)) return;
-  await connAction(c, 'logout', c.logoutWarning ? { confirm: true } : {});
+async function connLogout(c, acct) {
+  const what = acct ? `${acct.label} in ${c.label}` : c.label;
+  if (!confirm(c.logoutWarning ? `Sign out of ${what}?\n\n${c.logoutWarning}` : `Sign out of ${what} on this server?`)) return;
+  await connAction(c, 'logout', { ...(c.logoutWarning ? { confirm: true } : {}), ...(acct ? { provider: acct.id } : {}) });
 }
+const connVia = (a) => (a.account ? `${a.label} (${a.account})` : a.label);
 function connStatus(c) {
   if (!c.installed) return ['', 'Not installed'];
+  if (c.signedIn && c.accounts?.length) return ['on', `Connected via ${c.accounts.map(connVia).join(', ')}`];
   if (c.signedIn) return ['on', c.account ? `Connected as ${c.account}` : 'Connected'];
-  if (c.login?.state === 'waiting') return ['wait', 'Signing in…'];
+  if (c.login?.state === 'waiting') {
+    const p = c.providers?.find((x) => x.id === c.login.provider);
+    return ['wait', p ? `Signing in to ${p.label}…` : 'Signing in…'];
+  }
   return ['warn', 'Not signed in'];
+}
+// The provider picker: a radio list (connected providers are disabled), then Continue starts that provider's flow.
+function connPick(c) {
+  const box = el('div', 'cn-panel cn-pick'), have = new Set((c.accounts || []).map((a) => a.id));
+  const f = el('form');
+  f.append(el('div', 'cn-step', `Choose what ${c.label.replace(/ CLI$/, '')} signs in to`));
+  const opts = el('div', 'cn-opts');
+  opts.setAttribute('role', 'radiogroup');
+  let first = true;
+  for (const p of c.providers) {
+    const lab = el('label', 'cn-opt');
+    const r = el('input');
+    Object.assign(r, { type: 'radio', name: `cnp-${c.id}`, value: p.id, disabled: have.has(p.id) });
+    if (!r.disabled && first) { r.checked = true; first = false; }
+    const tx = el('span', 'cn-opt-tx');
+    tx.append(el('span', 'cn-opt-name', p.label), el('span', 'cn-opt-sub', have.has(p.id) ? 'Already connected' : p.blurb || ''));
+    lab.append(r, tx);
+    opts.append(lab);
+  }
+  const acts = el('div', 'cn-acts');
+  const cancel = el('button', 'link-btn', 'Cancel');
+  cancel.type = 'button';
+  cancel.onclick = () => { delete CONN.picking[c.id]; renderConnections(true); };
+  const go = el('button', 'btn small primary', 'Continue');
+  go.disabled = first;
+  acts.append(cancel, go);
+  f.append(opts, acts);
+  f.onsubmit = (e) => {
+    e.preventDefault();
+    const v = f.querySelector('input:checked')?.value;
+    if (v) connStart(c, { provider: v });
+  };
+  box.append(f);
+  return box;
 }
 function connPanel(c) {
   const l = c.login, box = el('div', 'cn-panel');
@@ -4375,7 +4417,7 @@ function connPanel(c) {
     const acts = el('div', 'cn-acts');
     const again = el('button', 'btn small primary', 'Try again');
     again.type = 'button';
-    again.onclick = () => connStart(c);
+    again.onclick = () => connStart(c, l.provider ? { provider: l.provider } : {});
     const close = el('button', 'link-btn', 'Close');
     close.type = 'button';
     close.onclick = () => { CONN.dismissed[c.id] = l.startedAt; renderConnections(true); };
@@ -4452,7 +4494,7 @@ function connPanel(c) {
 }
 function renderConnections(force) {
   const list = CONN.list;
-  const sig = JSON.stringify([list, CONN.justDone, CONN.dismissed, CONN.sent]);
+  const sig = JSON.stringify([list, CONN.justDone, CONN.dismissed, CONN.sent, CONN.picking]);
   if (!force && sig === CONN.sig) return;
   CONN.sig = sig;
   const box = $('connsList'), focused = document.activeElement?.dataset?.connInput;
@@ -4470,8 +4512,22 @@ function renderConnections(force) {
     st.title = text;
     info.append(st);
     main.append(connIcon(c.id), info);
-    const waiting = c.login?.state === 'waiting';
-    if (c.installed && c.signedIn && c.canLogout && !waiting) {
+    const waiting = c.login?.state === 'waiting', multi = !!c.providers;
+    const pick = () => { CONN.picking[c.id] = true; renderConnections(true); $('connsList').querySelector(`[data-conn="${c.id}"] .cn-pick input:checked`)?.focus(); };
+    if (multi && c.installed && c.signedIn && !waiting && !CONN.picking[c.id] && c.accounts?.length < c.providers.length) {
+      const b = el('button', 'btn small cn-btn', 'Add');
+      b.type = 'button';
+      b.title = `Sign ${c.label} in to another provider`;
+      b.onclick = pick;
+      main.append(b);
+    } else if (multi && c.installed && !c.signedIn && !waiting && !CONN.picking[c.id]) {
+      const b = el('button', 'btn small primary cn-btn', 'Connect');
+      b.type = 'button';
+      b.onclick = pick;
+      main.append(b);
+    } else if (multi) {
+      // Disconnect is per provider (below); Connect is the picker.
+    } else if (c.installed && c.signedIn && c.canLogout && !waiting) {
       const b = el('button', 'btn small cn-btn', 'Disconnect');
       b.type = 'button';
       b.onclick = () => connLogout(c);
@@ -4499,6 +4555,18 @@ function renderConnections(force) {
       }
     }
     row.append(main);
+    if (multi && c.signedIn && c.canLogout && !waiting) {
+      for (const a of c.accounts || []) {
+        const r = el('div', 'cn-acct');
+        const b = el('button', 'link-btn', 'Disconnect');
+        b.type = 'button';
+        b.setAttribute('aria-label', `Disconnect ${a.label}`);
+        b.onclick = () => connLogout(c, a);
+        r.append(el('span', 'cn-st', connVia(a)), b);
+        row.append(r);
+      }
+    }
+    if (multi && CONN.picking[c.id] && !waiting) row.append(connPick(c));
     const l = c.login;
     if (l && (l.state === 'waiting' || (l.state === 'failed' && !c.signedIn && CONN.dismissed[c.id] !== l.startedAt))) row.append(connPanel(c));
     box.append(row);

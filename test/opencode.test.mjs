@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AGENTS, runAgentCli, opencodeAuth, opencodeModels, limitScope, limitScopes } from '../agents.mjs';
-import { SPECS, parsePane } from '../connections.mjs';
+import { AGENTS, runAgentCli, opencodeAuth, opencodeModels, opencodeProviders, OPENCODE_OAUTH, limitScope, limitScopes } from '../agents.mjs';
+import { SPECS, parsePane, parseMenu, menuKeys, createConnections } from '../connections.mjs';
 import { normUsage } from '../usage.mjs';
 
 const stub = fileURLToPath(new URL('./fixtures/opencode-stub.mjs', import.meta.url));
@@ -21,11 +21,38 @@ test('OAuth only: key credentials do not count as a subscription connection', ()
   assert.equal(opencodeAuth(home), true);
 });
 
+const authHome = (creds) => {
+  const home = tmp(), file = path.join(home, '.local/share/opencode/auth.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(creds));
+  return home;
+};
+const jwt = (claims) => `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.s`;
+
+test('every signed-in subscription provider is reported, with the ChatGPT email; API keys are not', () => {
+  const home = authHome({
+    openai: { type: 'oauth', refresh: 'r', access: jwt({ 'https://api.openai.com/profile': { email: 'me@example.com' } }) },
+    'github-copilot': { type: 'oauth', refresh: 'gho_x', access: 'gho_x', expires: 0 },
+    anthropic: { type: 'api', key: 'secret' }, opencode: { type: 'api', key: 'zen' }, xai: { type: 'api', key: 'k' },
+  });
+  assert.deepEqual(opencodeProviders(home), [{ id: 'openai', account: 'me@example.com' }, { id: 'github-copilot', account: null }]);
+  assert.deepEqual(Object.keys(SPECS.opencode.providers), Object.keys(OPENCODE_OAUTH), 'one login flow per subscription provider');
+});
+
 test('model discovery parses provider-specific CLI output without a static catalog', async () => {
   assert.deepEqual(opencodeModels('openai/gpt-5.4\nopenai/gpt-5.3-codex\nother/a\n'), [
     { id: 'openai/gpt-5.4', label: 'gpt-5.4' }, { id: 'openai/gpt-5.3-codex', label: 'gpt-5.3-codex' },
   ]);
-  assert.deepEqual(await AGENTS.opencode.listModels({ bin: stub, env: env('success') }), opencodeModels('openai/gpt-5.4\nopenai/gpt-5.3-codex'));
+  assert.deepEqual(opencodeModels('openai/gpt-5\ngithub-copilot/gpt-5\nxai/grok-4\n', ['openai', 'github-copilot']), [
+    { id: 'openai/gpt-5', label: 'gpt-5 · ChatGPT' }, { id: 'github-copilot/gpt-5', label: 'gpt-5 · Copilot' },
+  ]);
+  // Only signed-in providers are asked for models.
+  const log = path.join(tmp(), 'argv.json'), home = authHome({ 'github-copilot': { type: 'oauth', refresh: 'gho', access: 'gho' } });
+  assert.deepEqual(await AGENTS.opencode.listModels({ bin: stub, env: env('success', { OPENCODE_STUB_LOG: log }), home }), []);
+  assert.deepEqual(JSON.parse(fs.readFileSync(log, 'utf8')).argv, ['models', 'github-copilot']);
+  await assert.rejects(AGENTS.opencode.listModels({ bin: stub, env: env('success'), home: tmp() }), /not signed in/);
+  assert.deepEqual(await AGENTS.opencode.listModels({ bin: stub, env: env('success'), home: authHome({ openai: { type: 'oauth', refresh: 'r', access: 'a' } }) }),
+    opencodeModels('openai/gpt-5.4\nopenai/gpt-5.3-codex'));
 });
 
 test('recorded OpenCode stream normalizes text, tools, paths, results and usage', async () => {
@@ -126,7 +153,7 @@ test('limits come only from structured error events, not tool output', async () 
   assert.equal(limit.resetsAt, Date.parse('2030-01-01T00:00:00Z') / 1000);
   assert.deepEqual(events.filter((e) => e.k === 'limit'), [{ k: 'limit', resetsAt: limit.resetsAt }]);
   assert.equal(limitScope('opencode', 'openai/gpt-5.4'), 'opencode:openai');
-  assert.ok(limitScopes(['opencode']).includes('opencode:openai'));
+  assert.deepEqual(limitScopes(['opencode']), ['opencode:openai', 'opencode:github-copilot', 'opencode:xai']);
 });
 
 test('recorded signed-out error stays a normal error without a false limit', async () => {
@@ -137,9 +164,70 @@ test('recorded signed-out error stays a normal error without a false limit', asy
   assert.ok(!events.some((e) => e.k === 'limit'));
 });
 
-test('device-flow sign-in spec parses URL and code', () => {
-  assert.deepEqual(parsePane(SPECS.opencode, 'Go to: https://auth.openai.com/codex/device\nEnter code: ABCD-12345'), {
-    url: 'https://auth.openai.com/codex/device', code: 'ABCD-12345', prompts: [], exited: false, exitCode: null, ok: false, error: null,
-  });
-  assert.deepEqual(SPECS.opencode.logout, ['opencode', 'auth', 'logout', 'openai']);
+const pane = (f) => fs.readFileSync(fileURLToPath(new URL(`./fixtures/panes/${f}`, import.meta.url)), 'utf8');
+
+test('provider menu (recorded `opencode auth login`) parses into options', () => {
+  const m = parseMenu(pane('opencode-providers.txt'));
+  assert.equal(m.prompt, 'Select provider');
+  assert.deepEqual(m.options.slice(0, 3), [{ label: 'OpenCode Zen (recommended)', active: true }, { label: 'OpenAI', active: false }, { label: 'GitHub Copilot', active: false }]);
+  assert.equal(m.options.length, 7);
+  const methods = parseMenu(pane('opencode-openai-methods.txt'));
+  assert.equal(methods.prompt, 'Login method');
+  assert.deepEqual(methods.options.map((o) => o.label), ['ChatGPT Pro/Plus (browser)', 'ChatGPT Pro/Plus (headless)', 'Manually enter API Key']);
+  assert.equal(parseMenu(pane('opencode-openai-device.txt')), null, 'no open menu once the device flow shows');
+  // Copilot's deployment question is answered with GitHub.com; other menus are left alone.
+  const cp = SPECS.opencode.providers['github-copilot'];
+  assert.deepEqual(menuKeys(cp, pane('opencode-copilot-deploy.txt')), [0, ['Enter']]);
+  assert.deepEqual(menuKeys(cp, pane('opencode-copilot-deploy.txt').replace('● GitHub.com', '○ GitHub.com').replace('○ GitHub Enterprise', '● GitHub Enterprise')), [0, ['Up', 'Enter']]);
+  assert.equal(menuKeys(cp, pane('opencode-openai-methods.txt')), null);
+});
+
+test('each provider flow parses its recorded URL and code; only subscription methods are used', () => {
+  const P = SPECS.opencode.providers;
+  const look = (id, f) => { const p = parsePane(P[id], pane(f)); return [p.url, p.code, p.exited]; };
+  assert.deepEqual(look('openai', 'opencode-openai-device.txt'), ['https://auth.openai.com/codex/device', 'Z28M-PTNE3', false]);
+  assert.deepEqual(look('github-copilot', 'opencode-copilot-device.txt'), ['https://github.com/login/device', '6140-6F98', false]);
+  assert.deepEqual(look('xai', 'opencode-xai-device.txt'), ['https://accounts.x.ai/oauth2/device?user_code=FPKF-QQZV', 'FPKF-QQZV', false]);
+  for (const [id, p] of Object.entries(P)) {
+    assert.deepEqual(p.start.slice(0, 5), ['opencode', 'auth', 'login', '--provider', id]);
+    assert.doesNotMatch(p.start.at(-1), /API Key|browser/i);
+  }
+  const ok = parsePane(P.openai, `${pane('opencode-openai-device.txt')}\n◇  Login successful\n__AO_EXIT:0\n`);
+  assert.deepEqual([ok.exited, ok.ok], [true, true]);
+  const bad = parsePane(P.xai, `${pane('opencode-xai-device.txt')}\n■  Failed to authorize\n__AO_EXIT:1\n`);
+  assert.deepEqual([bad.exited, bad.ok, bad.error], [true, false, '■  Failed to authorize']);
+});
+
+function fakeConn(accounts = []) {
+  const calls = [];
+  const tmux = async (args) => { calls.push(args); return { ok: true, out: args[0] === 'capture-pane' ? pane('opencode-copilot-deploy.txt') : '' }; };
+  const conn = createConnections({ entries: [{ id: 'opencode', label: 'OpenCode CLI', installed: () => true, signedIn: () => accounts.length > 0,
+    accounts: () => accounts, spec: SPECS.opencode }], env: { PATH: '/usr/bin' }, tmux, pollMs: 5 });
+  return { conn, calls };
+}
+
+test('start for a chosen provider launches that provider\'s flow, not OpenAI\'s', async () => {
+  const { conn, calls } = fakeConn();
+  assert.equal((await conn.start('opencode')).status, 400, 'a provider must be chosen');
+  assert.equal((await conn.start('opencode', { provider: 'anthropic' })).status, 400, 'API-key providers are not offered');
+  assert.equal((await conn.start('opencode', { provider: '__proto__' })).status, 400);
+  const r = await conn.start('opencode', { provider: 'github-copilot' });
+  assert.equal(r.status, 200);
+  assert.equal(r.login.provider, 'github-copilot');
+  const cmd = calls.find((c) => c[0] === 'new-session').at(-1);
+  assert.match(cmd, /^'opencode' 'auth' 'login' '--provider' 'github-copilot' '--method' 'Login with GitHub Copilot';/);
+  assert.doesNotMatch(cmd, /openai/);
+  for (let i = 0; i < 100 && !calls.some((c) => c[0] === 'send-keys'); i++) await new Promise((res) => setTimeout(res, 5));
+  assert.deepEqual(calls.filter((c) => c[0] === 'send-keys').map((c) => c.slice(3)), [['Enter']], 'GitHub.com chosen once');
+  const list = conn.list()[0];
+  assert.deepEqual(list.providers.map((p) => p.id), ['openai', 'github-copilot', 'xai']);
+  assert.match(list.providers[0].blurb, /ChatGPT Plus\/Pro/);
+  await conn.cancel('opencode');
+});
+
+test('status lists every signed-in provider; logout is per provider', async () => {
+  const { conn } = fakeConn([{ id: 'openai', account: 'me@example.com' }, { id: 'github-copilot', account: null }, { id: 'bogus' }]);
+  assert.deepEqual(conn.list()[0].accounts, [{ id: 'openai', account: 'me@example.com', label: 'ChatGPT' }, { id: 'github-copilot', account: null, label: 'GitHub Copilot' }]);
+  assert.equal((await conn.logout('opencode', {})).status, 400, 'no provider, no logout');
+  assert.deepEqual(SPECS.opencode.logout, ['opencode', 'auth', 'logout']);
 });

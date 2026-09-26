@@ -11,7 +11,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createOrchestrator, parseJsonl, SHOT_HINT } from './orchestrator.mjs';
 import { createGitHub } from './github.mjs';
 import { retireRuntime, chatIdle, whenIdle } from './runtimes.mjs';
-import { AGENTS, runAgentCli, clearLoginCache, isMissingSession, modelCatalog, codexLatestSnapshot, windowLabel, AGY_GROUPS, agyGroup } from './agents.mjs';
+import { AGENTS, runAgentCli, clearLoginCache, isMissingSession, modelCatalog, codexLatestSnapshot, windowLabel, AGY_GROUPS, agyGroup, opencodeProviders } from './agents.mjs';
 import { createModelStore } from './models.mjs';
 import { createConnections, SPECS, codexAccount, agyAccount, onPath } from './connections.mjs';
 import { mediaCollector, MEDIA_ID_RE, MEDIA_TYPES, toolResultImages } from './media.mjs';
@@ -663,7 +663,7 @@ const connections = createConnections({
     agentEntry(AGENTS.claude, { spec: SPECS.claude, account: () => AGENTS.claude.account() }),
     agentEntry(AGENTS.codex, { spec: SPECS.codex, account: () => codexAccount() }),
     agentEntry(AGENTS.antigravity, { spec: SPECS.antigravity, account: () => agyAccount(), probe: () => AGENTS.antigravity.probe() }),
-    agentEntry(AGENTS.opencode, { spec: SPECS.opencode, account: () => AGENTS.opencode.account() }),
+    agentEntry(AGENTS.opencode, { spec: SPECS.opencode, accounts: () => opencodeProviders() }),
     agentEntry(AGENTS.kiro, { spec: SPECS.kiro, account: () => AGENTS.kiro.account() }),
     agentEntry(AGENTS.copilot, { spec: SPECS.copilot, account: () => AGENTS.copilot.account(), afterChange: () => { gh.refresh(); signInChanged('copilot')(); } }),
     { id: 'github', label: 'GitHub', installed: () => onPath('gh'), signedIn: () => gh.status().linked, account: () => gh.status().login,

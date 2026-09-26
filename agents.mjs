@@ -518,7 +518,7 @@ export const limitScope = (agent, model) => (agent === 'antigravity' ? `antigrav
 export const scopeGroup = (scope) => String(scope || '').split(':')[1] || null;
 // Every scope that can be blocked.
 export const limitScopes = (agents) => agents.flatMap((a) => (a === 'antigravity' ? Object.keys(AGY_GROUPS).map((g) => `${a}:${g}`)
-  : a === 'opencode' ? ['opencode:openai'] : [a]));
+  : a === 'opencode' ? Object.keys(OPENCODE_OAUTH).map((p) => `opencode:${p}`) : [a]));
 // A scope's windows among an agent's: only its group's for antigravity.
 export const scopeWindows = (scope, list) => { const g = scopeGroup(scope); return (list || []).filter((w) => !g || (scope.startsWith('opencode:') ? w.window.startsWith(`${g}-`) : windowGroup(w.window) === g)); };
 
@@ -686,17 +686,38 @@ const ANTIGRAVITY = {
   run: runAntigravity,
 };
 
-// ---------------------------------------------------------------- opencode (OAuth-backed OpenAI provider)
+// ---------------------------------------------------------------- opencode (OAuth-backed subscription providers)
 
+// The OpenCode providers with a headless subscription sign-in (device flows; login specs in connections.mjs
+// SPECS.opencode.providers). API-key providers (OpenCode Zen, Anthropic, Google, …) never count as connected.
+export const OPENCODE_OAUTH = { openai: 'ChatGPT', 'github-copilot': 'Copilot', xai: 'SuperGrok' };
 export const opencodeAuthFile = (home = HOME) => path.join(home, '.local/share/opencode/auth.json');
-export function opencodeAuth(home = HOME) {
+// The email claim of an OAuth access token (decoded locally, never verified or sent anywhere); ChatGPT nests it.
+const jwtEmail = (jwt) => {
   try {
-    const a = JSON.parse(fs.readFileSync(opencodeAuthFile(home), 'utf8'))?.openai;
-    return a?.type === 'oauth' && typeof a.refresh === 'string' && a.refresh.length > 0;
-  } catch { return false; }
+    const c = JSON.parse(Buffer.from(String(jwt).split('.')[1], 'base64url').toString());
+    const e = c.email || c['https://api.openai.com/profile']?.email;
+    return typeof e === 'string' && e || null;
+  } catch { return null; }
+};
+// Signed-in subscription providers, in OPENCODE_OAUTH order: [{id, account}].
+export function opencodeProviders(home = HOME) {
+  let all;
+  try { all = JSON.parse(fs.readFileSync(opencodeAuthFile(home), 'utf8')) || {}; } catch { return []; }
+  return Object.keys(OPENCODE_OAUTH).flatMap((id) => {
+    const a = all[id], token = a?.type === 'oauth' && [a.refresh, a.access].find((t) => typeof t === 'string' && t.length > 0);
+    return token ? [{ id, account: jwtEmail(a.access) }] : [];
+  });
 }
-export function opencodeModels(out) {
-  return [...new Set(String(out).split('\n').map((s) => s.trim()).filter((s) => /^openai\/[\w.-]+$/.test(s)))].map((id) => ({ id, label: id.slice(7) }));
+export const opencodeAuth = (home = HOME) => opencodeProviders(home).length > 0;
+// `opencode models <provider>` output → [{id: 'provider/model', label}]; labels name the provider when several are listed.
+export function opencodeModels(out, providers = Object.keys(OPENCODE_OAUTH)) {
+  const ids = [...new Set(String(out).split('\n').map((s) => s.trim()))].flatMap((id) => {
+    const p = providers.find((x) => id.startsWith(`${x}/`));
+    return p && /^[\w.-]+$/.test(id.slice(p.length + 1)) ? [[id, p]] : [];
+  });
+  const many = new Set(ids.map(([, p]) => p)).size > 1;
+  return ids.map(([id, p]) => ({ id, label: id.slice(p.length + 1) + (many ? ` · ${OPENCODE_OAUTH[p]}` : '') }));
 }
 const OPENCODE_LIMIT_RE = /\b429\b|rate.?limit|quota|usage limit|resource.exhausted/i;
 const OPENCODE_AUTH_RE = /\b401\b|unauthorized|not authenticated|not logged in|invalid.*(?:token|credential)|authentication/i;
@@ -802,11 +823,16 @@ const OPENCODE = {
   id: 'opencode', label: 'OpenCode CLI', bin: 'opencode',
   available() { return onPath(this.bin); },
   loggedIn() { return cachedLogin(this, () => opencodeAuth()); },
-  // auth.json has provider credentials, but no documented reliable account identity.
+  // One OpenCode login can hold several providers; connections.mjs shows each one's account.
   account() { return null; },
   login: 'Connect from the sidebar',
-  async listModels({ bin, env = process.env, timeoutMs = 30_000 } = {}) {
-    return opencodeModels(await execOut(bin || this.bin, ['models', 'openai'], { env: stripEnv(env, this.envFilter), cwd: HOME, timeout: timeoutMs }));
+  // Only the signed-in subscription providers' models.
+  async listModels({ bin, env = process.env, home = HOME, timeoutMs = 30_000 } = {}) {
+    const ids = opencodeProviders(home).map((p) => p.id);
+    if (!ids.length) throw new Error('not signed in');
+    let out = '';
+    for (const id of ids) out += await execOut(bin || this.bin, ['models', id], { env: stripEnv(env, this.envFilter), cwd: HOME, timeout: timeoutMs });
+    return opencodeModels(out, ids);
   },
   envFilter: /^(?:.*(?:_API_KEY|_TOKEN)|OPENAI_(?:BASE_URL|ORG_ID|ORGANIZATION|PROJECT_ID)|AZURE_OPENAI_.*|OPENCODE_(?:AUTH|CONFIG.*))$/,
   events: opencodeEvents, run: runOpencode,

@@ -1,0 +1,8 @@
+
+┌  Add credential
+│
+◆  Login method
+│  ● ChatGPT Pro/Plus (browser)
+│  ○ ChatGPT Pro/Plus (headless)
+│  ○ Manually enter API Key
+└

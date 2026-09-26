@@ -14,11 +14,19 @@ const EXIT_RE = /__AO_EXIT:(\d+)/;
 
 // Per-agent login specs. start: argv run in the pane. url/code: regexes (group 1) or functions over the captured pane
 // text; url falls back to `defaultUrl`. needsPastedCode: the CLI waits for a code from the browser (POST …/code).
-// answers: prompts auto-answered once each with the given keys. successRe: printed on success (exit 0 counts as
+// answers: prompts auto-answered once each with the given keys. pick: [[promptRe, optionRe]] selects that option in a
+// clack select menu (see parseMenu). successRe: printed on success (exit 0 counts as
 // success too). liveSuccessRe/liveFailRe: end the login while the CLI is still running (a TUI that never exits).
-// logout: argv, or an async function (home) for a CLI with no logout command; logoutWarning: logout then needs {confirm: true}. Status checks stay with
+// providers: {id: spec + {label, blurb}} for a harness that signs into one of several accounts (start/logout take a
+// provider; logout argv gets the provider id appended). logout: argv, or an async function (home) for a CLI with no logout command; logoutWarning: logout then needs {confirm: true}. Status checks stay with
 // their owners (agents.mjs `loggedIn()`; github.mjs `gh.status()`), passed in as each entry's signedIn().
 const BIN = path.join(os.homedir(), '.local/bin');
+// `opencode auth login` for one provider's subscription method: prints "Go to: <url>", "…enter code: XXXX-XXXX",
+// then "Login successful" (exit 0) or "Failed to authorize" (exit 1).
+function opencodeLogin(provider, method) {
+  return { start: ['opencode', 'auth', 'login', '--provider', provider, '--method', method],
+    code: /enter code:\s*([A-Z0-9]+-[A-Z0-9]+)/i, needsPastedCode: false, successRe: /Login successful/ };
+}
 export const SPECS = {
   // `claude auth login --claudeai` = the Claude subscription (never --console, which bills API usage). It prints an
   // OAuth URL and waits at "Paste code here if prompted >" for the code the callback page shows.
@@ -50,13 +58,20 @@ export const SPECS = {
     successRe: /successfully logged in/i,
     logout: ['codex', 'logout'],
   },
+  // OpenCode has no account of its own: it signs into model providers. Only subscription sign-ins with a headless
+  // device flow are offered (agents.mjs OPENCODE_OAUTH); API-key methods, OpenCode Zen and localhost-callback OAuth
+  // (GitLab, Poe) are left out. `--provider`/`--method` skip OpenCode's menus; Copilot still asks for GitHub.com.
   opencode: {
-    start: ['opencode', 'auth', 'login', '--provider', 'openai', '--method', 'ChatGPT Pro/Plus (headless)'],
-    url: /(https:\/\/auth\.openai\.com\/codex\/device)/,
-    code: /Enter code:\s*([A-Z0-9]+-[A-Z0-9]+)/i,
-    needsPastedCode: false,
-    successRe: /credential added|logged in|authentication successful/i,
-    logout: ['opencode', 'auth', 'logout', 'openai'],
+    providers: {
+      openai: { label: 'ChatGPT', blurb: 'Uses your ChatGPT Plus/Pro plan',
+        ...opencodeLogin('openai', 'ChatGPT Pro/Plus (headless)'), url: /Go to:\s*(https:\/\/auth\.openai\.com\/\S+)/ },
+      'github-copilot': { label: 'GitHub Copilot', blurb: 'Uses your GitHub Copilot subscription',
+        ...opencodeLogin('github-copilot', 'Login with GitHub Copilot'), url: /Go to:\s*(https:\/\/github\.com\/login\/device)/,
+        pick: [[/Select GitHub deployment type/, /^GitHub\.com\b/]] },
+      xai: { label: 'SuperGrok', blurb: 'Uses your SuperGrok (xAI) subscription',
+        ...opencodeLogin('xai', 'SuperGrok Subscription'), url: /Go to:\s*(https:\/\/accounts\.x\.ai\/\S+)/ },
+    },
+    logout: ['opencode', 'auth', 'logout'],
   },
   kiro: {
     start: [path.join(BIN, 'kiro-cli'), 'login', '--use-device-flow', '--license', 'free'],
@@ -93,6 +108,31 @@ export function agyUrl(text) {
   let url = lines[i].trim();
   for (let j = i + 1; j < lines.length && /^\s*[\w%&=.+~:/?#-]+\s*$/.test(lines[j]); j++) url += lines[j].trim();
   return url;
+}
+
+// A clack select menu (OpenCode's prompts): the open question (◆) and its options, `active` = highlighted (●).
+export function parseMenu(text) {
+  const lines = String(text || '').replace(/\r/g, '').split('\n'), i = lines.findLastIndex((l) => /^\s*◆\s+\S/.test(l));
+  if (i < 0) return null;
+  const options = [];
+  for (const l of lines.slice(i + 1)) {
+    const m = l.match(/^\s*│\s+([●○])\s+(.+?)\s*$/);
+    if (m) options.push({ label: m[2], active: m[1] === '●' });
+    else if (/^\s*└/.test(l)) break;
+  }
+  return options.length ? { prompt: lines[i].replace(/^\s*◆\s+/, '').trim(), options } : null;
+}
+// Keys that choose spec.pick[i]'s option in the open menu: [i, keys], or null when no pick applies yet.
+export function menuKeys(spec, text) {
+  const menu = spec.pick && parseMenu(text);
+  if (!menu) return null;
+  for (const [i, [promptRe, optionRe]] of spec.pick.entries()) {
+    if (!promptRe.test(menu.prompt)) continue;
+    const to = menu.options.findIndex((o) => optionRe.test(o.label)), from = menu.options.findIndex((o) => o.active);
+    if (to < 0 || from < 0) return null;
+    return [i, [...Array(Math.abs(to - from)).fill(to > from ? 'Down' : 'Up'), 'Enter']];
+  }
+  return null;
 }
 
 const grab = (re, text) => (typeof re === 'function' ? re(text) : text.match(re)?.[1]) || null;
@@ -160,12 +200,19 @@ export function createConnections({ entries, env = process.env, onChange = () =>
   // Logins live in memory, so sessions left on the socket by a previous server process are orphans (AUDIT #23).
   const booted = Promise.resolve().then(() => tmux(['kill-server'])).catch(() => {});
 
-  const view = (l) => l && { state: l.state, url: l.url, code: l.code, needsPastedCode: l.needsPastedCode, error: l.error, ...(l.prompt ? { prompt: l.prompt } : {}), startedAt: l.startedAt };
+  const view = (l) => l && { state: l.state, url: l.url, code: l.code, needsPastedCode: l.needsPastedCode, error: l.error, ...(l.prompt ? { prompt: l.prompt } : {}), startedAt: l.startedAt,
+    ...(l.provider ? { provider: l.provider } : {}) };
+  const providerSpec = (e, id) => (typeof id === 'string' && Object.hasOwn(e.spec.providers, id) ? e.spec.providers[id] : null);
+  // Entries with spec.providers also list them (for the picker) and every signed-in one, from accounts(): [{id, account}].
   function list() {
     return entries.map((e) => {
-      let installed = false, signedIn = false, account = null;
-      try { installed = !!e.installed(); signedIn = installed && !!e.signedIn(); account = signedIn ? e.account?.() || null : null; } catch {}
+      let installed = false, signedIn = false, account = null, accounts = [];
+      try {
+        installed = !!e.installed(); signedIn = installed && !!e.signedIn(); account = signedIn ? e.account?.() || null : null;
+        if (signedIn && e.spec?.providers) accounts = (e.accounts?.() || []).flatMap((a) => (providerSpec(e, a.id) ? [{ ...a, label: e.spec.providers[a.id].label }] : []));
+      } catch {}
       return { id: e.id, label: e.label, installed, signedIn, account, canLogin: !!e.spec, canLogout: !!e.spec?.logout,
+        ...(e.spec?.providers ? { providers: Object.entries(e.spec.providers).map(([id, p]) => ({ id, label: p.label, blurb: p.blurb })), accounts } : {}),
         ...(e.spec?.logoutWarning ? { logoutWarning: e.spec.logoutWarning } : {}), login: view(logins.get(e.id)) || null };
     });
   }
@@ -190,11 +237,16 @@ export function createConnections({ entries, env = process.env, onChange = () =>
       const r = await tmux(['capture-pane', '-p', '-J', '-S', '-200', '-t', `=${session(id)}:`]);
       if (logins.get(id) !== l || l.state !== 'waiting') return;
       if (!r.ok) return finish(id, 'failed', 'the sign-in session ended unexpectedly', l);
-      const p = parsePane(e.spec, r.out);
+      const p = parsePane(l.spec, r.out);
       for (const i of p.prompts) {
         if (l.answered.has(i)) continue;
         l.answered.add(i);
-        await tmux(['send-keys', '-t', `=${session(id)}:`, ...e.spec.answers[i][1]]);
+        await tmux(['send-keys', '-t', `=${session(id)}:`, ...l.spec.answers[i][1]]);
+      }
+      const pick = menuKeys(l.spec, r.out);
+      if (pick && !l.answered.has(`pick${pick[0]}`)) {
+        l.answered.add(`pick${pick[0]}`);
+        await tmux(['send-keys', '-t', `=${session(id)}:`, ...pick[1]]);
       }
       if (p.method && l.methodIndex != null) {
         if (p.method.index === l.methodIndex) {
@@ -219,10 +271,14 @@ export function createConnections({ entries, env = process.env, onChange = () =>
     } finally { l.polling = false; }
   }
 
+  // options.provider picks the account for an entry with spec.providers; options.method etc. pick Kiro's login method.
   async function start(id, options = {}) {
+    const { provider } = options;
     const e = byId.get(id);
     if (!e) return { status: 404, error: 'No such connection' };
     if (!e.spec) return { status: 400, error: `${e.label} can't be signed in from here yet` };
+    const spec = e.spec.providers ? providerSpec(e, provider) : e.spec;
+    if (!spec) return { status: 400, error: `Choose what ${e.label} should sign in to: ${Object.keys(e.spec.providers).join(', ')}` };
     if (!e.installed()) return { status: 409, error: `${e.label} is not installed` };
     if (logins.get(id)?.state === 'waiting') return { status: 200, login: view(logins.get(id)) };
     // Strip the API-billing env vars (a login must end on the subscription), and keep the exit status visible.
@@ -232,12 +288,12 @@ export function createConnections({ entries, env = process.env, onChange = () =>
       return { status: 400, error: 'Organization login needs an HTTPS start URL and region' };
     }
     const argv = e.spec.methods ? [path.join(BIN, 'kiro-cli'), 'login', '--use-device-flow', ...method.args,
-      ...(options.method === 'organization' ? ['--identity-provider', options.startUrl, '--region', options.region] : [])] : e.spec.start;
+      ...(options.method === 'organization' ? ['--identity-provider', options.startUrl, '--region', options.region] : [])] : spec.start;
     const unset = e.envFilter ? Object.keys(env).filter((k) => e.envFilter.test(k)) : [];
     const cmd = `${unset.length ? `unset ${unset.join(' ')}; ` : ''}${argv.map(shq).join(' ')}; printf '\\n__AO_EXIT:%s\\n' $?; sleep 3600`;
     // The entry goes in before the first await, so a second start returns it and a cancel can reach it (AUDIT #22).
-    const l = { state: 'waiting', url: null, code: null, prompt: null, needsPastedCode: !!e.spec.needsPastedCode, error: null, startedAt: Date.now(), probedAt: Date.now(), answered: new Set(),
-      methodIndex: method?.menu, methodConfirmed: false };
+    const l = { state: 'waiting', url: null, code: null, prompt: null, needsPastedCode: !!spec.needsPastedCode, error: null, startedAt: Date.now(), probedAt: Date.now(),
+      answered: new Set(), spec, provider: e.spec.providers ? provider : null, methodIndex: method?.menu, methodConfirmed: false };
     logins.set(id, l);
     await booted;
     await tmux(['kill-session', '-t', `=${session(id)}`]);
@@ -257,7 +313,7 @@ export function createConnections({ entries, env = process.env, onChange = () =>
   async function submitCode(id, code) {
     const l = logins.get(id), e = byId.get(id);
     if (!l || l.state !== 'waiting') return { status: 409, error: 'No sign-in in progress' };
-    if (!e.spec.needsPastedCode) return { status: 400, error: `${e.label} doesn't take a pasted code` };
+    if (!l.spec.needsPastedCode) return { status: 400, error: `${e.label} doesn't take a pasted code` };
     code = String(code || '').trim();
     if (!code || code.length > 4096 || /[\r\n]/.test(code)) return { status: 400, error: 'Invalid code' };
     // `--` so a code starting with '-' isn't read as tmux flags; no Enter when the code didn't get typed.
@@ -273,14 +329,16 @@ export function createConnections({ entries, env = process.env, onChange = () =>
     return { status: 200, ok: true, login: view(logins.get(id)) || null };
   }
 
-  async function logout(id, { confirm = false } = {}) {
+  async function logout(id, { confirm = false, provider } = {}) {
     const e = byId.get(id);
     if (!e) return { status: 404, error: 'No such connection' };
     if (!e.spec?.logout) return { status: 400, error: `${e.label} can't be signed out from here` };
+    if (e.spec.providers && !providerSpec(e, provider)) return { status: 400, error: `Choose which ${e.label} provider to sign out of` };
+    const argv = e.spec.providers ? [...e.spec.logout, provider] : e.spec.logout;
     if (e.spec.logoutWarning && confirm !== true) return { status: 409, error: e.spec.logoutWarning, needsConfirm: true };
     const unset = new Set(e.envFilter ? Object.keys(env).filter((k) => e.envFilter.test(k)) : []);
     const r = typeof e.spec.logout === 'function' ? await Promise.resolve().then(() => e.spec.logout()).then(() => ({ ok: true }), (err) => ({ ok: false, err: err.message }))
-      : await new Promise((resolve) => execFile(e.spec.logout[0], e.spec.logout.slice(1), {
+      : await new Promise((resolve) => execFile(argv[0], argv.slice(1), {
       timeout: 15000, env: Object.fromEntries(Object.entries(env).filter(([k]) => !unset.has(k))),
     }, (err, out, stderr) => resolve({ ok: !err, err: String(stderr || err?.message || '').trim() })));
     try { await e.afterChange?.(); } catch {}

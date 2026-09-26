@@ -1,0 +1,16 @@
+
+┌  Add credential
+│
+◆  Select provider
+
+│  Search: _
+│  ● OpenCode Zen (recommended)
+│  ○ OpenAI
+│  ○ GitHub Copilot
+│  ○ Google
+│  ○ Anthropic
+│  ○ OpenRouter
+│  ○ Vercel AI Gateway
+│  ...
+│  ↑/↓ to select • Enter: confirm • Type: to search
+└

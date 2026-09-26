@@ -1,0 +1,8 @@
+
+┌  Add credential
+│
+●  Go to: https://accounts.x.ai/oauth2/device?user_code=FPKF-QQZV
+│
+●  Open https://accounts.x.ai/oauth2/device on any device and enter code: FPKF-QQZV
+│
+◐  Waiting for authorization.

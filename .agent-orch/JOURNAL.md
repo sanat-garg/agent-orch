@@ -555,6 +555,9 @@ malformed WebSocket frames no longer crash the server; tests pass
 
 Every response now forbids framing; HTTPS sessions use __Host-cw_session
 
+## 2026-09-26 14:36 — #184 OpenCode Connect: let the owner choose the provider instead of forcing OpenAI [done (check passed)]
+
+Waiting for the full test run to finish.
 ## 2026-09-26 13:18 — #186 Kiro Connect: pick the login method; never hang on an unanswered CLI prompt [done (check passed)]
 
 Kiro login methods, prompt safeguards, timeout, and tests pass
@@ -566,3 +569,7 @@ Task fallback editing verified; all 248 tests pass.
 ## 2026-09-26 14:18 — #192 Parallel-first planning and scheduling [done (check passed)]
 
 Parallel planning, dynamic scheduling, settings verified; all 251 tests pass.
+
+## 2026-09-26 14:47 — #205 Integrate #184: OpenCode Connect: let the owner choose the provider instead of forcing OpenAI [done (check passed)]
+
+Merge conflicts resolved; tests pass; no hardcoded OpenAI provider remains

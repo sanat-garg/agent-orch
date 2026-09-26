@@ -1126,9 +1126,37 @@ button.dg-row:disabled { opacity: .6; cursor: progress; }
 }
 .q-flash { animation: q-flash 1.2s ease; }
 @keyframes q-flash { 0%, 40% { box-shadow: 0 0 0 3px var(--accent-soft); border-color: var(--accent); } }
-.toast { position: fixed; left: 50%; bottom: max(24px, calc(env(safe-area-inset-bottom) + 12px)); transform: translateX(-50%); z-index: 90;
-  max-width: min(92vw, 480px); padding: 10px 14px; border-radius: 10px; background: var(--text); color: var(--bg); font-size: 13.5px;
-  box-shadow: 0 8px 24px rgba(0,0,0,.25); animation: fade .15s ease; }
+/* Toasts (app.js toast): a click-through stack; only the toasts themselves take pointer events. */
+.toasts { position: fixed; right: 16px; bottom: calc(16px + var(--toast-lift, 0px)); z-index: 90; width: min(360px, calc(100vw - 32px));
+  display: flex; flex-direction: column; align-items: stretch; pointer-events: none; }
+.toast { position: relative; box-sizing: border-box; display: flex; align-items: center; gap: 6px; margin-top: 8px; padding: 10px 6px 10px 14px;
+  overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); color: var(--text); font-size: 13.5px; line-height: 1.4;
+  box-shadow: 0 6px 20px rgba(0,0,0,.12), 0 1px 3px rgba(0,0,0,.08); pointer-events: auto; touch-action: pan-y;
+  animation: toast-in .22s cubic-bezier(.2,.8,.2,1);
+  transition: height .2s ease, margin .2s ease, padding .2s ease, opacity .18s ease, transform .2s ease; }
+.toast::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--toast-c, var(--accent)); }
+.toast-info { --toast-c: var(--accent); }
+.toast-success { --toast-c: var(--ok); }
+.toast-warn { --toast-c: var(--warn); }
+.toast-error { --toast-c: var(--danger); }
+.toast-msg { flex: 1; min-width: 0; padding: 3px 0; overflow-wrap: anywhere; }
+.toast-out { opacity: 0; margin-top: 0; padding-top: 0; padding-bottom: 0; border-width: 0; pointer-events: none; }
+.toast-swiped { transform: translateX(var(--swipe, 100%)); }
+.toast-x { flex: none; width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: 6px; background: transparent;
+  color: var(--muted); font: inherit; font-size: 18px; line-height: 1; cursor: pointer; }
+.toast-x:hover { background: var(--raised); color: var(--text); }
+.toast-x:focus-visible, .toast-act:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@keyframes toast-in { from { opacity: 0; transform: translateX(24px); } }
+@media (prefers-color-scheme: dark) { .toast { box-shadow: 0 8px 24px rgba(0,0,0,.45), 0 1px 3px rgba(0,0,0,.3); } }
+@media (max-width: 600px) {
+  /* Phones: across the top below the safe area (newest first), clear of the composer and the bottom sheets. */
+  .toasts { top: max(8px, env(safe-area-inset-top)); bottom: auto; left: 8px; right: 8px; width: auto; margin: 0 auto; max-width: 480px;
+    flex-direction: column-reverse; }
+  .toast { margin: 0 0 8px; }
+  .toast-out { margin: 0; }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(-16px); } }
+}
+@media (prefers-reduced-motion: reduce) { .toast { animation: none; transition: none; } }
 
 #fbBody, .fb-pop .m-head > div { min-width: 0; overflow-wrap: anywhere; }
 .fb-pop .icon-btn { min-width: 44px; min-height: 44px; flex: none; }
@@ -1170,12 +1198,14 @@ button.dg-row:disabled { opacity: .6; cursor: progress; }
 .fe-opt:hover:not(:disabled) { background: var(--raised); }
 .fe-opt:disabled { cursor: default; }
 .fe-opt:disabled .fe-model { color: var(--faint); }
-.toast-act { margin: -4px -6px -4px 12px; padding: 4px 8px; border: 0; border-radius: 6px; background: transparent; color: inherit; font: inherit; font-weight: 600; text-decoration: underline; cursor: pointer; }
+.toast-act { flex: none; align-self: center; margin: -4px 0; padding: 4px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--accent); font: inherit; font-weight: 600; cursor: pointer; }
+.toast-act:hover { background: var(--accent-soft); }
 @media (pointer: coarse) {
   .fe-rm { width: 44px; height: 44px; }
   .fe-grip { height: 44px; }
   .fe-opt { min-height: 44px; }
   .toast-act { min-height: 44px; }
+  .toast-x { width: 44px; height: 44px; margin: -8px -4px -8px 0; }
   .fe-add-btn { height: 44px; }
 }
 

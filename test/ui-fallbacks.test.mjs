@@ -127,7 +127,7 @@ test('chat fallbacks: the picker has no Auto Delegate; the sheet removes, undoes
   assert.deepEqual(await names(), ['GPT-6-Sol', 'Claude Sonnet 4.6 (Thinking)']);
   assert.equal(await chip.innerText(), 'Fallbacks · 2');
   // Undo from the toast puts it back in place.
-  await page.locator('#toast .toast-act').click();
+  await page.locator('#toasts .toast-act').click();
   await until(['gpt-6-sol', 'gemini-3.1-pro-high', 'claude-sonnet-4-6'], 'undo persisted');
   await rows.nth(1).locator('.fe-rm').click();
   await until(['gpt-6-sol', 'claude-sonnet-4-6'], 'remove persisted again');

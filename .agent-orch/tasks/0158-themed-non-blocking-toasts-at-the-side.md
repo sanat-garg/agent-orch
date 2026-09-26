@@ -12,3 +12,7 @@ Rework the toast(msg, {action, run}) helper in public/app.js and its CSS. Toasts
 ## Done when
 
 `node --check public/app.js && npm test` passes, and the toast container CSS has pointer-events:none and a bottom-right position on desktop
+
+## Result — done (check passed) (2026-09-26 09:49)
+
+AGENT-ORCH-STATUS: done — themed stacked toasts with kinds; tests pass; screenshots captured

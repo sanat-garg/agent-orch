@@ -1469,7 +1469,7 @@ function fbSave(list) {
       if (seq !== FB.seq) return;
       FB.local = { url, list: h.confirmed };
       h.apply(h.confirmed);
-      toast(`Could not save fallbacks: ${e.message}`);
+      toast(`Could not save fallbacks: ${e.message}`, { kind: 'error' });
     }).finally(() => { if (!--FB.pending) { FB.local = null; fbRender(); } });
   }
   fbRender();
@@ -1552,7 +1552,7 @@ function renderFallbackEditor(container, opts) {
     ui.focusKey = near ? apKey(near) : null;
     ui.focusAdd = !near;
     change(rows.filter((_, j) => j !== i));
-    toast(`Removed ${name(r)}`, { action: 'Undo', run: () => {
+    toast(`Removed ${name(r)}`, { kind: 'success', action: 'Undo', run: () => {
       const cur = ui.rows || [];
       if (cur.some((x) => apKey(x) === apKey(r))) return;
       const next = [...cur];
@@ -3770,20 +3770,91 @@ function queueTree(queued) {
   for (const t of queued) walk(t, 0, null); // a depends_on cycle: show what's left flat
   return out;
 }
-let toastTimer;
-// toast(msg, {action: 'Undo', run}) adds one action button and stays up a little longer.
-function toast(msg, { action, run } = {}) {
-  const t = $('toast');
-  t.textContent = msg;
+// toast(msg, {kind: 'info'|'success'|'warn'|'error', action: 'Undo', run, duration}): stacked, non-blocking notices in #toasts
+// (bottom-right on desktop, top on phones). 4 s (6 s with an action) unless `duration`; hover/focus pauses, × or a sideways
+// swipe dismisses, and only the newest TOAST_MAX stay up.
+const TOAST_MAX = 3;
+function toast(msg, { kind = 'info', action, run, duration } = {}) {
+  const box = $('toasts');
+  const t = el('div', `toast toast-${kind}`);
+  t.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+  t.setAttribute('aria-live', kind === 'error' ? 'assertive' : 'polite');
+  t.append(el('div', 'toast-msg', msg));
+  let left = duration ?? (action ? 6000 : 4000), started = 0, timer = 0, closed = false;
+  const holds = new Set();
+  const close = (swiped) => {
+    if (closed) return;
+    closed = true;
+    clearTimeout(timer);
+    t.style.height = `${t.offsetHeight}px`;
+    t.offsetHeight; // commit the height so it can collapse
+    t.classList.add('toast-out');
+    if (swiped) t.classList.add('toast-swiped');
+    t.style.height = '0px';
+    const done = () => t.remove();
+    t.addEventListener('transitionend', (e) => { if (e.target === t && e.propertyName === 'height') done(); });
+    setTimeout(done, 400);
+  };
+  const hold = (why, on) => {
+    if (closed) return;
+    const was = holds.size;
+    on ? holds.add(why) : holds.delete(why);
+    if (!was && holds.size) { clearTimeout(timer); left -= Date.now() - started; }
+    else if (was && !holds.size) { started = Date.now(); timer = setTimeout(close, Math.max(left, 1500)); }
+  };
   if (action) {
     const b = el('button', 'toast-act', action);
     b.type = 'button';
-    b.addEventListener('click', () => { t.hidden = true; clearTimeout(toastTimer); run(); });
+    b.addEventListener('click', () => { close(); run(); });
     t.append(b);
   }
-  t.hidden = false;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.hidden = true), action ? 6000 : 4500);
+  const x = el('button', 'toast-x', '×');
+  x.type = 'button';
+  x.setAttribute('aria-label', 'Dismiss');
+  x.addEventListener('click', () => close());
+  t.append(x);
+  t.addEventListener('pointerenter', (e) => { if (e.pointerType === 'mouse') hold('hover', true); });
+  t.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') hold('hover', false); });
+  t.addEventListener('focusin', () => hold('focus', true));
+  t.addEventListener('focusout', (e) => { if (!t.contains(e.relatedTarget)) hold('focus', false); });
+  let sw = null; // touch swipe: follow the finger sideways, dismiss past 64px
+  t.addEventListener('pointerdown', (e) => {
+    if (e.pointerType !== 'touch' || e.target.closest('button')) return;
+    sw = { id: e.pointerId, x: e.clientX, dx: 0 };
+    hold('swipe', true);
+  });
+  t.addEventListener('pointermove', (e) => {
+    if (sw?.id !== e.pointerId) return;
+    sw.dx = e.clientX - sw.x;
+    t.style.transform = `translateX(${sw.dx}px)`;
+    t.style.opacity = String(Math.max(0.2, 1 - Math.abs(sw.dx) / 240));
+  });
+  const endSwipe = (e) => {
+    if (sw?.id !== e.pointerId) return;
+    const dx = sw.dx;
+    sw = null;
+    if (Math.abs(dx) > 64) { t.style.setProperty('--swipe', `${Math.sign(dx) * 120}%`); t.style.transform = ''; t.style.opacity = ''; return close(true); }
+    t.style.transform = t.style.opacity = '';
+    hold('swipe', false);
+  };
+  t.addEventListener('pointerup', endSwipe);
+  t.addEventListener('pointercancel', endSwipe);
+  t.close = close;
+  box.style.setProperty('--toast-lift', `${toastLift()}px`);
+  box.append(t);
+  const live = [...box.children].filter((c) => !c.classList.contains('toast-out'));
+  for (const old of live.slice(0, -TOAST_MAX)) old.close();
+  started = Date.now();
+  timer = setTimeout(close, left);
+  return t;
+}
+// Desktop toasts sit 16px from the bottom-right corner, raised above the composer when its box reaches into that corner.
+function toastLift() {
+  if (matchMedia('(max-width: 600px)').matches) return 0;
+  const c = document.querySelector('#composer .box');
+  const r = c?.getBoundingClientRect();
+  if (!r || !r.width || r.right < innerWidth - 16 - 360) return 0;
+  return Math.max(0, innerHeight - r.top - 4);
 }
 function openQueue() {
   if ($('queueModal').hidden) Q.lastFocus = document.activeElement;
@@ -3940,7 +4011,7 @@ async function qMove(id, ctx, slot, before = qTops()) {
     for (const [tid, pos] of prev) { const t = O.tasks.get(tid); if (t) t.position = pos; }
     Q.busy = false;
     rerender(qTops());
-    toast(e.message);
+    toast(e.message, { kind: 'error' });
   }
 }
 
@@ -3964,8 +4035,8 @@ function startDrag(p) {
   clearTimeout(p.timer);
   p.card.classList.remove('q-pressing');
   const ctx = qContext(p.id);
-  if (!ctx.rest.length) { cancelPress(); return toast(`#${p.id}'s dependents move with it, so there's nothing to reorder it against`); }
-  if (ctx.slots.length < 2) { cancelPress(); return toast(`#${p.id} has no sibling to reorder against: it stays under #${ctx.block[0].dataset.parent}`); }
+  if (!ctx.rest.length) { cancelPress(); return toast(`#${p.id}'s dependents move with it, so there's nothing to reorder it against`, { kind: 'warn' }); }
+  if (ctx.slots.length < 2) { cancelPress(); return toast(`#${p.id} has no sibling to reorder against: it stays under #${ctx.block[0].dataset.parent}`, { kind: 'warn' }); }
   navigator.vibrate?.(10);
   const list = $('qList'), rect = p.card.getBoundingClientRect(), before = qTops();
   const ghost = el('div', 'q-ghost');
@@ -4037,7 +4108,7 @@ function endDrag(drop) {
   d.list.classList.remove('dragging');
   const ctx = qContext(d.id); // the list's order is unchanged until the move applies
   if (drop && d.slot >= d.minSlot && d.slot !== ctx.slot) return qMove(d.id, ctx, d.slot, tops);
-  if (drop && d.slot < d.minSlot) toast(`#${d.id} can't go above #${d.blocker}: it needs #${d.blocker} first`);
+  if (drop && d.slot < d.minSlot) toast(`#${d.id} can't go above #${d.blocker}: it needs #${d.blocker} first`, { kind: 'warn' });
   renderQueue();
   qFlip(tops);
 }
@@ -4064,7 +4135,7 @@ $('qBody').addEventListener('keydown', (e) => {
   const id = Number(card.dataset.task), ctx = qContext(id);
   const slot = ctx.slots[ctx.slots.indexOf(ctx.slot) + (e.key === 'ArrowUp' ? -1 : 1)];
   if (slot == null) return;
-  if (slot < ctx.minSlot) return toast(`#${id} needs #${ctx.blocker} first`);
+  if (slot < ctx.minSlot) return toast(`#${id} needs #${ctx.blocker} first`, { kind: 'warn' });
   qMove(id, ctx, slot);
 });
 

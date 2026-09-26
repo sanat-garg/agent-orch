@@ -501,3 +501,7 @@ Kiro integrated; live smoke awaits owner sign-in
 ## 2026-09-26 09:37 — #162 GitHub Copilot CLI: adapter, model discovery, connection and smoke test [done (check passed)]
 
 Copilot smoke 10/10, npm tests pass, connection listed
+
+## 2026-09-26 09:49 — #158 Themed, non-blocking toasts at the side [done (check passed)]
+
+themed stacked toasts with kinds; tests pass; screenshots captured

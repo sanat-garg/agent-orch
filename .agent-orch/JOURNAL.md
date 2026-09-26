@@ -515,3 +515,6 @@ parallel e2e passed live on haiku: tasks overlapped, both merged
 ## 2026-09-26 10:03 — #165 AUDIT round 4: worktrees, parallel scheduling, delegation and new adapters [done (check passed)]
 
 AUDIT.md Round 4 lists six verified findings (#27–32)
+## 2026-09-26 10:27 — #168 Speed up the tests: cut fixed waits in the slowest test files [done (check passed)]
+
+full suite now ~198 s from 278 s, stable

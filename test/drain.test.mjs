@@ -16,15 +16,19 @@ test('drain() lets the running task finish, claims nothing new, then resolves', 
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-drain-')), root = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-drain-p-'));
   try {
     const script = `import { createOrchestrator } from ${ORCH};
+      import { waitFor as until } from ${JSON.stringify(new URL('./helpers/wait.mjs', import.meta.url).href)};
       import { DatabaseSync } from 'node:sqlite';
       import fs from 'node:fs';
       import path from 'node:path';
       const [dataDir, root] = process.argv.slice(1);
+      let finish;
+      const work = new Promise((r) => { finish = r; });
       const query = ({ options }) => (async function* () {
-        await new Promise((r) => { const t = setTimeout(r, 2000); options.abortController.signal.addEventListener('abort', () => { clearTimeout(t); r(); }); });
+        options.abortController.signal.addEventListener('abort', finish, { once: true });
+        await work;
         yield { type: 'result', subtype: 'success', result: 'AGENT-ORCH-STATUS: done — ok', session_id: 's', num_turns: 1 };
       })();
-      const o = createOrchestrator({ query, dataDir, claudeEnv: {}, getLimits: () => [], onSubscription: () => true,
+      const o = createOrchestrator({ config: { pollMs: 100 }, query, dataDir, claudeEnv: {}, getLimits: () => [], onSubscription: () => true,
         broadcast() {}, emitChat() {}, convoExists: () => false });
       const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
       const p = path.join(root, 'p'); fs.mkdirSync(p);
@@ -33,14 +37,15 @@ test('drain() lets the running task finish, claims nothing new, then resolves', 
       const a = task('a', 1), b = task('b', 2);
       const get = (id) => db.prepare('SELECT status FROM tasks WHERE id=?').get(id).status;
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-      for (let i = 0; i < 200 && get(a) !== 'running'; i++) await sleep(50);
+      await until(() => get(a) === 'running');
       const before = { a: get(a), b: get(b), draining: o.stateView().draining };
       let resolved = false;
       const done = o.drain().then(() => { resolved = true; });
       const during = { draining: o.stateView().draining, resolved };
+      finish(); // Release the worker only after observing the unresolved drain.
       await done;
       const after = { a: get(a), b: get(b), running: o.stateView().running };
-      await sleep(4000); // more polls: b stays queued
+      await sleep(350); // More than three configured polls: b stays queued.
       const later = { b: get(b), kv: db.prepare("SELECT count(*) AS n FROM kv WHERE key LIKE '%drain%'").get().n };
       let idle = false; await o.drain().then(() => { idle = true; });
       console.log(JSON.stringify({ before, during, after, later, idle }));
@@ -89,6 +94,7 @@ test('undrain() cancels a drain and task claiming resumes', { timeout: 120000 },
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-drain-')), root = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-drain-p-'));
   try {
     const script = `import { createOrchestrator } from ${ORCH};
+      import { waitFor as until } from ${JSON.stringify(new URL('./helpers/wait.mjs', import.meta.url).href)};
       import { DatabaseSync } from 'node:sqlite';
       import fs from 'node:fs';
       import path from 'node:path';
@@ -96,7 +102,7 @@ test('undrain() cancels a drain and task claiming resumes', { timeout: 120000 },
       const query = () => (async function* () {
         yield { type: 'result', subtype: 'success', result: 'AGENT-ORCH-STATUS: done — ok', session_id: 's', num_turns: 1 };
       })();
-      const o = createOrchestrator({ query, dataDir, claudeEnv: {}, getLimits: () => [], onSubscription: () => true,
+      const o = createOrchestrator({ config: { pollMs: 100 }, query, dataDir, claudeEnv: {}, getLimits: () => [], onSubscription: () => true,
         broadcast() {}, emitChat() {}, convoExists: () => false });
       o.drain(); // before the first tick
       const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
@@ -105,11 +111,11 @@ test('undrain() cancels a drain and task claiming resumes', { timeout: 120000 },
       const a = Number(db.prepare("INSERT INTO tasks(project_id,title,prompt,priority,urgency,created_at) VALUES(?,'a','a',50,'normal',1)").run(pid).lastInsertRowid);
       const get = () => db.prepare('SELECT status FROM tasks WHERE id=?').get(a).status;
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-      await sleep(4000); // past a poll: nothing claimed while draining
+      await sleep(350); // More than three configured polls: nothing claimed while draining.
       const drained = { a: get(), draining: o.stateView().draining };
       o.undrain();
       const undrained = o.stateView().draining;
-      for (let i = 0; i < 200 && get() === 'queued'; i++) await sleep(50);
+      await until(() => get() !== 'queued');
       console.log(JSON.stringify({ drained, undrained, a: get() }));
       process.exit(0);`;
     const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script, dataDir, root], { encoding: 'utf8', timeout: 90000 });

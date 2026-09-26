@@ -239,13 +239,13 @@ test('a task routed to a missing agent runs on Claude and its view carries route
       const query = () => (async function* () {
         yield { type: 'result', subtype: 'success', result: 'AGENT-ORCH-STATUS: done — ok', session_id: 's', num_turns: 1 };
       })();
-      const o = createOrchestrator({ query, dataDir, claudeEnv: {}, getLimits: () => [], onSubscription: () => true,
+      const o = createOrchestrator({ config: { pollMs: 100 }, query, dataDir, claudeEnv: {}, getLimits: () => [], onSubscription: () => true,
         broadcast() {}, emitChat() {}, convoExists: () => false });
       const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
       const pid = Number(db.prepare("INSERT INTO projects(path,name,priority,status,perpetual,created_at) VALUES(?,'p',50,'active',0,0)").run(proj).lastInsertRowid);
       const ins = (title, agent) => Number(db.prepare('INSERT INTO tasks(project_id,title,prompt,agent,created_at) VALUES(?,?,?,?,0)').run(pid, title, title, agent).lastInsertRowid);
       const a = ins('Add tests', 'codex'), b = ins('Plain', null);
-      const until = async (f) => { for (let i = 0; i < 300 && !f(); i++) await new Promise((r) => setTimeout(r, 100)); };
+      const { waitFor: until } = await import(${JSON.stringify(new URL('./helpers/wait.mjs', import.meta.url).href)});
       await until(() => !db.prepare("SELECT 1 FROM tasks WHERE status IN ('queued','running')").get());
       console.log(JSON.stringify([a, b].map((id) => o.taskDetail(id).task)));
       process.exit(0);`;
@@ -277,12 +277,12 @@ test('a codex auth_error blocks only codex: blocked_until stays 0 and the retry 
       const query = () => (async function* () {
         yield { type: 'result', subtype: 'success', result: 'AGENT-ORCH-STATUS: done — ok', session_id: 's', num_turns: 1 };
       })();
-      const o = createOrchestrator({ query, dataDir, claudeEnv: { PATH: process.env.PATH, CODEX_STUB: 'auth' }, getLimits: () => [], onSubscription: () => true,
+      const o = createOrchestrator({ config: { pollMs: 100 }, query, dataDir, claudeEnv: { PATH: process.env.PATH, CODEX_STUB: 'auth' }, getLimits: () => [], onSubscription: () => true,
         broadcast() {}, emitChat() {}, convoExists: () => false });
       const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
       const pid = Number(db.prepare("INSERT INTO projects(path,name,priority,status,perpetual,created_at) VALUES(?,'p',50,'active',0,0)").run(proj).lastInsertRowid);
       const id = Number(db.prepare("INSERT INTO tasks(project_id,title,prompt,agent,created_at) VALUES(?,'Add tests','p','codex',0)").run(pid).lastInsertRowid);
-      const until = async (f) => { for (let i = 0; i < 300 && !f(); i++) await new Promise((r) => setTimeout(r, 100)); };
+      const { waitFor: until } = await import(${JSON.stringify(new URL('./helpers/wait.mjs', import.meta.url).href)});
       await until(() => !db.prepare("SELECT 1 FROM tasks WHERE status IN ('queued','running')").get());
       const kv = (k) => db.prepare('SELECT value FROM kv WHERE key=?').get(k)?.value ?? null;
       const runs = db.prepare('SELECT agent FROM runs WHERE task_id=? ORDER BY id').all(id).map((r) => r.agent);
@@ -317,12 +317,12 @@ test('a codex usage limit blocks only codex: blocked_until stays 0 and the retry
       const query = () => (async function* () {
         yield { type: 'result', subtype: 'success', result: 'AGENT-ORCH-STATUS: done — ok', session_id: 's', num_turns: 1 };
       })();
-      const o = createOrchestrator({ query, dataDir, claudeEnv: { PATH: process.env.PATH, CODEX_STUB: 'limit' }, getLimits: () => [], onSubscription: () => true,
+      const o = createOrchestrator({ config: { pollMs: 100 }, query, dataDir, claudeEnv: { PATH: process.env.PATH, CODEX_STUB: 'limit' }, getLimits: () => [], onSubscription: () => true,
         broadcast() {}, emitChat() {}, convoExists: () => false });
       const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
       const pid = Number(db.prepare("INSERT INTO projects(path,name,priority,status,perpetual,created_at) VALUES(?,'p',50,'active',0,0)").run(proj).lastInsertRowid);
       const id = Number(db.prepare("INSERT INTO tasks(project_id,title,prompt,agent,created_at) VALUES(?,'Add tests','p','codex',0)").run(pid).lastInsertRowid);
-      const until = async (f) => { for (let i = 0; i < 300 && !f(); i++) await new Promise((r) => setTimeout(r, 100)); };
+      const { waitFor: until } = await import(${JSON.stringify(new URL('./helpers/wait.mjs', import.meta.url).href)});
       await until(() => !db.prepare("SELECT 1 FROM tasks WHERE status IN ('queued','running')").get());
       const kv = (k) => db.prepare('SELECT value FROM kv WHERE key=?').get(k)?.value ?? null;
       const runs = db.prepare('SELECT agent FROM runs WHERE task_id=? ORDER BY id').all(id).map((r) => r.agent);

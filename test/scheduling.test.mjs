@@ -10,12 +10,13 @@ import { promisify } from 'node:util';
 const ORCH = JSON.stringify(new URL('../orchestrator.mjs', import.meta.url).href);
 
 // createOrchestrator starts timers, so each scenario runs in a child process with a fake SDK query() and
-// rows inserted straight into its DB before the first tick (5 s after start). The body prints a JSON line.
+// rows inserted synchronously before the first test-configured tick. The body prints a JSON line.
 // `fiveHour` set: a 5h reading above 90% makes pacing drop to one slot, so claims happen strictly in order.
 async function scenario(body, { fiveHour = false } = {}) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-sched-')), root = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-sched-p-'));
   try {
     const script = `import { createOrchestrator } from ${ORCH};
+      import { waitFor as until } from ${JSON.stringify(new URL('./helpers/wait.mjs', import.meta.url).href)};
       import { DatabaseSync } from 'node:sqlite';
       import fs from 'node:fs';
       import path from 'node:path';
@@ -28,7 +29,8 @@ async function scenario(body, { fiveHour = false } = {}) {
         else yield { type: 'result', subtype: 'success', result: 'AGENT-ORCH-STATUS: done — ok', session_id: 's', num_turns: 1 };
       })();
       const getLimits = () => ${fiveHour} ? [{ limit_type: 'five_hour', status: 'allowed', utilization: 0.95, resets_at: now() + 3600, observed_at: now() }] : [];
-      const o = createOrchestrator({ query, dataDir, claudeEnv: {}, getLimits, onSubscription: () => true,
+      let subscriptionChecks = 0;
+      const o = createOrchestrator({ config: { pollMs: 100 }, query, dataDir, claudeEnv: {}, getLimits, onSubscription: () => { subscriptionChecks++; return true; },
         broadcast() {}, emitChat() {}, convoExists: () => false });
       const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
       let n = 0;
@@ -41,8 +43,7 @@ async function scenario(body, { fiveHour = false } = {}) {
         Number(db.prepare('INSERT INTO tasks(project_id,title,prompt,priority,urgency,depends_on,attempts,created_at) VALUES(?,?,?,?,?,?,?,?)')
           .run(pid, title, title, priority, urgency, dependsOn, attempts, ++created).lastInsertRowid);
       const get = (id) => db.prepare('SELECT * FROM tasks WHERE id=?').get(id);
-      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-      const until = async (f) => { for (let i = 0; i < 400 && !f(); i++) await sleep(100); };
+      const nextPoll = async () => { const checks = subscriptionChecks; await until(() => subscriptionChecks > checks); };
       const settled = () => !db.prepare("SELECT 1 FROM tasks WHERE status IN ('queued','running')").get();
       const out = await (async () => { ${body} })();
       console.log(JSON.stringify(out));
@@ -74,7 +75,8 @@ describe('scheduling', { concurrency: true, timeout: 120000 }, () => {
       const paused = project(50, 'paused'), active = project(50);
       const dep = task(paused, 'dep'), child = task(active, 'child', { urgency: 'urgent', dependsOn: dep }), other = task(active, 'other');
       await until(() => get(other).status === 'done');
-      await sleep(3500); // another poll after the project went idle
+      await until(() => o.stateView().running === 0);
+      await nextPoll(); // Another scheduler check after the project went idle.
       const before = { dep: get(dep).status, child: get(child).status, childStarted: get(child).started_at };
       o.projectAction(paused, { status: 'active' });
       await until(settled);
@@ -124,7 +126,7 @@ describe('scheduling', { concurrency: true, timeout: 120000 }, () => {
     const r = await scenario(`
       db.prepare("INSERT INTO kv(key,value) VALUES('blocked_until', ?)").run(String(now() + 3600));
       const t = task(project(50), 't');
-      await sleep(8500); // past the first tick and another poll
+      await nextPoll(); await nextPoll(); // First scheduler check and another poll, while blocked.
       const blocked = { status: get(t).status, started_at: get(t).started_at };
       db.prepare("UPDATE kv SET value='0' WHERE key='blocked_until'").run();
       await until(settled);

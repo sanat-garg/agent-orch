@@ -22,6 +22,7 @@ async function scenario(body, block) {
     const script = `import { createOrchestrator } from ${JSON.stringify(new URL('../orchestrator.mjs', import.meta.url).href)};
       import { setModelCatalog } from ${JSON.stringify(new URL('../agents.mjs', import.meta.url).href)};
       setModelCatalog('antigravity', { models: ['gemini-3.8-flash-high', 'claude-sonnet-4-6', 'gpt-oss-120b-medium'].map((id) => ({ id, label: id })), error: null, at: Date.now() });
+      import { waitFor as until } from ${JSON.stringify(new URL('./helpers/wait.mjs', import.meta.url).href)};
       import { DatabaseSync } from 'node:sqlite';
       import fs from 'node:fs';
       import path from 'node:path';
@@ -32,7 +33,8 @@ async function scenario(body, block) {
         claudePrompts.push(prompt);
         yield { type: 'result', subtype: 'success', result: 'AGENT-ORCH-STATUS: done — ok', session_id: 's', num_turns: 1 };
       })();
-      const o = createOrchestrator({ query, dataDir, claudeEnv: { PATH: process.env.PATH, HOME: process.env.HOME }, getLimits: () => [], onSubscription: () => true,
+      let subscriptionChecks = 0;
+      const o = createOrchestrator({ config: { pollMs: 100 }, query, dataDir, claudeEnv: { PATH: process.env.PATH, HOME: process.env.HOME }, getLimits: () => [], onSubscription: () => { subscriptionChecks++; return true; },
         broadcast() {}, emitChat: (id, m) => chat.push({ id, ...m }), convoExists: () => true });
       const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
       for (const [k, v] of Object.entries(${JSON.stringify(block)})) db.prepare('INSERT OR REPLACE INTO kv(key,value) VALUES(?,?)').run(k, String(now() + v));
@@ -41,8 +43,6 @@ async function scenario(body, block) {
       const project = () => { const p = dir(); return Number(db.prepare("INSERT INTO projects(path,name,priority,status,perpetual,created_at) VALUES(?,?,50,'active',0,0)").run(p, 'p' + n).lastInsertRowid); };
       const task = (pid, title, agent = null, model = null) => Number(db.prepare('INSERT INTO tasks(project_id,title,prompt,agent,model,created_at) VALUES(?,?,?,?,?,0)').run(pid, title, title, agent, model).lastInsertRowid);
       const get = (id) => db.prepare('SELECT * FROM tasks WHERE id=?').get(id);
-      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-      const until = async (f) => { for (let i = 0; i < 300 && !f(); i++) await sleep(100); };
       const pending = () => db.prepare("SELECT COUNT(*) AS n FROM messages WHERE status='pending'").get().n;
       const out = await (async () => { ${body} })();
       console.log(JSON.stringify(out));
@@ -78,7 +78,9 @@ test('a Claude block does not stop claiming a codex-routed task; Claude tasks wa
     const pid = project(), pid2 = project();
     const codex = task(pid, 'Add tests', 'codex'), plain = task(pid2, 'Plain');
     await until(() => get(codex).status === 'done');
-    await sleep(3500); // another poll: the Claude task still waits
+    await until(() => o.stateView().running === 0);
+    const checks = subscriptionChecks;
+    await until(() => subscriptionChecks > checks); // Another scheduler check: Claude still waits.
     const view = o.taskDetail(plain).task;
     return { codex: get(codex), plain: get(plain), plainRunsOn: view.runs_on, claudePrompts: claudePrompts.length };`, { blocked_until: 3600 });
   assert.equal(r.codex.status, 'done');

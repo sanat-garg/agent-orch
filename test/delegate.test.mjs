@@ -55,6 +55,7 @@ test('a queued task moves to its first available fallback when its primary is li
     const url = (f) => JSON.stringify(new URL(`../${f}`, import.meta.url).href);
     const script = `import { createOrchestrator } from ${url('orchestrator.mjs')};
       import { setModelCatalog } from ${url('agents.mjs')};
+      import { waitFor as until } from ${JSON.stringify(new URL('./helpers/wait.mjs', import.meta.url).href)};
       import { DatabaseSync } from 'node:sqlite';
       import fs from 'node:fs';
       import path from 'node:path';
@@ -65,7 +66,8 @@ test('a queued task moves to its first available fallback when its primary is li
       let claude = 0;
       const query = () => (async function* () { claude++; yield { type: 'result', subtype: 'success', result: 'AGENT-ORCH-STATUS: done — ok', session_id: 's', num_turns: 1 }; })();
       const chat = [];
-      const o = createOrchestrator({ query, dataDir, claudeEnv: { PATH: process.env.PATH, HOME: process.env.HOME }, getLimits: () => [], onSubscription: () => true,
+      let subscriptionChecks = 0;
+      const o = createOrchestrator({ config: { pollMs: 100 }, query, dataDir, claudeEnv: { PATH: process.env.PATH, HOME: process.env.HOME }, getLimits: () => [], onSubscription: () => { subscriptionChecks++; return true; },
         broadcast() {}, emitChat: (cid, ev) => ev.t === 'moved' && chat.push({ cid, ...ev }), convoExists: () => true });
       const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
       db.prepare('INSERT OR REPLACE INTO kv(key,value) VALUES(?,?)').run('blocked_until', String(Date.now() / 1000 + 3600));
@@ -78,9 +80,11 @@ test('a queued task moves to its first available fallback when its primary is li
         curated: task('e', 'chat', JSON.stringify([{ agent: 'antigravity', model: 'gemini-x' }, { agent: 'codex', model: 'gpt-mini' }])) };
       db.prepare("UPDATE projects SET convo_id='cb' WHERE name='b'").run();
       const get = (id) => db.prepare('SELECT * FROM tasks WHERE id=?').get(id);
-      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-      for (let i = 0; i < 300 && !['reflect', 'chat', 'curated'].every((k) => get(ids[k]).status === 'done'); i++) await sleep(100);
-      await sleep(3500);
+      await until(() => ['reflect', 'chat', 'curated'].every((k) => get(ids[k]).status === 'done'));
+      // After workers settle, observe another scheduler subscription check: empty lists still wait.
+      await until(() => o.stateView().running === 0);
+      const checks = subscriptionChecks;
+      await until(() => subscriptionChecks > checks);
       const out = Object.fromEntries(Object.entries(ids).map(([k, id]) => { const t = get(id); return [k, { status: t.status, agent: t.agent, model: t.model, from: t.delegated_from, reason: t.delegated_reason, view: o.taskDetail(id).task.delegated_from }]; }));
       out.claude = claude;
       out.cols = db.prepare('PRAGMA table_info(tasks)').all().map((c) => c.name).filter((c) => ['auto_delegate', 'pinned_model'].includes(c));
@@ -119,6 +123,7 @@ test("a chat's fallback list is snapshotted onto the tasks its messages queue (l
     const url = (f) => JSON.stringify(new URL(`../${f}`, import.meta.url).href);
     const script = `import { createOrchestrator } from ${url('orchestrator.mjs')};
       import { setModelCatalog } from ${url('agents.mjs')};
+      import { waitFor as until } from ${JSON.stringify(new URL('./helpers/wait.mjs', import.meta.url).href)};
       import { DatabaseSync } from 'node:sqlite';
       import path from 'node:path';
       const [dataDir, proj] = process.argv.slice(1);
@@ -129,7 +134,7 @@ test("a chat's fallback list is snapshotted onto the tasks its messages queue (l
         yield { type: 'result', subtype: 'success', result: reply, session_id: 's', num_turns: 1 };
       })();
       const convo = { id: 'c1', cwd: proj, fallbacks: [{ agent: 'codex', model: 'gpt-a' }] };
-      const o = createOrchestrator({ query, dataDir, claudeEnv: { PATH: process.env.PATH, HOME: process.env.HOME }, getLimits: () => [], onSubscription: () => true,
+      const o = createOrchestrator({ config: { pollMs: 100 }, query, dataDir, claudeEnv: { PATH: process.env.PATH, HOME: process.env.HOME }, getLimits: () => [], onSubscription: () => true,
         broadcast() {}, emitChat() {}, convoExists: () => true, convoFallbacks: () => [{ agent: 'antigravity', model: 'gemini-x' }] });
       await o.planTurn(convo, 'FIRST');
       const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
@@ -139,7 +144,7 @@ test("a chat's fallback list is snapshotted onto the tasks its messages queue (l
       const tid = Number(db.prepare("INSERT INTO tasks(project_id,kind,title,prompt,created_at) VALUES(?, 'plan', 'Answer', 'x', 0)").run(pid).lastInsertRowid);
       o.taskAction(tid, 'next');
       const two = () => db.prepare("SELECT title, fallbacks FROM tasks WHERE kind='work' ORDER BY id").all();
-      for (let i = 0; i < 300 && two().length < 2; i++) await new Promise((r) => setTimeout(r, 100));
+      await until(() => two().length >= 2);
       console.log(JSON.stringify(two()));
       process.exit(0);`;
     const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script, dataDir, proj], { encoding: 'utf8', timeout: 50000 });

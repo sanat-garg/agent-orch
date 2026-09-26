@@ -22,7 +22,7 @@ _Durable knowledge for every agent session: architecture, conventions, decisions
 
 ## Conventions
 - ESM `.mjs`, no build step, no framework, minimal deps. Match the terse style and comment density.
-- Tests: `node --test`; `npm test` runs `test/**/*.test.mjs`. Server tests spawn server.mjs on a free port with `CW_DATA_DIR` set to a temp dir. Scheduling tests run `createOrchestrator` in a child process with a fake `query`; CLI adapters use stub binaries in test/fixtures/. Browser tests (test/ui-*.test.mjs) use playwright-core.
+- Tests: `node --test`; `npm test` runs `test/**/*.test.mjs`. Server tests spawn server.mjs on a free port with `CW_DATA_DIR` set to a temp dir. Scheduling tests run `createOrchestrator` in a child process with a fake `query`; CLI adapters use stub binaries in test/fixtures/. Scheduler tests pass `config: { pollMs: 100 }` and poll with `test/helpers/wait.mjs` instead of fixed sleeps. Browser tests (test/ui-*.test.mjs) use playwright-core.
 - User-visible times: events carry `until` (epoch s); app.js `withUntil` formats in the browser's timezone. Don't format times on the server except in logs.
 - .agent-orch/AUDIT.md is the bug backlog; mark fixed items `**Fixed**` with a one-line note.
 - Mobile: follow Apple HIG (apple-design skill). Modals need `grid-template-columns: minmax(0, 100%)`; test/ui-away.test.mjs checks every modal fits 375×667 and 390×844.

@@ -13,3 +13,7 @@
 ## Done when
 
 `npm test` `grep -qi total .agent-orch/TEST-SPEED.md`
+
+## Result — done (check passed) (2026-09-26 10:27)
+
+AGENT-ORCH-STATUS: done — full suite now ~198 s from 278 s, stable

@@ -77,7 +77,7 @@ describe('agent spreading (spreadAssign)', () => {
 
 // A temp git repo (worktrees on) plus a HOME with the codex stub. The fake Claude query answers planner turns
 // ('[Owner says]') with globalThis.PLAN as a tasks block, and work prompts by writing `WRITE <file> <text>` lines
-// into its cwd after `HOLD <ms>` (default 700).
+// into its cwd after a short hold, or after the scenario releases a named WAIT gate.
 async function scenario(body, { config = {} } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-par-'))), repo = path.join(root, 'proj');
   const dataDir = path.join(root, 'data'), home = path.join(root, 'home');
@@ -90,6 +90,7 @@ async function scenario(body, { config = {} } = {}) {
   try {
     const script = `import { createOrchestrator } from ${url('orchestrator.mjs')};
       import { setModelCatalog } from ${url('agents.mjs')};
+      import { waitFor as until } from ${url('test/helpers/wait.mjs')};
       import { DatabaseSync } from 'node:sqlite';
       import fs from 'node:fs';
       import path from 'node:path';
@@ -97,23 +98,25 @@ async function scenario(body, { config = {} } = {}) {
       setModelCatalog('claude', { models: [{ id: 'opus', default: true }], error: null, at: Date.now() });
       setModelCatalog('codex', { models: [{ id: 'gpt-a', default: true }], error: null, at: Date.now() });
       globalThis.PLAN = [];
+      const released = new Set();
       const query = ({ prompt, options }) => (async function* () {
         if (/\\[Owner says\\]/.test(prompt)) {
           yield { type: 'result', subtype: 'success', result: 'Queued.\\n\`\`\`agent-orch-tasks\\n' + JSON.stringify({ tasks: PLAN }) + '\\n\`\`\`', session_id: 'plan', num_turns: 1 };
           return;
         }
-        await new Promise((r) => setTimeout(r, Number(/^HOLD (\\d+)$/m.exec(prompt)?.[1] || 700)));
+        const gate = /^WAIT (\\w+)$/m.exec(prompt)?.[1];
+        if (gate) await until(() => released.has(gate) || options.abortController.signal.aborted);
+        else await new Promise((r) => setTimeout(r, 700));
+        if (options.abortController.signal.aborted) return;
         for (const [, f, text] of prompt.matchAll(/^WRITE (\\S+) (\\S+)$/gm)) fs.writeFileSync(path.join(options.cwd, f), text + '\\n');
         yield { type: 'result', subtype: 'success', result: 'AGENT-ORCH-STATUS: done — ok', session_id: 's-' + Math.random(), num_turns: 1 };
       })();
       const convo = { id: 'c1', cwd: repo, fallbacks: [{ agent: 'codex', model: 'gpt-a' }] };
       const o = createOrchestrator({ query, dataDir, claudeEnv: { PATH: process.env.PATH, HOME: process.env.HOME }, getLimits: () => [], onSubscription: () => true,
-        broadcast() {}, emitChat() {}, convoExists: () => true, config: ${JSON.stringify(config)} });
+        broadcast() {}, emitChat() {}, convoExists: () => true, config: ${JSON.stringify({ pollMs: 100, ...config })} });
       const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
       const all = () => db.prepare("SELECT * FROM tasks WHERE kind='work' ORDER BY id").all();
       const byTitle = (t) => all().find((r) => r.title === t);
-      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-      const until = async (f) => { for (let i = 0; i < 500 && !f(); i++) await sleep(100); };
       const plan = async (tasks) => { PLAN = tasks; await o.planTurn(convo, 'go'); db.prepare('UPDATE projects SET perpetual=0').run(); };
       // Run intervals, from what the fake query and the DB saw: [started_at, finished_at] per title.
       const spans = () => Object.fromEntries(all().map((t) => [t.title, [t.started_at, t.finished_at]]));
@@ -151,8 +154,8 @@ describe('parallel scheduling', { concurrency: true, timeout: 120000 }, () => {
   test('multi-dependency: the integrator starts only after ALL parts; cancel cascades and retry revives', async () => {
     const r = await scenario(`
       await plan([
-        { title: 'part1', prompt: 'HOLD 400\\nWRITE p1.txt one', files: ['p1.txt'] },
-        { title: 'part2', prompt: 'HOLD 2500\\nWRITE p2.txt two', files: ['p2.txt'] },
+        { title: 'part1', prompt: 'WRITE p1.txt one', files: ['p1.txt'] },
+        { title: 'part2', prompt: 'WAIT part2\\nWRITE p2.txt two', files: ['p2.txt'] },
         { title: 'integrate', prompt: 'WRITE merged.txt both', after: [0, 1], done_when: '\`test -f p1.txt\` and \`test -f p2.txt\`' },
       ]);
       const ids = all().map((t) => t.id);
@@ -160,11 +163,12 @@ describe('parallel scheduling', { concurrency: true, timeout: 120000 }, () => {
       const view = o.taskDetail(ids[2]);
       await until(() => byTitle('part1').status === 'done');
       const whenPart1Done = { part2: byTitle('part2').status, integrate: byTitle('integrate').status };
+      released.add('part2');
       await until(() => all().every((t) => t.status === 'done'));
       // Cascade: a new pair where one prerequisite is cancelled.
       await plan([
-        { title: 'x', prompt: 'HOLD 3000', files: ['x.txt'] },
-        { title: 'y', prompt: 'HOLD 3000', files: ['y.txt'] },
+        { title: 'x', prompt: 'WAIT x', files: ['x.txt'] },
+        { title: 'y', prompt: 'WAIT y', files: ['y.txt'] },
         { title: 'z', prompt: 'ok', after: [0, 1] },
       ]);
       await until(() => byTitle('y').status === 'running');
@@ -172,6 +176,7 @@ describe('parallel scheduling', { concurrency: true, timeout: 120000 }, () => {
       const cancelled = { z: byTitle('z').status, zResult: byTitle('z').result };
       o.taskAction(byTitle('y').id, 'retry');
       const revived = byTitle('z').status;
+      released.add('x'); released.add('y');
       await until(() => ['x', 'y', 'z'].every((t) => byTitle(t).status === 'done'));
       return { ids, deps, after: view.after.map((t) => t.id), zDeps: view.task.deps, spans: spans(), whenPart1Done, cancelled, revived,
         statuses: all().map((t) => t.status) };`, { config: { concurrency: 3, maxParallel: 3, agentSlots: 3 } });
@@ -192,9 +197,11 @@ describe('parallel scheduling', { concurrency: true, timeout: 120000 }, () => {
   test("agent spreading: a task beyond the primary's slots runs on the next fallback with usage left", async () => {
     const r = await scenario(`
       await plan([
-        { title: 'S1', prompt: 'HOLD 2500\\nWRITE s1.txt one', files: ['s1.txt'] },
+        { title: 'S1', prompt: 'WAIT s1\\nWRITE s1.txt one', files: ['s1.txt'] },
         { title: 'S2', prompt: 'WRITE s2.txt two', files: ['s2.txt'] },
       ]);
+      await until(() => byTitle('S2')?.status === 'done');
+      released.add('s1');
       await until(() => all().every((t) => t.status === 'done'));
       return { spans: spans(), rows: all().map((t) => ({ title: t.title, ran: t.ran_agent, agent: t.agent, moves: JSON.parse(t.moves || '[]'), reason: t.delegated_reason })) };`,
     { config: { concurrency: 2, maxParallel: 2, agentSlots: 1 } });

@@ -639,3 +639,7 @@ worker daemon runs jobs, pushes branches; npm test passes
 ## 2026-09-27 13:10 — #219 Scheduler: place tasks on remote nodes and merge their pushed branches [done (check passed)]
 
 remote placement, dispatch and merge-back work; cluster e2e passes
+
+## 2026-09-27 13:37 — #220 Node failure handling: disconnects, laptop sleep, WIP recovery and reassignment [done (check passed)]
+
+Waiting for the full `npm test` run to finish.

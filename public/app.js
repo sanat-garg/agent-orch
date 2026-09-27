@@ -3712,7 +3712,8 @@ function modelSection(t) {
   const ms = modelStatus(t), c = section('Model');
   c.append(modelChip(t, ms));
   // Remote runs (cluster workers) name their machine; the controller's own runs don't.
-  if (t.node_name) c.append(el('div', 'dr-check', `${t.status === 'running' ? 'Running' : 'Ran'} on ${t.node_name}`));
+  if (t.waiting_for) c.append(el('div', 'dr-check', `Waiting for ${t.waiting_for} to come back`));
+  else if (t.node_name) c.append(el('div', 'dr-check', `${t.status === 'running' ? 'Running' : 'Ran'} on ${t.node_name}`));
   const editable = t.kind === 'work' && ['queued', 'running'].includes(t.status);
   if (!editable && ms.list.length) {
     const ol = el('ol', 'dr-fallbacks');

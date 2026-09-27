@@ -55,12 +55,13 @@ Direction: C = controller → worker, W = worker → controller (`DIRECTION`; `v
 
 | type | dir | fields | meaning |
 | --- | --- | --- | --- |
-| `hello` | W | node, protocol, version, jobs[{job, state, sha}] | first frame; `jobs` = work still on this machine (re-attach) |
+| `hello` | W | node, protocol, version, jobs[{job, state, sha, next}] | first frame; `jobs` = work still on this machine, finished ones whose `job.done` wasn't acked included (re-attach) |
 | `welcome` | C | node, protocol, heartbeatMs, wipPushMs, graceMs | settings for this node |
 | `inventory` | W | node, name, os (linux/darwin), arch, cores, mem, agents[{id, installed, version, signedIn, account, models}], limits, versions{agentOrch, node, git} | after `welcome` and whenever it changes |
 | `resources` | W | memAvailable, load[1,5,15], running[job ids], swapUsedPct | every heartbeat-ish (≥10 s), from /proc/meminfo or `vm_stat`/`sysctl` on macOS |
 | `heartbeat` | both | — | liveness |
-| `ack` / `error` / `bye` | both | re / message / reason | replies; `bye` before a clean shutdown (a drained Mac going to sleep) |
+| `ack` / `error` / `bye` | both | re (+job) / message / reason | replies; the controller acks each `job.done` with its `job` (the worker then forgets the job); `bye` before a clean shutdown |
+| `wake` | W | sleptAt, sleptMs | a time jump on the worker (a laptop's sleep), sent after the next `welcome` |
 | `job.offer` | C | job, agent, model, footprint | "can you take this?" |
 | `job.accept` / `job.reject` | W | job / job, reason (busy, low_memory, agent_missing, not_signed_in, draining, version, other) | answer within 10 s or counts as reject |
 | `job.start` | C | job, title, prompt, systemAppend, agent, model, account, repo, baseSha, branch, doneWhen, resume, timeouts{taskSec, verifySec, installSec}, autonomous, tools, install[argv] | run it |
@@ -68,7 +69,8 @@ Direction: C = controller → worker, W = worker → controller (`DIRECTION`; `v
 | `job.check` | W | job, command, output, pass, code | result of the done-when check, run on the worker in the task's worktree |
 | `job.wip` | W | job, sha, branch | a WIP commit was pushed to `agent-orch/task-<id>` |
 | `job.done` | W | job, outcome, text, usage, limits, sha, sessionId | the agent turn ended (outcomes = `runAgentCli`'s + setup_failed, lost) |
-| `job.cancel` / `job.pause` / `job.resume` | C | job (+reason / +prompt) | cancel = kill + push WIP + drop worktree; pause = kill + keep worktree + push WIP; resume = continue the session |
+| `job.cancel` / `job.pause` / `job.resume` | C | job (+reason / +prompt) | cancel = kill + push WIP + drop worktree (reason `reassigned`/`disabled`: no push); pause = kill + keep worktree + push WIP; resume = continue the session |
+| `job.attach` | C | job, from | after a reconnect: the controller still wants the job and has its events up to `from`; the worker replays from there |
 | `git.credential` | C | host, token | the only frame that may carry a secret (see Security) |
 | `login.start` / `login.code` / `login.cancel` | C | login, agent / login, code / login | remote sign-in: connections.mjs runs on the worker, same tmux scraping |
 | `login.state` | W | login, state (starting, url, waiting_code, done, failed, cancelled), url, code, account, message | relayed to the owner's Connections sheet for that node |
@@ -128,22 +130,35 @@ verify-failed prompt, same as the local flow) or `job.cancel`. The controller ke
 
 ## Failure modes
 
-- **Worker disconnects mid-task** (sleep, Wi-Fi, crash): its jobs keep `running` and the node shows "away". The
-  controller waits `graceMs(os)`: 5 min for a Mac (`GRACE_MS.mac`), 2 min for a VPS (`GRACE_MS.vps`).
-  - **Same node returns within grace**: `hello.jobs` lists the jobs it still has; the controller re-attaches them
-    (events resume from `job.event.from`, a job the controller no longer wants gets `job.cancel`). A job that
-    finished while offline is re-sent as `job.done` from the worker's outbox (`~/.agent-orch-worker/outbox/`).
-  - **Grace expires**: the task is requeued with `last_error = '[lost] node <name> disappeared'` (no attempt spent the
-    first time) and reassigned. The new run starts from the latest pushed WIP (`origin/agent-orch/task-<id>` at
-    `tasks.wip_sha`), with a handoff prompt: "a previous session on another machine was interrupted; its work up to
-    <sha> is on this branch; read .agent-orch/TASK.md and `git log`, check what is done, then finish the task". The
-    agent session is not resumed (it lives on the other machine). Up to 10 min of work can be lost.
-  - **Node returns after reassignment**: `hello.jobs` names a job now owned by another node → `job.cancel` with
-    reason `reassigned`; the worker discards its worktree without pushing (its branch must not clobber the new run's).
-- **Controller restart** (deploy, "Restart when idle"): workers keep running their agents and buffer frames in the
-  outbox (events capped, oldest dropped first; `job.wip`/`job.done` always kept), reconnect with backoff, and
-  re-attach via `hello.jobs`. The orchestrator boots with remote `running` tasks left as they are for one grace
-  period instead of requeueing them; "Restart when idle" counts remote jobs as busy.
+- **A job's stream** (worker.mjs): events are numbered from 0 per job; `job.check`/`job.wip`/`job.done` sit at their
+  place in that sequence. The worker keeps them (up to 5000 events) after sending, and on every disconnect holds
+  them until the controller answers its `hello` with `job.attach {from}` (it replays events ≥ `from` and the frames
+  placed at or after it) or `job.cancel`. The controller dedupes by index and writes each run-log entry with its index
+  (`i`), so nothing is lost or duplicated, across a controller restart too. A finished job stays on the worker until
+  its `job.done` is acked. The agent keeps running throughout.
+- **Worker disconnects mid-task** (sleep, Wi-Fi, crash): its jobs keep `running`; the task shows 'waiting for <node>'
+  ('(Mac asleep)' when a darwin node went silent without a `bye`: nodes.away). The controller waits the node's grace:
+  `nodes.grace_ms` (owner, PATCH `graceSec`), else `graceMs(os)`: 5 min for a Mac, 2 min for a VPS.
+  - **Same node returns within grace**: `hello.jobs` lists what it still has; ours get `job.attach`, the rest
+    `job.cancel {reason:'reassigned'}`. A job of ours it doesn't list (it rebooted) is lost at once.
+  - **Grace expires**: the run ends `aborted` + `lost`; the task is requeued with `last_error = '[lost] node <name>
+    disappeared'` and no session (no attempt spent the first time; repeated losses do) and isn't offered to that node
+    for 10 min. The next run (another worker, or the controller) starts on `agent-orch/task-<id>` at the latest pushed
+    WIP with a handoff prompt (orchestrator.mjs `handoffPrompt`): the original task and done-when, the branch's diff
+    stat, and the previous agent's last messages and tool calls from its run log. Up to `wipPushMs` of work can be lost.
+    A worker away past its grace pushes nothing (WIP skipped, the final push waits for `job.attach`), so it never
+    clobbers the new run's branch.
+  - **Node returns after reassignment**: `job.cancel` with reason `reassigned`; the worker discards its worktree
+    without pushing.
+- **Controller restart** (deploy, crash): workers keep running their agents and hold their frames. At boot the
+  orchestrator leaves remote `running` work tasks (and their open run) as they are; `attachCluster` re-adopts each one
+  (the next event index is read back from its run log) and waits one grace period for its node's `hello`, then the
+  job continues in the same run. Without a hub they are requeued.
+- **Draining** a node (PATCH `draining`): it takes no new jobs; running ones finish there. **Disabling** or removing it
+  moves its jobs now: `job.cancel {reason:'disabled'}` and a reassignment as after the grace period.
+- **Sleep/wake**: the worker's 5 s clock firing more than `SLEEP_JUMP_MS` (30 s) late means the machine slept; it
+  drops its (dead) socket, reconnects at once and reports `wake`. The controller keeps `nodes.slept_at/slept_ms` and
+  logs it.
 - **Push fails** (network, auth): the worker retries with backoff and reports `error {job}`; the job's `job.done`
   waits until its final push succeeds, so the controller never merges a sha it can't fetch.
 - **Worker out of memory / reboot**: the local memGuard equivalent on the worker aborts its newest job

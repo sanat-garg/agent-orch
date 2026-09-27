@@ -14,3 +14,7 @@ Make remote execution robust (per the Failure modes section of .agent-orch/CLUST
 ## Done when
 
 `npm test` passes with reconnect-within-grace, reassign-after-grace-from-WIP, controller-restart re-adopt and drain tests
+
+## Result — done (check passed) (2026-09-27 13:37)
+
+Waiting for the full `npm test` run to finish.

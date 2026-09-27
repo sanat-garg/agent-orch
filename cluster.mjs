@@ -20,6 +20,10 @@ CREATE TABLE IF NOT EXISTS nodes (
   inventory TEXT, resources TEXT, max_slots INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 1,
   draining INTEGER NOT NULL DEFAULT 0
 )`;
+// Added later: grace_ms (the owner's per-node grace before its jobs are reassigned; NULL = graceMs(os)); away (why a
+// node is offline: 'bye' after a clean shutdown, 'asleep' when a Mac went silent, 'lost' otherwise); slept_at/slept_ms
+// (the last sleep a worker reported on wake).
+const COLUMNS = [['grace_ms', 'INTEGER'], ['away', 'TEXT'], ['slept_at', 'INTEGER'], ['slept_ms', 'INTEGER']];
 
 const statusOf = (row, connected) => (!row.enabled ? 'disabled' : !connected ? 'offline' : row.draining ? 'draining' : 'online');
 const parse = (s) => { try { return s ? JSON.parse(s) : null; } catch { return null; } };
@@ -27,10 +31,13 @@ const cleanName = (s) => (typeof s === 'string' ? s.replace(/[\u0000-\u001f]/g, 
 
 // dbFile: the orchestrator DB. local(): {inventory, resources, maxSlots?} for the controller's own node row.
 // heartbeatMs: liveness interval (tests shorten it); a node is offline after HEARTBEAT_MISSES silent intervals.
-export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTBEAT_MS, log = () => {}, onChange = () => {} }) {
+// wipPushMs: how often workers push WIP while an agent runs; graceMs: every node's grace period (tests shorten both).
+export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTBEAT_MS, wipPushMs = WIP_PUSH_MS, graceMs: graceAll = null, log = () => {}, onChange = () => {} }) {
   const db = new DatabaseSync(dbFile);
   db.exec('PRAGMA busy_timeout=5000');
   db.exec(SCHEMA);
+  const cols = db.prepare('PRAGMA table_info(nodes)').all().map((c) => c.name);
+  for (const [c, type] of COLUMNS) if (!cols.includes(c)) db.exec(`ALTER TABLE nodes ADD COLUMN ${c} ${type}`);
   const conns = new Map(); // node id -> { ws, send, lastFrame, hello, errors }
   const codes = new Map(); // hashSecret(code) -> expiry (epoch ms); single use
   const handlers = new Set();
@@ -60,12 +67,18 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
       .run(Date.now(), info.inventory ? JSON.stringify(info.inventory) : null, info.resources ? JSON.stringify(info.resources) : null, LOCAL_NODE);
   }
 
+  // A node that went away: why (row.away), and the owner-facing words for it ('Mac asleep').
+  const awayLabel = (row) => (row.away === 'asleep' ? 'Mac asleep' : row.away === 'bye' ? 'shut down' : 'offline');
+  const nodeGrace = (row) => graceAll ?? row.grace_ms ?? graceMs(row.os);
+
   // Public view: never the token hash.
   function view(row) {
-    const c = conns.get(row.id), isLocal = row.id === LOCAL_NODE;
+    const c = conns.get(row.id), isLocal = row.id === LOCAL_NODE, connected = isLocal || !!c;
     return {
-      id: row.id, name: row.name, os: row.os, arch: row.arch, local: isLocal, connected: isLocal || !!c,
+      id: row.id, name: row.name, os: row.os, arch: row.arch, local: isLocal, connected,
       status: row.status, createdAt: row.created_at, lastSeen: row.last_seen,
+      away: connected ? null : row.away || 'lost', awayLabel: connected ? null : awayLabel(row),
+      graceMs: nodeGrace(row), sleptAt: row.slept_at ?? null, sleptMs: row.slept_ms ?? null,
       enabled: !!row.enabled, draining: !!row.draining, maxSlots: row.max_slots,
       inventory: parse(row.inventory), resources: parse(row.resources),
       protocol: c?.hello?.protocol ?? null, version: c?.hello?.version ?? null,
@@ -113,6 +126,11 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
       if (typeof body[k] !== 'boolean') return { status: 400, error: `${k} must be true or false` };
       if (id === LOCAL_NODE && k === 'enabled' && !body[k]) return { status: 400, error: 'the controller node cannot be disabled' };
       set[k] = body[k] ? 1 : 0;
+    }
+    const grace = body.graceSec ?? body.grace_sec;
+    if (grace !== undefined) {
+      if (grace !== null && !(Number.isInteger(grace) && grace >= 10 && grace <= 86400)) return { status: 400, error: 'graceSec must be null or an integer 10-86400' };
+      set.grace_ms = grace === null ? null : grace * 1000;
     }
     const slots = body.maxSlots ?? body.max_slots;
     if (slots !== undefined) {
@@ -185,7 +203,8 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
           const row = get(id);
           touch();
           setStatus(row, true);
-          c.send(MSG.WELCOME, { node: id, protocol: PROTOCOL_VERSION, heartbeatMs, wipPushMs: WIP_PUSH_MS, graceMs: graceMs(row.os) });
+          touch({ away: null });
+          c.send(MSG.WELCOME, { node: id, protocol: PROTOCOL_VERSION, heartbeatMs, wipPushMs, graceMs: nodeGrace(row) });
           changed();
           break;
         }
@@ -200,7 +219,12 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
           touch({ resources: JSON.stringify({ ...res, at: Date.now() }) });
           break;
         }
-        case MSG.BYE: touch(); ws.close(1000, 'bye'); break;
+        case MSG.BYE: c.bye = true; touch(); ws.close(1000, 'bye'); break;
+        case MSG.WAKE:
+          touch({ slept_at: Math.round(msg.sleptAt), slept_ms: msg.sleptMs });
+          log(`node ${id} woke after ${Math.round(msg.sleptMs / 60_000)} min asleep`);
+          changed();
+          break;
         default: touch();
       }
       for (const h of handlers) { try { h(id, msg); } catch (e) { log(`cluster handler failed: ${e.message}`); } }
@@ -208,12 +232,19 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     ws.on('close', () => {
       if (!own()) return;
       conns.delete(id);
-      const row = get(id);
-      if (row) setStatus(row, false);
+      gone(id, c.bye);
       log(`node ${id} disconnected`);
       changed();
     });
     ws.on('error', () => {});
+  }
+
+  // A node dropped: offline, and why. A Mac that goes silent without a bye is (almost always) asleep.
+  function gone(id, bye) {
+    const row = get(id);
+    if (!row) return;
+    db.prepare('UPDATE nodes SET away=? WHERE id=?').run(bye ? 'bye' : row.os === 'darwin' ? 'asleep' : 'lost', id);
+    setStatus(row, false);
   }
 
   // Liveness: ping every interval (keeps Caddy's proxy connection open); no frame for HEARTBEAT_MISSES intervals → offline.
@@ -222,8 +253,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     for (const [id, c] of conns) {
       if (t - c.lastFrame > heartbeatMs * HEARTBEAT_MISSES) {
         conns.delete(id);
-        const row = get(id);
-        if (row) setStatus(row, false);
+        gone(id, false);
         log(`node ${id} missed ${HEARTBEAT_MISSES} heartbeats; marked offline`);
         c.ws.terminate();
         changed();

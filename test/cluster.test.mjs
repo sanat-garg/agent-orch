@@ -28,9 +28,9 @@ const api = (p, { method = 'GET', body, auth = true } = {}) => fetch(base + p, {
 const nodes = async () => (await (await api('/api/cluster/nodes')).json()).nodes;
 const nodeOf = async (id) => (await nodes()).find((n) => n.id === id);
 
-async function pair(name = 'worker-1') {
+async function pair(name = 'worker-1', kind = 'linux') {
   const { code } = await (await api(PAIR_PATH, { method: 'POST' })).json();
-  const r = await api(CLAIM_PATH, { method: 'POST', auth: false, body: { code, name, os: 'linux', arch: 'arm64' } });
+  const r = await api(CLAIM_PATH, { method: 'POST', auth: false, body: { code, name, os: kind, arch: 'arm64' } });
   assert.equal(r.status, 200);
   return r.json();
 }
@@ -155,6 +155,26 @@ test('PATCH edits name, draining and max slots', async () => {
   assert.equal((await api(`/api/cluster/nodes/${w.node}`, { method: 'PATCH', body: { maxSlots: -1 } })).status, 400);
   assert.equal((await (await api(`/api/cluster/nodes/${w.node}`, { method: 'PATCH', body: { enabled: false } })).json()).node.status, 'disabled');
   c.ws.close();
+});
+
+test('a Mac that goes silent shows as asleep; its wake report and a per-node grace period are kept', async () => {
+  const w = await pair('macbook', 'darwin');
+  let c = await helloed(w);
+  assert.equal(c.frames.find((f) => f.t === 'welcome').graceMs, 5 * 60_000, 'a Mac waits 5 min by default');
+  assert.equal((await api(`/api/cluster/nodes/${w.node}`, { method: 'PATCH', body: { graceSec: 5 } })).status, 400);
+  assert.equal((await (await api(`/api/cluster/nodes/${w.node}`, { method: 'PATCH', body: { graceSec: 600 } })).json()).node.graceMs, 600_000);
+  await closed(c.ws); // silent: no heartbeats
+  let n = await nodeOf(w.node);
+  assert.deepEqual([n.status, n.away, n.awayLabel], ['offline', 'asleep', 'Mac asleep']);
+  c = await helloed(w);
+  assert.equal(c.frames.find((f) => f.t === 'welcome').graceMs, 600_000);
+  c.send('wake', { sleptAt: Date.now() - 90_000, sleptMs: 90_000 });
+  await waitFor(async () => (await nodeOf(w.node)).sleptMs === 90_000, { timeout: 5000 });
+  n = await nodeOf(w.node);
+  assert.deepEqual([n.status, n.away, n.awayLabel], ['online', null, null]);
+  c.send('bye', { reason: 'shutdown' });
+  await closed(c.ws);
+  assert.deepEqual([(await nodeOf(w.node)).away, (await nodeOf(w.node)).awayLabel], ['bye', 'shut down']);
 });
 
 test('revoking a node closes its socket and its token stops working', async () => {

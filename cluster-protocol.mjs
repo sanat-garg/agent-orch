@@ -15,6 +15,7 @@ export const HEARTBEAT_MS = 10_000;
 export const HEARTBEAT_MISSES = 3; // no frame for 3 heartbeats = disconnected (the grace period starts then)
 export const GRACE_MS = { mac: 5 * 60_000, vps: 2 * 60_000 };
 export const WIP_PUSH_MS = 10 * 60_000;
+export const SLEEP_JUMP_MS = 30_000; // a timer firing this much later than due means the machine was asleep
 export const MAX_FRAME = 1024 * 1024;
 export const MAX_BATCH = 200; // normalised events per job.event frame
 export const PAIRING_TTL_MS = 10 * 60_000;
@@ -25,7 +26,7 @@ export const MSG = {
   ACK: 'ack', ERROR: 'error', BYE: 'bye',
   JOB_OFFER: 'job.offer', JOB_ACCEPT: 'job.accept', JOB_REJECT: 'job.reject', JOB_START: 'job.start',
   JOB_EVENT: 'job.event', JOB_CHECK: 'job.check', JOB_WIP: 'job.wip', JOB_DONE: 'job.done',
-  JOB_CANCEL: 'job.cancel', JOB_PAUSE: 'job.pause', JOB_RESUME: 'job.resume',
+  JOB_CANCEL: 'job.cancel', JOB_PAUSE: 'job.pause', JOB_RESUME: 'job.resume', JOB_ATTACH: 'job.attach', WAKE: 'wake',
   GIT_CREDENTIAL: 'git.credential',
   LOGIN_START: 'login.start', LOGIN_STATE: 'login.state', LOGIN_CODE: 'login.code', LOGIN_CANCEL: 'login.cancel',
   MODELS_REFRESH: 'models.refresh', MODELS: 'models', LIMITS_REFRESH: 'limits.refresh', LIMITS: 'limits',
@@ -36,7 +37,7 @@ const C = 'c', W = 'w', B = 'both';
 export const DIRECTION = {
   hello: W, welcome: C, inventory: W, resources: W, heartbeat: B, ack: B, error: B, bye: B,
   'job.offer': C, 'job.accept': W, 'job.reject': W, 'job.start': C, 'job.event': W, 'job.check': W, 'job.wip': W,
-  'job.done': W, 'job.cancel': C, 'job.pause': C, 'job.resume': C, 'git.credential': C,
+  'job.done': W, 'job.cancel': C, 'job.pause': C, 'job.resume': C, 'job.attach': C, wake: W, 'git.credential': C,
   'login.start': C, 'login.state': W, 'login.code': C, 'login.cancel': C,
   'models.refresh': C, models: W, 'limits.refresh': C, limits: W,
 };
@@ -56,7 +57,7 @@ const S = {
   inventory: { node: 'str', name: 'str', os: 'os', arch: 'str', cores: 'int', mem: 'int', agents: 'arr', limits: 'obj?', versions: 'obj' },
   resources: { memAvailable: 'int', load: 'arr', running: 'arr', swapUsedPct: 'num?' },
   heartbeat: {},
-  ack: { re: 'int' },
+  ack: { re: 'int', job: 'int?' }, // job: the controller acks a job.done (the worker then forgets the job)
   error: { message: 'str', re: 'int?', job: 'int?' },
   bye: { reason: 'str?' },
   'job.offer': { job: 'int', agent: 'agent', model: 'str?', footprint: 'int?' },
@@ -74,6 +75,11 @@ const S = {
   'job.cancel': { job: 'int', reason: 'str?' },
   'job.pause': { job: 'int' },
   'job.resume': { job: 'int', prompt: 'str?' },
+  // After a (re)connect: the controller still wants this job and holds its events up to `from` (exclusive); the worker
+  // replays from there (events and the job's later check/wip/done frames). Until then it holds the job's frames.
+  'job.attach': { job: 'int', from: 'int' },
+  // A time jump on the worker (a laptop's sleep): it was suspended from sleptAt (epoch ms) for sleptMs.
+  wake: { sleptAt: 'num', sleptMs: 'int' },
   'git.credential': { host: 'str', token: 'str' },
   'login.start': { login: 'str', agent: 'agent' },
   'login.state': { login: 'str', state: 'login', url: 'str?', code: 'str?', account: 'str?', message: 'str?' },

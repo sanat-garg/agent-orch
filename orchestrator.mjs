@@ -61,7 +61,6 @@ const CFG = {
   footprint: { claude: 1.2 * 1024 ** 3, codex: 0.8 * 1024 ** 3 },
   controllerWork: false,
   offerMs: 10_000,
-  remoteGraceMs: null,          // a vanished worker's jobs are requeued after this (null = graceMs(os) from the protocol)
   // Tools a worker may use without full autonomy. Anything else is refused, never prompted.
   // File changes are limited to the project folder (./** is relative to the session's cwd).
   safeTools: [
@@ -285,6 +284,25 @@ function taskBody(task, header) {
   return parts.join('\n') + '\n';
 }
 const workerTaskPrompt = (project, task, environment) => taskBody(task, [`Project: ${project.name} (${project.path})`, environment, '']);
+// A task whose machine vanished continues elsewhere from its pushed branch (CLUSTER.md, Failure modes): the new agent
+// gets the original task plus what the previous one left: the branch's diff stat and its last messages and tool calls.
+function handoffPrompt(project, task, environment, { node, sha, stat, texts, tools }) {
+  const parts = [`A previous session on the machine ${node} was interrupted (the machine disappeared), so the task moved here. ` +
+    `Its work up to ${sha ? sha.slice(0, 12) : 'its last push'} is on this branch (${taskBranch(task.id)}), which you are on now. ` +
+    'Its session can\'t be resumed (it lives on the other machine): read `git log` and the changes, check what is already done, then finish the task.',
+  '', '## Changed so far (git diff --stat against the main branch)', stat || '(nothing pushed yet)'];
+  if (texts.length) parts.push('', "## The previous agent's last messages", ...texts.map((t) => `> ${t.replace(/\n/g, '\n> ')}`));
+  if (tools.length) parts.push('', '## Its last tool calls', ...tools.map((t) => `- ${t}`));
+  return taskBody(task, [`Project: ${project.name} (${project.path})`, environment, '', ...parts, '']);
+}
+// A requeued task that lost its machine (and so its session) starts with a handoff prompt.
+const lostHandoff = (task) => task.kind === 'work' && !task.session_id && /^\[lost\]/.test(task.last_error || '');
+// "Edit · src/app.js": a tool call in one line (lane activity, handoff prompts).
+const toolLine = (e) => {
+  const input = e.input || {};
+  const detail = input.command || input.file_path || input.pattern || input.url || input.query || input.path || input.description || '';
+  return `${e.name || 'Tool'} · ${String(detail).replace(/\s+/g, ' ').slice(0, 240)}`;
+};
 const worktreeNote = (wt, project) => `You are in an isolated git worktree of ${project.path} (branch ${wt.branch}), so tasks running at ` +
   `the same time can't clobber your edits. Work only in ${wt.cwd}, never in ${project.path}: the orchestrator merges this branch back when you finish.`;
 const nextTaskPrompt = (task) => taskBody(task, [
@@ -1560,9 +1578,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const writeEntry = (e) => {
       log?.write(JSON.stringify(e) + '\n');
       if (e.k === 'tool' && taskId) {
-        const input = e.input || {};
-        const detail = input.command || input.file_path || input.pattern || input.url || input.query || input.path || input.description || '';
-        const activity = `${e.name || 'Tool'} · ${String(detail).replace(/\s+/g, ' ').slice(0, 240)}`;
+        const activity = toolLine(e);
         const lane = running.get(taskId);
         if (lane) lane.activity = activity;
         broadcast({ t: 'olane', taskId, activity });
@@ -2117,6 +2133,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (ticking || !leader.ok || draining) return;
     ticking = true;
     try {
+      // No hub was attached (the cluster is off): tasks left running on workers can't be re-adopted.
+      if (!cluster && adoptable.length) for (const id of adoptable.splice(0)) requeueIfRunning(id);
       armCheckpoints();
       if (kvGet('paused_all') === '1') return;
       if (!onSubscription()) {
@@ -2156,12 +2174,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
 
   // node: where it runs (LOCAL_NODE or a worker id); prevNode: where it ran before (a worker's pushed branch is adopted).
-  function startTask(task, node = LOCAL_NODE, prevNode = null) {
+  // adopt: {runId, logPath, from, agent} continues a remote job that outlived a controller restart.
+  function startTask(task, node = LOCAL_NODE, prevNode = null, adopt = null) {
     const abort = new AbortController();
     const project = getProject(task.project_id);
     // A remote task always has its own checkout, so it shares its project like a worktree task.
-    running.set(task.id, { abort, kind: task.kind, projectId: task.project_id, startedAt: now(), node, prevNode,
-      wt: task.kind === 'work' && (node !== LOCAL_NODE || worktreeCapable(project)), agent: routeNow(task, project).agent });
+    running.set(task.id, { abort, kind: task.kind, projectId: task.project_id, startedAt: now(), node, prevNode, adopt,
+      wt: task.kind === 'work' && (node !== LOCAL_NODE || worktreeCapable(project)), agent: adopt?.agent || routeNow(task, project).agent });
     pushState();
     execute(task, abort.signal)
       .catch((e) => console.error('[orchestrator] task crashed', e))
@@ -2235,7 +2254,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   async function execute(task, signal) {
     const project = getProject(task.project_id);
-    logEvent(`started #${task.id}: ${task.title}`, { projectId: project.id, taskId: task.id });
+    if (!running.get(task.id)?.adopt) logEvent(`started #${task.id}: ${task.title}`, { projectId: project.id, taskId: task.id });
     try {
       let res;
       if (task.kind === 'plan') {
@@ -2320,8 +2339,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       autonomous = false;
     } else {
       // A warm session from another task was made in another checkout, so worktree tasks always start fresh.
-      if (!resume && route.agent === 'claude' && !wt) { resume = pickSession(task); reused = !!resume; }
-      body = reused ? nextTaskPrompt(task) : workerTaskPrompt(wt ? { ...project, path: cwd } : project, task, wt ? `${ENVIRONMENT}\n${worktreeNote(wt, project)}` : ENVIRONMENT);
+      if (!resume && route.agent === 'claude' && !wt && !lostHandoff(task)) { resume = pickSession(task); reused = !!resume; }
+      const where = wt ? { ...project, path: cwd } : project, env = wt ? `${ENVIRONMENT}\n${worktreeNote(wt, project)}` : ENVIRONMENT;
+      body = reused ? nextTaskPrompt(task) : !resume && lostHandoff(task) ? handoffPrompt(where, task, env, await handoffInfo(task, project)) : workerTaskPrompt(where, task, env);
       system = WORKER_SYSTEM;
       tools = CFG.safeTools;
       autonomous = !!project.autonomous;
@@ -2361,6 +2381,12 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // fetches it and merges it here exactly like a local worktree.
   async function runRemote(task, project, signal) {
     const nodeId = nodeOf(task.id), n = nodesNow().find((x) => x.id === nodeId), name = n?.name || nodeId;
+    const adopt = running.get(task.id)?.adopt;
+    if (adopt) { // re-adopted after a controller restart: the job still runs there; its run and log continue
+      const res = await remoteJob(task.id, nodeId, name, adopt, { agent: adopt.agent }, signal, { from: adopt.from });
+      finishRun(adopt.runId, res);
+      return res;
+    }
     const repo = remoteRepo(project);
     if (!repo) throw new Error(`${project.name} has no GitHub remote for a worker to clone`);
     const route = routeFor(task, project);
@@ -2369,7 +2395,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const where = `a checkout of ${repo} on the worker machine ${name}`;
     const env = `Environment (cluster worker ${name}, ${n?.os || 'unknown'}/${n?.arch || 'unknown'}): a machine that runs agent-orch tasks; ` +
       `install whatever the task needs.\nYou are in ${where}, on branch ${taskBranch(task.id)}. The orchestrator pushes and merges it when you finish.`;
-    const prompt = resume ? resumePrompt(task) : workerTaskPrompt({ ...project, path: where }, task, env);
+    const prompt = resume ? resumePrompt(task) : lostHandoff(task) ? handoffPrompt({ ...project, path: where }, task, env, await handoffInfo(task, project))
+      : workerTaskPrompt({ ...project, path: where }, task, env);
     const { runId, logPath } = startRun(task.id, task.kind, route.agent, nodeId);
     updateTask(task.id, { ran_agent: route.agent, ran_model: route.model || null, route_note: routeNote(route), node_id: nodeId });
     const r = running.get(task.id);
@@ -2391,41 +2418,54 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
 
   // One job on a worker, as a runAgent-shaped result. Its events go through the same run log (task drawer, lanes);
-  // usage and limit readings feed usage.mjs like a local run (same accounts, same limits).
-  function remoteJob(id, nodeId, name, { runId, logPath }, spec, signal) {
+  // usage and limit readings feed usage.mjs like a local run (same accounts, same limits). Each log entry keeps its
+  // event index (`i`), so a re-adopted job continues after the last one written. attach: {from} re-adopts a job that
+  // already runs there (after a controller restart): no offer or start, the worker's hello gets job.attach instead.
+  // While the node is away the task shows 'waiting for <node>'; past its grace period the job is lost and the task
+  // moves on (handle → requeue with a handoff prompt, from the pushed WIP branch).
+  function remoteJob(id, nodeId, name, { runId, logPath }, spec, signal, attach = null) {
     return new Promise((resolve) => {
       const write = runLog(id, runId, logPath), media = mediaCollector(dataDir, null);
-      write({ k: 'start', at: now(), resumed: !!spec.resume, agent: spec.agent, model: spec.model || null, node: nodeId, nodeName: name });
-      let settled = false, started = false, offerTimer = null, watch = null, lostSince = 0;
-      const job = { node: nodeId, next: 0, check: null };
+      if (!attach) write({ k: 'start', at: now(), resumed: !!spec.resume, agent: spec.agent, model: spec.model || null, node: nodeId, nodeName: name });
+      let settled = false, offerTimer = null, watch = null, lostSince = attach ? Date.now() : 0;
+      const job = { node: nodeId, next: attach?.from || 0, check: null, started: !!attach, attached: false };
+      const waiting = (label) => {
+        const r = running.get(id);
+        if (!r || r.waiting === label) return;
+        r.waiting = label;
+        if (label) logEvent(`#${id} waiting for ${label}`, { level: 'warn', taskId: id });
+        pushTask(id); pushState();
+      };
       const finish = (res) => {
         if (settled) return;
         settled = true;
         clearTimeout(offerTimer); clearInterval(watch);
         signal?.removeEventListener('abort', onAbort);
         if (jobs.get(id) === job) jobs.delete(id);
+        waiting(null);
         write({ k: 'end', at: now(), outcome: res.outcome, turns: 0 });
         write.end();
-        resolve({ usage: {}, numTurns: 0, text: '', ...res });
+        resolve({ usage: {}, numTurns: 0, text: '', sessionId: null, ...res });
       };
       job.accept = () => {
-        if (started || settled) return;
-        started = true;
+        if (job.started || settled) return;
+        job.started = job.attached = true;
         clearTimeout(offerTimer);
         if (!cluster.send(nodeId, { t: MSG.JOB_START, job: id, ...spec })) finish({ outcome: 'aborted', text: `${name} went away before the job started` });
       };
       job.reject = (reason) => {
-        if (started) return;
+        if (job.started) return;
         rejected.set(`${nodeId}/${id}`, Date.now() + 60_000);
         finish({ outcome: 'aborted', text: `${name} declined the job (${reason})` });
       };
       // Batches may be re-sent after a reconnect: `from` + index dedupes them.
       job.event = ({ from, events }) => {
-        events.forEach((e, i) => {
-          if (from + i < job.next) return;
-          if (e.k === 'image') { const img = e.data && media.image(e); if (img) write({ k: 'image', ...img, tool: e.tool }); return; }
+        events.forEach((e, n) => {
+          const i = from + n;
+          if (i < job.next) return;
+          if (e.k === 'image') { const img = e.data && media.image(e); if (img) write({ k: 'image', ...img, tool: e.tool, i }); return; }
           const l = logEntryOf(e);
-          if (l) write(l);
+          if (l) write({ ...l, i });
         });
         job.next = Math.max(job.next, from + events.length);
       };
@@ -2437,20 +2477,34 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
           resetsAt: lim.resetsAt ?? undefined, limitType: lim.limitType ?? undefined, windows: lim.windows ?? undefined,
           remote: { node: nodeId, sha: msg.sha || null, check: job.check } });
       };
+      // The job is gone from that node: don't offer it there again for a while (its old copy is cancelled when it returns).
+      job.lost = (why) => {
+        rejected.set(`${nodeId}/${id}`, Date.now() + 10 * 60_000);
+        logEvent(`#${id}: ${why}; it moves to another machine`, { level: 'warn', taskId: id });
+        finish({ outcome: 'aborted', lost: true, text: `[lost] ${why}` });
+      };
       const onAbort = () => {
-        if (started) cluster.send(nodeId, { t: MSG.JOB_CANCEL, job: id, reason: 'stopped by the controller' });
+        if (job.started) cluster.send(nodeId, { t: MSG.JOB_CANCEL, job: id, reason: 'stopped by the controller' });
         finish({ outcome: 'aborted', text: 'stopped by the controller' });
       };
       jobs.set(id, job);
       if (signal) { if (signal.aborted) return onAbort(); signal.addEventListener('abort', onAbort, { once: true }); }
-      // A worker that stays away past its grace period loses the job; the task requeues and continues from its pushed WIP.
       watch = setInterval(() => {
-        if (cluster.isConnected(nodeId)) { lostSince = 0; return; }
+        const n = cluster.node(nodeId);
+        // Disabled or removed by the owner: its jobs move now (the worker drops its copy without pushing).
+        if (!n?.enabled) {
+          if (job.started) cluster.send(nodeId, { t: MSG.JOB_CANCEL, job: id, reason: 'disabled' });
+          return job.lost(`node ${name} was ${n ? 'disabled' : 'removed'}`);
+        }
+        if (!job.started) return; // an unanswered offer times out on its own
+        const up = cluster.isConnected(nodeId);
+        if (!up) job.attached = false;
+        if (up && job.attached) { if (lostSince) { lostSince = 0; logEvent(`#${id}: ${name} is back; the job continues`, { taskId: id }); } return waiting(null); }
         lostSince ||= Date.now();
-        if (Date.now() - lostSince < (CFG.remoteGraceMs ?? graceMs(cluster.node(nodeId)?.os))) return;
-        logEvent(`#${id}: ${name} disappeared; requeued`, { level: 'warn', taskId: id });
-        finish({ outcome: 'aborted', text: `[lost] node ${name} disappeared` });
-      }, 2000);
+        waiting(n.awayLabel === 'Mac asleep' ? `${name} (Mac asleep)` : name);
+        if (Date.now() - lostSince >= (n.graceMs ?? graceMs(n.os))) job.lost(`node ${name} disappeared`);
+      }, 1000);
+      if (attach) return;
       if (!cluster.send(nodeId, { t: MSG.JOB_OFFER, job: id, agent: spec.agent, model: spec.model, footprint: Math.round(footprint(spec.agent)) })) {
         return finish({ outcome: 'aborted', text: `${name} is not connected` });
       }
@@ -2460,14 +2514,23 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   function onClusterMessage(nodeId, msg) {
     if (msg.t === MSG.HELLO) {
-      // Jobs a (re)connecting worker still holds that don't run there any more (a controller restart requeued them, or
-      // they moved to another node): cancel them. 'reassigned' drops the worktree without pushing over the new run.
+      // A (re)connecting worker lists the jobs it still holds: ours continue (job.attach: it replays the stream from
+      // what we have), the rest are cancelled; 'reassigned' drops the worktree without pushing over the new run.
+      // A job of ours it no longer has (it rebooted) moves on at once instead of waiting out the grace period.
+      const listed = new Set(msg.jobs.map((j) => j.job));
       for (const j of msg.jobs) {
         const mine = jobs.get(j.job);
-        if (mine?.node !== nodeId) cluster.send(nodeId, { t: MSG.JOB_CANCEL, job: j.job, reason: mine ? 'reassigned' : 'not running on the controller' });
+        if (mine?.node === nodeId && mine.started) {
+          mine.attached = true;
+          cluster.send(nodeId, { t: MSG.JOB_ATTACH, job: j.job, from: mine.next });
+        } else cluster.send(nodeId, { t: MSG.JOB_CANCEL, job: j.job, reason: 'reassigned' });
       }
+      for (const [id, job] of jobs) if (job.node === nodeId && job.started && !listed.has(id)) job.lost(`${nodeName(nodeId)} came back without the job (restarted?)`);
       return;
     }
+    // The worker keeps a finished job (to replay it) until its job.done is acked.
+    if (msg.t === MSG.JOB_DONE) cluster.send(nodeId, { t: MSG.ACK, re: msg.seq, job: msg.job });
+    if (msg.t === MSG.WAKE) return logEvent(`${nodeName(nodeId)} woke up after ${Math.max(1, Math.round(msg.sleptMs / 60_000))} min asleep`);
     const job = msg.job != null ? jobs.get(msg.job) : null;
     if (msg.t === MSG.ERROR && msg.job != null) return logEvent(`#${msg.job} on ${nodeName(nodeId)}: ${msg.message}`, { level: 'warn', taskId: msg.job });
     if (!job || job.node !== nodeId) return;
@@ -2484,6 +2547,40 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     cluster = c;
     nodesAt = 0;
     c.onMessage(onClusterMessage);
+    for (const id of adoptable.splice(0)) adopt(id);
+  }
+  // Controller restart: a task that was running on a worker stays 'running' and is re-adopted here. It waits (one grace
+  // period) for its node to reconnect; the worker's hello then re-attaches the job and its run log continues.
+  function adopt(id) {
+    const task = getTask(id), last = q1('SELECT * FROM runs WHERE task_id=:t ORDER BY id DESC LIMIT 1', { t: id });
+    if (task?.status !== 'running') return;
+    if (!last?.log_path || last.finished_at) { requeueIfRunning(id); return logEvent(`requeued #${id}: no run to re-adopt`, { taskId: id }); }
+    let from = 0;
+    try { for (const e of parseJsonl(fs.readFileSync(last.log_path, 'utf8'))) if (Number.isInteger(e.i)) from = Math.max(from, e.i + 1); } catch {}
+    logEvent(`#${id} re-adopted after a restart: it runs on ${nodeName(task.node_id)}`, { projectId: task.project_id, taskId: id });
+    startTask(task, task.node_id, null, { runId: last.id, logPath: last.log_path, from, agent: last.agent || task.ran_agent || 'claude' });
+  }
+  let adoptable = []; // remote tasks left running at boot, re-adopted once the hub is attached
+
+  // What a handoff run is told about the lost one: its last messages and tool calls (its run log) and the pushed
+  // branch's diff stat against the main branch. The branch is fetched here (a local run's worktree starts from it).
+  async function handoffInfo(task, project) {
+    const last = q1('SELECT * FROM runs WHERE task_id=:t ORDER BY id DESC LIMIT 1', { t: task.id });
+    let entries = [];
+    try { entries = parseJsonl(fs.readFileSync(last.log_path, 'utf8')); } catch {}
+    const texts = entries.filter((e) => e.k === 'text' && String(e.text || '').trim()).slice(-3)
+      .map((e) => { const t = String(e.text).trim(); return t.length > 1500 ? `…${t.slice(-1500)}` : t; });
+    const tools = entries.filter((e) => e.k === 'tool').slice(-12).map(toolLine);
+    let sha = task.wip_sha || null, stat = '';
+    await serialGit(project.path, async () => {
+      const info = await repoInfo(project.path);
+      if (!info) return;
+      const b = taskBranch(task.id);
+      if (!(await listWorktrees(info.top)).some((w) => w.id === task.id)) await git(info.top, ['fetch', '-q', 'origin', `+refs/heads/${b}:refs/heads/${b}`]);
+      sha = (await git(info.top, ['rev-parse', `refs/heads/${b}`])).trim();
+      stat = (await git(info.top, ['diff', '--stat', (await git(info.top, ['merge-base', info.branch, b])).trim(), b])).trim();
+    }).catch(() => {});
+    return { node: nodeName(last?.node_id || task.node_id), sha, stat, texts, tools };
   }
 
   // The base a worker starts from: the main branch's head, pushed to origin first when origin lacks it. A task whose
@@ -2561,6 +2658,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       pushState();
       return logEvent('Claude Code is not authenticated; rechecking every 10 min', { level: 'error', projectId: pid, taskId: tid });
     }
+    if (res.outcome === 'aborted' && res.lost) {
+      // Its machine vanished: the next run (another node, or here) starts fresh from the pushed WIP branch with a
+      // handoff prompt. The first loss costs no attempt; repeated ones do.
+      const again = /^\[lost\]/.test(task.last_error || ''), attempts = task.attempts + (again ? 1 : 0);
+      if (attempts >= CFG.maxAttempts) return fail(task, project, 'lost', res.text);
+      return requeueIfRunning(tid, { session_id: null, attempts, not_before: 0, last_error: res.text.slice(0, 2000) });
+    }
     if (res.outcome === 'aborted') {
       requeueIfRunning(tid, { session_id: res.sessionId || task.session_id, not_before: now() + 5 });
       return logEvent(`#${tid} interrupted; will continue later`, { projectId: pid, taskId: tid });
@@ -2626,7 +2730,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         return needsIntegration(task, project, res, wt, merged.conflict);
       }
       sha = merged.sha;
-      if (remote) await git(project.path, ['push', '-q', 'origin', '--delete', taskBranch(tid)]).catch(() => {}); // merged: the pushed branch is done
+      // Merged: a branch a worker pushed (this run's, or a lost run's WIP this one continued) is done.
+      if (remote || task.wip_sha) await git(project.path, ['push', '-q', 'origin', '--delete', taskBranch(tid)]).catch(() => {});
     } else sha = await gitCommit(project.path, `agent-orch #${tid}: ${task.title}`);
     if (!updateTask(tid, { status: 'done', finished_at: now(), result: res.text, session_id: res.sessionId, verify_output: null, commit_sha: sha || null }, true)) return;
     logEvent(`✔ #${tid} done${checked}: ${task.title}${sha ? ` (commit ${sha})` : ''}`, { projectId: project.id, taskId: tid });
@@ -2966,6 +3071,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       worktree: t.worktree ?? null, integrates: t.integrates ?? null,
       // Where it runs (or last ran): a worker's id and name; null/controller = this server.
       node: t.node_id ?? null, node_name: t.node_id && t.node_id !== LOCAL_NODE ? nodeName(t.node_id) : null,
+      // A remote run whose node went away (within its grace period): 'Mac mini (Mac asleep)'.
+      waiting_for: running.get(t.id)?.waiting || null,
     };
   }
   function projectView(p) {
@@ -2996,7 +3103,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const lanes = [...running.entries()].map(([id, r]) => {
       const t = getTask(id);
       return { agent: r.agent, task: id, project_id: r.projectId, title: t.title, model: t.ran_model || t.model || delegator.defaultModel(r.agent),
-        activity: r.activity || null, started_at: r.startedAt, elapsed: Math.max(0, now() - r.startedAt), node: r.node, node_name: r.node === LOCAL_NODE ? null : nodeName(r.node) };
+        activity: r.activity || null, started_at: r.startedAt, elapsed: Math.max(0, now() - r.startedAt), node: r.node, node_name: r.node === LOCAL_NODE ? null : nodeName(r.node), waiting_for: r.waiting || null };
     });
     return { activeUsage, blocks, blockedUntil: blockedUntil(), blockedReason: kvGet('blocked_reason'),
       pacing: d?.reason || kvGet('budget_reason'), slots: slotCount(d, mem), parallel, lanes,
@@ -3062,8 +3169,12 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   if (disabled) {
     console.log('[orchestrator] disabled (CW_NO_ORCHESTRATOR=1): not requeueing or scheduling tasks');
   } else if (leader.ok) {
-    const orphans = run("UPDATE tasks SET status='queued' WHERE status='running'").changes;
-    run("UPDATE runs SET outcome='error', finished_at=:t WHERE finished_at IS NULL", { t: now() });
+    // Work running on a worker keeps running there: it is re-adopted when the hub is attached (attachCluster).
+    const remoteSql = "status='running' AND kind='work' AND node_id IS NOT NULL AND node_id!=:l";
+    adoptable = qa(`SELECT id FROM tasks WHERE ${remoteSql}`, { l: LOCAL_NODE }).map((r) => r.id);
+    const orphans = run(`UPDATE tasks SET status='queued' WHERE status='running' AND NOT (${remoteSql})`, { l: LOCAL_NODE }).changes;
+    run(`UPDATE runs SET outcome='error', finished_at=:t WHERE finished_at IS NULL
+      AND id NOT IN (SELECT MAX(id) FROM runs WHERE task_id IN (SELECT value FROM json_each(:k)) GROUP BY task_id)`, { t: now(), k: JSON.stringify(adoptable) });
     if (orphans) logEvent(`requeued ${orphans} interrupted task(s) after a restart`);
     cleanupWorktrees(); // per-project merge lock: a claim in the same project waits for it
     reconcileCodexLimit();

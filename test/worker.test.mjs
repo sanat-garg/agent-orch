@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { createCluster } from '../cluster.mjs';
 import { CLAIM_PATH } from '../cluster-protocol.mjs';
 import { parseVmStat, parseSwapUsage } from '../resources.mjs';
-import { cacheName } from '../worker.mjs';
+import { cacheName, sleptFor } from '../worker.mjs';
 import { isolatedPath } from './helpers/isolated-path.mjs';
 import { waitFor } from './helpers/wait.mjs';
 
@@ -79,6 +79,12 @@ test('darwin memory readings parse vm_stat and vm.swapusage', () => {
   assert.equal(parseVmStat('garbage'), null);
   assert.deepEqual(parseSwapUsage('total = 2048.00M  used = 1024.50M  free = 1023.50M  (encrypted)'), { swapTotal: 2048 * 1024 ** 2, swapFree: Math.round(1023.5 * 1024 ** 2) });
   assert.equal(cacheName('git@github.com:Owner/My.Repo.git'), 'Owner__My.Repo');
+});
+
+test('sleep detection: a clock tick far later than due is a sleep of that length', () => {
+  assert.equal(sleptFor(5_100, 5_000), 0);
+  assert.equal(sleptFor(20_000, 5_000), 0, 'a busy event loop is not a sleep');
+  assert.equal(sleptFor(605_000, 5_000), 600_000);
 });
 
 test('pair stores the node token in config.json (0600)', async () => {

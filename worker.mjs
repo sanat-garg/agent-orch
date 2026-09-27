@@ -16,8 +16,8 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import {
-  PROTOCOL_VERSION, WS_PATH, CLAIM_PATH, HEARTBEAT_MS, HEARTBEAT_MISSES, WIP_PUSH_MS, MAX_FRAME, MAX_BATCH, MSG, OUTCOMES,
-  EVENT_KINDS, OS_KINDS, backoffMs, createSender, decode,
+  PROTOCOL_VERSION, WS_PATH, CLAIM_PATH, HEARTBEAT_MS, HEARTBEAT_MISSES, WIP_PUSH_MS, SLEEP_JUMP_MS, MAX_FRAME, MAX_BATCH, MSG, OUTCOMES,
+  EVENT_KINDS, OS_KINDS, GRACE_MS, backoffMs, createSender, decode,
 } from './cluster-protocol.mjs';
 import { AGENTS, agentStatus, fetchLimits, modelCatalog, readVersion, runAgentCli } from './agents.mjs';
 import { createModelStore } from './models.mjs';
@@ -34,7 +34,13 @@ const VERSION = (() => { try { return JSON.parse(fs.readFileSync(path.join(ROOT,
 export const workerHome = () => process.env.AGENT_ORCH_WORKER_HOME || path.join(os.homedir(), '.agent-orch-worker');
 const RESUME_PROMPT = 'You were interrupted before finishing. Continue the same task from where you left off.';
 const EVENT_FLUSH_MS = 1000;
-const MAX_PENDING_EVENTS = 5000; // unsent events kept per job while the controller is away (oldest dropped)
+const MAX_PENDING_EVENTS = 5000; // events kept per job for a replay after a reconnect (oldest dropped)
+const CLOCK_MS = 5000; // the sleep detector's tick
+// Tests shorten these: the reconnect backoff's ceiling and the time jump that counts as a sleep.
+const BACKOFF_MAX_MS = Number(process.env.AGENT_ORCH_WORKER_BACKOFF_MAX_MS) || Infinity;
+const SLEEP_MS = Number(process.env.AGENT_ORCH_WORKER_SLEEP_JUMP_MS) || SLEEP_JUMP_MS;
+// A timer due every `interval` that fires `gap` ms after the last one: the process was suspended (a laptop's sleep).
+export const sleptFor = (gap, interval, jump = SLEEP_JUMP_MS) => (gap > interval + jump ? gap - interval : 0);
 const BATCH_BYTES = 512 * 1024;
 const CACHE_TTL_MS = 14 * 86400e3; // cached repos unused this long are pruned
 const LOG_MAX = 10 * 1024 ** 2;
@@ -106,10 +112,11 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   const ids = Object.keys(AGENTS);
   const jobs = new Map(); // job id -> job (setup | running | paused | checking | pushing)
   const finished = new Map(); // job id -> job.start spec of recently finished jobs (a later job.resume restarts from the pushed branch)
-  const outbox = []; // [t, fields] frames kept while the controller is away
+  const held = new Map(); // job id -> a finished job whose job.done the controller hasn't acked yet (replayed on reconnect)
   const gitCreds = new Map(); // host -> token from git.credential (memory only)
   let ws = null, send = null, welcomed = false, attempt = 0, connectedAt = 0, lastFrame = 0, stopping = false;
-  let heartbeatMs = HEARTBEAT_MS, wipPushMs = WIP_PUSH_MS, beat = null, reconnectTimer = null;
+  let heartbeatMs = HEARTBEAT_MS, wipPushMs = WIP_PUSH_MS, graceMs = process.platform === 'darwin' ? GRACE_MS.mac : GRACE_MS.vps, beat = null, reconnectTimer = null;
+  let pendingWake = null;
 
   // Model lists (once a day per agent, cached) and plan limits (only on limits.refresh): nothing polls (BRIEF goal 7).
   const models = createModelStore({ file: path.join(home, 'models.json'), log, onChange: () => sendInventory() });
@@ -125,21 +132,11 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     if (!live()) return false;
     try { ws.send(send(t, fields)); return true; } catch (e) { log(`could not send ${t}: ${e.message}`, 'warn'); return false; }
   }
-  // Job frames are kept (outbox) while disconnected; a job's pending events always go out before its other frames.
-  function emit(t, fields) {
-    if (fields?.job != null) flushEvents(jobs.get(fields.job));
-    if (!raw(t, fields) && fields?.job != null) outbox.push([t, fields]);
-  }
-  function flushOutbox() {
-    while (outbox.length && live()) {
-      const [t, fields] = outbox[0];
-      flushEvents(jobs.get(fields.job));
-      if (!raw(t, fields)) return;
-      outbox.shift();
-    }
-  }
 
-  // ---- events: batched ~1 s, `from` = index of the batch's first event so resends dedupe on the controller
+  // ---- a job's stream: its events (index = position since the job started) and its other frames (job.check, job.wip,
+  // job.done), each placed after the events emitted before it. Nothing is dropped once sent: after a reconnect the
+  // controller answers job.attach {from} and the worker replays from there, so events arrive once, in order. Until
+  // then (or while the controller is away) frames wait here; the agent keeps running either way.
   const clip = (v, n) => (typeof v === 'string' && v.length > n ? v.slice(0, n) + '\n…' : v);
   function slim(e) {
     if (e.k === 'image') return { k: 'image', tool: e.tool, mediaType: e.mediaType, ...(e.data?.length <= 256 * 1024 ? { data: e.data } : { dropped: true }) };
@@ -147,23 +144,63 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     if (JSON.stringify(out).length > 64_000) return { k: e.k, name: e.name, id: e.id, text: clip(String(e.text ?? JSON.stringify(e.input ?? '')), 32_000), clipped: true };
     return out;
   }
+  const evEnd = (job) => job.evBase + job.ev.length;
   function pushEvent(job, e) {
     if (!e || !EVENT_KINDS.includes(e.k)) return;
     const s = slim(e);
     log.job(job.id, s.k === 'image' ? { ...s, data: undefined } : s);
     job.ev.push(s);
-    if (job.ev.length > MAX_PENDING_EVENTS) { const n = job.ev.length - MAX_PENDING_EVENTS; job.ev.splice(0, n); job.evFrom += n; }
-  }
-  function flushEvents(job) {
-    while (job?.ev.length && live()) {
-      let n = 0, bytes = 0;
-      while (n < job.ev.length && n < MAX_BATCH && (n === 0 || bytes + JSON.stringify(job.ev[n]).length < BATCH_BYTES)) bytes += JSON.stringify(job.ev[n++]).length;
-      if (!raw(MSG.JOB_EVENT, { job: job.id, from: job.evFrom, events: job.ev.slice(0, n) })) return;
-      job.ev.splice(0, n);
-      job.evFrom += n;
+    if (job.ev.length > MAX_PENDING_EVENTS) {
+      const n = job.ev.length - MAX_PENDING_EVENTS;
+      job.ev.splice(0, n); job.evBase += n; job.sent = Math.max(job.sent, job.evBase);
     }
   }
-  const flusher = setInterval(() => { for (const j of jobs.values()) flushEvents(j); }, EVENT_FLUSH_MS);
+  function emit(job, t, fields) {
+    job.ctl.push({ t, fields, upto: evEnd(job) });
+    flushJob(job);
+  }
+  // Sends events [sent, upto) in batches of at most MAX_BATCH / BATCH_BYTES.
+  function sendEvents(job, upto) {
+    while (job.sent < upto && live()) {
+      const i0 = job.sent - job.evBase;
+      let n = 0, bytes = 0;
+      while (job.sent + n < upto && n < MAX_BATCH && (n === 0 || bytes + JSON.stringify(job.ev[i0 + n]).length < BATCH_BYTES)) bytes += JSON.stringify(job.ev[i0 + n++]).length;
+      if (!raw(MSG.JOB_EVENT, { job: job.id, from: job.sent, events: job.ev.slice(i0, i0 + n) })) return false;
+      job.sent += n;
+    }
+    return job.sent >= upto;
+  }
+  function flushJob(job) {
+    if (!job?.attached) return;
+    while (job.ctlSent < job.ctl.length) {
+      const c = job.ctl[job.ctlSent];
+      if (!sendEvents(job, c.upto) || !raw(c.t, c.fields)) return;
+      if (c.t === MSG.JOB_DONE) c.seqSent = true;
+      job.ctlSent++;
+    }
+    sendEvents(job, evEnd(job));
+  }
+  const allJobs = () => [...jobs.values(), ...held.values()];
+  const flusher = setInterval(() => { for (const j of allJobs()) flushJob(j); }, EVENT_FLUSH_MS);
+  // The controller has this job's stream up to `from`: drop what it has, replay the rest (frames placed at or after it).
+  function attachJob(msg) {
+    const job = jobs.get(msg.job) || held.get(msg.job);
+    if (!job) return raw(MSG.ERROR, { message: `job ${msg.job} is not on this worker`, job: msg.job });
+    const from = Math.min(Math.max(msg.from, 0), evEnd(job));
+    if (from < job.evBase) log(`job ${job.id}: events ${from}-${job.evBase - 1} were dropped while away`, 'warn');
+    job.ev.splice(0, Math.max(0, from - job.evBase));
+    job.evBase = Math.max(job.evBase, from);
+    job.sent = job.evBase;
+    job.ctl = job.ctl.filter((c) => c.upto >= from);
+    job.ctlSent = 0;
+    job.attached = true;
+    job.detachedAt = 0;
+    log(`job ${job.id} re-attached (events from ${from})`);
+    flushJob(job);
+  }
+  // The controller reassigns a job whose node stayed away past the grace period, so such a job pushes nothing more
+  // until the controller re-attaches it (or cancels it): its branch may belong to the new run by now.
+  const pastGrace = (job) => !job.attached && job.detachedAt && Date.now() - job.detachedAt > graceMs;
 
   // ---- inventory and resources
   async function inventory() {
@@ -208,8 +245,9 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       connectedAt = lastFrame = Date.now();
       send = createSender('w');
       log(`connected to ${config.controller}`);
+      // Every job still here (finished ones whose job.done wasn't acked too): the controller attaches or cancels each.
       sock.send(send(MSG.HELLO, { node: config.node, protocol: PROTOCOL_VERSION, version: VERSION,
-        jobs: [...jobs.values()].map((j) => ({ job: j.id, state: j.state, ...(j.pushed ? { sha: j.pushed } : {}) })) }));
+        jobs: allJobs().map((j) => ({ job: j.id, state: held.has(j.id) ? 'done' : j.state, next: evEnd(j), ...(j.pushed ? { sha: j.pushed } : {}) })) }));
     });
     sock.on('unexpected-response', (_req, res) => {
       log(res.statusCode === 401 ? 'the controller refused this node token (revoked?): pair again' : `connection refused: HTTP ${res.statusCode}`, 'warn');
@@ -227,11 +265,12 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       if (ws !== sock) return;
       ws = null; welcomed = false;
       clearInterval(beat); beat = null;
+      for (const j of allJobs()) if (j.attached) { j.attached = false; j.detachedAt = Date.now(); }
       if (connectedAt) log(`disconnected (${code}${reason?.length ? ` ${reason}` : ''})`);
       if (connectedAt && Date.now() - connectedAt > 60_000) attempt = 0;
       connectedAt = 0;
       if (stopping) return;
-      const delay = backoffMs(attempt++);
+      const delay = Math.min(BACKOFF_MAX_MS, backoffMs(attempt++));
       reconnectTimer = setTimeout(connect, delay);
     });
   }
@@ -239,6 +278,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   function onWelcome(msg) {
     heartbeatMs = msg.heartbeatMs || HEARTBEAT_MS;
     wipPushMs = msg.wipPushMs || WIP_PUSH_MS;
+    graceMs = msg.graceMs || graceMs;
     welcomed = true;
     log(`welcomed as ${msg.node}`);
     clearInterval(beat);
@@ -250,14 +290,34 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     }, heartbeatMs);
     sendInventory();
     sendResources();
-    flushOutbox();
-    for (const j of jobs.values()) flushEvents(j);
+    if (pendingWake) { raw(MSG.WAKE, pendingWake); pendingWake = null; }
   }
+
+  // Sleep/wake: a clock tick that fires far too late means the machine was suspended. The socket is dead by then
+  // (the controller saw the node go quiet), so reconnect now instead of waiting out the missed heartbeats.
+  let lastTick = Date.now();
+  const clock = setInterval(() => {
+    const t = Date.now(), slept = sleptFor(t - lastTick, CLOCK_MS, SLEEP_MS);
+    if (slept) {
+      log(`woke up after ${Math.round(slept / 1000)} s asleep`);
+      pendingWake = { sleptAt: lastTick, sleptMs: Math.round(slept) };
+      attempt = 0;
+      if (ws) ws.terminate();
+      else if (reconnectTimer) { clearTimeout(reconnectTimer); connect(); }
+    }
+    lastTick = t;
+  }, CLOCK_MS);
 
   async function handle(msg) {
     switch (msg.t) {
       case MSG.WELCOME: return onWelcome(msg);
-      case MSG.HEARTBEAT: case MSG.ACK: return;
+      case MSG.HEARTBEAT: return;
+      case MSG.ACK: { // the controller has a finished job's job.done: nothing of it is left to replay
+        const j = msg.job != null && held.get(msg.job);
+        if (j && j.ctl.some((c) => c.t === MSG.JOB_DONE && c.seqSent)) held.delete(msg.job);
+        return;
+      }
+      case MSG.JOB_ATTACH: return attachJob(msg);
       case MSG.ERROR: return log(`controller error: ${msg.message}`, 'warn');
       case MSG.BYE: log(`controller said bye (${msg.reason || 'no reason'})`); return ws?.close(1000, 'bye');
       case MSG.JOB_OFFER: {
@@ -323,7 +383,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   }
 
   const newJob = (spec) => ({
-    id: spec.job, spec, state: 'setup', ac: null, ev: [], evFrom: 0, cache: null, env: gitAuthEnv(spec.repo),
+    id: spec.job, spec, state: 'setup', ac: null, ev: [], evBase: 0, sent: 0, ctl: [], ctlSent: 0, attached: true, detachedAt: 0,
+    cache: null, env: gitAuthEnv(spec.repo),
     dir: path.join(dirs.worktrees, `${cacheName(spec.repo).split('__').pop()}-task-${spec.job}`),
     sessionId: spec.resume || null, pushed: null, remoteStart: null, stop: null, lock: Promise.resolve(),
   });
@@ -333,6 +394,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     const job = newJob(spec);
     jobs.set(job.id, job);
     finished.delete(job.id);
+    held.delete(job.id);
     log(`job ${job.id} start: ${spec.title} (${spec.agent}${spec.model ? `/${spec.model}` : ''})`);
     if (!(await setup(job))) return;
     if (await stopped(job)) return; // paused or cancelled during setup
@@ -366,7 +428,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       log(`job ${job.id} ${text}`, 'error');
       await dropWorktree(job);
       jobs.delete(job.id);
-      emit(MSG.JOB_DONE, { job: job.id, outcome: 'setup_failed', text });
+      held.set(job.id, job);
+      emit(job, MSG.JOB_DONE, { job: job.id, outcome: 'setup_failed', text });
       return false;
     }
   }
@@ -426,7 +489,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       log(`job ${job.id} paused`);
       return true;
     }
-    if (s.reason !== 'reassigned') await pushWip(job).catch((e) => log(`job ${job.id} WIP push on cancel failed: ${e.message}`, 'warn'));
+    if (s.reason !== 'reassigned' && s.reason !== 'disabled') await pushWip(job).catch((e) => log(`job ${job.id} WIP push on cancel failed: ${e.message}`, 'warn'));
     await dropWorktree(job);
     jobs.delete(job.id);
     log(`job ${job.id} cancelled${s.reason ? ` (${s.reason})` : ''}`);
@@ -443,7 +506,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       catch (e) { output = `verification crashed: ${e?.message || e}`; }
       if (await stopped(job)) return;
       log(`job ${job.id} check ${pass ? 'passed' : 'failed'}: ${command}`);
-      emit(MSG.JOB_CHECK, { job: job.id, command, output: String(output).slice(-3000), pass, ...(Number.isInteger(code) ? { code } : {}) });
+      emit(job, MSG.JOB_CHECK, { job: job.id, command, output: String(output).slice(-3000), pass, ...(Number.isInteger(code) ? { code } : {}) });
     }
     job.state = 'pushing';
     let sha = null;
@@ -452,22 +515,31 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     if (await stopped(job)) return;
     const outcome = OUTCOMES.includes(res.outcome) ? res.outcome : 'error';
     const limitsOut = res.resetsAt || res.limitType || res.windows ? { resetsAt: res.resetsAt ?? null, limitType: res.limitType ?? null, windows: res.windows ?? null } : undefined;
-    emit(MSG.JOB_DONE, {
+    jobs.delete(job.id);
+    held.set(job.id, job);
+    if (held.size > 50) held.delete(held.keys().next().value);
+    emit(job, MSG.JOB_DONE, {
       job: job.id, outcome, text: String(res.text || ''), usage: res.usage || {}, ...(limitsOut ? { limits: limitsOut } : {}),
       ...(sha ? { sha } : {}), ...(job.sessionId ? { sessionId: job.sessionId } : {}),
     });
     log(`job ${job.id} done: ${outcome}${sha ? ` at ${sha.slice(0, 8)}` : ''}`);
     await dropWorktree(job);
-    jobs.delete(job.id);
     finished.set(job.id, { ...spec, resume: job.sessionId || undefined });
     if (finished.size > 20) finished.delete(finished.keys().next().value);
   }
 
   // Commits everything and pushes agent-orch/task-<id> (force-with-lease against our last push), then job.wip.
   // Serialised per job. A final push retries until it lands (or the job is cancelled); a WIP push tries 3 times.
+  // Past the grace period without the controller, a WIP push is skipped and a final one waits for job.attach.
   function pushWip(job, message = `agent-orch #${job.id} (wip)`, { final = false } = {}) {
     const run = job.lock.then(async () => {
       if (!fs.existsSync(job.dir)) return job.pushed;
+      if (pastGrace(job)) {
+        if (!final) return job.pushed;
+        log(`job ${job.id} finished while the controller was away past the grace period; waiting to push`);
+        while (pastGrace(job) && job.stop?.kind !== 'cancel') await new Promise((r) => setTimeout(r, 500));
+        if (job.stop?.kind === 'cancel') throw new Error('cancelled');
+      }
       await commitAll(job.dir, message);
       const sha = (await git(job.dir, ['rev-parse', 'HEAD'])).trim();
       if (sha === job.pushed) return sha;
@@ -485,7 +557,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
         }
       }
       job.pushed = sha;
-      emit(MSG.JOB_WIP, { job: job.id, sha, branch });
+      emit(job, MSG.JOB_WIP, { job: job.id, sha, branch });
       return sha;
     });
     job.lock = run.catch(() => {});
@@ -502,7 +574,9 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
 
   async function stopJob(id, kind, reason) {
     const job = jobs.get(id);
+    if (!job && kind === 'cancel' && held.delete(id)) return log(`job ${id} dropped (${reason || 'cancelled'})`); // finished; the controller doesn't want it
     if (!job) return raw(MSG.ERROR, { message: `job ${id} is not on this worker`, job: id });
+    job.attached = true; job.detachedAt = 0; // the controller spoke about it: frames flow again
     if (kind === 'pause' && job.state === 'paused') return;
     job.stop = { kind, reason };
     if (job.state === 'running' || job.state === 'checking') return job.ac?.abort();
@@ -518,6 +592,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       job = newJob(spec);
       jobs.set(job.id, job);
       finished.delete(job.id);
+      held.delete(job.id);
       if (!(await setup(job))) return;
     }
     job.stop = null;
@@ -567,9 +642,9 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       Promise.all(pausing.map((j) => (async () => { while (j.state !== 'paused' && jobs.has(j.id)) await new Promise((r) => setTimeout(r, 100)); })())),
       new Promise((r) => setTimeout(r, timeoutMs)),
     ]);
-    flushOutbox();
+    for (const j of allJobs()) flushJob(j);
     raw(MSG.BYE, { reason: 'shutdown' });
-    clearInterval(flusher); clearInterval(beat);
+    clearInterval(flusher); clearInterval(beat); clearInterval(clock);
     models.stop(); limits.stop(); resources?.stop();
     try { ws?.close(1000, 'shutdown'); } catch {}
   }

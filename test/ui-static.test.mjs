@@ -75,7 +75,7 @@ test('the model picker picks the primary model only; a Fallbacks button opens th
   const fn = appJs.slice(appJs.indexOf('function renderAgentPicker()'));
   const body = fn.slice(0, fn.indexOf('\n}\n'));
   assert.doesNotMatch(body, /AUTO_PICK|__auto/);
-  assert.match(appJs, /send\(\{ t: 'send', cid: state\.cid, text \}\)/);
+  assert.match(appJs, /send\(\{ t: 'send', cid: state\.cid, text, \.\.\.\(attachments\.length && \{ attachments \}\) \}\)/);
   assert.doesNotMatch(appJs, /autoDelegate|delegate\/preview|Forecast/);
   assert.match(indexHtml, /class="chip fb-chip" id="fbChip"/);
   assert.match(indexHtml, /class="modal fb-pop" id="fbModal"/);
@@ -167,4 +167,11 @@ test('composer menus: mode, model and effort chips open compact .cmenu listboxes
   }
   assert.match(appCss, /\.cmenu \{ position: fixed;/);
   assert.match(appCss, /\.cm-opt\[aria-selected="true"\]::after \{ background: var\(--accent\);/);
+});
+
+test('server details: Top processes sits in the metric grid right after the six cards, two cards wide on desktop', () => {
+  assert.match(appJs, /tile\('load', 'Load average'\),\n\s*\$\('mTopCard'\),/);
+  assert.match(indexHtml, /id="mTopCard"[\s\S]*?class="m-top-scroll"><table class="m-table" id="mTop">/);
+  assert.match(appCss, /@media \(min-width: 801px\) \{\n\s*\.m-grid > \.m-top \{ grid-column: span 2; \}/);
+  assert.match(appCss, /\.m-top-scroll \{[^}]*contain: size;/, 'the list scrolls inside the row instead of stretching it');
 });

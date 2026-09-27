@@ -25,6 +25,7 @@ import { createCluster } from './cluster.mjs';
 import { WS_PATH, PAIR_PATH, CLAIM_PATH } from './cluster-protocol.mjs';
 import { createRemoteLogins } from './remote-login.mjs';
 import { createExtensions } from './extensions.mjs';
+import { saveUpload, readUpload, placeUploads, attachmentView, attachmentNote, claudeImageBlocks, MAX_UPLOAD_BYTES, MAX_ATTACHMENTS } from './uploads.mjs';
 import { headRefusal } from './role.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
@@ -828,8 +829,9 @@ gh.refresh().then((s) => console.log(`[github] ${s.linked ? `linked as ${s.login
 // Messages sent while the planner is still replying wait and go together as the next turn,
 // so two turns never run on the same planner session at once.
 const planQueue = new Map(); // convo id -> [text]
-async function orchestratorTurn(convo, text) {
-  emit(convo.id, { t: 'user', text });
+async function orchestratorTurn(convo, text, files = []) {
+  emit(convo.id, userEvent(text, files));
+  text += attachmentNote(files); // the planner (and the tasks it writes) use the files by path
   if (planning.has(convo.id)) {
     if (!planQueue.has(convo.id)) planQueue.set(convo.id, []);
     planQueue.get(convo.id).push(text);
@@ -1030,24 +1032,31 @@ function authHint(code) {
 }
 
 // ---------- non-Claude chats: one runAgentCli turn per message, its normalised events shown as chat events ----------
-const agentQueue = new Map(); // convo id -> [text] sent while a turn was running
-async function agentChatTurn(convo, text) {
-  emit(convo.id, { t: 'user', text });
+const agentQueue = new Map(); // convo id -> [{text, images}] sent while a turn was running
+// Queued messages (sent while a turn runs) go together as the next turn: their texts joined, their images all attached.
+const takeQueued = (cid) => {
+  const q = agentQueue.get(cid)?.splice(0) || [];
+  return q.length ? { text: q.map((m) => m.text).join('\n\n'), images: q.flatMap((m) => m.images) } : null;
+};
+async function agentChatTurn(convo, text, files = []) {
+  emit(convo.id, userEvent(text, files));
+  const msg = { text: text + attachmentNote(files), images: files.filter((f) => f.image).map((f) => f.path) };
   if (agentTurns.has(convo.id)) {
     if (!agentQueue.has(convo.id)) agentQueue.set(convo.id, []);
-    agentQueue.get(convo.id).push(text);
+    agentQueue.get(convo.id).push(msg);
     return;
   }
   const cid = convo.id;
   broadcast(cid, { t: 'busy', busy: true });
-  for (let next = text; next;) {
+  for (let m = msg; m;) {
+    const next = m.text;
     const agent = chatAgent(convo), a = AGENTS[agent], ac = new AbortController();
     // Only this chat's own agent's limit matters (never Claude's): while it's limited, say so and skip the turn.
     const lim = orch.limitResetFor(agent, convo.model);
     if (lim) {
       emit(cid, { t: 'error', until: lim.at, untilKnown: lim.known, text: `Not sent: ${lim.name} is at its usage limit${lim.known ? ' until {until}' : "; the reset time isn't known yet. Try again around {until}"}.` });
       emit(cid, { t: 'result', ok: false, text: 'rate_limited', ms: 0 });
-      next = agentQueue.get(cid)?.splice(0).join('\n\n') || null;
+      m = takeQueued(cid);
       continue;
     }
     agentTurns.set(cid, ac);
@@ -1057,7 +1066,7 @@ async function agentChatTurn(convo, text) {
     const turn = async (resume) => {
       try {
         return await runAgentCli({
-          agent, prompt: resume ? personaSwitch(convo, next) : next, cwd: convo.cwd, resume, model: convo.model || undefined, effort: convo.effort || undefined, signal: ac.signal, env: withOwner(CLAUDE_ENV, 'chat', cid),
+          agent, prompt: resume ? personaSwitch(convo, next) : next, images: m.images, cwd: convo.cwd, resume, model: convo.model || undefined, effort: convo.effort || undefined, signal: ac.signal, env: withOwner(CLAUDE_ENV, 'chat', cid),
           onSpawn: ({ pid, pgid }) => registerPid({ pid, pgid, kind: 'chat', id: cid }),
           systemAppend: resume ? undefined : chatSystemAppend(convo), autonomous: convo.mode === 'bypassPermissions',
           onEvent: (e) => {
@@ -1093,20 +1102,22 @@ async function agentChatTurn(convo, text) {
     convo.updatedAt = Date.now();
     saveConvos();
     syncGit(convo.cwd, `Chat: ${String(next).replace(/\s+/g, ' ').slice(0, 72)}`).catch((e) => console.error('[github] sync failed', convo.cwd, e));
-    const waiting = res.outcome === 'aborted' ? null : agentQueue.get(cid);
-    next = waiting?.length ? waiting.splice(0).join('\n\n') : null;
+    m = res.outcome === 'aborted' ? null : takeQueued(cid);
   }
   agentQueue.delete(cid);
   broadcast(cid, { t: 'busy', busy: false });
   broadcastConvos();
 }
 
-async function sendUserMessage(convo, text) {
+// files: attachments already placed in the project (uploads.mjs placeUploads). The log shows them with the owner's text;
+// the agent gets the text plus where they are, and sees images directly (Claude: image blocks, Codex: -i).
+const userEvent = (text, files) => ({ t: 'user', text, ...(files?.length && { attachments: files.map(attachmentView) }) });
+async function sendUserMessage(convo, text, files = []) {
   // A non-Claude chat depends only on its own agent: no Claude sign-in or limit check.
-  if (chatAgent(convo) !== 'claude') return convo.mode === 'orchestrator' ? orchestratorTurn(convo, text) : agentChatTurn(convo, text);
+  if (chatAgent(convo) !== 'claude') return convo.mode === 'orchestrator' ? orchestratorTurn(convo, text, files) : agentChatTurn(convo, text, files);
   if (!onSubscription()) await refreshClaudeAuth();
   if (!onSubscription()) {
-    emit(convo.id, { t: 'user', text });
+    emit(convo.id, userEvent(text, files));
     emit(convo.id, {
       t: 'error',
       text: claudeAuth.loggedIn
@@ -1115,17 +1126,17 @@ async function sendUserMessage(convo, text) {
     });
     return;
   }
-  if (convo.mode === 'orchestrator') return orchestratorTurn(convo, text);
+  if (convo.mode === 'orchestrator') return orchestratorTurn(convo, text, files);
   // Orchestrator-style context control: a session that has grown past the limit is retired, and the next
   // message starts a fresh one carrying the project memory (.agent-orch/) and a recap of the recent chat.
-  let prompt = text;
+  let prompt = text + attachmentNote(files);
   if (convo.sessionId && (convo.ctxTokens || 0) > CHAT_CONTEXT_LIMIT) {
     retireRuntime(runtimes, convo.id);
     const recap = chatRecap(convo.id);
     convo.sessionId = null;
     convo.ctxTokens = 0;
     emit(convo.id, { t: 'notice', text: 'This chat was getting long, so it continues in a fresh session with the project memory and a recap of the recent conversation. That keeps replies fast and uses less of your plan.' });
-    prompt = `[This conversation continues from an earlier session in this project that grew too long. Recent conversation:]\n${recap}\n\n[New message]\n${text}`;
+    prompt = `[This conversation continues from an earlier session in this project that grew too long. Recent conversation:]\n${recap}\n\n[New message]\n${text}${attachmentNote(files)}`;
   }
   // A persona or MCP servers changed since the session started apply from the next message: a fresh runtime, same session.
   const live = runtimes.get(convo.id);
@@ -1135,11 +1146,12 @@ async function sendUserMessage(convo, text) {
   if (!rt.busy || !rt.media) rt.media = mediaCollector(DATA, convo.cwd); // a queued message keeps the running turn's snapshot
   convo.updatedAt = Date.now();
   saveConvos();
-  emit(convo.id, { t: 'user', text });
+  emit(convo.id, userEvent(text, files));
   rt.busy = true;
   broadcast(convo.id, { t: 'busy', busy: true });
   broadcastConvos();
-  rt.push({ type: 'user', message: { role: 'user', content: prompt }, parent_tool_use_id: null });
+  const images = claudeImageBlocks(files);
+  rt.push({ type: 'user', message: { role: 'user', content: images.length ? [{ type: 'text', text: prompt }, ...images] : prompt }, parent_tool_use_id: null });
 }
 
 const CHAT_CONTEXT_LIMIT = 120000; // tokens of context before a chat rolls over to a fresh session
@@ -1534,6 +1546,28 @@ async function handleRequest(req, res) {
       res.end(buf);
     });
   }
+  // Composer attachments (uploads.mjs): POST the raw bytes (X-File-Name: the URI-encoded name) → {id, name, size, type,
+  // image?}; the message then names them by id. GET serves one back: images inline, anything else as a download.
+  if (p === '/api/uploads' && req.method === 'POST') {
+    const buf = await readRaw(req, MAX_UPLOAD_BYTES); // a 413 goes out through the handler's HttpError path
+    let name = 'file';
+    try { name = decodeURIComponent(String(req.headers['x-file-name'] || 'file')); } catch {}
+    const r = saveUpload(DATA, buf, { name, type: req.headers['content-type'] });
+    return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : attachmentView(r));
+  }
+  const up = p.match(/^\/api\/uploads\/([a-f0-9]{24})$/);
+  if (up && req.method === 'GET') {
+    const u = readUpload(DATA, up[1]);
+    if (!u) return json(res, 404, { error: 'Not found' });
+    return fs.readFile(u.file, (err, buf) => {
+      if (err) return json(res, 404, { error: 'Not found' });
+      // Only sniffed images render in the page; everything else downloads and is never interpreted by the browser.
+      res.writeHead(200, { 'Content-Type': u.image ? u.type : 'application/octet-stream', 'Content-Length': buf.length,
+        'Content-Disposition': `${u.image ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(u.name)}`,
+        'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, max-age=31536000, immutable', 'Content-Security-Policy': "default-src 'none'; sandbox" });
+      res.end(buf);
+    });
+  }
   if (p === '/api/settings/sound' && req.method === 'POST') {
     const buf = await readRaw(req, MAX_SOUND_BYTES); // a 413 goes out through the handler's HttpError path
     if (!isMp3(buf)) return json(res, 400, { error: 'Not an MP3 file' });
@@ -1906,11 +1940,18 @@ wss.on('connection', (ws, req) => {
     }
     if (!convo) return;
     switch (msg.t) {
-      case 'send':
-        if (typeof msg.text === 'string' && msg.text.trim()) {
-          sendUserMessage(convo, msg.text).catch((e) => emit(convo.id, { t: 'error', text: String(e?.message || e) }));
-        }
+      case 'send': {
+        // attachments: upload ids (POST /api/uploads), copied into the project before the turn; a message may be only files.
+        const text = typeof msg.text === 'string' ? msg.text : '';
+        const ids = Array.isArray(msg.attachments) ? msg.attachments.filter((x) => typeof x === 'string').slice(0, MAX_ATTACHMENTS) : [];
+        if (!text.trim() && !ids.length) break;
+        let files = [];
+        try { files = ids.length ? placeUploads(DATA, ids, convo.cwd) : []; }
+        catch (e) { emit(convo.id, { t: 'error', text: `Couldn't attach the files: ${e?.message || e}` }); break; }
+        if (!text.trim() && !files.length) break;
+        sendUserMessage(convo, text, files).catch((e) => emit(convo.id, { t: 'error', text: String(e?.message || e) }));
         break;
+      }
       case 'perm_reply':
         answerPermission(convo, msg);
         break;

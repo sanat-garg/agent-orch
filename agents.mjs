@@ -522,7 +522,8 @@ function* codexEvents(m, started = new Set()) {
 // rate-limit snapshots are; CODEX_HOME is stripped, so the CLI always uses ~/.codex). Codex has no system-prompt
 // append flag, so systemAppend is prepended to the prompt. effort: a level from CODEX.efforts, passed as
 // `-c model_reasoning_effort=<level>` (also on `exec resume`); null keeps the model's default.
-async function runCodex({ model, prompt, cwd, resume, systemAppend, signal, onEvent, bin, env = process.env, autonomous = true, onMessage, codexHome, effort, mcp }) {
+// images: local image paths attached to the prompt with -i (a chat's attached pictures; exec and exec resume both take it).
+async function runCodex({ model, prompt, cwd, resume, systemAppend, signal, onEvent, bin, env = process.env, autonomous = true, onMessage, codexHome, effort, mcp, images }) {
   const res = { outcome: 'error', text: '', sessionId: resume || null, usage: {}, numTurns: 0, resetsAt: null, limitType: null, stderr: '', errorCode: null, windows: null };
   const startedAt = Date.now();
   // The MCP profile goes before `exec`: `exec resume` has no -p of its own.
@@ -530,6 +531,7 @@ async function runCodex({ model, prompt, cwd, resume, systemAppend, signal, onEv
   const args = [...(profile ? ['-p', profile] : []), 'exec', ...(resume ? ['resume'] : []), '--json', '--skip-git-repo-check', '-c', 'forced_login_method="chatgpt"'];
   if (model) args.push('-m', model);
   if (effort) args.push('-c', `model_reasoning_effort=${effort}`);
+  for (const img of images || []) args.push('-i', img);
   if (autonomous) args.push('--dangerously-bypass-approvals-and-sandbox');
   else args.push('-c', 'sandbox_mode="workspace-write"', '-c', 'approval_policy="never"');
   const text = systemAppend ? `${systemAppend}\n\n${prompt}` : prompt;

@@ -303,14 +303,18 @@
   }
 
   // ---------- heatmap: who worked when ----------
-  // Days × local hours (weekday × hour when the range spans more than a month), starting at the first day with any
-  // activity. Cell shade = agent time in that hour (agent-minutes: two tasks at once count twice); the blue dot = your
-  // messages, sized by how many. Hover: which agents, how many at once, which tasks. Right: each row's totals; below:
-  // agent time by hour of day across all rows. heatSummary() is the card's one-line reading of it.
+  // Always the last 30 days (whatever the range picker says; the project filter applies): one row per local day,
+  // one column per local hour. Cell shade (orange) = agent time in that hour (agent-minutes: two tasks at once count
+  // twice); a small neutral dot = you sent messages then. Totals use their own ramp (blue): a square at the end of each
+  // row for the day, and a bottom row for each hour of the day across the month. Details are in the tooltips.
+  const HEAT_DAYS = 30;
+  function monthCut() {
+    let from = dayStart(SX.data.at);
+    for (let i = 1; i < HEAT_DAYS; i++) from = dayStart(from - 1); // local midnights, DST-safe
+    return cut(from, SX.data.at);
+  }
   function heatData(c) {
-    const byDay = (c.to - c.from) <= 32 * DAY;
-    const rowKey = (t) => (byDay ? dayStart(t) : new Date(t).getDay());
-    const k = (t) => `${rowKey(t)}|${new Date(t).getHours()}`;
+    const k = (t) => `${dayStart(t)}|${new Date(t).getHours()}`;
     const cells = new Map(); // key -> { ms, msgs, agents: Map(agent -> ms), tasks: Set, spans: [[s, e]] }
     const at = (key) => cells.get(key) || cells.set(key, { ms: 0, msgs: 0, agents: new Map(), tasks: new Set(), spans: [] }).get(key);
     eachHour(c.runs, c.from, c.to, (t, ms, r) => {
@@ -321,90 +325,84 @@
       x.spans.push([t, t + ms]);
     });
     for (const m of c.you) at(k(m.t)).msgs++;
-    let rows;
-    if (byDay) {
-      // From the first active day (a range reaching back before the project began shows no empty weeks).
-      const active = [...cells.keys()].map((key) => Number(key.split('|')[0]));
-      const first = active.length ? Math.min(...active) : dayStart(c.from);
-      rows = [];
-      for (let d = Math.max(dayStart(c.from), first); d <= c.to; d = nextDay(d)) rows.push(d);
-    } else rows = [1, 2, 3, 4, 5, 6, 0];
-    return { byDay, rows, cells, max: Math.max(1, ...[...cells.values()].map((x) => x.ms)) };
+    const rows = [];
+    for (let d = dayStart(c.from); d <= c.to; d = nextDay(d)) rows.push(d);
+    const days = rows.map((r) => { let ms = 0, n = 0; for (let hr = 0; hr < 24; hr++) { const x = cells.get(`${r}|${hr}`); ms += x?.ms || 0; n += x?.msgs || 0; } return { ms, n }; });
+    const hours = Array.from({ length: 24 }, (_, hr) => ({ ms: sum(rows, (r) => cells.get(`${r}|${hr}`)?.ms || 0), n: sum(rows, (r) => cells.get(`${r}|${hr}`)?.msgs || 0) }));
+    return { rows, cells, days, hours, max: Math.max(1, ...[...cells.values()].map((x) => x.ms)) };
   }
   // Most runs at once inside one cell (its clipped run spans).
   const overlap = (spans) => { let n = 0, best = 0; for (const [, d] of spans.flatMap(([s, e]) => [[s, 1], [e, -1]]).sort((a, b) => a[0] - b[0] || a[1] - b[1])) best = Math.max(best, n += d); return best; };
   function heatSummary(c, h) {
-    const agentMs = sum([...h.cells.values()], (x) => x.ms);
-    if (!agentMs) return c.you.length ? `No agent work in this range; you sent ${plural(c.you.length, 'message')}.` : 'No activity in this range.';
-    const days = new Set([...h.cells].filter(([, x]) => x.ms).map(([key]) => key.split('|')[0])).size;
-    const away = awayShare(c);
-    const [bk, bx] = [...h.cells].sort((a, b) => b[1].ms - a[1].ms)[0];
-    const [r, hr] = bk.split('|').map(Number);
-    const busiest = `${h.byDay ? new Date(r).toLocaleDateString([], { weekday: 'short', day: 'numeric' }) : `${weekdayName(r)}s`}, ${hourName(hr)}`;
-    return `Agents worked ${hrs(agentMs)} across ${plural(days, h.byDay ? 'day' : 'weekday')}` +
-      `${away && away.share >= 0.05 ? `, ${pct(away.share)} of it while you were away (no message from you in the hour before)` : ''}. ` +
-      `Busiest: ${busiest} (${hrs(bx.ms)}${overlap(bx.spans) > 1 ? `, ${overlap(bx.spans)} at once` : ''}).`;
+    const agentMs = sum(h.days, (d) => d.ms);
+    if (!agentMs) return `Last ${HEAT_DAYS} days · ${c.you.length ? `no agent work · ${plural(c.you.length, 'message')} from you` : 'no activity'}`;
+    const active = h.days.filter((d) => d.ms).length, away = awayShare(c);
+    return `Last ${HEAT_DAYS} days · ${hrs(agentMs)} of agent work on ${plural(active, 'day')}${away && away.share >= 0.05 ? ` · ${pct(away.share)} while you were away` : ''}`;
   }
+  const step = (v, max, n) => (v ? Math.min(n, Math.ceil((v / max) * n)) : 0);
   function heatmap(c, h = heatData(c)) {
-    const { byDay, rows, cells, max } = h;
+    const { rows, cells, days, hours, max } = h;
     const grid = el('div', 'sx-heat');
     grid.setAttribute('role', 'img');
-    grid.setAttribute('aria-label', `Agent time and your messages by ${byDay ? 'day' : 'weekday'} and hour. ${heatSummary(c, h)}`);
-    grid.append(el('span', 'sx-heat-corner'));
-    for (let hr = 0; hr < 24; hr++) grid.append(el('span', `sx-heat-h${hr % 6 ? ' sx-heat-h3' : ''}`, hr % 3 === 0 ? hourName(hr) : ''));
-    grid.append(el('span', 'sx-heat-tot sx-heat-tot-h', 'Total'));
-    const nowH = Math.floor(Date.now() / H), thisHour = Math.floor(Date.now() / H) * H;
-    const hourTotals = Array.from({ length: 24 }, () => 0);
+    grid.setAttribute('aria-label', `Agent time and your messages by day and hour: ${heatSummary(c, h)}`);
+    grid.append(el('span'));
+    for (let hr = 0; hr < 24; hr++) grid.append(el('span', `sx-heat-h${hr && hr % 6 === 0 ? ' g' : ''}`, hr % 6 === 0 ? (hr === 12 ? 'Noon' : hourName(hr)) : ''));
+    grid.append(el('span', 'sx-heat-h sx-heat-toth', 'Day'));
+    const nowH = Math.floor(Date.now() / H);
     const taskTitle = (id) => SX.data.tasks.find((t) => t.id === id)?.title || '';
-    for (const r of rows) {
-      grid.append(el('span', 'sx-heat-row', byDay ? new Date(r).toLocaleDateString([], { weekday: 'short', day: 'numeric' }) : weekdayName(r)));
-      let rowMs = 0, rowMsgs = 0;
+    // "Sep 28" on the first row and on the 1st of a month, else "Mon 28".
+    const rowName = (r, i) => new Date(r).toLocaleDateString([], i === 0 || new Date(r).getDate() === 1 ? { month: 'short', day: 'numeric' } : { weekday: 'short', day: 'numeric' });
+    const dayMax = Math.max(1, ...days.map((d) => d.ms)), hourMax = Math.max(1, ...hours.map((x) => x.ms));
+    rows.forEach((r, ri) => {
+      grid.append(el('span', 'sx-heat-row', rowName(r, ri)));
       for (let hr = 0; hr < 24; hr++) {
         const x = cells.get(`${r}|${hr}`), v = x?.ms || 0, n = x?.msgs || 0;
-        rowMs += v; rowMsgs += n; hourTotals[hr] += v;
-        const cell = el('span', 'sx-heat-c');
-        const cellStart = byDay ? new Date(new Date(r).setHours(hr)).getTime() : null;
-        if (byDay && (cellStart + H <= c.from || cellStart > c.to || Math.floor(cellStart / H) > nowH)) cell.classList.add('out');
-        if (byDay && cellStart === thisHour) cell.classList.add('now');
-        cell.dataset.s = String(v ? Math.min(5, Math.ceil((v / max) * 5)) : 0);
-        if (n) { const dot = el('i', `msg${n >= 5 ? ' l' : n >= 2 ? ' m' : ''}`); cell.append(dot); }
+        const cell = el('span', `sx-heat-c${hr && hr % 6 === 0 ? ' g' : ''}`);
+        const cellStart = new Date(new Date(r).setHours(hr)).getTime();
+        if (cellStart + H <= c.from || Math.floor(cellStart / H) > nowH) cell.classList.add('out');
+        cell.dataset.s = String(step(v, max, 4));
+        if (n) cell.append(el('i', 'msg'));
         if (v || n) {
-          const when = byDay ? `${dayName(r)}, ${hourName(hr)}–${hourName((hr + 1) % 24)}` : `${weekdayName(r)}s, ${hourName(hr)}–${hourName((hr + 1) % 24)}`;
-          const lines = [when];
+          const lines = [`${dayName(r)}, ${hourName(hr)}–${hourName((hr + 1) % 24)}`];
           if (v) {
             const at = overlap(x.spans);
             lines.push(`${hrs(v)} of agent time${at > 1 ? ` · ${at} at once` : ''}`);
             lines.push([...x.agents].sort((a, b) => b[1] - a[1]).map(([a, ms]) => `${safeAgent(a)} ${hrs(ms)}`).join(' · '));
             const ids = [...x.tasks];
             lines.push(ids.slice(0, 3).map((id) => `#${id} ${taskTitle(id)}`.trim()).join('\n') + (ids.length > 3 ? `\n+${ids.length - 3} more` : ''));
-          } else lines.push('No agent work');
+          }
           if (n) lines.push(`You sent ${plural(n, 'message')}`);
           cell.dataset.tip = lines.join('\n');
         }
         grid.append(cell);
       }
-      const tot = el('span', 'sx-heat-tot', rowMs ? hrs(rowMs) : '–');
-      if (rowMsgs) tot.append(el('small', '', ` · ${plural(rowMsgs, 'msg')}`));
+      const t = days[ri], tot = el('span', 'sx-heat-c sx-heat-tot sx-heat-dtot');
+      tot.dataset.t = String(step(t.ms, dayMax, 4));
+      tot.dataset.tip = `${dayName(r)}\n${t.ms ? `${hrs(t.ms)} of agent time` : 'No agent work'}${t.n ? ` · ${plural(t.n, 'message')} from you` : ''}`;
       grid.append(tot);
-    }
-    // All rows by hour of day: when the agents usually work.
-    const hmax = Math.max(1, ...hourTotals);
-    grid.append(el('span', 'sx-heat-row sx-heat-sumlab', byDay ? 'All days' : 'All'));
-    hourTotals.forEach((v, hr) => {
-      const b = el('span', 'sx-heat-sum');
-      const bar = el('i'); bar.style.height = `${Math.round((v / hmax) * 100)}%`; b.append(bar);
-      if (v) b.dataset.tip = `${hrs(v)} of agent time\n${hourName(hr)}–${hourName((hr + 1) % 24)}, all ${byDay ? 'days' : 'weekdays'} in range`;
-      grid.append(b);
     });
-    grid.append(el('span', 'sx-heat-tot')); // the totals column's empty foot
+    // Each hour of the day across the month.
+    grid.append(el('span', 'sx-heat-row sx-heat-totlab', 'Total'));
+    hours.forEach((x, hr) => {
+      const tot = el('span', `sx-heat-c sx-heat-tot sx-heat-htot${hr && hr % 6 === 0 ? ' g' : ''}`);
+      tot.dataset.t = String(step(x.ms, hourMax, 4));
+      tot.dataset.tip = `${hourName(hr)}–${hourName((hr + 1) % 24)}, last ${HEAT_DAYS} days\n${x.ms ? `${hrs(x.ms)} of agent time` : 'No agent work'}${x.n ? ` · ${plural(x.n, 'message')} from you` : ''}`;
+      grid.append(tot);
+    });
+    const all = sum(days, (d) => d.ms), allN = sum(days, (d) => d.n);
+    const corner = el('span', 'sx-heat-sum', all ? hrs(all).replace(' ', '') : '–');
+    corner.dataset.tip = `Last ${HEAT_DAYS} days\n${hrs(all)} of agent time${allN ? ` · ${plural(allN, 'message')} from you` : ''}`;
+    grid.append(corner);
     const wrap = el('div', 'sx-heat-wrap');
-    const scale = el('div', 'sx-heat-scale');
-    scale.append(el('span', '', 'Agent time in an hour: 0'));
-    for (let s = 0; s <= 5; s++) { const i = el('i'); i.dataset.s = String(s); scale.append(i); }
-    scale.append(el('span', '', hrs(max)));
-    const you = el('span', 'sx-heat-you', 'Your messages (bigger dot = more)');
-    scale.append(you, el('span', 'sx-heat-hint', 'Hover a square for its agents and tasks'));
-    wrap.append(grid, scale);
+    const key = el('div', 'sx-heat-scale');
+    const ramp = (attr, label) => {
+      const g = el('span', 'sx-heat-key');
+      g.append(el('span', '', label));
+      for (let s = 0; s <= 4; s++) { const i = el('i'); i.dataset[attr] = String(s); g.append(i); }
+      return g;
+    };
+    key.append(ramp('s', 'Agent time per hour'), ramp('t', 'Totals per day and hour'), el('span', 'sx-heat-you', 'Your messages'));
+    wrap.append(grid, key);
     return wrap;
   }
 
@@ -597,9 +595,9 @@
     ins.append(insightList(insights(c, m, pm)));
     out.push(ins);
 
-    const hd = heatData(c);
-    const hm = card('Who worked when', heatSummary(c, hd), 'wide');
-    if (c.runs.length || c.you.length) hm.append(heatmap(c, hd));
+    const mc = monthCut(), hd = heatData(mc);
+    const hm = card('Who worked when', heatSummary(mc, hd), 'wide');
+    hm.append(heatmap(mc, hd));
     out.push(hm);
 
     const sp = card('Shipped per day', 'Work tasks that finished, by who asked for them');
@@ -826,8 +824,13 @@
 
   function projectsTab(c, m) {
     const out = [];
-    const projects = SX.data.projects.filter((p) => SX.project === 'all' || String(p.id) === SX.project);
-    const pc = card('Projects', SX.project === 'all' ? `${projects.length} in total` : '', 'wide');
+    // All projects: only the active ones (paused or detached projects are left out, their commits too); picking one in
+    // the project filter still shows it whatever its status.
+    const allP = SX.project === 'all', paused = SX.data.projects.filter((p) => p.status !== 'active');
+    const projects = SX.data.projects.filter((p) => (allP ? p.status === 'active' : String(p.id) === SX.project));
+    const ids = new Set(projects.map((p) => p.id)), mine = (xs) => (allP ? xs.filter((x) => ids.has(x.p)) : xs);
+    c = { ...c, commits: mine(c.commits), allCommits: mine(c.allCommits) };
+    const pc = card('Projects', allP ? `${plural(projects.length, 'active project')}${paused.length ? ` · ${num(paused.length)} paused not shown` : ''}` : '', 'wide');
     const list = el('div', 'sx-models');
     for (const p of projects) {
       const runs = c.runs.filter((r) => r.p === p.id), commits = c.commits.filter((x) => x.p === p.id);
@@ -844,7 +847,7 @@
       row.append(head, facts);
       list.append(row);
     }
-    pc.append(projects.length ? list : empty('No projects yet.'));
+    pc.append(projects.length ? list : empty(allP && paused.length ? 'No active projects.' : 'No projects yet.'));
     out.push(pc);
 
     // Code size over time: running total of lines added minus removed (generated files excluded).

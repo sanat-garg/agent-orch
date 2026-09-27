@@ -63,6 +63,8 @@ before(async () => {
   const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
   const s = now / 1000;
   const pid = Number(db.prepare('INSERT INTO projects (path, name, created_at) VALUES (?, ?, ?)').run(proj, 'demo', s - 4 * 86400).lastInsertRowid);
+  // A paused project: left out of the Projects tab (unless picked in the project filter).
+  db.prepare("INSERT INTO projects (path, name, status, created_at) VALUES (?, ?, 'paused', ?)").run(path.join(dataDir, 'p', 'old'), 'old-paused', s - 9 * 86400);
   const addT = db.prepare(`INSERT INTO tasks (project_id, kind, title, prompt, status, source, origin, created_at, started_at, finished_at, agent, model, ran_agent, ran_model)
     VALUES (?, 'work', ?, 'x', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
   const addR = db.prepare(`INSERT INTO runs (task_id, purpose, outcome, agent, input_tokens, output_tokens, cache_read_tokens, num_turns, started_at, finished_at)
@@ -115,14 +117,35 @@ test('desktop: Overview leads with shipped tasks; every tab renders the seeded w
   assert.ok(await page.locator('.sx-insights li').count() >= 3, 'insights');
   assert.match(await page.locator('.sx-insights').textContent(), /5-hour windows peaked at 95% on average before resetting \(4 of 4 reached 90%\+\)/);
   assert.ok(await page.locator('.sx-heat-c .msg').count() >= 1, 'your messages on the heatmap');
-  // The heatmap and bars carry hover details.
+  // Who worked when: always the last 30 days (not the range picker, not trimmed to the first active day), with blue
+  // total squares for each day (end of row) and each hour of the day (bottom row), and details on hover.
+  const heat = page.locator('.sx-card', { hasText: 'Who worked when' });
+  assert.match(await heat.locator('.sx-card-sub').textContent(), /^Last 30 days · \d+(\.\d)? (h|min) of agent work on \d+ days?( · \d+% while you were away)?$/);
+  assert.equal(await heat.locator('.sx-heat-row:not(.sx-heat-totlab)').count(), 30, 'a month of rows');
+  assert.equal(await heat.locator('.sx-heat-dtot').count(), 30, 'a total square per day');
+  assert.equal(await heat.locator('.sx-heat-htot').count(), 24, 'a total square per hour of day');
+  const dayTips = await heat.locator('.sx-heat-dtot').evaluateAll((ds) => ds.map((d) => d.dataset.tip));
+  assert.ok(dayTips.some((t) => /\n.+ of agent time · \d+ messages? from you$/.test(t)), dayTips.join(' | '));
+  assert.ok(dayTips.filter((t) => /No agent work/.test(t)).length >= 20, 'quiet days are shown, not skipped');
+  const colors = await heat.evaluate((h) => [getComputedStyle(h.querySelector('.sx-heat-dtot:not([data-t="0"])')).backgroundColor, getComputedStyle(h.querySelector('.sx-heat-c:not(.sx-heat-tot):not([data-s="0"])')).backgroundColor]);
+  assert.notEqual(colors[0], colors[1], 'totals use their own color');
+  assert.match(await heat.locator('.sx-heat-sum').textContent(), /^\d+(\.\d)?(h|min)$/);
+  assert.equal(await heat.locator('.sx-heat-day, .msg.m, .msg.l').count(), 0, 'no day dots or big message dots');
+  // The range picker doesn't change it.
+  await page.locator('#sxRange [data-range="24h"]').click();
+  assert.equal(await page.locator('.sx-card', { hasText: 'Who worked when' }).locator('.sx-heat-dtot').count(), 30);
+  await page.locator('#sxRange [data-range="all"]').click();
+  const tip = await heat.locator('.sx-heat-c[data-tip]').evaluateAll((cs) => cs.map((c) => c.dataset.tip).find((t) => /of agent time/.test(t)));
+  assert.match(tip, /^.+, \d+ (AM|PM)–\d+ (AM|PM)\n.+ of agent time.*\n(Claude|Codex).+\n#\d+ /, tip);
+  assert.doesNotMatch(await heat.textContent(), /h\/h/, 'no "h/h" unit');
   await page.locator('.sx-heat-c[data-tip]').first().hover();
   assert.equal(await page.locator('#sxTip').isVisible(), true);
 
   await tab(page, 'you');
   assert.equal(await page.locator('.sx-tile .sx-value').first().textContent(), '12');
   assert.match(await page.locator('.sx-words').textContent(), /sidebar/);
-  assert.match(await page.locator('.sx-quote').textContent(), /round 2-3/, 'where it began: your first message');
+  assert.equal(await page.locator('.sx-quote').count(), 0);
+  assert.doesNotMatch(await page.locator('#sxBody').textContent(), /Where it began/, 'removed');
 
   await tab(page, 'agents');
   const models = await page.locator('.sx-table .sx-tr:not(.sx-th) .sx-td-name strong').allTextContents();
@@ -131,6 +154,9 @@ test('desktop: Overview leads with shipped tasks; every tab renders the seeded w
 
   await tab(page, 'projects');
   assert.match(await page.locator('.sx-model-head').first().textContent(), /demo/);
+  assert.equal(await page.locator('.sx-model-head').count(), 1, 'only active projects');
+  assert.doesNotMatch(await page.locator('#sxBody').textContent(), /old-paused/);
+  assert.match(await page.locator('.sx-card-sub').first().textContent(), /^1 active project · 1 paused not shown$/);
 
   // Ranges re-slice: nothing in the seeded data is in the last 24 hours but the newest few tasks.
   await tab(page, 'overview');

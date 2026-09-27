@@ -123,6 +123,7 @@
     </div>
 
     <section class="chat" id="chatView">
+      <div class="drop-zone" id="dropZone" hidden aria-hidden="true"><div>Drop images or files to attach</div></div>
       <div class="scroller" id="scroller">
         <div class="messages" id="messages"></div>
         <div class="working" id="working" hidden>
@@ -147,9 +148,15 @@
       </div>
       <form class="composer" id="composer">
         <div class="box">
+          <!-- Attachments waiting to go with the next message (app.js ATT): images as thumbnails, other files as chips. -->
+          <div class="att-tray" id="attTray" role="list" aria-label="Attachments" hidden></div>
           <textarea id="input" rows="1" placeholder="Ask Claude to build something…" autocomplete="off" spellcheck="true"></textarea>
           <div class="controls">
             <div class="left">
+              <button type="button" class="chip att-btn" id="attBtn" aria-label="Attach images or files" title="Attach images or files (you can also paste or drop them)">
+                <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M20.5 11.5 12 20a5.5 5.5 0 0 1-7.8-7.8l8.9-8.9a3.7 3.7 0 0 1 5.2 5.2l-8.9 8.9a1.8 1.8 0 0 1-2.6-2.6l8.2-8.2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </button>
+              <input type="file" id="attInput" multiple hidden tabindex="-1">
               <!-- Reserved for a future per-chat directory selector.
               <button type="button" class="chip project-chip" id="folderBtn" aria-haspopup="dialog">
                 <svg viewBox="0 0 24 24" width="15" height="15"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
@@ -487,9 +494,9 @@
         </div>
       </div>
       <div class="m-grid" id="mGrid"></div>
-      <div class="m-card m-top">
+      <div class="m-card m-top" id="mTopCard">
         <h3>Top processes</h3>
-        <table class="m-table" id="mTop"><thead><tr><th>Process</th><th class="num">CPU</th><th class="num">Memory</th></tr></thead><tbody></tbody></table>
+        <div class="m-top-scroll"><table class="m-table" id="mTop"><thead><tr><th>Process</th><th class="num">CPU</th><th class="num">Memory</th></tr></thead><tbody></tbody></table></div>
       </div>
       <section class="mc-sec" aria-labelledby="mcTitle">
         <div class="mc-head"><h3 id="mcTitle">Machines</h3><button class="btn small" id="addMachine" type="button">Add machine</button></div>

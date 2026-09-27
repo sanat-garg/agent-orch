@@ -702,7 +702,6 @@ code, pre, kbd { font-family: var(--mono); }
 .m-head > div { flex: 1; min-width: 0; }
 .m-head h2 { margin: 0; font-size: 22px; letter-spacing: -0.01em; }
 .m-sub { margin: 3px 0 0; color: var(--muted); font-size: 13px; }
-.m-top { margin-top: 12px; }
 .u-row { margin: 4px 0 14px; }
 .u-row .u-top { display: flex; justify-content: space-between; gap: 8px; font-size: 13.5px; }
 .u-row .u-top b { font-variant-numeric: tabular-nums; }
@@ -1120,6 +1119,15 @@ details.dr-more[open] > summary { margin-bottom: 12px; }
 @keyframes fade { from { opacity: 0; } }
 @keyframes rise { from { opacity: 0; transform: translateY(8px) scale(.99); } }
 .m-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+/* Top processes: two cards wide in the metric grid; its list scrolls inside the row the cards set (contain: size keeps
+   it from stretching them). One column on narrow screens, where it takes the full width at its natural height. */
+.m-top { display: flex; flex-direction: column; grid-column: 1 / -1; }
+.m-top .m-table td { padding: 5px 0; }
+@media (min-width: 801px) {
+  .m-grid > .m-top { grid-column: span 2; }
+  .m-top-scroll { flex: 1; min-height: 150px; overflow-y: auto; overscroll-behavior: contain; contain: size; }
+  .m-top-scroll thead th { position: sticky; top: 0; background: var(--panel); }
+}
 .m-card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px; position: relative; min-width: 0; }
 .m-card h3 { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--muted); }
 .tile-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
@@ -1254,6 +1262,46 @@ pre.copy-cmd:hover::after { opacity: .7; }
 .copy-cmd.copied, [data-copy].copied { outline: 1px solid var(--accent); outline-offset: 1px; }
 .copy-tip { position: fixed; z-index: 1000; transform: translateX(-50%); padding: 3px 8px; border-radius: 6px; background: var(--text); color: var(--bg); font-size: 12px; pointer-events: none; animation: copy-tip 1.2s ease forwards; }
 @keyframes copy-tip { 0%, 75% { opacity: 1; } 100% { opacity: 0; } }
+
+/* Attachments (app.js ATT): the paperclip chip, the tray above the box (thumbnails and file chips, each removable,
+   a spinner while uploading), the drop veil over the chat, and a sent message's attachments inside its bubble. */
+.att-btn { padding: 0 8px; }
+.att-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.att-tray { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 12px 0; }
+.att-item { position: relative; flex: none; display: flex; align-items: center; gap: 8px; height: 56px; border: 1px solid var(--border); border-radius: 10px; background: var(--raised); }
+.att-item.img { width: 56px; overflow: hidden; }
+.att-item.img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.att-item.file { max-width: 220px; padding: 0 30px 0 10px; }
+.att-item.error { border-color: var(--danger); }
+.att-item.uploading img, .att-item.uploading .att-text { opacity: .55; }
+.att-ico { flex: none; display: grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; background: var(--panel); color: var(--muted); }
+.att-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.att-name { font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.att-size { font-size: 11.5px; color: var(--muted); }
+.att-item.error .att-size { color: var(--danger); }
+.att-x { position: absolute; top: 3px; right: 3px; display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%;
+  background: color-mix(in srgb, var(--text) 72%, transparent); color: var(--bg); cursor: pointer; }
+.att-x:hover { background: var(--text); }
+.att-x:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.att-spin { position: absolute; left: 50%; top: 50%; width: 18px; height: 18px; margin: -9px 0 0 -9px; border: 2px solid var(--border-strong); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+.att-item.file .att-spin { left: auto; right: 34px; }
+.att-bad { position: absolute; left: 4px; bottom: 4px; display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--danger); color: #fff; font-size: 12px; font-weight: 700; }
+.drop-zone { position: absolute; inset: 8px; z-index: 30; display: grid; place-items: center; border: 2px dashed var(--accent); border-radius: 16px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent); color: var(--text); font-size: 16px; font-weight: 600; pointer-events: none; }
+.msg.user .msg-atts { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; margin-top: 10px; white-space: normal; }
+.msg.user.atts-only .msg-atts { margin-top: 0; }
+.msg.user .msg-atts .shots { --thumb-w: 132px; --thumb-h: 92px; margin: 0; }
+.msg.user .msg-atts .shot img { object-position: center; }
+.att-file { display: flex; align-items: center; gap: 8px; max-width: 240px; padding: 6px 10px 6px 6px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); color: inherit; text-decoration: none; }
+.att-file:hover { border-color: var(--accent); }
+@media (max-width: 800px) { .msg.user .msg-atts .shot { width: 116px; } .msg.user .msg-atts .shot button { height: 80px; aspect-ratio: auto; } }
+/* Phones: one row of attachments that scrolls sideways, so the box keeps its height for typing. */
+@media (max-width: 600px) {
+  .att-tray { flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; padding-bottom: 2px; }
+  .att-tray::-webkit-scrollbar { display: none; }
+  .att-item.file { max-width: 180px; }
+}
+@media (prefers-reduced-motion: reduce) { .att-spin { animation-duration: 2s; } }
 
 /* screenshots: one fixed 16:10 thumbnail size for the chat and the task drawer (.shots grids); click opens the lightbox */
 .shots { --thumb-w: 160px; --thumb-h: 100px; display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 10px; }

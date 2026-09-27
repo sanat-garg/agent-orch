@@ -1040,7 +1040,8 @@ function renderEvent(ev, replay) {
   switch (ev.t) {
     case 'user': {
       endLive();
-      state.lastUser = add(el('div', 'msg user', ev.text));
+      state.lastUser = add(el('div', 'msg user' + (ev.attachments?.length ? ` has-atts${ev.text ? '' : ' atts-only'}` : ''), ev.text));
+      if (ev.attachments?.length) state.lastUser.append(attachmentList(ev.attachments));
       if (!replay) { stick = true; scrollDown(true); }
       break;
     }
@@ -1447,10 +1448,126 @@ function autosize() {
   input.style.height = Math.min(input.scrollHeight, innerHeight * 0.4) + 'px';
 }
 function updateSendButton() {
-  const stop = state.busy && !input.value.trim();
+  const has = !!input.value.trim() || ATT.list.length > 0;
+  const stop = state.busy && !has;
   $('send').classList.toggle('stop', stop);
   $('send').setAttribute('aria-label', stop ? 'Stop' : 'Send');
-  $('send').disabled = !stop && !input.value.trim();
+  $('send').disabled = !stop && !has;
+}
+
+// ---------- attachments (uploads.mjs): the paperclip, paste or drop; many at once, images and any other file ----------
+// Each file uploads as soon as it is added (POST /api/uploads) and waits in the tray above the box; the message then
+// names them by id. The server copies them into the project and tells the agent where they are (Claude and Codex also
+// see images directly), so they work the same in a chat and in Orchestrator Mode.
+const ATT = { list: [], seq: 0, max: 10, maxBytes: 25 * 1024 * 1024 };
+function addAttachments(files) {
+  let skipped = 0;
+  for (const f of files) {
+    if (ATT.list.length >= ATT.max) { skipped++; continue; }
+    if (!f.size) { toast(`${f.name || 'That file'} is empty`, { kind: 'error' }); continue; }
+    if (f.size > ATT.maxBytes) { toast(`${f.name} is too large (max 25 MB)`, { kind: 'error' }); continue; }
+    // A pasted screenshot arrives as "image.png": give it a name that says what it is.
+    const name = f.name && f.name !== 'image.png' ? f.name : `pasted-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.${(f.type.split('/')[1] || 'png').replace('jpeg', 'jpg')}`;
+    const a = { key: ++ATT.seq, name, size: f.size, type: f.type, status: 'uploading', preview: /^image\/(png|jpe?g|gif|webp)$/.test(f.type) ? URL.createObjectURL(f) : null };
+    ATT.list.push(a);
+    uploadAttachment(a, f);
+  }
+  if (skipped) toast(`Up to ${ATT.max} attachments per message; ${skipped} left out`, { kind: 'error' });
+  renderAttTray();
+  updateSendButton();
+}
+async function uploadAttachment(a, f) {
+  try {
+    const r = await fetch('/api/uploads', { method: 'POST', body: f,
+      headers: { 'Content-Type': f.type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(a.name) } });
+    if (r.status === 401) { location.href = '/login'; return; }
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `Upload failed (${r.status})`);
+    Object.assign(a, { status: 'ready', id: d.id, image: d.image || null });
+  } catch (e) { Object.assign(a, { status: 'error', error: e.message }); }
+  if (ATT.list.includes(a)) { renderAttTray(); updateSendButton(); }
+}
+function removeAttachment(a) {
+  ATT.list = ATT.list.filter((x) => x !== a);
+  if (a.preview) URL.revokeObjectURL(a.preview);
+  renderAttTray();
+  updateSendButton();
+}
+function clearAttachments() {
+  for (const a of ATT.list) if (a.preview) URL.revokeObjectURL(a.preview);
+  ATT.list = [];
+  renderAttTray();
+  updateSendButton();
+}
+const FILE_ICON = '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M14 3v5h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>';
+function renderAttTray() {
+  const tray = $('attTray');
+  tray.hidden = !ATT.list.length;
+  tray.replaceChildren(...ATT.list.map((a) => {
+    const item = el('div', `att-item ${a.preview ? 'img' : 'file'} ${a.status}`);
+    item.setAttribute('role', 'listitem');
+    item.title = a.status === 'error' ? `${a.name}: ${a.error}` : `${a.name} · ${fmtBytes(a.size)}`;
+    if (a.preview) { const im = el('img'); im.src = a.preview; im.alt = a.name; item.append(im); }
+    else {
+      const ico = el('span', 'att-ico'); ico.innerHTML = FILE_ICON;
+      const txt = el('span', 'att-text');
+      txt.append(el('span', 'att-name', a.name), el('span', 'att-size', a.status === 'error' ? 'Upload failed' : fmtBytes(a.size)));
+      item.append(ico, txt);
+    }
+    if (a.status === 'uploading') item.append(el('span', 'att-spin'));
+    if (a.status === 'error' && a.preview) item.append(el('span', 'att-bad', '!'));
+    const x = el('button', 'att-x');
+    x.type = 'button';
+    x.setAttribute('aria-label', `Remove ${a.name}`);
+    x.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>';
+    x.onclick = () => { removeAttachment(a); input.focus(); };
+    item.append(x);
+    return item;
+  }));
+}
+$('attBtn').addEventListener('click', () => $('attInput').click());
+$('attInput').addEventListener('change', (e) => { addAttachments([...e.target.files]); e.target.value = ''; input.focus(); });
+// Pasting a copied image or file attaches it; pasting text (even with a picture of it alongside) stays text.
+input.addEventListener('paste', (e) => {
+  const files = [...(e.clipboardData?.files || [])];
+  if (!files.length || e.clipboardData.types.includes('text/plain')) return;
+  e.preventDefault();
+  addAttachments(files);
+});
+// Drop anywhere on the chat: a veil says where it goes; only file drags count (not text or links being moved).
+{
+  let depth = 0;
+  const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+  const view = $('chatView'), zone = $('dropZone');
+  view.addEventListener('dragenter', (e) => { if (!hasFiles(e)) return; e.preventDefault(); depth++; zone.hidden = false; });
+  view.addEventListener('dragover', (e) => { if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
+  view.addEventListener('dragleave', (e) => { if (!hasFiles(e)) return; if (--depth <= 0) { depth = 0; zone.hidden = true; } });
+  view.addEventListener('drop', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    depth = 0;
+    zone.hidden = true;
+    addAttachments([...e.dataTransfer.files]);
+    input.focus();
+  });
+}
+// A sent message's attachments in the chat log: images as thumbnails (the lightbox pages through them), files as links.
+function attachmentList(list) {
+  const wrap = el('div', 'msg-atts');
+  const imgs = list.filter((a) => a.image);
+  if (imgs.length) wrap.append(shotGrid(imgs.map((a) => ({ id: a.image.id, name: a.name, w: a.image.w, h: a.image.h }))));
+  for (const a of list.filter((x) => !x.image)) {
+    const link = el('a', 'att-file');
+    link.href = `/api/uploads/${encodeURIComponent(a.id)}`;
+    link.download = a.name;
+    link.title = a.path ? `Saved in the project: ${a.path}` : a.name;
+    const ico = el('span', 'att-ico'); ico.innerHTML = FILE_ICON;
+    const txt = el('span', 'att-text');
+    txt.append(el('span', 'att-name', a.name), el('span', 'att-size', fmtBytes(a.size || 0)));
+    link.append(ico, txt);
+    wrap.append(link);
+  }
+  return wrap;
 }
 input.addEventListener('input', () => {
   autosize();
@@ -1474,15 +1591,19 @@ input.addEventListener('keydown', (e) => {
 $('composer').addEventListener('submit', async (e) => {
   e.preventDefault();
   const text = input.value.trim();
-  if (!text) {
+  if (!text && !ATT.list.length) {
     if (state.busy) send({ t: 'interrupt', cid: state.cid });
     return;
   }
+  if (ATT.list.some((a) => a.status === 'uploading')) { toast('Still uploading your attachments. Send again in a moment.'); return; }
+  const failed = ATT.list.filter((a) => a.status === 'error');
+  if (failed.length) { toast(`${failed.map((a) => a.name).join(', ')} didn't upload. Remove ${failed.length === 1 ? 'it' : 'them'} or add ${failed.length === 1 ? 'it' : 'them'} again.`, { kind: 'error' }); return; }
+  const attachments = ATT.list.map((a) => a.id);
   if (!state.cid) {
     try {
       const d = state.draft;
       const c = await api('/api/convos', 'POST', d.type === 'new'
-        ? { newProject: { name: d.name, fromText: text }, mode: state.draftMode }
+        ? { newProject: { name: d.name, fromText: text || ATT.list[0]?.name.replace(/\.[^.]+$/, '') || '' }, mode: state.draftMode }
         : { folder: d.path, mode: state.draftMode });
       state.draft = { type: 'new', name: '' }; // the next new chat starts its own project again
       if (!state.convos.find((x) => x.id === c.id)) state.convos.unshift(c);
@@ -1506,7 +1627,7 @@ $('composer').addEventListener('submit', async (e) => {
       return;
     }
   }
-  if (!send({ t: 'send', cid: state.cid, text })) {
+  if (!send({ t: 'send', cid: state.cid, text, ...(attachments.length && { attachments }) })) {
     // Keep the text (under this chat's draft key, which reconnect restores) rather than lose it.
     store.set('cw.draft.' + state.cid, input.value);
     add(el('div', 'notice error', 'Not connected, reconnecting. Your message was kept.'));
@@ -1515,6 +1636,7 @@ $('composer').addEventListener('submit', async (e) => {
   input.value = '';
   store.set('cw.draft.' + state.cid, '');
   store.set('cw.draft.new', '');
+  clearAttachments();
   autosize();
   updateSendButton();
 });
@@ -2913,6 +3035,7 @@ function buildMetrics() {
     tile('net', 'Network', { pair: [['rx', 'Download'], ['tx', 'Upload']], spark: [(h) => h.rx + h.tx, fmtRate] }),
     tile('io', 'Disk activity', { pair: [['dr', 'Read'], ['dw', 'Write']], spark: [(h) => h.dr + h.dw, fmtRate] }),
     tile('load', 'Load average'),
+    $('mTopCard'), // two cards wide, in the grid right after the six metric cards
   );
   let resizeTimer;
   addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => M.draws.forEach((d) => d()), 100); });

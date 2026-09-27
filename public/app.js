@@ -773,6 +773,7 @@ function openConvo(cid) {
   updateFolderChip();
   updateHeader();
   renderConvoList();
+  window.Ext?.renderChip();
   send({ t: 'open', cid });
   if ($('app').dataset.view === 'files') window.FilesView?.show(); // Files follows the chat's project
   else $('input').focus({ preventScroll: true });
@@ -1491,6 +1492,8 @@ $('composer').addEventListener('submit', async (e) => {
       if (pickVal(parsePick(state.draftModel)) !== 'claude|') send({ t: 'set_model', cid: c.id, ...parsePick(state.draftModel), ...(effort && { effort }) });
       else if (effort) await api(`/api/convos/${c.id}/effort`, 'PUT', { effort }).then((r) => (c.effort = r.effort ?? null));
       if (state.draftFallbacks?.length) await api(`/api/convos/${c.id}/fallbacks`, 'PUT', { fallbacks: state.draftFallbacks }).then((r) => (c.fallbacks = r.fallbacks));
+      const persona = window.Ext?.draftPersona();
+      if (persona) await api(`/api/convos/${c.id}/persona`, 'PUT', { persona }).then((r) => (c.persona = r.persona ?? null)).catch(() => {});
     } catch (err) {
       const n = el('div', 'notice error', err.message);
       if (/github/i.test(err.message)) {
@@ -1705,10 +1708,16 @@ function chatFallbacks() {
     },
     confirmedOf: (c) => c.fallbacks ?? null };
 }
-// Reflection fallbacks (Settings): one list for every project's reflection-queued tasks (PUT /api/orch/reflect-settings).
+// Reflection fallbacks (Settings, PUT /api/orch/reflect-settings): one list for every project. Reflect tasks move down it
+// when their model is at its limit, and the work they queue snapshots it. Its primary is the reflection model: the
+// Settings choice, else what a reflect task routes to (a 'reflect' route, else the chat's model).
+function reflectPrimary() {
+  const r = O.state?.reflect || {};
+  return r.agent ? { agent: r.agent, model: r.model || '' } : O.project?.reflect_route || O.project?.work_route || { agent: 'claude', model: '' };
+}
 function reflectFallbacks() {
   const r = () => O.state?.reflect || {};
-  return { what: 'reflection-queued tasks', primary: O.project?.work_route || { agent: 'claude', model: '' },
+  return { what: 'reflection tasks', primary: reflectPrimary(),
     list: () => r().fallbacks ?? null,
     url: '/api/orch/reflect-settings',
     apply: (list) => { if (O.state) O.state.reflect = { ...r(), fallbacks: list }; renderReflectBtn(); },
@@ -1796,6 +1805,8 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('fbMo
 // A new chat keeps it as its draft and sends it with its first set_model. Tasks read the chat's effort live when a session
 // starts (orchestrator taskEffort), so the toast says when it takes effect.
 const EFFORT_ORDER = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+// Levels read in title case wherever they are shown ('High', 'X-High'); the API and saved chats keep the lowercase ids.
+const effortName = (l) => (l === 'xhigh' ? 'X-High' : l ? l[0].toUpperCase() + l.slice(1) : 'Default');
 const EFFORT_HINT = {
   low: 'Lightest and fastest. Uses the least of your limit.',
   medium: 'Quick, with some thinking. Fine for routine edits.',
@@ -1836,11 +1847,11 @@ function renderEffChip() {
   chip.hidden = !levels.length;
   if (!levels.length) return;
   const shown = effort ? clampEffortTo(levels, effort) : null;
-  $('effVal').textContent = shown || 'default';
+  $('effVal').textContent = effortName(shown);
   chip.classList.toggle('none', !shown);
-  chip.setAttribute('aria-label', `Effort: ${shown || 'default'}`);
+  chip.setAttribute('aria-label', `Effort: ${effortName(shown)}`);
   const def = defaultEffort(agent, model);
-  chip.title = shown ? `Reasoning effort: ${shown}. ${effortHint(levels, shown)}` : `Reasoning effort: the model's default${def ? ` (${def})` : ''}`;
+  chip.title = shown ? `Reasoning effort: ${effortName(shown)}. ${effortHint(levels, shown)}` : `Reasoning effort: the model's default${def ? ` (${effortName(def)})` : ''}`;
 }
 function renderEff() {
   renderEffChip();
@@ -1885,29 +1896,30 @@ function syncEffMenu(preview) {
   range.value = String(levels.indexOf(at));
   range.classList.toggle('is-default', !level);
   range.style.setProperty('--fill', `${levels.length > 1 ? (levels.indexOf(at) / (levels.length - 1)) * 100 : 0}%`);
-  range.setAttribute('aria-valuetext', level ? `${level}. ${effortHint(levels, level)}` : `Default, ${at}`);
-  range.title = level ? effortHint(levels, level) : `The model's own setting: ${at}`;
+  range.setAttribute('aria-valuetext', level ? `${effortName(level)}. ${effortHint(levels, level)}` : `Default, ${effortName(at)}`);
+  range.title = level ? effortHint(levels, level) : `The model's own setting: ${effortName(at)}`;
   $('effDefault').setAttribute('aria-pressed', String(!level));
-  $('effDefault').title = def ? `The model's own setting: ${def}` : "The model's own setting";
+  $('effDefault').title = def ? `The model's own setting: ${effortName(def)}` : "The model's own setting";
   const runsAs = level && clampEffortTo(ok, level);
   $('effNote').hidden = !runsAs || runsAs === level;
-  if (runsAs && runsAs !== level) $('effNote').textContent = `${modelName(agent, model)} runs this as ${runsAs}`;
+  if (runsAs && runsAs !== level) $('effNote').textContent = `${modelName(agent, model)} runs this as ${effortName(runsAs)}`;
   const ticks = $('effTicks');
   ticks.textContent = '';
   ticks.style.setProperty('--n', String(Math.max(1, levels.length - 1)));
   levels.forEach((l, i) => {
-    const b = el('button', 'eff-tick' + (l === at ? ' on' : '') + (ok.includes(l) ? '' : ' eff-off'), l);
+    const b = el('button', 'eff-tick' + (l === at ? ' on' : '') + (ok.includes(l) ? '' : ' eff-off'), effortName(l));
+    b.dataset.level = l;
     b.type = 'button';
     b.tabIndex = -1; // the slider has the keyboard; ticks are for pointers
     b.style.setProperty('--i', String(i));
-    b.title = ok.includes(l) ? effortHint(levels, l) : `${modelName(agent, model)} runs this as ${clampEffortTo(ok, l)}`;
+    b.title = ok.includes(l) ? effortHint(levels, l) : `${modelName(agent, model)} runs this as ${effortName(clampEffortTo(ok, l))}`;
     b.onclick = () => { effSave(l); range.focus(); };
     ticks.append(b);
   });
 }
 function effToast(level) {
   EF.toast?.close?.();
-  EF.toast = toast(`Effort set to ${level || 'the model default'}. Queued tasks use it when they start; running tasks switch at their next session.`);
+  EF.toast = toast(`Effort set to ${level ? effortName(level) : 'the model default'}. Queued tasks use it when they start; running tasks switch at their next session.`);
 }
 // Optimistic: shown at once; PUTs run in order and only the latest one's result speaks (toast, or rollback on error).
 function effSave(level) {
@@ -2619,6 +2631,7 @@ function onServer(msg) {
   if (msg.t === 'cluster') { if (!$('serverModal').hidden) loadMachines(); if (!$('connsModal').hidden) loadConnNodes(); return checkPairing(); }
   if (msg.t === 'models') return api('/api/agents').then((d) => { AGENT_LIST = d.agents || []; renderAgentPicker(); }).catch(() => {});
   if (msg.t === 'status') { upd.pending = !!msg.restartPending; return renderUpdateBanner(); }
+  if (msg.t === 'ext') return window.Ext?.changed(msg.kind); // skills/MCP/subagents/personas changed (ext.js)
   if (msg.t === 'convos') {
     const drChat = O.detail?.project?.convo_id, effortOf = () => state.convos.find((c) => c.id === drChat)?.effort ?? null;
     const drEffort = drChat ? effortOf() : null;
@@ -2631,6 +2644,7 @@ function onServer(msg) {
     renderFbChip();
     fbRender();
     renderEff();
+    window.Ext?.renderChip(); // the persona chip follows the chat's persona
     if (drChat && O.drawer && effortOf() !== drEffort) renderDrawer(true); // its Effort row follows the chat's live effort
     renderUsage();
     if (!state.cid) splash.need.delete('history'); // no chat open (or it was deleted): nothing more to wait for
@@ -3103,7 +3117,7 @@ function renderUsage(fresh = false) {
     row.title = [w?.tip, w?.resetsAt ? fmtReset(w.resetsAt) : ''].filter(Boolean).join('\n');
   });
   let note;
-  if (id === 'claude' && !u?.updatedAt) note = 'Press refresh to check plan limits';
+  if (id === 'claude' && !u?.updatedAt) note = 'Checking plan limits…';
   else if (!u?.available) note = id === 'claude'
     ? (u?.error ? `Couldn't read limits: ${u.error}` : 'Plan limits unavailable')
     : usageSlides.error ? "Couldn't refresh limits" : limitsHidden(id) ? 'Limits not exposed by CLI' : 'No current limits reported by this agent';
@@ -3129,7 +3143,7 @@ function renderUsageAge() {
   if (!u?.updatedAt) { blurSwap($('usAge'), ''); return; }
   const m = Math.floor((Date.now() - u.updatedAt) / 60e3);
   blurSwap($('usAge'), m < 1 ? 'just now' : `${m}m ago`);
-  $('usAge').title = `Checked ${new Date(u.updatedAt).toLocaleTimeString()}. Updates when you press refresh.`;
+  $('usAge').title = `Checked ${new Date(u.updatedAt).toLocaleTimeString()}. ${usageSlides.agent === 'claude' ? 'Updates every 5 seconds.' : 'Updates when you press refresh.'}`;
 }
 let refreshGuard;
 function setRefreshing(on) {
@@ -3163,8 +3177,10 @@ function onMetrics(msg) {
     M.data = msg.d;
   } else if (msg.t === 'usage') {
     M.usage = msg.usage;
+    // Auto-refresh lands every 5 s: only a refresh the owner pressed replays the numbers' swap animation.
+    const pressed = $('usRefresh').classList.contains('spin');
     setRefreshing(false);
-    renderUsage(true);
+    renderUsage(pressed);
     return;
   }
   renderMini();
@@ -4032,40 +4048,16 @@ function renderSettings() {
   $('stProject').hidden = !p;
   if (!p) return;
   $('stProjectTitle').textContent = `This project · ${p.path.split('/').pop()}`;
-  $('stPerpetual').checked = p.perpetual;
-  const ids = rankedProjectIds(), at = ids.indexOf(p.id) + 1;
-  $('stRank').textContent = at ? `#${at} of ${ids.length}` : '';
-  const routes = $('stRoutes');
-  routes.textContent = '';
-  const head = el('span', 'st-text');
-  head.append(el('strong', '', 'Routes'), el('small', '', p.routes?.length ? 'Send matching tasks to an agent' : 'None yet. Ask in chat, e.g. "use codex for tests"'));
-  routes.append(head);
-  for (const r of p.routes || []) {
-    const row = el('div', 'st-route');
-    const what = el('span', '', `"${r.match}" → ${[r.agent, r.model].filter(Boolean).join(' · ')}`);
-    what.append(el('small', '', r.scope === 'global' ? 'all projects' : 'this project'));
-    const ag = AGENT_LIST.find((a) => a.id === r.agent);
-    if (ag && ag.id !== 'claude' && (!ag.available || ag.loggedIn === false)) {
-      const hint = el('small', '', `${ag.available ? 'not signed in' : 'not installed'}, falls back to Claude · `);
-      const go = el('button', 'link-btn inline', ag.available ? 'Sign in' : 'Connections');
-      go.type = 'button';
-      go.onclick = () => { closeSettings(); openConnections(ag.id); };
-      hint.append(go);
-      what.append(hint);
-    }
-    const del = el('button', 'btn small danger', 'Delete');
-    del.type = 'button';
-    del.onclick = () => { if (confirm(`Delete the routing rule "${r.match}"${r.scope === 'global' ? ' for all projects' : ''}?`)) orchProject({ removeRoute: r.id }); };
-    row.append(what, del);
-    routes.append(row);
-  }
+  // Never overwrite what the owner is typing (renderSettings runs on every state push).
+  if (document.activeElement !== $('stDirection') && !DIR.timer && !DIR.saving) { $('stDirection').value = p.reflect_direction || ''; fitDirection(); }
 }
 // Reflection model: every discovered model of a signed-in agent; '' = routes, else Claude. Not rebuilt while open.
 function renderReflectModel() {
   const sel = $('stReflectModel');
   if (document.activeElement === sel) return;
   const r = O.state?.reflect || {}, cur = r.agent ? `${r.agent}\n${r.model || ''}` : '';
-  sel.replaceChildren(new Option('Default (routes, else Claude)', ''));
+  // The default names what it resolves to for the open project (a 'reflect' route, else the chat's model).
+  sel.replaceChildren(new Option(O.project?.reflect_route ? `Default · ${fbName(O.project.reflect_route)}` : "Default (the chat's model)", ''));
   for (const a of AGENT_LIST) {
     if (!a.models?.length || !a.available || a.loggedIn === false) continue;
     const g = document.createElement('optgroup');
@@ -4086,7 +4078,34 @@ $('stReflectModel').addEventListener('change', async (e) => {
   renderSettings();
 });
 $('stParallel').addEventListener('change', (e) => saveParallel({ parallelTasks: Number(e.target.value) }));
-$('stPerpetual').addEventListener('change', (e) => orchProject({ perpetual: e.target.checked }));
+// Reflection direction (per project, optional): saved as you type (debounced) and on blur; blank = the reflector decides.
+const DIR = { timer: null, saving: false };
+// The box grows with its text (CSS caps it; past that it scrolls).
+function fitDirection() { const b = $('stDirection'); b.style.height = 'auto'; b.style.height = `${b.scrollHeight + 2}px`; }
+async function saveDirection() {
+  clearTimeout(DIR.timer); DIR.timer = null;
+  const p = O.project, text = $('stDirection').value.trim();
+  if (!p || text === (p.reflect_direction || '')) return;
+  DIR.saving = true;
+  $('stDirSaved').textContent = 'Saving…';
+  try {
+    await api(`/api/orch/project/${p.id}`, 'POST', { reflectDirection: text });
+    if (O.project?.id === p.id) O.project.reflect_direction = text || null;
+    $('stDirSaved').textContent = text ? 'Saved. The next reflection follows it.' : 'Cleared. Reflection decides on its own.';
+  } catch (e) { $('stDirSaved').textContent = `Couldn't save: ${e.message}`; }
+  finally { DIR.saving = false; }
+}
+$('stDirection').addEventListener('input', () => { fitDirection(); clearTimeout(DIR.timer); DIR.timer = setTimeout(saveDirection, 900); $('stDirSaved').textContent = ''; });
+$('stDirection').addEventListener('blur', () => { if (DIR.timer) saveDirection(); });
+// A preset fills an empty box, or adds a line to what's there (once).
+document.querySelector('.st-presets').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-dir]');
+  if (!b) return;
+  const box = $('stDirection'), cur = box.value.trim(), add = b.dataset.dir;
+  if (!cur.includes(add)) box.value = cur ? `${cur}\n${add}` : add;
+  fitDirection();
+  saveDirection();
+});
 // Reflection fallbacks: the same sheet as a chat's, saved for every project (no fetch).
 $('stReflectBtn').addEventListener('click', () => openFallbacks(reflectFallbacks(), $('stReflectBtn')));
 
@@ -4442,7 +4461,7 @@ function renderOutput(container, runs, isRunning) {
   runs.forEach((run, ri) => {
     const prev = runs[ri - 1];
     const how = ri === 0 ? 'Started' : prev?.outcome === 'ok' ? 'Continued' : ['error', 'max_turns', 'timeout'].includes(prev?.outcome) ? 'Retried' : 'Resumed';
-    const effort = effortLevels(run.agent).length ? ` · effort ${run.effort || 'default'}` : '';
+    const effort = effortLevels(run.agent).length ? ` · ${effortName(run.effort)} effort` : '';
     container.append(el('div', 'out-run', `${how} ${fmtClock(run.started_at)}${effort}${run.outcome ? ` · ${OUTCOME_TEXT[run.outcome] || run.outcome}` : ''}`));
     const results = new Map(run.entries.filter((e) => e.k === 'result').map((e) => [e.id, e]));
     let group = null, shots = null;

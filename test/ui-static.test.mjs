@@ -105,7 +105,14 @@ test('the sidebar gear opens Settings: sound + MP3 upload, max parallel tasks, r
   assert.match(side, /id="settingsBtn"[^>]*aria-label="Settings"/);
   const sheet = indexHtml.slice(indexHtml.indexOf('id="settingsModal"'), indexHtml.indexOf('id="fbModal"'));
   assert.deepEqual([...sheet.matchAll(/class="st-sec"[^>]*>([^<]+)</g)].map((m) => m[1]), ['Sound', 'Tasks', 'Reflection', 'This project']);
-  assert.match(sheet, /id="stSound"[\s\S]*id="stSoundUpload"[\s\S]*id="stSoundFile" accept="audio\/mpeg,\.mp3"[\s\S]*id="stParallel"[\s\S]*id="stReflectModel"[\s\S]*id="stReflectBtn"[\s\S]*id="stPerpetual"[\s\S]*id="stRank"[\s\S]*id="stRoutes"/);
+  assert.match(sheet, /id="stSoundUpload"[\s\S]*id="stSoundFile" accept="audio\/mpeg,\.mp3"[\s\S]*id="stSound"[\s\S]*id="stParallel"[\s\S]*id="stReflectModel"[\s\S]*id="stReflectBtn"[\s\S]*id="stDirection"/);
+  // Sound is one row: the switch, the current file, Test and Upload together.
+  const sound = sheet.slice(sheet.indexOf('class="st-row st-sound"'), sheet.indexOf('class="st-sec">Tasks'));
+  for (const id of ['stSound"', 'stSoundName', 'stSoundTest', 'stSoundUpload']) assert.ok(sound.includes(`id="${id}`), id);
+  assert.equal((sound.match(/class="st-row/g) || []).length, 1);
+  // Orchestrator Mode already means "keep improving": no toggle for it.
+  assert.doesNotMatch(sheet + appJs, /stPerpetual|Keep improving/);
+  assert.doesNotMatch(sheet, /stRank|stRoutes|Project priority|Routes/, 'no priority or routes rows in project settings');
   assert.match(appJs, /openFallbacks\(reflectFallbacks\(\), /);
   assert.match(appJs, /url: '\/api\/orch\/reflect-settings'/);
   assert.match(appJs, /fetch\('\/api\/settings\/sound', \{ method: 'POST'/);

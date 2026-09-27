@@ -12,6 +12,8 @@
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/app.css">
 <link rel="stylesheet" href="/files.css">
+<link rel="stylesheet" href="/stats.css">
+<link rel="stylesheet" href="/ext.css">
 <link rel="preload" href="/mascot.png" as="image">
 </head>
 <body>
@@ -66,6 +68,9 @@
       <button type="button" class="side-foot" id="connFoot" aria-haspopup="dialog" title="Open connections">
         <span class="dot" id="connDot"></span>
         <span class="host" id="connText">Connecting…</span>
+      </button>
+      <button type="button" class="icon-btn side-stats" id="statsBtn" aria-haspopup="dialog" aria-label="Stats" title="Stats">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M5 20V11M12 20V4M19 20v-6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
       </button>
       <button type="button" class="icon-btn side-settings" id="settingsBtn" aria-haspopup="dialog" aria-label="Settings" title="Settings">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="7" r="2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="8" cy="17" r="2" fill="none" stroke="currentColor" stroke-width="2"/></svg>
@@ -167,6 +172,8 @@
               </select>
               <button type="button" class="chip menu-chip eff-chip" id="effChip" aria-haspopup="listbox" aria-controls="effPop" aria-expanded="false" hidden><span class="eff-k">Effort: </span><span id="effVal">default</span><svg class="caret" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></button>
               <button type="button" class="chip fb-chip" id="fbChip" aria-haspopup="dialog" aria-controls="fbModal">No fallbacks</button>
+              <!-- Shown once a persona exists (or the chat has one): ext.js. -->
+              <button type="button" class="chip menu-chip persona-chip" id="personaChip" aria-haspopup="listbox" aria-controls="personaPop" aria-expanded="false" hidden><svg class="pc-ico" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><circle cx="12" cy="8" r="3.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span id="personaLabel">Persona</span><svg class="caret" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></button>
             </div>
             <button type="submit" class="send" id="send" aria-label="Send">
               <svg class="i-send" viewBox="0 0 24 24" width="18" height="18"><path d="M12 19V5M5 12l7-7 7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -329,17 +336,19 @@
       </button>
     </div>
     <div class="m-body">
+      <h3 class="st-sec">Skills &amp; tools</h3>
+      <button type="button" class="st-row st-link" data-ext-open="skills"><span class="st-text"><strong>Skills</strong><small>Know-how an agent loads when a task needs it</small></span><span class="st-count" id="stExtSkills"></span><svg class="st-chev" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>
+      <button type="button" class="st-row st-link" data-ext-open="mcp"><span class="st-text"><strong>MCP servers</strong><small>Extra tools: a browser, a database, docs, other apps</small></span><span class="st-count" id="stExtMcp"></span><svg class="st-chev" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>
+      <button type="button" class="st-row st-link" data-ext-open="agents"><span class="st-text"><strong>Subagents</strong><small>Specialists Claude hands part of a task to</small></span><span class="st-count" id="stExtAgents"></span><svg class="st-chev" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>
+      <button type="button" class="st-row st-link" data-ext-open="personas"><span class="st-text"><strong>Personas</strong><small>How a chat's agents work and talk; pick one per chat</small></span><span class="st-count" id="stExtPersonas"></span><svg class="st-chev" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>
       <h3 class="st-sec">Sound</h3>
-      <div class="st-row">
-        <label class="st-text" for="stSound"><strong>Sound when a task finishes</strong><small>Plays while this tab is in the background</small></label>
-        <input type="checkbox" class="st-switch" id="stSound" role="switch" checked>
-      </div>
-      <div class="st-row">
-        <span class="st-text"><strong>Sound file</strong><small id="stSoundName">Default chime</small></span>
+      <div class="st-row st-sound">
+        <label class="st-text" for="stSound"><strong>Sound when a task finishes</strong><small>Plays while this tab is in the background · <span id="stSoundName">Default chime</span></small></label>
         <button type="button" class="btn small" id="stSoundTest">Test</button>
         <button type="button" class="btn small" id="stSoundUpload">Upload MP3</button>
         <button type="button" class="btn small" id="stSoundReset" hidden>Reset</button>
         <input type="file" id="stSoundFile" accept="audio/mpeg,.mp3" hidden>
+        <input type="checkbox" class="st-switch" id="stSound" role="switch" checked>
       </div>
       <h3 class="st-sec">Tasks</h3>
       <label class="st-row">
@@ -352,22 +361,49 @@
         <select id="stReflectModel"></select>
       </label>
       <div class="st-row">
-        <span class="st-text"><strong>Reflection fallbacks</strong><small>Where the work it queues goes when its model hits a limit</small></span>
+        <span class="st-text"><strong>Reflection fallbacks</strong><small>Where reflection (and the work it queues) moves when its model hits a limit</small></span>
         <button type="button" class="chip fb-chip" id="stReflectBtn" aria-haspopup="dialog" aria-controls="fbModal">No fallbacks</button>
       </div>
       <div id="stProject" hidden>
         <h3 class="st-sec" id="stProjectTitle">This project</h3>
-        <label class="st-row">
-          <span class="st-text"><strong>Keep improving</strong><small>Plan next steps when the queue is empty</small></span>
-          <input type="checkbox" class="st-switch" id="stPerpetual" role="switch">
-        </label>
-        <div class="st-row">
-          <span class="st-text"><strong>Project priority</strong><small>Drag projects in the sidebar to set priority</small></span>
-          <span class="st-rank" id="stRank"></span>
+        <div class="st-row st-dir">
+          <label class="st-text" for="stDirection"><strong>Reflection direction</strong><small id="stDirHint">Optional. Leave blank and it decides what matters most</small></label>
+          <textarea id="stDirection" rows="2" maxlength="1000" placeholder="e.g. Make it feel polished on phones" aria-describedby="stDirHint stDirSaved"></textarea>
+          <div class="st-presets" role="group" aria-label="Suggested directions">
+            <button type="button" class="chip" data-dir="Polish the look and feel: visual consistency, spacing, typography, dark mode and small-screen layouts.">Look &amp; feel</button>
+            <button type="button" class="chip" data-dir="Add the most valuable new features for users, building on what already exists.">New features</button>
+            <button type="button" class="chip" data-dir="Make it more reliable: find and fix bugs, loopholes, edge cases and missing error handling, with tests.">Reliability</button>
+            <button type="button" class="chip" data-dir="Make it more secure: authentication, password hashing, rate limits or captchas, input validation, secrets and permissions.">Security</button>
+            <button type="button" class="chip" data-dir="Make it faster and lighter: slow pages and queries, bundle size and memory use.">Performance</button>
+          </div>
+          <small class="st-saved" id="stDirSaved" aria-live="polite"></small>
         </div>
-        <div class="st-routes" id="stRoutes"></div>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- Skills & tools (ext.js): one tab per kind; the body is a list or, in place of it, one entry's editor. -->
+<div class="modal sheet" id="extModal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-panel ext" role="dialog" aria-modal="true" aria-labelledby="extTitle">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <div class="m-head">
+      <div>
+        <h2 id="extTitle">Skills &amp; tools</h2>
+        <p class="m-sub">What your agents know, can use and sound like.</p>
+      </div>
+      <button class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="ext-tabs" id="extTabs" role="tablist" aria-label="Kind">
+      <button type="button" role="tab" id="extTab-skills" data-tab="skills" aria-controls="extBody" aria-selected="true">Skills</button>
+      <button type="button" role="tab" id="extTab-mcp" data-tab="mcp" aria-controls="extBody" aria-selected="false" tabindex="-1">MCP</button>
+      <button type="button" role="tab" id="extTab-agents" data-tab="agents" aria-controls="extBody" aria-selected="false" tabindex="-1">Subagents</button>
+      <button type="button" role="tab" id="extTab-personas" data-tab="personas" aria-controls="extBody" aria-selected="false" tabindex="-1">Personas</button>
+    </div>
+    <div class="m-body ext-body" id="extBody" role="tabpanel" aria-labelledby="extTab-skills"></div>
   </div>
 </div>
 
@@ -375,6 +411,7 @@
 <div class="cmenu" id="modePop" role="listbox" aria-label="Permission mode" hidden></div>
 <div class="cmenu model-menu" id="modelPop" role="listbox" aria-label="Agent and model" hidden></div>
 <div class="cmenu" id="effPop" role="listbox" aria-label="Effort" hidden></div>
+<div class="cmenu" id="personaPop" role="listbox" aria-label="Persona" hidden></div>
 <div class="modal fb-pop" id="fbModal" hidden>
   <div class="modal-backdrop" data-close></div>
   <div class="modal-panel fb" role="dialog" aria-modal="true" aria-labelledby="fbTitle">
@@ -509,6 +546,41 @@
   </div>
 </div>
 
+<!-- Stats: you and the orchestrator (stats.js builds the body from GET /api/stats). -->
+<div class="modal sheet" id="statsModal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-panel sx" role="dialog" aria-modal="true" aria-labelledby="sxTitle">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <div class="m-head">
+      <div>
+        <h2 id="sxTitle">Stats</h2>
+        <p class="m-sub" id="sxSub">Loading…</p>
+      </div>
+      <button class="icon-btn" id="sxRefresh" aria-label="Refresh stats" title="Refresh">
+        <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <button class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="sx-bar">
+      <div class="sx-tabs" id="sxTabs" role="tablist" aria-label="Stats view">
+        <button type="button" role="tab" data-tab="overview" aria-controls="sxBody">Overview</button>
+        <button type="button" role="tab" data-tab="you" aria-controls="sxBody">You</button>
+        <button type="button" role="tab" data-tab="agents" aria-controls="sxBody">Agents</button>
+        <button type="button" role="tab" data-tab="projects" aria-controls="sxBody">Projects</button>
+      </div>
+      <div class="sx-filters">
+        <select id="sxProject" aria-label="Project" hidden></select>
+        <div class="range-picker" id="sxRange" role="group" aria-label="Time range">
+          <button type="button" data-range="all">All</button><button type="button" data-range="30d">30d</button><button type="button" data-range="7d">7d</button><button type="button" data-range="24h">24h</button>
+        </div>
+      </div>
+    </div>
+    <div class="m-body" id="sxBody" role="tabpanel" aria-labelledby="sxTitle"></div>
+  </div>
+</div>
+
 <template id="emptyTpl">
   <div class="empty">
     <img class="empty-art" src="/mascot.png" width="82" height="60" alt="">
@@ -529,5 +601,7 @@
 <script src="/vendor/purify.js"></script>
 <script src="/app.js"></script>
 <script src="/files.js"></script>
+<script src="/stats.js"></script>
+<script src="/ext.js"></script>
 </body>
 </html>

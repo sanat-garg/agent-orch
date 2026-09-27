@@ -111,3 +111,55 @@ test('reflection settings: the reflect task runs on the chosen model; the global
     for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
   }
 });
+
+// The owner's optional reflection direction (projects.reflect_direction, Settings → This project): it leads the reflection
+// prompt when set, is absent when blank, and a new direction skips the "found nothing" cooldown.
+test('reflection direction: steers the reflect prompt when set; blank leaves it to the reflector', { timeout: 60000 }, async () => {
+  const dirs = ['cw-rd-', 'cw-rd-p-'].map((p) => fs.mkdtempSync(path.join(os.tmpdir(), p)));
+  const [dataDir, root] = dirs;
+  try {
+    const url = (f) => JSON.stringify(new URL(`../${f}`, import.meta.url).href);
+    const script = `import { createOrchestrator } from ${url('orchestrator.mjs')};
+      import { setModelCatalog } from ${url('agents.mjs')};
+      import { DatabaseSync } from 'node:sqlite';
+      import fs from 'node:fs';
+      import path from 'node:path';
+      const [dataDir, root] = process.argv.slice(1);
+      setModelCatalog('claude', { models: [{ id: 'opus', default: true }], error: null, at: 1 });
+      const prompts = {};
+      const query = ({ prompt, options }) => (async function* () {
+        prompts[path.basename(options.cwd)] = prompt;
+        yield { type: 'result', subtype: 'success', result: 'Nothing to add.\\n\`\`\`agent-orch-tasks\\n[]\\n\`\`\`', session_id: 's', num_turns: 1 };
+      })();
+      const o = createOrchestrator({ config: { pollMs: 100 }, query, dataDir, claudeEnv: { PATH: process.env.PATH, HOME: process.env.HOME }, getLimits: () => [], onSubscription: () => true,
+        broadcast() {}, emitChat() {}, convoExists: () => false });
+      const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
+      const project = (n) => { const p = path.join(root, n); fs.mkdirSync(p); const id = Number(db.prepare("INSERT INTO projects(path,name,status,perpetual,next_reflect_at,created_at) VALUES(?,?,'active',1,?,0)").run(p, n, Date.now() / 1000 + 9999).lastInsertRowid);
+        db.prepare("INSERT INTO tasks(project_id,kind,title,prompt,status,created_at) VALUES(?,'work','Seed','seed','done',0)").run(id); return id; };
+      const steered = project('steered'), free = project('free');
+      const long = 'Harden security: hash passwords and add a captcha to the login form. ' + 'x'.repeat(1200);
+      o.projectAction(steered, { reflectDirection: '  ' + long + '  ' });
+      const view = o.projectFor({ cwd: path.join(root, 'steered') });
+      const cooldown = db.prepare('SELECT next_reflect_at AS n FROM projects WHERE id=?').get(steered).n;
+      db.prepare('UPDATE projects SET next_reflect_at=0 WHERE id=?').run(free);
+      o.projectAction(free, { reflectDirection: '   ' });
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      for (let i = 0; i < 300 && Object.keys(prompts).length < 2; i++) await sleep(100);
+      console.log(JSON.stringify({ prompts, stored: view.reflect_direction, cooldown, freeDir: db.prepare('SELECT reflect_direction AS d FROM projects WHERE id=?').get(free).d }));
+      process.exit(0);`;
+    const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script, dataDir, root], { encoding: 'utf8', timeout: 50000 });
+    const r = JSON.parse(stdout.trim().split('\n').pop());
+    assert.equal(r.stored.length, 1000, 'trimmed and capped');
+    assert.match(r.stored, /^Harden security: hash passwords/);
+    assert.equal(r.cooldown, 0, 'a new direction reflects at once, past the cooldown');
+    assert.equal(r.freeDir, null, 'blank means no direction');
+    assert.match(r.prompts.steered, /The owner's direction for this reflection:\n> Harden security: hash passwords and add a captcha to the login form\./);
+    assert.match(r.prompts.steered, /most of the steps you queue should serve it/);
+    assert.match(r.prompts.steered, /unless the brief or the direction above asks for it/);
+    assert.ok(r.prompts.steered.indexOf("owner's direction") < r.prompts.steered.indexOf('Ask yourself'), 'the direction comes first');
+    assert.doesNotMatch(r.prompts.free, /owner's direction/);
+    assert.match(r.prompts.free, /Ask yourself: what else should be done\?/);
+  } finally {
+    for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
+  }
+});

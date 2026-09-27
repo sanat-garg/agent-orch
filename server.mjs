@@ -11,18 +11,20 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createOrchestrator, parseJsonl, SHOT_HINT } from './orchestrator.mjs';
 import { createGitHub } from './github.mjs';
 import { retireRuntime, chatIdle, whenIdle } from './runtimes.mjs';
-import { AGENTS, agentEfforts, clampEffort, runAgentCli, clearLoginCache, isMissingSession, modelCatalog, claudeWindows, fetchLimits, agentVersion, readVersion, windowLabel } from './agents.mjs';
+import { AGENTS, agentEfforts, clampEffort, runAgentCli, clearLoginCache, isMissingSession, modelCatalog, claudeWindows, fetchLimits, agentVersion, readVersion, windowLabel, setMcpSource } from './agents.mjs';
 import { createModelStore } from './models.mjs';
 import { runHelper, claudeHelperSpawn } from './helpers.mjs';
 import { createConnections, SPECS, codexAccount, onPath } from './connections.mjs';
 import { mediaCollector, MEDIA_ID_RE, MEDIA_TYPES, toolResultImages } from './media.mjs';
 import { createUsageLog, createLimitStore, RANGES as USAGE_RANGES } from './usage.mjs';
 import { handleFiles } from './files.mjs';
+import { createStats } from './stats.mjs';
 import { healthRow } from './health.mjs';
 import { createResources, registerPid, withOwner, readSystem } from './resources.mjs';
 import { createCluster } from './cluster.mjs';
 import { WS_PATH, PAIR_PATH, CLAIM_PATH } from './cluster-protocol.mjs';
 import { createRemoteLogins } from './remote-login.mjs';
+import { createExtensions } from './extensions.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -180,6 +182,7 @@ const saveConvos = () => writeJSON('convos.json', convos);
   if (changed) writeJSON('convos.json', convos);
 })();
 const findConvo = (id) => convos.find((c) => c.id === id);
+const stats = createStats({ dataDir: DATA, convos: () => convos, log: (m) => console.log(`[stats] ${m}`) });
 const logPath = (id) => path.join(LOGS, `${id}.jsonl`);
 function appendLog(id, ev) { fs.appendFileSync(logPath(id), JSON.stringify(ev) + '\n'); }
 function readLog(id) {
@@ -205,7 +208,7 @@ function checkFallbacks(v) {
 function publicConvo(c) {
   const rt = runtimes.get(c.id);
   // project: its orchestrator project's {id, position, priority} (the sidebar's drag order), null for a plain chat.
-  return { ...c, fallbacks: c.fallbacks ?? null, effort: c.effort ?? null, busy: !!rt?.busy || planning.has(c.id) || agentTurns.has(c.id), project: orch?.projectRank(c.cwd) ?? null };
+  return { ...c, fallbacks: c.fallbacks ?? null, effort: c.effort ?? null, persona: c.persona ?? null, busy: !!rt?.busy || planning.has(c.id) || agentTurns.has(c.id), project: orch?.projectRank(c.cwd) ?? null };
 }
 const planning = new Set(); // convo ids with an orchestrator planner turn in progress
 const agentTurns = new Map(); // convo id -> AbortController of a running non-Claude chat turn
@@ -493,6 +496,14 @@ function pushMetrics() {
 // no model tokens. The SDK marks it experimental, so every field is read defensively.
 let usage = { available: false, updatedAt: 0 };
 let usageRun = null;
+// One long-lived probe answers every check (a fresh one would start a Claude CLI process each time); it is closed
+// after a failed check and whenever auto-refresh stops.
+let usageProbe = null, usageFails = 0, usageTriedAt = 0;
+const usageProbeQuery = () => (usageProbe ||= query({
+  prompt: (async function* idle() { await new Promise(() => {}); })(),
+  options: { pathToClaudeCodeExecutable: CLAUDE_BIN, env: CLAUDE_ENV, cwd: WORKSPACE, spawnClaudeCodeProcess: claudeHelperSpawn },
+}));
+function closeUsageProbe() { try { usageProbe?.close(); } catch {} usageProbe = null; }
 // One check at a time: callers during a check wait for its answer (the limit store reads `usage` afterwards).
 function refreshUsage(liveQuery) { return (usageRun ||= refreshUsageNow(liveQuery).finally(() => { usageRun = null; })); }
 async function refreshUsageNow(liveQuery) {
@@ -501,16 +512,8 @@ async function refreshUsageNow(liveQuery) {
     for (const ws of allClients) send(ws, { t: 'usage', usage });
     return;
   }
-  let probe = null;
   try {
-    let q = liveQuery;
-    if (!q) {
-      probe = query({
-        prompt: (async function* idle() { await new Promise(() => {}); })(),
-        options: { pathToClaudeCodeExecutable: CLAUDE_BIN, env: CLAUDE_ENV, cwd: WORKSPACE, spawnClaudeCodeProcess: claudeHelperSpawn },
-      });
-      q = probe;
-    }
+    const q = liveQuery || usageProbeQuery();
     const u = await Promise.race([
       q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }),
       new Promise((_, rej) => setTimeout(() => rej(new Error('timed out')), 20000)),
@@ -533,15 +536,29 @@ async function refreshUsageNow(liveQuery) {
     const windows = claudeWindows(rl);
     for (const w of windows) usageLog.window('claude', w.window, w.pct, w.resetsAt);
     if (usage.available) limitStore.note('claude', { windows, at: usage.updatedAt });
+    usageFails = 0;
   } catch (e) {
     usage = { ...usage, error: String(e?.message || e), updatedAt: Date.now() };
-  } finally {
-    probe?.close();
+    usageFails++;
+    if (!liveQuery) closeUsageProbe(); // a stuck or dead probe: the next check starts a new one
   }
   for (const ws of allClients) send(ws, { t: 'usage', usage });
 }
-// No check at boot, on a timer or after replies (each probe starts a Claude process): the card shows the last saved
-// reading until the owner presses its refresh. Orchestrated Claude runs still report their limits as they go.
+// Auto-refresh: every 5 s while a browser is connected; with none, once a minute only while the orchestrator's Claude
+// is at its limit (so a reset or a plan upgrade is seen and queued tasks start); otherwise off, and the probe closes.
+// Failures back off (15 s, 30 s, … up to 5 min). Test and preflight copies (CW_NO_ORCHESTRATOR=1) never poll.
+const USAGE_POLL_MS = 5000, USAGE_IDLE_POLL_MS = 60e3;
+if (process.env.CW_NO_ORCHESTRATOR !== '1') setInterval(() => { // NO_ORCH is declared further down
+  const watching = allClients.size > 0;
+  if (usageRun) return;
+  // Nobody watching and Claude not at its limit: stop at once (the limit check reads the DB, so only then).
+  if (!onSubscription() || (!watching && !orch?.stateView().blockedUntil)) { if (usageProbe) closeUsageProbe(); return; }
+  const due = Math.max(watching ? USAGE_POLL_MS : USAGE_IDLE_POLL_MS, usageFails ? Math.min(300e3, 15e3 * 2 ** (usageFails - 1)) : 0);
+  if (Date.now() - usageTriedAt < due - 250) return;
+  usageTriedAt = Date.now();
+  refreshUsage().catch((e) => console.error('[usage] refresh failed', e));
+}, 1000).unref?.();
+// Until the first check answers, the card shows the last saved reading.
 {
   const saved = limitStore.get('claude'), find = (id) => saved?.windows?.find((w) => w.window === id);
   const win = (w) => w && { pct: w.pct, resetsAt: w.resetsAt ? new Date(w.resetsAt * 1000).toISOString() : null };
@@ -617,6 +634,17 @@ const runtimes = new Map(); // convo id -> { q, push, busy, pending: Map }
 const subscribers = new Map(); // convo id -> Set<ws>
 const allClients = new Set();
 
+// ---------- Skills, MCP servers, subagents and personas (extensions.mjs; Settings → Skills & tools) ----------
+const ext = createExtensions({ dataDir: DATA });
+setMcpSource((agent) => ext.mcpFor(agent)); // every runAgentCli run (tasks, planner, non-Claude chats)
+ext.onChange((kind) => {
+  for (const ws of allClients) send(ws, { t: 'ext', kind });
+  // Live Claude chats swap their MCP servers in place; every other run reads the list when it starts.
+  if (kind === 'mcp') for (const [cid, rt] of runtimes) rt.q?.setMcpServers(ext.mcpFor('claude') || {}).catch((e) => console.error('[ext] mcp not applied', cid.slice(0, 8), e?.message || e));
+});
+// A chat's persona as its system-prompt block (null: none, or deleted).
+const personaOf = (convo) => ext.personaPrompt(convo.persona);
+
 function send(ws, msg) { if (ws.readyState === 1) ws.send(JSON.stringify(msg)); }
 function broadcast(cid, msg) { for (const ws of subscribers.get(cid) || []) send(ws, { cid, ...msg }); }
 function broadcastConvos() {
@@ -654,6 +682,8 @@ const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
   convoFallbacks: (cid) => findConvo(cid)?.fallbacks ?? null,
   // Read at every task session boundary: tasks follow the chat's live effort, never a snapshot.
   convoEffort: (cid) => findConvo(cid)?.effort ?? null,
+  // The chat's persona (extensions.mjs) as a system-prompt block, appended to its project's planner and task runs.
+  convoPersona: (cid) => ext.personaPrompt(findConvo(cid)?.persona),
   refreshUsage: () => refreshUsage().catch((e) => console.error('[usage] refresh failed', e)),
   onCommit: (dir) => syncGit(dir).catch((e) => console.error('[github] sync failed', dir, e)),
   projectReady: (dir) => gh.status().linked && !!convos.find((c) => c.cwd === dir)?.repo,
@@ -826,7 +856,7 @@ const clip = (s, n = 30000) => (s.length > n ? s.slice(0, n) + `\n… (${s.lengt
 
 function startRuntime(convo) {
   const input = inputQueue();
-  const rt = { push: input.push, busy: false, pending: new Map(), q: null };
+  const rt = { push: input.push, busy: false, pending: new Map(), q: null, persona: personaOf(convo) };
 
   const canUseTool = (toolName, toolInput, { signal, suggestions }) =>
     new Promise((resolve) => {
@@ -851,6 +881,7 @@ function startRuntime(convo) {
       allowDangerouslySkipPermissions: true,
       includePartialMessages: true,
       systemPrompt: { type: 'preset', preset: 'claude_code', append: chatSystemAppend(convo) },
+      ...(ext.mcpFor('claude') && { mcpServers: ext.mcpFor('claude') }),
       pathToClaudeCodeExecutable: CLAUDE_BIN,
       env: withOwner(CLAUDE_ENV, 'chat', convo.id),
       canUseTool,
@@ -1000,7 +1031,7 @@ async function agentChatTurn(convo, text) {
     const turn = async (resume) => {
       try {
         return await runAgentCli({
-          agent, prompt: next, cwd: convo.cwd, resume, model: convo.model || undefined, effort: convo.effort || undefined, signal: ac.signal, env: withOwner(CLAUDE_ENV, 'chat', cid),
+          agent, prompt: resume ? personaSwitch(convo, next) : next, cwd: convo.cwd, resume, model: convo.model || undefined, effort: convo.effort || undefined, signal: ac.signal, env: withOwner(CLAUDE_ENV, 'chat', cid),
           onSpawn: ({ pid, pgid }) => registerPid({ pid, pgid, kind: 'chat', id: cid }),
           systemAppend: resume ? undefined : chatSystemAppend(convo), autonomous: convo.mode === 'bypassPermissions',
           onEvent: (e) => {
@@ -1022,7 +1053,7 @@ async function agentChatTurn(convo, text) {
       convo.agentSession = null;
       res = await turn(null);
     }
-    if (res.sessionId) convo.agentSession = { agent, id: res.sessionId };
+    if (res.sessionId) convo.agentSession = { agent, id: res.sessionId, persona: personaOf(convo) };
     emitShots(cid, media);
     usageLog.tokens(agent, res.usage, 'chat', cid);
     usageLog.windows(agent, res.windows);
@@ -1070,6 +1101,9 @@ async function sendUserMessage(convo, text) {
     emit(convo.id, { t: 'notice', text: 'This chat was getting long, so it continues in a fresh session with the project memory and a recap of the recent conversation. That keeps replies fast and uses less of your plan.' });
     prompt = `[This conversation continues from an earlier session in this project that grew too long. Recent conversation:]\n${recap}\n\n[New message]\n${text}`;
   }
+  // A persona picked (or edited) since the session started applies from the next message: a fresh runtime, same session.
+  const live = runtimes.get(convo.id);
+  if (live && !live.busy && live.persona !== personaOf(convo)) retireRuntime(runtimes, convo.id);
   const rt = runtimes.get(convo.id) || startRuntime(convo);
   rt.lastUserText = text;
   if (!rt.busy || !rt.media) rt.media = mediaCollector(DATA, convo.cwd); // a queued message keeps the running turn's snapshot
@@ -1095,7 +1129,14 @@ function chatRecap(cid, budget = 6000) {
   }
   return lines.join('\n') || '(no earlier messages)';
 }
-// Every chat session starts knowing the project's durable memory, shared with the orchestrator.
+// A resumed non-Claude session got its system text (and persona) only when it started: a persona picked since is
+// told to it with the next message.
+function personaSwitch(convo, text) {
+  const now = personaOf(convo);
+  if ((convo.agentSession?.persona ?? null) === now) return text;
+  return `${now ? `[The owner switched this chat's persona.]\n${now}` : "[The owner cleared this chat's persona: stop following the earlier one.]"}\n\n[Message]\n${text}`;
+}
+// Every chat session starts knowing the project's durable memory, shared with the orchestrator, and the chat's persona.
 function chatSystemAppend(convo) {
   orch.initMemory(convo.cwd);
   const mem = orch.readMemory(convo.cwd);
@@ -1111,7 +1152,7 @@ Current .agent-orch/BRIEF.md:
 ${mem.brief || '(empty)'}
 
 Current .agent-orch/CONTEXT.md:
-${mem.context || '(empty)'}`;
+${mem.context || '(empty)'}${personaOf(convo) ? `\n\n${personaOf(convo)}` : ''}`;
 }
 
 function answerPermission(convo, msg) {
@@ -1304,7 +1345,7 @@ async function handleRequest(req, res) {
 
   if (VENDOR[p]) return serveFile(res, path.join(ROOT, VENDOR[p]));
   if (p === '/' || p === '/index.html') return serveFile(res, path.join(PUBLIC, 'index.html'));
-  if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css') return serveFile(res, path.join(PUBLIC, p));
+  if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css') return serveFile(res, path.join(PUBLIC, p));
   // The Files view: read-only listing and preview of one chat's project folder (files.mjs).
   if (handleFiles(req, res, url, { rootFor: (cid) => findConvo(cid)?.cwd || null, json })) return;
 
@@ -1342,6 +1383,8 @@ async function handleRequest(req, res) {
   if (p === '/api/metrics/history') {
     return json(res, 200, historyFor(url.searchParams.get('range') || '1h'));
   }
+  // The Stats sheet: everything you and the orchestrator did, raw; the browser slices and summarises it (stats.mjs).
+  if (p === '/api/stats' && req.method === 'GET') return json(res, 200, await stats.collect({ fresh: url.searchParams.has('fresh') }));
   if (p === '/api/usage/history') {
     const range = url.searchParams.get('range') || '24h';
     if (!USAGE_RANGES[range]) return json(res, 400, { error: 'range must be 6h, 24h, 7d or 30d' });
@@ -1511,6 +1554,48 @@ async function handleRequest(req, res) {
     applyChatEffort(c);
     broadcastConvos();
     return json(res, 200, publicConvo(c));
+  }
+  // A chat's persona: {persona: id | null}. Claude chats switch at their next message; its project's planner and tasks
+  // take it at their next session start.
+  const cpers = p.match(/^\/api\/convos\/([\w-]+)\/persona$/);
+  if (cpers && req.method === 'PUT') {
+    const c = findConvo(cpers[1]);
+    if (!c) return json(res, 404, { error: 'No such chat' });
+    const { persona = null } = await readBody(req);
+    if (persona !== null && !ext.persona(persona)) return json(res, 400, { error: 'No such persona' });
+    c.persona = persona;
+    saveConvos();
+    broadcastConvos();
+    return json(res, 200, publicConvo(c));
+  }
+  // Skills, MCP servers, subagents and personas (extensions.mjs). GET /api/ext lists all four (/api/ext/<kind> one); POST /api/ext/<kind>
+  // saves one (body.prev = the name/id being edited), DELETE /api/ext/<kind>/<name> removes it, PATCH
+  // /api/ext/mcp/<name> {enabled} switches a server, POST /api/ext/import {url, agents, replace} adds a skill from GitHub.
+  // Every write answers with the new lists; a rejected one is a 400 with the reason.
+  if (p === '/api/ext' && req.method === 'GET') return json(res, 200, ext.list());
+  const exm = p.match(/^\/api\/ext\/(skills|agents|mcp|personas|import)(?:\/([\w.-]{1,100}))?$/);
+  if (exm) {
+    const [, kind, name] = exm;
+    if (req.method === 'GET' && !name && kind !== 'import') return json(res, 200, ext.list(kind)); // e.g. the persona chip's list
+    try {
+      let item;
+      if (kind === 'import' && !name && req.method === 'POST') item = await ext.importSkill(await readBody(req));
+      else if (kind !== 'import' && !name && req.method === 'POST') {
+        item = ({ skills: ext.saveSkill, agents: ext.saveAgent, mcp: ext.saveMcp, personas: ext.savePersona })[kind](await readBody(req));
+      } else if (kind === 'mcp' && name && req.method === 'PATCH') item = ext.setMcpEnabled(name, (await readBody(req)).enabled);
+      else if (kind !== 'import' && name && req.method === 'DELETE') {
+        ({ skills: ext.removeSkill, agents: ext.removeAgent, mcp: ext.removeMcp, personas: ext.removePersona })[kind](name);
+        if (kind === 'personas') { // chats that used it go back to no persona
+          const using = convos.filter((c) => c.persona === name);
+          for (const c of using) c.persona = null;
+          if (using.length) { saveConvos(); broadcastConvos(); }
+        }
+      } else return json(res, 405, { error: 'Method not allowed' });
+      return json(res, 200, { item: item ?? null, ...ext.list() });
+    } catch (e) {
+      if (e instanceof HttpError) throw e;
+      return json(res, 400, { error: e.message, ...(e.exists && { exists: e.exists }) });
+    }
   }
   if (p === '/api/github' && req.method === 'GET') {
     const s = Date.now() - gh.status().checkedAt > 15000 ? await gh.refresh() : gh.status();
@@ -1829,6 +1914,7 @@ wss.on('connection', (ws, req) => {
         if (msg.effort === null || agentEfforts(agent).includes(msg.effort)) convo.effort = msg.effort;
         else if (convo.effort && agentEfforts(agent).length) convo.effort = clampEffort(agent, convo.effort);
         saveConvos();
+        orch?.syncConvoModel(convo);
         if ((convo.effort ?? null) !== was) broadcastConvos();
         // The Claude runtime is only kept while the chat is on Claude.
         if (agent === 'claude') runtimes.get(convo.id)?.q.setModel(convo.model || undefined).then(() => applyChatEffort(convo), () => {});

@@ -207,6 +207,7 @@ record that. Use \`continue\` if the task is genuinely unfinished (including whe
 orchestrator will give the rest back to you in a new session. Never write \`done\` for work you could not verify.`;
 
 const REFLECT_ASK = 'Look at this project and improve it — find the most valuable next steps and queue them.';
+const REFLECT_DIRECTION_MAX = 1000; // characters of the owner's reflection direction kept
 
 const REFLECT_SYSTEM = `You are the reflective mind of an agent orchestrator (agent-orch). The work queue for this project is empty, and
 your job is to decide what would most improve the project next — thinking like its owner, a demanding
@@ -329,6 +330,7 @@ const until = (sec) => {
 };
 
 function reflectPrompt(project, rows, journalTail, overage, limits, reason, failures, outcomes, environment) {
+  const direction = String(project.reflect_direction || '').trim();
   const sections = [];
   const lines = [];
   for (const [type, label] of [['five_hour', '5h window'], ['seven_day', 'Weekly']]) {
@@ -371,14 +373,21 @@ ${journalTail || '(nothing yet)'}
 Recent task history:
 ${formatQueue(rows)}
 ${sections.map((s) => `\n${s}`).join('')}
-Ask yourself: what else should be done? Consider, in rough order of value: broken things (failing
+${direction ? `The owner's direction for this reflection:
+${direction.split('\n').map((l) => `> ${l}`).join('\n')}
+Look at the project through this lens first: most of the steps you queue should serve it, and it outranks the
+general order below (new features or scope included, if that's what it asks for). Still put anything genuinely
+broken (failing build/tests, bugs that block the owner) first, and if nothing valuable remains in this direction,
+say so and queue fewer steps rather than stretching it.
+
+` : ''}Ask yourself: what else should be done? Consider, in rough order of value: broken things (failing
 build/tests, bugs), gaps versus the brief's goals and definition of done, user-facing quality and UX,
 reliability and error handling, security, performance, test coverage, documentation, and code health.
 
 Then:
 1. Rewrite .agent-orch/ROADMAP.md: a brief honest assessment, the prioritized next steps, and later ideas.
 2. Queue the next 1–5 steps as small, separately verifiable tasks (\`after\` only for true prerequisites; \`files\` for each). Prefer
-   finishing and hardening what exists over new scope unless the brief asks for it. If the project truly
+   finishing and hardening what exists over new scope unless the brief${direction ? ' or the direction above' : ''} asks for it. If the project truly
    meets its brief and nothing valuable remains, return an empty task list rather than inventing busywork.
    Unless something is genuinely broken or time-bound, this upkeep work is \`background\` urgency.
 
@@ -894,7 +903,7 @@ function takeLock(file) {
 }
 
 export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLimits, onSubscription, emitChat, broadcast, convoExists, refreshUsage,
-  convoFallbacks = () => null, convoEffort = () => null, onCommit = () => {}, projectReady = () => true, disabled = false, usageLog = createUsageLog(dataDir),
+  convoFallbacks = () => null, convoEffort = () => null, convoPersona = () => null, onCommit = () => {}, projectReady = () => true, disabled = false, usageLog = createUsageLog(dataDir),
   codexSnapshot = () => codexLatestSnapshot(), reap = null, config = {} }) {
   Object.assign(CFG, config); // tests tune slots (concurrency, parallelTasks, agentSlots, meminfo)
   const dir = path.join(dataDir, 'orchestrator');
@@ -962,6 +971,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // projects.reflect_fallbacks: JSON [{agent, model}] the owner curates for reflection-queued tasks (NULL = none);
   // queuePayload snapshots it into their tasks.fallbacks.
   if (!db.prepare('PRAGMA table_info(projects)').all().some((c) => c.name === 'reflect_fallbacks')) db.exec('ALTER TABLE projects ADD COLUMN reflect_fallbacks TEXT');
+  // projects.reflect_direction: the owner's optional steer for reflection ("polish the look and feel", "harden security");
+  // NULL = the reflector decides what matters most. reflectPrompt puts it first.
+  if (!db.prepare('PRAGMA table_info(projects)').all().some((c) => c.name === 'reflect_direction')) db.exec('ALTER TABLE projects ADD COLUMN reflect_direction TEXT');
   // tasks.worktree: the task's live git worktree (worktrees.mjs), NULL once merged or parked. tasks.integrates: the
   // 'needs_integration' task whose worktree this integrator task resolves and merges.
   if (!db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === 'worktree')) db.exec('ALTER TABLE tasks ADD COLUMN worktree TEXT');
@@ -985,6 +997,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     db.exec(`UPDATE tasks SET position=(SELECT rn FROM (SELECT t.id, ROW_NUMBER() OVER (PARTITION BY t.project_id
       ORDER BY ${EFFECTIVE_SQL.replaceAll(':now', String(Date.now() / 1000))} DESC, t.created_at ASC, t.id ASC) AS rn
       FROM tasks t JOIN projects p ON p.id=t.project_id) o WHERE o.id=tasks.id)`);
+  }
+  // Keep improving was removed from Settings: Orchestrator Mode itself means "keep improving", so every project reflects
+  // when its queue empties (projects.perpetual stays for the API). Once, turn it back on where the old toggle was off.
+  if (!db.prepare("SELECT 1 FROM kv WHERE key='perpetual_always'").get()) {
+    db.exec("UPDATE projects SET perpetual=1, next_reflect_at=0 WHERE perpetual=0; INSERT INTO kv(key,value) VALUES('perpetual_always','1')");
   }
   // projects.position: the owner's sidebar order (1 = top = highest priority; see reorderProjects). Existing rows
   // start in the order the scheduler already ranked them: priority, then age.
@@ -1863,7 +1880,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
   const delegateTried = new Map(); // task id -> last attempt (s): a task with no usable fallback is rechecked once a minute
   function delegate(task) {
-    if ((task.kind || 'work') !== 'work' || !parseFallbacks(task.fallbacks)?.length || now() - (delegateTried.get(task.id) || 0) < 60) return false;
+    if (!['work', 'reflect'].includes(task.kind || 'work') || !parseFallbacks(task.fallbacks)?.length || now() - (delegateTried.get(task.id) || 0) < 60) return false;
     delegateTried.set(task.id, now());
     const from = intendedRoute(task, getProject(task.project_id));
     const top = delegator.nextModel(task, from);
@@ -2091,6 +2108,15 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     };
   }
 
+  // The chat's model picker changed: its project's default model (what unrouted tasks run on) follows at once, not only
+  // when the next message is sent, so queued tasks, their fallback sheets and the reflection sheet name the right model.
+  function syncConvoModel(convo) {
+    const p = q1('SELECT * FROM projects WHERE path=:p AND convo_id=:c', { p: convo.cwd, c: convo.id });
+    if (!p || (convo.model || null) === p.model) return;
+    updateProject(p.id, { model: convo.model || null });
+    // Queued tasks show where they will run (runs_on/runs_model: card chips, their fallback sheets): refresh those too.
+    for (const t of qa("SELECT id FROM tasks WHERE project_id=:p AND status='queued'", { p: p.id })) pushTask(t.id);
+  }
   function ensureProject(convo) {
     let p = q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd });
     if (!p) {
@@ -2196,6 +2222,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   // Planner sessions: Claude's is projects.chat_session_id; another agent's is kv planner_session:<project>:<agent>
   // (a session only resumes on the agent that made it).
+  // A run's system text plus the persona of the project's chat (server: extensions.mjs), read at each session start.
+  const withPersona = (system, project, convoId = null) => {
+    const cid = convoId || project?.convo_id, p = cid ? convoPersona(cid) : null;
+    return p ? `${system}\n\n${p}` : system;
+  };
   const plannerSession = (project, agent) => (agent === 'claude' ? project.chat_session_id : kvGet(`planner_session:${project.id}:${agent}`) || null);
   const setPlannerSession = (project, agent, id) => (agent === 'claude' ? updateProject(project.id, { chat_session_id: id }) : kvSet(`planner_session:${project.id}:${agent}`, id || ''));
 
@@ -2213,7 +2244,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     // A chat turn (and a plan task answering the chat) runs at the chat's current effort.
     const effort = clampEffort(agent, convoId || project.convo_id ? convoEffort(convoId || project.convo_id) : null, plannerModel || null);
     const attempt = (resume) => runAgent({
-      agent, prompt, cwd: project.path, resume, append: resume ? null : PLANNER_SYSTEM, autonomous: false, signal, timeoutSec: 30 * 60,
+      agent, prompt, cwd: project.path, resume, append: resume ? null : withPersona(PLANNER_SYSTEM, project, convoId), autonomous: false, signal, timeoutSec: 30 * 60,
       model: plannerModel, effort,
       tools: PLANNER_TOOLS, partial: claude && !!convoId, onMessage: claude && convoId ? chatStreamer(convoId) : null, onEvent: toChat,
     });
@@ -2331,8 +2362,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       if (!q1("SELECT 1 AS x FROM tasks WHERE project_id=:p AND kind='work' AND status='done' LIMIT 1", { p: p.id })) continue;
       run('UPDATE projects SET next_reflect_at=:u WHERE id=:id', { u: t + 120, id: p.id });
       const rs = reflectSettings();
-      const id = addTask(p.id, { title: 'Reflect: what else should be done?', prompt: '(reflection)', kind: 'reflect', source: 'reflection', agent: rs.agent, model: rs.model });
-      if (p.convo_id) emitChat(p.convo_id, { t: 'reflect', taskId: id, text: REFLECT_ASK });
+      // The reflection fallbacks move the reflect task itself too when its model is at its limit (delegate).
+      const id = addTask(p.id, { title: 'Reflect: what else should be done?', prompt: '(reflection)', kind: 'reflect', source: 'reflection', agent: rs.agent, model: rs.model,
+        fallbacks: reflectFallbacksFor(p) });
+      if (p.convo_id) emitChat(p.convo_id, { t: 'reflect', taskId: id, text: p.reflect_direction ? `${REFLECT_ASK} Direction: ${p.reflect_direction}` : REFLECT_ASK });
       logEvent(`queue empty → reflecting (task #${id})`, { projectId: p.id, taskId: id });
       added = true;
     }
@@ -2476,7 +2509,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const r = running.get(task.id);
     if (r) r.runId = runId;
     const res = await runAgent({
-      agent: route.agent, prompt, cwd, resume, model: route.model, append: resume ? null : system, tools, autonomous, effort,
+      agent: route.agent, prompt, cwd, resume, model: route.model, append: resume ? null : withPersona(system, project), tools, autonomous, effort,
       signal, timeoutSec: CFG.taskTimeoutSec, taskId: task.id, runId, logPath,
     });
     finishRun(runId, res);
@@ -2528,7 +2561,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     pushState();
     logEvent(`#${task.id} runs on ${name}`, { projectId: project.id, taskId: task.id });
     const res = await remoteJob(task.id, nodeId, name, { runId, logPath }, {
-      title: task.title, prompt, systemAppend: resume ? undefined : WORKER_SYSTEM, agent: route.agent, model: route.model || undefined, effort: effort || undefined,
+      title: task.title, prompt, systemAppend: resume ? undefined : withPersona(WORKER_SYSTEM, project), agent: route.agent, model: route.model || undefined, effort: effort || undefined,
       repo, baseSha, branch: taskBranch(task.id), doneWhen: task.done_when || undefined, resume: resume || undefined,
       timeouts: { taskSec: CFG.taskTimeoutSec, verifySec: CFG.verifyTimeoutSec, installSec: 900 }, autonomous: !!project.autonomous,
     }, signal);
@@ -3154,6 +3187,14 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if ('mode' in fields && ['build', 'maintain'].includes(fields.mode)) allowed.mode = fields.mode;
     if ('status' in fields && ['active', 'paused'].includes(fields.status)) allowed.status = fields.status;
     if (allowed.perpetual === 1 && !p.perpetual) allowed.next_reflect_at = 0;
+    if ('reflectDirection' in fields) {
+      const d = String(fields.reflectDirection ?? '').trim().slice(0, REFLECT_DIRECTION_MAX) || null;
+      if (d !== (p.reflect_direction || null)) {
+        allowed.reflect_direction = d;
+        // A new direction deserves a fresh look now, not after the "found nothing" cooldown.
+        if (d) { allowed.next_reflect_at = 0; kvSet(`reflect_empty_streak:${id}`, 0); }
+      }
+    }
     updateProject(id, allowed);
     if (allowed.status === 'paused') pauseProject(id);
     logEvent(`project settings: ${JSON.stringify(allowed)}`, { projectId: id });
@@ -3259,7 +3300,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       id: p.id, name: p.name, path: p.path, convo_id: p.convo_id, status: p.status, priority: p.priority, position: p.position ?? null, mode: p.mode,
       perpetual: !!p.perpetual, autonomous: !!p.autonomous, next_reflect_at: p.next_reflect_at, ready: !!projectReady(p.path),
       counts: { queued: c.queued || 0, running: c.running || 0, done: c.done || 0, failed: c.failed || 0 },
-      reflect_fallbacks: parseFallbacks(p.reflect_fallbacks),
+      reflect_fallbacks: parseFallbacks(p.reflect_fallbacks), reflect_direction: p.reflect_direction || null,
+      // What a reflect task starts on when Settings names no reflection model (a 'reflect' route, else the chat's model).
+      reflect_route: (({ agent, model }) => ({ agent, model: model || delegator.defaultModel(agent) }))(intendedRoute({ kind: 'reflect', title: 'Reflect: what else should be done?', prompt: '' }, p)),
       // What its work tasks (and so reflection-queued ones) start on: the "primary" the reflection fallbacks back up.
       work_route: (({ agent, model }) => ({ agent, model: model || delegator.defaultModel(agent) }))(intendedRoute({ kind: 'work', title: '', prompt: '' }, p)),
       routes: listRoutes(p.id).map((r) => ({ id: r.id, scope: r.project_id == null ? 'global' : 'project', match: r.match, agent: r.agent, model: r.model, note: r.note })),
@@ -3389,7 +3432,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   return {
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
-    planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, insertCheckpoint, approveCheckpoint, requestChanges, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setReflectFallbacks, setReflectSettings, pauseTask, resumeTask, handoffTask, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
+    planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, insertCheckpoint, approveCheckpoint, requestChanges, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setReflectFallbacks, setReflectSettings, syncConvoModel, pauseTask, resumeTask, handoffTask, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
     drain, undrain, chatPlanning, stateView, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, reconcileClaudeLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     // A sidebar chat's project rank ({id, position, priority}), or null when its folder has no orchestrator project.
     projectRank: (cwd) => q1('SELECT id, position, priority FROM projects WHERE path=:p', { p: cwd }) ?? null,

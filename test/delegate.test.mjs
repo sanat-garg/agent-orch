@@ -145,3 +145,48 @@ test("a chat's fallback list is snapshotted onto the tasks its messages queue (l
     for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
   }
 });
+
+// Reflection fallbacks (Settings) now move the reflect task itself, not only the work it queues: with Claude at its limit,
+// the reflection runs on the first usable fallback.
+test('a reflect task moves to the reflection fallbacks when its model is limited', { timeout: 60000 }, async () => {
+  const dirs = ['cw-delr-', 'cw-delr-p-', 'cw-delr-home-'].map((p) => fs.mkdtempSync(path.join(os.tmpdir(), p)));
+  const [dataDir, root, home] = dirs;
+  try {
+    fs.mkdirSync(path.join(home, '.local/bin'), { recursive: true });
+    fs.symlinkSync(fixture('codex-stub.mjs'), path.join(home, '.local/bin/codex'));
+    const url = (f) => JSON.stringify(new URL(`../${f}`, import.meta.url).href);
+    const script = `import { createOrchestrator } from ${url('orchestrator.mjs')};
+      import { setModelCatalog } from ${url('agents.mjs')};
+      import { waitFor as until } from ${JSON.stringify(new URL('./helpers/wait.mjs', import.meta.url).href)};
+      import { DatabaseSync } from 'node:sqlite';
+      import fs from 'node:fs';
+      import path from 'node:path';
+      const [dataDir, root] = process.argv.slice(1);
+      setModelCatalog('claude', { models: [{ id: 'opus', default: true }, { id: 'claude-fable-5-1' }], error: null, at: 1 });
+      setModelCatalog('codex', { models: [{ id: 'gpt-a' }], error: null, at: 1 });
+      let claude = 0;
+      const query = () => (async function* () { claude++; yield { type: 'result', subtype: 'success', result: 'ok', session_id: 's', num_turns: 1 }; })();
+      const o = createOrchestrator({ config: { pollMs: 100 }, query, dataDir, claudeEnv: { PATH: process.env.PATH, HOME: process.env.HOME }, getLimits: () => [], onSubscription: () => true,
+        broadcast() {}, emitChat() {}, convoExists: () => false });
+      const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
+      db.prepare('INSERT OR REPLACE INTO kv(key,value) VALUES(?,?)').run('blocked_until', String(Date.now() / 1000 + 3600));
+      o.setReflectSettings({ model: { agent: 'claude', model: 'claude-fable-5-1' }, fallbacks: [{ agent: 'codex', model: 'gpt-a' }] });
+      const p = path.join(root, 'proj'); fs.mkdirSync(p);
+      const pid = Number(db.prepare("INSERT INTO projects(path,name,status,perpetual,created_at) VALUES(?,?,'active',1,0)").run(p, 'proj').lastInsertRowid);
+      db.prepare("INSERT INTO tasks(project_id,kind,title,prompt,status,created_at) VALUES(?,'work','Seed','seed','done',0)").run(pid);
+      const reflect = () => db.prepare("SELECT * FROM tasks WHERE kind='reflect'").get();
+      await until(() => ['done', 'failed'].includes(reflect()?.status), { timeout: 30000 }).catch(() => {});
+      const t = reflect();
+      console.log(JSON.stringify({ status: t?.status, agent: t?.agent, model: t?.model, ran: t?.ran_agent, from: t?.delegated_from, reason: t?.delegated_reason, fallbacks: t && JSON.parse(t.fallbacks), claude }));
+      process.exit(0);`;
+    const env = { ...process.env, HOME: home, PATH: `${path.join(home, '.local/bin')}:${process.env.PATH}` };
+    const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script, dataDir, root], { encoding: 'utf8', timeout: 50000, env });
+    const r = JSON.parse(stdout.trim().split('\n').pop());
+    assert.deepEqual(r.fallbacks, [{ agent: 'codex', model: 'gpt-a' }], 'the reflect task snapshots the reflection fallbacks');
+    assert.deepEqual([r.agent, r.model, r.ran, r.from, r.reason], ['codex', 'gpt-a', 'codex', 'claude/claude-fable-5-1', "owner's fallback #1"], JSON.stringify(r));
+    assert.equal(r.status, 'done');
+    assert.equal(r.claude, 0, 'the limited reflection model never ran');
+  } finally {
+    for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
+  }
+});

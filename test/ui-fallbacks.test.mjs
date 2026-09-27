@@ -276,3 +276,87 @@ test('task drawer: the Model chip shows model → fallbacks and opens the shared
   assert.deepEqual(errors, []);
   await ctx.close();
 });
+
+test('reflection direction: typed or picked from presets in Settings → This project, saved per project; blank clears it', { skip, timeout: 90000 }, async () => {
+  const [name, value] = cookie.split('=');
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  await ctx.addCookies([{ name, value, url: base }]);
+  const page = await ctx.newPage();
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  await page.goto(`${base}/#${CID}`);
+  await page.waitForLoadState('networkidle');
+  await page.evaluate(() => openSettings());
+  const box = page.locator('#stDirection');
+  await box.waitFor();
+  const stored = () => db.prepare('SELECT reflect_direction AS d FROM projects WHERE id=?').get(pid).d;
+  const until = async (want, what) => { for (let i = 0; i < 60; i++) { if (stored() === want) return; await new Promise((r) => setTimeout(r, 100)); } assert.fail(`${what}: ${stored()}`); };
+  assert.equal(await box.inputValue(), '', 'optional: empty by default');
+  assert.equal(stored(), null);
+  await box.fill('Make the dashboard feel polished');
+  await until('Make the dashboard feel polished', 'typed text saves');
+  await page.locator('#stDirSaved', { hasText: 'Saved' }).waitFor();
+  await page.locator('.st-presets .chip', { hasText: 'Security' }).tap();
+  await until('Make the dashboard feel polished\nMake it more secure: authentication, password hashing, rate limits or captchas, input validation, secrets and permissions.', 'a preset adds a line');
+  await page.locator('.st-presets .chip', { hasText: 'Security' }).tap();
+  assert.equal((await box.inputValue()).match(/password hashing/g).length, 1, 'once');
+  // A state push while it is shown doesn't clobber the box; clearing it goes back to "decide on your own".
+  await page.evaluate(() => renderOrchBar());
+  assert.match(await box.inputValue(), /polished/);
+  await box.fill('');
+  await box.blur();
+  await until(null, 'blank clears it');
+  await page.locator('#stDirSaved', { hasText: 'Cleared' }).waitFor();
+  const fits = await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth && [...document.querySelectorAll('.st-presets .chip')].every((c) => c.getBoundingClientRect().right <= innerWidth));
+  assert.equal(fits, true, 'fits 390px');
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+// The bug: the chat was switched to Fable but the reflection fallback sheet still said Opus, because the project's
+// default model only followed the chat on the next message and the sheet used the work route, not the reflection model.
+test('fallback sheets name the model they back up: the chat\'s new model at once, and the reflection model for reflection', { skip, timeout: 90000 }, async () => {
+  const [name, value] = cookie.split('=');
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
+  await ctx.addCookies([{ name, value, url: base }]);
+  const page = await ctx.newPage();
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  const queued = Number(db.prepare("INSERT INTO tasks(project_id,title,prompt,created_at) VALUES(?,'Unrouted work','code',0)").run(pid).lastInsertRowid);
+  const reset = await fetch(base + '/api/orch/reflect-settings', { method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ model: null }) });
+  assert.equal(reset.status, 200); await reset.json();
+  try {
+    await page.goto(`${base}/#${CID}`);
+    await page.waitForLoadState('networkidle');
+    // The owner picks Fable for the chat: the project follows before any message is sent.
+    await page.evaluate(() => send({ t: 'set_model', cid: state.cid, agent: 'claude', model: 'claude-fable-5-1' }));
+    for (let i = 0; i < 50 && db.prepare('SELECT model FROM projects WHERE id=?').get(pid).model !== 'claude-fable-5-1'; i++) await new Promise((r) => setTimeout(r, 100));
+    assert.equal(db.prepare('SELECT model FROM projects WHERE id=?').get(pid).model, 'claude-fable-5-1');
+    await page.waitForFunction(() => O.project?.reflect_route?.model === 'claude-fable-5-1');
+    await page.waitForFunction((id) => O.tasks.get(id)?.runs_model === 'claude-fable-5-1', queued);
+    await page.evaluate(() => openSettings());
+    assert.match(await page.locator('#stReflectBtn').getAttribute('title'), /^If claude-fable-5-1 hits its limit, reflection tasks/);
+    assert.match(await page.locator('#stReflectModel option').first().innerText(), /^Default · claude-fable-5-1/);
+    await page.locator('#stReflectBtn').click();
+    assert.equal(await page.locator('#fbTitle').innerText(), 'If claude-fable-5-1 hits its limit');
+    await page.keyboard.press('Escape');
+    // Its own model in Settings wins over the chat's.
+    await page.locator('#stReflectModel').selectOption({ label: 'GPT-6-Sol' });
+    await page.waitForFunction(() => /^If GPT-6-Sol hits its limit/.test(document.querySelector('#stReflectBtn').title));
+    await page.locator('#stReflectBtn').click();
+    assert.equal(await page.locator('#fbTitle').innerText(), 'If GPT-6-Sol hits its limit');
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('Escape');
+    // The chat's own sheet and a queued task's sheet name the chat's new model too.
+    assert.match(await page.locator('#fbChip').getAttribute('title'), /^If claude-fable-5-1 hits its limit, queued tasks/);
+    await page.evaluate((id) => openFallbacks(taskFallbacks(id), document.body), queued);
+    assert.equal(await page.locator('#fbTitle').innerText(), 'If claude-fable-5-1 hits its limit');
+    assert.deepEqual(errors, []);
+  } finally {
+    await page.evaluate(() => send({ t: 'set_model', cid: state.cid, agent: 'codex', model: 'gpt-5.5' })).catch(() => {});
+    db.prepare("UPDATE tasks SET status='cancelled' WHERE id=?").run(queued);
+    const r = await fetch(base + '/api/orch/reflect-settings', { method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ model: null }) });
+    await r.arrayBuffer();
+    await ctx.close();
+  }
+});

@@ -179,9 +179,16 @@ function* claudeEvents(m) {
   } else if (m.type === 'result') yield { k: 'result', usage: m.usage || {} };
 }
 
+// MCP servers every run gets (extensions.mjs, set by the server): agent id -> Claude's mcpServers record or codex's
+// `-c` overrides, null/[] for none. A run's own `mcp` option replaces it.
+let mcpSource = () => null;
+export const setMcpSource = (fn) => { mcpSource = fn || (() => null); };
+const mcpOf = (agent, own) => { if (own !== undefined) return own; try { return mcpSource(agent); } catch (e) { console.error('[agents] mcp source failed', e); return null; } };
+
 // Extra options: query (SDK override, for tests), bin, env, partial (stream deltas), onMessage (raw SDK messages).
 // effort: a level from CLAUDE.efforts (the SDK's `effort` option), or null for the model's default.
-async function runClaude({ model, prompt, cwd, resume, systemAppend, signal, onEvent, query = sdkQuery, bin, env = process.env, partial, onMessage, effort }) {
+async function runClaude({ model, prompt, cwd, resume, systemAppend, signal, onEvent, query = sdkQuery, bin, env = process.env, partial, onMessage, effort, mcp }) {
+  mcp = mcpOf('claude', mcp);
   const ac = new AbortController();
   let aborted = false;
   const onAbort = () => { aborted = true; ac.abort(); };
@@ -193,6 +200,7 @@ async function runClaude({ model, prompt, cwd, resume, systemAppend, signal, onE
       prompt,
       options: {
         cwd, resume: resume || undefined, model: model || undefined, ...(effort && { effort }),
+        ...(mcp && Object.keys(mcp).length && { mcpServers: mcp }),
         pathToClaudeCodeExecutable: bin || CLAUDE.bin, env: stripEnv(env, CLAUDE.envFilter), abortController: ac,
         systemPrompt: systemAppend ? { type: 'preset', preset: 'claude_code', append: systemAppend } : { type: 'preset', preset: 'claude_code' },
         // The owner runs this on a disposable server and gave every agent full access (including
@@ -513,12 +521,13 @@ function* codexEvents(m, started = new Set()) {
 // rate-limit snapshots are; CODEX_HOME is stripped, so the CLI always uses ~/.codex). Codex has no system-prompt
 // append flag, so systemAppend is prepended to the prompt. effort: a level from CODEX.efforts, passed as
 // `-c model_reasoning_effort=<level>` (also on `exec resume`); null keeps the model's default.
-async function runCodex({ model, prompt, cwd, resume, systemAppend, signal, onEvent, bin, env = process.env, autonomous = true, onMessage, codexHome, effort }) {
+async function runCodex({ model, prompt, cwd, resume, systemAppend, signal, onEvent, bin, env = process.env, autonomous = true, onMessage, codexHome, effort, mcp }) {
   const res = { outcome: 'error', text: '', sessionId: resume || null, usage: {}, numTurns: 0, resetsAt: null, limitType: null, stderr: '', errorCode: null, windows: null };
   const startedAt = Date.now();
   const args = ['exec', ...(resume ? ['resume'] : []), '--json', '--skip-git-repo-check', '-c', 'forced_login_method="chatgpt"'];
   if (model) args.push('-m', model);
   if (effort) args.push('-c', `model_reasoning_effort=${effort}`);
+  for (const kv of mcpOf('codex', mcp) || []) args.push('-c', kv); // mcp_servers.<name>.<key>=<toml>, also on resume
   if (autonomous) args.push('--dangerously-bypass-approvals-and-sandbox');
   else args.push('-c', 'sandbox_mode="workspace-write"', '-c', 'approval_policy="never"');
   const text = systemAppend ? `${systemAppend}\n\n${prompt}` : prompt;

@@ -14,3 +14,7 @@ Wire remote execution into orchestrator.mjs using cluster.mjs (the hub) and work
 ## Done when
 
 `npm test` passes with a cluster e2e test in which a task runs on a paired local worker process and its branch is merged into main by the controller
+
+## Result — done (check passed) (2026-09-27 13:10)
+
+AGENT-ORCH-STATUS: done — remote placement, dispatch and merge-back work; cluster e2e passes

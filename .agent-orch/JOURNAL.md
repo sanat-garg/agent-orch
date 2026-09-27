@@ -635,3 +635,7 @@ cluster hub with pairing/auth/heartbeat/revocation; npm test passes
 ## 2026-09-27 12:48 — #218 Worker daemon: connect, report inventory, run jobs in local checkouts [done (check passed)]
 
 worker daemon runs jobs, pushes branches; npm test passes
+
+## 2026-09-27 13:10 — #219 Scheduler: place tasks on remote nodes and merge their pushed branches [done (check passed)]
+
+remote placement, dispatch and merge-back work; cluster e2e passes

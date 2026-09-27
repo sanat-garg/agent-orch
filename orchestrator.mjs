@@ -23,7 +23,9 @@ import { createUsageLog } from './usage.mjs';
 import { DELEGATE_CFG, createDelegator, parseFallbacks } from './delegate.mjs';
 import { filesOverlap, parseFiles, spreadAssign, readMemInfo, taskSlots, MEM } from './parallel.mjs';
 import { registerPid, withOwner } from './resources.mjs';
-import { commitAll, ensureWorktree, isMerged, listWorktrees, mergeBack, parkWorktree, removeWorktree, repoInfo, startIntegration, unresolvedFiles, worktreesRoot } from './worktrees.mjs';
+import { LOCAL_NODE } from './cluster.mjs';
+import { MSG, graceMs, isRepoUrl } from './cluster-protocol.mjs';
+import { commitAll, ensureWorktree, isMerged, listWorktrees, mergeBack, parkWorktree, removeWorktree, repoInfo, startIntegration, taskBranch, unresolvedFiles, worktreesRoot } from './worktrees.mjs';
 
 // ---------------------------------------------------------------- config
 
@@ -52,6 +54,14 @@ const CFG = {
   sessionMaxTasks: 6,
   contextBudgetBytes: 8000,
   delegate: { ...DELEGATE_CFG }, // maxWindowPct
+  // Cluster placement (BRIEF goal 11). footprint: an agent run's memory on a node, kept free above MEM.claimFloor
+  // (a constant until #209 measures the per-agent p90). controllerWork: whether the controller also runs work tasks that
+  // an online worker could run (default: no, it keeps its CPU/RAM for chat and the planner); the owner's kv
+  // parallel_settings overrides it. offerMs: a job.offer unanswered this long counts as a reject.
+  footprint: { claude: 1.2 * 1024 ** 3, codex: 0.8 * 1024 ** 3 },
+  controllerWork: false,
+  offerMs: 10_000,
+  remoteGraceMs: null,          // a vanished worker's jobs are requeued after this (null = graceMs(os) from the protocol)
   // Tools a worker may use without full autonomy. Anything else is refused, never prompted.
   // File changes are limited to the project folder (./** is relative to the session's cwd).
   safeTools: [
@@ -892,7 +902,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   db.exec(SCHEMA);
   // Columns added after release: tasks.agent/model (explicit per-task routing), tasks.ran_agent/ran_model (what its
   // latest run used, for the UI badge), tasks.route_note (why that run fell back to Claude), runs.agent (who made the session).
-  for (const [table, col] of [['tasks', 'agent'], ['tasks', 'model'], ['tasks', 'ran_agent'], ['tasks', 'ran_model'], ['tasks', 'route_note'], ['runs', 'agent']]) {
+  for (const [table, col] of [['tasks', 'agent'], ['tasks', 'model'], ['tasks', 'ran_agent'], ['tasks', 'ran_model'], ['tasks', 'route_note'], ['runs', 'agent'],
+    // Cluster: the node a task last ran on (and each run's), and the last WIP sha a worker pushed for it.
+    ['tasks', 'node_id'], ['tasks', 'wip_sha'], ['runs', 'node_id']]) {
     if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} TEXT`);
   }
   // Delegation (delegate.mjs): tasks.origin ('reflection' | 'chat' | null), tasks.category (legacy, unused),
@@ -1188,11 +1200,14 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     setTimeout(tick, 100);
     return { ok: true, order };
   }
-  // kv parallel_settings { parallelTasks: 1 | 2 } (older shapes read as the default of one).
+  // kv parallel_settings { parallelTasks: 1 | 2 (the controller's own work slots), controllerWork: bool (see
+  // CFG.controllerWork), maxTasks: null | n (owner cap on work tasks across every node) }. Older shapes read as defaults.
   function parallelSettings() {
     let s = {};
     try { s = JSON.parse(kvGet('parallel_settings') || '{}') || {}; } catch {}
-    return { parallelTasks: [1, 2].includes(s.parallelTasks) ? s.parallelTasks : CFG.parallelTasks };
+    return { parallelTasks: [1, 2].includes(s.parallelTasks) ? s.parallelTasks : CFG.parallelTasks,
+      controllerWork: typeof s.controllerWork === 'boolean' ? s.controllerWork : CFG.controllerWork,
+      maxTasks: Number.isInteger(s.maxTasks) && s.maxTasks > 0 ? s.maxTasks : null };
   }
   const slotsFor = (a) => typeof CFG.agentSlots === 'number' ? CFG.agentSlots : CFG.agentSlots[a] ?? 1;
   // Read fresh before every claim: the second slot and claiming at all depend on the memory available right now.
@@ -1201,14 +1216,22 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       pacingLimit: d && (d.scarce || d.concurrency < CFG.concurrency) ? d.concurrency : Infinity });
   }
   function setParallelSettings(value) {
-    if (![1, 2].includes(value?.parallelTasks)) return { error: 'Expected parallelTasks 1 or 2' };
-    kvSet('parallel_settings', JSON.stringify({ parallelTasks: value.parallelTasks }));
+    const v = value && typeof value === 'object' ? value : {};
+    let next = {};
+    try { next = JSON.parse(kvGet('parallel_settings') || '{}') || {}; } catch {} // only what the owner set is stored
+    if (!['parallelTasks', 'controllerWork', 'maxTasks'].some((k) => k in v)) return { error: 'Expected parallelTasks 1 or 2' };
+    if ('parallelTasks' in v) { if (![1, 2].includes(v.parallelTasks)) return { error: 'Expected parallelTasks 1 or 2' }; next.parallelTasks = v.parallelTasks; }
+    if ('controllerWork' in v) { if (typeof v.controllerWork !== 'boolean') return { error: 'controllerWork must be true or false' }; next.controllerWork = v.controllerWork; }
+    if ('maxTasks' in v) { if (v.maxTasks !== null && !(Number.isInteger(v.maxTasks) && v.maxTasks >= 1 && v.maxTasks <= 64)) return { error: 'maxTasks must be null or 1-64' }; next.maxTasks = v.maxTasks; }
+    kvSet('parallel_settings', JSON.stringify(next));
     pushState(); setTimeout(tick, 0);
     return { ok: true, state: stateView() };
   }
-  const runningOn = (agent) => [...running.values()].filter((r) => r.agent === agent).length;
+  // Slots and agentSlots count the controller's own runs; each worker has its own (nodes.max_slots, headroom).
+  const runningOn = (agent) => [...running.values()].filter((r) => r.agent === agent && r.node === LOCAL_NODE).length;
   // Work slots hold work, reflect and integrator tasks; plan tasks (the owner's messages) run beside them as before.
-  const workRunning = () => [...running.values()].filter((r) => r.kind !== 'plan').length;
+  const workRunning = () => [...running.values()].filter((r) => r.kind !== 'plan' && r.node === LOCAL_NODE).length;
+  const workEverywhere = () => [...running.values()].filter((r) => r.kind !== 'plan').length;
   const listedModel = (agent, model) => !!AGENTS[agent] && (modelCatalog(agent).models || []).some((m) => m.id === model);
   // A ready task whose agent has no free slot moves to the fallback spreadAssign picked (recorded like a delegation).
   function spread(task, to) {
@@ -1219,14 +1242,80 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       moves: addMove(task, { from: { agent: from.agent, model: fromModel }, to: { agent: to.agent, model: to.model }, until: null, by: 'spread' }) });
     logEvent(`#${task.id} spread from ${fromName} (busy) to ${to.agent}/${to.model} to run in parallel`, { projectId: task.project_id, taskId: task.id });
   }
-  function claimNext(allowed, workSlot = true) {
+  // ---- cluster placement (cluster.mjs hub, worker.mjs daemons; .agent-orch/CLUSTER.md). Without a hub or with no
+  // worker online, every task lands on the controller exactly as before.
+  let cluster = null;
+  const jobs = new Map(); // task id -> the remote job in flight: { node, next (event index), check, accept, reject, event, done }
+  const rejected = new Map(); // `${node}/${task}` -> until (ms): a worker that declined a task isn't asked again for a minute
+  const nodeOf = (id) => running.get(id)?.node || LOCAL_NODE;
+  let nodesAt = 0, nodesList = [];
+  function nodesNow() {
+    if (!cluster) return [];
+    if (Date.now() - nodesAt > 1000) { try { nodesList = cluster.listNodes(); } catch { nodesList = []; } nodesAt = Date.now(); }
+    return nodesList;
+  }
+  const nodeName = (id) => nodesNow().find((n) => n.id === id)?.name || id;
+  // Workers that could run `agent`: connected, enabled, not draining, with the agent installed and signed in.
+  const workerNodes = (agent) => nodesNow().filter((n) => !n.local && n.status === 'online' && n.connected
+    && (n.inventory?.agents || []).some((a) => a.id === agent && a.installed && a.signedIn));
+  const footprint = (agent) => CFG.footprint[agent] ?? CFG.footprint.claude;
+  const nodeRuns = (id) => [...running.values()].filter((r) => r.node === id);
+  // A worker's headroom for one more `agent` run: its last MemAvailable, less the footprint of runs placed on it since
+  // that reading and of the new run. It must stay at or above the same floor the controller keeps (MEM.claimFloor).
+  function headroom(n, agent) {
+    const res = n.resources || {}, fresh = nodeRuns(n.id).filter((r) => r.startedAt * 1000 > (res.at || 0));
+    return (res.memAvailable || 0) - fresh.reduce((sum, r) => sum + footprint(r.agent), 0) - footprint(agent);
+  }
+  const freeWorkers = (agent, taskId) => workerNodes(agent).filter((n) => nodeRuns(n.id).length < n.maxSlots
+    && headroom(n, agent) >= MEM.claimFloor && !(rejected.get(`${n.id}/${taskId}`) > Date.now()));
+  const workerSlots = (agent) => freeWorkers(agent).reduce((sum, n) => sum + n.maxSlots - nodeRuns(n.id).length, 0);
+  // The project's GitHub clone URL (never with credentials), or null: remote nodes need one, and a project that is a
+  // subfolder of its repo stays local (a worker checks out the whole repo). Cached for a minute.
+  const repoCache = new Map();
+  function remoteRepo(project) {
+    const hit = repoCache.get(project.path);
+    if (hit && Date.now() - hit.at < 60_000) return hit.url;
+    let url = null;
+    try {
+      const o = { cwd: project.path, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] };
+      const top = execFileSync('git', ['rev-parse', '--show-toplevel'], o).trim();
+      const raw = execFileSync('git', ['config', '--get', 'remote.origin.url'], o).trim().replace(/^(https:\/\/)[^@/]+@/, '$1');
+      if (fs.realpathSync(top) === fs.realpathSync(project.path) && isRepoUrl(raw)) url = raw;
+    } catch {}
+    repoCache.set(project.path, { at: Date.now(), url });
+    return url;
+  }
+  // Work tasks may run remotely; plan/reflect tasks, integrators (they need the controller's conflicted worktree) and
+  // tasks with a live worktree here (a verify-failed or interrupted run keeps it) stay on the controller.
+  const remoteCapable = (task, project) => !!cluster && task.kind === 'work' && !task.integrates && !task.worktree
+    && worktreeCapable(project) && !!remoteRepo(project);
+  const localAgentOk = (agent) => (agent === 'claude' ? onSubscription() : agentStatus(agent) === true && !(kvTime(`agent_auth_failed:${agent}`) > now()));
+  // Where a claimed task runs: the free worker with the most headroom (the node that last ran it first), else the
+  // controller when it has a free slot. While some worker could run a work task, the controller leaves it to the
+  // workers (it waits for one to free up) unless the owner's controllerWork setting says otherwise. null = not now.
+  function place(task, agent, { localFree, localOk, cap }) {
+    if (task.kind === 'plan') return localOk ? LOCAL_NODE : null;
+    if (workEverywhere() >= cap) return null;
+    const remote = remoteCapable(task, getProject(task.project_id));
+    if (remote) {
+      const free = freeWorkers(agent, task.id).sort((a, b) => (b.id === task.node_id) - (a.id === task.node_id) || headroom(b, agent) - headroom(a, agent));
+      if (free.length) return free[0].id;
+    }
+    if (!localOk || !localFree || !localAgentOk(agent) || slotsFor(agent) - runningOn(agent) <= 0) return null;
+    if (remote && !parallelSettings().controllerWork && workerNodes(agent).length) return null;
+    return LOCAL_NODE;
+  }
+
+  // Claims the next task and its node: { task, node, prevNode }. localFree: the controller has a free work slot;
+  // localOk: it may claim at all (memory); cap: work tasks allowed across all nodes (owner cap, pacing).
+  function claimNext(allowed, localFree = true, localOk = true, cap = Infinity) {
     // Mandatory GitHub protocol: a project's work only starts once its repo exists.
     // A plan task waits while the owner's chat turn holds the planner session (AUDIT #5).
     // A task whose agent is at its usage limit waits; others (e.g. codex-routed while Claude is limited) still run.
     // A waiting task that may be delegated moves to the owner's first fallback with usage left (delegate.mjs) and runs now.
     // Agent spreading (parallel.mjs spreadAssign): each task takes its own route while that agent has a free slot
-    // (CFG.agentSlots); one that would otherwise wait spills to its first fallback with a free slot and usage left.
-    let rows = runnable(allowed, true, 25).filter((r) => (workSlot || r.kind === 'plan') && !(r.kind === 'plan' && planningProjects.has(r.project_id)) && projectReady(getProject(r.project_id)?.path));
+    // (CFG.agentSlots here, plus free worker slots); one that would otherwise wait spills to its first fallback with a free slot and usage left.
+    let rows = runnable(allowed, true, 25).filter((r) => !(r.kind === 'plan' && planningProjects.has(r.project_id)) && projectReady(getProject(r.project_id)?.path));
     for (const r of rows) if (waitsForLimit(r)) delegate(r);
     rows = rows.map((r) => getTask(r.id));
     const ready = rows.filter((r) => !waitsForLimit(r)).map((r) => {
@@ -1234,16 +1323,20 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       const fallbacks = r.kind === 'work' ? (parseFallbacks(r.fallbacks) || []).filter((f) => listedModel(f.agent, f.model) && `${f.agent}/${f.model}` !== `${primary.agent}/${primary.model}`) : [];
       return { task: r, options: [primary, ...fallbacks] };
     });
-    const pick = spreadAssign(ready, {
-      slotsFree: (a) => slotsFor(a) - runningOn(a),
+    const picks = spreadAssign(ready, {
+      slotsFree: (a) => Math.max(0, slotsFor(a) - runningOn(a)) + workerSlots(a),
       hasUsage: (a, m) => delegator.hasUsage(a, m),
-    })[0];
-    if (pick?.spilled) spread(pick.task, pick);
-    const row = pick?.task;
-    if (!row) return null;
-    run("UPDATE tasks SET status='running', started_at=:t WHERE id=:id", { t: now(), id: row.id });
-    pushTask(row.id);
-    return getTask(row.id);
+    });
+    for (const pick of picks) {
+      const node = place(pick.task, pick.agent, { localFree, localOk, cap });
+      if (!node) continue;
+      if (pick.spilled) spread(pick.task, pick);
+      const row = pick.task;
+      run("UPDATE tasks SET status='running', started_at=:t, node_id=:n WHERE id=:id", { t: now(), n: node, id: row.id });
+      pushTask(row.id);
+      return { task: getTask(row.id), node, prevNode: row.node_id || null };
+    }
+    return null;
   }
 
   function cascadeBlock(taskId, status, reason) {
@@ -1292,8 +1385,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return revived;
   }
 
-  function startRun(taskId, purpose, agent = 'claude') {
-    const r = run('INSERT INTO runs(task_id,purpose,agent,started_at) VALUES(:t,:p,:a,:s)', { t: taskId, p: purpose, a: agent, s: now() });
+  function startRun(taskId, purpose, agent = 'claude', node = LOCAL_NODE) {
+    const r = run('INSERT INTO runs(task_id,purpose,agent,node_id,started_at) VALUES(:t,:p,:a,:n,:s)', { t: taskId, p: purpose, a: agent, n: node, s: now() });
     const id = Number(r.lastInsertRowid);
     const logPath = path.join(runsDir, `run-${String(id).padStart(6, '0')}.jsonl`);
     run('UPDATE runs SET log_path=:l WHERE id=:id', { l: logPath, id });
@@ -1306,6 +1399,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     });
   }
   const lastRunAgent = (taskId) => q1('SELECT agent FROM runs WHERE task_id=:t ORDER BY id DESC LIMIT 1', { t: taskId })?.agent || 'claude';
+  // A session resumes only on the node that made it (runs before the cluster have no node: the controller's).
+  const lastRunNode = (taskId) => q1('SELECT node_id FROM runs WHERE task_id=:t ORDER BY id DESC LIMIT 1', { t: taskId })?.node_id || LOCAL_NODE;
   const lastRunOutcome = (taskId) => q1('SELECT outcome FROM runs WHERE task_id=:t AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1', { t: taskId })?.outcome || null;
 
   // ---- warm session reuse (agent-orch sessions.py): a new task may continue a recent, healthy session
@@ -1458,12 +1553,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // Task drawer Output entries: public messages, commands and tool results (logged as k:'result').
   const logEntryOf = (e) => (e.k === 'tool_result' ? { ...e, k: 'result' } : e.k === 'text' || e.k === 'tool' ? e : null);
 
-  async function runAgent({ agent = 'claude', prompt, cwd, resume, model, append, tools, autonomous, signal, timeoutSec, taskId, runId, logPath, onMessage, onEvent, partial }) {
-    const ac = new AbortController();
-    let stopped = null;
-    const onAbort = () => { stopped = stopped || 'aborted'; ac.abort(); };
-    if (signal) { if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true }); }
-    const timer = timeoutSec ? setTimeout(() => { stopped = 'timeout'; ac.abort(); }, timeoutSec * 1000) : null;
+  // A run log writer: appends entries to the run's log and mirrors them to the task drawer (orun) and lanes (olane).
+  // Local runs and remote ones (job.event from a worker) write through the same path, so the UI can't tell them apart.
+  function runLog(taskId, runId, logPath) {
     const log = logPath ? fs.createWriteStream(logPath, { flags: 'a' }) : null;
     const writeEntry = (e) => {
       log?.write(JSON.stringify(e) + '\n');
@@ -1481,6 +1573,17 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         for (const ws of subs) if (ws.readyState === 1) ws.send(msg);
       }
     };
+    writeEntry.end = () => log?.end();
+    return writeEntry;
+  }
+
+  async function runAgent({ agent = 'claude', prompt, cwd, resume, model, append, tools, autonomous, signal, timeoutSec, taskId, runId, logPath, onMessage, onEvent, partial }) {
+    const ac = new AbortController();
+    let stopped = null;
+    const onAbort = () => { stopped = stopped || 'aborted'; ac.abort(); };
+    if (signal) { if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true }); }
+    const timer = timeoutSec ? setTimeout(() => { stopped = 'timeout'; ac.abort(); }, timeoutSec * 1000) : null;
+    const writeEntry = runLog(taskId, runId, logPath);
     if (taskId) writeEntry({ k: 'start', at: now(), resumed: !!resume, agent, model: model || null });
     // Screenshots: tool-result images, plus new/changed files in .agent-orch/shots/ after each tool result and at the end.
     const media = taskId ? mediaCollector(dataDir, cwd) : null;
@@ -1510,7 +1613,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     usageLog.windows(agent, res.windows);
     if (taskId) writeShots();
     if (taskId) writeEntry({ k: 'end', at: now(), outcome: res.outcome, turns: res.numTurns });
-    log?.end();
+    writeEntry.end();
     return res;
   }
 
@@ -1685,7 +1788,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   const agentAvailable = (id, model) => {
     if (kvTime(`agent_auth_failed:${id}`) > now()) return 'sign-in failed';
     const u = blockedUntilFor(id, model);
-    return u ? `usage limit until ${fmtAt(u)}` : agentStatus(id);
+    if (u) return `usage limit until ${fmtAt(u)}`;
+    const st = agentStatus(id);
+    return st !== true && workerNodes(id).length ? true : st; // signed in on a worker is enough: the task runs there
   };
   // The agent/model a queued task would run on right now (no logging). Plan tasks run the planner on their own agent.
   const routeNow = (task, project) => (task.kind === 'plan' ? { agent: plannerAgent(task.agent), model: task.agent && task.agent !== 'claude' ? task.model : null }
@@ -1705,7 +1810,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // ---- delegation: a work task whose agent is limited moves to its first usable fallback (tasks.fallbacks); none = it waits
   const delegator = createDelegator({
     agents: () => Object.keys(AGENTS),
-    connected: (id) => (id === 'claude' ? onSubscription() : agentStatus(id) === true && !(kvTime(`agent_auth_failed:${id}`) > now())),
+    connected: (id) => (id === 'claude' ? onSubscription() : (agentStatus(id) === true || workerNodes(id).length > 0) && !(kvTime(`agent_auth_failed:${id}`) > now())),
     blockedUntil: (id, model) => blockedUntilFor(id, model),
     windows: (id) => usageLog.current?.(id) || [],
     models: (id) => modelCatalog(id).models || [],
@@ -2022,16 +2127,18 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       const d = decision();
       considerPreemption(d);
       reapIfLow();
+      // Pacing and the owner's cap limit work across every node (all nodes share the same accounts' limits).
+      const settings = parallelSettings();
+      const cap = Math.min(settings.maxTasks || Infinity, d.scarce || d.concurrency < CFG.concurrency ? Math.max(1, d.concurrency) : Infinity);
       for (;;) {
         const mem = readMemInfo(CFG.meminfo), slots = slotCount(d, mem);
         if (!slots) {
           if (kvGet('announced_mem') !== '1') { kvSet('announced_mem', 1); logEvent(`waiting: server memory low (${Math.round(mem.avail / 1024 ** 2)} MB available)`, { level: 'warn' }); }
-          break;
-        }
-        kvSet('announced_mem', 0);
-        const free = workRunning() < slots, task = claimNext(d.allowed, free);
-        if (!task) { if (free && scheduleReflections()) continue; break; }
-        startTask(task);
+          if (!workerNodes('claude').length && !workerNodes('codex').length) break; // workers can still take work
+        } else kvSet('announced_mem', 0);
+        const free = slots > 0 && workRunning() < slots, claim = claimNext(d.allowed, free, slots > 0, cap);
+        if (!claim) { if (free && scheduleReflections()) continue; break; }
+        startTask(claim.task, claim.node, claim.prevNode);
       }
     } catch (e) {
       console.error('[orchestrator] tick failed', e);
@@ -2048,10 +2155,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     try { reap(); } catch (e) { console.error('[orchestrator] reap failed', e); }
   }
 
-  function startTask(task) {
+  // node: where it runs (LOCAL_NODE or a worker id); prevNode: where it ran before (a worker's pushed branch is adopted).
+  function startTask(task, node = LOCAL_NODE, prevNode = null) {
     const abort = new AbortController();
     const project = getProject(task.project_id);
-    running.set(task.id, { abort, kind: task.kind, projectId: task.project_id, startedAt: now(), wt: task.kind === 'work' && worktreeCapable(project), agent: routeNow(task, project).agent });
+    // A remote task always has its own checkout, so it shares its project like a worktree task.
+    running.set(task.id, { abort, kind: task.kind, projectId: task.project_id, startedAt: now(), node, prevNode,
+      wt: task.kind === 'work' && (node !== LOCAL_NODE || worktreeCapable(project)), agent: routeNow(task, project).agent });
     pushState();
     execute(task, abort.signal)
       .catch((e) => console.error('[orchestrator] task crashed', e))
@@ -2099,7 +2209,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (readMemInfo(CFG.meminfo).avail >= MEM.pauseBelow) { memLowSince = 0; return; }
     memLowSince ||= Date.now();
     if (Date.now() - memLowSince < CFG.memLowPauseSec * 1000) return;
-    const [id, r] = [...running.entries()].filter(([, r]) => r.kind !== 'plan' && !r.paused && !r.abort.signal.aborted).pop() || [];
+    const [id, r] = [...running.entries()].filter(([, r]) => r.kind !== 'plan' && r.node === LOCAL_NODE && !r.paused && !r.abort.signal.aborted).pop() || [];
     if (!r) return;
     memLowSince = Date.now();
     r.paused = true;
@@ -2117,7 +2227,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (!lowest || lowest.kind === 'plan' || now() - (lowest.started_at || 0) < PREEMPT_MIN_RUNTIME) return;
     if (best.eff - lowest.eff < PREEMPT_MARGIN || best.project_id === lowest.project_id) return;
     const r = running.get(lowest.id);
-    if (!r || r.preempted) return;
+    if (!r || r.preempted || r.node !== LOCAL_NODE) return;
     r.preempted = true;
     logEvent(`⇅ pausing #${lowest.id} (${lowest.title}) for more urgent #${best.id} (${best.title})`, { projectId: lowest.project_id, taskId: lowest.id });
     r.abort.abort();
@@ -2177,6 +2287,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
 
   async function runTask(task, project, signal) {
+    if (nodeOf(task.id) !== LOCAL_NODE) return runRemote(task, project, signal);
+    const prev = running.get(task.id)?.prevNode;
+    if (prev && prev !== LOCAL_NODE && task.kind === 'work' && worktreeCapable(project)) await adoptRemoteBranch(task, project);
     let wt = null;
     if (running.get(task.id)?.wt) {
       wt = await taskWorktree(task, project);
@@ -2194,7 +2307,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     writeTaskSpec(cwd, task);
     const route = routeFor(task, project);
     // A session id only resumes on the agent that created it.
-    let resume = task.session_id && lastRunAgent(task.id) === route.agent ? task.session_id : null, reused = false, body, system, tools, autonomous;
+    let resume = task.session_id && lastRunAgent(task.id) === route.agent && lastRunNode(task.id) === LOCAL_NODE ? task.session_id : null, reused = false, body, system, tools, autonomous;
     if (task.kind === 'reflect') {
       const failures = qa("SELECT * FROM tasks WHERE project_id=:p AND status IN ('failed') AND finished_at>=:s ORDER BY finished_at DESC LIMIT 8",
         { p: project.id, s: now() - 7 * 86400 });
@@ -2213,15 +2326,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       tools = CFG.safeTools;
       autonomous = !!project.autonomous;
     }
-    let prompt = body;
-    if (resume && !reused) {
-      if (task.verify_output != null) prompt = verifyFailedPrompt(extractCommand(task.done_when) || '(the done-when check)', task.verify_output || '(no output)');
-      else if (task.last_error != null) prompt = retryAfterFailure(task.attempts + 1, lastRunOutcome(task.id) || 'error', task.last_error);
-      else if (task.continuations) prompt = CONTINUE;
-      else prompt = RESUME;
-    }
+    const prompt = resume && !reused ? resumePrompt(task) : body;
     const { runId, logPath } = startRun(task.id, task.kind, route.agent);
-    updateTask(task.id, { ran_agent: route.agent, ran_model: route.model || null, route_note: routeNote(route) });
+    updateTask(task.id, { ran_agent: route.agent, ran_model: route.model || null, route_note: routeNote(route), node_id: LOCAL_NODE });
     if (running.has(task.id)) running.get(task.id).agent = route.agent;
     pushState(); // Publish the actual route once fallback/model resolution has finished.
     const r = running.get(task.id);
@@ -2240,6 +2347,185 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     }
     if (task.kind === 'work' && route.agent === 'claude') recordSessionUse(res, project.id, task.id);
     return res;
+  }
+
+  // What a resumed session is told: the check that failed, the error it hit, or just to continue.
+  function resumePrompt(task) {
+    if (task.verify_output != null) return verifyFailedPrompt(extractCommand(task.done_when) || '(the done-when check)', task.verify_output || '(no output)');
+    if (task.last_error != null) return retryAfterFailure(task.attempts + 1, lastRunOutcome(task.id) || 'error', task.last_error);
+    return task.continuations ? CONTINUE : RESUME;
+  }
+
+  // ---- remote runs: a work task on a worker (job.offer → job.start → job.event* → job.check → job.done). The worker
+  // checks out the project's GitHub repo at the base sha on agent-orch/task-<id> and pushes that branch; finishWork
+  // fetches it and merges it here exactly like a local worktree.
+  async function runRemote(task, project, signal) {
+    const nodeId = nodeOf(task.id), n = nodesNow().find((x) => x.id === nodeId), name = n?.name || nodeId;
+    const repo = remoteRepo(project);
+    if (!repo) throw new Error(`${project.name} has no GitHub remote for a worker to clone`);
+    const route = routeFor(task, project);
+    const baseSha = await remoteBase(task, project, running.get(task.id)?.prevNode);
+    const resume = task.session_id && lastRunAgent(task.id) === route.agent && lastRunNode(task.id) === nodeId ? task.session_id : null;
+    const where = `a checkout of ${repo} on the worker machine ${name}`;
+    const env = `Environment (cluster worker ${name}, ${n?.os || 'unknown'}/${n?.arch || 'unknown'}): a machine that runs agent-orch tasks; ` +
+      `install whatever the task needs.\nYou are in ${where}, on branch ${taskBranch(task.id)}. The orchestrator pushes and merges it when you finish.`;
+    const prompt = resume ? resumePrompt(task) : workerTaskPrompt({ ...project, path: where }, task, env);
+    const { runId, logPath } = startRun(task.id, task.kind, route.agent, nodeId);
+    updateTask(task.id, { ran_agent: route.agent, ran_model: route.model || null, route_note: routeNote(route), node_id: nodeId });
+    const r = running.get(task.id);
+    if (r) { r.agent = route.agent; r.runId = runId; }
+    pushState();
+    logEvent(`#${task.id} runs on ${name}`, { projectId: project.id, taskId: task.id });
+    const res = await remoteJob(task.id, nodeId, name, { runId, logPath }, {
+      title: task.title, prompt, systemAppend: resume ? undefined : WORKER_SYSTEM, agent: route.agent, model: route.model || undefined,
+      repo, baseSha, branch: taskBranch(task.id), doneWhen: task.done_when || undefined, resume: resume || undefined,
+      timeouts: { taskSec: CFG.taskTimeoutSec, verifySec: CFG.verifyTimeoutSec, installSec: 900 }, autonomous: !!project.autonomous,
+    }, signal);
+    finishRun(runId, res);
+    if (resume && isMissingSession(res)) {
+      updateTask(task.id, { session_id: null });
+      res.outcome = 'aborted';
+      res.sessionId = null;
+    }
+    return res;
+  }
+
+  // One job on a worker, as a runAgent-shaped result. Its events go through the same run log (task drawer, lanes);
+  // usage and limit readings feed usage.mjs like a local run (same accounts, same limits).
+  function remoteJob(id, nodeId, name, { runId, logPath }, spec, signal) {
+    return new Promise((resolve) => {
+      const write = runLog(id, runId, logPath), media = mediaCollector(dataDir, null);
+      write({ k: 'start', at: now(), resumed: !!spec.resume, agent: spec.agent, model: spec.model || null, node: nodeId, nodeName: name });
+      let settled = false, started = false, offerTimer = null, watch = null, lostSince = 0;
+      const job = { node: nodeId, next: 0, check: null };
+      const finish = (res) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(offerTimer); clearInterval(watch);
+        signal?.removeEventListener('abort', onAbort);
+        if (jobs.get(id) === job) jobs.delete(id);
+        write({ k: 'end', at: now(), outcome: res.outcome, turns: 0 });
+        write.end();
+        resolve({ usage: {}, numTurns: 0, text: '', ...res });
+      };
+      job.accept = () => {
+        if (started || settled) return;
+        started = true;
+        clearTimeout(offerTimer);
+        if (!cluster.send(nodeId, { t: MSG.JOB_START, job: id, ...spec })) finish({ outcome: 'aborted', text: `${name} went away before the job started` });
+      };
+      job.reject = (reason) => {
+        if (started) return;
+        rejected.set(`${nodeId}/${id}`, Date.now() + 60_000);
+        finish({ outcome: 'aborted', text: `${name} declined the job (${reason})` });
+      };
+      // Batches may be re-sent after a reconnect: `from` + index dedupes them.
+      job.event = ({ from, events }) => {
+        events.forEach((e, i) => {
+          if (from + i < job.next) return;
+          if (e.k === 'image') { const img = e.data && media.image(e); if (img) write({ k: 'image', ...img, tool: e.tool }); return; }
+          const l = logEntryOf(e);
+          if (l) write(l);
+        });
+        job.next = Math.max(job.next, from + events.length);
+      };
+      job.done = (msg) => {
+        const lim = msg.limits || {};
+        usageLog.tokens(spec.agent, msg.usage || {}, 'task', id);
+        usageLog.windows(spec.agent, lim.windows || undefined);
+        finish({ outcome: msg.outcome, text: msg.text, usage: msg.usage || {}, sessionId: msg.sessionId || null,
+          resetsAt: lim.resetsAt ?? undefined, limitType: lim.limitType ?? undefined, windows: lim.windows ?? undefined,
+          remote: { node: nodeId, sha: msg.sha || null, check: job.check } });
+      };
+      const onAbort = () => {
+        if (started) cluster.send(nodeId, { t: MSG.JOB_CANCEL, job: id, reason: 'stopped by the controller' });
+        finish({ outcome: 'aborted', text: 'stopped by the controller' });
+      };
+      jobs.set(id, job);
+      if (signal) { if (signal.aborted) return onAbort(); signal.addEventListener('abort', onAbort, { once: true }); }
+      // A worker that stays away past its grace period loses the job; the task requeues and continues from its pushed WIP.
+      watch = setInterval(() => {
+        if (cluster.isConnected(nodeId)) { lostSince = 0; return; }
+        lostSince ||= Date.now();
+        if (Date.now() - lostSince < (CFG.remoteGraceMs ?? graceMs(cluster.node(nodeId)?.os))) return;
+        logEvent(`#${id}: ${name} disappeared; requeued`, { level: 'warn', taskId: id });
+        finish({ outcome: 'aborted', text: `[lost] node ${name} disappeared` });
+      }, 2000);
+      if (!cluster.send(nodeId, { t: MSG.JOB_OFFER, job: id, agent: spec.agent, model: spec.model, footprint: Math.round(footprint(spec.agent)) })) {
+        return finish({ outcome: 'aborted', text: `${name} is not connected` });
+      }
+      offerTimer = setTimeout(() => job.reject('no answer'), CFG.offerMs);
+    });
+  }
+
+  function onClusterMessage(nodeId, msg) {
+    if (msg.t === MSG.HELLO) {
+      // Jobs a (re)connecting worker still holds that don't run there any more (a controller restart requeued them, or
+      // they moved to another node): cancel them. 'reassigned' drops the worktree without pushing over the new run.
+      for (const j of msg.jobs) {
+        const mine = jobs.get(j.job);
+        if (mine?.node !== nodeId) cluster.send(nodeId, { t: MSG.JOB_CANCEL, job: j.job, reason: mine ? 'reassigned' : 'not running on the controller' });
+      }
+      return;
+    }
+    const job = msg.job != null ? jobs.get(msg.job) : null;
+    if (msg.t === MSG.ERROR && msg.job != null) return logEvent(`#${msg.job} on ${nodeName(nodeId)}: ${msg.message}`, { level: 'warn', taskId: msg.job });
+    if (!job || job.node !== nodeId) return;
+    switch (msg.t) {
+      case MSG.JOB_ACCEPT: return job.accept();
+      case MSG.JOB_REJECT: return job.reject(msg.reason);
+      case MSG.JOB_EVENT: return job.event(msg);
+      case MSG.JOB_CHECK: job.check = { command: msg.command, pass: msg.pass, output: msg.output, code: msg.code ?? null }; return;
+      case MSG.JOB_WIP: run('UPDATE tasks SET wip_sha=:s WHERE id=:id', { s: msg.sha, id: msg.job }); return;
+      case MSG.JOB_DONE: return job.done(msg);
+    }
+  }
+  function attachCluster(c) {
+    cluster = c;
+    nodesAt = 0;
+    c.onMessage(onClusterMessage);
+  }
+
+  // The base a worker starts from: the main branch's head, pushed to origin first when origin lacks it. A task whose
+  // last run was here and left its branch (a retried task) pushes that branch too, so the worker continues from it.
+  function remoteBase(task, project, prevNode) {
+    return serialGit(project.path, async () => {
+      const info = await repoInfo(project.path);
+      if (!info) throw new Error('not on a git branch');
+      await commitNow(project.path, `agent-orch: uncommitted changes before #${task.id}`);
+      const sha = (await git(info.top, ['rev-parse', info.branch])).trim();
+      const has = (args) => git(info.top, args).then(() => true, () => false);
+      if (!(await has(['merge-base', '--is-ancestor', sha, `refs/remotes/origin/${info.branch}`]))) await git(info.top, ['push', '-q', 'origin', `${info.branch}:refs/heads/${info.branch}`]);
+      const b = taskBranch(task.id);
+      if ((!prevNode || prevNode === LOCAL_NODE) && await has(['rev-parse', '--verify', '-q', `refs/heads/${b}`])) await git(info.top, ['push', '-q', '-f', 'origin', `${b}:refs/heads/${b}`]);
+      return sha;
+    });
+  }
+  // A task that last ran on a worker continues here from its pushed branch (unless a worktree here already has it).
+  function adoptRemoteBranch(task, project) {
+    return serialGit(project.path, async () => {
+      const info = await repoInfo(project.path);
+      if (!info || (await listWorktrees(info.top)).some((w) => w.id === task.id)) return;
+      const b = taskBranch(task.id);
+      await git(info.top, ['fetch', '-q', 'origin', `+refs/heads/${b}:refs/heads/${b}`]);
+    }).catch(() => {});
+  }
+  // A finished remote run: fetch its branch (it must be at the sha the worker reported) and check it out as the task's
+  // worktree here, so the existing merge path (mergeTask, needs_integration) takes over.
+  async function remoteWorktree(task, project, sha) {
+    const b = taskBranch(task.id);
+    if (!sha) throw new Error(`the worker reported no pushed commit for ${b}`);
+    await serialGit(project.path, async () => {
+      const info = await repoInfo(project.path);
+      await git(info.top, ['fetch', '-q', 'origin', `+refs/heads/${b}:refs/heads/${b}`]);
+      const tip = (await git(info.top, ['rev-parse', `refs/heads/${b}`])).trim();
+      if (tip !== sha) throw new Error(`${b} on origin is at ${tip.slice(0, 8)}, not the reported ${sha.slice(0, 8)}`);
+    });
+    const wt = await taskWorktree(task, project);
+    if (!wt) throw new Error(`couldn't check out ${b} from origin`);
+    taskWts.set(task.id, wt);
+    run('UPDATE tasks SET worktree=:w WHERE id=:id', { w: wt.dir, id: task.id });
+    return wt;
   }
 
   async function handle(task, project, res, signal) {
@@ -2290,12 +2576,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
 
   async function finishWork(task, project, res, signal) {
-    const tid = task.id;
-    const wt = taskWts.get(tid), dir = wt?.cwd || project.path;
+    const tid = task.id, remote = res.remote || null;
+    let wt = taskWts.get(tid), dir = wt?.cwd || project.path;
     const [status, note] = parseStatus(res.text);
     if (status === 'continue' && task.continuations < CFG.maxContinuations) {
-      recordResult(dir, task, `in progress (${task.continuations + 1})`, res.text);
-      if (!wt) await gitCommit(project.path, `agent-orch #${tid} (in progress): ${task.title}`); // a worktree just stays as it is
+      // A remote task's notes stay in its run log: its checkout is on the worker, not in this main tree.
+      if (!remote) recordResult(dir, task, `in progress (${task.continuations + 1})`, res.text);
+      if (!wt && !remote) await gitCommit(project.path, `agent-orch #${tid} (in progress): ${task.title}`); // a worktree just stays as it is
       requeueIfRunning(tid, { continuations: task.continuations + 1, session_id: res.sessionId || task.session_id, result: res.text });
       return logEvent(`↻ #${tid} not finished yet: ${note.slice(0, 160) || 'continuing'}`, { projectId: project.id, taskId: tid });
     }
@@ -2309,8 +2596,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (command) {
       logEvent(`checking #${tid}: ${command}`, { projectId: project.id, taskId: tid });
       let ok, output, code;
-      try { [ok, output, code] = await runCheck(command, dir, agentEnv, CFG.verifyTimeoutSec, signal); }
-      catch (e) { ok = false; output = `verification crashed: ${e?.message || e}`; }
+      if (remote) [ok, output, code] = remote.check ? [remote.check.pass, remote.check.output, remote.check.code] : [false, 'command not found: the worker ran no check', 127]; // the worker ran it in its checkout
+      else {
+        try { [ok, output, code] = await runCheck(command, dir, agentEnv, CFG.verifyTimeoutSec, signal); }
+        catch (e) { ok = false; output = `verification crashed: ${e?.message || e}`; }
+      }
       if (getTask(tid)?.status !== 'running') return;
       if (signal?.aborted) { // paused or preempted mid-check: same as an interrupted run
         requeueIfRunning(tid, { session_id: res.sessionId || task.session_id, not_before: now() + 5 });
@@ -2325,6 +2615,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       } else if (!ok) return verifyFailed(task, project, res, command, output);
       else checked = ' (check passed)';
     }
+    if (remote) { wt = await remoteWorktree(task, project, remote.sha); dir = wt.cwd; }
     recordResult(dir, task, `done${checked}`, res.text);
     let sha;
     if (wt) {
@@ -2335,6 +2626,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         return needsIntegration(task, project, res, wt, merged.conflict);
       }
       sha = merged.sha;
+      if (remote) await git(project.path, ['push', '-q', 'origin', '--delete', taskBranch(tid)]).catch(() => {}); // merged: the pushed branch is done
     } else sha = await gitCommit(project.path, `agent-orch #${tid}: ${task.title}`);
     if (!updateTask(tid, { status: 'done', finished_at: now(), result: res.text, session_id: res.sessionId, verify_output: null, commit_sha: sha || null }, true)) return;
     logEvent(`✔ #${tid} done${checked}: ${task.title}${sha ? ` (commit ${sha})` : ''}`, { projectId: project.id, taskId: tid });
@@ -2366,9 +2658,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (task.continuations >= CFG.maxContinuations) {
       return fail(task, project, 'verification', `\`${command}\` still failing after ${CFG.maxContinuations} sessions:\n${output.slice(-1500)}`);
     }
-    const wt = taskWts.get(tid);
-    recordResult(wt?.cwd || project.path, task, `verify failed (${task.continuations + 1})`, `Command: ${command}\n\n${output}`);
-    if (!wt) await gitCommit(project.path, `agent-orch #${tid} (in progress): ${task.title}`);
+    const wt = taskWts.get(tid), remote = nodeOf(tid) !== LOCAL_NODE;
+    if (!remote) recordResult(wt?.cwd || project.path, task, `verify failed (${task.continuations + 1})`, `Command: ${command}\n\n${output}`);
+    if (!wt && !remote) await gitCommit(project.path, `agent-orch #${tid} (in progress): ${task.title}`);
     requeueIfRunning(tid, { continuations: task.continuations + 1, session_id: res.sessionId || task.session_id, result: res.text, verify_output: output });
     logEvent(`↻ #${tid} done-when check failed: ${command}\n${output.slice(0, 300)}`, { projectId: project.id, taskId: tid });
   }
@@ -2376,7 +2668,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   async function fail(task, project, outcome, detail) {
     const tid = task.id;
     if (!updateTask(tid, { status: 'failed', attempts: task.attempts + 1, finished_at: now(), result: detail }, true)) return;
-    if (task.kind === 'work') {
+    if (task.kind === 'work' && (taskWts.get(tid) || nodeOf(tid) === LOCAL_NODE)) { // a remote run's partial work stays on its pushed branch
       const wt = taskWts.get(tid);
       recordResult(wt?.cwd || project.path, task, `failed (${outcome})`, detail);
       if (!wt) await gitCommit(project.path, `agent-orch #${tid} failed: ${task.title} (partial work)`); // else execute() parks the worktree
@@ -2672,6 +2964,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       // A review checkpoint waiting for the owner: {task, title, summary, commit, files: [{status, path}], shots: [media]}.
       review: t.kind === 'review' && t.status === 'awaiting_review' ? (() => { try { return JSON.parse(t.result); } catch { return null; } })() : null,
       worktree: t.worktree ?? null, integrates: t.integrates ?? null,
+      // Where it runs (or last ran): a worker's id and name; null/controller = this server.
+      node: t.node_id ?? null, node_name: t.node_id && t.node_id !== LOCAL_NODE ? nodeName(t.node_id) : null,
     };
   }
   function projectView(p) {
@@ -2702,11 +2996,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const lanes = [...running.entries()].map(([id, r]) => {
       const t = getTask(id);
       return { agent: r.agent, task: id, project_id: r.projectId, title: t.title, model: t.ran_model || t.model || delegator.defaultModel(r.agent),
-        activity: r.activity || null, started_at: r.startedAt, elapsed: Math.max(0, now() - r.startedAt) };
+        activity: r.activity || null, started_at: r.startedAt, elapsed: Math.max(0, now() - r.startedAt), node: r.node, node_name: r.node === LOCAL_NODE ? null : nodeName(r.node) };
     });
     return { activeUsage, blocks, blockedUntil: blockedUntil(), blockedReason: kvGet('blocked_reason'),
       pacing: d?.reason || kvGet('budget_reason'), slots: slotCount(d, mem), parallel, lanes,
-      running: running.size, workRunning: workRunning(), draining, subscription: onSubscription() };
+      running: running.size, workRunning: workRunning(), remoteRunning: workEverywhere() - workRunning(), draining, subscription: onSubscription() };
   }
   function pushTask(id) {
     const t = taskView(getTask(id));
@@ -2811,7 +3105,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     drain, undrain, chatPlanning, stateView, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, reconcileClaudeLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     // A sidebar chat's project rank ({id, position, priority}), or null when its folder has no orchestrator project.
     projectRank: (cwd) => q1('SELECT id, position, priority FROM projects WHERE path=:p', { p: cwd }) ?? null,
-    isRunning: (id) => running.has(Number(id)), logEvent,
+    isRunning: (id) => running.has(Number(id)), logEvent, attachCluster,
     unwatch: (ws) => { for (const set of runSubs.values()) set.delete(ws); },
   };
 }

@@ -702,6 +702,8 @@ const cluster = orch && createCluster({
   log: (m) => console.log(`[cluster] ${m}`),
   onChange: () => { for (const ws of allClients) send(ws, { t: 'cluster' }); },
 });
+// The scheduler places work on online workers through the hub (orchestrator.mjs `place`/`runRemote`).
+if (cluster && !NO_ORCH) orch.attachCluster(cluster);
 
 // convo.repo mirrors the folder's real `origin` (a stale copy survives repo moves); cleared when there is none.
 async function refreshRepo(convo) {

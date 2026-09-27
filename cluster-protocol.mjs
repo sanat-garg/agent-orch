@@ -90,6 +90,7 @@ const SHA_RE = /^[0-9a-f]{40}$/;
 const BRANCH_RE = /^agent-orch\/task-\d+$/;
 // Plain https or ssh GitHub-style URLs; never credentials embedded in the URL.
 const REPO_RE = /^(https:\/\/[^\s/@:]+(?::\d+)?\/[\w.\-/]+|git@[\w.-]+:[\w.\-/]+)$/;
+export const isRepoUrl = (v) => typeof v === 'string' && REPO_RE.test(v);
 // Key names ending like a secret (githubToken, api_key, password…); usage counters such as input_tokens don't match.
 const SECRET_KEY_RE = /(token|secret|password|passwd|api_?key|apikey|cookie|credentials?|authorization|bearer)$/i;
 

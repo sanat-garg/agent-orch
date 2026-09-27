@@ -3087,6 +3087,16 @@ function sidebarUsage() {
     windows: active.sort(([a], [b]) => byWin(a, b)).map(([id, w]) => ({ ...w, id, label: winLabel(id), resetsAt: w.resetsAt ? new Date(w.resetsAt * 1000).toISOString() : null })),
   };
 }
+// Claude's card: 5-hour and Weekly, then each model-specific window the plan reports while it has a reading (the
+// Opus/Sonnet weeklies, or model-scoped ones such as Fable), as extra rows.
+function claudeCardWindows(u) {
+  const rows = [{ ...u?.session, label: '5-hour' }, { ...u?.weekly, label: 'Weekly' }];
+  for (const [label, w] of [['Opus', u?.weeklyOpus], ['Sonnet', u?.weeklySonnet], ...(u?.models || []).map((m) => [m.name, m])]) {
+    if (!label || w?.pct == null || rows.some((r) => r.label.toLowerCase() === String(label).toLowerCase())) continue;
+    rows.push({ pct: w.pct, resetsAt: w.resetsAt, label, tip: `${label}: its own limit, used on top of 5-hour and Weekly` });
+  }
+  return rows;
+}
 function renderUsage(fresh = false) {
   renderFbChip(); // its usage dots follow the same readings
   renderReflectBtn();
@@ -3099,7 +3109,7 @@ function renderUsage(fresh = false) {
   blurSwap($('usageTitle'), title);
   $('usageCard').title = `${name} subscription limits · open usage over time`;
   $('usRefresh').setAttribute('aria-label', `Refresh ${name} usage limits`);
-  const windows = id === 'claude' ? [{ ...u?.session, label: '5-hour' }, { ...u?.weekly, label: 'Weekly' }] : (u?.windows || []);
+  const windows = id === 'claude' ? claudeCardWindows(u) : (u?.windows || []);
   // Two fixed rows; any windows past those get compact rows in #usMore.
   const more = $('usMore'), rows = [$('usSessionRow'), $('usWeeklyRow')];
   while (more.children.length < windows.length - 2) {
@@ -3123,7 +3133,10 @@ function renderUsage(fresh = false) {
     ? (u?.error ? `Couldn't read limits: ${u.error}` : 'Plan limits unavailable')
     : usageSlides.error ? "Couldn't refresh limits" : limitsHidden(id) ? 'Limits not exposed by CLI' : 'No current limits reported by this agent';
   else {
-    note = windows.map((w) => (w.resetsAt ? `${w.label} resets ${fmtResetAt(w.resetsAt)}` : '')).filter(Boolean).join('\n');
+    // Windows that reset together share a line ("Weekly and Fable reset Mon 3:00 AM · in 2d 4h").
+    const byReset = new Map();
+    for (const w of windows) if (w.resetsAt && w.pct != null) { const at = fmtResetAt(w.resetsAt); byReset.set(at, [...(byReset.get(at) || []), w.label]); }
+    note = [...byReset].map(([at, labels]) => `${labels.length > 1 ? `${labels.slice(0, -1).join(', ')} and ${labels.at(-1)} reset` : `${labels[0]} resets`} ${at}`).join('\n');
     if (u.extraUsage === true) note += ' ⚠ Extra usage is ON: it can bill beyond your plan';
   }
   $('usNote').title = note.trim();

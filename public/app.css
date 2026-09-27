@@ -578,6 +578,7 @@ code, pre, kbd { font-family: var(--mono); }
 .ms-open { display: inline-flex; align-items: center; gap: 2px; color: var(--faint); font-size: 11.5px; }
 .ms-server:hover .ms-open { color: var(--accent); }
 .ms-row { display: grid; grid-template-columns: 44px 1fr 38px; align-items: center; gap: 8px; }
+.ms-row > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } /* a long model name; the row's title has it */
 #usMore { display: grid; gap: 5px; }
 .ms-bar { height: 6px; border-radius: 3px; background: var(--raised); overflow: hidden; }
 .ms-bar i { display: block; height: 100%; width: 0; border-radius: 3px; background: var(--accent); transition: width .6s ease; }

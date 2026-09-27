@@ -213,3 +213,33 @@ test('task drawer on a phone: the gallery fills the width with four small tiles 
   assert.deepEqual(errors, []);
   await ctx.close();
 });
+
+// The sidebar's Claude limits card: model-specific windows the plan reports (model_scoped, e.g. Fable) get their own row
+// under 5-hour and Weekly, and windows resetting together share one line of the note.
+test('sidebar usage card: a Fable window gets its own row next to 5-hour and Weekly', { skip, timeout: 60000 }, async () => {
+  const [name, value] = cookie.split('=');
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, reducedMotion: 'reduce' });
+  await ctx.addCookies([{ name, value, url: base }]);
+  const page = await ctx.newPage();
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  await page.goto(`${base}/#${CID}`);
+  await page.locator('#usageCard').waitFor();
+  const card = await page.evaluate(() => {
+    const week = new Date(Date.now() + 3 * 86400e3).toISOString(), soon = new Date(Date.now() + 2 * 3600e3).toISOString();
+    M.usage = { available: true, updatedAt: Date.now(), session: { pct: 47, resetsAt: soon }, weekly: { pct: 18, resetsAt: week },
+      weeklyOpus: null, weeklySonnet: null, models: [{ name: 'Fable', pct: 1, resetsAt: week }] };
+    usageSlides.agent = 'claude';
+    renderUsage();
+    const rows = [...document.querySelectorAll('#usageCard .ms-row')].map((r) => [...r.children].map((c) => c.textContent.trim()));
+    return { rows: rows.map(([l, , v]) => [l, v]), note: document.querySelector('#usNote').textContent, tip: document.querySelector('#usMore .ms-row')?.title || '' };
+  });
+  assert.deepEqual(card.rows, [['5-hour', '47%'], ['Weekly', '18%'], ['Fable', '1%']]);
+  assert.match(card.note, /^5-hour resets .+\nWeekly and Fable reset .+$/);
+  assert.match(card.tip, /^Fable: its own limit/);
+  // Without a model-specific reading the card is the usual two rows.
+  const plain = await page.evaluate(() => { M.usage = { ...M.usage, models: [] }; renderUsage(); return document.querySelectorAll('#usageCard .ms-row').length; });
+  assert.equal(plain, 2);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});

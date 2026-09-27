@@ -63,7 +63,8 @@ before(async () => {
   base = `http://127.0.0.1:${port}`;
   child = spawn(process.execPath, ['server.mjs'], {
     cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, PORT: String(port), CW_DATA_DIR: dataDir, CW_NO_ORCHESTRATOR: '1', CW_CLUSTER_HEARTBEAT_MS: String(HEARTBEAT_MS) },
+    env: { ...process.env, PORT: String(port), CW_DATA_DIR: dataDir, CW_NO_ORCHESTRATOR: '1', CW_CLUSTER_HEARTBEAT_MS: String(HEARTBEAT_MS),
+      AGENT_ORCH_MEMINFO: path.join(ROOT, 'test/fixtures/meminfo-ample') }, // the controller's own slots follow its memory
   });
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`server did not start:\n${out}`)), 20000);
@@ -153,6 +154,15 @@ test('PATCH edits name, draining and max slots', async () => {
   const n = (await r.json()).node;
   assert.deepEqual([n.name, n.draining, n.maxSlots, n.status], ['MacBook', true, 2, 'draining']);
   assert.equal((await api(`/api/cluster/nodes/${w.node}`, { method: 'PATCH', body: { maxSlots: -1 } })).status, 400);
+  assert.equal((await api(`/api/cluster/nodes/${w.node}`, { method: 'PATCH', body: { maxSlots: 0 } })).status, 400);
+  // Auto (null): min(cores, (MemAvailable − the 800 MB floor) / 1.2 GB per Claude run) = min(4, 2) here.
+  assert.equal((await (await api(`/api/cluster/nodes/${w.node}`, { method: 'PATCH', body: { maxSlots: null } })).json()).node.maxSlots, null);
+  c.send('inventory', { node: w.node, name: 'laptop', os: 'linux', arch: 'arm64', cores: 4, mem: 16 * 1024 ** 3, agents: [], versions: {} });
+  c.send('resources', { memAvailable: 4 * 1024 ** 3, load: [0.5, 0.4, 0.3], running: [] });
+  await waitFor(async () => (await nodeOf(w.node)).resources?.memAvailable === 4 * 1024 ** 3, { timeout: 5000 });
+  const m = await nodeOf(w.node);
+  assert.deepEqual([m.maxSlots, m.slots, m.used, m.tasks], [null, 2, 0, []]);
+  assert.equal((await nodeOf('controller')).slots, 2, "the controller's slots are its own (up to 2 with memory to spare), not its nodes row's 1");
   assert.equal((await (await api(`/api/cluster/nodes/${w.node}`, { method: 'PATCH', body: { enabled: false } })).json()).node.status, 'disabled');
   c.ws.close();
 });

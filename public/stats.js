@@ -140,11 +140,19 @@
   // Any element with data-tip (lines split by \n) shows it on hover and keyboard focus.
   function wireTips(root) {
     const at = (e) => e.target.closest?.('[data-tip]');
-    root.addEventListener('pointermove', (e) => { const n = at(e); if (n) showTip(n.dataset.tip.split('\n'), e.clientX, e.clientY); else hideTip(); });
-    root.addEventListener('pointerleave', hideTip);
+    let mouse = null; // where the mouse rests, so a scroll re-targets the tip to what is under it now instead of dropping it
+    root.addEventListener('pointermove', (e) => {
+      mouse = e.pointerType === 'mouse' ? { x: e.clientX, y: e.clientY } : null;
+      const n = at(e); if (n) showTip(n.dataset.tip.split('\n'), e.clientX, e.clientY); else hideTip();
+    });
+    root.addEventListener('pointerleave', () => { mouse = null; hideTip(); });
     root.addEventListener('focusin', (e) => { const n = at(e); if (!n) return; const r = n.getBoundingClientRect(); showTip(n.dataset.tip.split('\n'), r.left + r.width / 2, r.top); });
     root.addEventListener('focusout', hideTip);
-    root.addEventListener('scroll', hideTip, { passive: true, capture: true });
+    // Scrolling (wheel, or a scroll-into-view that lands after the pointer arrived) moves content under a resting mouse.
+    root.addEventListener('scroll', () => {
+      const n = mouse && document.elementFromPoint(mouse.x, mouse.y)?.closest('[data-tip]');
+      if (n) showTip(n.dataset.tip.split('\n'), mouse.x, mouse.y); else hideTip();
+    }, { passive: true, capture: true });
   }
 
   // ---------- building blocks ----------

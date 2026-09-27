@@ -1,6 +1,8 @@
 // The "Add machine" wizard (Server details → Machines): the pairing API flow (POST /api/cluster/pair → GET
 // /api/cluster/pair/:code waiting → a worker claims it → paired), the install scripts served at /install/…, and the UI
 // showing a one-line command per OS with the fresh code that flips to "Paired: <name>" once the code is claimed.
+// Then the Machines view with seeded fake nodes (a worker socket sending inventory/resources, running tasks in the DB):
+// one card per node with its controls, the cluster summary, live updates, and a 390px fit.
 // Boots server.mjs (CW_NO_ORCHESTRATOR=1, temp data dir). The browser part skips when Playwright's Chromium can't launch.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -11,7 +13,10 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DatabaseSync } from 'node:sqlite';
+import WebSocket from 'ws';
 import { chromium } from 'playwright-core';
+import { PROTOCOL_VERSION, WS_PATH, createSender } from '../cluster-protocol.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PASSWORD = 'machines-ui-password';
@@ -52,6 +57,7 @@ before(async () => {
 });
 
 after(async () => {
+  for (const ws of workers) ws.terminate();
   await browser?.close();
   child?.kill('SIGKILL');
   if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
@@ -142,6 +148,95 @@ test('UI: Connections shows a machine switcher once workers exist, and a worker 
   assert.ok(fits, 'the switcher does not widen the sheet');
   await page.locator('#connsMachines button', { hasText: 'Controller' }).click();
   await page.locator('#connsApp', { hasText: 'agent-orch server' }).waitFor();
+  await ctx.close();
+  assert.deepEqual(errors, []);
+});
+
+const workers = []; // fake worker sockets, closed in after()
+// A fake worker: pairs, dials the hub with its token and reports inventory + resources; heartbeats keep it online.
+async function fakeWorker(name, kind, { cores, mem, avail, load, agents }) {
+  const { body: { code } } = await call('/api/cluster/pair', 'POST');
+  const { body: { node, token } } = await call('/api/cluster/claim', 'POST', { code, name, os: kind, arch: 'arm64' }, false);
+  const ws = new WebSocket(base.replace('http', 'ws') + WS_PATH, { headers: { authorization: `Bearer ${token}` } });
+  await new Promise((resolve, reject) => { ws.on('open', resolve); ws.on('error', reject); });
+  const sender = createSender('w'), tx = (t, f) => ws.readyState === 1 && ws.send(sender(t, f));
+  tx('hello', { node, protocol: PROTOCOL_VERSION, version: 'test', jobs: [] });
+  tx('inventory', { node, name, os: kind, arch: 'arm64', cores, mem, versions: {}, agents: agents.map((id) => ({ id, installed: true, signedIn: true })) });
+  tx('resources', { memAvailable: avail, load, running: [] });
+  const beat = setInterval(() => tx('heartbeat'), 2000);
+  beat.unref();
+  workers.push(ws);
+  return { node, ws, tx };
+}
+
+test('Machines view: one card per node with its state, capacity, running tasks and a Drain control', { skip: noBrowser, timeout: 60000 }, async () => {
+  const GB = 2 ** 30;
+  const vps = await fakeWorker('build-vps', 'linux', { cores: 4, mem: 24 * GB, avail: 16 * GB, load: [1.5, 1, 1], agents: ['claude', 'codex'] });
+  const mac = await fakeWorker('studio-mac', 'darwin', { cores: 10, mem: 16 * GB, avail: 8 * GB, load: [2, 2, 2], agents: ['claude'] });
+  const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
+  db.exec('PRAGMA busy_timeout=5000');
+  const pid = Number(db.prepare("INSERT INTO projects(path,name,status,created_at) VALUES(?,?,'active',0)").run(path.join(dataDir, 'proj'), 'Seeded').lastInsertRowid);
+  const seed = db.prepare("INSERT INTO tasks(project_id,kind,title,prompt,status,agent,ran_agent,ran_model,started_at,created_at,node_id) VALUES(?,'work',?,'seed','running',?,?,?,?,0,?)");
+  const now = Math.floor(Date.now() / 1000);
+  const t1 = Number(seed.run(pid, 'Build the machines view', 'codex', 'codex', 'gpt-5.5', now - 750, vps.node).lastInsertRowid);
+  seed.run(pid, 'Tidy the settings sheet', 'claude', 'claude', 'opus', now - 60, 'controller');
+  db.close();
+
+  const nodes = (await call('/api/cluster/nodes')).body.nodes;
+  const [name, value] = cookie.split('=');
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  await ctx.addCookies([{ name, value, url: base }]);
+  const page = await ctx.newPage();
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  page.on('dialog', (d) => d.accept(d.type() === 'prompt' ? 'build-vps-2' : undefined));
+  await page.goto(`${base}/`);
+  await page.locator('#miniStats').dispatchEvent('click'); // the sidebar is off-canvas on a phone
+  const cards = page.locator('#mMachines .mc-node');
+  await page.locator('#mMachines .mc-node[data-node]', { hasText: 'studio-mac' }).waitFor();
+  assert.equal(await cards.count(), nodes.length, 'one card per node');
+  assert.deepEqual(await cards.evaluateAll((els) => els.map((e) => e.dataset.node)), nodes.map((n) => n.id));
+  for (let i = 0; i < nodes.length; i++) assert.equal(await cards.nth(i).locator('button[data-act="drain"]').count(), 1, `${nodes[i].name} has a Drain control`);
+  // With workers the section leads Server details, and the summary counts the connected machines.
+  assert.equal(await page.evaluate(() => document.querySelector('#serverModal .m-body').firstElementChild.id || document.querySelector('#serverModal .m-body').firstElementChild.className), 'mc-sec first');
+  assert.match(await page.locator('#mcSum').textContent(), /^Cluster: 3 machines · \d+ cores · [\d.]+ GB free · 2 of \d+ slots running · 2 offline$/);
+
+  const card = page.locator('.mc-node', { hasText: 'build-vps' });
+  const text = await card.textContent();
+  for (const want of ['Online', 'Linux · arm64', '4 cores', 'load 1.50', '8.0 GB used', '16.0 GB free of 24.0 GB', 'Claude Code', 'Build the machines view', '#' + t1, '13m', 'Running · 1 of 1 slot']) {
+    assert.ok(text.includes(want), `build-vps card shows "${want}": ${text}`);
+  }
+  assert.match(await page.locator('.mc-node', { hasText: 'studio-mac' }).textContent(), /macOS · arm64[\s\S]*Nothing running|macOS · arm64[\s\S]*Idle/);
+  assert.match(await page.locator('.mc-node', { hasText: 'vps-2' }).first().textContent(), /Offline/);
+  const local = page.locator('.mc-node[data-node="controller"]');
+  assert.match(await local.textContent(), /this server[\s\S]*Tidy the settings sheet/);
+  assert.equal(await local.locator('[data-act="remove"], [data-act="disable"]').count(), 0, 'the controller cannot be disabled or removed');
+
+  // Controls: Drain (live through the 'cluster' push), Auto slots, Rename.
+  await card.locator('[data-act="drain"]').click();
+  await page.locator('.mc-node', { hasText: 'build-vps' }).locator('.mc-st', { hasText: 'Draining' }).waitFor({ timeout: 10000 });
+  assert.equal(await page.locator('.mc-node', { hasText: 'build-vps' }).locator('[data-act="drain"]').getAttribute('aria-pressed'), 'true');
+  assert.equal((await call('/api/cluster/nodes')).body.nodes.find((n) => n.id === vps.node).draining, true);
+  await page.locator('.mc-node', { hasText: 'build-vps' }).locator('.seg-sm button', { hasText: 'Auto' }).click();
+  await page.locator('.mc-node', { hasText: 'build-vps' }).locator('.seg-sm button[aria-pressed="true"]', { hasText: 'Auto' }).waitFor();
+  assert.equal((await call('/api/cluster/nodes')).body.nodes.find((n) => n.id === vps.node).maxSlots, null);
+  await page.locator('.mc-node', { hasText: 'build-vps' }).locator('[data-act="rename"]').click();
+  await page.locator('.mc-node .mc-name', { hasText: 'build-vps-2' }).waitFor();
+  // A worker's new reading shows up live.
+  vps.tx('resources', { memAvailable: 20 * GB, load: [0.25, 0.5, 0.5], running: [] });
+  await page.locator('.mc-node', { hasText: 'build-vps-2' }).locator('.mc-meter', { hasText: '20.0 GB free' }).waitFor({ timeout: 15000 });
+
+  const fits = await page.evaluate(() => {
+    const p = document.querySelector('#serverModal .modal-panel');
+    return document.documentElement.scrollWidth <= innerWidth && p.scrollWidth <= p.clientWidth + 1
+      && [...document.querySelectorAll('.mc-node')].every((c) => c.scrollWidth <= c.clientWidth + 1);
+  });
+  assert.ok(fits, 'the Machines view fits 390px');
+  // Tapping a running task opens its drawer.
+  await page.locator('.mc-task', { hasText: 'Build the machines view' }).click();
+  await page.locator('#taskDrawer:not([hidden])').waitFor();
+  assert.equal(await page.locator('#serverModal').isHidden(), true);
+  assert.equal(await page.evaluate(() => O.drawer), t1);
   await ctx.close();
   assert.deepEqual(errors, []);
 });

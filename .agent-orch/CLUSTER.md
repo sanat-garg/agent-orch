@@ -117,8 +117,9 @@ verify-failed prompt, same as the local flow) or `job.cancel`. The controller ke
   a free slot, and `memAvailable - footprint(agent)` stays above the node's floor (the local node keeps today's
   `MEM` thresholds; workers report the same numbers). `footprint(agent)` is the per-agent measured RSS from #209
   (until then a constant per agent, e.g. 1.2 GB for claude, 0.8 GB for codex).
-- Slots per node = `min(cores, floor((memAvailable - floor) / footprint))`, capped by a per-node setting in the UI
-  (default 1 for the Mac, so the owner's laptop stays usable). The local node keeps its current `taskSlots` rule.
+- Slots per node = `min(cores, floor((memAvailable - floor) / footprint))` when its max tasks is Auto (`max_slots` 0,
+  API `maxSlots: null`), else the owner's number from the Machines view (new nodes start at 1, so a laptop stays
+  usable); headroom is checked per claim either way. The local node keeps its current `taskSlots` rule.
 - Placement picks the placeable node with the most headroom, preferring: the node that last ran the task (warm
   worktree and session), then remote nodes over the local one (the controller also serves the UI and merges). Plan and
   reflect tasks always run on the local node: they need the DB and project context.

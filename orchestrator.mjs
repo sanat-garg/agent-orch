@@ -1310,13 +1310,14 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return { ok: true, state: stateView() };
   }
   // What can run right now (Settings shows it; the owner can only cap it): the controller's slots (memory-guarded; none
-  // while workers are online unless controllerWork), each usable worker's max_slots, pacing's limit, the owner's cap.
+  // while workers are online unless controllerWork), each usable worker's slots (nodeCap: its max tasks, or Auto), pacing's
+  // limit, the owner's cap.
   function capacityView(d = decisionCache?.d, mem = readMemInfo(CFG.meminfo)) {
     const settings = parallelSettings();
     const workers = nodesNow().filter((n) => !n.local && n.status === 'online' && n.connected && n.enabled !== false && !n.draining);
     const controller = workers.length && !settings.controllerWork ? 0 : taskSlots({ setting: settings.parallelTasks, mem });
     const pacing = d && (d.scarce || d.concurrency < CFG.concurrency) ? Math.max(1, d.concurrency) : null;
-    const max = controller + workers.reduce((sum, n) => sum + (n.maxSlots || 0), 0);
+    const max = controller + workers.reduce((sum, n) => sum + nodeCap(n), 0);
     // controllerMax: what the controller takes when memory allows (controller < controllerMax: memory is holding it back).
     return { controller, controllerMax: workers.length && !settings.controllerWork ? 0 : settings.parallelTasks, workers: max - controller, max, pacing, cap: settings.maxTasks, running: workEverywhere(),
       effective: Math.min(max, pacing ?? Infinity, settings.maxTasks ?? Infinity) };
@@ -1342,10 +1343,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   const jobs = new Map(); // task id -> the remote job in flight: { node, next (event index), check, accept, reject, event, done }
   const rejected = new Map(); // `${node}/${task}` -> until (ms): a worker that declined a task isn't asked again for a minute
   const nodeOf = (id) => running.get(id)?.node || LOCAL_NODE;
-  let nodesAt = 0, nodesList = [];
+  // Read many times per claim, so cached for a second, but re-read at once after any node change (cluster.version()):
+  // a worker that just came back, or was drained or disabled, is seen by the very next placement.
+  let nodesAt = 0, nodesVer = null, nodesList = [];
   function nodesNow() {
     if (!cluster) return [];
-    if (Date.now() - nodesAt > 1000) { try { nodesList = cluster.listNodes(); } catch { nodesList = []; } nodesAt = Date.now(); }
+    const ver = cluster.version?.();
+    if (ver !== nodesVer || Date.now() - nodesAt > 1000) { try { nodesList = cluster.listNodes(); } catch { nodesList = []; } nodesAt = Date.now(); nodesVer = ver; }
     return nodesList;
   }
   const nodeName = (id) => nodesNow().find((n) => n.id === id)?.name || id;
@@ -1354,15 +1358,22 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     && (n.inventory?.agents || []).some((a) => a.id === agent && a.installed && a.signedIn));
   const footprint = (agent) => CFG.footprint[agent] ?? CFG.footprint.claude;
   const nodeRuns = (id) => [...running.values()].filter((r) => r.node === id);
-  // A worker's headroom for one more `agent` run: its last MemAvailable, less the footprint of runs placed on it since
-  // that reading and of the new run. It must stay at or above the same floor the controller keeps (MEM.claimFloor).
-  function headroom(n, agent) {
+  // A worker's spare memory: its last MemAvailable, less the footprint of runs placed on it since that reading.
+  function spareMem(n) {
     const res = n.resources || {}, fresh = nodeRuns(n.id).filter((r) => r.startedAt * 1000 > (res.at || 0));
-    return (res.memAvailable || 0) - fresh.reduce((sum, r) => sum + footprint(r.agent), 0) - footprint(agent);
+    return (res.memAvailable || 0) - fresh.reduce((sum, r) => sum + footprint(r.agent), 0);
   }
-  const freeWorkers = (agent, taskId) => workerNodes(agent).filter((n) => nodeRuns(n.id).length < n.maxSlots
+  // Headroom for one more `agent` run: it must stay at or above the same floor the controller keeps (MEM.claimFloor).
+  const headroom = (n, agent) => spareMem(n) - footprint(agent);
+  // A worker's slots: the owner's cap (nodes.max_slots), or Auto (null) = min(cores, its runs + the Claude-sized runs
+  // its spare memory fits above the floor). Headroom is checked per claim either way.
+  const nodeCap = (n) => n.maxSlots ?? Math.min(n.inventory?.cores || 1,
+    nodeRuns(n.id).length + Math.max(0, Math.floor((spareMem(n) - MEM.claimFloor) / footprint('claude'))));
+  const freeWorkers = (agent, taskId) => workerNodes(agent).filter((n) => nodeRuns(n.id).length < nodeCap(n)
     && headroom(n, agent) >= MEM.claimFloor && !(rejected.get(`${n.id}/${taskId}`) > Date.now()));
-  const workerSlots = (agent) => freeWorkers(agent).reduce((sum, n) => sum + n.maxSlots - nodeRuns(n.id).length, 0);
+  const workerSlots = (agent) => freeWorkers(agent).reduce((sum, n) => sum + nodeCap(n) - nodeRuns(n.id).length, 0);
+  // The owner drained the controller (Machines view): it starts no new work tasks; plan tasks still run here.
+  const localDraining = () => !!nodesNow().find((n) => n.local)?.draining;
   // The project's GitHub clone URL (never with credentials), or null: remote nodes need one, and a project that is a
   // subfolder of its repo stays local (a worker checks out the whole repo). Cached for a minute.
   const repoCache = new Map();
@@ -1395,7 +1406,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       const free = freeWorkers(agent, task.id).sort((a, b) => (b.id === task.node_id) - (a.id === task.node_id) || headroom(b, agent) - headroom(a, agent));
       if (free.length) return free[0].id;
     }
-    if (!localOk || !localFree || !localAgentOk(agent) || slotsFor(agent) - runningOn(agent) <= 0) return null;
+    if (!localOk || !localFree || localDraining() || !localAgentOk(agent) || slotsFor(agent) - runningOn(agent) <= 0) return null;
     if (remote && !parallelSettings().controllerWork && workerNodes(agent).length) return null;
     return LOCAL_NODE;
   }
@@ -3366,6 +3377,20 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       pacing: d?.reason || kvGet('budget_reason'), slots: slotCount(d, mem), parallel, lanes, capacity: capacityView(d, mem),
       running: running.size, workRunning: workRunning(), remoteRunning: workEverywhere() - workRunning(), draining, subscription: onSubscription() };
   }
+  // The Machines view (GET /api/cluster/nodes): each node's running tasks (read from the DB, so adopted remote work
+  // shows too), the work slots they hold and its slot count (the controller: slotCount; a worker: nodeCap).
+  function machines(nodes) {
+    const rows = qa(`SELECT t.id, t.project_id, p.name AS project, t.kind, t.title, t.agent, t.model, t.ran_agent, t.ran_model, t.started_at, t.node_id
+      FROM tasks t LEFT JOIN projects p ON p.id=t.project_id WHERE t.status='running' ORDER BY t.started_at, t.id`);
+    return nodes.map((n) => {
+      const tasks = rows.filter((t) => (t.node_id || LOCAL_NODE) === n.id).map((t) => {
+        const agent = t.ran_agent || t.agent || 'claude';
+        return { id: t.id, project_id: t.project_id, project: t.project, kind: t.kind, title: t.title, agent,
+          model: t.ran_model || t.model || delegator.defaultModel(agent) || null, started_at: t.started_at, waiting_for: running.get(t.id)?.waiting || null };
+      });
+      return { ...n, tasks, used: tasks.filter((t) => t.kind !== 'plan').length, slots: n.local ? slotCount(decisionCache?.d) : nodeCap(n) };
+    });
+  }
   function pushTask(id) {
     const t = taskView(getTask(id));
     if (!t) return;
@@ -3471,7 +3496,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   return {
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
     planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, insertCheckpoint, approveCheckpoint, requestChanges, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setReflectFallbacks, setReflectSettings, syncConvoModel, pauseTask, resumeTask, handoffTask, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
-    drain, undrain, chatPlanning, stateView, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, reconcileClaudeLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
+    drain, undrain, chatPlanning, stateView, machines, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, reconcileClaudeLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     // A sidebar chat's project rank ({id, position, priority}), or null when its folder has no orchestrator project.
     projectRank: (cwd) => q1('SELECT id, position, priority FROM projects WHERE path=:p', { p: cwd }) ?? null,
     isRunning: (id) => running.has(Number(id)), logEvent, attachCluster,

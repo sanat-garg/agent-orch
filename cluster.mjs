@@ -1,6 +1,6 @@
 // Controller side of the cluster (BRIEF goal 11, design: .agent-orch/CLUSTER.md, wire format: cluster-protocol.mjs).
 // Node registry in the orchestrator DB, one-time pairing codes, and the worker WebSocket hub at WS_PATH. The scheduler
-// uses listNodes() / send(nodeId, msg) / onMessage(handler); the UI reads listNodes() via GET /api/cluster/nodes.
+// uses listNodes() / send(nodeId, msg) / onMessage(handler) / version(); the UI reads listNodes() via GET /api/cluster/nodes.
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS nodes (
 )`;
 // Added later: grace_ms (the owner's per-node grace before its jobs are reassigned; NULL = graceMs(os)); away (why a
 // node is offline: 'bye' after a clean shutdown, 'asleep' when a Mac went silent, 'lost' otherwise); slept_at/slept_ms
-// (the last sleep a worker reported on wake).
+// (the last sleep a worker reported on wake). max_slots 0 = Auto (the scheduler sizes it from cores and free RAM).
 const COLUMNS = [['grace_ms', 'INTEGER'], ['away', 'TEXT'], ['slept_at', 'INTEGER'], ['slept_ms', 'INTEGER']];
 
 const statusOf = (row, connected) => (!row.enabled ? 'disabled' : !connected ? 'offline' : row.draining ? 'draining' : 'online');
@@ -58,7 +58,10 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     if (status !== row.status) db.prepare('UPDATE nodes SET status=? WHERE id=?').run(status, row.id);
     return status;
   }
-  const changed = () => { try { onChange(); } catch (e) { log(`onChange failed: ${e.message}`); } };
+  // kind 'resources': only a worker's periodic CPU/RAM reading changed (the Machines view refreshes; nothing else needs to).
+  // version (read via version()) counts every change, so the scheduler's cached listNodes() is re-read right after one.
+  let version = 0;
+  const changed = (kind) => { version++; try { onChange(kind); } catch (e) { log(`onChange failed: ${e.message}`); } };
 
   function refreshLocal() {
     let info = {};
@@ -79,7 +82,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
       status: row.status, createdAt: row.created_at, lastSeen: row.last_seen,
       away: connected ? null : row.away || 'lost', awayLabel: connected ? null : awayLabel(row),
       graceMs: nodeGrace(row), sleptAt: row.slept_at ?? null, sleptMs: row.slept_ms ?? null,
-      enabled: !!row.enabled, draining: !!row.draining, maxSlots: row.max_slots,
+      enabled: !!row.enabled, draining: !!row.draining, maxSlots: row.max_slots || null, // null = Auto
       inventory: parse(row.inventory), resources: parse(row.resources),
       protocol: c?.hello?.protocol ?? null, version: c?.hello?.version ?? null,
     };
@@ -141,10 +144,10 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
       if (grace !== null && !(Number.isInteger(grace) && grace >= 10 && grace <= 86400)) return { status: 400, error: 'graceSec must be null or an integer 10-86400' };
       set.grace_ms = grace === null ? null : grace * 1000;
     }
-    const slots = body.maxSlots ?? body.max_slots;
+    const slots = 'maxSlots' in body ? body.maxSlots : body.max_slots; // null = Auto
     if (slots !== undefined) {
-      if (!Number.isInteger(slots) || slots < 0 || slots > 16) return { status: 400, error: 'maxSlots must be an integer 0-16' };
-      set.max_slots = slots;
+      if (slots !== null && !(Number.isInteger(slots) && slots >= 1 && slots <= 16)) return { status: 400, error: 'maxSlots must be null (Auto) or an integer 1-16' };
+      set.max_slots = slots ?? 0;
     }
     const keys = Object.keys(set);
     if (keys.length) db.prepare(`UPDATE nodes SET ${keys.map((k) => `${k}=?`).join(', ')} WHERE id=?`).run(...keys.map((k) => set[k]), id);
@@ -226,6 +229,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
         case MSG.RESOURCES: {
           const { t, seq, ts, ...res } = msg;
           touch({ resources: JSON.stringify({ ...res, at: Date.now() }) });
+          changed('resources');
           break;
         }
         case MSG.BYE: c.bye = true; touch(); ws.close(1000, 'bye'); break;
@@ -288,5 +292,5 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     db.close();
   }
 
-  return { listNodes, node, createPairing, pairing, claim, update, revoke, handleUpgrade, send, onMessage, isConnected: (id) => conns.has(id), close };
+  return { listNodes, node, createPairing, pairing, claim, update, revoke, handleUpgrade, send, onMessage, isConnected: (id) => conns.has(id), version: () => version, close };
 }

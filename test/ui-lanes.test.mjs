@@ -85,6 +85,11 @@ test('running projects get a sidebar dot; the Queue window shows no lanes', { sk
   if (process.env.CW_LANES_KEEP) return;
   await page.waitForFunction(() => document.querySelector('#qBody').textContent.includes('Build lanes UI'));
   assert.equal(await page.locator('#qLanes, .lane-card').count(), 0);
+  // Each running task names its machine instead ('on vps-2'; 'waiting for …' while that machine is away).
+  await page.evaluate(() => { const t = [...O.tasks.values()].find((x) => x.title === 'Build lanes UI'); onOrch({ t: 'otask', task: { ...t, node: 'n_1', node_name: 'vps-2' } }); });
+  await page.locator('#qBody .tcard', { hasText: 'Build lanes UI' }).locator('.tc-node', { hasText: 'on vps-2' }).waitFor();
+  await page.evaluate(() => { const t = [...O.tasks.values()].find((x) => x.title === 'Build lanes UI'); onOrch({ t: 'otask', task: { ...t, waiting_for: 'Mac mini (Mac asleep)' } }); });
+  await page.locator('#qBody .tcard', { hasText: 'Build lanes UI' }).locator('.tc-node', { hasText: 'waiting for Mac mini (Mac asleep)' }).waitFor();
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   await page.evaluate(() => closeQueue());
   await page.waitForFunction((cid) => document.querySelector(`.convo[data-cid="${cid}"] .run-dot`), CID);

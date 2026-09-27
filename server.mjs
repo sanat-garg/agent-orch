@@ -742,8 +742,13 @@ const cluster = orch && createCluster({
     };
   },
   log: (m) => console.log(`[cluster] ${m}`),
-  onChange: () => { for (const ws of allClients) send(ws, { t: 'cluster' }); },
+  onChange: (kind) => (kind === 'resources' ? resourcesPush() : clusterPush()),
 });
+// 'cluster' pushes: the UI re-reads GET /api/cluster/nodes. A worker's periodic CPU/RAM reading ({kind: 'resources'},
+// only the Machines view cares) goes out at most every 5 s.
+function clusterPush(kind) { for (const ws of allClients) send(ws, kind ? { t: 'cluster', kind } : { t: 'cluster' }); }
+let resourcesTimer = null;
+function resourcesPush() { resourcesTimer ??= setTimeout(() => { resourcesTimer = null; clusterPush('resources'); }, 5000); }
 // The scheduler places work on online workers through the hub (orchestrator.mjs `place`/`runRemote`).
 if (cluster && !NO_ORCH) orch.attachCluster(cluster);
 if (cluster) remoteLogins = createRemoteLogins({ cluster, local: () => connections.list(),
@@ -1445,7 +1450,7 @@ async function handleRequest(req, res) {
     }
   }
   if (p.startsWith('/api/cluster/') && !cluster) return json(res, 503, { error: 'cluster unavailable' });
-  if (p === '/api/cluster/nodes' && req.method === 'GET') return json(res, 200, { nodes: cluster.listNodes() });
+  if (p === '/api/cluster/nodes' && req.method === 'GET') return json(res, 200, { nodes: orch.machines(cluster.listNodes()) });
   if (p === PAIR_PATH && req.method === 'POST') return json(res, 200, cluster.createPairing());
   const pcode = p.match(/^\/api\/cluster\/pair\/([\w-]{1,20})$/);
   if (pcode && req.method === 'GET') return json(res, 200, cluster.pairing(pcode[1]));

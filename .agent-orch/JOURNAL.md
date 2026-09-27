@@ -663,3 +663,27 @@ Command: npm test
 ## 2026-09-27 15:16 — #238 Integrate #222: Remote sign-in and per-machine agent status in Connections [done (check passed)]
 
 npm test passes 310/310, merge conflicts resolved
+
+## 2026-09-27 15:57 — #223 Machines view: status, capacity and running tasks per machine [done (check passed)]
+
+Machines view: per-node cards, controls, cluster summary; tests pass
+
+## 2026-09-27 16:45 — #240 Integrate #223: Machines view: status, capacity and running tasks per machine [verify failed (1)]
+
+Command: node --check public/app.js && npm test
+
+## 2026-09-27 17:34 — #240 Integrate #223: Machines view: status, capacity and running tasks per machine [done (check passed)]
+
+Stale-node-cache race fixed; exact check passes 324/324
+
+## 2026-09-27 17:34 — #240 Integrate #223: Machines view: status, capacity and running tasks per machine [verify failed (2)]
+
+Command: merge main again
+
+## 2026-09-27 17:56 — #240 Integrate #223: Machines view: status, capacity and running tasks per machine [verify failed (3)]
+
+Command: node --check public/app.js && npm test
+
+## 2026-09-27 18:23 — #240 Integrate #223: Machines view: status, capacity and running tasks per machine [done (check passed)]
+
+Merge resolved, tooltip race fixed, 353/353 tests pass

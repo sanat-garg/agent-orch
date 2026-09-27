@@ -2629,7 +2629,12 @@ function onServer(msg) {
   if (msg.t === 'oprojects') { applyProjectOrder(msg.order || []); renderConvoList(); return renderOrchBar(); }
   if (['otask', 'oproject', 'ostate', 'orun', 'oorder', 'olane'].includes(msg.t)) return onOrch(msg);
   if (msg.t === 'connections') return msg.node ? applyRemote(msg.node, msg.connections) : applyConnections(msg.connections);
-  if (msg.t === 'cluster') { if (!$('serverModal').hidden) loadMachines(); if (!$('connsModal').hidden) loadConnNodes(); return checkPairing(); }
+  if (msg.t === 'cluster') {
+    scheduleMachines(msg.kind === 'resources' ? 600 : 0);
+    if (msg.kind === 'resources') return; // only a worker's CPU/RAM reading changed
+    if (!$('connsModal').hidden) loadConnNodes();
+    return checkPairing();
+  }
   if (msg.t === 'models') return api('/api/agents').then((d) => { AGENT_LIST = d.agents || []; renderAgentPicker(); }).catch(() => {});
   if (msg.t === 'status') { upd.pending = !!msg.restartPending; return renderUpdateBanner(); }
   if (msg.t === 'ext') return window.Ext?.changed(msg.kind); // skills/MCP/subagents/personas changed (ext.js)
@@ -3187,6 +3192,7 @@ function onMetrics(msg) {
     appendLive(msg.s);
     // The first sample after (re)connecting is a catch-up copy, not a fresh fetch.
     if (!first) { M.lastTick = Date.now(); beat(); } else M.lastTick = msg.s.t;
+    if (Date.now() - MC.at > 10e3) scheduleMachines(0); // the controller's own CPU/RAM (and elapsed times) on the Machines cards
   } else if (msg.t === 'mdetail') {
     M.data = msg.d;
   } else if (msg.t === 'usage') {
@@ -3265,19 +3271,182 @@ document.addEventListener('keydown', (e) => {
 setInterval(() => { if (M.usage) renderUsage(); }, 30e3); // keep the "in 2h 9m" countdowns current
 
 // ----- machines (cluster nodes) and the "Add machine" wizard -----
-// POST /api/cluster/pair → a one-time code, embedded in a one-line install command per OS (bin/install-worker*.sh,
-// served at /install/…). GET /api/cluster/pair/:code then reports waiting → paired (node) → node.connected.
+// One card per node from GET /api/cluster/nodes (cluster.mjs view + orchestrator `machines`: running tasks, work slots in
+// use and the node's slot count). While Server details is open it re-reads on 'cluster' pushes (node changes, worker
+// CPU/RAM readings), task changes and, for the controller's own numbers, its metric ticks (at most every 10 s).
+// "Add machine": POST /api/cluster/pair → a one-time code, embedded in a one-line install command per OS
+// (bin/install-worker*.sh, served at /install/…). GET /api/cluster/pair/:code then reports waiting → paired (node) → node.connected.
 const AM = { code: null, expiresAt: 0, pairing: null, err: '', timer: null, lastFocus: null };
+const MC = { nodes: [], at: 0, timer: null, loading: false };
+const fmtGB = (b) => `${((b || 0) / 2 ** 30).toFixed(1)} GB`;
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const NODE_ST = { online: 'Online', draining: 'Draining', disabled: 'Disabled' };
+const OS_NAME = { darwin: 'macOS', linux: 'Linux' };
+const OS_ICON = { // SF Symbols style: laptopcomputer (macOS) and server.rack (Linux)
+  darwin: '<svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true"><rect x="5" y="5" width="14" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M2.5 18.5h19" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
+  linux: '<svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="4" y="13" width="16" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 7.5h.01M8 16.5h.01" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>',
+};
 async function loadMachines() {
-  let nodes;
-  try { nodes = (await api('/api/cluster/nodes')).nodes || []; } catch { return; }
-  $('mMachines').replaceChildren(...nodes.map((n) => {
-    const li = el('li');
-    li.append(el('span', `dot ${n.connected ? 'on' : ''}`), el('span', 'mc-name', n.local ? `${n.name} (this server)` : n.name),
-      el('span', 'mc-st', n.connected ? NODE_ST[n.status] || n.status : cap(n.awayLabel || 'offline')));
-    return li;
-  }));
+  if (MC.loading) return;
+  MC.loading = true;
+  try { MC.nodes = (await api('/api/cluster/nodes')).nodes || []; MC.at = Date.now(); } catch { return; } finally { MC.loading = false; }
+  renderMachines();
+}
+// Coalesces bursts (task updates, pushes) into one read while Server details is open.
+function scheduleMachines(ms = 600) {
+  if ($('serverModal').hidden || MC.timer) return;
+  MC.timer = setTimeout(() => { MC.timer = null; if (!$('serverModal').hidden) loadMachines(); }, ms);
+}
+// Online / Draining / Disabled while connected; away: Asleep (a Mac that went silent), Shut down (bye), else Offline.
+function nodeState(n) {
+  if (!n.enabled) return { dot: '', label: 'Disabled' };
+  if (!n.connected) return n.away === 'asleep' ? { dot: '', label: 'Asleep' } : n.away === 'bye' ? { dot: '', label: 'Shut down' } : { dot: 'off', label: 'Offline' };
+  return n.draining ? { dot: 'warn', label: 'Draining' } : { dot: 'on', label: 'Online' };
+}
+// 'Cluster: 3 machines · 7 cores · 14.2 GB free · 4 of 6 slots running': machines that are connected and enabled.
+function machineSummary(nodes) {
+  const up = nodes.filter((n) => n.connected && n.enabled), sum = (f) => up.reduce((a, n) => a + (f(n) || 0), 0);
+  const used = sum((n) => n.used), slots = sum((n) => (n.draining ? n.used : Math.max(n.slots || 0, n.used)));
+  const off = nodes.filter((n) => n.enabled && !n.connected).length, dis = nodes.filter((n) => !n.enabled).length;
+  return [`Cluster: ${plural(up.length, 'machine')}`, plural(sum((n) => n.inventory?.cores), 'core'), `${fmtGB(sum((n) => n.resources?.memAvailable))} free`,
+    `${used} of ${plural(slots, 'slot')} running`, off && `${off} offline`, dis && `${dis} disabled`].filter(Boolean).join(' · ');
+}
+function renderMachines() {
+  const nodes = MC.nodes, sec = $('mcTitle').closest('.mc-sec'), body = sec.parentElement, first = nodes.some((n) => !n.local);
+  // With workers the cluster leads Server details (above this server's charts); alone it sits at the bottom.
+  if (first !== (body.firstElementChild === sec)) { if (first) body.prepend(sec); else body.append(sec); }
+  sec.classList.toggle('first', first);
+  $('mcSum').textContent = nodes.length ? machineSummary(nodes) : '';
+  // Live re-renders keep keyboard focus on the same control of the same card.
+  const f = document.activeElement, card = f?.closest?.('#mMachines .mc-node'), key = (b) => b.dataset.act || b.dataset.task || b.textContent;
+  const was = card && f.tagName === 'BUTTON' && [card.dataset.node, key(f)];
+  $('mMachines').replaceChildren(...nodes.map(machineCard));
+  if (was) [...$('mMachines').querySelectorAll(`.mc-node[data-node="${CSS.escape(was[0])}"] button`)].find((b) => key(b) === was[1])?.focus({ preventScroll: true });
+}
+// A labelled meter: 'CPU  4 cores · load 1.20' over a bar (warn ≥ 75%, crit ≥ 90%).
+function mcMeter(label, parts, pct) {
+  const m = el('div', 'mc-meter'), d = el('div', 'detail');
+  for (const p of parts) d.append(typeof p === 'string' ? document.createTextNode(p) : el('b', '', p.b));
+  m.append(el('span', '', label), d);
+  if (pct != null) {
+    const bar = el('div', 'bar'), i = el('i', pct >= 90 ? 'crit' : pct >= 75 ? 'warn' : '');
+    i.style.width = `${Math.max(2, Math.min(100, pct))}%`;
+    bar.append(i);
+    m.append(bar);
+  }
+  return m;
+}
+function machineCard(n) {
+  const li = el('li', 'm-card mc-node'), st = nodeState(n), inv = n.inventory || {}, res = n.resources || {};
+  li.dataset.node = n.id;
+  if (!n.connected || !n.enabled) li.classList.add('away');
+  const top = el('div', 'mc-top'), icon = el('span', 'mc-os'), id = el('div', 'mc-id'), name = el('span', 'mc-name', n.name);
+  icon.innerHTML = OS_ICON[n.os] || OS_ICON.linux;
+  icon.title = OS_NAME[n.os] || n.os || '';
+  if (n.local) name.append(el('small', '', '(this server)'));
+  const seen = n.local ? 'controller' : n.lastSeen ? `${n.connected ? 'seen' : 'last seen'} ${relTime(n.lastSeen)}` : 'never connected';
+  id.append(name, el('span', 'mc-meta', [OS_NAME[n.os] || n.os, n.arch, seen].filter(Boolean).join(' · ')));
+  const pill = el('span', 'mc-st');
+  pill.append(el('span', `dot ${st.dot}`), document.createTextNode(st.label));
+  top.append(icon, id, pill);
+  li.append(top);
+
+  const load = res.load?.[0];
+  if (inv.cores) li.append(mcMeter('CPU', [{ b: String(inv.cores) }, ` ${inv.cores === 1 ? 'core' : 'cores'}`, ...(load != null ? [' · load ', { b: load.toFixed(2) }] : [])],
+    load != null ? (load / inv.cores) * 100 : null));
+  if (inv.mem && res.memAvailable != null) {
+    const used = Math.max(0, inv.mem - res.memAvailable);
+    li.append(mcMeter('RAM', [{ b: fmtGB(used) }, ' used · ', { b: fmtGB(res.memAvailable) }, ` free of ${fmtGB(inv.mem)}`], (used / inv.mem) * 100));
+  }
+  if (!inv.cores && res.memAvailable == null) li.append(el('p', 'mc-idle', 'No readings yet: they arrive once its worker connects.'));
+
+  const ag = el('div', 'mc-agents'), signed = (inv.agents || []).filter((a) => a.signedIn);
+  for (const a of signed) {
+    const t = el('span', 'tc-tag on', agentLabel(a.id));
+    if (a.account) t.title = `Signed in as ${a.account}`;
+    ag.append(t);
+  }
+  if (!signed.length) ag.append(el('span', 'mc-idle', inv.agents ? 'No agents signed in' : 'Agents not reported yet'));
+  li.append(ag);
+
+  // Running tasks (plan tasks too, though they hold no work slot); tap one for its drawer.
+  const run = el('div', 'mc-run'), h = el('h4');
+  h.append(document.createTextNode('Running · '), el('b', '', `${n.used} of ${n.slots ?? 0}`), document.createTextNode(` ${n.slots === 1 ? 'slot' : 'slots'}`));
+  run.append(h);
+  const tasks = n.tasks || [];
+  if (!tasks.length) run.append(el('p', 'mc-idle', n.connected && n.enabled && !n.draining ? 'Idle' : 'Nothing running'));
+  const list = el('div', 'mc-tasks');
+  for (const t of tasks) {
+    const b = el('button', 'mc-task'), main = el('span');
+    b.type = 'button';
+    b.dataset.task = t.id;
+    main.append(el('span', 't', displayTitle(t)), el('span', 's', [`#${t.id}`, t.project, `${shortLabel(t.agent)} · ${modelName(t.agent, t.model)}`].filter(Boolean).join(' · ')));
+    const e = el('span', t.waiting_for ? 'e wait' : 'e', t.waiting_for ? 'waiting' : fmtDur(Date.now() / 1000 - t.started_at));
+    e.title = t.waiting_for ? `Waiting for ${t.waiting_for} to come back` : 'Running for';
+    b.append(main, e);
+    b.addEventListener('click', () => { closeServer(); openTask(t.id); });
+    list.append(b);
+  }
+  if (tasks.length) run.append(list);
+  li.append(run);
+  li.append(machineControls(n));
+  return li;
+}
+// Rename, max parallel tasks, Drain, Disable and Remove. The controller's own slots follow its free memory (the owner
+// only caps tasks across all machines, in Settings), so its card names no choice; it can't be disabled or removed.
+function machineControls(n) {
+  const ctl = el('div', 'mc-ctl'), slots = el('span', 'mc-slots', 'Max tasks');
+  if (n.local) {
+    const auto = el('span', 'mc-auto', 'Auto');
+    auto.title = "Follows this server's free memory. Settings → Parallel tasks caps tasks across all machines.";
+    slots.append(auto);
+  } else {
+    const seg = el('span', 'seg-sm');
+    seg.setAttribute('role', 'group');
+    seg.setAttribute('aria-label', `Max parallel tasks on ${n.name}`);
+    for (const v of [null, 1, 2, 3, 4, ...(n.maxSlots > 4 ? [n.maxSlots] : [])]) {
+      const b = el('button', '', v == null ? 'Auto' : String(v));
+      b.type = 'button';
+      b.setAttribute('aria-pressed', String(v === n.maxSlots));
+      if (v == null) b.title = 'Sized from its cores and free RAM';
+      b.addEventListener('click', () => { if (v !== n.maxSlots) patchNode(n, { maxSlots: v }); });
+      seg.append(b);
+    }
+    slots.append(seg);
+  }
+  const btn = (text, act, run, cls = '') => {
+    const b = el('button', `btn small${cls}`, text);
+    b.type = 'button';
+    b.dataset.act = act;
+    b.addEventListener('click', run);
+    ctl.append(b);
+    return b;
+  };
+  ctl.append(slots);
+  btn('Rename', 'rename', () => {
+    const name = prompt(`Rename ${n.name}`, n.name)?.trim();
+    if (name && name !== n.name) patchNode(n, { name });
+  });
+  const drain = btn('Drain', 'drain', () => patchNode(n, { draining: !n.draining }));
+  drain.setAttribute('aria-pressed', String(n.draining));
+  drain.title = n.draining ? 'Draining: it takes no new tasks. Press to take tasks again.' : 'Take no new tasks; running ones finish here';
+  const moving = n.used ? ` Its ${plural(n.used, 'running task')} go${n.used === 1 ? 'es' : ''} back to the queue now.` : '';
+  if (!n.local) {
+    btn(n.enabled ? 'Disable' : 'Enable', 'disable', () => {
+      if (n.enabled && moving && !confirm(`Disable ${n.name}?${moving}`)) return;
+      patchNode(n, { enabled: !n.enabled });
+    });
+    btn('Remove', 'remove', async () => {
+      if (!confirm(`Remove ${n.name}? Its token is revoked and it disconnects.${moving} Adding it back needs a new pairing code.`)) return;
+      try { await api(`/api/cluster/nodes/${encodeURIComponent(n.id)}`, 'DELETE'); toast(`Removed ${n.name}`); } catch (e) { toast(e.message, { kind: 'error' }); }
+      loadMachines();
+    }, ' danger');
+  }
+  return ctl;
+}
+async function patchNode(n, body) {
+  try { await api(`/api/cluster/nodes/${encodeURIComponent(n.id)}`, 'PATCH', body); } catch (e) { toast(e.message, { kind: 'error' }); }
+  loadMachines();
 }
 const installCmd = (os, code) => {
   const o = location.origin;
@@ -3795,6 +3964,8 @@ function fillCard(b, id) {
   // A limit wait is spelled out by the model chip; the sub line keeps just the time (the chip is clipped on phones).
   const wait = s.cls === 'limited' && modelStatus(t);
   sub.append(document.createTextNode(` · ${wait ? `Waiting until ${fmtWhen(wait.until * 1000)}` : deps.length && s.label.startsWith('Waits for #') ? 'Waiting' : s.label}`));
+  const where = taskMachine(t);
+  if (where) sub.append(el('span', 'tc-node', ` · ${where}`));
   tags.textContent = '';
   const open = t.status === 'queued' || t.status === 'running';
   if (open && t.urgency === 'urgent') tags.append(el('span', 'tc-tag urgent', 'Urgent'));
@@ -3933,6 +4104,14 @@ function reviewPanel(t) {
   p.append(row, form);
   return p;
 }
+// The machine a running task is on ('on vps-2', 'waiting for Mac mini (Mac asleep)'); tasks on the controller say
+// 'on this server' only once the cluster has workers (MC.nodes, read when the Queue or Server details opens).
+function taskMachine(t) {
+  if (t.status !== 'running' || t.kind === 'plan') return '';
+  if (t.waiting_for) return `waiting for ${t.waiting_for}`;
+  if (t.node_name) return `on ${t.node_name}`;
+  return MC.nodes.some((n) => !n.local) ? 'on this server' : '';
+}
 const refreshCards = (id) => document.querySelectorAll(`.tcard[data-task="${id}"]`).forEach((b) => fillCard(b, id));
 const refreshAllCards = () => document.querySelectorAll('.tcard[data-task]').forEach((b) => fillCard(b, Number(b.dataset.task)));
 
@@ -3950,6 +4129,7 @@ function applyOrchSnapshot(s) {
 
 function onOrch(msg) {
   if (msg.t === 'olane') return; // live lane activity: the Queue window no longer shows lanes
+  if (msg.t === 'otask' || msg.t === 'ostate') scheduleMachines(); // running tasks per machine
   if (msg.t === 'otask') {
     observeTaskCompletion(msg.task);
     if (FB.local?.url === `/api/orch/tasks/${msg.task.id}/fallbacks`) msg.task.fallbacks = FB.local.list; // a save still in flight
@@ -4831,6 +5011,7 @@ function parallelInfo(t) {
 function openQueue() {
   if ($('queueModal').hidden) Q.lastFocus = document.activeElement;
   $('queueModal').hidden = false;
+  if (!MC.at) loadMachines().then(renderQueue); // which machines exist, for the running tasks' 'on <machine>'
   renderQueue();
   $('queueModal').querySelector('.q-card, [data-close].icon-btn').focus();
 }

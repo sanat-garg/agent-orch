@@ -486,11 +486,56 @@ code, pre, kbd { font-family: var(--mono); }
 /* server details: machines, and the "Add machine" wizard */
 .mc-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
 .mc-head h3 { margin: 0; }
-.mc-list { list-style: none; margin: 0; padding: 0; font-size: 13.5px; }
-.mc-list li { display: flex; align-items: center; gap: 8px; padding: 6px 0; min-width: 0; }
-.mc-list li + li { border-top: 1px solid var(--border); }
-.mc-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
-.mc-st { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+/* Machines (Server details): a cluster summary, then one card per node */
+.mc-sec { margin-top: 18px; }
+.mc-sec.first { margin: 0 0 18px; }
+.mc-sec > .mc-head h3 { font-size: 15px; color: var(--text); }
+.mc-sum { margin: -2px 0 10px; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.mc-sum b { color: var(--text); font-weight: 600; }
+.mc-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 12px; }
+.mc-node { display: flex; flex-direction: column; gap: 10px; font-size: 13px; color: var(--muted); }
+.mc-node.away .mc-meter, .mc-node.away .mc-agents { opacity: .55; }
+.mc-top { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+.mc-os { flex: none; width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; background: var(--raised); color: var(--text); }
+.mc-id { flex: 1; min-width: 0; }
+.mc-name { display: block; color: var(--text); font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-name small { font-size: 12px; font-weight: 500; color: var(--muted); margin-left: 4px; }
+.mc-meta { display: block; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-st { flex: none; display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 99px; border: 1px solid var(--border);
+  background: var(--raised); font-size: 12px; font-weight: 550; color: var(--text); white-space: nowrap; }
+.mc-st .dot { width: 7px; height: 7px; }
+.mc-meter { display: grid; grid-template-columns: 34px minmax(0, 1fr); column-gap: 8px; row-gap: 3px; align-items: center; }
+.mc-meter > span:first-child { font-size: 12px; font-weight: 600; color: var(--faint); grid-row: span 2; align-self: start; padding-top: 1px; }
+.mc-meter .detail b { font-weight: 600; }
+.mc-meter .bar { margin: 0; height: 6px; }
+.mc-meter .bar i.warn { background: var(--warn); }
+.mc-meter .bar i.crit { background: var(--danger); }
+.mc-agents { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.mc-agents .tc-tag.on { color: var(--text); }
+.mc-agents .tc-tag.on::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--ok); margin-right: 5px; vertical-align: 1px; }
+.mc-run h4 { margin: 0 0 4px; font-size: 12px; font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
+.mc-run h4 b { color: var(--text); }
+.mc-tasks { display: flex; flex-direction: column; gap: 4px; }
+.mc-task { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg); color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.mc-task:hover { border-color: var(--border-strong); }
+.mc-task > span:first-child { flex: 1; min-width: 0; }
+.mc-task .t { display: block; color: var(--text); font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-task .s { display: block; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-task .e { flex: none; font-size: 12px; font-variant-numeric: tabular-nums; }
+.mc-task .e.wait { color: var(--warn); }
+.mc-idle { margin: 0; font-size: 12.5px; }
+.mc-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: auto; padding-top: 10px; border-top: 1px solid var(--border); }
+.mc-ctl .mc-slots { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-basis: 100%; font-size: 12.5px; }
+.mc-ctl .mc-auto { color: var(--text); font-weight: 550; cursor: help; }
+.mc-ctl .btn.small { height: 30px; padding: 0 10px; font-size: 12.5px; }
+.mc-ctl .btn[aria-pressed="true"] { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
+.mc-ctl .seg-sm button { height: 26px; padding: 0 9px; }
+@media (pointer: coarse), (max-width: 700px) {
+  .mc-ctl .btn.small { height: 44px; padding: 0 12px; }
+  .mc-ctl .seg-sm button { height: 38px; min-width: 38px; }
+  .mc-ctl .btn.small { flex: 1; }
+}
 .am-body { display: flex; flex-direction: column; gap: 10px; }
 .am-os { margin: 0; color: var(--text); font-weight: 600; font-size: 13.5px; }
 .am-cmd { margin: 4px 0 0; padding: 9px 30px 9px 10px; border-radius: 9px; background: var(--code-bg); border: 1px solid var(--border);

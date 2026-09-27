@@ -491,10 +491,11 @@
         <h3>Top processes</h3>
         <table class="m-table" id="mTop"><thead><tr><th>Process</th><th class="num">CPU</th><th class="num">Memory</th></tr></thead><tbody></tbody></table>
       </div>
-      <div class="m-card m-top">
-        <div class="mc-head"><h3>Machines</h3><button class="btn small" id="addMachine" type="button">Add machine</button></div>
-        <ul class="mc-list" id="mMachines"></ul>
-      </div>
+      <section class="mc-sec" aria-labelledby="mcTitle">
+        <div class="mc-head"><h3 id="mcTitle">Machines</h3><button class="btn small" id="addMachine" type="button">Add machine</button></div>
+        <p class="mc-sum" id="mcSum"></p>
+        <ul class="mc-grid" id="mMachines"></ul>
+      </section>
     </div>
   </div>
 </div>

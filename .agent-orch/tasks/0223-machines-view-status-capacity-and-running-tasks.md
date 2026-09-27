@@ -14,3 +14,7 @@ Add a 'Machines' section (in Server details, or its own sidebar entry next to Co
 ## Done when
 
 `node --check public/app.js && npm test` passes, and a seeded UI test shows one machine card per node with a Drain control
+
+## Result — done (check passed) (2026-09-27 15:57)
+
+AGENT-ORCH-STATUS: done — Machines view: per-node cards, controls, cluster summary; tests pass

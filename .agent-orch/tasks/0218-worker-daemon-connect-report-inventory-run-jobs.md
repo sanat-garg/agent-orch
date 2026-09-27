@@ -14,3 +14,7 @@ Implement worker.mjs, the daemon that runs on extra machines (per .agent-orch/CL
 ## Done when
 
 `npm test` passes with a worker e2e test (fake hub, temp bare repo, stub agent) where the job's branch is pushed to the bare repo containing the agent's change
+
+## Result — done (check passed) (2026-09-27 12:48)
+
+AGENT-ORCH-STATUS: done — worker daemon runs jobs, pushes branches; npm test passes

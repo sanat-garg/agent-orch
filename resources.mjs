@@ -10,6 +10,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { runHelperSync } from './helpers.mjs';
 
 export const OWNER_ENV = 'AGENT_ORCH_OWNER';
 export const ownerTag = (kind, id, server = process.pid) => `${server}:${kind}:${id}`;
@@ -73,7 +74,9 @@ export function readProcesses(dir = '/proc') {
   return procs;
 }
 
+// macOS has no /proc (the worker daemon on the owner's Mac): the same shape from os.*, `vm_stat` and `sysctl vm.swapusage`.
 export function readSystem(dir = '/proc') {
+  if (process.platform === 'darwin' && dir === '/proc') return readSystemDarwin();
   const mem = read(path.join(dir, 'meminfo')) || '';
   const cpus = [];
   for (const line of (read(path.join(dir, 'stat')) || '').split('\n')) {
@@ -87,6 +90,28 @@ export function readSystem(dir = '/proc') {
     memTotal: kb(mem, 'MemTotal'), memAvailable: kb(mem, 'MemAvailable'), swapTotal: kb(mem, 'SwapTotal'), swapFree: kb(mem, 'SwapFree'),
     load, cpus, uptime: Number((read(path.join(dir, 'uptime')) || '0').split(' ')[0]),
   };
+}
+
+// `vm_stat` → bytes the system could hand out without swapping (free + inactive + speculative + purgeable pages), like
+// Linux's MemAvailable. null when unparseable.
+export function parseVmStat(text) {
+  const page = Number(/page size of (\d+) bytes/.exec(text || '')?.[1]);
+  if (!page) return null;
+  const pages = (k) => Number(new RegExp(`^Pages ${k}:\\s+(\\d+)`, 'm').exec(text)?.[1] || 0);
+  return (pages('free') + pages('inactive') + pages('speculative') + pages('purgeable')) * page;
+}
+// `sysctl -n vm.swapusage` ("total = 2048.00M  used = 1024.50M  free = 1023.50M  (encrypted)") → {swapTotal, swapFree} bytes.
+export function parseSwapUsage(text) {
+  const unit = { K: 1024, M: 1024 ** 2, G: 1024 ** 3 };
+  const v = (k) => { const m = new RegExp(`${k} = ([\\d.]+)([KMG])`).exec(text || ''); return m ? Math.round(Number(m[1]) * unit[m[2]]) : null; };
+  return { swapTotal: v('total'), swapFree: v('free') };
+}
+function readSystemDarwin() {
+  const out = (cmd, args) => { const r = runHelperSync(cmd, args, { timeoutMs: 3000 }); return r.status === 0 ? r.stdout : ''; };
+  const avail = parseVmStat(out('/usr/bin/vm_stat', []));
+  const swap = parseSwapUsage(out('/usr/sbin/sysctl', ['-n', 'vm.swapusage']));
+  const cpus = os.cpus().map(({ times: t }) => ({ total: (t.user + t.nice + t.sys + t.idle + t.irq) / 10, idle: t.idle / 10 }));
+  return { memTotal: os.totalmem(), memAvailable: avail ?? os.freemem(), ...swap, load: os.loadavg(), cpus, uptime: os.uptime() };
 }
 
 // ---- classification

@@ -14,7 +14,7 @@ supply the CPU/RAM. They do not supply quota (see the caveat at the end).
   (`mergeTask` under `serialGit`). It decides which node runs which task. It is also a node itself: the
   **local node** runs tasks exactly as today (worktree beside the repo, `runAgent` in-process).
 - **Workers**: a Linux VPS (same spec as the controller) and the owner's MacBook whenever it is awake. Each runs a
-  small daemon (`agent-orch-worker`, a future `worker.mjs` in this repo, started by systemd on Linux or a launchd
+  small daemon (`worker.mjs` in this repo, started by systemd on Linux or a launchd
   agent on macOS) that dials the controller, reports what it has, and runs the jobs it is given with the same
   adapters (`agents.mjs` `runAgentCli`, normalised events) and the same done-when check (`runCheck`). A worker has no
   DB, no planner and no UI; it holds nothing the controller can't rebuild except in-flight work, which it pushes.
@@ -75,8 +75,8 @@ Direction: C = controller → worker, W = worker → controller (`DIRECTION`; `v
 | `models.refresh` / `limits.refresh` | C | agent | the owner pressed refresh for that node's agent (nothing polls: BRIEF goal 7) |
 | `models` / `limits` | W | agent, models[] / windows[], error | the answer, from the worker's own `discoverModels` / `fetchLimits` |
 
-A task's life on a worker: `job.offer` → `job.accept` → `job.start` → `job.event`* (+ `job.wip`*) → `job.done` →
-(if ok and the task has a done-when) `job.check` → controller merges or answers with `job.resume` (continue /
+A task's life on a worker: `job.offer` → `job.accept` → `job.start` → `job.event`* (+ `job.wip`*) → (if ok and the
+task has a done-when) `job.check` → final commit + push (`job.wip`) → `job.done` → controller merges or answers with `job.resume` (continue /
 verify-failed prompt, same as the local flow) or `job.cancel`. The controller keeps the task `running` throughout;
 `tasks.node` records where it runs, and the run log is written on the controller from `job.event`.
 

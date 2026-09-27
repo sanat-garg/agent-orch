@@ -631,3 +631,7 @@ merged latest main; npm test passes 256/256 with checkpoint tests
 ## 2026-09-27 12:30 — #217 Controller: node registry, pairing tokens and cluster WebSocket hub [done (check passed)]
 
 cluster hub with pairing/auth/heartbeat/revocation; npm test passes
+
+## 2026-09-27 12:48 — #218 Worker daemon: connect, report inventory, run jobs in local checkouts [done (check passed)]
+
+worker daemon runs jobs, pushes branches; npm test passes

@@ -222,6 +222,27 @@ worktree. That task merges the main branch in, resolves the conflict markers, re
 work, which marks the original task done. Failed or cancelled work is committed to its branch and the worktree
 removed, so a retry can pick it up.
 
+## Worker machines
+
+Extra machines (a second VPS, a Mac) run `worker.mjs`, which dials out to this server over WSS (no inbound port) and
+runs orchestrator tasks in its own checkouts. Design: `.agent-orch/CLUSTER.md`. On the worker (Node 22+, git, this
+repo checked out, `npm ci`):
+
+```sh
+node worker.mjs pair --controller https://<your-host> --code ABCD-1234 --name mac   # code from "Add machine"
+node worker.mjs run                                                                  # the daemon
+```
+
+- Pairing stores the node token in `~/.agent-orch-worker/config.json` (mode 0600). Everything else lives there
+  too: `repos/` (bare cache clones), `worktrees/` (one per job, removed when it finishes), `deps/` (`node_modules`
+  cached by lockfile hash), `logs/worker.log` and `logs/jobs/<id>.jsonl`. `AGENT_ORCH_WORKER_HOME` moves it.
+- **Credentials come from the machine's own login**: sign Claude Code and Codex in locally, and set up git so it can
+  fetch and push the project repos (`gh auth login` then `gh auth setup-git`, or an SSH key). Nothing else is sent to
+  the worker, except a GitHub token the owner explicitly authorises per node (`git.credential`, kept in memory only).
+- Run it as a dedicated unprivileged user under systemd (`Restart=always`) or a launchd agent on macOS. On stop it
+  pauses running jobs and pushes their work first. It reconnects with backoff forever and runs its own reaper for
+  leftover agent processes (`AGENT_ORCH_REAPER=off` disables it).
+
 ## Screenshots
 
 `bin/shot.mjs` screenshots a page with Playwright's Chromium (`playwright-core` is pinned to the version

@@ -85,6 +85,8 @@ test('a task placed on a paired worker is merged into main by the controller; an
   assert.equal(remoteRun.node_id, r.worker);
   assert.equal(remoteRun.outcome, 'ok');
   assert.equal(remoteRun.input_tokens, 100, 'usage from job.done is recorded');
+  // The worker's phase timeline (job.phase) is stored on the run.
+  assert.deepEqual(JSON.parse(remoteRun.phases).map((p) => p.phase), ['queued', 'cloning', 'running', 'checking', 'committing', 'pushing', 'done']);
   // The worker's events were mirrored into the controller's run log like a local run's.
   const entries = parseJsonl(remoteRun.log);
   assert.equal(entries[0].k, 'start');

@@ -311,6 +311,14 @@ node worker.mjs run                                                             
 - Run it as a dedicated unprivileged user under systemd (`Restart=always`) or a launchd agent on macOS. On stop it
   pauses running jobs and pushes their work first. It reconnects with backoff forever and runs its own reaper for
   leftover agent processes (`AGENT_ORCH_REAPER=off` disables it).
+- **It reports to this server**: each job's steps (shown as a timeline in the task drawer), health telemetry every
+  10 s (kept for 24 h in `<DATA>/metrics/nodes/`, `GET /api/cluster/nodes/:id/metrics?range=1h`) and its errors; `GET
+  /api/cluster/nodes/:id/logs?tail=200` fetches its log. A worker with under 2 GB of disk free, one that keeps losing
+  its connection, or one where tasks keep failing that no other machine fails is drained automatically, with a notice.
+- **It updates itself**: once it is more than 20 commits behind this server's `origin/main` (`AGENT_ORCH_OUTDATED_COMMITS`),
+  it takes no new tasks, and when idle it runs `git pull --ff-only` in its checkout (plus `npm ci` when the lockfile
+  changed) and restarts through its service. Keep that checkout free of local changes. Server details → Machines also
+  has an Update button.
 
 ## Screenshots
 

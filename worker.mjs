@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // agent-orch worker daemon (BRIEF goal 11; design: .agent-orch/CLUSTER.md, wire format: cluster-protocol.mjs). Runs on
 // extra machines, dials OUT to the controller over WSS (no inbound port), reports its inventory and resources, and runs
-// the jobs it is given in local checkouts of the project's GitHub repo with the same adapters as the controller.
+// the jobs it is given in local checkouts of the project's GitHub repo with the same adapters as the controller. It
+// reports richly: each job's phases with progress hints, health telemetry every heartbeat, structured errors, its log
+// tail on request, and it updates itself (git pull + service restart) when the controller asks while it is idle.
 //   node worker.mjs pair --controller https://<host> --code ABCD-1234 [--name mac]   one time: stores the node token
 //   node worker.mjs run                                                              the daemon (systemd / launchd)
 //   node worker.mjs status                                                           the stored pairing (no token)
@@ -11,24 +13,25 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import net from 'node:net';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import WebSocket from 'ws';
 import {
   PROTOCOL_VERSION, WS_PATH, CLAIM_PATH, HEARTBEAT_MS, HEARTBEAT_MISSES, WIP_PUSH_MS, SLEEP_JUMP_MS, MAX_FRAME, MAX_BATCH, MSG, OUTCOMES,
-  EVENT_KINDS, OS_KINDS, GRACE_MS, backoffMs, createSender, decode,
+  EVENT_KINDS, OS_KINDS, GRACE_MS, FEATURES, FEATURE_LIST, backoffMs, createSender, decode,
 } from './cluster-protocol.mjs';
 import { AGENTS, agentStatus, clearLoginCache, fetchLimits, modelCatalog, readVersion, runAgentCli } from './agents.mjs';
 import { agentAccount } from './health.mjs';
 import { createNodeLogins } from './remote-login.mjs';
 import { createModelStore } from './models.mjs';
 import { createLimitStore } from './usage.mjs';
-import { createResources, readSystem, registerPid, withOwner } from './resources.mjs';
+import { cpuPercent, createResources, readPowerDarwin, readSystem, registerPid, withOwner } from './resources.mjs';
 import { runHelper } from './helpers.mjs';
 import { MEM } from './parallel.mjs';
 import { GIT_ID, commitAll, taskBranch } from './worktrees.mjs';
-import { extractCommand, runCheck } from './orchestrator.mjs';
+import { extractCommand, runCheck, toolLine } from './orchestrator.mjs';
 
 const execFileP = promisify(execFile);
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -46,6 +49,18 @@ export const sleptFor = (gap, interval, jump = SLEEP_JUMP_MS) => (gap > interval
 const BATCH_BYTES = 512 * 1024;
 const CACHE_TTL_MS = 14 * 86400e3; // cached repos unused this long are pruned
 const LOG_MAX = 10 * 1024 ** 2;
+const PROGRESS_MS = 5000; // a running job's progress hints go out at most this often (when they changed)
+// Telemetry probes, cached between heartbeats: GitHub's reachability (a TCP connect; host:port, 'off' in tests) once a
+// minute, a Mac's battery and thermal state (pmset) once a minute.
+const NET_PROBE = process.env.AGENT_ORCH_WORKER_NET_PROBE || 'github.com:443';
+const PROBE_EVERY_MS = 60_000;
+// The agent-orch checkout this worker runs from, which node.update pulls (tests point it at a scratch repo).
+const SRC_DIR = process.env.AGENT_ORCH_WORKER_SRC || ROOT;
+const EDIT_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
+// The files an edit tool call touched: Claude's file_path, or codex's file_change lines ("add hello.txt").
+const editedFiles = (e) => (EDIT_TOOLS.has(e.name) ? String(e.input?.file_path || e.input?.path || '').split('\n')
+  .map((l) => l.replace(/^(add|update|delete|modify|rename|move)\s+/, '').trim()).filter(Boolean) : []);
+const firstLine = (e) => String(e?.message || e || '').trim().split('\n')[0].slice(0, 500);
 
 // ---------------------------------------------------------------- config, logs
 
@@ -74,6 +89,33 @@ function createLog(home) {
   };
   log.job = (id, entry) => { try { fs.appendFileSync(path.join(dir, 'jobs', `${id}.jsonl`), JSON.stringify(entry) + '\n'); } catch {} };
   return log;
+}
+const logFile = (home) => path.join(home, 'logs', 'worker.log');
+
+// The last n lines of a log (and of its rotated predecessor when that one is too short), each clipped to 2000 chars and
+// together small enough for one frame (the oldest lines give way).
+export function tailLines(file, n, maxBytes = 512 * 1024) {
+  const read = (f) => {
+    let fd;
+    try { fd = fs.openSync(f, 'r'); } catch { return []; }
+    try {
+      const size = fs.fstatSync(fd).size, len = Math.min(size, maxBytes), buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, size - len);
+      const lines = buf.toString('utf8').split('\n');
+      if (lines.at(-1) === '') lines.pop();
+      if (len < size) lines.shift(); // cut mid-line
+      return lines;
+    } finally { fs.closeSync(fd); }
+  };
+  let lines = read(file);
+  if (lines.length < n) lines = [...read(`${file}.1`), ...lines];
+  const out = [];
+  for (let i = lines.length - 1, bytes = 0; i >= 0 && out.length < n; i--) {
+    const l = lines[i].length > 2000 ? `${lines[i].slice(0, 2000)}…` : lines[i];
+    if ((bytes += JSON.stringify(l).length + 1) > 700_000) break;
+    out.push(l);
+  }
+  return out.reverse();
 }
 
 // ---------------------------------------------------------------- pairing
@@ -107,7 +149,8 @@ export function cacheName(repo) {
 
 // ---------------------------------------------------------------- the daemon
 
-export function createWorker({ home = workerHome(), config = readConfig(home), log = createLog(home) } = {}) {
+// restart(): after a self-update, start the new code (default: a clean stop, then exit 0 so systemd/launchd restart it).
+export function createWorker({ home = workerHome(), config = readConfig(home), log = createLog(home), srcDir = SRC_DIR, restart = null } = {}) {
   if (!config?.token || !config?.node || !config?.controller) throw new Error(`not paired: run \`node worker.mjs pair --controller https://<host> --code <code>\` first (${configFile(home)})`);
   const dirs = { repos: path.join(home, 'repos'), worktrees: path.join(home, 'worktrees'), deps: path.join(home, 'deps'), npmCache: path.join(home, 'npm-cache') };
   for (const d of Object.values(dirs)) fs.mkdirSync(d, { recursive: true });
@@ -119,6 +162,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   let ws = null, send = null, welcomed = false, attempt = 0, connectedAt = 0, lastFrame = 0, stopping = false;
   let heartbeatMs = HEARTBEAT_MS, wipPushMs = WIP_PUSH_MS, graceMs = process.platform === 'darwin' ? GRACE_MS.mac : GRACE_MS.vps, beat = null, reconnectTimer = null;
   let pendingWake = null;
+  let peer = new Set(); // the controller's features (welcome.features): newer frame types go only to one that reads them
+  let srcSha = null, lastInv = null, updating = false;
 
   // Model lists (once a day per agent, cached) and plan limits (only on limits.refresh): nothing polls (BRIEF goal 7).
   const models = createModelStore({ file: path.join(home, 'models.json'), log, onChange: () => sendInventory() });
@@ -136,8 +181,9 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
 
   // ---- frames
   const live = () => welcomed && ws?.readyState === WebSocket.OPEN;
+  const supports = (t) => !FEATURES[t] || peer.has(FEATURES[t]);
   function raw(t, fields) {
-    if (!live()) return false;
+    if (!live() || !supports(t)) return false;
     try { ws.send(send(t, fields)); return true; } catch (e) { log(`could not send ${t}: ${e.message}`, 'warn'); return false; }
   }
 
@@ -157,6 +203,12 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     if (!e || !EVENT_KINDS.includes(e.k)) return;
     const s = slim(e);
     log.job(job.id, s.k === 'image' ? { ...s, data: undefined } : s);
+    if (s.k === 'tool') {
+      const p = job.progress;
+      p.tools++;
+      p.last = toolLine(s).slice(0, 200);
+      for (const f of editedFiles(s)) if (p.files.size < 10_000) p.files.add(f);
+    }
     job.ev.push(s);
     if (job.ev.length > MAX_PENDING_EVENTS) {
       const n = job.ev.length - MAX_PENDING_EVENTS;
@@ -182,14 +234,48 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     if (!job?.attached) return;
     while (job.ctlSent < job.ctl.length) {
       const c = job.ctl[job.ctlSent];
-      if (!sendEvents(job, c.upto) || !raw(c.t, c.fields)) return;
+      if (!sendEvents(job, c.upto)) return;
+      if (supports(c.t) && !raw(c.t, c.fields)) return; // a type this controller can't read is skipped
       if (c.t === MSG.JOB_DONE) c.seqSent = true;
       job.ctlSent++;
     }
     sendEvents(job, evEnd(job));
   }
   const allJobs = () => [...jobs.values(), ...held.values()];
-  const flusher = setInterval(() => { for (const j of allJobs()) flushJob(j); }, EVENT_FLUSH_MS);
+  const flusher = setInterval(() => { for (const j of allJobs()) { flushJob(j); sendProgress(j); } }, EVENT_FLUSH_MS);
+
+  // ---- phases (job.phase): queued → cloning/fetching → installing → running → checking → committing → pushing → done.
+  // Each frame is stamped when its phase starts and says how long the one before took; it rides the job's stream (held
+  // while away, replayed after job.attach). Progress hints while the agent runs go out directly, at most every
+  // PROGRESS_MS: the running phase again (same `at`) with {tools, files, last}.
+  function setPhase(job, phase, extra = {}) {
+    const t = Date.now(), prev = job.phase;
+    if (prev?.name === 'running') sendProgress(job, true);
+    job.phase = { name: phase, at: t };
+    emit(job, MSG.JOB_PHASE, { job: job.id, phase, at: t, ...(prev ? { ms: Math.max(0, t - prev.at) } : {}), ...extra });
+  }
+  function sendProgress(job, now = false) {
+    const p = job.progress, sig = `${p.tools}/${p.files.size}/${p.last}`;
+    if (job.phase?.name !== 'running' || !job.attached || sig === job.progressSig || (!now && Date.now() - job.progressAt < PROGRESS_MS)) return;
+    if (raw(MSG.JOB_PHASE, { job: job.id, phase: 'running', at: job.phase.at, progress: { tools: p.tools, files: p.files.size, last: p.last } })) {
+      job.progressSig = sig;
+      job.progressAt = Date.now();
+    }
+  }
+
+  // ---- structured errors (job.error / node.error) with a stack or stderr tail; a controller that can't read them gets
+  // a plain error frame instead.
+  const tail = (v) => (v ? String(v).slice(-4000) : undefined);
+  function jobError(job, kind, message, { stack, stderr } = {}) {
+    log(`job ${job.id} ${kind}: ${message}`, 'error');
+    const fields = { job: job.id, kind, message: String(message).slice(0, 2000), stack: tail(stack), stderr: tail(stderr), at: Date.now() };
+    if (supports(MSG.JOB_ERROR)) emit(job, MSG.JOB_ERROR, fields);
+    else raw(MSG.ERROR, { message: `${kind}: ${fields.message}`, job: job.id });
+  }
+  function nodeError(kind, message, { stack, stderr, re } = {}) {
+    const fields = { kind, message: String(message).slice(0, 2000), stack: tail(stack), stderr: tail(stderr), re };
+    return supports(MSG.NODE_ERROR) ? raw(MSG.NODE_ERROR, fields) : raw(MSG.ERROR, { message: `${kind}: ${fields.message}`, re });
+  }
   // The controller has this job's stream up to `from`: drop what it has, replay the rest (frames placed at or after it).
   function attachJob(msg) {
     const job = jobs.get(msg.job) || held.get(msg.job);
@@ -229,12 +315,55 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   let invBusy = null;
   function sendInventory() {
     if (!live() || invBusy) return invBusy;
-    return invBusy = inventory().then((inv) => raw(MSG.INVENTORY, inv)).catch((e) => log(`inventory failed: ${e.message}`, 'warn')).finally(() => { invBusy = null; });
+    return invBusy = inventory().then((inv) => { lastInv = inv; return raw(MSG.INVENTORY, inv); })
+      .catch((e) => { log(`inventory failed: ${e.message}`, 'warn'); nodeError('inventory', `inventory failed: ${e.message}`, { stack: e.stack }); })
+      .finally(() => { invBusy = null; });
+  }
+
+  // ---- health telemetry, sent with every resources frame: CPU % per core, memory, swap, disk free on the volume holding
+  // the repos, GitHub's reachability, the agents as last checked (never polled: BRIEF goal 7), uptimes, version and sha,
+  // and on a Mac its battery and thermal state.
+  let prevCpus = null, netState = null, netAt = 0, netBusy = false, power = null, powerAt = 0;
+  function probeNet() {
+    if (NET_PROBE === 'off' || netBusy || Date.now() - netAt < PROBE_EVERY_MS) return;
+    const [host, port = '443'] = NET_PROBE.split(':'), t0 = Date.now();
+    netBusy = true;
+    const sock = net.connect({ host, port: Number(port), timeout: 5000 });
+    const done = (ok, error) => {
+      if (!netBusy) return;
+      netBusy = false;
+      netAt = Date.now();
+      sock.destroy();
+      netState = { host, ok, ms: ok ? netAt - t0 : null, at: netAt, ...(error ? { error: String(error).slice(0, 120) } : {}) };
+    };
+    sock.once('connect', () => done(true));
+    sock.once('timeout', () => done(false, 'timed out'));
+    sock.once('error', (e) => done(false, e.code || e.message));
+  }
+  function probePower() {
+    if (process.platform !== 'darwin' || Date.now() - powerAt < PROBE_EVERY_MS) return;
+    powerAt = Date.now();
+    readPowerDarwin().then((p) => { power = p; }, () => {});
+  }
+  function telemetry(sys) {
+    const cpu = prevCpus && cpuPercent(prevCpus, sys.cpus || []);
+    prevCpus = sys.cpus;
+    let disk = null;
+    try { const f = fs.statfsSync(home); disk = { path: home, free: f.bavail * f.bsize, total: f.blocks * f.bsize }; } catch {}
+    probeNet();
+    probePower();
+    return {
+      ...(cpu?.length ? { cpu } : {}), memTotal: sys.memTotal ?? os.totalmem(), swapTotal: sys.swapTotal || 0, swapUsed: sys.swapTotal ? sys.swapTotal - (sys.swapFree || 0) : 0,
+      ...(disk ? { disk } : {}), ...(netState ? { net: netState } : {}),
+      ...(lastInv ? { agents: lastInv.agents.map(({ id, installed, version, signedIn }) => ({ id, installed, version, signedIn })) } : {}),
+      uptime: Math.round(sys.uptime || os.uptime()), procUptime: Math.round(process.uptime()), version: VERSION, ...(srcSha ? { sha: srcSha } : {}),
+      ...(power?.battery ? { battery: power.battery } : {}), ...(power?.thermal ? { thermal: power.thermal } : {}),
+    };
   }
   function sendResources() {
     const sys = readSystem();
     const swapUsedPct = sys.swapTotal ? Math.round((sys.swapTotal - (sys.swapFree || 0)) / sys.swapTotal * 1000) / 10 : 0;
-    raw(MSG.RESOURCES, { memAvailable: sys.memAvailable ?? os.freemem(), load: sys.load, running: [...jobs.keys()], swapUsedPct });
+    raw(MSG.RESOURCES, { memAvailable: sys.memAvailable ?? os.freemem(), load: sys.load, running: [...jobs.keys()], swapUsedPct, ...telemetry(sys) });
   }
 
   // ---- connection: dial out, hello, reconnect with backoff forever
@@ -254,7 +383,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       send = createSender('w');
       log(`connected to ${config.controller}`);
       // Every job still here (finished ones whose job.done wasn't acked too): the controller attaches or cancels each.
-      sock.send(send(MSG.HELLO, { node: config.node, protocol: PROTOCOL_VERSION, version: VERSION,
+      sock.send(send(MSG.HELLO, { node: config.node, protocol: PROTOCOL_VERSION, version: VERSION, ...(srcSha ? { sha: srcSha } : {}), features: FEATURE_LIST,
         jobs: allJobs().map((j) => ({ job: j.id, state: held.has(j.id) ? 'done' : j.state, next: evEnd(j), ...(j.pushed ? { sha: j.pushed } : {}) })) }));
     });
     sock.on('unexpected-response', (_req, res) => {
@@ -266,7 +395,10 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       lastFrame = Date.now();
       const { msg, error } = decode(isBinary ? null : data.toString('utf8'), { from: 'c' });
       if (error) { log(`bad frame from the controller: ${error}`, 'warn'); return raw(MSG.ERROR, { message: error }); }
-      handle(msg).catch((e) => log(`handling ${msg.t} failed: ${e.stack || e.message}`, 'error'));
+      handle(msg).catch((e) => {
+        log(`handling ${msg.t} failed: ${e.stack || e.message}`, 'error');
+        nodeError('exception', `handling ${msg.t} failed: ${e.message}`, { stack: e.stack });
+      });
     });
     sock.on('error', (e) => log(`connection error: ${e.message}`, 'warn'));
     sock.on('close', (code, reason) => {
@@ -287,6 +419,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     heartbeatMs = msg.heartbeatMs || HEARTBEAT_MS;
     wipPushMs = msg.wipPushMs || WIP_PUSH_MS;
     graceMs = msg.graceMs || graceMs;
+    peer = new Set(Array.isArray(msg.features) ? msg.features : []);
     welcomed = true;
     log(`welcomed as ${msg.node}`);
     clearInterval(beat);
@@ -296,9 +429,10 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       sendResources();
       try { ws?.ping(); } catch {}
     }, heartbeatMs);
+    // The wake first: the controller excuses the lost connection before it weighs this one's health.
+    if (pendingWake) { raw(MSG.WAKE, pendingWake); pendingWake = null; }
     sendInventory();
     sendResources();
-    if (pendingWake) { raw(MSG.WAKE, pendingWake); pendingWake = null; }
   }
 
   // Sleep/wake: a clock tick that fires far too late means the machine was suspended. The socket is dead by then
@@ -351,12 +485,14 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
         return sendInventory();
       }
       case MSG.LOGIN_START: case MSG.LOGIN_CODE: case MSG.LOGIN_CANCEL: case MSG.LOGIN_LOGOUT: return logins.handle(msg);
+      case MSG.LOGS_TAIL: return raw(MSG.LOGS, { req: msg.req, lines: tailLines(logFile(home), Math.max(1, Math.min(2000, msg.lines))) });
+      case MSG.NODE_UPDATE: return selfUpdate(msg);
       default: return;
     }
   }
 
   function offerRejection(msg) {
-    if (stopping) return 'draining';
+    if (stopping || updating) return 'draining';
     const st = agentStatus(msg.agent);
     if (st === 'not installed' || st === 'unknown agent') return 'agent_missing';
     if (st !== true) return 'not_signed_in';
@@ -376,8 +512,9 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   };
 
   // Bare cache clone (blob-less), fetched before each job; remote branches land in refs/remotes/origin/*.
+  const cacheDir = (repo) => path.join(dirs.repos, `${cacheName(repo)}.git`);
   async function ensureCache(repo) {
-    const dir = path.join(dirs.repos, `${cacheName(repo)}.git`), env = gitAuthEnv(repo);
+    const dir = cacheDir(repo), env = gitAuthEnv(repo);
     if (!fs.existsSync(path.join(dir, 'HEAD'))) {
       fs.rmSync(dir, { recursive: true, force: true });
       await git(dirs.repos, ['clone', '--bare', '--filter=blob:none', '-q', repo, dir], { env });
@@ -393,6 +530,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
 
   const newJob = (spec) => ({
     id: spec.job, spec, state: 'setup', ac: null, ev: [], evBase: 0, sent: 0, ctl: [], ctlSent: 0, attached: true, detachedAt: 0,
+    phase: null, progress: { tools: 0, files: new Set(), last: '' }, progressSig: '', progressAt: 0,
     cache: null, env: gitAuthEnv(spec.repo),
     dir: path.join(dirs.worktrees, `${cacheName(spec.repo).split('__').pop()}-task-${spec.job}`),
     sessionId: spec.resume || null, pushed: null, remoteStart: null, stop: null, lock: Promise.resolve(),
@@ -405,6 +543,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     finished.delete(job.id);
     held.delete(job.id);
     log(`job ${job.id} start: ${spec.title} (${spec.agent}${spec.model ? `/${spec.model}` : ''})`);
+    setPhase(job, 'queued');
     if (!(await setup(job))) return;
     if (await stopped(job)) return; // paused or cancelled during setup
     await runTurn(job, spec.prompt, spec.resume || null);
@@ -415,6 +554,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     const { spec } = job, branch = taskBranch(job.id);
     job.state = 'setup';
     try {
+      setPhase(job, fs.existsSync(path.join(cacheDir(spec.repo), 'HEAD')) ? 'fetching' : 'cloning');
       job.cache = await ensureCache(spec.repo);
       const remote = `refs/remotes/origin/${branch}`;
       job.remoteStart = (await gitOk(job.cache, ['rev-parse', '--verify', '-q', remote])) ? (await git(job.cache, ['rev-parse', remote])).trim() : '';
@@ -434,10 +574,14 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       return true;
     } catch (e) {
       const text = `setup failed: ${String(e.stderr || e.message || e).trim().split('\n').slice(-5).join('\n')}`;
-      log(`job ${job.id} ${text}`, 'error');
+      // An install names its own failure; a git error's reason is its stderr's last line.
+      const install = job.phase?.name === 'installing';
+      jobError(job, install ? 'install_failed' : 'setup_failed', (!install && String(e.stderr || '').trim().split('\n').pop()) || firstLine(e),
+        { stack: e.stderr ? undefined : e.stack, stderr: e.stderr });
       await dropWorktree(job);
       jobs.delete(job.id);
       held.set(job.id, job);
+      setPhase(job, 'done', { outcome: 'setup_failed' });
       emit(job, MSG.JOB_DONE, { job: job.id, outcome: 'setup_failed', text });
       return false;
     }
@@ -450,6 +594,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     const lock = path.join(dir, 'package-lock.json');
     const argv = spec.install ?? (fs.existsSync(path.join(dir, 'package.json')) ? ['npm', fs.existsSync(lock) ? 'ci' : 'install'] : null);
     if (!argv?.length) return;
+    setPhase(job, 'installing');
     const nm = path.join(dir, 'node_modules');
     const cacheable = argv[0] === 'npm' && argv[1] === 'ci' && fs.existsSync(lock);
     const key = cacheable && crypto.createHash('sha256').update(fs.readFileSync(lock)).update(process.version).digest('hex').slice(0, 16);
@@ -459,7 +604,10 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       cwd: dir, timeoutMs: (spec.timeouts.installSec || 900) * 1000,
       env: { ...process.env, npm_config_cache: dirs.npmCache, npm_config_prefer_offline: 'true', npm_config_audit: 'false', npm_config_fund: 'false' },
     });
-    if (r.error || r.timedOut || r.code !== 0) throw new Error(`${argv.join(' ')} failed: ${r.timedOut ? 'timed out' : String(r.stderr || r.error?.message || `exit ${r.code}`).trim().split('\n').slice(-3).join(' ')}`);
+    if (r.error || r.timedOut || r.code !== 0) {
+      throw Object.assign(new Error(`${argv.join(' ')} failed: ${r.timedOut ? 'timed out' : String(r.stderr || r.error?.message || `exit ${r.code}`).trim().split('\n').slice(-3).join(' ')}`),
+        { stderr: r.stderr || undefined });
+    }
     if (cached && fs.existsSync(nm) && !fs.lstatSync(nm).isSymbolicLink() && !fs.existsSync(cached)) {
       try { fs.mkdirSync(path.dirname(cached), { recursive: true }); fs.renameSync(nm, cached); fs.symlinkSync(cached, nm, 'dir'); } catch (e) { log(`dependency cache failed: ${e.message}`, 'warn'); }
     }
@@ -469,6 +617,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   async function runTurn(job, prompt, resume) {
     const { spec } = job;
     job.state = 'running';
+    setPhase(job, 'running');
     job.ac = new AbortController();
     const kill = setTimeout(() => { job.stop = { kind: 'timeout' }; job.ac.abort(); }, (spec.timeouts.taskSec || 3 * 3600) * 1000);
     const wip = setInterval(() => pushWip(job).catch(() => {}), wipPushMs);
@@ -479,11 +628,17 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
         autonomous: spec.autonomous ?? true, signal: job.ac.signal, onEvent: (e) => pushEvent(job, e),
         env: withOwner(process.env, 'task', job.id), onSpawn: ({ pid, pgid }) => registerPid({ pid, pgid, kind: 'task', id: job.id }),
       });
-    } catch (e) { res = { outcome: 'error', text: `agent crashed: ${e?.message || e}` }; }
-    finally { clearTimeout(kill); clearInterval(wip); }
+    } catch (e) {
+      res = { outcome: 'error', text: `agent crashed: ${e?.message || e}` };
+      jobError(job, 'agent_crash', res.text, { stack: e?.stack });
+    } finally { clearTimeout(kill); clearInterval(wip); }
     if (res.sessionId) job.sessionId = res.sessionId;
     log(`job ${job.id} agent turn ended: ${res.outcome}`);
     if (await stopped(job)) return;
+    // The agent's process failed (not a limit, a sign-in or a stop): its stderr tells why.
+    if (res.outcome === 'error' && !/^agent crashed:/.test(res.text || '')) {
+      jobError(job, 'agent_crash', firstLine(res.text) || `${spec.agent} exited with an error`, { stderr: res.stderr });
+    }
     if (job.stop?.kind === 'timeout') res.outcome = 'timeout';
     await finish(job, res);
   }
@@ -510,9 +665,10 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     const command = res.outcome === 'ok' ? extractCommand(spec.doneWhen) : null;
     if (command) {
       job.state = 'checking';
+      setPhase(job, 'checking');
       let [pass, output, code] = [false, '', null];
       try { [pass, output, code] = await runCheck(command, job.dir, withOwner(process.env, 'task', job.id), spec.timeouts.verifySec || 600, job.ac.signal); }
-      catch (e) { output = `verification crashed: ${e?.message || e}`; }
+      catch (e) { output = `verification crashed: ${e?.message || e}`; jobError(job, 'check_crashed', output, { stack: e?.stack }); }
       if (await stopped(job)) return;
       log(`job ${job.id} check ${pass ? 'passed' : 'failed'}: ${command}`);
       emit(job, MSG.JOB_CHECK, { job: job.id, command, output: String(output).slice(-3000), pass, ...(Number.isInteger(code) ? { code } : {}) });
@@ -527,6 +683,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     jobs.delete(job.id);
     held.set(job.id, job);
     if (held.size > 50) held.delete(held.keys().next().value);
+    setPhase(job, 'done', { outcome });
     emit(job, MSG.JOB_DONE, {
       job: job.id, outcome, text: String(res.text || ''), usage: res.usage || {}, ...(limitsOut ? { limits: limitsOut } : {}),
       ...(sha ? { sha } : {}), ...(job.sessionId ? { sessionId: job.sessionId } : {}),
@@ -549,18 +706,19 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
         while (pastGrace(job) && job.stop?.kind !== 'cancel') await new Promise((r) => setTimeout(r, 500));
         if (job.stop?.kind === 'cancel') throw new Error('cancelled');
       }
+      if (final) setPhase(job, 'committing');
       await commitAll(job.dir, message);
       const sha = (await git(job.dir, ['rev-parse', 'HEAD'])).trim();
       if (sha === job.pushed) return sha;
       const branch = taskBranch(job.id);
+      if (final) setPhase(job, 'pushing');
       for (let i = 0; ; i++) {
         try {
           await git(job.dir, [...GIT_ID, 'push', '-q', `--force-with-lease=refs/heads/${branch}:${job.pushed || ''}`, 'origin', `HEAD:refs/heads/${branch}`], { env: job.env });
           break;
         } catch (e) {
           const why = String(e.stderr || e.message).trim().split('\n').pop();
-          log(`job ${job.id} push failed (${why})`, 'warn');
-          raw(MSG.ERROR, { message: `push of ${branch} failed: ${why}`, job: job.id });
+          jobError(job, 'push_failed', `push of ${branch} failed: ${why}`, { stderr: e.stderr });
           if ((!final && i >= 2) || job.stop?.kind === 'cancel') throw new Error(why);
           await new Promise((r) => setTimeout(r, backoffMs(i)));
         }
@@ -602,6 +760,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       jobs.set(job.id, job);
       finished.delete(job.id);
       held.delete(job.id);
+      setPhase(job, 'queued');
       if (!(await setup(job))) return;
     }
     job.stop = null;
@@ -632,16 +791,71 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     }
   }
 
+  // ---- self-update (node.update, sent by the controller while this machine is idle): git pull --ff-only in the checkout
+  // this worker runs from, npm ci when the lockfile changed, and a trial import of the new worker.mjs; then a clean stop
+  // and exit, and the service manager (systemd Restart=always, launchd KeepAlive) starts the new code. A busy worker
+  // refuses; any failure rolls the checkout back and is reported (node.error kind update).
+  const busyJobs = () => jobs.size + [...held.values()].filter((j) => !j.ctl.some((c) => c.t === MSG.JOB_DONE && c.seqSent)).length;
+  // Runs a step of the update; its error names the step and the stderr line that says why (an Error line, npm's own).
+  async function mustRun(step, cmd, argv, opts) {
+    const r = await runHelper(cmd, argv, opts);
+    if (!r.error && !r.timedOut && r.code === 0) return;
+    const lines = String(r.stderr || '').split('\n').map((l) => l.trim()).filter((l) => l && !/^Node\.js v\d/.test(l));
+    const why = r.timedOut ? 'timed out' : lines.find((l) => /\b\w*Error\b|^npm (error|ERR!)/.test(l)) || lines.pop() || r.error?.message || `exit ${r.code}`;
+    throw Object.assign(new Error(`${step} failed: ${why}`), { stderr: r.stderr });
+  }
+  async function selfUpdate(msg) {
+    const n = busyJobs();
+    if (updating || n) return nodeError('update', updating ? 'an update is already running' : `busy: ${n} job${n === 1 ? '' : 's'} on this machine`, { re: msg.seq });
+    updating = true;
+    const lockFile = path.join(srcDir, 'package-lock.json');
+    const lockHash = () => { try { return crypto.createHash('sha256').update(fs.readFileSync(lockFile)).digest('hex'); } catch { return null; } };
+    try {
+      const before = (await git(srcDir, ['rev-parse', 'HEAD'])).trim(), lockBefore = lockHash();
+      log(`updating agent-orch in ${srcDir} from ${before.slice(0, 8)}${msg.sha ? ` (the controller is at ${msg.sha.slice(0, 8)})` : ''}`);
+      await git(srcDir, ['pull', '--ff-only', '-q'], { timeout: 300_000 });
+      const after = (await git(srcDir, ['rev-parse', 'HEAD'])).trim();
+      if (after === before) throw new Error('already up to date with its origin');
+      const deps = lockHash() !== lockBefore;
+      try {
+        if (deps) await mustRun('npm ci', 'npm', ['ci', '--no-audit', '--no-fund'], { cwd: srcDir, timeoutMs: 900_000 });
+        await mustRun('loading the new worker.mjs', process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(pathToFileURL(path.join(srcDir, 'worker.mjs')).href)})`],
+          { cwd: srcDir, timeoutMs: 60_000 });
+      } catch (e) {
+        await git(srcDir, ['reset', '-q', '--hard', before]).catch(() => {});
+        if (deps) await runHelper('npm', ['ci', '--no-audit', '--no-fund'], { cwd: srcDir, timeoutMs: 900_000 });
+        throw e;
+      }
+      log(`updated ${before.slice(0, 8)} → ${after.slice(0, 8)}; restarting`);
+      await (restart ? restart() : stop({ reason: 'update' }).then(() => process.exit(0)));
+    } catch (e) {
+      updating = false;
+      // A git command's reason is its stderr's last line ("Not possible to fast-forward"); ours name themselves.
+      const why = (e.cmd && String(e.stderr || '').trim().split('\n').pop()) || firstLine(e);
+      log(`update failed: ${why}`, 'error');
+      nodeError('update', why, { stderr: e.stderr, re: msg.seq });
+    }
+  }
+
+  // A crash of the daemon itself (main's uncaughtException): report it, stop cleanly (running jobs pause and push
+  // their WIP), then exit non-zero for the service manager to restart it. Rejections are only reported.
+  function reportError(e, kind = 'exception') {
+    log(`${kind}: ${e?.stack || e}`, 'error');
+    nodeError(kind, firstLine(e) || 'unknown error', { stack: e?.stack });
+  }
+
   async function start() {
     log(`agent-orch worker ${config.name || ''} (${config.node}) starting; home ${home}`);
+    srcSha = await git(srcDir, ['rev-parse', 'HEAD']).then((s) => s.trim(), () => null);
+    if (srcSha && !/^[0-9a-f]{40}$/.test(srcSha)) srcSha = null;
     await sweepLeftovers().catch((e) => log(`leftover sweep failed: ${e.message}`, 'warn'));
     resources?.start();
     models.start().catch((e) => log(`model discovery failed: ${e.message}`, 'warn'));
     connect();
   }
 
-  // Clean shutdown (systemd stop, a Mac going to sleep via launchd): pause running jobs (WIP pushed), say bye.
-  async function stop({ timeoutMs = 60_000 } = {}) {
+  // Clean shutdown (systemd stop, a Mac going to sleep via launchd, an update): pause running jobs (WIP pushed), say bye.
+  async function stop({ timeoutMs = 60_000, reason = 'shutdown' } = {}) {
     if (stopping) return;
     stopping = true;
     clearTimeout(reconnectTimer);
@@ -652,13 +866,16 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       new Promise((r) => setTimeout(r, timeoutMs)),
     ]);
     for (const j of allJobs()) flushJob(j);
-    raw(MSG.BYE, { reason: 'shutdown' });
+    raw(MSG.BYE, { reason });
     clearInterval(flusher); clearInterval(beat); clearInterval(clock);
     models.stop(); limits.stop(); resources?.stop();
-    try { ws?.close(1000, 'shutdown'); } catch {}
+    // Let the bye and the close frame out before the process exits.
+    const sock = ws;
+    try { sock?.close(1000, reason); } catch {}
+    if (sock && sock.readyState !== WebSocket.CLOSED) await new Promise((r) => { const t = setTimeout(r, 2000); sock.once('close', () => { clearTimeout(t); r(); }); });
   }
 
-  return { start, stop, jobs, isConnected: live };
+  return { start, stop, jobs, isConnected: live, reportError };
 }
 
 // ---------------------------------------------------------------- CLI
@@ -683,6 +900,11 @@ async function main() {
   } else if (cmd === 'run') {
     const w = createWorker();
     for (const sig of ['SIGINT', 'SIGTERM']) process.once(sig, () => { w.stop().finally(() => process.exit(0)); });
+    process.on('unhandledRejection', (e) => w.reportError(e, 'exception'));
+    process.once('uncaughtException', (e) => {
+      w.reportError(e, 'exception');
+      w.stop({ reason: 'crash' }).finally(() => process.exit(1));
+    });
     await w.start();
   } else if (cmd === 'status') {
     const c = readConfig();

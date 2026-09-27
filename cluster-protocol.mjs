@@ -30,6 +30,7 @@ export const MSG = {
   GIT_CREDENTIAL: 'git.credential',
   LOGIN_START: 'login.start', LOGIN_STATE: 'login.state', LOGIN_CODE: 'login.code', LOGIN_CANCEL: 'login.cancel', LOGIN_LOGOUT: 'login.logout',
   MODELS_REFRESH: 'models.refresh', MODELS: 'models', LIMITS_REFRESH: 'limits.refresh', LIMITS: 'limits',
+  JOB_PHASE: 'job.phase', JOB_ERROR: 'job.error', NODE_ERROR: 'node.error', LOGS_TAIL: 'logs.tail', LOGS: 'logs', NODE_UPDATE: 'node.update',
 };
 
 // Who may send each type: 'w' worker → controller, 'c' controller → worker, 'both'. Only the controller originates jobs.
@@ -40,7 +41,13 @@ export const DIRECTION = {
   'job.done': W, 'job.cancel': C, 'job.pause': C, 'job.resume': C, 'job.attach': C, wake: W, 'git.credential': C,
   'login.start': C, 'login.state': W, 'login.code': C, 'login.cancel': C, 'login.logout': C,
   'models.refresh': C, models: W, 'limits.refresh': C, limits: W,
+  'job.phase': W, 'job.error': W, 'node.error': W, 'logs.tail': C, logs: W, 'node.update': C,
 };
+// Frame types a peer sends only when the other side lists the feature (hello.features: the worker's, welcome.features:
+// the controller's), so a worker updated ahead of the controller's running code (or the reverse) never sends a type the
+// other can't read. Additive fields need no flag: validators ignore unknown fields.
+export const FEATURES = { 'job.phase': 'phases', 'job.error': 'errors', 'node.error': 'errors', 'logs.tail': 'logs', logs: 'logs', 'node.update': 'update' };
+export const FEATURE_LIST = [...new Set(Object.values(FEATURES))];
 
 export const AGENT_IDS = ['claude', 'codex'];
 export const OS_KINDS = ['linux', 'darwin'];
@@ -51,13 +58,24 @@ export const REJECT_REASONS = ['busy', 'low_memory', 'agent_missing', 'not_signe
 // starting → url (open it; a device code may ride along) or waiting_code (paste the page's code back) → done | failed |
 // cancelled; signed_out answers login.logout.
 export const LOGIN_STATES = ['starting', 'url', 'waiting_code', 'done', 'failed', 'cancelled', 'signed_out'];
+// A job's phases on a worker, in order (job.phase): cloning = a first clone of the repo, fetching = an update of the cached
+// clone; installing only when the job installs dependencies, checking only when it has a done-when check.
+export const PHASES = ['queued', 'cloning', 'fetching', 'installing', 'running', 'checking', 'committing', 'pushing', 'done'];
 
 // Field specs: type name, '?' suffix = optional. Types: str, int, num, bool, obj, arr, sha, agent, os, plus enums above.
 const S = {
-  hello: { node: 'str', protocol: 'int', version: 'str', jobs: 'arr' },
-  welcome: { node: 'str', protocol: 'int', heartbeatMs: 'int', wipPushMs: 'int', graceMs: 'int' },
+  // sha: the worker's agent-orch checkout (the controller compares it with its origin/main); features: see FEATURES.
+  hello: { node: 'str', protocol: 'int', version: 'str', jobs: 'arr', sha: 'sha?', features: 'arr?' },
+  welcome: { node: 'str', protocol: 'int', heartbeatMs: 'int', wipPushMs: 'int', graceMs: 'int', features: 'arr?' },
   inventory: { node: 'str', name: 'str', os: 'os', arch: 'str', cores: 'int', mem: 'int', agents: 'arr', limits: 'obj?', versions: 'obj' },
-  resources: { memAvailable: 'int', load: 'arr', running: 'arr', swapUsedPct: 'num?' },
+  // Also the worker's health telemetry (every heartbeat, the controller keeps a 24 h series): cpu (% per core), memTotal,
+  // swapTotal/swapUsed (bytes), disk {path, free, total} (the volume holding its repos), net {host, ok, ms, at, error}
+  // (reachability of GitHub), agents [{id, installed, version, signedIn}] (as last checked, never polled), uptime (s),
+  // procUptime (s), version, sha, and on macOS battery {pct, charging, source} and thermal {pressure, speedLimit}.
+  resources: {
+    memAvailable: 'int', load: 'arr', running: 'arr', swapUsedPct: 'num?', cpu: 'arr?', memTotal: 'int?', swapTotal: 'int?', swapUsed: 'int?',
+    disk: 'obj?', net: 'obj?', agents: 'arr?', uptime: 'num?', procUptime: 'num?', version: 'str?', sha: 'sha?', battery: 'obj?', thermal: 'obj?',
+  },
   heartbeat: {},
   ack: { re: 'int', job: 'int?' }, // job: the controller acks a job.done (the worker then forgets the job)
   error: { message: 'str', re: 'int?', job: 'int?' },
@@ -95,6 +113,21 @@ const S = {
   models: { agent: 'agent', models: 'arr', error: 'str?' },
   'limits.refresh': { agent: 'agent' },
   limits: { agent: 'agent', windows: 'arr', error: 'str?' },
+  // A job moved to `phase` at `at` (worker epoch ms); ms = how long the phase before it took (the worker's own clock, so
+  // skew doesn't matter). While running, the same phase and `at` are re-sent with progress {tools, files, last}: tool
+  // calls so far, files its edit tools touched, the last tool line. The done phase carries the outcome.
+  'job.phase': { job: 'int', phase: 'phase', at: 'num', ms: 'int?', progress: 'obj?', outcome: 'outcome?' },
+  // Structured failures, with a stack or stderr tail. job.error kinds: agent_crash, setup_failed, install_failed,
+  // push_failed, check_crashed; node.error kinds: exception, update (re: the node.update it answers), inventory.
+  // job.error.at: when it happened (worker epoch ms; a replay after a reconnect dedupes by it).
+  'job.error': { job: 'int', kind: 'str', message: 'str', stack: 'str?', stderr: 'str?', at: 'num?' },
+  'node.error': { kind: 'str', message: 'str', stack: 'str?', stderr: 'str?', re: 'int?' },
+  // The owner asked for the worker's log (GET /api/cluster/nodes/:id/logs?tail=): the last `lines` lines, answered by `logs`.
+  'logs.tail': { req: 'str', lines: 'int' },
+  logs: { req: 'str', lines: 'arr', error: 'str?' },
+  // Update agent-orch on the worker (git pull --ff-only, npm ci when the lockfile changed) and restart its service. Sent
+  // only while the node is idle; a busy worker refuses (node.error kind update). sha: the controller's origin/main.
+  'node.update': { sha: 'sha?' },
 };
 export const SCHEMA = S;
 
@@ -112,6 +145,7 @@ const TYPES = {
   sha: (v) => typeof v === 'string' && SHA_RE.test(v), branch: (v) => typeof v === 'string' && BRANCH_RE.test(v),
   repo: (v) => typeof v === 'string' && REPO_RE.test(v), agent: (v) => AGENT_IDS.includes(v), os: (v) => OS_KINDS.includes(v),
   outcome: (v) => OUTCOMES.includes(v), reject: (v) => REJECT_REASONS.includes(v), login: (v) => LOGIN_STATES.includes(v),
+  phase: (v) => PHASES.includes(v),
   events: (v) => Array.isArray(v) && v.length > 0 && v.length <= MAX_BATCH && v.every((e) => e && EVENT_KINDS.includes(e.k)),
 };
 

@@ -2630,6 +2630,8 @@ function onServer(msg) {
   if (['otask', 'oproject', 'ostate', 'orun', 'oorder', 'olane'].includes(msg.t)) return onOrch(msg);
   if (msg.t === 'connections') return msg.node ? applyRemote(msg.node, msg.connections) : applyConnections(msg.connections);
   if (msg.t === 'cluster') {
+    // An auto-drain or a failed self-update: the owner should see it now (it stays on the machine's card and in the log).
+    if (msg.kind === 'notice') { toast(msg.text, { kind: 'warn', duration: 12000 }); return scheduleMachines(0); }
     scheduleMachines(msg.kind === 'resources' ? 600 : 0);
     if (msg.kind === 'resources') return; // only a worker's CPU/RAM reading changed
     if (!$('connsModal').hidden) loadConnNodes();
@@ -3280,7 +3282,7 @@ const AM = { code: null, expiresAt: 0, pairing: null, err: '', timer: null, last
 const MC = { nodes: [], at: 0, timer: null, loading: false };
 const fmtGB = (b) => `${((b || 0) / 2 ** 30).toFixed(1)} GB`;
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
-const NODE_ST = { online: 'Online', draining: 'Draining', disabled: 'Disabled' };
+const NODE_ST = { online: 'Online', draining: 'Draining', disabled: 'Disabled', updating: 'Updating' };
 const OS_NAME = { darwin: 'macOS', linux: 'Linux' };
 const OS_ICON = { // SF Symbols style: laptopcomputer (macOS) and server.rack (Linux)
   darwin: '<svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true"><rect x="5" y="5" width="14" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M2.5 18.5h19" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
@@ -3298,8 +3300,10 @@ function scheduleMachines(ms = 600) {
   MC.timer = setTimeout(() => { MC.timer = null; if (!$('serverModal').hidden) loadMachines(); }, ms);
 }
 // Online / Draining / Disabled while connected; away: Asleep (a Mac that went silent), Shut down (bye), else Offline.
+// Updating: waiting to be idle for its self-update, or restarting into it.
 function nodeState(n) {
   if (!n.enabled) return { dot: '', label: 'Disabled' };
+  if (['pending', 'sent'].includes(n.update?.state) && !n.draining) return { dot: 'warn', label: 'Updating' };
   if (!n.connected) return n.away === 'asleep' ? { dot: '', label: 'Asleep' } : n.away === 'bye' ? { dot: '', label: 'Shut down' } : { dot: 'off', label: 'Offline' };
   return n.draining ? { dot: 'warn', label: 'Draining' } : { dot: 'on', label: 'Online' };
 }
@@ -3358,7 +3362,13 @@ function machineCard(n) {
     const used = Math.max(0, inv.mem - res.memAvailable);
     li.append(mcMeter('RAM', [{ b: fmtGB(used) }, ' used · ', { b: fmtGB(res.memAvailable) }, ` free of ${fmtGB(inv.mem)}`], (used / inv.mem) * 100));
   }
+  if (res.disk?.total) {
+    const used = Math.max(0, res.disk.total - res.disk.free);
+    li.append(mcMeter('Disk', [{ b: fmtGB(res.disk.free) }, ` free of ${fmtGB(res.disk.total)}`], (used / res.disk.total) * 100));
+  }
   if (!inv.cores && res.memAvailable == null) li.append(el('p', 'mc-idle', 'No readings yet: they arrive once its worker connects.'));
+  const health = machineHealth(n);
+  if (health.length) li.append(...health);
 
   const ag = el('div', 'mc-agents'), signed = (inv.agents || []).filter((a) => a.signedIn);
   for (const a of signed) {
@@ -3380,7 +3390,8 @@ function machineCard(n) {
     const b = el('button', 'mc-task'), main = el('span');
     b.type = 'button';
     b.dataset.task = t.id;
-    main.append(el('span', 't', displayTitle(t)), el('span', 's', [`#${t.id}`, t.project, `${shortLabel(t.agent)} · ${modelName(t.agent, t.model)}`].filter(Boolean).join(' · ')));
+    main.append(el('span', 't', displayTitle(t)), el('span', 's', [`#${t.id}`, t.project, `${shortLabel(t.agent)} · ${modelName(t.agent, t.model)}`,
+      t.phase && t.phase !== 'running' ? PHASE_DOING[t.phase] : ''].filter(Boolean).join(' · ')));
     const e = el('span', t.waiting_for ? 'e wait' : 'e', t.waiting_for ? 'waiting' : fmtDur(Date.now() / 1000 - t.started_at));
     e.title = t.waiting_for ? `Waiting for ${t.waiting_for} to come back` : 'Running for';
     b.append(main, e);
@@ -3391,6 +3402,27 @@ function machineCard(n) {
   li.append(run);
   li.append(machineControls(n));
   return li;
+}
+// A running remote task's step on its card ('installing deps'; nothing extra while the agent itself runs).
+const PHASE_DOING = { queued: 'starting', cloning: 'cloning', fetching: 'fetching', installing: 'installing deps', checking: 'checking', committing: 'committing', pushing: 'pushing', done: 'finishing' };
+// What the owner should know about a machine's health, one short line each: why it was drained automatically, an update
+// (waiting, restarting, failed) or how far behind it is, its last error today, a Mac's battery and thermal state, GitHub
+// out of reach.
+function machineHealth(n) {
+  const out = [], res = n.resources || {}, line = (cls, text, title) => { const p = el('p', `mc-health ${cls}`, text); if (title) p.title = title; out.push(p); };
+  if (n.drainReason) line('warn', `Drained automatically${n.drainedAt ? ` ${relTime(n.drainedAt)}` : ''}: ${n.drainReason}. Undrain it when that's fixed.`);
+  const u = n.update;
+  if (u?.state === 'pending') line('', n.draining ? 'Updates itself once its running tasks finish (it is draining meanwhile).' : 'Updates itself once its running tasks finish; it takes no new ones meanwhile.');
+  else if (u?.state === 'sent') line('', 'Updating: pulling the latest agent-orch and restarting…');
+  else if (u?.state === 'failed') line('bad', `Update failed: ${u.error}`);
+  else if (n.outdated) line('warn', `${plural(n.behind, 'commit')} behind this server's agent-orch`);
+  const e = n.lastError;
+  if (e && Date.now() - e.at < 86400e3 && e.kind !== 'update') line('bad', `Error ${relTime(e.at)}: ${e.message}`, [e.kind, e.stderr || e.stack].filter(Boolean).join('\n\n'));
+  const bat = res.battery, th = res.thermal;
+  if (bat) line(bat.pct < 20 && !bat.charging ? 'warn' : '', `Battery ${bat.pct}%${bat.charging ? ' · charging' : bat.source === 'ac' ? ' · on power' : ''}`);
+  if (th?.pressure === 'throttled') line('warn', th.speedLimit != null ? `Running hot: CPU limited to ${th.speedLimit}%` : 'Running hot: the CPU is throttled');
+  if (res.net && !res.net.ok && n.connected) line('warn', `Can't reach ${res.net.host === 'github.com' ? 'GitHub' : res.net.host}${res.net.error ? ` (${res.net.error})` : ''}: it can't clone or push`);
+  return out;
 }
 // Rename, max parallel tasks, Drain, Disable and Remove. The controller's own slots follow its free memory (the owner
 // only caps tasks across all machines, in Settings), so its card names no choice; it can't be disabled or removed.
@@ -3431,6 +3463,14 @@ function machineControls(n) {
   drain.setAttribute('aria-pressed', String(n.draining));
   drain.title = n.draining ? 'Draining: it takes no new tasks. Press to take tasks again.' : 'Take no new tasks; running ones finish here';
   const moving = n.used ? ` Its ${plural(n.used, 'running task')} go${n.used === 1 ? 'es' : ''} back to the queue now.` : '';
+  // Update: an outdated worker, or one whose update failed, pulls the latest agent-orch and restarts once idle.
+  if (!n.local && n.connected && (n.update?.state === 'failed' || (n.outdated && !n.update))) {
+    const up = btn('Update', 'update', async () => {
+      try { await api(`/api/cluster/nodes/${encodeURIComponent(n.id)}/update`, 'POST'); toast(`${n.name} updates itself once its running tasks finish`); } catch (e) { toast(e.message, { kind: 'error' }); }
+      loadMachines();
+    });
+    up.title = 'Pull the latest agent-orch on it and restart its worker, once its running tasks finish';
+  }
   if (!n.local) {
     btn(n.enabled ? 'Disable' : 'Enable', 'disable', () => {
       if (n.enabled && moving && !confirm(`Disable ${n.name}?${moving}`)) return;
@@ -4378,7 +4418,8 @@ function appendRunEntry(runId, e) {
   const runs = O.detail.runs;
   let run = runs.find((r) => r.id === runId);
   if (!run) { run = { id: runId, started_at: Date.now() / 1000, outcome: null, entries: [] }; runs.push(run); }
-  if (e.k === 'end') run.outcome = e.outcome;
+  if (e.k === 'phases' || e.k === 'errors') run[e.k] = e[e.k]; // a remote run's timeline / worker errors, whole
+  else if (e.k === 'end') run.outcome = e.outcome;
   else if (e.k !== 'start') run.entries.push(e);
   if (!drawerFrame) drawerFrame = requestAnimationFrame(() => { drawerFrame = 0; renderDrawer(true); });
 }
@@ -4448,6 +4489,59 @@ function section(title) {
   if (title) s.append(el('h3', '', title));
   return s;
 }
+
+// A remote run's timeline (job.phase from its worker): one thin bar whose segments take each step's share of the time
+// (a 2px gap between them; the step in progress in the running blue, done ones neutral, the step it failed in red),
+// then the same steps as text, which carries every value (the bar's hover titles only repeat it; a step cut short when
+// the run stopped says so), the latest progress hints while the agent runs, and the errors the worker reported with
+// their stderr or stack. The step in progress counts up live (the ticker below).
+const PHASE_NAME = { queued: 'Queued', cloning: 'Clone', fetching: 'Fetch', installing: 'Install', running: 'Agent', checking: 'Check', committing: 'Commit', pushing: 'Push' };
+const ERROR_KIND = { agent_crash: 'Agent crashed', setup_failed: 'Setup failed', install_failed: 'Install failed', push_failed: 'Push failed', check_crashed: 'Check crashed' };
+function timelineSection(run, live) {
+  const phases = run.phases || [], errors = run.errors || [];
+  if (!phases.length && !errors.length) return null;
+  const c = section('Timeline');
+  const steps = phases.filter((p) => p.phase !== 'done'), end = phases.find((p) => p.phase === 'done');
+  const ms = (p) => p.ms ?? Math.max(0, Date.now() - p.at);
+  if (steps.length) {
+    const bar = el('div', 'tl-bar'), list = el('ol', 'tl-steps');
+    steps.forEach((p, i) => {
+      const last = i === steps.length - 1, cur = live && !end && last && p.ms == null;
+      const bad = last && end && end.outcome !== 'ok';
+      const seg = el('i', cur ? 'cur' : bad ? 'bad' : ''), name = PHASE_NAME[p.phase] || p.phase;
+      seg.style.flex = `${Math.max(1, ms(p))} 0 3px`;
+      seg.title = `${name} · ${fmtDur(ms(p) / 1000)}${p.cut ? ' · stopped' : ''}`;
+      const li = el('li', cur ? 'cur' : bad ? 'bad' : ''), time = el('span', 't', `${fmtDur(ms(p) / 1000)}${cur ? '…' : p.cut ? ' · stopped' : ''}`);
+      if (cur) { time.dataset.since = p.at; seg.dataset.since = p.at; }
+      li.append(el('span', 'n', name), time);
+      bar.append(seg);
+      list.append(li);
+    });
+    if (end) list.append(el('li', end.outcome === 'ok' ? 'end' : 'end bad', end.outcome === 'ok' ? 'Done' : OUTCOME_TEXT[end.outcome] || end.outcome.replace(/_/g, ' ')));
+    bar.setAttribute('role', 'img');
+    bar.setAttribute('aria-label', `Time per step: ${steps.map((p) => `${PHASE_NAME[p.phase] || p.phase} ${fmtDur(ms(p) / 1000)}`).join(', ')}`);
+    c.append(bar, list);
+  }
+  const hint = steps.findLast((p) => p.progress)?.progress;
+  if (hint && (live || hint.tools)) {
+    const words = [`${hint.tools} tool call${hint.tools === 1 ? '' : 's'}`, `${hint.files} file${hint.files === 1 ? '' : 's'} edited`];
+    c.append(el('div', 'dr-check tl-hint', live && hint.last ? `${words.join(' · ')} · last: ${hint.last}` : words.join(' · ')));
+  }
+  for (const e of errors.slice(-3)) {
+    const head = `${ERROR_KIND[e.kind] || e.kind.replace(/_/g, ' ')}${e.count > 1 ? ` (${e.count}×)` : ''}: ${e.message}`, tail = e.stderr || e.stack;
+    if (!tail) { c.append(el('div', 'tl-err', head)); continue; }
+    const d = el('details', 'tl-err');
+    d.append(el('summary', '', head), el('pre', 'dr-pre err', tail));
+    c.append(d);
+  }
+  return c;
+}
+// The step in progress counts up while its drawer is open: its time, and its segment's share of the bar.
+setInterval(() => {
+  if (!O.drawer) return;
+  for (const n of document.querySelectorAll('#drBody .tl-bar i[data-since]')) n.style.flexGrow = String(Math.max(1, Date.now() - Number(n.dataset.since)));
+  for (const n of document.querySelectorAll('#drBody .tl-steps [data-since]')) n.textContent = `${fmtDur((Date.now() - Number(n.dataset.since)) / 1000)}…`;
+}, 1000);
 
 // The drawer's 'Order' links: what a task starts after and what follows it.
 function orderSection(d) {
@@ -4565,6 +4659,9 @@ function renderDrawer(fromLive = false) {
 
   // Model: the same text as the card's chip, the ordered fallbacks (current one marked) and every move.
   if (t.kind !== 'plan') body.append(modelSection(t));
+  // A worker's steps for the latest run (runs.phases): where the time went, what it's doing now, what failed.
+  const lastRun = d.runs.at(-1), tl = lastRun && timelineSection(lastRun, t.status === 'running' && !lastRun.outcome);
+  if (tl) body.append(tl);
 
   // 2. The instructions it was given.
   if (t.kind === 'work') {

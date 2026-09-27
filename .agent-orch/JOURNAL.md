@@ -687,3 +687,7 @@ Command: node --check public/app.js && npm test
 ## 2026-09-27 18:23 — #240 Integrate #223: Machines view: status, capacity and running tasks per machine [done (check passed)]
 
 Merge resolved, tooltip race fixed, 353/353 tests pass
+
+## 2026-09-27 19:32 — #229 Strong worker reporting: phases, health telemetry, crash reports, auto-drain [done (check passed)]
+
+worker phases, telemetry, errors, log tail, auto-drain, updates; tests pass

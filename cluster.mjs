@@ -1,17 +1,62 @@
 // Controller side of the cluster (BRIEF goal 11, design: .agent-orch/CLUSTER.md, wire format: cluster-protocol.mjs).
 // Node registry in the orchestrator DB, one-time pairing codes, and the worker WebSocket hub at WS_PATH. The scheduler
 // uses listNodes() / send(nodeId, msg) / onMessage(handler) / version(); the UI reads listNodes() via GET /api/cluster/nodes.
+// Health (CLUSTER.md, Health): each worker's telemetry as a 24 h series (node-metrics.mjs), its log tail on demand,
+// its last error, auto-drain, and the version check that updates an outdated worker once it is idle.
 import os from 'node:os';
 import crypto from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { WebSocketServer } from 'ws';
 import {
-  PROTOCOL_VERSION, HEARTBEAT_MS, HEARTBEAT_MISSES, WIP_PUSH_MS, MAX_FRAME, PAIRING_TTL_MS, OS_KINDS, MSG,
+  PROTOCOL_VERSION, HEARTBEAT_MS, HEARTBEAT_MISSES, WIP_PUSH_MS, MAX_FRAME, PAIRING_TTL_MS, OS_KINDS, MSG, FEATURE_LIST,
   graceMs, newPairingCode, normalizePairingCode, newNodeToken, hashSecret, secretMatches, bearerToken, createSender, decode,
 } from './cluster-protocol.mjs';
+import { createNodeMetrics, RANGES } from './node-metrics.mjs';
 
 export const LOCAL_NODE = 'controller';
 const MAX_ERRORS = 5; // invalid frames per connection before the worker is disconnected
+// Auto-health: a worker is drained, and the owner told, when the disk holding its repos has under 2 GB free, when it lost
+// its connection 3 times in 30 min (missed heartbeats or a dropped socket, not a Mac's sleep), or when 3 different tasks
+// failed there in 30 min that no other machine failed (orchestrator.mjs checkNodeFailures). Evidence from before the
+// owner last undrained it doesn't count, and low disk doesn't drain it again within the hour after that.
+export const HEALTH = { diskMinBytes: 2 * 1024 ** 3, drops: 3, failures: 3, windowMs: 30 * 60_000, ackQuietMs: 3600e3 };
+// A worker whose agent-orch checkout is more commits behind the controller's origin/main than this is outdated; the
+// controller then gives it no new work (status 'updating'), sends node.update once it is idle, and it comes back updated
+// (bye, service restart, hello with the new sha).
+export const OUTDATED_AFTER = 20;
+const UPDATE_WAIT_MS = 10 * 60_000; // node.update sent and no hello with a new sha by then: the update failed
+const clip = (v, n) => (typeof v === 'string' && v.length > n ? `${v.slice(0, n)}…` : v);
+const gb = (b) => `${(b / 1024 ** 3).toFixed(1)} GB`;
+const execFileP = promisify(execFile);
+
+// How far a worker's sha lags the controller's origin/main (repoDir: the controller's agent-orch checkout), in commits;
+// null while unknown (no sha, a sha this repo doesn't have, or the count still running). Both git reads are async and
+// cached: origin/main is re-read at most every mainTtlMs, a count once per (sha, main) pair. onChange: a count landed.
+export function createVersionCheck({ repoDir, mainTtlMs = 5 * 60_000, onChange = () => {} }) {
+  let main = null, mainAt = 0, reading = false;
+  const counts = new Map();
+  const git = (args) => execFileP('git', args, { cwd: repoDir, encoding: 'utf8', timeout: 20_000 }).then((r) => r.stdout.trim());
+  function refresh() {
+    if (reading || Date.now() - mainAt < mainTtlMs) return;
+    reading = true;
+    git(['rev-parse', '--verify', '-q', 'origin/main^{commit}']).then((s) => { if (s !== main) { main = s; onChange(); } }, () => {})
+      .finally(() => { reading = false; mainAt = Date.now(); });
+  }
+  function behind(sha) {
+    refresh();
+    if (!sha || !main) return null;
+    if (sha === main) return 0;
+    const key = `${sha}..${main}`;
+    if (!counts.has(key)) {
+      counts.set(key, null);
+      git(['rev-list', '--count', key]).then((n) => { counts.set(key, Number(n)); onChange(); }, () => {});
+    }
+    return counts.get(key);
+  }
+  return { behind, main: () => (refresh(), main) };
+}
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS nodes (
@@ -23,7 +68,10 @@ CREATE TABLE IF NOT EXISTS nodes (
 // Added later: grace_ms (the owner's per-node grace before its jobs are reassigned; NULL = graceMs(os)); away (why a
 // node is offline: 'bye' after a clean shutdown, 'asleep' when a Mac went silent, 'lost' otherwise); slept_at/slept_ms
 // (the last sleep a worker reported on wake). max_slots 0 = Auto (the scheduler sizes it from cores and free RAM).
-const COLUMNS = [['grace_ms', 'INTEGER'], ['away', 'TEXT'], ['slept_at', 'INTEGER'], ['slept_ms', 'INTEGER']];
+// drain_reason/drained_at: why and when auto-health drained it (NULL when the owner did); health_ack: when the owner last
+// undrained it (older evidence no longer counts); last_error: JSON of its last node.error {at, kind, message, stack, stderr}.
+const COLUMNS = [['grace_ms', 'INTEGER'], ['away', 'TEXT'], ['slept_at', 'INTEGER'], ['slept_ms', 'INTEGER'],
+  ['drain_reason', 'TEXT'], ['drained_at', 'INTEGER'], ['health_ack', 'INTEGER'], ['last_error', 'TEXT']];
 
 const statusOf = (row, connected) => (!row.enabled ? 'disabled' : !connected ? 'offline' : row.draining ? 'draining' : 'online');
 const parse = (s) => { try { return s ? JSON.parse(s) : null; } catch { return null; } };
@@ -32,16 +80,29 @@ const cleanName = (s) => (typeof s === 'string' ? s.replace(/[\u0000-\u001f]/g, 
 // dbFile: the orchestrator DB. local(): {inventory, resources, maxSlots?} for the controller's own node row.
 // heartbeatMs: liveness interval (tests shorten it); a node is offline after HEARTBEAT_MISSES silent intervals.
 // wipPushMs: how often workers push WIP while an agent runs; graceMs: every node's grace period (tests shorten both).
-export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTBEAT_MS, wipPushMs = WIP_PUSH_MS, graceMs: graceAll = null, log = () => {}, onChange = () => {} }) {
+// metricsDir: where the per-node telemetry series live (<DATA>/metrics/nodes; null = not kept). repoDir: the controller's
+// agent-orch checkout for the version check (null = off); outdatedAfter: see OUTDATED_AFTER; autoUpdate: update outdated
+// workers on its own. onNotice({node, level, text}): something the owner should hear about (an auto-drain, an update).
+// health: HEALTH overrides (tests); logsTimeoutMs: how long a log tail may take.
+export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTBEAT_MS, wipPushMs = WIP_PUSH_MS, graceMs: graceAll = null, log = () => {}, onChange = () => {},
+  metricsDir = null, repoDir = null, outdatedAfter = OUTDATED_AFTER, autoUpdate = true, mainTtlMs, onNotice = () => {}, health: healthOpts = {}, logsTimeoutMs = 15_000 }) {
+  const health = { ...HEALTH, ...healthOpts };
   const db = new DatabaseSync(dbFile);
   db.exec('PRAGMA busy_timeout=5000');
   db.exec(SCHEMA);
   const cols = db.prepare('PRAGMA table_info(nodes)').all().map((c) => c.name);
   for (const [c, type] of COLUMNS) if (!cols.includes(c)) db.exec(`ALTER TABLE nodes ADD COLUMN ${c} ${type}`);
-  const conns = new Map(); // node id -> { ws, send, lastFrame, hello, errors }
+  const conns = new Map(); // node id -> { ws, send, lastFrame, hello, errors, connectedAt }
   const codes = new Map(); // hashSecret(code) -> { expiresAt, node }; single use (node = the id that claimed it)
   const handlers = new Set();
   const get = (id) => db.prepare('SELECT * FROM nodes WHERE id=?').get(id);
+  const metrics = metricsDir ? createNodeMetrics({ dir: metricsDir, log }) : null;
+  const drops = new Map(); // node id -> when (ms) it lost its connection without a bye, last HEALTH.windowMs
+  const updates = new Map(); // node id -> { state: 'pending' | 'sent' | 'failed', target, from, by, at, error }
+  const failedFor = new Map(); // node id -> the origin/main sha an automatic update failed for (not retried on its own)
+  const requests = new Map(); // request id -> { node, done(frame) } (log tails)
+  let busy = () => false; // setBusy: the scheduler's view (jobs placed or offered there) for the update's idle check
+  const notice = (n) => { try { onNotice(n); } catch (e) { log(`onNotice failed: ${e.message}`); } };
 
   // The controller is a node too; it never connects, so it is online while this process runs.
   const now = Date.now();
@@ -62,29 +123,40 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
   // version (read via version()) counts every change, so the scheduler's cached listNodes() is re-read right after one.
   let version = 0;
   const changed = (kind) => { version++; try { onChange(kind); } catch (e) { log(`onChange failed: ${e.message}`); } };
+  // A version count that lands may make a worker outdated: mark it for its update right away.
+  const versions = repoDir ? createVersionCheck({ repoDir, ...(mainTtlMs != null ? { mainTtlMs } : {}), onChange: () => { changed(); for (const id of conns.keys()) checkUpdate(id); } }) : null;
 
+  let localAt = 0;
   function refreshLocal() {
     let info = {};
     try { info = local() || {}; } catch (e) { log(`local node info failed: ${e.message}`); }
     db.prepare('UPDATE nodes SET last_seen=?, inventory=COALESCE(?, inventory), resources=COALESCE(?, resources) WHERE id=?')
       .run(Date.now(), info.inventory ? JSON.stringify(info.inventory) : null, info.resources ? JSON.stringify(info.resources) : null, LOCAL_NODE);
+    // The controller's own series, at the workers' pace.
+    if (metrics && info.resources && Date.now() - localAt >= heartbeatMs) { localAt = Date.now(); metrics.record(LOCAL_NODE, info.resources); }
   }
 
   // A node that went away: why (row.away), and the owner-facing words for it ('Mac asleep').
   const awayLabel = (row) => (row.away === 'asleep' ? 'Mac asleep' : row.away === 'bye' ? 'shut down' : 'offline');
   const nodeGrace = (row) => graceAll ?? row.grace_ms ?? graceMs(row.os);
 
-  // Public view: never the token hash.
+  // Public view: never the token hash. status 'updating': an update is pending (waiting for it to be idle) or sent.
   function view(row) {
-    const c = conns.get(row.id), isLocal = row.id === LOCAL_NODE, connected = isLocal || !!c;
+    const c = conns.get(row.id), isLocal = row.id === LOCAL_NODE, connected = isLocal || !!c, resources = parse(row.resources);
+    const sha = c?.hello?.sha ?? resources?.sha ?? null, behind = !isLocal && versions ? versions.behind(sha) : null, u = updates.get(row.id);
+    const updating = connected && row.enabled && !row.draining && (u?.state === 'pending' || u?.state === 'sent');
     return {
       id: row.id, name: row.name, os: row.os, arch: row.arch, local: isLocal, connected,
-      status: row.status, createdAt: row.created_at, lastSeen: row.last_seen,
+      status: updating ? 'updating' : row.status, createdAt: row.created_at, lastSeen: row.last_seen,
       away: connected ? null : row.away || 'lost', awayLabel: connected ? null : awayLabel(row),
       graceMs: nodeGrace(row), sleptAt: row.slept_at ?? null, sleptMs: row.slept_ms ?? null,
       enabled: !!row.enabled, draining: !!row.draining, maxSlots: row.max_slots || null, // null = Auto
-      inventory: parse(row.inventory), resources: parse(row.resources),
-      protocol: c?.hello?.protocol ?? null, version: c?.hello?.version ?? null,
+      drainReason: row.draining ? row.drain_reason ?? null : null, drainedAt: row.draining ? row.drained_at ?? null : null, healthAck: row.health_ack ?? null,
+      lastError: parse(row.last_error),
+      inventory: parse(row.inventory), resources,
+      protocol: c?.hello?.protocol ?? null, version: c?.hello?.version ?? null, features: c?.hello?.features ?? null,
+      sha, behind, outdated: behind != null && behind > outdatedAfter,
+      update: u ? { state: u.state, by: u.by, at: u.at, target: u.target ?? null, error: u.error ?? null } : null,
     };
   }
   function listNodes() {
@@ -139,6 +211,8 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
       if (id === LOCAL_NODE && k === 'enabled' && !body[k]) return { status: 400, error: 'the controller node cannot be disabled' };
       set[k] = body[k] ? 1 : 0;
     }
+    // The owner drains or undrains by hand: no automatic reason; undraining sets aside the evidence so far.
+    if (set.draining !== undefined) Object.assign(set, { drain_reason: null, drained_at: set.draining ? Date.now() : null, ...(set.draining ? {} : { health_ack: Date.now() }) });
     const grace = body.graceSec ?? body.grace_sec;
     if (grace !== undefined) {
       if (grace !== null && !(Number.isInteger(grace) && grace >= 10 && grace <= 86400)) return { status: 400, error: 'graceSec must be null or an integer 10-86400' };
@@ -161,6 +235,8 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     db.prepare('DELETE FROM nodes WHERE id=?').run(id);
     const c = conns.get(id);
     if (c) { conns.delete(id); c.ws.close(4003, 'revoked'); }
+    metrics?.remove(id);
+    for (const m of [drops, updates, failedFor]) m.delete(id);
     log(`revoked node ${id}`);
     changed();
     return { ok: true };
@@ -181,7 +257,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     const old = conns.get(id);
     if (old) { conns.delete(id); old.ws.close(4000, 'replaced by a new connection'); }
     const sender = createSender('c');
-    const c = { ws, lastFrame: Date.now(), hello: null, errors: 0 };
+    const c = { ws, lastFrame: Date.now(), hello: null, errors: 0, connectedAt: Date.now() };
     c.send = (t, fields) => { if (ws.readyState === 1) ws.send(sender(t, fields)); };
     conns.set(id, c);
     const own = () => conns.get(id) === c;
@@ -191,7 +267,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     };
     const fail = (message, re) => {
       try { c.send(MSG.ERROR, re ? { message, re } : { message }); } catch {}
-      if (++c.errors >= MAX_ERRORS) ws.close(1008, 'too many invalid frames');
+      if (++c.errors >= MAX_ERRORS) { c.closing = true; ws.close(1008, 'too many invalid frames'); }
     };
     touch();
     log(`node ${id} connected`);
@@ -205,18 +281,20 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
       if (!c.hello && msg.t !== MSG.HELLO) return fail('send hello first', msg.seq);
       switch (msg.t) {
         case MSG.HELLO: {
-          if (msg.node !== id) { fail('hello.node does not match this token', msg.seq); return ws.close(1008, 'wrong node'); }
+          if (msg.node !== id) { fail('hello.node does not match this token', msg.seq); c.closing = true; return ws.close(1008, 'wrong node'); }
           if (msg.protocol !== PROTOCOL_VERSION) {
             fail(`protocol ${msg.protocol} is not supported (controller speaks ${PROTOCOL_VERSION}): update the worker`, msg.seq);
             c.send(MSG.BYE, { reason: 'version' });
+            c.closing = true;
             return ws.close(1008, 'protocol version');
           }
-          c.hello = { protocol: msg.protocol, version: msg.version, jobs: msg.jobs };
+          c.hello = { protocol: msg.protocol, version: msg.version, jobs: msg.jobs, sha: msg.sha || null, features: Array.isArray(msg.features) ? msg.features : [] };
           const row = get(id);
           touch();
           setStatus(row, true);
           touch({ away: null });
-          c.send(MSG.WELCOME, { node: id, protocol: PROTOCOL_VERSION, heartbeatMs, wipPushMs, graceMs: nodeGrace(row) });
+          c.send(MSG.WELCOME, { node: id, protocol: PROTOCOL_VERSION, heartbeatMs, wipPushMs, graceMs: nodeGrace(row), features: FEATURE_LIST });
+          helloUpdate(id, row, c.hello.sha);
           changed();
           break;
         }
@@ -229,15 +307,37 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
         case MSG.RESOURCES: {
           const { t, seq, ts, ...res } = msg;
           touch({ resources: JSON.stringify({ ...res, at: Date.now() }) });
+          metrics?.record(id, res);
           changed('resources');
+          checkHealth(id, c, res);
+          checkUpdate(id);
           break;
         }
         case MSG.BYE: c.bye = true; touch(); ws.close(1000, 'bye'); break;
-        case MSG.WAKE:
+        case MSG.WAKE: {
           touch({ slept_at: Math.round(msg.sleptAt), slept_ms: msg.sleptMs });
+          // The connection this sleep cost isn't a failing heartbeat (a few minutes' slack for clock skew).
+          const slack = 5 * 60_000;
+          drops.set(id, (drops.get(id) || []).filter((x) => x < msg.sleptAt - slack || x > msg.sleptAt + msg.sleptMs + slack));
           log(`node ${id} woke after ${Math.round(msg.sleptMs / 60_000)} min asleep`);
           changed();
           break;
+        }
+        case MSG.NODE_ERROR: {
+          const e = { at: Date.now(), kind: clip(msg.kind, 40), message: clip(msg.message, 500),
+            ...(msg.stack ? { stack: clip(msg.stack, 4000) } : {}), ...(msg.stderr ? { stderr: clip(msg.stderr, 4000) } : {}) };
+          touch({ last_error: JSON.stringify(e) });
+          log(`node ${id} error (${e.kind}): ${e.message}`);
+          if (e.kind === 'update') updateFailed(id, e.message);
+          changed();
+          break;
+        }
+        case MSG.LOGS: {
+          const r = requests.get(msg.req);
+          if (r?.node === id) r.done(msg);
+          touch();
+          break;
+        }
         default: touch();
       }
       for (const h of handlers) { try { h(id, msg); } catch (e) { log(`cluster handler failed: ${e.message}`); } }
@@ -246,6 +346,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
       if (!own()) return;
       conns.delete(id);
       gone(id, c.bye);
+      if (!c.bye && !c.closing) dropped(id);
       log(`node ${id} disconnected`);
       changed();
     });
@@ -267,15 +368,138 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
       if (t - c.lastFrame > heartbeatMs * HEARTBEAT_MISSES) {
         conns.delete(id);
         gone(id, false);
+        dropped(id);
         log(`node ${id} missed ${HEARTBEAT_MISSES} heartbeats; marked offline`);
         c.ws.terminate();
         changed();
       } else if (c.ws.readyState === 1) {
         try { c.send(MSG.HEARTBEAT); c.ws.ping(); } catch {}
+        checkUpdate(id);
       }
     }
+    for (const [id, u] of updates) if (u.state === 'sent' && t - u.at > UPDATE_WAIT_MS) updateFailed(id, 'it did not come back updated');
   }, heartbeatMs);
   sweep.unref?.();
+
+  // ---- auto-health (HEALTH)
+  function dropped(id) {
+    const t = Date.now();
+    drops.set(id, [...(drops.get(id) || []).filter((x) => x > t - health.windowMs), t]);
+  }
+  // Drains a worker on its own, with a notice for the owner. False when it is already draining (or disabled).
+  function autoDrain(id, reason) {
+    const row = get(id);
+    if (!row || id === LOCAL_NODE || row.draining || !row.enabled) return false;
+    db.prepare('UPDATE nodes SET draining=1, drain_reason=?, drained_at=? WHERE id=?').run(reason, Date.now(), id);
+    setStatus(get(id), conns.has(id));
+    log(`node ${id} drained automatically: ${reason}`);
+    notice({ node: id, level: 'warn', text: `${row.name} was drained automatically: ${reason}. It finishes what it runs and takes no new tasks until you undrain it (Server details → Machines).` });
+    changed();
+    return true;
+  }
+  // Each telemetry frame: low disk now, or too many lost connections lately. A wake report (a Mac's sleep) arrives right
+  // after the welcome, so lost connections count only once this one is a heartbeat and a half old.
+  function checkHealth(id, c, res) {
+    const row = get(id), t = Date.now();
+    if (!row || row.draining || !row.enabled) return;
+    const ack = row.health_ack || 0, free = res.disk?.free;
+    if (Number.isFinite(free) && free < health.diskMinBytes && t - ack > health.ackQuietMs) {
+      return autoDrain(id, `only ${gb(free)} is free on the disk that holds its repos (under ${gb(health.diskMinBytes)})`);
+    }
+    if (t - c.connectedAt < heartbeatMs * 1.5) return;
+    const lost = (drops.get(id) || []).filter((x) => x > Math.max(t - health.windowMs, ack));
+    if (lost.length >= health.drops) autoDrain(id, `it lost its connection ${lost.length} times in ${Math.round(health.windowMs / 60_000)} min (missed heartbeats)`);
+  }
+
+  // ---- version check and updates
+  const canUpdate = (c) => !!c?.hello?.features?.includes('update');
+  function updateFailed(id, error) {
+    const u = updates.get(id);
+    if (!u || u.state === 'failed') return;
+    Object.assign(u, { state: 'failed', error: clip(String(error || 'update failed'), 300), at: Date.now() });
+    if (u.target) failedFor.set(id, u.target);
+    log(`node ${id} update failed: ${u.error}`);
+    notice({ node: id, level: 'warn', text: `${get(id)?.name || id} could not update itself: ${u.error}` });
+    changed();
+  }
+  // A worker (re)connected on another sha: its update landed (or it was updated by hand). On the same sha a sent update
+  // is still under way (a reconnect while it pulls); the worker reports a failure itself, else UPDATE_WAIT_MS ends it.
+  function helloUpdate(id, row, sha) {
+    const u = updates.get(id);
+    if (!u || !sha || sha === u.from) return;
+    updates.delete(id);
+    failedFor.delete(id);
+    log(`node ${id} updated to ${sha.slice(0, 8)}`);
+    if (u.state === 'sent') notice({ node: id, level: 'info', text: `${row.name} updated itself to ${sha.slice(0, 8)}` });
+  }
+  // An outdated worker is marked for an update (status 'updating': no new jobs); once idle (its latest telemetry, sent on
+  // this connection, lists no running job and the scheduler has nothing placed or offered there) it gets node.update.
+  function checkUpdate(id) {
+    const c = conns.get(id), row = c?.hello && get(id);
+    if (!row?.enabled || !canUpdate(c)) return;
+    let u = updates.get(id);
+    if (!u && autoUpdate && versions) {
+      const behind = versions.behind(c.hello.sha), target = versions.main();
+      if (behind != null && behind > outdatedAfter && failedFor.get(id) !== target) {
+        u = { state: 'pending', target, from: c.hello.sha, by: 'auto', at: Date.now() };
+        updates.set(id, u);
+        log(`node ${id} is ${behind} commits behind origin/main; it updates once idle`);
+        changed();
+      }
+    }
+    if (u?.state !== 'pending') return;
+    const res = parse(row.resources); // idle = a reading from this connection lists no job
+    if (!(res?.at >= c.connectedAt) || res.running?.length || busy(id)) return;
+    if (!send(id, { t: MSG.NODE_UPDATE, ...(u.target ? { sha: u.target } : {}) })) return;
+    Object.assign(u, { state: 'sent', at: Date.now(), from: c.hello.sha });
+    log(`node ${id} is idle: sent node.update`);
+    changed();
+  }
+  // The owner's "Update" (POST /api/cluster/nodes/:id/update): update it once idle, outdated or not.
+  function requestUpdate(id) {
+    const row = get(id), c = conns.get(id);
+    if (!row || id === LOCAL_NODE) return { status: 404, error: 'no such worker' };
+    if (!c?.hello) return { status: 409, error: `${row.name} is offline` };
+    if (!canUpdate(c)) return { status: 409, error: `${row.name} runs a worker too old to update itself: run its install command again` };
+    if (versions && versions.behind(c.hello.sha) === 0) return { status: 409, error: `${row.name} is up to date` };
+    if (['pending', 'sent'].includes(updates.get(id)?.state)) return { node: node(id) }; // already on its way
+    failedFor.delete(id);
+    updates.set(id, { state: 'pending', target: versions?.main() || null, from: c.hello.sha, by: 'owner', at: Date.now() });
+    checkUpdate(id);
+    changed();
+    return { node: node(id) };
+  }
+
+  // ---- on-demand reads from a worker
+  // One request frame and its reply (matched by `req`): the reply, null on timeout, undefined when it couldn't be sent.
+  function request(id, t, fields, timeoutMs) {
+    const req = crypto.randomBytes(6).toString('hex');
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => { requests.delete(req); resolve(null); }, timeoutMs);
+      requests.set(req, { node: id, done: (m) => { clearTimeout(timer); requests.delete(req); resolve(m); } });
+      if (!send(id, { t, req, ...fields })) { clearTimeout(timer); requests.delete(req); resolve(undefined); }
+    });
+  }
+  // The worker's log, last `lines` lines (GET /api/cluster/nodes/:id/logs?tail=).
+  async function logsTail(id, lines = 200) {
+    const row = get(id), c = conns.get(id);
+    if (!row) return { status: 404, error: 'no such node' };
+    if (id === LOCAL_NODE) return { status: 400, error: 'the controller logs to its own journal (journalctl -u agent-orch)' };
+    if (!c?.hello) return { status: 409, error: `${row.name} is offline` };
+    if (!c.hello.features?.includes('logs')) return { status: 409, error: `${row.name} runs a worker too old to send its log` };
+    const n = Math.max(1, Math.min(2000, Math.floor(Number(lines)) || 200));
+    const m = await request(id, MSG.LOGS_TAIL, { lines: n }, logsTimeoutMs);
+    if (m === undefined) return { status: 409, error: `${row.name} is not connected` };
+    if (!m) return { status: 504, error: `${row.name} did not answer` };
+    if (m.error) return { status: 500, error: m.error };
+    return { node: id, lines: m.lines.slice(-n).map(String), at: Date.now() };
+  }
+  // A node's telemetry series (GET /api/cluster/nodes/:id/metrics?range=): range '15m', '1h' (default), '6h' or '24h'.
+  function metricsOf(id, range) {
+    if (!get(id)) return { status: 404, error: 'no such node' };
+    const key = RANGES[range] ? range : '1h';
+    return { node: id, range: key, samples: metrics ? metrics.series(id, key) : [] };
+  }
 
   // For the scheduler: msg = {t, ...fields}; stamped and validated as a controller frame. False when not connected.
   function send(id, { t, ...fields }) {
@@ -289,8 +513,10 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     clearInterval(sweep);
     for (const c of conns.values()) c.ws.close(1001, 'controller shutting down');
     conns.clear();
+    for (const r of requests.values()) r.done(null);
     db.close();
   }
 
-  return { listNodes, node, createPairing, pairing, claim, update, revoke, handleUpgrade, send, onMessage, isConnected: (id) => conns.has(id), version: () => version, close };
+  return { listNodes, node, createPairing, pairing, claim, update, revoke, handleUpgrade, send, onMessage, isConnected: (id) => conns.has(id), version: () => version, close,
+    autoDrain, requestUpdate, logsTail, metrics: metricsOf, setBusy: (fn) => { busy = fn; }, health };
 }

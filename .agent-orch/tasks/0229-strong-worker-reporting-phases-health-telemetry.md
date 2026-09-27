@@ -14,3 +14,7 @@ Make workers report richly to the head (controller). 1) Job phases: the worker s
 ## Done when
 
 `npm test` passes with worker phase/telemetry/log-tail/auto-drain/update tests
+
+## Result — done (check passed) (2026-09-27 19:32)
+
+AGENT-ORCH-STATUS: done — worker phases, telemetry, errors, log tail, auto-drain, updates; tests pass

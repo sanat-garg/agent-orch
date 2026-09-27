@@ -55,10 +55,10 @@ Direction: C = controller → worker, W = worker → controller (`DIRECTION`; `v
 
 | type | dir | fields | meaning |
 | --- | --- | --- | --- |
-| `hello` | W | node, protocol, version, jobs[{job, state, sha, next}] | first frame; `jobs` = work still on this machine, finished ones whose `job.done` wasn't acked included (re-attach) |
-| `welcome` | C | node, protocol, heartbeatMs, wipPushMs, graceMs | settings for this node |
+| `hello` | W | node, protocol, version, jobs[{job, state, sha, next}], sha, features | first frame; `jobs` = work still on this machine, finished ones whose `job.done` wasn't acked included (re-attach); `sha` = its agent-orch checkout; `features` see Health |
+| `welcome` | C | node, protocol, heartbeatMs, wipPushMs, graceMs, features | settings for this node |
 | `inventory` | W | node, name, os (linux/darwin), arch, cores, mem, agents[{id, installed, version, signedIn, account, models}], limits, versions{agentOrch, node, git} | after `welcome` and whenever it changes |
-| `resources` | W | memAvailable, load[1,5,15], running[job ids], swapUsedPct | every heartbeat-ish (≥10 s), from /proc/meminfo or `vm_stat`/`sysctl` on macOS |
+| `resources` | W | memAvailable, load[1,5,15], running[job ids], swapUsedPct + health telemetry: cpu[% per core], memTotal, swapTotal, swapUsed, disk{path, free, total}, net{host, ok, ms, at, error}, agents[{id, installed, version, signedIn}], uptime, procUptime, version, sha, battery{pct, charging, source}, thermal{pressure, speedLimit} | every heartbeat (10 s), from /proc or `vm_stat`/`sysctl`/`pmset` on macOS; see Health |
 | `heartbeat` | both | — | liveness |
 | `ack` / `error` / `bye` | both | re (+job) / message / reason | replies; the controller acks each `job.done` with its `job` (the worker then forgets the job); `bye` before a clean shutdown |
 | `wake` | W | sleptAt, sleptMs | a time jump on the worker (a laptop's sleep), sent after the next `welcome` |
@@ -76,6 +76,10 @@ Direction: C = controller → worker, W = worker → controller (`DIRECTION`; `v
 | `login.state` | W | login, state (starting, url, waiting_code, done, failed, cancelled, signed_out), url, code, account, message, prompt | relayed to the owner's Connections sheet for that node |
 | `models.refresh` / `limits.refresh` | C | agent | the owner pressed refresh for that node's agent (nothing polls: BRIEF goal 7) |
 | `models` / `limits` | W | agent, models[] / windows[], error | the answer, from the worker's own `discoverModels` / `fetchLimits` |
+| `job.phase` | W | job, phase, at, ms, progress{tools, files, last}, outcome | a job moved to `phase` at `at`; `ms` = how long the one before took; re-sent with `progress` while the agent runs (feature `phases`) |
+| `job.error` / `node.error` | W | job, kind, message, stack, stderr, at / kind, message, stack, stderr, re | a structured failure with its stack or stderr tail (feature `errors`) |
+| `logs.tail` / `logs` | C / W | req, lines / req, lines[], error | the owner asked for the worker's log tail (feature `logs`) |
+| `node.update` | C | sha | update agent-orch and restart, sent only while the node is idle (feature `update`) |
 
 A task's life on a worker: `job.offer` → `job.accept` → `job.start` → `job.event`* (+ `job.wip`*) → (if ok and the
 task has a done-when) `job.check` → final commit + push (`job.wip`) → `job.done` → controller merges or answers with `job.resume` (continue /
@@ -167,6 +171,48 @@ verify-failed prompt, same as the local flow) or `job.cancel`. The controller ke
   instead of waiting for the grace period.
 - **Clock skew**: `ts` is informational only; all deadlines (grace, offers, rate-limit resets) run on the
   controller's clock.
+
+## Health (#229)
+
+Workers report richly; the controller keeps what the owner needs and acts on it.
+
+- **Features**: `hello.features` / `welcome.features` list what each side reads (`FEATURES` in cluster-protocol.mjs:
+  phases, errors, logs, update). A peer sends a newer frame type only when the other side lists its feature, so a worker
+  updated ahead of the controller's running code (or behind it) never trips the invalid-frame limit. Fields added to
+  existing frames (the telemetry on `resources`, `hello.sha`) need no flag.
+- **Phases**: `job.phase` frames ride the job's stream (held while away, replayed after `job.attach`, deduped by phase +
+  the worker's `at`): queued → cloning (first clone) / fetching → installing (when it installs) → running → checking
+  (with a done-when) → committing → pushing → done {outcome}. Each carries the previous phase's duration measured on the
+  worker. While the agent runs, progress hints go out directly every ≥5 s when changed: tool calls so far, files its
+  edit tools touched, the last tool line. The controller keeps them per run (`runs.phases`, `at` moved onto its clock;
+  a run that ends mid-phase closes it with `cut`) and streams them to the task drawer (`orun` `{k:'phases'}`), which
+  shows a timeline.
+- **Telemetry**: every heartbeat the `resources` frame carries the health fields above. Agent versions and sign-ins
+  come from the last inventory (never polled, BRIEF goal 7); GitHub reachability is a TCP connect at most once a
+  minute; a Mac's battery/thermal state (`pmset`) at most once a minute. The controller appends each frame to
+  `<DATA>/metrics/nodes/<id>.jsonl` (node-metrics.mjs; the controller's own node at the same pace), compacted: the last
+  hour at full resolution, 5-minute buckets to 24 h, nothing older. `GET /api/cluster/nodes/:id/metrics?range=15m|1h|6h|24h`.
+- **Errors**: agent crashes (the CLI failing, with its stderr tail), failed setups and installs, push failures and
+  crashed checks are `job.error` (kept on the run, `runs.errors`, and in the task's events); daemon exceptions (a frame
+  handler, uncaughtException: reported, then a clean stop and exit 1 for the service manager) are `node.error` (the
+  node's `last_error`, shown on its card for a day).
+- **Logs**: `GET /api/cluster/nodes/:id/logs?tail=200` sends `logs.tail {req}` and waits (15 s) for `logs {req, lines}`:
+  the worker's `logs/worker.log` (and the rotated one before it), at most 2000 lines clipped to fit one frame.
+- **Auto-health** (cluster.mjs `HEALTH`): a worker is drained (`nodes.drain_reason`, a notice in the event log and a
+  toast) when 3 different tasks failed there within 30 min (error, setup_failed, empty_response, auth_error) and none of
+  them failed on another machine too (orchestrator.mjs `checkNodeFailures`), when the disk holding its repos has under
+  2 GB free, or when it lost its connection 3 times in 30 min without a bye (missed heartbeats or a dropped socket; a
+  Mac's reported sleep excuses its drop). Undraining (the owner) sets `health_ack`: older evidence stops counting, and
+  low disk doesn't drain it again within the hour.
+- **Updates**: the controller compares `hello.sha` with its own checkout's `origin/main` (`git rev-list --count`,
+  cached). More than `OUTDATED_AFTER` (20; `AGENT_ORCH_OUTDATED_COMMITS`) commits behind = outdated: the node takes no
+  new work (status `updating`) and gets `node.update` once idle (its telemetry from this connection lists no job and
+  the scheduler has nothing placed or offered there). The owner can ask too (`POST /api/cluster/nodes/:id/update`).
+  The worker refuses while it holds a job; else it runs `git pull --ff-only` in its checkout (`AGENT_ORCH_WORKER_SRC`,
+  default its own directory), `npm ci` when the lockfile changed and a trial import of the new worker.mjs (any failure
+  rolls back and is reported as `node.error {kind:'update'}`), then says `bye {reason:'update'}` and exits 0 for
+  systemd (`Restart=always`) or launchd (`KeepAlive`) to start the new code. Its next hello on another sha ends the
+  update; a failed one isn't retried on its own for the same target, and one that doesn't come back within 10 min fails.
 
 ## Security
 

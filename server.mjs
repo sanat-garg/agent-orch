@@ -20,7 +20,7 @@ import { createUsageLog, createLimitStore, RANGES as USAGE_RANGES } from './usag
 import { handleFiles } from './files.mjs';
 import { createStats } from './stats.mjs';
 import { healthRow } from './health.mjs';
-import { createResources, registerPid, withOwner, readSystem } from './resources.mjs';
+import { createResources, registerPid, withOwner, readSystem, cpuPercent } from './resources.mjs';
 import { createCluster } from './cluster.mjs';
 import { WS_PATH, PAIR_PATH, CLAIM_PATH } from './cluster-protocol.mjs';
 import { createRemoteLogins } from './remote-login.mjs';
@@ -729,20 +729,36 @@ const resources = createResources({
 if (orch) resources.start();
 
 // Cluster (cluster.mjs, BRIEF goal 11): node registry in the orchestrator DB + the worker hub at WS_PATH. The controller
-// is node 'controller'; its capacity comes from /proc. CW_CLUSTER_HEARTBEAT_MS shortens liveness in tests.
+// is node 'controller'; its capacity comes from /proc. CW_CLUSTER_HEARTBEAT_MS shortens liveness in tests. Worker health:
+// telemetry series in <DATA>/metrics/nodes, and the version check against this checkout's origin/main
+// (AGENT_ORCH_OUTDATED_COMMITS: how far behind a worker may fall before it updates itself once idle).
+let localCpus = null; // the controller's last /proc/stat reading, for its CPU % per core
 const cluster = orch && createCluster({
   dbFile: path.join(DATA, 'orchestrator', 'agent-orch.db'),
   heartbeatMs: Number(process.env.CW_CLUSTER_HEARTBEAT_MS) || undefined,
+  metricsDir: path.join(DATA, 'metrics', 'nodes'),
+  repoDir: ROOT,
+  outdatedAfter: Number(process.env.AGENT_ORCH_OUTDATED_COMMITS) || undefined,
   local: () => {
     const sys = readSystem(), swapUsed = sys.swapTotal ? (sys.swapTotal - (sys.swapFree || 0)) / sys.swapTotal : 0;
+    const cpu = localCpus && cpuPercent(localCpus, sys.cpus);
+    localCpus = sys.cpus;
+    let disk = null;
+    try { const f = fs.statfsSync(DATA); disk = { path: DATA, free: f.bavail * f.bsize, total: f.blocks * f.bsize }; } catch {}
     return {
       inventory: { cores: os.cpus().length, mem: os.totalmem(),
         agents: Object.values(AGENTS).map((a) => { const installed = !!a.available(); return { id: a.id, installed, signedIn: installed && !!a.loggedIn() }; }) },
-      resources: { memAvailable: sys.memAvailable ?? os.freemem(), load: sys.load, swapUsedPct: Math.round(swapUsed * 1000) / 10, at: Date.now() },
+      resources: { memAvailable: sys.memAvailable ?? os.freemem(), load: sys.load, swapUsedPct: Math.round(swapUsed * 1000) / 10, at: Date.now(),
+        ...(cpu?.length ? { cpu } : {}), ...(disk ? { disk } : {}) },
     };
   },
   log: (m) => console.log(`[cluster] ${m}`),
   onChange: (kind) => (kind === 'resources' ? resourcesPush() : clusterPush()),
+  // An auto-drain or a worker's self-update: in the event log, and a warning also as a toast in every open app.
+  onNotice: ({ node, level, text }) => {
+    orch?.logEvent(text, { level: level === 'warn' ? 'warn' : 'info' });
+    if (level === 'warn') for (const ws of allClients) send(ws, { t: 'cluster', kind: 'notice', node, text });
+  },
 });
 // 'cluster' pushes: the UI re-reads GET /api/cluster/nodes. A worker's periodic CPU/RAM reading ({kind: 'resources'},
 // only the Machines view cares) goes out at most every 5 s.
@@ -1458,6 +1474,17 @@ async function handleRequest(req, res) {
   if (cnode && (req.method === 'PATCH' || req.method === 'DELETE')) {
     const r = req.method === 'PATCH' ? cluster.update(cnode[1], await readBody(req)) : cluster.revoke(cnode[1]);
     return r.error ? json(res, r.status, { error: r.error }) : json(res, 200, r);
+  }
+  // A node's health: its telemetry series (?range=15m|1h|6h|24h), its log tail fetched over the socket (?tail=200), and
+  // the owner's "Update" (the worker pulls and restarts once idle).
+  const nsub = p.match(/^\/api\/cluster\/nodes\/([\w-]+)\/(metrics|logs|update)$/);
+  if (nsub) {
+    const [, id, what] = nsub;
+    let r = null;
+    if (what === 'metrics' && req.method === 'GET') r = cluster.metrics(id, url.searchParams.get('range') || '1h');
+    else if (what === 'logs' && req.method === 'GET') r = await cluster.logsTail(id, Number(url.searchParams.get('tail')) || 200);
+    else if (what === 'update' && req.method === 'POST') r = cluster.requestUpdate(id);
+    if (r) return r.error ? json(res, r.status, { error: r.error }) : json(res, 200, r);
   }
   if (p === '/api/resources' && req.method === 'GET') return json(res, 200, resources.summary());
   if (p === '/api/resources/kill' && req.method === 'POST') {

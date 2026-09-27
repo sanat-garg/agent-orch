@@ -6,6 +6,7 @@ import {
   MSG, DIRECTION, SCHEMA, MAX_BATCH, MAX_FRAME, GRACE_MS, validate, decode, createSender, batchEvents, backoffMs, graceMs,
   secretKeys, newPairingCode, newNodeToken, hashSecret, secretMatches, bearerToken,
 } from '../cluster-protocol.mjs';
+import { FEATURES, FEATURE_LIST, PHASES } from '../cluster-protocol.mjs';
 
 const SHA = 'a'.repeat(40);
 const frame = (t, fields) => ({ t, seq: 1, ts: Date.now(), ...fields });
@@ -124,4 +125,35 @@ test('pairing codes, node tokens and hashes', () => {
   assert.equal(bearerToken({ authorization: `Bearer ${tok}` }), tok);
   assert.equal(bearerToken({ authorization: 'Basic abc' }), null);
   assert.equal(bearerToken({}), null);
+});
+
+test('worker reports: job.phase, job.error, node.error, logs, node.update, and telemetry on resources', () => {
+  assert.equal(validate(frame(MSG.JOB_PHASE, { job: 1, phase: 'running', at: Date.now(), ms: 20, progress: { tools: 3, files: 1, last: 'Bash · npm test' } }), { from: 'w' }), null);
+  assert.equal(validate(frame(MSG.JOB_PHASE, { job: 1, phase: 'done', at: 1, ms: 5, outcome: 'setup_failed' }), { from: 'w' }), null);
+  assert.match(validate(frame(MSG.JOB_PHASE, { job: 1, phase: 'napping', at: 1 })), /bad phase/);
+  assert.match(validate(frame(MSG.JOB_PHASE, { job: 1, phase: 'queued', at: 1 }), { from: 'c' }), /controller/);
+  assert.deepEqual(PHASES, ['queued', 'cloning', 'fetching', 'installing', 'running', 'checking', 'committing', 'pushing', 'done']);
+  assert.equal(validate(frame(MSG.JOB_ERROR, { job: 1, kind: 'install_failed', message: 'npm ci failed', stderr: 'npm ERR! 404', at: 5 }), { from: 'w' }), null);
+  assert.match(validate(frame(MSG.JOB_ERROR, { job: 1, kind: 'agent_crash' })), /missing message/);
+  assert.equal(validate(frame(MSG.NODE_ERROR, { kind: 'exception', message: 'boom', stack: 'Error: boom\n    at x' }), { from: 'w' }), null);
+  assert.equal(validate(frame(MSG.NODE_ERROR, { kind: 'update', message: 'busy: 1 job on this machine', re: 7 }), { from: 'w' }), null);
+  assert.equal(validate(frame(MSG.LOGS_TAIL, { req: 'a1', lines: 200 }), { from: 'c' }), null);
+  assert.match(validate(frame(MSG.LOGS_TAIL, { req: 'a1', lines: 200 }), { from: 'w' }), /worker/);
+  assert.equal(validate(frame(MSG.LOGS, { req: 'a1', lines: ['2026-09-27T10:00:00Z info hi'] }), { from: 'w' }), null);
+  assert.equal(validate(frame(MSG.NODE_UPDATE, { sha: SHA }), { from: 'c' }), null);
+  assert.equal(validate(frame(MSG.NODE_UPDATE, {}), { from: 'c' }), null);
+  assert.match(validate(frame(MSG.NODE_UPDATE, { sha: 'main' })), /bad sha/);
+  assert.match(validate(frame(MSG.NODE_UPDATE, {}), { from: 'w' }), /worker/);
+  // Telemetry rides the resources frame: additive fields an older controller simply ignores.
+  const tele = { memAvailable: 1, load: [0, 0, 0], running: [], cpu: [1, 2], memTotal: 8, swapTotal: 0, swapUsed: 0, disk: { path: '/x', free: 1, total: 2 },
+    net: { host: 'github.com', ok: true, ms: 3, at: 1 }, agents: [{ id: 'codex', installed: true, version: '1', signedIn: true }], uptime: 1, procUptime: 1,
+    version: '1.0.0', sha: SHA, battery: { pct: 50, charging: false, source: 'battery' }, thermal: { pressure: 'nominal', speedLimit: 100, warning: null } };
+  assert.equal(validate(frame(MSG.RESOURCES, tele), { from: 'w' }), null);
+  assert.match(validate(frame(MSG.RESOURCES, { ...tele, sha: 'abc' })), /bad sha/);
+  assert.match(validate(frame(MSG.RESOURCES, { ...tele, disk: 5 })), /bad disk/);
+  // hello and welcome name their features; each newer type is sent only to a peer that lists its feature.
+  assert.equal(validate(frame(MSG.HELLO, { node: 'n', protocol: 1, version: '1', jobs: [], sha: SHA, features: FEATURE_LIST }), { from: 'w' }), null);
+  assert.equal(validate(frame(MSG.WELCOME, { node: 'n', protocol: 1, heartbeatMs: 1, wipPushMs: 1, graceMs: 1, features: FEATURE_LIST }), { from: 'c' }), null);
+  assert.deepEqual(FEATURE_LIST, ['phases', 'errors', 'logs', 'update']);
+  for (const [t, f] of Object.entries(FEATURES)) assert.ok(SCHEMA[t] && FEATURE_LIST.includes(f), t);
 });

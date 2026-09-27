@@ -4,7 +4,8 @@
 // Started again on the same data dir, it is a restarted controller (remote tasks are re-adopted).
 //   node cluster-failover-controller.mjs <dataDir> <project> <graceMs>
 // Commands: {cmd:'pair'} → {code} · {cmd:'task', title, prompt, agent, doneWhen, files} → {id} ·
-// {cmd:'node', id, body} → cluster.update · {cmd:'get', id} → {task, runs (with their logs), events} · {cmd:'nodes'}
+// {cmd:'node', id, body} → cluster.update · {cmd:'get', id} → {task, runs (with their logs), events} · {cmd:'nodes'} ·
+// {cmd:'detail', id} → orch.taskDetail · {cmd:'sql', sql, params} → {changes} (test/cluster-reports.test.mjs)
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -25,7 +26,9 @@ const o = createOrchestrator({
   broadcast() {}, emitChat() {}, convoExists: () => false,
   onCommit: (dir) => { promisify(execFile)('git', ['push', '-q', 'origin', 'HEAD:main'], { cwd: dir }).catch((e) => console.error('push failed', e.message)); },
 });
-const cluster = createCluster({ dbFile: path.join(dataDir, 'orchestrator', 'agent-orch.db'), heartbeatMs: 300, wipPushMs: 1000, graceMs: Number(grace) });
+// Notices (auto-drain) go to the event log as in server.mjs; test homes may sit on a small /tmp, so no disk rule.
+const cluster = createCluster({ dbFile: path.join(dataDir, 'orchestrator', 'agent-orch.db'), heartbeatMs: 300, wipPushMs: 1000, graceMs: Number(grace),
+  health: { diskMinBytes: 0 }, onNotice: ({ text, level }) => o.logEvent(text, { level: level === 'warn' ? 'warn' : 'info' }) });
 o.attachCluster(cluster);
 const server = http.createServer(async (req, res) => {
   if (req.url !== CLAIM_PATH || req.method !== 'POST') { res.writeHead(404); return res.end(); }
@@ -51,6 +54,8 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
       .run(pid, c.title, c.prompt, 'normal', c.agent, JSON.stringify(c.files || null), c.doneWhen || null, Date.now() / 1000).lastInsertRowid) });
   } else if (c.cmd === 'node') out(cluster.update(c.id, c.body));
   else if (c.cmd === 'nodes') out({ nodes: cluster.listNodes() });
+  else if (c.cmd === 'detail') out(o.taskDetail(c.id));
+  else if (c.cmd === 'sql') out({ changes: Number(db.prepare(c.sql).run(...(c.params || [])).changes) });
   else if (c.cmd === 'get') {
     const runs = db.prepare('SELECT * FROM runs WHERE task_id=? ORDER BY id').all(c.id)
       .map((r) => ({ ...r, log: fs.existsSync(r.log_path) ? fs.readFileSync(r.log_path, 'utf8') : '' }));

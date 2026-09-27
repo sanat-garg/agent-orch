@@ -196,3 +196,35 @@ test('revoking a node closes its socket and its token stops working', async () =
   assert.equal(await nodeOf(w.node), undefined);
   await assert.rejects(connect({ authorization: `Bearer ${w.token}` }), { status: 401 });
 });
+
+test('health API: telemetry series per node, a log tail fetched over the socket, and Update once idle', async () => {
+  const w = await pair('reporter');
+  const c = await connect({ authorization: `Bearer ${w.token}` });
+  const send = createSender('w');
+  c.send = (t, f) => c.ws.send(send(t, f));
+  c.ws.on('message', (d) => { const f = JSON.parse(d); if (f.t === 'logs.tail') c.send('logs', { req: f.req, lines: ['line 1', 'line 2', 'line 3'].slice(-f.lines) }); });
+  c.send('hello', { node: w.node, protocol: PROTOCOL_VERSION, version: 'test', jobs: [], features: ['logs', 'update'] });
+  await waitFor(() => c.frames.find((f) => f.t === 'welcome'), { timeout: 5000 });
+  c.send('resources', { memAvailable: 12e9, load: [0.5, 0.4, 0.3], running: [], cpu: [20, 40], disk: { path: '/w', free: 40e9, total: 80e9 } });
+  const m = await waitFor(async () => { const r = await (await api(`/api/cluster/nodes/${w.node}/metrics?range=1h`)).json(); return r.samples?.length && r; }, { timeout: 5000 });
+  assert.deepEqual([m.node, m.range, m.samples[0].cpu, m.samples[0].cores, m.samples[0].disk], [w.node, '1h', 30, [20, 40], 40e9]);
+  assert.ok(fs.existsSync(path.join(dataDir, 'metrics', 'nodes', `${w.node}.jsonl`)));
+  assert.equal((await api('/api/cluster/nodes/n_nope/metrics')).status, 404);
+  // The controller keeps its own series at the same pace.
+  await nodes();
+  await new Promise((r) => setTimeout(r, HEARTBEAT_MS + 50));
+  await nodes();
+  const own = await (await api('/api/cluster/nodes/controller/metrics?range=15m')).json();
+  assert.ok(own.samples.length >= 1 && own.samples.at(-1).mem > 0, JSON.stringify(own));
+  // The log tail: asked over the socket, answered by the worker.
+  assert.deepEqual((await (await api(`/api/cluster/nodes/${w.node}/logs?tail=2`)).json()).lines, ['line 2', 'line 3']);
+  assert.equal((await api(`/api/cluster/nodes/${w.node}/logs`, { auth: false })).status, 401);
+  assert.equal((await api('/api/cluster/nodes/controller/logs')).status, 400);
+  // Update: sent right away because its telemetry lists no running job (no orchestrator here has any placed there).
+  const u = await api(`/api/cluster/nodes/${w.node}/update`, { method: 'POST' });
+  assert.equal(u.status, 200);
+  assert.equal((await u.json()).node.update.state, 'sent');
+  await waitFor(() => c.frames.find((f) => f.t === 'node.update'), { timeout: 5000 });
+  assert.equal((await api('/api/cluster/nodes/controller/update', { method: 'POST' })).status, 404);
+  c.ws.close();
+});

@@ -32,7 +32,8 @@ const o = createOrchestrator({
   // server.mjs pushes every merge to GitHub (syncGit); here origin is the test's bare repo.
   onCommit: (dir) => { promisify(execFile)('git', ['push', '-q', 'origin', 'HEAD:main'], { cwd: dir }).catch((e) => console.error('push failed', e.message)); },
 });
-const cluster = createCluster({ dbFile: path.join(dataDir, 'orchestrator', 'agent-orch.db'), heartbeatMs: 500 });
+// Test homes may sit on a small /tmp: no low-disk auto-drain here.
+const cluster = createCluster({ dbFile: path.join(dataDir, 'orchestrator', 'agent-orch.db'), heartbeatMs: 500, health: { diskMinBytes: 0 } });
 o.attachCluster(cluster);
 const server = http.createServer(async (req, res) => {
   if (req.url !== CLAIM_PATH || req.method !== 'POST') { res.writeHead(404); return res.end(); }

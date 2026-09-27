@@ -23,7 +23,7 @@ import { createUsageLog } from './usage.mjs';
 import { DELEGATE_CFG, createDelegator, parseFallbacks } from './delegate.mjs';
 import { filesOverlap, parseFiles, spreadAssign, readMemInfo, taskSlots, MEM } from './parallel.mjs';
 import { registerPid, withOwner } from './resources.mjs';
-import { LOCAL_NODE } from './cluster.mjs';
+import { LOCAL_NODE, HEALTH } from './cluster.mjs';
 import { MSG, graceMs, isRepoUrl } from './cluster-protocol.mjs';
 import { commitAll, ensureWorktree, isMerged, listWorktrees, mergeBack, parkWorktree, removeWorktree, repoInfo, startIntegration, taskBranch, unresolvedFiles, worktreesRoot } from './worktrees.mjs';
 
@@ -311,8 +311,8 @@ function ownerHandoffPrompt(project, task, environment, { from, texts, tools, st
 }
 // A requeued task that lost its machine (and so its session) starts with a handoff prompt.
 const lostHandoff = (task) => task.kind === 'work' && !task.session_id && /^\[lost\]/.test(task.last_error || '');
-// "Edit · src/app.js": a tool call in one line (lane activity, handoff prompts).
-const toolLine = (e) => {
+// "Edit · src/app.js": a tool call in one line (lane activity, handoff prompts, a worker's progress hints).
+export const toolLine = (e) => {
   const input = e.input || {};
   const detail = input.command || input.file_path || input.pattern || input.url || input.query || input.path || input.description || '';
   return `${e.name || 'Tool'} · ${String(detail).replace(/\s+/g, ' ').slice(0, 240)}`;
@@ -950,7 +950,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     ['tasks', 'effort'], ['runs', 'effort'],
     // tasks.handoff: JSON {agent, model, reason} of the session the owner moved the task off (POST .../handoff); its next
     // fresh session starts with ownerHandoffPrompt. Cleared once the new agent has a session of its own.
-    ['tasks', 'handoff']]) {
+    ['tasks', 'handoff'],
+    // A remote run's timeline and failures from its worker: runs.phases JSON [{phase, at, w, ms, progress, outcome}] (at: our
+    // clock, w: the worker's; ms: how long it took) and runs.errors JSON [{at, w, kind, message, stack, stderr, count, seen}]
+    // (count/seen: repeats of the same error and their worker timestamps).
+    ['runs', 'phases'], ['runs', 'errors']]) {
     if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} TEXT`);
   }
   // Delegation (delegate.mjs): tasks.origin ('reflection' | 'chat' | null), tasks.category (legacy, unused),
@@ -1663,6 +1667,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // Task drawer Output entries: public messages, commands and tool results (logged as k:'result').
   const logEntryOf = (e) => (e.k === 'tool_result' ? { ...e, k: 'result' } : e.k === 'text' || e.k === 'tool' ? e : null);
 
+  // The task drawers watching a task get each new run entry (orun), and a remote run's phases/errors as they change.
+  function toWatchers(taskId, runId, e) {
+    const subs = runSubs.get(taskId);
+    if (!subs?.size) return;
+    const msg = JSON.stringify({ t: 'orun', taskId, runId, e });
+    for (const ws of subs) if (ws.readyState === 1) ws.send(msg);
+  }
   // A run log writer: appends entries to the run's log and mirrors them to the task drawer (orun) and lanes (olane).
   // Local runs and remote ones (job.event from a worker) write through the same path, so the UI can't tell them apart.
   function runLog(taskId, runId, logPath) {
@@ -1675,11 +1686,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         if (lane) lane.activity = activity;
         broadcast({ t: 'olane', taskId, activity });
       }
-      const subs = runSubs.get(taskId);
-      if (subs?.size) {
-        const msg = JSON.stringify({ t: 'orun', taskId, runId, e });
-        for (const ws of subs) if (ws.readyState === 1) ws.send(msg);
-      }
+      toWatchers(taskId, runId, e);
     };
     writeEntry.end = () => log?.end();
     return writeEntry;
@@ -2592,6 +2599,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (adopt) { // re-adopted after a controller restart: the job still runs there; its run and log continue
       const res = await remoteJob(task.id, nodeId, name, adopt, { agent: adopt.agent }, signal, { from: adopt.from });
       finishRun(adopt.runId, res);
+      checkNodeFailures(nodeId, res);
       return res;
     }
     const repo = remoteRepo(project);
@@ -2617,6 +2625,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       timeouts: { taskSec: CFG.taskTimeoutSec, verifySec: CFG.verifyTimeoutSec, installSec: 900 }, autonomous: !!project.autonomous,
     }, signal);
     finishRun(runId, res);
+    checkNodeFailures(nodeId, res);
     if (resume && isMissingSession(res)) {
       updateTask(task.id, { session_id: null });
       res.outcome = 'aborted';
@@ -2637,6 +2646,15 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       if (!attach) write({ k: 'start', at: now(), resumed: !!spec.resume, agent: spec.agent, model: spec.model || null, node: nodeId, nodeName: name });
       let settled = false, offerTimer = null, watch = null, lostSince = attach ? Date.now() : 0;
       const job = { node: nodeId, next: attach?.from || 0, check: null, started: !!attach, attached: false };
+      // The worker's phase timeline and structured errors live on the run (a re-adopted run continues its own).
+      const stored = q1('SELECT phases, errors FROM runs WHERE id=:id', { id: runId }) || {};
+      job.phases = parseJsonList(stored.phases);
+      job.errors = parseJsonList(stored.errors);
+      const errorsSeen = new Set(job.errors.flatMap((x) => x.seen || [x.w])); // worker timestamps: replays count once
+      const saveRun = (col) => {
+        run(`UPDATE runs SET ${col}=:v WHERE id=:id`, { v: JSON.stringify(job[col]), id: runId });
+        toWatchers(id, runId, { k: col, [col]: job[col].map(({ w, seen, ...x }) => x) });
+      };
       const waiting = (label) => {
         const r = running.get(id);
         if (!r || r.waiting === label) return;
@@ -2651,6 +2669,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         signal?.removeEventListener('abort', onAbort);
         if (jobs.get(id) === job) jobs.delete(id);
         waiting(null);
+        // A run that ended mid-phase (lost, stopped): that phase lasted until now.
+        const open = job.phases.at(-1);
+        if (open && open.phase !== 'done' && open.ms == null) { open.ms = Math.max(0, Date.now() - open.at); open.cut = true; saveRun('phases'); }
         write({ k: 'end', at: now(), outcome: res.outcome, turns: 0 });
         write.end();
         resolve({ usage: {}, numTurns: 0, text: '', sessionId: null, ...res });
@@ -2676,6 +2697,42 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
           if (l) write({ ...l, i });
         });
         job.next = Math.max(job.next, from + events.length);
+      };
+      // job.phase: a new phase (the one before gets its duration), or progress hints for the current one. Replays dedupe
+      // by phase and the worker's own timestamp; `at` moves onto our clock with the frame's send time.
+      job.phase = (msg) => {
+        const list = job.phases;
+        let e = list.find((x) => x.phase === msg.phase && x.w === msg.at);
+        if (!e) {
+          e = { phase: msg.phase, at: Math.round(msg.at + (Date.now() - msg.ts)), w: msg.at };
+          list.push(e);
+          list.sort((a, b) => a.w - b.w);
+          if (list.length > 60) list.splice(0, list.length - 60);
+        }
+        const i = list.indexOf(e);
+        if (msg.ms != null && i > 0) list[i - 1].ms ??= msg.ms;
+        const p = msg.progress;
+        if (p) e.progress = { tools: Number.isFinite(p.tools) ? p.tools : 0, files: Number.isFinite(p.files) ? p.files : 0, last: String(p.last || '').slice(0, 200) };
+        if (msg.outcome) e.outcome = msg.outcome;
+        const r = running.get(id);
+        if (r && list.at(-1) === e) r.phase = msg.phase;
+        saveRun('phases');
+      };
+      // job.error: kept on the run (the latest 20; a repeat of the last one counts up) and logged on the task.
+      job.error = (msg) => {
+        if (msg.at != null && errorsSeen.has(msg.at)) return;
+        if (msg.at != null) errorsSeen.add(msg.at);
+        const e = { at: Date.now(), w: msg.at ?? null, kind: String(msg.kind).slice(0, 40), message: String(msg.message).slice(0, 1000),
+          ...(msg.stack ? { stack: String(msg.stack).slice(-4000) } : {}), ...(msg.stderr ? { stderr: String(msg.stderr).slice(-4000) } : {}) };
+        const last = job.errors.at(-1);
+        if (last && last.kind === e.kind && last.message === e.message) {
+          Object.assign(last, { count: (last.count || 1) + 1, at: e.at, seen: [...(last.seen || [last.w]), e.w].slice(-50) });
+        } else {
+          job.errors.push(e);
+          if (job.errors.length > 20) job.errors.shift();
+          logEvent(`#${id} on ${name}: ${e.kind}: ${e.message.split('\n')[0].slice(0, 300)}`, { level: 'error', taskId: id });
+        }
+        saveRun('errors');
       };
       job.done = (msg) => {
         const lim = msg.limits || {};
@@ -2741,11 +2798,17 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (msg.t === MSG.WAKE) return logEvent(`${nodeName(nodeId)} woke up after ${Math.max(1, Math.round(msg.sleptMs / 60_000))} min asleep`);
     const job = msg.job != null ? jobs.get(msg.job) : null;
     if (msg.t === MSG.ERROR && msg.job != null) return logEvent(`#${msg.job} on ${nodeName(nodeId)}: ${msg.message}`, { level: 'warn', taskId: msg.job });
-    if (!job || job.node !== nodeId) return;
+    if (msg.t === MSG.NODE_ERROR) return logEvent(`${nodeName(nodeId)}: ${msg.kind}: ${String(msg.message).split('\n')[0].slice(0, 300)}`, { level: 'error' });
+    if (!job || job.node !== nodeId) {
+      if (msg.t === MSG.JOB_ERROR) logEvent(`#${msg.job} on ${nodeName(nodeId)}: ${msg.kind}: ${String(msg.message).split('\n')[0].slice(0, 300)}`, { level: 'error', taskId: msg.job });
+      return;
+    }
     switch (msg.t) {
       case MSG.JOB_ACCEPT: return job.accept();
       case MSG.JOB_REJECT: return job.reject(msg.reason);
       case MSG.JOB_EVENT: return job.event(msg);
+      case MSG.JOB_PHASE: return job.phase(msg);
+      case MSG.JOB_ERROR: return job.error(msg);
       case MSG.JOB_CHECK: job.check = { command: msg.command, pass: msg.pass, output: msg.output, code: msg.code ?? null }; return;
       case MSG.JOB_WIP: run('UPDATE tasks SET wip_sha=:s WHERE id=:id', { s: msg.sha, id: msg.job }); return;
       case MSG.JOB_DONE: return job.done(msg);
@@ -2755,7 +2818,26 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     cluster = c;
     nodesAt = 0;
     c.onMessage(onClusterMessage);
+    // A worker counts as busy while we have a job placed or offered there: it is sent node.update only once idle.
+    c.setBusy?.((nodeId) => nodeRuns(nodeId).length > 0 || [...jobs.values()].some((j) => j.node === nodeId));
     for (const id of adoptable.splice(0)) adopt(id);
+  }
+  // Auto-health: a worker where HEALTH.failures different tasks failed within HEALTH.windowMs (a crashed agent, a failed
+  // setup or install, no reply, a lost sign-in), none of which failed on another machine too (then the task is at fault),
+  // is drained with a notice to the owner (cluster.autoDrain). Failures before the owner last undrained it don't count.
+  const NODE_FAILURES = ['error', 'setup_failed', 'empty_response', 'auth_error'];
+  function checkNodeFailures(nodeId, res) {
+    if (!cluster || !NODE_FAILURES.includes(res?.outcome)) return;
+    const n = cluster.node(nodeId), h = cluster.health || HEALTH;
+    if (!n || n.local || n.draining || !n.enabled) return;
+    const outcomes = `(${NODE_FAILURES.map((o) => `'${o}'`).join(',')})`;
+    const since = Math.max(now() - h.windowMs / 1000, (n.healthAck || 0) / 1000);
+    const failed = qa(`SELECT DISTINCT task_id FROM runs WHERE node_id=:n AND finished_at>=:s AND outcome IN ${outcomes}`, { n: nodeId, s: since }).map((r) => r.task_id);
+    const elsewhere = new Set(failed.length ? qa(`SELECT DISTINCT task_id FROM runs WHERE task_id IN (SELECT value FROM json_each(:ids))
+      AND COALESCE(node_id, :l)!=:n AND outcome IN ${outcomes}`, { ids: JSON.stringify(failed), l: LOCAL_NODE, n: nodeId }).map((r) => r.task_id) : []);
+    const mine = failed.filter((t) => !elsewhere.has(t));
+    if (mine.length < h.failures) return;
+    cluster.autoDrain(nodeId, `${mine.length} tasks failed there in ${Math.round(h.windowMs / 60_000)} min (${mine.map((t) => `#${t}`).join(', ')}) and no other machine failed them`);
   }
   // Controller restart: a task that was running on a worker stays 'running' and is re-adopted here. It waits (one grace
   // period) for its node to reconnect; the worker's hello then re-attaches the job and its run log continues.
@@ -3386,7 +3468,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       const tasks = rows.filter((t) => (t.node_id || LOCAL_NODE) === n.id).map((t) => {
         const agent = t.ran_agent || t.agent || 'claude';
         return { id: t.id, project_id: t.project_id, project: t.project, kind: t.kind, title: t.title, agent,
-          model: t.ran_model || t.model || delegator.defaultModel(agent) || null, started_at: t.started_at, waiting_for: running.get(t.id)?.waiting || null };
+          model: t.ran_model || t.model || delegator.defaultModel(agent) || null, started_at: t.started_at, waiting_for: running.get(t.id)?.waiting || null,
+          phase: running.get(t.id)?.phase || null }; // a remote job's current phase (job.phase)
       });
       return { ...n, tasks, used: tasks.filter((t) => t.kind !== 'plan').length, slots: n.local ? slotCount(decisionCache?.d) : nodeCap(n) };
     });
@@ -3425,8 +3508,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         entries = parseJsonl(fs.readFileSync(r.log_path, 'utf8')).filter((e) => e.k !== 'start' && e.k !== 'end');
       } catch {}
       if (entries.length > 1500) entries = entries.slice(-1500);
+      const strip = (list) => parseJsonList(list).map(({ w, seen, ...x }) => x);
       return { id: r.id, outcome: r.outcome, started_at: r.started_at, finished_at: r.finished_at, turns: r.num_turns, output_tokens: r.output_tokens,
-        agent: r.agent || 'claude', effort: r.effort ?? null, entries };
+        agent: r.agent || 'claude', effort: r.effort ?? null, node: r.node_id || null, phases: strip(r.phases), errors: strip(r.errors), entries };
     });
     return {
       task: { ...taskView(t), prompt: t.prompt, done_when: t.done_when, result: t.result, last_error: t.last_error, verify_output: t.verify_output, check: extractCommand(t.done_when) },

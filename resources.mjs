@@ -10,7 +10,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { runHelperSync } from './helpers.mjs';
+import { helperOut, runHelperSync } from './helpers.mjs';
 
 export const OWNER_ENV = 'AGENT_ORCH_OWNER';
 export const ownerTag = (kind, id, server = process.pid) => `${server}:${kind}:${id}`;
@@ -92,6 +92,12 @@ export function readSystem(dir = '/proc') {
   };
 }
 
+// CPU % per core between two readSystem() `cpus` readings (0 for a core with no earlier reading).
+export const cpuPercent = (prev, cpus) => cpus.map((c, i) => {
+  const b = prev?.[i], d = b ? c.total - b.total : 0;
+  return d > 0 ? Math.round(Math.max(0, 1 - (c.idle - b.idle) / d) * 1000) / 10 : 0;
+});
+
 // `vm_stat` → bytes the system could hand out without swapping (free + inactive + speculative + purgeable pages), like
 // Linux's MemAvailable. null when unparseable.
 export function parseVmStat(text) {
@@ -105,6 +111,28 @@ export function parseSwapUsage(text) {
   const unit = { K: 1024, M: 1024 ** 2, G: 1024 ** 3 };
   const v = (k) => { const m = new RegExp(`${k} = ([\\d.]+)([KMG])`).exec(text || ''); return m ? Math.round(Number(m[1]) * unit[m[2]]) : null; };
   return { swapTotal: v('total'), swapFree: v('free') };
+}
+// macOS power for worker telemetry. `pmset -g batt` ("Now drawing from 'AC Power'\n -InternalBattery-0 (id=1)\t64%;
+// charging; 1:10 remaining") → {pct, charging, source: 'ac' | 'battery'}; null without a battery (a Mac mini).
+export function parseBattery(text) {
+  const m = /(\d{1,3})%;\s*([^;\n]+)/.exec(text || '');
+  if (!m) return null;
+  const state = m[2].trim().toLowerCase();
+  return { pct: Number(m[1]), charging: state === 'charging' || state === 'finishing charge',
+    source: /'AC Power'/.test(text) ? 'ac' : /'Battery Power'/.test(text) ? 'battery' : null };
+}
+// `pmset -g therm`: CPU_Speed_Limit (100 = not throttled) and any thermal warning level → {pressure: 'nominal' |
+// 'throttled', speedLimit, warning}; the "No … has been recorded" notes mean nominal.
+export function parseThermal(text) {
+  if (!text) return null;
+  const speed = /CPU_Speed_Limit\s*=\s*(\d+)/.exec(text), warn = /thermal warning level\D{0,20}?(\d+)/i.exec(text);
+  const speedLimit = speed ? Number(speed[1]) : null, warning = warn ? Number(warn[1]) : null;
+  return { pressure: (speedLimit != null && speedLimit < 100) || warning > 0 ? 'throttled' : 'nominal', speedLimit, warning };
+}
+export async function readPowerDarwin() {
+  const out = (args) => helperOut('/usr/bin/pmset', args, { timeoutMs: 3000 }).catch(() => '');
+  const [batt, therm] = await Promise.all([out(['-g', 'batt']), out(['-g', 'therm'])]);
+  return { battery: parseBattery(batt), thermal: parseThermal(therm) };
 }
 function readSystemDarwin() {
   const out = (cmd, args) => { const r = runHelperSync(cmd, args, { timeoutMs: 3000 }); return r.status === 0 ? r.stdout : ''; };
@@ -231,10 +259,7 @@ export function createResources({ procDir = '/proc', dataDir, uid = process.getu
         const before = prev.ticks.get(p.pid);
         if (before && before.start === p.start && dt > 0) cpu.set(p.pid, Math.max(0, (p.ticks - before.ticks) / CLK / dt * 100));
       }
-      system.cpuPct = system.cpus.map((c, i) => {
-        const b = prev.cpus[i], dT = b ? c.total - b.total : 0;
-        return dT > 0 ? Math.round((1 - (c.idle - b.idle) / dT) * 1000) / 10 : 0;
-      });
+      system.cpuPct = cpuPercent(prev.cpus, system.cpus);
     } else system.cpuPct = system.cpus.map(() => 0);
     prev = { t, cpus: system.cpus, ticks: new Map([...procs.values()].map((p) => [p.pid, { ticks: p.ticks, start: p.start }])) };
     const cats = classify(procs, { uid, selfPid, isActive, tmpDirs, registered: reg });

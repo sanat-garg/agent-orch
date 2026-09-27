@@ -11,7 +11,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createOrchestrator, parseJsonl, SHOT_HINT } from './orchestrator.mjs';
 import { createGitHub } from './github.mjs';
 import { retireRuntime, chatIdle, whenIdle } from './runtimes.mjs';
-import { AGENTS, runAgentCli, clearLoginCache, isMissingSession, modelCatalog, claudeWindows, fetchLimits, agentVersion, readVersion, windowLabel } from './agents.mjs';
+import { AGENTS, agentEfforts, clampEffort, runAgentCli, clearLoginCache, isMissingSession, modelCatalog, claudeWindows, fetchLimits, agentVersion, readVersion, windowLabel } from './agents.mjs';
 import { createModelStore } from './models.mjs';
 import { runHelper, claudeHelperSpawn } from './helpers.mjs';
 import { createConnections, SPECS, codexAccount, onPath } from './connections.mjs';
@@ -202,12 +202,16 @@ function checkFallbacks(v) {
 function publicConvo(c) {
   const rt = runtimes.get(c.id);
   // project: its orchestrator project's {id, position, priority} (the sidebar's drag order), null for a plain chat.
-  return { ...c, fallbacks: c.fallbacks ?? null, busy: !!rt?.busy || planning.has(c.id) || agentTurns.has(c.id), project: orch?.projectRank(c.cwd) ?? null };
+  return { ...c, fallbacks: c.fallbacks ?? null, effort: c.effort ?? null, busy: !!rt?.busy || planning.has(c.id) || agentTurns.has(c.id), project: orch?.projectRank(c.cwd) ?? null };
 }
 const planning = new Set(); // convo ids with an orchestrator planner turn in progress
 const agentTurns = new Map(); // convo id -> AbortController of a running non-Claude chat turn
 const chatAgent = (c) => (c.agent && c.agent !== 'claude' && AGENTS[c.agent] ? c.agent : 'claude');
 const MODES = ['default', 'acceptEdits', 'plan', 'bypassPermissions', 'orchestrator'];
+// The chat's reasoning effort as its agent (and model) takes it: null = the agent's default (and for agents without efforts).
+const chatEffort = (c) => clampEffort(chatAgent(c), c.effort || null, c.model || null);
+// A live Claude chat session switches to the chat's current effort from its next turn (null goes back to the model default).
+const applyChatEffort = (c) => runtimes.get(c.id)?.q.applyFlagSettings({ effortLevel: chatEffort(c) }).catch((e) => console.error('[chat] effort not applied', c.id, e?.message || e));
 const sdkMode = (mode) => (mode === 'orchestrator' || !mode ? 'default' : mode);
 
 const STOP_WORDS = new Set('a an the and or of for to in on with me my our your i we you it this that please can could would should make build create write add set up setup help need want let using use into from some new small simple quick basic'.split(' '));
@@ -645,6 +649,8 @@ const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
   broadcast: (msg) => { for (const ws of allClients) send(ws, msg); },
   convoExists: (cid) => !!findConvo(cid),
   convoFallbacks: (cid) => findConvo(cid)?.fallbacks ?? null,
+  // Read at every task session boundary: tasks follow the chat's live effort, never a snapshot.
+  convoEffort: (cid) => findConvo(cid)?.effort ?? null,
   refreshUsage: () => refreshUsage().catch((e) => console.error('[usage] refresh failed', e)),
   onCommit: (dir) => syncGit(dir).catch((e) => console.error('[github] sync failed', dir, e)),
   projectReady: (dir) => gh.status().linked && !!convos.find((c) => c.cwd === dir)?.repo,
@@ -830,6 +836,7 @@ function startRuntime(convo) {
       cwd: convo.cwd,
       resume: convo.sessionId || undefined,
       model: convo.model || undefined,
+      ...(chatEffort(convo) && { effort: chatEffort(convo) }),
       permissionMode: sdkMode(convo.mode),
       // Lets the mode picker switch to "Bypass" later without restarting the session.
       allowDangerouslySkipPermissions: true,
@@ -984,7 +991,7 @@ async function agentChatTurn(convo, text) {
     const turn = async (resume) => {
       try {
         return await runAgentCli({
-          agent, prompt: next, cwd: convo.cwd, resume, model: convo.model || undefined, signal: ac.signal, env: withOwner(CLAUDE_ENV, 'chat', cid),
+          agent, prompt: next, cwd: convo.cwd, resume, model: convo.model || undefined, effort: convo.effort || undefined, signal: ac.signal, env: withOwner(CLAUDE_ENV, 'chat', cid),
           onSpawn: ({ pid, pgid }) => registerPid({ pid, pgid, kind: 'chat', id: cid }),
           systemAppend: resume ? undefined : chatSystemAppend(convo), autonomous: convo.mode === 'bypassPermissions',
           onEvent: (e) => {
@@ -1155,6 +1162,22 @@ function json(res, code, body, headers = {}) {
 }
 // Settles on every path: an oversized, malformed or aborted body rejects with an HttpError the server wrapper answers.
 class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
+const SOUND_FILE = path.join(DATA, 'sounds', 'task-done.mp3'), MAX_SOUND_BYTES = 2 * 1024 * 1024;
+// ID3 tag, or an MPEG audio frame sync (11 set bits).
+const isMp3 = (b) => b.length > 3 && (b.subarray(0, 3).toString('latin1') === 'ID3' || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0));
+function readRaw(req, max) {
+  return new Promise((resolve, reject) => {
+    const chunks = []; let n = 0, done = false;
+    req.on('data', (c) => {
+      if (done) return;
+      n += c.length;
+      if (n > max) { done = true; req.pause(); reject(new HttpError(413, `File too large (max ${max / 1024 / 1024} MB)`)); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => { if (!done) { done = true; resolve(Buffer.concat(chunks)); } });
+    req.on('error', (e) => { if (!done) { done = true; reject(e); } });
+  });
+}
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = '', done = false;
@@ -1376,6 +1399,50 @@ async function handleRequest(req, res) {
     const r = resources.killPid(pid);
     return json(res, r.error ? r.status : 200, r);
   }
+  // Settings sheet: reflection model {model: {agent, model} | null} and/or fallbacks {fallbacks: [...] | null}, every project.
+  if (p === '/api/orch/reflect-settings' && req.method === 'PUT') {
+    const body = await readBody(req), v = {};
+    if ('model' in body) {
+      if (body.model == null) v.model = null;
+      else {
+        const { list, error } = checkFallbacks([body.model]);
+        if (error) return json(res, 400, { error });
+        v.model = list[0];
+      }
+    }
+    if ('fallbacks' in body) {
+      const { list, error } = checkFallbacks(body.fallbacks);
+      if (error) return json(res, 400, { error });
+      v.fallbacks = list;
+    }
+    if (!Object.keys(v).length) return json(res, 400, { error: 'Expected model and/or fallbacks' });
+    return json(res, 200, orch.setReflectSettings(v));
+  }
+  // The task-finished sound: an owner-uploaded MP3 (<DATA>/sounds/task-done.mp3) replaces /sounds/task-done.mp3.
+  if (p === '/api/settings') {
+    const st = fs.statSync(SOUND_FILE, { throwIfNoEntry: false });
+    return json(res, 200, { sound: { custom: !!st, at: st ? Math.floor(st.mtimeMs) : null } });
+  }
+  if (p === '/api/settings/sound' && req.method === 'GET') {
+    return fs.readFile(SOUND_FILE, (err, buf) => {
+      if (err) return json(res, 404, { error: 'No custom sound' });
+      res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': buf.length, 'Cache-Control': 'private, no-cache',
+        'Content-Security-Policy': "default-src 'none'; sandbox" });
+      res.end(buf);
+    });
+  }
+  if (p === '/api/settings/sound' && req.method === 'POST') {
+    const buf = await readRaw(req, MAX_SOUND_BYTES); // a 413 goes out through the handler's HttpError path
+    if (!isMp3(buf)) return json(res, 400, { error: 'Not an MP3 file' });
+    fs.mkdirSync(path.dirname(SOUND_FILE), { recursive: true });
+    fs.writeFileSync(SOUND_FILE + '.tmp', buf);
+    fs.renameSync(SOUND_FILE + '.tmp', SOUND_FILE);
+    return json(res, 200, { ok: true, sound: { custom: true, at: Date.now() } });
+  }
+  if (p === '/api/settings/sound' && req.method === 'DELETE') {
+    fs.rmSync(SOUND_FILE, { force: true });
+    return json(res, 200, { ok: true, sound: { custom: false, at: null } });
+  }
   if (p === '/api/orch/parallel' && req.method === 'PUT') {
     const result = orch.setParallelSettings(await readBody(req));
     return json(res, result.error ? 400 : 200, result);
@@ -1406,6 +1473,23 @@ async function handleRequest(req, res) {
     if (error) return json(res, 400, { error });
     c.fallbacks = list;
     saveConvos();
+    broadcastConvos();
+    return json(res, 200, publicConvo(c));
+  }
+  // A chat's reasoning effort: {effort: level | null}. null = the agent's default; a level must be one the chat's agent
+  // declares (Claude and Codex only). Chat turns and the project's tasks read it live (at their next session boundary).
+  const ce = p.match(/^\/api\/convos\/([\w-]+)\/effort$/);
+  if (ce && req.method === 'PUT') {
+    const c = findConvo(ce[1]);
+    if (!c) return json(res, 404, { error: 'No such chat' });
+    const { effort = null } = await readBody(req);
+    const levels = agentEfforts(chatAgent(c));
+    if (effort !== null && !levels.includes(effort)) {
+      return json(res, 400, { error: levels.length ? `effort must be one of ${levels.join(', ')} or null` : `${chatAgent(c)} has no effort levels` });
+    }
+    c.effort = effort;
+    saveConvos();
+    applyChatEffort(c);
     broadcastConvos();
     return json(res, 200, publicConvo(c));
   }
@@ -1540,7 +1624,7 @@ async function handleRequest(req, res) {
     // models: [{id, label, description?, default?}] from the CLI; empty with modelsError ('not signed in', 'loading', or why discovery failed).
     return json(res, 200, { agents: Object.values(AGENTS).map((a) => {
       const { models, error, at } = modelCatalog(a.id);
-      return { id: a.id, label: a.label, available: !!a.available(), loggedIn: !!a.available() && a.loggedIn(), models, modelsError: error || null, modelsAt: at, login: a.login };
+      return { id: a.id, label: a.label, efforts: agentEfforts(a.id), available: !!a.available(), loggedIn: !!a.available() && a.loggedIn(), models, modelsError: error || null, modelsAt: at, login: a.login };
     }) });
   }
   if (p === '/api/projects') {
@@ -1692,9 +1776,15 @@ wss.on('connection', (ws, req) => {
         const agent = AGENTS[msg.agent] ? msg.agent : 'claude';
         convo.model = typeof msg.model === 'string' ? msg.model : '';
         convo.agent = agent;
+        // A new chat's draft effort rides along (one message, so it is checked against the agent it was picked for);
+        // otherwise switching agents clamps the chat's effort to the nearest level the new one takes.
+        const was = convo.effort ?? null;
+        if (msg.effort === null || agentEfforts(agent).includes(msg.effort)) convo.effort = msg.effort;
+        else if (convo.effort && agentEfforts(agent).length) convo.effort = clampEffort(agent, convo.effort);
         saveConvos();
+        if ((convo.effort ?? null) !== was) broadcastConvos();
         // The Claude runtime is only kept while the chat is on Claude.
-        if (agent === 'claude') runtimes.get(convo.id)?.q.setModel(convo.model || undefined).catch(() => {});
+        if (agent === 'claude') runtimes.get(convo.id)?.q.setModel(convo.model || undefined).then(() => applyChatEffort(convo), () => {});
         else if (runtimes.has(convo.id)) { retireRuntime(runtimes, convo.id); broadcastConvos(); }
         broadcast(convo.id, { t: 'model', agent, model: convo.model });
         break;

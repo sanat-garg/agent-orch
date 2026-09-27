@@ -17,7 +17,7 @@ import path from 'node:path';
 import { spawn, execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
-import { AGENTS, agentStatus, codexExhausted, codexLatestSnapshot, isMissingSession, limitScope, limitScopes, modelCatalog, modelNames, runAgentCli, toolInputSummary, windowLabel } from './agents.mjs';
+import { AGENTS, agentEfforts, agentStatus, clampEffort, codexExhausted, codexLatestSnapshot, isMissingSession, limitScope, limitScopes, modelCatalog, modelNames, runAgentCli, toolInputSummary, windowLabel } from './agents.mjs';
 import { mediaCollector } from './media.mjs';
 import { createUsageLog } from './usage.mjs';
 import { DELEGATE_CFG, createDelegator, parseFallbacks } from './delegate.mjs';
@@ -881,7 +881,7 @@ function takeLock(file) {
 }
 
 export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLimits, onSubscription, emitChat, broadcast, convoExists, refreshUsage,
-  convoFallbacks = () => null, onCommit = () => {}, projectReady = () => true, disabled = false, usageLog = createUsageLog(dataDir),
+  convoFallbacks = () => null, convoEffort = () => null, onCommit = () => {}, projectReady = () => true, disabled = false, usageLog = createUsageLog(dataDir),
   codexSnapshot = () => codexLatestSnapshot(), reap = null, config = {} }) {
   Object.assign(CFG, config); // tests tune slots (concurrency, parallelTasks, agentSlots, meminfo)
   const dir = path.join(dataDir, 'orchestrator');
@@ -922,7 +922,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // latest run used, for the UI badge), tasks.route_note (why that run fell back to Claude), runs.agent (who made the session).
   for (const [table, col] of [['tasks', 'agent'], ['tasks', 'model'], ['tasks', 'ran_agent'], ['tasks', 'ran_model'], ['tasks', 'route_note'], ['runs', 'agent'],
     // Cluster: the node a task last ran on (and each run's), and the last WIP sha a worker pushed for it.
-    ['tasks', 'node_id'], ['tasks', 'wip_sha'], ['runs', 'node_id']]) {
+    ['tasks', 'node_id'], ['tasks', 'wip_sha'], ['runs', 'node_id'],
+    // Reasoning effort: tasks.effort is the owner's per-task override (drawer only; NULL = the chat's live effort), and
+    // runs.effort the level a run actually started with (NULL = the agent's default). See taskEffort.
+    ['tasks', 'effort'], ['runs', 'effort']]) {
     if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} TEXT`);
   }
   // Delegation (delegate.mjs): tasks.origin ('reflection' | 'chat' | null), tasks.category (legacy, unused),
@@ -1403,8 +1406,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return revived;
   }
 
-  function startRun(taskId, purpose, agent = 'claude', node = LOCAL_NODE) {
-    const r = run('INSERT INTO runs(task_id,purpose,agent,node_id,started_at) VALUES(:t,:p,:a,:n,:s)', { t: taskId, p: purpose, a: agent, n: node, s: now() });
+  function startRun(taskId, purpose, agent = 'claude', node = LOCAL_NODE, effort = null) {
+    const r = run('INSERT INTO runs(task_id,purpose,agent,node_id,effort,started_at) VALUES(:t,:p,:a,:n,:e,:s)', { t: taskId, p: purpose, a: agent, n: node, e: effort, s: now() });
     const id = Number(r.lastInsertRowid);
     const logPath = path.join(runsDir, `run-${String(id).padStart(6, '0')}.jsonl`);
     run('UPDATE runs SET log_path=:l WHERE id=:id', { l: logPath, id });
@@ -1416,6 +1419,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       c: res.usage.cache_read_input_tokens || 0, n: res.numTurns || 0, f: now(), id: runId,
     });
   }
+  // The effort a task's run starts with, read fresh at every session boundary (start, resume, retry, handoff), never
+  // snapshotted at queue time: the owner's per-task override if set, else its project chat's CURRENT effort; clamped to
+  // what `route` (agent and model) accepts. null = the agent's default (and always for an agent without efforts).
+  const taskEffort = (task, project, route) =>
+    clampEffort(route.agent, getTask(task.id)?.effort || (project.convo_id ? convoEffort(project.convo_id) : null), route.model || null);
   const lastRunAgent = (taskId) => q1('SELECT agent FROM runs WHERE task_id=:t ORDER BY id DESC LIMIT 1', { t: taskId })?.agent || 'claude';
   // A session resumes only on the node that made it (runs before the cluster have no node: the controller's).
   const lastRunNode = (taskId) => q1('SELECT node_id FROM runs WHERE task_id=:t ORDER BY id DESC LIMIT 1', { t: taskId })?.node_id || LOCAL_NODE;
@@ -1593,21 +1601,21 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return writeEntry;
   }
 
-  async function runAgent({ agent = 'claude', prompt, cwd, resume, model, append, tools, autonomous, signal, timeoutSec, taskId, runId, logPath, onMessage, onEvent, partial }) {
+  async function runAgent({ agent = 'claude', prompt, cwd, resume, model, append, tools, autonomous, signal, timeoutSec, taskId, runId, logPath, onMessage, onEvent, partial, effort }) {
     const ac = new AbortController();
     let stopped = null;
     const onAbort = () => { stopped = stopped || 'aborted'; ac.abort(); };
     if (signal) { if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true }); }
     const timer = timeoutSec ? setTimeout(() => { stopped = 'timeout'; ac.abort(); }, timeoutSec * 1000) : null;
     const writeEntry = runLog(taskId, runId, logPath);
-    if (taskId) writeEntry({ k: 'start', at: now(), resumed: !!resume, agent, model: model || null });
+    if (taskId) writeEntry({ k: 'start', at: now(), resumed: !!resume, agent, model: model || null, effort: effort || null });
     // Screenshots: tool-result images, plus new/changed files in .agent-orch/shots/ after each tool result and at the end.
     const media = taskId ? mediaCollector(dataDir, cwd) : null;
     const writeShots = () => { for (const img of media.shots()) writeEntry({ k: 'image', ...img }); };
     let res;
     try {
       res = await runAgentCli({
-        agent, model, prompt, cwd, resume, systemAppend: append, autonomous, signal: ac.signal,
+        agent, model, prompt, cwd, resume, systemAppend: append, autonomous, effort, signal: ac.signal,
         onEvent: taskId ? (e) => {
           onEvent?.(e);
           if (e.k === 'image') { const img = media.image(e); if (img) writeEntry({ k: 'image', ...img, tool: e.tool }); return; }
@@ -2096,9 +2104,12 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       if (e.k === 'tool') emitChat(convoId, { t: 'tool_use', id: e.id, name: e.name, input: e.input });
       else if (e.k === 'tool_result') emitChat(convoId, { t: 'tool_result', id: e.id, text: String(e.text || '').slice(0, 20000), isError: !!e.isError });
     } : null;
+    const plannerModel = claude ? (route.agent === 'claude' ? route.model : project.model) : model || undefined;
+    // A chat turn (and a plan task answering the chat) runs at the chat's current effort.
+    const effort = clampEffort(agent, convoId || project.convo_id ? convoEffort(convoId || project.convo_id) : null, plannerModel || null);
     const attempt = (resume) => runAgent({
       agent, prompt, cwd: project.path, resume, append: resume ? null : PLANNER_SYSTEM, autonomous: false, signal, timeoutSec: 30 * 60,
-      model: claude ? (route.agent === 'claude' ? route.model : project.model) : model || undefined,
+      model: plannerModel, effort,
       tools: PLANNER_TOOLS, partial: claude && !!convoId, onMessage: claude && convoId ? chatStreamer(convoId) : null, onEvent: toChat,
     });
     const session = plannerSession(project, agent);
@@ -2212,7 +2223,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       // Nothing to improve until the owner has said what the project is and some work has landed.
       if (!q1("SELECT 1 AS x FROM tasks WHERE project_id=:p AND kind='work' AND status='done' LIMIT 1", { p: p.id })) continue;
       run('UPDATE projects SET next_reflect_at=:u WHERE id=:id', { u: t + 120, id: p.id });
-      const id = addTask(p.id, { title: 'Reflect: what else should be done?', prompt: '(reflection)', kind: 'reflect', source: 'reflection' });
+      const rs = reflectSettings();
+      const id = addTask(p.id, { title: 'Reflect: what else should be done?', prompt: '(reflection)', kind: 'reflect', source: 'reflection', agent: rs.agent, model: rs.model });
       if (p.convo_id) emitChat(p.convo_id, { t: 'reflect', taskId: id, text: REFLECT_ASK });
       logEvent(`queue empty → reflecting (task #${id})`, { projectId: p.id, taskId: id });
       added = true;
@@ -2333,7 +2345,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       const oc = q1(`SELECT SUM(status='done') AS done, SUM(status='failed') AS failed FROM tasks WHERE project_id=:p AND source='reflection' AND kind='work' AND finished_at>=:s`,
         { p: project.id, s: now() - 7 * 86400 }) || {};
       body = reflectPrompt(project, listTasks(project.id, 20), recentJournal(project.path), contextOverage(project.path),
-        limitsRows(), decision().reason, failures, { done: oc.done || 0, failed: oc.failed || 0 }, `${ENVIRONMENT}\nOwner fallback list (used when a model hits its limit): ${JSON.stringify(parseFallbacks(project.reflect_fallbacks) || [])}`);
+        limitsRows(), decision().reason, failures, { done: oc.done || 0, failed: oc.failed || 0 }, `${ENVIRONMENT}\nOwner fallback list (used when a model hits its limit): ${JSON.stringify(reflectFallbacksFor(project) || [])}`);
       system = REFLECT_SYSTEM;
       tools = [...PLANNER_TOOLS, ...CFG.safeTools.filter((t) => t.startsWith('Bash('))];
       autonomous = false;
@@ -2347,14 +2359,15 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       autonomous = !!project.autonomous;
     }
     const prompt = resume && !reused ? resumePrompt(task) : body;
-    const { runId, logPath } = startRun(task.id, task.kind, route.agent);
+    const effort = taskEffort(task, project, route);
+    const { runId, logPath } = startRun(task.id, task.kind, route.agent, LOCAL_NODE, effort);
     updateTask(task.id, { ran_agent: route.agent, ran_model: route.model || null, route_note: routeNote(route), node_id: LOCAL_NODE });
     if (running.has(task.id)) running.get(task.id).agent = route.agent;
     pushState(); // Publish the actual route once fallback/model resolution has finished.
     const r = running.get(task.id);
     if (r) r.runId = runId;
     const res = await runAgent({
-      agent: route.agent, prompt, cwd, resume, model: route.model, append: resume ? null : system, tools, autonomous,
+      agent: route.agent, prompt, cwd, resume, model: route.model, append: resume ? null : system, tools, autonomous, effort,
       signal, timeoutSec: CFG.taskTimeoutSec, taskId: task.id, runId, logPath,
     });
     finishRun(runId, res);
@@ -2397,14 +2410,15 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       `install whatever the task needs.\nYou are in ${where}, on branch ${taskBranch(task.id)}. The orchestrator pushes and merges it when you finish.`;
     const prompt = resume ? resumePrompt(task) : lostHandoff(task) ? handoffPrompt({ ...project, path: where }, task, env, await handoffInfo(task, project))
       : workerTaskPrompt({ ...project, path: where }, task, env);
-    const { runId, logPath } = startRun(task.id, task.kind, route.agent, nodeId);
+    const effort = taskEffort(task, project, route);
+    const { runId, logPath } = startRun(task.id, task.kind, route.agent, nodeId, effort);
     updateTask(task.id, { ran_agent: route.agent, ran_model: route.model || null, route_note: routeNote(route), node_id: nodeId });
     const r = running.get(task.id);
     if (r) { r.agent = route.agent; r.runId = runId; }
     pushState();
     logEvent(`#${task.id} runs on ${name}`, { projectId: project.id, taskId: task.id });
     const res = await remoteJob(task.id, nodeId, name, { runId, logPath }, {
-      title: task.title, prompt, systemAppend: resume ? undefined : WORKER_SYSTEM, agent: route.agent, model: route.model || undefined,
+      title: task.title, prompt, systemAppend: resume ? undefined : WORKER_SYSTEM, agent: route.agent, model: route.model || undefined, effort: effort || undefined,
       repo, baseSha, branch: taskBranch(task.id), doneWhen: task.done_when || undefined, resume: resume || undefined,
       timeouts: { taskSec: CFG.taskTimeoutSec, verifySec: CFG.verifyTimeoutSec, installSec: 900 }, autonomous: !!project.autonomous,
     }, signal);
@@ -2788,7 +2802,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const [clean, payload] = extractTasks(res.text);
     // The project's curated reflection fallbacks are snapshotted, so a later edit doesn't change what's already queued.
     const fresh = getProject(project.id);
-    const ids = queuePayload(fresh, payload, 'reflection', { fallbacks: parseFallbacks(fresh.reflect_fallbacks) });
+    const ids = queuePayload(fresh, payload, 'reflection', { fallbacks: reflectFallbacksFor(fresh) });
     const key = `reflect_empty_streak:${project.id}`;
     const streak = ids.length ? 0 : (parseInt(kvGet(key, '0'), 10) || 0) + 1;
     kvSet(key, streak);
@@ -2918,6 +2932,16 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const task = getTask(id);
     if (!task) return { error: 'No such task' };
     switch (action) {
+      // The drawer's per-task effort override: a level of the agent the task would run on now, or null to follow the
+      // chat's live effort again. Takes effect at the task's next session boundary.
+      case 'effort': {
+        if (value == null || value === '') { updateTask(id, { effort: null }); return { ok: true }; }
+        const agent = routeNow(task, getProject(task.project_id)).agent;
+        if (!agentEfforts(agent).includes(value)) return { error: agentEfforts(agent).length ? `${agent} takes ${agentEfforts(agent).join(', ')}` : `${agent} has no effort levels` };
+        updateTask(id, { effort: value });
+        logEvent(`#${id} effort: ${value}`, { projectId: task.project_id, taskId: id });
+        return { ok: true };
+      }
       case 'urgency': {
         if (!URGENCIES.includes(value)) return { error: 'Unknown urgency' };
         updateTask(id, { urgency: value, priority: URGENCY[value] });
@@ -3018,6 +3042,24 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     logEvent(`reflection fallbacks: ${list == null ? 'none' : list.map((f) => `${f.agent}/${f.model}`).join(' → ') || 'none'}`, { projectId: id });
     return { ok: true, project: projectView(getProject(id)) };
   }
+  // kv reflect_settings {agent, model, fallbacks} from the Settings sheet, for every project: reflect tasks run on
+  // agent/model (null = routes, else Claude); the work they queue snapshots fallbacks (null = the project's own list).
+  function reflectSettings() {
+    let s = {};
+    try { s = JSON.parse(kvGet('reflect_settings') || '{}') || {}; } catch {}
+    return { agent: s.agent || null, model: s.model || null, fallbacks: Array.isArray(s.fallbacks) ? s.fallbacks : null };
+  }
+  // v: {model?: {agent, model} | null, fallbacks?: [{agent, model}] | null}, already validated by the server.
+  function setReflectSettings(v) {
+    const next = reflectSettings();
+    if ('model' in v) { next.agent = v.model?.agent || null; next.model = v.model?.model || null; }
+    if ('fallbacks' in v) next.fallbacks = v.fallbacks;
+    kvSet('reflect_settings', JSON.stringify(next));
+    logEvent(`reflection settings: ${next.agent ? `${next.agent}/${next.model || 'default'}` : 'default model'}; fallbacks ${next.fallbacks?.map((f) => `${f.agent}/${f.model}`).join(' → ') || 'none'}`);
+    pushState();
+    return { ok: true, reflect: next };
+  }
+  const reflectFallbacksFor = (p) => reflectSettings().fallbacks ?? parseFallbacks(p.reflect_fallbacks);
   function pauseProject(id) {
     for (const [tid, r] of running) if (r.projectId === id) r.abort.abort(); // sessions are kept and resumed
   }
@@ -3050,6 +3092,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return {
       id: t.id, project_id: t.project_id, kind: t.kind, title: t.title, status: t.status, urgency: t.urgency,
       priority: t.priority, deadline: t.deadline, depends_on: t.depends_on, attempts: t.attempts, position: t.position ?? null,
+      effort: t.effort ?? null, // the owner's per-task override (null = the chat's live effort)
       // deps: every direct prerequisite (all must be done); prereqs: unfinished tasks up the prerequisite graph (must finish
       // first); dependents: the queued subtree that moves with it. files: what it declared it modifies (null = everything).
       deps: depsOf(t.id), prereqs: prereqIds(depsOf(t.id)), dependents: dependentIds(t.id), files: parseFiles(t.files),
@@ -3106,7 +3149,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         activity: r.activity || null, started_at: r.startedAt, elapsed: Math.max(0, now() - r.startedAt), node: r.node, node_name: r.node === LOCAL_NODE ? null : nodeName(r.node), waiting_for: r.waiting || null };
     });
     return { activeUsage, blocks, blockedUntil: blockedUntil(), blockedReason: kvGet('blocked_reason'),
-      pacing: d?.reason || kvGet('budget_reason'), slots: slotCount(d, mem), parallel, lanes,
+      pacing: d?.reason || kvGet('budget_reason'), slots: slotCount(d, mem), parallel, lanes, reflect: reflectSettings(),
       running: running.size, workRunning: workRunning(), remoteRunning: workEverywhere() - workRunning(), draining, subscription: onSubscription() };
   }
   function pushTask(id) {
@@ -3143,7 +3186,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         entries = parseJsonl(fs.readFileSync(r.log_path, 'utf8')).filter((e) => e.k !== 'start' && e.k !== 'end');
       } catch {}
       if (entries.length > 1500) entries = entries.slice(-1500);
-      return { id: r.id, outcome: r.outcome, started_at: r.started_at, finished_at: r.finished_at, turns: r.num_turns, output_tokens: r.output_tokens, entries };
+      return { id: r.id, outcome: r.outcome, started_at: r.started_at, finished_at: r.finished_at, turns: r.num_turns, output_tokens: r.output_tokens,
+        agent: r.agent || 'claude', effort: r.effort ?? null, entries };
     });
     return {
       task: { ...taskView(t), prompt: t.prompt, done_when: t.done_when, result: t.result, last_error: t.last_error, verify_output: t.verify_output, check: extractCommand(t.done_when) },
@@ -3212,7 +3256,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   return {
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
-    planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, insertCheckpoint, approveCheckpoint, requestChanges, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setReflectFallbacks, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
+    planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, insertCheckpoint, approveCheckpoint, requestChanges, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setReflectFallbacks, setReflectSettings, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
     drain, undrain, chatPlanning, stateView, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, reconcileClaudeLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     // A sidebar chat's project rank ({id, position, priority}), or null when its folder has no orchestrator project.
     projectRank: (cwd) => q1('SELECT id, position, priority FROM projects WHERE path=:p', { p: cwd }) ?? null,

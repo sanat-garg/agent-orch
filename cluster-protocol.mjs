@@ -64,7 +64,8 @@ const S = {
   'job.accept': { job: 'int' },
   'job.reject': { job: 'int', reason: 'reject' },
   'job.start': {
-    job: 'int', title: 'str', prompt: 'str', systemAppend: 'str?', agent: 'agent', model: 'str?', account: 'str?',
+    // effort: the reasoning-effort level the controller read at this session boundary (the worker clamps it to the agent).
+    job: 'int', title: 'str', prompt: 'str', systemAppend: 'str?', agent: 'agent', model: 'str?', effort: 'str?', account: 'str?',
     repo: 'repo', baseSha: 'sha', branch: 'branch', doneWhen: 'str?', resume: 'str?',
     timeouts: 'obj', autonomous: 'bool?', tools: 'arr?', install: 'arr?',
   },

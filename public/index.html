@@ -66,6 +66,9 @@
         <span class="dot" id="connDot"></span>
         <span class="host" id="connText">Connecting…</span>
       </button>
+      <button type="button" class="icon-btn side-settings" id="settingsBtn" aria-haspopup="dialog" aria-label="Settings" title="Settings">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="7" r="2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="8" cy="17" r="2" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+      </button>
       <button class="link-btn" id="logout">Sign out</button>
     </div>
   </aside>
@@ -127,45 +130,6 @@
           <svg class="ob-ico" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
           <span class="ob-label">Queue</span><span class="ob-badge" id="obQueueCount" hidden></span>
         </button>
-        <div class="pop-wrap">
-          <button type="button" class="btn ob-btn" id="obSettingsBtn" aria-label="Settings" aria-haspopup="dialog" aria-expanded="false" aria-controls="obPop">
-            <svg class="ob-ico" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="7" r="2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="8" cy="17" r="2" fill="none" stroke="currentColor" stroke-width="2"/></svg>
-            <span class="ob-label">Settings</span>
-          </button>
-          <div class="popover ob-pop" id="obPop" role="dialog" aria-labelledby="obPopTitle" hidden>
-            <div class="ob-pop-head">
-              <strong id="obPopTitle">Orchestrator settings</strong>
-              <button type="button" class="icon-btn" id="obPopClose" aria-label="Close">
-                <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-              </button>
-            </div>
-            <h4 class="ob-sec">General</h4>
-            <label class="ob-opt">
-              <span class="ob-text"><strong>Keep improving</strong><small>Plan next steps when idle</small></span>
-              <input type="checkbox" id="obPerpetual">
-            </label>
-            <div class="ob-opt">
-              <span class="ob-text"><strong>Project priority</strong><small>Drag projects in the sidebar to set priority</small></span>
-              <span class="ob-rank" id="obRank"></span>
-            </div>
-            <div class="ob-opt">
-              <label class="ob-text" for="obSound"><strong>Sound</strong><small>Chime when a task finishes</small></label>
-              <button type="button" class="btn small" id="obSoundTest">Test</button>
-              <input type="checkbox" id="obSound" checked>
-            </div>
-            <h4 class="ob-sec">Running</h4>
-            <label class="ob-opt">
-              <span class="ob-text"><strong>Parallel tasks</strong><small>2 only with spare memory</small></span>
-              <select id="obParallel"><option value="1">1 (recommended)</option><option value="2">2</option></select>
-            </label>
-            <h4 class="ob-sec">Models</h4>
-            <div class="ob-routes" id="obRoutes"></div>
-            <div class="ob-opt" id="obReflect">
-              <span class="ob-text"><strong>Reflection fallbacks</strong><small>If reflection hits a limit</small></span>
-              <button type="button" class="chip fb-chip" id="obReflectBtn" aria-haspopup="dialog" aria-controls="fbModal">No fallbacks</button>
-            </div>
-          </div>
-        </div>
         <button type="button" class="btn ob-btn ob-pause" id="obPause" aria-label="Pause" hidden>
           <svg class="ob-ico" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path class="i-pause" d="M9 6v12M15 6v12" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path class="i-play" d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg>
           <span class="ob-label">Pause</span>
@@ -197,6 +161,7 @@
                   <option value="claude|">Claude Code</option>
                 </select>
               </label>
+              <button type="button" class="chip eff-chip" id="effChip" aria-haspopup="dialog" aria-controls="effModal" hidden><span class="eff-k">Effort: </span><span id="effVal">default</span></button>
               <button type="button" class="chip fb-chip" id="fbChip" aria-haspopup="dialog" aria-controls="fbModal">No fallbacks</button>
             </div>
             <button type="submit" class="send" id="send" aria-label="Send">
@@ -346,6 +311,86 @@
 
 <div class="toasts" id="toasts" aria-live="polite"></div>
 
+<div class="modal sheet" id="settingsModal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-panel st" role="dialog" aria-modal="true" aria-labelledby="stTitle">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <div class="m-head">
+      <div><h2 id="stTitle">Settings</h2></div>
+      <button class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="m-body">
+      <h3 class="st-sec">Sound</h3>
+      <div class="st-row">
+        <label class="st-text" for="stSound"><strong>Sound when a task finishes</strong><small>Plays while this tab is in the background</small></label>
+        <input type="checkbox" class="st-switch" id="stSound" role="switch" checked>
+      </div>
+      <div class="st-row">
+        <span class="st-text"><strong>Sound file</strong><small id="stSoundName">Default chime</small></span>
+        <button type="button" class="btn small" id="stSoundTest">Test</button>
+        <button type="button" class="btn small" id="stSoundUpload">Upload MP3</button>
+        <button type="button" class="btn small" id="stSoundReset" hidden>Reset</button>
+        <input type="file" id="stSoundFile" accept="audio/mpeg,.mp3" hidden>
+      </div>
+      <h3 class="st-sec">Tasks</h3>
+      <label class="st-row">
+        <span class="st-text"><strong>Max parallel tasks</strong><small>Across all projects. 2 only while the server has spare memory</small></span>
+        <select id="stParallel"><option value="1">1 (recommended)</option><option value="2">2</option></select>
+      </label>
+      <h3 class="st-sec">Reflection</h3>
+      <label class="st-row">
+        <span class="st-text"><strong>Reflection model</strong><small>Runs the "what next?" check when a queue empties</small></span>
+        <select id="stReflectModel"></select>
+      </label>
+      <div class="st-row">
+        <span class="st-text"><strong>Reflection fallbacks</strong><small>Where the work it queues goes when its model hits a limit</small></span>
+        <button type="button" class="chip fb-chip" id="stReflectBtn" aria-haspopup="dialog" aria-controls="fbModal">No fallbacks</button>
+      </div>
+      <div id="stProject" hidden>
+        <h3 class="st-sec" id="stProjectTitle">This project</h3>
+        <label class="st-row">
+          <span class="st-text"><strong>Keep improving</strong><small>Plan next steps when the queue is empty</small></span>
+          <input type="checkbox" class="st-switch" id="stPerpetual" role="switch">
+        </label>
+        <div class="st-row">
+          <span class="st-text"><strong>Project priority</strong><small>Drag projects in the sidebar to set priority</small></span>
+          <span class="st-rank" id="stRank"></span>
+        </div>
+        <div class="st-routes" id="stRoutes"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Reasoning effort (Claude and Codex): a popover over the composer's Effort pill; a bottom sheet on phones. -->
+<div class="modal sheet fb-pop eff-pop" id="effModal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-panel fb eff" role="dialog" aria-modal="true" aria-labelledby="effTitle">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <div class="m-head">
+      <div>
+        <h2 id="effTitle">Effort</h2>
+        <p class="m-sub" id="effSub"></p>
+      </div>
+      <button class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="eff-body">
+      <div class="eff-now"><strong id="effLevel"></strong><span class="eff-tag" id="effTag"></span></div>
+      <input type="range" id="effRange" min="0" max="4" step="1" value="0" aria-labelledby="effTitle" aria-describedby="effHint">
+      <div class="eff-ticks" id="effTicks" aria-hidden="true"></div>
+      <p class="eff-hint" id="effHint"></p>
+      <p class="eff-note" id="effNote" hidden></p>
+      <div class="eff-foot">
+        <button type="button" class="btn small" id="effDefault" aria-pressed="false">Default</button>
+        <span class="eff-def" id="effDefNote"></span>
+      </div>
+    </div>
+  </div>
+</div>
 <div class="modal sheet fb-pop" id="fbModal" hidden>
   <div class="modal-backdrop" data-close></div>
   <div class="modal-panel fb" role="dialog" aria-modal="true" aria-labelledby="fbTitle">

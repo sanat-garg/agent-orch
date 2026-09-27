@@ -466,7 +466,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     let res;
     try {
       res = await runAgentCli({
-        agent: spec.agent, model: spec.model || undefined, prompt, cwd: job.dir, resume: resume || undefined, systemAppend: spec.systemAppend || undefined,
+        agent: spec.agent, model: spec.model || undefined, effort: spec.effort || undefined, prompt, cwd: job.dir, resume: resume || undefined, systemAppend: spec.systemAppend || undefined,
         autonomous: spec.autonomous ?? true, signal: job.ac.signal, onEvent: (e) => pushEvent(job, e),
         env: withOwner(process.env, 'task', job.id), onSpawn: ({ pid, pgid }) => registerPid({ pid, pgid, kind: 'task', id: job.id }),
       });

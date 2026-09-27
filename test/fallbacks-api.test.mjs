@@ -233,3 +233,55 @@ test('POST /api/orch/projects/reorder: sets positions, derives priority 90 → 1
     assert.deepEqual(r.body.order, msg.order);
   } finally { ws.close(); db.close(); }
 });
+
+test('PUT /api/convos/:id/effort: validated against the chat agent\'s levels; saved and sent with the chat', { timeout: 30000 }, async () => {
+  const url = `/api/convos/${CID}/effort`;
+  const unauth = await fetch(base + url, { method: 'PUT', body: '{"effort":null}' });
+  assert.equal(unauth.status, 401);
+  await unauth.arrayBuffer();
+  assert.equal((await get('/api/convos')).body.find((c) => c.id === CID).effort, null, 'the agent default until set');
+  const agents = (await get('/api/agents')).body.agents;
+  assert.deepEqual(agents.find((a) => a.id === 'claude').efforts, ['low', 'medium', 'high', 'xhigh', 'max']);
+  assert.deepEqual(agents.find((a) => a.id === 'codex').efforts, ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+  // The chat is on Claude: codex's 'ultra' and unknown levels are refused.
+  for (const bad of ['ultra', 'minimal', 'HIGH', 3, true]) assert.equal((await put(url, { effort: bad })).status, 400, JSON.stringify(bad));
+  assert.equal((await put('/api/convos/nope/effort', { effort: 'high' })).status, 404);
+  const r = await put(url, { effort: 'xhigh' });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.effort, 'xhigh');
+  assert.equal((await get('/api/convos')).body.find((c) => c.id === CID).effort, 'xhigh');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dataDir, 'convos.json'), 'utf8'))[0].effort, 'xhigh');
+  assert.equal((await put(url, { effort: null })).body.effort, null);
+});
+
+test('PUT /api/orch/reflect-settings and the task sound upload (Settings sheet)', { timeout: 60000 }, async () => {
+  await discovered();
+  for (const bad of [{}, { model: { agent: 'codex', model: 'gpt-9000' } }, { fallbacks: [{ agent: 'nope', model: 'x' }] }]) {
+    assert.equal((await put('/api/orch/reflect-settings', bad)).status, 400, JSON.stringify(bad));
+  }
+  let r = await put('/api/orch/reflect-settings', { model: { agent: 'codex', model: 'gpt-5.5' } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(r.body.reflect, { agent: 'codex', model: 'gpt-5.5', fallbacks: null });
+  r = await put('/api/orch/reflect-settings', { fallbacks: [{ agent: 'codex', model: 'gpt-5.5' }] });
+  assert.deepEqual(r.body.reflect, { agent: 'codex', model: 'gpt-5.5', fallbacks: [{ agent: 'codex', model: 'gpt-5.5' }] }, 'fields save independently');
+  r = await put('/api/orch/reflect-settings', { model: null });
+  assert.deepEqual([r.body.reflect.agent, r.body.reflect.model], [null, null]);
+
+  assert.deepEqual((await get('/api/settings')).body.sound, { custom: false, at: null });
+  const post = (buf) => fetch(base + '/api/settings/sound', { method: 'POST', headers: { cookie, 'content-type': 'audio/mpeg' }, body: buf });
+  let res = await post(Buffer.from('not audio at all'));
+  assert.equal(res.status, 400); await res.arrayBuffer();
+  res = await post(Buffer.alloc(2 * 1024 * 1024 + 10, 0xff));
+  assert.equal(res.status, 413); await res.arrayBuffer().catch(() => {});
+  const mp3 = Buffer.concat([Buffer.from('ID3'), Buffer.alloc(200, 1)]);
+  res = await post(mp3);
+  assert.equal(res.status, 200); await res.arrayBuffer();
+  assert.equal((await get('/api/settings')).body.sound.custom, true);
+  res = await fetch(base + '/api/settings/sound', { headers: { cookie } });
+  assert.equal(res.headers.get('content-type'), 'audio/mpeg');
+  assert.deepEqual(Buffer.from(await res.arrayBuffer()), mp3);
+  res = await fetch(base + '/api/settings/sound', { method: 'DELETE', headers: { cookie } });
+  assert.equal(res.status, 200); await res.arrayBuffer();
+  assert.equal((await get('/api/settings')).body.sound.custom, false);
+  assert.equal((await fetch(base + '/api/settings/sound', { headers: { cookie } })).status, 404);
+});

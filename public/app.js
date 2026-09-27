@@ -76,6 +76,7 @@ const state = {
   draftMode: store.get('cw.fullAccess') ? store.get('cw.mode') || 'bypassPermissions'
     : (store.set('cw.fullAccess', '1'), ['plan', 'orchestrator'].includes(store.get('cw.mode')) ? store.get('cw.mode') : 'bypassPermissions'),
   draftModel: store.get('cw.model') || 'claude|', // agent|model (an older saved value is a bare Claude model)
+  draftEffort: store.get('cw.effort') || null, // the next new chat's reasoning effort (null = the model default)
   draftFallbacks: (() => { try { return JSON.parse(store.get('cw.fallbacks')) || null; } catch { return null; } })(), // the next new chat's
   busy: false,
   ws: null,
@@ -1490,7 +1491,10 @@ $('composer').addEventListener('submit', async (e) => {
       state.draft = { type: 'new', name: '' }; // the next new chat starts its own project again
       if (!state.convos.find((x) => x.id === c.id)) state.convos.unshift(c);
       openConvo(c.id);
-      if (pickVal(parsePick(state.draftModel)) !== 'claude|') send({ t: 'set_model', cid: c.id, ...parsePick(state.draftModel) });
+      // The draft effort rides on set_model, so the server checks it against the agent it was picked for.
+      const effort = clampEffortTo(effortLevels(parsePick(state.draftModel).agent), state.draftEffort);
+      if (pickVal(parsePick(state.draftModel)) !== 'claude|') send({ t: 'set_model', cid: c.id, ...parsePick(state.draftModel), ...(effort && { effort }) });
+      else if (effort) await api(`/api/convos/${c.id}/effort`, 'PUT', { effort }).then((r) => (c.effort = r.effort ?? null));
       if (state.draftFallbacks?.length) await api(`/api/convos/${c.id}/fallbacks`, 'PUT', { fallbacks: state.draftFallbacks }).then((r) => (c.fallbacks = r.fallbacks));
     } catch (err) {
       const n = el('div', 'notice error', err.message);
@@ -1532,6 +1536,7 @@ $('model').addEventListener('change', () => {
   const v = $('model').value;
   if (v === CONNECT_PICK) { $('model').value = $('model').dataset.prev || 'claude|'; fitPick(); openConnections(); return; }
   $('model').dataset.prev = v;
+  clampEffortForAgent(parsePick(v).agent);
   renderPickChip();
   if (state.cid) send({ t: 'set_model', cid: state.cid, ...parsePick(v) });
   else { state.draftModel = v; store.set('cw.model', v); }
@@ -1568,7 +1573,7 @@ document.fonts?.ready.then(fitPick);
 // it when their model hits its limit; empty = they wait) or a project's list for reflection tasks. It renders from what
 // is already loaded (convos, O.project, AGENT_LIST, O.state.blocks), never a fetch; every change saves at once (PUT).
 // The composer's button next to the model picker shows the chat's count; the picker itself only picks the primary model.
-function renderPickChip() { fitPick(); renderFbChip(); fbRender(); }
+function renderPickChip() { fitPick(); renderFbChip(); fbRender(); renderEff(); }
 const FB = { host: null, fe: {}, lastFocus: null, local: null, pending: 0, chain: Promise.resolve(), seq: 0 };
 const apKey = (r) => `${r.agent}/${r.model}`;
 // The model a route runs: its own, else its agent's default.
@@ -1602,22 +1607,46 @@ function chatFallbacks() {
     },
     confirmedOf: (c) => c.fallbacks ?? null };
 }
+// Reflection fallbacks (Settings): one list for every project's reflection-queued tasks (PUT /api/orch/reflect-settings).
 function reflectFallbacks() {
-  const pid = O.project?.id;
-  return { what: 'reflection tasks', primary: O.project?.work_route || { agent: 'claude', model: '' },
-    list: () => (O.project?.id === pid ? O.project.reflect_fallbacks : null) ?? null,
-    url: `/api/orch/projects/${pid}/reflect-fallbacks`,
-    apply: (list) => { if (O.project?.id === pid) O.project.reflect_fallbacks = list; renderReflectBtn(); },
-    confirmedOf: (r) => r.project?.reflect_fallbacks ?? null };
+  const r = () => O.state?.reflect || {};
+  return { what: 'reflection-queued tasks', primary: O.project?.work_route || { agent: 'claude', model: '' },
+    list: () => r().fallbacks ?? null,
+    url: '/api/orch/reflect-settings',
+    apply: (list) => { if (O.state) O.state.reflect = { ...r(), fallbacks: list }; renderReflectBtn(); },
+    confirmedOf: (res) => res.reflect?.fallbacks ?? null };
+}
+// One task's own fallback snapshot (PATCH /api/orch/tasks/:id/fallbacks). reset: back to its chat's list when it differs.
+function taskFallbacks(id) {
+  const task = () => ({ ...(O.detail?.task.id === id ? O.detail.task : {}), ...(O.tasks.get(id) || {}) });
+  const t = task(), queued = t.status === 'queued';
+  const [agent, model] = queued && t.runs_on ? [t.runs_on, t.runs_model || null] : t.ran_agent ? [t.ran_agent, t.ran_model || null] : [t.agent || 'claude', t.model || null];
+  const chat = () => state.convos.find((c) => c.id === O.detail?.project?.convo_id);
+  const set = (list) => {
+    const x = O.tasks.get(id);
+    if (x) x.fallbacks = list;
+    if (O.detail?.task.id === id) O.detail.task.fallbacks = list;
+    refreshCards(id);
+    if (O.drawer === id) renderDrawer();
+  };
+  return { what: 'this task', primary: { agent, model }, method: 'PATCH',
+    sub: `This task moves to the first model below with usage left. With none, it waits.${t.status === 'running' ? ' Changes apply from the next resume or limit event.' : ''}`,
+    empty: (name) => `No fallbacks: this task waits for ${name} to reset.`,
+    list: () => task().fallbacks ?? null,
+    url: `/api/orch/tasks/${id}/fallbacks`,
+    apply: set,
+    confirmedOf: (r) => r.task?.fallbacks ?? null,
+    reset: () => { const c = chat(); return c && JSON.stringify(task().fallbacks || []) !== JSON.stringify(c.fallbacks || []) ? c.fallbacks ?? null : undefined; },
+    // The drawer re-renders on every save, so focus returns to the fresh chip.
+    focusBack: () => $('drBody').querySelector('.dr-model .dr-chip-btn') };
 }
 function renderFbChip() {
   const h = chatFallbacks();
   fbChipText($('fbChip'), h.primary, h.list(), h.what);
 }
 function renderReflectBtn() {
-  if (!O.project) return;
   const h = reflectFallbacks();
-  fbChipText($('obReflectBtn'), h.primary, h.list(), h.what);
+  fbChipText($('stReflectBtn'), h.primary, h.list(), h.what);
 }
 // Optimistic: shown and stored at once; PUTs run in order, and if the latest fails the last saved list comes back.
 function fbSave(list) {
@@ -1628,7 +1657,7 @@ function fbSave(list) {
     const seq = ++FB.seq, url = h.url;
     FB.local = { url, list };
     FB.pending++;
-    FB.chain = FB.chain.then(() => api(url, 'PUT', { fallbacks: list })).then((r) => { h.confirmed = h.confirmedOf(r); }, (e) => {
+    FB.chain = FB.chain.then(() => api(url, h.method || 'PUT', { fallbacks: list })).then((r) => { h.confirmed = h.confirmedOf(r); }, (e) => {
       if (seq !== FB.seq) return;
       FB.local = { url, list: h.confirmed };
       h.apply(h.confirmed);
@@ -1658,13 +1687,179 @@ function openFallbacks(host, anchor) {
 }
 function closeFallbacks() {
   $('fbModal').hidden = true;
+  const back = FB.lastFocus?.isConnected ? FB.lastFocus : FB.host?.focusBack?.();
   FB.host = null;
   FB.fe = {};
-  FB.lastFocus?.focus?.();
+  back?.focus?.();
 }
 $('fbChip').addEventListener('click', () => openFallbacks(chatFallbacks(), $('fbChip')));
 $('fbModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeFallbacks(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('fbModal').hidden && !e.target.closest?.('.fe-add')) { e.stopImmediatePropagation(); closeFallbacks(); } }, true);
+
+// ---------- reasoning effort (Claude and Codex only: agents that list `efforts` in /api/agents) ----------
+// The composer's pill shows the chat's effort ('Effort: high'; the level word alone on phones) while the picked agent has
+// levels, and opens #effModal: a popover over the pill on desktop, the .modal.sheet bottom sheet on phones. A discrete
+// slider spans the agent's levels; every change saves at once (PUT /api/convos/:id/effort). null = the model's default.
+// A new chat keeps it as its draft and sends it with its first set_model. Tasks read the chat's effort live when a session
+// starts (orchestrator taskEffort), so the toast says when it takes effect.
+const EFFORT_ORDER = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+const EFFORT_HINT = {
+  low: 'Lightest and fastest. Uses the least of your limit.',
+  medium: 'Quick, with some thinking. Fine for routine edits.',
+  high: 'Careful reasoning for most coding work.',
+  xhigh: 'Deeper reasoning for hard problems. Slower, uses more of your limit.',
+  max: 'Very deep reasoning. Slow, uses much more of your limit.',
+  ultra: 'Deepest and slowest. Uses the most of your limit.',
+};
+// The top level always reads as the deepest, whichever it is.
+const effortHint = (levels, l) => (l === levels.at(-1) ? EFFORT_HINT.ultra : EFFORT_HINT[l] || '');
+const agentEntry = (id) => AGENT_LIST.find((a) => a.id === id);
+const effortLevels = (agent) => agentEntry(agent)?.efforts || [];
+const effortModel = (agent, model) => { const ms = agentEntry(agent)?.models || []; return (model && ms.find((m) => m.id === model || m.resolved === model)) || ms.find((m) => m.default) || ms[0] || null; };
+// The levels this model takes (a discovered model may narrow its agent's, e.g. GPT-5.5 stops at xhigh).
+function modelEfforts(agent, model) {
+  const levels = effortLevels(agent), m = effortModel(agent, model);
+  return m?.efforts?.length ? levels.filter((l) => m.efforts.includes(l)) : levels;
+}
+// Mirrors agents.mjs clampEffort: the level itself, else the nearest lower one in `levels`, else the lowest.
+function clampEffortTo(levels, level) {
+  const rank = EFFORT_ORDER.indexOf(level);
+  if (!levels.length || rank < 0) return null;
+  if (levels.includes(level)) return level;
+  const lower = levels.filter((l) => EFFORT_ORDER.indexOf(l) < rank);
+  return lower.length ? lower.at(-1) : levels[0];
+}
+// What 'Default' runs as: the model's own default level (Codex reports it; Claude's is high, per the Agent SDK).
+const defaultEffort = (agent, model) => effortModel(agent, model)?.defaultEffort || (agent === 'claude' ? 'high' : null);
+// The chat the composer edits: its agent/model (the picker) and effort (the open chat's, else the new-chat draft).
+function composerEffort() {
+  const { agent, model } = parsePick($('model').dataset.prev || 'claude|');
+  return { agent, model: model || null, effort: (state.cid ? currentConvo()?.effort : state.draftEffort) ?? null };
+}
+const EF = { lastFocus: null, chain: Promise.resolve(), seq: 0, toast: null };
+function renderEffChip() {
+  const chip = $('effChip'), { agent, model, effort } = composerEffort();
+  const levels = effortLevels(agent);
+  chip.hidden = !levels.length;
+  if (!levels.length) return;
+  const shown = effort ? clampEffortTo(levels, effort) : null;
+  $('effVal').textContent = shown || 'default';
+  chip.classList.toggle('none', !shown);
+  chip.setAttribute('aria-label', `Effort: ${shown || 'default'}`);
+  const def = defaultEffort(agent, model);
+  chip.title = shown ? `Reasoning effort: ${shown}. ${effortHint(levels, shown)}` : `Reasoning effort: the model's default${def ? ` (${def})` : ''}`;
+}
+function renderEff() {
+  renderEffChip();
+  if ($('effModal').hidden) return;
+  const { agent, model, effort } = composerEffort(), levels = effortLevels(agent);
+  if (!levels.length) return closeEffort();
+  const ok = modelEfforts(agent, model), def = defaultEffort(agent, model);
+  const level = effort ? clampEffortTo(levels, effort) : null;
+  const at = level || clampEffortTo(levels, def) || levels[Math.floor(levels.length / 2)];
+  const range = $('effRange');
+  range.max = String(levels.length - 1);
+  range.value = String(levels.indexOf(at));
+  range.classList.toggle('is-default', !level);
+  range.setAttribute('aria-valuetext', level ? `${level}. ${effortHint(levels, level)}` : `Default, ${at}`);
+  range.style.setProperty('--fill', `${levels.length > 1 ? (levels.indexOf(at) / (levels.length - 1)) * 100 : 0}%`);
+  $('effSub').textContent = `${shortLabel(agent)} · ${modelName(agent, model)}`;
+  $('effLevel').textContent = level || 'Default';
+  $('effTag').textContent = level ? '' : `runs as ${at}`;
+  $('effHint').textContent = level ? effortHint(levels, level) : `Uses the model's own setting (${at}). ${effortHint(levels, at)}`;
+  const runsAs = level && clampEffortTo(ok, level);
+  $('effNote').hidden = !runsAs || runsAs === level;
+  if (runsAs && runsAs !== level) $('effNote').textContent = `${modelName(agent, model)} tops out at ${ok.at(-1)}, so it runs as ${runsAs}.`;
+  const ticks = $('effTicks');
+  ticks.textContent = '';
+  ticks.style.setProperty('--n', String(Math.max(1, levels.length - 1)));
+  levels.forEach((l, i) => {
+    const b = el('button', 'eff-tick' + (l === at ? ' on' : '') + (ok.includes(l) ? '' : ' na'), l);
+    b.type = 'button';
+    b.tabIndex = -1; // the slider has the keyboard; ticks are for pointers
+    b.style.setProperty('--i', String(i));
+    if (!ok.includes(l)) b.title = `${modelName(agent, model)} runs this as ${clampEffortTo(ok, l)}`;
+    b.onclick = () => { effSave(l); range.focus(); };
+    ticks.append(b);
+  });
+  $('effDefault').setAttribute('aria-pressed', String(!level));
+  $('effDefault').disabled = !level;
+  $('effDefNote').textContent = def ? `The model's own setting: ${def}` : "The model's own setting";
+}
+function effToast(level) {
+  EF.toast?.close?.();
+  EF.toast = toast(`Effort set to ${level || 'the model default'}. Queued tasks use it when they start; running tasks switch at their next session.`);
+}
+// Optimistic: shown at once; PUTs run in order and only the latest one's result speaks (toast, or rollback on error).
+function effSave(level) {
+  const cid = state.cid;
+  if (!cid) {
+    state.draftEffort = level;
+    store.set('cw.effort', level || '');
+    renderEff();
+    return effToast(level);
+  }
+  const c = currentConvo();
+  if (!c || (c.effort ?? null) === level) return;
+  const before = c.effort ?? null, seq = ++EF.seq;
+  c.effort = level;
+  renderEff();
+  EF.chain = EF.chain.then(() => api(`/api/convos/${cid}/effort`, 'PUT', { effort: level })).then((r) => {
+    if (seq !== EF.seq) return;
+    const x = state.convos.find((y) => y.id === cid);
+    if (x) x.effort = r.effort ?? null;
+    effToast(r.effort ?? null);
+    renderEff();
+  }, (e) => {
+    if (seq !== EF.seq) return;
+    const x = state.convos.find((y) => y.id === cid);
+    if (x) x.effort = before;
+    renderEff();
+    toast(`Could not save effort: ${e.message}`, { kind: 'error' });
+  });
+}
+function openEffort() {
+  const m = $('effModal'), anchor = $('effChip');
+  if (m.hidden) EF.lastFocus = anchor;
+  m.hidden = false;
+  // Desktop: a popover above the pill (the composer sits at the bottom); phones (≤800px): the bottom sheet.
+  const panel = m.querySelector('.modal-panel');
+  panel.style.left = panel.style.top = panel.style.bottom = '';
+  if (matchMedia('(min-width: 801px)').matches) {
+    const r = anchor.getBoundingClientRect(), w = Math.min(380, innerWidth - 24);
+    panel.style.left = `${Math.max(12, Math.min(r.left, innerWidth - w - 12))}px`;
+    if (r.top > innerHeight / 2) panel.style.bottom = `${innerHeight - r.top + 8}px`;
+    else panel.style.top = `${r.bottom + 8}px`;
+  }
+  renderEff();
+  $('effRange').focus();
+}
+function closeEffort() {
+  if ($('effModal').hidden) return;
+  $('effModal').hidden = true;
+  if (EF.lastFocus?.isConnected && !EF.lastFocus.hidden) EF.lastFocus.focus();
+}
+$('effChip').addEventListener('click', openEffort);
+$('effModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeEffort(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('effModal').hidden) { e.stopImmediatePropagation(); closeEffort(); } }, true);
+// Arrow keys, Home/End and dragging move the slider (the native range); `input` previews, `change` saves.
+$('effRange').addEventListener('input', () => {
+  const levels = effortLevels(composerEffort().agent), l = levels[Number($('effRange').value)];
+  $('effRange').style.setProperty('--fill', `${(Number($('effRange').value) / Math.max(1, levels.length - 1)) * 100}%`);
+  $('effLevel').textContent = l;
+  $('effTag').textContent = '';
+  $('effHint').textContent = effortHint(levels, l);
+});
+$('effRange').addEventListener('change', () => effSave(effortLevels(composerEffort().agent)[Number($('effRange').value)] || null));
+$('effDefault').addEventListener('click', () => { effSave(null); $('effRange').focus(); });
+// Switching the picker between agents keeps the chat's effort at the nearest level the new agent takes (the server
+// clamps the saved chat the same way on set_model; this keeps the draft and the pill in step).
+function clampEffortForAgent(agent) {
+  const levels = effortLevels(agent);
+  if (!levels.length) return;
+  if (state.cid) { const c = currentConvo(); if (c?.effort) c.effort = clampEffortTo(levels, c.effort); }
+  else if (state.draftEffort) { state.draftEffort = clampEffortTo(levels, state.draftEffort); store.set('cw.effort', state.draftEffort || ''); }
+}
 function fbRender() {
   const h = FB.host;
   if (!h || $('fbModal').hidden) return;
@@ -1674,9 +1869,17 @@ function fbRender() {
   if (focused && !FB.fe.focusKey) FB.fe.focusKey = focused;
   const list = (FB.local?.url === h.url ? FB.local.list : h.list()) || [], name = fbName(h.primary);
   $('fbTitle').textContent = `If ${name} hits its limit`;
-  $('fbSub').textContent = `${h.what[0].toUpperCase()}${h.what.slice(1)} move to the first model below with usage left. With none, they wait.`;
+  $('fbSub').textContent = h.sub || `${h.what[0].toUpperCase()}${h.what.slice(1)} move to the first model below with usage left. With none, they wait.`;
+  // A task's own list that differs from its chat's can go back to the chat's.
+  const back = !FB.pending && h.reset?.();
+  if (back !== undefined && back !== false) {
+    const rb = el('button', 'link-btn inline', "Reset to chat's list");
+    rb.type = 'button';
+    rb.onclick = () => fbSave(back);
+    $('fbSub').append(el('br'), el('span', '', 'Custom list for this task · '), rb);
+  }
   renderFallbackEditor($('fbBody'), { list, onChange: fbSave, ui: FB.fe,
-    exclude: [{ agent: h.primary.agent, model: fbModelOf(h.primary) }], empty: `No fallbacks: ${h.what} wait for ${name} to reset.` });
+    exclude: [{ agent: h.primary.agent, model: fbModelOf(h.primary) }], empty: h.empty ? h.empty(name) : `No fallbacks: ${h.what} wait for ${name} to reset.` });
 }
 // Chats that had the old per-chat delegation flag on (#153 removed it; it lived in localStorage) with no list get an empty one.
 function migrateAutoDelegate() {
@@ -2182,7 +2385,8 @@ $('splashSkip').addEventListener('click', hideSplash);
 splash.skipTimer = setTimeout(() => { if ($('splash')) $('splashSkip').hidden = false; }, 8000);
 
 // ---------- task completion sound ----------
-const taskSound = new Audio('/sounds/task-done.mp3');
+const DEFAULT_TASK_SOUND = '/sounds/task-done.mp3';
+const taskSound = new Audio(DEFAULT_TASK_SOUND);
 taskSound.preload = 'auto';
 taskSound.volume = 0.6;
 const completionSound = { synced: false, statuses: new Map(), done: new Set(), lastPlayed: -Infinity, unlocking: null };
@@ -2210,9 +2414,35 @@ function unlockTaskSound() {
 }
 document.addEventListener('pointerdown', unlockTaskSound);
 document.addEventListener('keydown', unlockTaskSound);
-$('obSound').checked = store.get('cw.taskSound') !== 'off';
-$('obSound').addEventListener('change', (e) => store.set('cw.taskSound', e.target.checked ? 'on' : 'off'));
-$('obSoundTest').addEventListener('click', playTaskSound);
+$('stSound').checked = store.get('cw.taskSound') !== 'off';
+$('stSound').addEventListener('change', (e) => store.set('cw.taskSound', e.target.checked ? 'on' : 'off'));
+$('stSoundTest').addEventListener('click', playTaskSound);
+// An uploaded MP3 (GET /api/settings/sound) replaces the default chime for every browser.
+function setSoundInfo(sound) {
+  taskSound.src = sound?.custom ? `/api/settings/sound?v=${sound.at}` : DEFAULT_TASK_SOUND;
+  $('stSoundName').textContent = sound?.custom ? 'Your MP3' : 'Default chime';
+  $('stSoundReset').hidden = !sound?.custom;
+}
+api('/api/settings').then((d) => setSoundInfo(d.sound)).catch(() => {});
+$('stSoundUpload').addEventListener('click', () => $('stSoundFile').click());
+$('stSoundFile').addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (!f) return;
+  if (f.size > 2 * 1024 * 1024) return toast('That file is over 2 MB. Pick a shorter MP3.', { kind: 'error' });
+  try {
+    const r = await fetch('/api/settings/sound', { method: 'POST', headers: { 'Content-Type': 'audio/mpeg' }, body: f });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `Upload failed (${r.status})`);
+    setSoundInfo(d.sound);
+    toast('Sound updated');
+    playTaskSound();
+  } catch (err) { toast(err.message, { kind: 'error' }); }
+});
+$('stSoundReset').addEventListener('click', async () => {
+  try { setSoundInfo((await api('/api/settings/sound', 'DELETE')).sound); }
+  catch (err) { toast(err.message, { kind: 'error' }); }
+});
 function syncCompletionSound(tasks) {
   if (!completionSound.synced) completionSound.statuses.clear();
   for (const t of tasks || []) {
@@ -2231,7 +2461,7 @@ function observeTaskCompletion(t) {
     completionSound.done.add(t.id);
     if (!completionSound.synced || !previous || previous === 'done' || !['work', 'reflect'].includes(t.kind)) return;
   }
-  if (!$('obSound').checked || (document.visibilityState !== 'hidden' && document.hasFocus())) return;
+  if (!$('stSound').checked || (document.visibilityState !== 'hidden' && document.hasFocus())) return;
   const now = performance.now();
   if (now - completionSound.lastPlayed < 3000) return;
   completionSound.lastPlayed = now;
@@ -2282,6 +2512,8 @@ function onServer(msg) {
   if (msg.t === 'models') return api('/api/agents').then((d) => { AGENT_LIST = d.agents || []; renderAgentPicker(); }).catch(() => {});
   if (msg.t === 'status') { upd.pending = !!msg.restartPending; return renderUpdateBanner(); }
   if (msg.t === 'convos') {
+    const drChat = O.detail?.project?.convo_id, effortOf = () => state.convos.find((c) => c.id === drChat)?.effort ?? null;
+    const drEffort = drChat ? effortOf() : null;
     state.convos = msg.convos;
     if (state.cid && !state.convos.find((c) => c.id === state.cid)) openConvo(null);
     renderConvoList();
@@ -2290,6 +2522,8 @@ function onServer(msg) {
     migrateAutoDelegate();
     renderFbChip();
     fbRender();
+    renderEff();
+    if (drChat && O.drawer && effortOf() !== drEffort) renderDrawer(true); // its Effort row follows the chat's live effort
     renderUsage();
     if (!state.cid) splash.need.delete('history'); // no chat open (or it was deleted): nothing more to wait for
     splashReady('convos');
@@ -3443,8 +3677,7 @@ function onOrch(msg) {
   if (msg.t === 'olane') return; // live lane activity: the Queue window no longer shows lanes
   if (msg.t === 'otask') {
     observeTaskCompletion(msg.task);
-    const edit = taskFallbackEdits.get(msg.task.id);
-    if (edit?.pending) msg.task.fallbacks = edit.list;
+    if (FB.local?.url === `/api/orch/tasks/${msg.task.id}/fallbacks`) msg.task.fallbacks = FB.local.list; // a save still in flight
     O.tasks.set(msg.task.id, msg.task);
     syncSidebarRunning();
     renderUsage();
@@ -3480,6 +3713,7 @@ let obTogglePending = null;
 function renderOrchBar() {
   renderConnFoot(); // routing rules decide whether a signed-out agent warrants the footer's warning
   syncSidebarRunning();
+  renderSettings();
   const on = $('mode').value === 'orchestrator';
   $('orchBar').hidden = !on;
   if (!on) return;
@@ -3494,49 +3728,14 @@ function renderOrchBar() {
   $('obQueueCount').hidden = !queued;
   $('obQueueCount').textContent = queued ? String(queued) : '';
   $('obQueue').setAttribute('aria-label', queued ? `Queue, ${queued} queued` : 'Queue');
-  $('obParallel').value = String(s.parallel?.parallelTasks ?? 1);
-  const routes = $('obRoutes');
-  routes.textContent = '';
-  if (p) {
-    const head = el('span', 'ob-text');
-    head.append(el('strong', '', 'Routes'), el('small', '', p.routes?.length ? 'Send matching tasks to an agent' : 'None yet. Ask in chat to add one'));
-    routes.append(head);
-    for (const r of p.routes || []) {
-      const row = el('div', 'ob-route');
-      const what = el('span', '', `"${r.match}" → ${[r.agent, r.model].filter(Boolean).join(' · ')}`);
-      what.append(el('small', '', r.scope === 'global' ? 'all projects' : 'this project'));
-      const ag = AGENT_LIST.find((a) => a.id === r.agent);
-      if (ag && ag.id !== 'claude' && (!ag.available || ag.loggedIn === false)) {
-        const hint = el('small', '', `${ag.available ? 'not signed in' : 'not installed'}, falls back to Claude · `);
-        const go = el('button', 'link-btn inline', ag.available ? 'Sign in' : 'Connections');
-        go.type = 'button';
-        go.onclick = (e) => { e.stopPropagation(); closeObPop(); openConnections(ag.id); };
-        hint.append(go);
-        what.append(hint);
-      }
-      const del = el('button', 'btn small danger', 'Delete');
-      del.type = 'button';
-      del.onclick = (e) => {
-        e.stopPropagation(); // the row re-renders, which would otherwise read as a click outside the popover
-        if (confirm(`Delete the routing rule "${r.match}"${r.scope === 'global' ? ' for all projects' : ''}?`)) orchProject({ removeRoute: r.id });
-      };
-      row.append(what, del);
-      routes.append(row);
-    }
-  }
   $('obPause').hidden = !p;
   $('obQueue').hidden = !p;
-  $('obSettingsBtn').parentElement.hidden = !p;
   if (p) {
     $('obPause').querySelector('.ob-label').textContent = paused ? 'Resume' : 'Pause';
     $('obPause').setAttribute('aria-label', paused ? 'Resume' : 'Pause');
     $('obPause').classList.toggle('primary', paused);
     $('obPause').disabled = obTogglePending?.id === p.id;
     $('obPause').setAttribute('aria-busy', String(obTogglePending?.id === p.id));
-    $('obPerpetual').checked = p.perpetual;
-    const ids = rankedProjectIds(), at = ids.indexOf(p.id) + 1;
-    $('obRank').textContent = at ? `#${at} of ${ids.length}` : '';
-    renderReflectBtn();
   }
 }
 setInterval(() => { refreshAllCards(); renderOrchBar(); if (O.drawer) renderDrawerHead(); }, 15000);
@@ -3552,7 +3751,6 @@ async function saveParallel(fields) {
     O.state = result.state; renderOrchBar();
   } catch (e) { toast(e.message, { kind: 'error' }); renderOrchBar(); }
 }
-$('obParallel').addEventListener('change', (e) => saveParallel({ parallelTasks: Number(e.target.value) }));
 $('obPause').addEventListener('click', async () => {
   const p = O.project;
   if (!p || obTogglePending) return;
@@ -3565,34 +3763,87 @@ $('obPause').addEventListener('click', async () => {
   } catch (e) { toast(e.message, { kind: 'error' }); }
   finally { obTogglePending = null; renderOrchBar(); }
 });
-$('obPerpetual').addEventListener('change', (e) => orchProject({ perpetual: e.target.checked }));
-function closeObPop(refocus) {
-  if ($('obPop').hidden) return;
-  $('obPop').hidden = true;
-  $('obSettingsBtn').setAttribute('aria-expanded', 'false');
-  if (refocus) $('obSettingsBtn').focus();
+// ----- Settings (sidebar gear): sound, parallel tasks and reflection for every project; the open project's options
+function openSettings() {
+  if ($('settingsModal').hidden) ST.lastFocus = document.activeElement;
+  $('settingsModal').hidden = false;
+  renderSettings();
+  $('settingsModal').querySelector('.icon-btn[data-close]').focus();
 }
-$('obSettingsBtn').addEventListener('click', (e) => {
-  e.stopPropagation();
-  const pop = $('obPop');
-  if (!pop.hidden) return closeObPop();
-  pop.hidden = false;
-  $('obSettingsBtn').setAttribute('aria-expanded', 'true');
+function closeSettings() {
+  $('settingsModal').hidden = true;
+  ST.lastFocus?.focus?.();
+}
+const ST = { lastFocus: null };
+$('settingsBtn').addEventListener('click', openSettings);
+$('settingsModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeSettings(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('settingsModal').hidden && $('fbModal').hidden) { e.stopImmediatePropagation(); closeSettings(); } }, true);
+function renderSettings() {
+  if ($('settingsModal').hidden) return;
+  const s = O.state || {}, p = O.project;
+  $('stParallel').value = String(s.parallel?.parallelTasks ?? 1);
+  renderReflectModel();
   renderReflectBtn();
-  const close = (ev) => {
-    if (!pop.hidden && pop.contains(ev.target) && !ev.target.closest('#obPopClose')) return;
-    closeObPop(ev.type === 'keydown' || !!ev.target.closest?.('#obPopClose'));
-    document.removeEventListener('click', close);
-    document.removeEventListener('keydown', esc, true);
-  };
-  const esc = (ev) => { if (ev.key === 'Escape') { ev.stopImmediatePropagation(); close(ev); } };
-  setTimeout(() => { document.addEventListener('click', close); document.addEventListener('keydown', esc, true); });
+  $('stProject').hidden = !p;
+  if (!p) return;
+  $('stProjectTitle').textContent = `This project · ${folderName(p.path)}`;
+  $('stPerpetual').checked = p.perpetual;
+  const ids = rankedProjectIds(), at = ids.indexOf(p.id) + 1;
+  $('stRank').textContent = at ? `#${at} of ${ids.length}` : '';
+  const routes = $('stRoutes');
+  routes.textContent = '';
+  const head = el('span', 'st-text');
+  head.append(el('strong', '', 'Routes'), el('small', '', p.routes?.length ? 'Send matching tasks to an agent' : 'None yet. Ask in chat, e.g. "use codex for tests"'));
+  routes.append(head);
+  for (const r of p.routes || []) {
+    const row = el('div', 'st-route');
+    const what = el('span', '', `"${r.match}" → ${[r.agent, r.model].filter(Boolean).join(' · ')}`);
+    what.append(el('small', '', r.scope === 'global' ? 'all projects' : 'this project'));
+    const ag = AGENT_LIST.find((a) => a.id === r.agent);
+    if (ag && ag.id !== 'claude' && (!ag.available || ag.loggedIn === false)) {
+      const hint = el('small', '', `${ag.available ? 'not signed in' : 'not installed'}, falls back to Claude · `);
+      const go = el('button', 'link-btn inline', ag.available ? 'Sign in' : 'Connections');
+      go.type = 'button';
+      go.onclick = () => { closeSettings(); openConnections(ag.id); };
+      hint.append(go);
+      what.append(hint);
+    }
+    const del = el('button', 'btn small danger', 'Delete');
+    del.type = 'button';
+    del.onclick = () => { if (confirm(`Delete the routing rule "${r.match}"${r.scope === 'global' ? ' for all projects' : ''}?`)) orchProject({ removeRoute: r.id }); };
+    row.append(what, del);
+    routes.append(row);
+  }
+}
+// Reflection model: every discovered model of a signed-in agent; '' = routes, else Claude. Not rebuilt while open.
+function renderReflectModel() {
+  const sel = $('stReflectModel');
+  if (document.activeElement === sel) return;
+  const r = O.state?.reflect || {}, cur = r.agent ? `${r.agent}\n${r.model || ''}` : '';
+  sel.replaceChildren(new Option('Default (routes, else Claude)', ''));
+  for (const a of AGENT_LIST) {
+    if (!a.models?.length || !a.available || a.loggedIn === false) continue;
+    const g = document.createElement('optgroup');
+    g.label = a.label;
+    for (const m of a.models) g.append(new Option(m.label || m.id, `${a.id}\n${m.id}`));
+    sel.append(g);
+  }
+  if (cur && ![...sel.options].some((o) => o.value === cur)) sel.append(new Option(`${r.agent} · ${r.model || 'default'} (unavailable)`, cur));
+  sel.value = cur;
+}
+$('stReflectModel').addEventListener('change', async (e) => {
+  const [agent, model] = e.target.value.split('\n');
+  try {
+    const d = await api('/api/orch/reflect-settings', 'PUT', { model: agent ? { agent, model } : null });
+    if (O.state) O.state.reflect = d.reflect;
+  } catch (err) { toast(err.message, { kind: 'error' }); }
+  e.target.blur();
+  renderSettings();
 });
-// Reflection fallbacks: the same sheet as a chat's, from the already-loaded project (no fetch).
-$('obReflectBtn').addEventListener('click', () => {
-  closeObPop();
-  openFallbacks(reflectFallbacks(), $('obSettingsBtn'));
-});
+$('stParallel').addEventListener('change', (e) => saveParallel({ parallelTasks: Number(e.target.value) }));
+$('stPerpetual').addEventListener('change', (e) => orchProject({ perpetual: e.target.checked }));
+// Reflection fallbacks: the same sheet as a chat's, saved for every project (no fetch).
+$('stReflectBtn').addEventListener('click', () => openFallbacks(reflectFallbacks(), $('stReflectBtn')));
 
 // ----- the task drawer
 function openTask(id) {
@@ -3619,7 +3870,7 @@ function closeTask() {
 $('drClose').addEventListener('click', closeTask);
 $('drawerScrim').addEventListener('click', closeTask);
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && O.drawer && $('pickerModal').hidden && $('serverModal').hidden && $('connsModal').hidden && $('usageModal').hidden && $('queueModal').hidden && !e.target.closest?.('.dr-due')) {
+  if (e.key === 'Escape' && O.drawer && $('settingsModal').hidden && $('pickerModal').hidden && $('serverModal').hidden && $('connsModal').hidden && $('usageModal').hidden && $('queueModal').hidden && !e.target.closest?.('.dr-due')) {
     e.stopImmediatePropagation();
     closeTask();
   }
@@ -3633,8 +3884,7 @@ async function loadDetail() {
   try {
     const d = await api(`/api/orch/task/${id}`);
     if (O.drawer !== id) return;
-    const edit = taskFallbackEdits.get(id);
-    if (edit?.pending) d.task.fallbacks = edit.list;
+    if (FB.local?.url === `/api/orch/tasks/${id}/fallbacks`) d.task.fallbacks = FB.local.list; // a save still in flight
     O.detail = d;
     O.tasks.set(id, { ...(O.tasks.get(id) || {}), ...d.task });
     renderDrawer();
@@ -3661,70 +3911,43 @@ function renderDrawerHead() {
   $('drTitle').textContent = t ? displayTitle(t) : 'Loading…';
 }
 
-const taskFallbackEdits = new Map();
-function taskFallbackSection(t) {
-  let edit = taskFallbackEdits.get(t.id);
-  if (!edit) {
-    edit = { ui: {}, chain: Promise.resolve(), pending: 0, confirmed: t.fallbacks };
-    taskFallbackEdits.set(t.id, edit);
-  }
-  const c = section('Fallbacks');
-  const chat = state.convos.find((c) => c.id === O.detail?.project?.convo_id);
-  const list = edit.pending ? edit.list : t.fallbacks;
-  const apply = (list) => {
-    const task = O.tasks.get(t.id);
-    if (task) task.fallbacks = list;
-    if (O.detail?.task.id === t.id) O.detail.task.fallbacks = list;
-    refreshCards(t.id);
-    if (O.drawer === t.id) renderDrawer();
-  };
-  const save = (list) => {
-    if (!edit.pending) edit.confirmed = t.fallbacks;
-    edit.list = list;
-    edit.pending++;
-    apply(list);
-    edit.chain = edit.chain.then(async () => {
-      try {
-        const r = await api(`/api/orch/tasks/${t.id}/fallbacks`, 'PATCH', { fallbacks: list });
-        edit.confirmed = r.task.fallbacks;
-      } catch (e) {
-        toast(`Could not save fallbacks: ${e.message}`, { kind: 'error' });
-      } finally {
-        edit.pending--;
-        apply(edit.pending ? edit.list : edit.confirmed);
-      }
-    });
-  };
-  if (chat && JSON.stringify(list || []) !== JSON.stringify(chat.fallbacks || [])) {
-    c.append(el('span', 'muted', 'Custom'));
-    const reset = el('button', 'btn small', "Reset to chat's list");
-    reset.onclick = () => save(chat.fallbacks ?? null);
-    c.append(reset);
-  }
-  if (t.status === 'running') c.append(el('div', 'dr-check', 'Changes apply from the next resume or limit event.'));
-  const editor = el('div');
-  c.append(editor);
-  renderFallbackEditor(editor, { list, onChange: save, ui: edit.ui });
-  return c;
-}
-
+// The Model row: one chip with the model and its fallbacks in order ("Opus → GPT-6-Sol"), bold on the one it's on once
+// it has moved. On a queued or running work task the chip opens the fallback sheet; with no fallbacks an "Add fallback"
+// chip of the same style sits beside it.
 function modelSection(t) {
   const ms = modelStatus(t), c = section('Model');
-  c.append(modelChip(t, ms));
+  const editable = t.kind === 'work' && ['queued', 'running'].includes(t.status);
+  const start = ms.from || ms.model;
+  const chain = [{ name: start, current: !ms.from }, ...ms.list.filter((f) => f.name !== start || f.current).map((f) => ({ name: f.name, current: !!ms.from && f.current }))]
+    .filter((x, i, a) => a.findIndex((y) => y.name === x.name) === i);
+  const row = el('div', 'dr-model');
+  const chip = el(editable ? 'button' : 'span', `tc-tag model ${ms.kind}${editable ? ' dr-chip-btn' : ''}`);
+  if (ms.kind === 'delegated') chip.innerHTML = MOVED_SVG;
+  const names = el('span'); // one inline run: a flex chip would trim the spaces around each arrow
+  chain.forEach((x, i) => {
+    if (i) names.append(document.createTextNode(' → '));
+    names.append(x.current && chain.length > 1 ? el('strong', '', x.name) : document.createTextNode(x.name));
+  });
+  chip.append(names);
+  chip.title = [ms.kind === 'waiting' || ms.kind === 'delegated' ? ms.text : '', chain.length > 1 ? 'Fallbacks at a limit, in order' : '', t.route_note].filter(Boolean).join(' — ');
+  row.append(chip);
+  if (editable) {
+    chip.type = 'button';
+    chip.setAttribute('aria-label', `${chain.map((x) => x.name).join(', then ')}. Edit fallbacks`);
+    chip.onclick = () => openFallbacks(taskFallbacks(t.id), chip);
+    if (chain.length === 1) {
+      const add = el('button', 'tc-tag model dr-chip-btn', 'Add fallback');
+      add.type = 'button';
+      add.title = `Pick models to move this task to if ${ms.model} hits its limit`;
+      add.onclick = () => openFallbacks(taskFallbacks(t.id), add);
+      row.append(add);
+    }
+  }
+  c.append(row);
+  if (ms.kind === 'waiting' || ms.kind === 'delegated') c.append(el('div', 'dr-check', ms.text));
   // Remote runs (cluster workers) name their machine; the controller's own runs don't.
   if (t.waiting_for) c.append(el('div', 'dr-check', `Waiting for ${t.waiting_for} to come back`));
   else if (t.node_name) c.append(el('div', 'dr-check', `${t.status === 'running' ? 'Running' : 'Ran'} on ${t.node_name}`));
-  const editable = t.kind === 'work' && ['queued', 'running'].includes(t.status);
-  if (!editable && ms.list.length) {
-    const ol = el('ol', 'dr-fallbacks');
-    ol.setAttribute('aria-label', 'Fallbacks, in order');
-    for (const f of ms.list) {
-      const li = el('li', f.current ? 'current' : '', f.name);
-      if (f.current) { li.append(el('span', 'muted', ' · on it now')); li.setAttribute('aria-current', 'true'); }
-      ol.append(li);
-    }
-    c.append(el('div', 'dr-check', 'Fallbacks at a limit, in order'), ol);
-  } else if (!editable) c.append(el('div', 'dr-check', 'No fallbacks: at a limit it waits for the reset.'));
   if (t.moves?.length) {
     const ul = el('ul', 'dr-events');
     for (const m of t.moves) {
@@ -3776,8 +3999,6 @@ function renderDrawer(fromLive = false) {
   }
   const d = O.detail;
   const t = { ...d.task, ...(O.tasks.get(id) || {}) };
-  const edit = taskFallbackEdits.get(id);
-  if (edit?.pending) t.fallbacks = edit.list;
   const st = taskState(t);
   const isOpen = t.status === 'queued' || t.status === 'running';
 
@@ -3851,7 +4072,6 @@ function renderDrawer(fromLive = false) {
 
   // Model: the same text as the card's chip, the ordered fallbacks (current one marked) and every move.
   if (t.kind !== 'plan') body.append(modelSection(t));
-  if (t.kind === 'work' && isOpen) body.append(taskFallbackSection(t));
 
   // 2. The instructions it was given.
   if (t.kind === 'work') {
@@ -3996,31 +4216,73 @@ function renderOutput(container, runs, isRunning) {
   }
 }
 
-// Consecutive tool calls fold into one line ("Ran 4 commands"); open it for one row each,
-// and open a row for the exact command and what it printed.
+// Consecutive tool calls fold into one muted line in Claude Code's words ("Read 4 files, ran a command ›"); open it for
+// one row per call, and open a row for the exact command and what it printed.
+const aOrN = (n, one, many = `${one}s`) => (n === 1 ? `a ${one}` : `${n} ${many}`);
+const PAST = { run: 'ran', check: 'checked', list: 'listed', install: 'installed', show: 'showed', find: 'found', read: 'read', create: 'created',
+  remove: 'removed', delete: 'deleted', start: 'started', stop: 'stopped', kill: 'killed', build: 'built', test: 'tested', fetch: 'fetched',
+  search: 'searched', count: 'counted', print: 'printed', copy: 'copied', move: 'moved', verify: 'verified', update: 'updated', add: 'added',
+  make: 'made', write: 'wrote', open: 'opened', view: 'viewed', inspect: 'inspected', compare: 'compared', wait: 'waited', restart: 'restarted',
+  commit: 'committed', push: 'pushed', pull: 'pulled', clone: 'cloned', download: 'downloaded', generate: 'generated', apply: 'applied',
+  measure: 'measured', take: 'took', capture: 'captured', load: 'loaded', save: 'saved', send: 'sent', fix: 'fixed', clean: 'cleaned',
+  query: 'queried', confirm: 'confirmed', validate: 'validated', scan: 'scanned', get: 'got', look: 'looked', rerun: 'reran', lint: 'linted' };
+function toolGroupSummary(items) {
+  // One command with a description (Claude's Bash tool writes one) reads as that sentence, in the past tense.
+  const d = items.length === 1 && items[0].e.name === 'Bash' && String(items[0].e.input?.description || '').trim();
+  if (d) {
+    const [w, ...rest] = d.split(' '), past = PAST[w.toLowerCase()];
+    if (past) return [past[0].toUpperCase() + past.slice(1), ...rest].join(' ');
+  }
+  const kinds = new Map();
+  const kindOf = (n) => ({ Bash: 'run', Read: 'read', Edit: 'edit', MultiEdit: 'edit', NotebookEdit: 'edit', Write: 'write', Grep: 'search', Glob: 'search',
+    WebSearch: 'web', WebFetch: 'fetch', TodoWrite: 'plan', Task: 'agent', Agent: 'agent', Skill: 'skill' })[n] || 'tool';
+  for (const { e } of items) { const k = kindOf(e.name); if (!kinds.has(k)) kinds.set(k, []); kinds.get(k).push(e); }
+  const files = (es) => new Set(es.map((e) => e.input?.file_path || e.id)).size;
+  const parts = [...kinds].map(([k, es]) => {
+    const n = es.length;
+    switch (k) {
+      case 'run': return `ran ${aOrN(n, 'command')}`;
+      case 'read': return `read ${aOrN(files(es), 'file')}`;
+      case 'edit': return `edited ${aOrN(files(es), 'file')}`;
+      case 'write': return `wrote ${aOrN(files(es), 'file')}`;
+      case 'search': return n === 1 ? 'searched the code' : `ran ${n} searches`;
+      case 'web': return n === 1 ? 'searched the web' : `ran ${n} web searches`;
+      case 'fetch': return `fetched ${aOrN(n, 'page')}`;
+      case 'plan': return 'updated the plan';
+      case 'agent': return `ran ${aOrN(n, 'subagent')}`;
+      case 'skill': return `used ${aOrN(n, 'skill')}`;
+      default: return `used ${aOrN(n, 'tool')}`;
+    }
+  });
+  const text = parts.join(', ');
+  return text[0].toUpperCase() + text.slice(1);
+}
 function groupNode(group) {
-  const box = el('div', 'out-group');
+  const box = el('div', 'out-tools');
   group.refresh = () => {
     const open = O.expanded.has(group.key);
-    box.className = 'out-group' + (open ? ' open' : '');
+    box.className = 'out-tools' + (open ? ' open' : '');
     box.textContent = '';
-    const n = group.items.length;
-    const allBash = group.items.every((i) => i.e.name === 'Bash');
     const failed = group.items.filter((i) => i.res?.isError).length;
+    const running = group.items.some((i) => !i.res);
     const head = el('button');
     head.type = 'button';
-    head.append(el('span', 'n', allBash ? `Ran ${n} command${n === 1 ? '' : 's'}` : `Used ${n} tool${n === 1 ? '' : 's'}`));
-    if (failed) head.append(el('span', 'fail', `${failed} failed`));
+    head.setAttribute('aria-expanded', String(open));
+    head.append(el('span', 'n', toolGroupSummary(group.items)));
+    if (failed) head.append(el('span', 'fail', `· ${failed} failed`));
+    else if (running) head.append(el('span', 'live', '· running'));
     head.insertAdjacentHTML('beforeend', CHEVRON_SVG);
     head.onclick = () => { if (!O.expanded.delete(group.key)) O.expanded.add(group.key); group.refresh(); };
     box.append(head);
     if (!open) return;
+    const list = el('div', 'out-calls');
     for (const { e, res } of group.items) {
       const key = `${group.key}:${e.id}`;
       const rowOpen = O.expanded.has(key);
-      const row = el('div', 'out-row' + (res?.isError ? ' err' : ''));
+      const row = el('div', 'out-row' + (res?.isError ? ' err' : '') + (rowOpen ? ' open' : ''));
       const rb = el('button');
       rb.type = 'button';
+      rb.setAttribute('aria-expanded', String(rowOpen));
       const txt = el('span', 'txt', toolLine(e) || '(no details)');
       if (e.name === 'Bash' && e.input?.command) txt.dataset.copy = e.input.command;
       rb.append(el('span', 'verb', TOOL_VERB[e.name] || e.name), txt);
@@ -4034,8 +4296,9 @@ function groupNode(group) {
         if (e.name === 'Bash' && i.command) pre.dataset.copy = i.command;
         row.append(el('pre', 'dr-pre' + (res?.isError ? ' err' : ''), res ? (res.text.trim() || 'No output') : 'Still running…'));
       }
-      box.append(row);
+      list.append(row);
     }
+    box.append(list);
   };
   return box;
 }

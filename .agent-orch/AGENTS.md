@@ -33,6 +33,23 @@ without a reset although its source reports resets. Limit readings (agents.mjs `
 | Claude Code | SDK `usage_EXPERIMENTAL_…()` on an idle query (on refresh only; orchestrated runs report their limits as they go) | `five_hour`, `seven_day`, `seven_day_opus/_sonnet`, model-scoped, with `resets_at` |
 | Codex | newest `~/.codex/sessions/**/rollout-*.jsonl` `token_count.rate_limits` (only as fresh as the last codex run) | `5h`, `weekly`, with `resets_at` |
 
+**Reasoning effort (verified 2026-09-27: Agent SDK 0.3.281, codex-cli 0.157.0).** Only Claude and Codex take an effort;
+an agent adapter without `efforts` keeps its default and `runAgentCli` drops `effort` for it. Each adapter declares its
+levels (agents.mjs `efforts`), and every discovered model may narrow them (`models[].efforts`); `clampEffort(agent, level,
+model)` picks the level itself, else the nearest lower one it accepts, else its lowest.
+
+| Agent | Levels | How it is passed |
+|---|---|---|
+| Claude Code | `low`, `medium`, `high`, `xhigh`, `max` (SDK `EffortLevel`; per model: `ModelInfo.supportedEffortLevels`) | `query({options: {effort}})`; a live chat session: `q.applyFlagSettings({effortLevel})` (null = model default) |
+| Codex | `low`, `medium`, `high`, `xhigh`, `max`, `ultra` (per model: `debug models` → `supported_reasoning_levels[].effort`; e.g. gpt-5.5 stops at `xhigh`, `ultra` only on some) | `-c model_reasoning_effort=<level>`, also on `exec resume` (no `minimal` in 0.157) |
+
+Where the level comes from: the chat's `effort` (`PUT /api/convos/:id/effort {effort: level | null}`, validated against the
+chat's agent; null = default). It is **live**, never snapshotted into tasks: every time a task's run starts (new session,
+resume, retry, handoff, a worker's `job.start`) the orchestrator reads its project chat's CURRENT effort and clamps it to
+the route's agent/model (`taskEffort`). A task's own `tasks.effort` (set only from the task drawer: task action `effort`)
+wins when set. A running session keeps its level until its next session boundary; `runs.effort` records what each run used.
+Chat turns (Claude's live session, other agents' per-turn runs, the orchestrator planner) use the chat's current effort.
+
 ---
 
 ## 1. OpenAI Codex CLI

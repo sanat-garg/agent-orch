@@ -46,7 +46,10 @@ test('claude: a supportedModels() that never answers times out', async () => {
 test('codex: `codex debug models` (stub) → listed models in priority order, hidden ones skipped', async () => {
   const models = await AGENTS.codex.listModels({ bin: fixture('codex-stub.mjs') });
   assert.deepEqual(models.map((m) => m.id), ['gpt-6-astra', 'gpt-6-sol', 'gpt-5.5']);
-  assert.deepEqual(models[1], { id: 'gpt-6-sol', label: 'GPT-6-Sol', description: 'Workhorse model for coding and everyday work.' });
+  // efforts: the model's supported_reasoning_levels (gpt-5.5 stops at xhigh in codex-cli 0.157).
+  assert.deepEqual(models[1], { id: 'gpt-6-sol', label: 'GPT-6-Sol', description: 'Workhorse model for coding and everyday work.',
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] });
+  assert.deepEqual(models[2].efforts, ['low', 'medium', 'high', 'xhigh']);
   await assert.rejects(AGENTS.codex.listModels({ bin: fixture('codex-stub.mjs'), env: { ...process.env, CODEX_STUB_MODELS: 'fail' } }), /503 Service Unavailable/);
   assert.deepEqual(codexModels({}), []);
 });

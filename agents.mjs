@@ -180,7 +180,8 @@ function* claudeEvents(m) {
 }
 
 // Extra options: query (SDK override, for tests), bin, env, partial (stream deltas), onMessage (raw SDK messages).
-async function runClaude({ model, prompt, cwd, resume, systemAppend, signal, onEvent, query = sdkQuery, bin, env = process.env, partial, onMessage }) {
+// effort: a level from CLAUDE.efforts (the SDK's `effort` option), or null for the model's default.
+async function runClaude({ model, prompt, cwd, resume, systemAppend, signal, onEvent, query = sdkQuery, bin, env = process.env, partial, onMessage, effort }) {
   const ac = new AbortController();
   let aborted = false;
   const onAbort = () => { aborted = true; ac.abort(); };
@@ -191,7 +192,7 @@ async function runClaude({ model, prompt, cwd, resume, systemAppend, signal, onE
     const it = query({
       prompt,
       options: {
-        cwd, resume: resume || undefined, model: model || undefined,
+        cwd, resume: resume || undefined, model: model || undefined, ...(effort && { effort }),
         pathToClaudeCodeExecutable: bin || CLAUDE.bin, env: stripEnv(env, CLAUDE.envFilter), abortController: ac,
         systemPrompt: systemAppend ? { type: 'preset', preset: 'claude_code', append: systemAppend } : { type: 'preset', preset: 'claude_code' },
         // The owner runs this on a disposable server and gave every agent full access (including
@@ -235,6 +236,8 @@ export function parseClaudeAuth(out) {
 const CLAUDE = {
   id: 'claude',
   label: 'Claude Code',
+  // The Agent SDK's EffortLevel (query option `effort`, the CLI's --effort); 'max' only on some models.
+  efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
   bin: path.join(HOME, '.local/bin/claude'),
   available() { return onPath(this.bin); },
   // `claude auth status --json` → {loggedIn, authMethod, apiProvider, email, …}. Only a first-party claude.ai
@@ -508,12 +511,14 @@ function* codexEvents(m, started = new Set()) {
 // Extra options: bin, env, autonomous (default true: no approvals and no sandbox, like Claude's bypassPermissions;
 // false keeps the workspace-write sandbox), onMessage (raw JSONL events), codexHome (where the rollouts with the
 // rate-limit snapshots are; CODEX_HOME is stripped, so the CLI always uses ~/.codex). Codex has no system-prompt
-// append flag, so systemAppend is prepended to the prompt.
-async function runCodex({ model, prompt, cwd, resume, systemAppend, signal, onEvent, bin, env = process.env, autonomous = true, onMessage, codexHome }) {
+// append flag, so systemAppend is prepended to the prompt. effort: a level from CODEX.efforts, passed as
+// `-c model_reasoning_effort=<level>` (also on `exec resume`); null keeps the model's default.
+async function runCodex({ model, prompt, cwd, resume, systemAppend, signal, onEvent, bin, env = process.env, autonomous = true, onMessage, codexHome, effort }) {
   const res = { outcome: 'error', text: '', sessionId: resume || null, usage: {}, numTurns: 0, resetsAt: null, limitType: null, stderr: '', errorCode: null, windows: null };
   const startedAt = Date.now();
   const args = ['exec', ...(resume ? ['resume'] : []), '--json', '--skip-git-repo-check', '-c', 'forced_login_method="chatgpt"'];
   if (model) args.push('-m', model);
+  if (effort) args.push('-c', `model_reasoning_effort=${effort}`);
   if (autonomous) args.push('--dangerously-bypass-approvals-and-sandbox');
   else args.push('-c', 'sandbox_mode="workspace-write"', '-c', 'approval_policy="never"');
   const text = systemAppend ? `${systemAppend}\n\n${prompt}` : prompt;
@@ -564,6 +569,9 @@ async function runCodex({ model, prompt, cwd, resume, systemAppend, signal, onEv
 const CODEX = {
   id: 'codex',
   label: 'Codex CLI',
+  // model_reasoning_effort values codex-cli 0.157 accepts (`debug models` supported_reasoning_levels; 'ultra' and 'max'
+  // only on some models: each discovered model carries its own `efforts`).
+  efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
   bin: 'codex',
   available() { return onPath(this.bin); },
   // `codex login status` prints "Logged in using ChatGPT" (exit 0) or "Not logged in" (exit 1). An API-key login
@@ -611,16 +619,19 @@ export function claudeModels(list) {
   const rows = Array.isArray(list) ? list.filter((m) => m?.value) : [];
   const def = rows.find((m) => m.value === 'default');
   const models = rows.filter((m) => m.value !== 'default').map((m) => ({ id: m.value, label: m.displayName || m.value,
-    ...(m.description && { description: m.description }), ...(m.resolvedModel && m.resolvedModel !== m.value && { resolved: m.resolvedModel }) }));
+    ...(m.description && { description: m.description }), ...(m.supportedEffortLevels?.length && { efforts: m.supportedEffortLevels }), ...(m.resolvedModel && m.resolvedModel !== m.value && { resolved: m.resolvedModel }) }));
   const d = def && models.find((m) => (m.resolved || m.id) === (def.resolvedModel || def.value));
   if (d) d.default = true;
   return models;
 }
-// `codex debug models` JSON (a `models` array of {slug, display_name, description, visibility, priority}), in priority order.
+// `codex debug models` JSON (a `models` array of {slug, display_name, description, visibility, priority,
+// supported_reasoning_levels: [{effort} | level]}), in priority order.
 export function codexModels(j) {
+  const levels = (m) => (Array.isArray(m.supported_reasoning_levels) ? m.supported_reasoning_levels : []).map((l) => (typeof l === 'string' ? l : l?.effort)).filter(Boolean);
   return (Array.isArray(j?.models) ? j.models : []).filter((m) => m?.slug && m.visibility !== 'hide')
     .sort((a, b) => (a.priority ?? 1e9) - (b.priority ?? 1e9))
-    .map((m) => ({ id: m.slug, label: m.display_name || m.slug, ...(m.description && { description: m.description }) }));
+    .map((m) => ({ id: m.slug, label: m.display_name || m.slug, ...(m.description && { description: m.description }), ...(levels(m).length && { efforts: levels(m) }),
+      ...(m.default_reasoning_level && { defaultEffort: m.default_reasoning_level }) }));
 }
 function withTimeout(p, ms, what) {
   let timer;
@@ -699,14 +710,34 @@ export const isMissingSession = (res) => res.outcome === 'error' &&
 
 export const AGENTS = { claude: CLAUDE, codex: CODEX };
 
+// ---------------------------------------------------------------- reasoning effort
+// Only agents that declare `efforts` take one (Claude and Codex); every other agent keeps its default and never sees it.
+const EFFORT_ORDER = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+export const agentEfforts = (id) => AGENTS[id]?.efforts || [];
+// The level `agent` (on `model`, when its discovered catalog entry lists levels) runs for a requested `level`: the level
+// itself if accepted, else the nearest lower one, else the lowest. null (the default) for no level or an agent without efforts.
+export function clampEffort(agent, level, model = null) {
+  let levels = agentEfforts(agent);
+  const m = model ? modelCatalog(agent).models.find((x) => x.id === model || x.resolved === model) : null;
+  if (m?.efforts?.length) levels = levels.filter((l) => m.efforts.includes(l));
+  const rank = EFFORT_ORDER.indexOf(level);
+  if (!levels.length || rank < 0) return null;
+  if (levels.includes(level)) return level;
+  const lower = levels.filter((l) => EFFORT_ORDER.indexOf(l) < rank);
+  return lower.length ? lower.at(-1) : levels[0];
+}
+
 // Runs one turn on `agent` (default 'claude'). Returns at least {outcome, text, sessionId, usage, resetsAt, errorCode};
 // outcome is ok | aborted | rate_limited | auth_error | max_turns | error.
 // opts.onSpawn({pid, pgid}) is called for every agent CLI process spawned (not the Claude SDK's own child: see resources.mjs).
 // An ok run without a final reply keeps the last assistant text; if there was none but tools ran, it gets a synthesized
 // summary of them (marked as such, and emitted as a text event); a run with neither is an error, not a success.
+// opts.effort: a reasoning-effort level, clamped to the agent's (and model's) levels; dropped for an agent without efforts.
 export function runAgentCli(opts) {
   const a = AGENTS[opts.agent || 'claude'];
   if (!a) throw new Error(`unknown agent: ${opts.agent}`);
+  opts = { ...opts, effort: opts.effort ? clampEffort(a.id, opts.effort, opts.model) : null };
+  if (!opts.effort) delete opts.effort;
   let lastText = '';
   const tools = [];
   const onEvent = (e) => {

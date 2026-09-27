@@ -83,12 +83,11 @@ test('the model picker picks the primary model only; a Fallbacks button opens th
   assert.match(appJs, /'Delegate…'/);
 });
 
-test('the orchestrator bar is a status word plus Queue, Settings and Pause only', () => {
+test('the orchestrator bar is a status word plus Queue and Pause only', () => {
   const bar = indexHtml.slice(indexHtml.indexOf('id="orchBar"'), indexHtml.indexOf('id="composer"'));
-  const outside = bar.slice(0, bar.indexOf('id="obPop"')) + bar.slice(bar.lastIndexOf('<button', bar.indexOf('id="obPause"')));
-  assert.deepEqual([...outside.matchAll(/<button[^>]*id="(\w+)"/g)].map((m) => m[1]), ['obQueue', 'obSettingsBtn', 'obPause']);
+  assert.deepEqual([...bar.matchAll(/<button[^>]*id="(\w+)"/g)].map((m) => m[1]), ['obQueue', 'obPause']);
   assert.match(bar, /class="ob-dot"[\s\S]*id="obStatus"/);
-  for (const gone of ['ob-icon', 'ob-title', 'obCounts', 'obLaneStrip', 'obLanes', 'lanes-compact']) {
+  for (const gone of ['ob-icon', 'ob-title', 'obCounts', 'obLaneStrip', 'obLanes', 'lanes-compact', 'obSettingsBtn', 'obPop', 'ob-opt', 'closeObPop']) {
     assert.ok(!indexHtml.includes(gone) && !appJs.includes(gone) && !appCss.includes(gone), `${gone} removed`);
   }
   assert.doesNotMatch(bar, /[⏸▶]/, 'Pause/Resume are plain text');
@@ -96,15 +95,16 @@ test('the orchestrator bar is a status word plus Queue, Settings and Pause only'
   assert.match(appJs, /paused \? 'Paused' : running \? 'Running' : queued \? 'Waiting' : 'Idle'/);
   assert.match(appJs, /\$\('obQueueCount'\)\.hidden = !queued/);
   assert.match(appCss, /\.ob-pause \{ color: var\(--accent\); border-color: var\(--accent\); background: transparent;/);
-  const pop = bar.slice(bar.indexOf('id="obPop"'), bar.indexOf('id="obPause"'));
-  const secs = [...pop.matchAll(/class="ob-sec">(\w+)</g)].map((m) => m[1]);
-  assert.deepEqual(secs, ['General', 'Running', 'Models']);
-  assert.match(pop, /General[\s\S]*obPerpetual[\s\S]*obRank[\s\S]*obSound[\s\S]*Running[\s\S]*obParallel[\s\S]*Models[\s\S]*obRoutes[\s\S]*obReflectBtn/);
 });
 
-test('orchestrator settings popover opens the same fallback sheet for reflection', () => {
-  const pop = indexHtml.slice(indexHtml.indexOf('id="obPop"'), indexHtml.indexOf('id="obPause"'));
-  assert.match(pop, /id="obReflect"[\s\S]*Reflection fallbacks[\s\S]*id="obReflectBtn"/);
+test('the sidebar gear opens Settings: sound + MP3 upload, max parallel tasks, reflection model and fallbacks', () => {
+  const side = indexHtml.slice(indexHtml.indexOf('id="sidebar"'), indexHtml.indexOf('</aside>'));
+  assert.match(side, /id="settingsBtn"[^>]*aria-label="Settings"/);
+  const sheet = indexHtml.slice(indexHtml.indexOf('id="settingsModal"'), indexHtml.indexOf('id="fbModal"'));
+  assert.deepEqual([...sheet.matchAll(/class="st-sec"[^>]*>([^<]+)</g)].map((m) => m[1]), ['Sound', 'Tasks', 'Reflection', 'This project']);
+  assert.match(sheet, /id="stSound"[\s\S]*id="stSoundUpload"[\s\S]*id="stSoundFile" accept="audio\/mpeg,\.mp3"[\s\S]*id="stParallel"[\s\S]*id="stReflectModel"[\s\S]*id="stReflectBtn"[\s\S]*id="stPerpetual"[\s\S]*id="stRank"[\s\S]*id="stRoutes"/);
   assert.match(appJs, /openFallbacks\(reflectFallbacks\(\), /);
-  assert.match(appJs, /\/api\/orch\/projects\/\$\{pid\}\/reflect-fallbacks/);
+  assert.match(appJs, /url: '\/api\/orch\/reflect-settings'/);
+  assert.match(appJs, /fetch\('\/api\/settings\/sound', \{ method: 'POST'/);
+  assert.match(appJs, /sound\?\.custom \? `\/api\/settings\/sound\?v=\$\{sound\.at\}` : DEFAULT_TASK_SOUND/);
 });

@@ -202,48 +202,73 @@ test('reflection fallbacks: the settings popover opens the same sheet instantly,
   await ctx.close();
 });
 
-test('task drawer edits its own fallback snapshot', { skip, timeout: 60000 }, async () => {
+test('task drawer: the Model chip shows model → fallbacks and opens the shared sheet; "Add fallback" when there are none', { skip, timeout: 90000 }, async () => {
   const resetChat = await fetch(base + '/api/convos/' + CID + '/fallbacks', { method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ fallbacks: START }) });
   assert.equal(resetChat.status, 200); await resetChat.json();
-  const id = Number(db.prepare("INSERT INTO tasks(project_id,title,prompt,agent,model,fallbacks,created_at) VALUES(?,'Task fallback editing','code','codex','gpt-5.5',?,0)").run(pid, JSON.stringify(START)).lastInsertRowid);
-  if (process.env.TASK_FB_SHOT) {
-    const { execFile } = await import('node:child_process');
-    const { promisify } = await import('node:util');
-    const { stdout } = await promisify(execFile)(process.execPath, ['/home/ubuntu/agent-orch/bin/shot.mjs', base + '/#' + CID,
-      '.agent-orch/shots/task-fallbacks-' + process.env.TASK_FB_SHOT + '.png', '--cookie=' + cookie, '--click=#obQueue', '--click=[data-task="' + id + '"]', '--wait=500']);
-    console.log(stdout);
-    if (process.env.TASK_FB_SHOT === 'before') return;
-  }
+  const add = (fallbacks) => Number(db.prepare("INSERT INTO tasks(project_id,title,prompt,agent,model,fallbacks,created_at) VALUES(?,'Task fallback editing','code','codex','gpt-5.5',?,0)")
+    .run(pid, fallbacks && JSON.stringify(fallbacks)).lastInsertRowid);
+  const id = add(START), none = add(null);
+  const taskFb = async (id) => (await (await fetch(base + '/api/orch/task/' + id, { headers: { cookie } })).json()).task.fallbacks;
+  const until = async (id, fn, what) => { for (let i = 0; i < 100; i++) { if (fn(await taskFb(id))) return; await new Promise((r) => setTimeout(r, 100)); } assert.fail(what); };
   const ctx = await browser.newContext();
   const [name, value] = cookie.split('=');
   await ctx.addCookies([{ name, value, url: base }]);
   const page = await ctx.newPage();
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(e.message));
   await page.goto(base + '/#' + CID);
-  await page.locator('#obQueue').click();
-  await page.locator('[data-task="' + id + '"]').first().click();
-  const section = page.locator('#drBody .dr-sec').filter({ has: page.locator('h3', { hasText: /^Fallbacks$/ }) });
-  await section.waitFor();
-  assert.equal(await section.locator('.fe-row').count(), 3);
-  await section.locator('.fe-row').nth(1).focus();
+  await page.locator('#obQueue').waitFor();
+  const open = async (id) => { await page.evaluate((id) => openTask(id), id); await page.locator('#drBody h3', { hasText: 'Model' }).waitFor(); };
+  await open(id);
+  // No separate Fallbacks section: one chip names the model and its fallbacks in order.
+  assert.equal(await page.locator('#drBody h3', { hasText: /^Fallbacks$/ }).count(), 0);
+  const chip = page.locator('#drBody .dr-model .dr-chip-btn').first();
+  // The first name is the model it would run on now (codex is limited in this fixture, so that's the route's pick).
+  assert.match(await chip.innerText(), /^[^→]+ → GPT-6-Sol → GPT-6-Astra → GPT-6-Nova$/);
+  assert.equal(await page.locator('#drBody .dr-model button', { hasText: 'Add fallback' }).count(), 0);
+  await chip.click();
+  const rows = page.locator('#fbModal .fe-row');
+  await rows.nth(2).waitFor();
+  assert.match(await page.locator('#fbTitle').innerText(), /^If .+ hits its limit$/);
+  // Reorder in the sheet: saved on the task, and the chip follows.
+  await rows.nth(1).focus();
   await page.keyboard.press('Alt+ArrowUp');
-  await page.waitForFunction(async (id) => (await (await fetch('/api/orch/task/' + id)).json()).task.fallbacks[0].model === 'gpt-6-astra', id);
-  assert.match(await page.locator('#drBody .tc-tag.model').innerText(), /Astra/);
-  await section.locator('.fe-rm').first().click();
-  await section.getByText('Custom', { exact: true }).waitFor();
-  await page.waitForFunction(async (id) => (await (await fetch('/api/orch/task/' + id)).json()).task.fallbacks.length === 2, id);
-  await section.getByRole('button', { name: "Reset to chat's list" }).click();
-  await page.waitForFunction(async (id) => (await (await fetch('/api/orch/task/' + id)).json()).task.fallbacks.length === 3, id);
+  await until(id, (f) => f[0].model === 'gpt-6-astra', 'reorder saved');
+  await page.waitForFunction(() => / → GPT-6-Astra → GPT-6-Sol → GPT-6-Nova$/.test(document.querySelector('#drBody .dr-model .dr-chip-btn').textContent));
+  // Now it differs from the chat's list: remove one, then reset to the chat's list.
+  await rows.first().locator('.fe-rm').click();
+  await until(id, (f) => f.length === 2, 'remove saved');
+  await page.locator('#fbSub', { hasText: 'Custom list for this task' }).waitFor();
+  await page.locator('#fbSub').getByRole('button', { name: "Reset to chat's list" }).click();
+  await until(id, (f) => f.length === 3, 'reset saved');
   assert.deepEqual(await saved(), START);
+  await page.keyboard.press('Escape');
+  // A running task's sheet says when changes apply.
   db.prepare("UPDATE tasks SET status='running' WHERE id=?").run(id);
   await page.reload();
-  await page.locator('#obQueue').click();
-  await page.locator('[data-task="' + id + '"]').first().click();
-  await section.getByText('Changes apply from the next resume or limit event.').waitFor();
+  await page.locator('#obQueue').waitFor();
+  await open(id);
+  await page.locator('#drBody .dr-model .dr-chip-btn').first().click();
+  await page.locator('#fbSub', { hasText: 'Changes apply from the next resume or limit event.' }).waitFor();
+  await page.keyboard.press('Escape');
+  // Finished: the chain is read-only text, and there's no "Add fallback".
   db.prepare("UPDATE tasks SET status='done' WHERE id=?").run(id);
   await page.reload();
   await page.locator('#obQueue').waitFor();
-  await page.evaluate((id) => openTask(id), id);
-  await page.locator('#drBody h3', { hasText: 'Model' }).waitFor();
-  assert.equal(await section.count(), 0);
+  await open(id);
+  assert.equal(await page.locator('#drBody .dr-model button').count(), 0);
+  assert.match(await page.locator('#drBody .dr-model .tc-tag.model').innerText(), /^GPT-5.5 → /);
+  // No fallbacks yet: "Add fallback", in the same chip style, opens the same sheet; adding one turns it into the chain.
+  await open(none);
+  const addBtn = page.locator('#drBody .dr-model button', { hasText: 'Add fallback' });
+  assert.equal(await addBtn.getAttribute('class'), await page.locator('#drBody .dr-model .dr-chip-btn').first().getAttribute('class'));
+  await addBtn.click();
+  await page.locator('#fbModal .fe-add-btn').click();
+  await page.locator('#fbModal .fe-search').fill('sol');
+  await page.locator('#fbModal .fe-opt', { hasText: 'GPT-6-Sol' }).click();
+  await until(none, (f) => f?.length === 1 && f[0].model === 'gpt-6-sol', 'add saved');
+  await page.waitForFunction(() => / → GPT-6-Sol$/.test(document.querySelector('#drBody .dr-model .dr-chip-btn')?.textContent || ''));
+  assert.equal(await page.locator('#drBody .dr-model button', { hasText: 'Add fallback' }).count(), 0);
+  assert.deepEqual(errors, []);
   await ctx.close();
 });

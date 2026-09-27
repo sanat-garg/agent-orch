@@ -8,7 +8,21 @@
    "visibility": "list",
    "supported_in_api": true,
    "priority": 12,
-   "context_window": 272000
+   "context_window": 272000,
+   "supported_reasoning_levels": [
+    {
+     "effort": "low"
+    },
+    {
+     "effort": "medium"
+    },
+    {
+     "effort": "high"
+    },
+    {
+     "effort": "xhigh"
+    }
+   ]
   },
   {
    "slug": "gpt-reserve",
@@ -18,7 +32,24 @@
    "visibility": "hide",
    "supported_in_api": true,
    "priority": 3,
-   "context_window": 272000
+   "context_window": 272000,
+   "supported_reasoning_levels": [
+    {
+     "effort": "low"
+    },
+    {
+     "effort": "medium"
+    },
+    {
+     "effort": "high"
+    },
+    {
+     "effort": "xhigh"
+    },
+    {
+     "effort": "max"
+    }
+   ]
   },
   {
    "slug": "gpt-6-sol",
@@ -28,7 +59,27 @@
    "visibility": "list",
    "supported_in_api": true,
    "priority": 2,
-   "context_window": 272000
+   "context_window": 272000,
+   "supported_reasoning_levels": [
+    {
+     "effort": "low"
+    },
+    {
+     "effort": "medium"
+    },
+    {
+     "effort": "high"
+    },
+    {
+     "effort": "xhigh"
+    },
+    {
+     "effort": "max"
+    },
+    {
+     "effort": "ultra"
+    }
+   ]
   },
   {
    "slug": "gpt-6-astra",
@@ -38,7 +89,27 @@
    "visibility": "list",
    "supported_in_api": true,
    "priority": 1,
-   "context_window": 272000
+   "context_window": 272000,
+   "supported_reasoning_levels": [
+    {
+     "effort": "low"
+    },
+    {
+     "effort": "medium"
+    },
+    {
+     "effort": "high"
+    },
+    {
+     "effort": "xhigh"
+    },
+    {
+     "effort": "max"
+    },
+    {
+     "effort": "ultra"
+    }
+   ]
   }
  ]
 }

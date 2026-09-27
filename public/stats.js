@@ -303,52 +303,107 @@
   }
 
   // ---------- heatmap: who worked when ----------
-  // Days × local hours (weekday × hour when the range spans more than a month). Cell shade = agent time in that hour
-  // (agent-minutes: two tasks at once count twice); a blue dot = you sent a message then.
-  function heatmap(c) {
+  // Days × local hours (weekday × hour when the range spans more than a month), starting at the first day with any
+  // activity. Cell shade = agent time in that hour (agent-minutes: two tasks at once count twice); the blue dot = your
+  // messages, sized by how many. Hover: which agents, how many at once, which tasks. Right: each row's totals; below:
+  // agent time by hour of day across all rows. heatSummary() is the card's one-line reading of it.
+  function heatData(c) {
     const byDay = (c.to - c.from) <= 32 * DAY;
     const rowKey = (t) => (byDay ? dayStart(t) : new Date(t).getDay());
-    const cells = new Map(), msgs = new Map(), tasksIn = new Map();
     const k = (t) => `${rowKey(t)}|${new Date(t).getHours()}`;
+    const cells = new Map(); // key -> { ms, msgs, agents: Map(agent -> ms), tasks: Set, spans: [[s, e]] }
+    const at = (key) => cells.get(key) || cells.set(key, { ms: 0, msgs: 0, agents: new Map(), tasks: new Set(), spans: [] }).get(key);
     eachHour(c.runs, c.from, c.to, (t, ms, r) => {
-      cells.set(k(t), (cells.get(k(t)) || 0) + ms);
-      (tasksIn.get(k(t)) || tasksIn.set(k(t), new Set()).get(k(t))).add(r.task);
+      const x = at(k(t));
+      x.ms += ms;
+      x.agents.set(r.agent, (x.agents.get(r.agent) || 0) + ms);
+      x.tasks.add(r.task);
+      x.spans.push([t, t + ms]);
     });
-    for (const m of c.you) msgs.set(k(m.t), (msgs.get(k(m.t)) || 0) + 1);
+    for (const m of c.you) at(k(m.t)).msgs++;
     let rows;
-    if (byDay) { rows = []; for (let d = dayStart(c.from); d <= c.to; d = nextDay(d)) rows.push(d); }
-    else rows = [1, 2, 3, 4, 5, 6, 0];
-    const max = Math.max(1, ...cells.values());
+    if (byDay) {
+      // From the first active day (a range reaching back before the project began shows no empty weeks).
+      const active = [...cells.keys()].map((key) => Number(key.split('|')[0]));
+      const first = active.length ? Math.min(...active) : dayStart(c.from);
+      rows = [];
+      for (let d = Math.max(dayStart(c.from), first); d <= c.to; d = nextDay(d)) rows.push(d);
+    } else rows = [1, 2, 3, 4, 5, 6, 0];
+    return { byDay, rows, cells, max: Math.max(1, ...[...cells.values()].map((x) => x.ms)) };
+  }
+  // Most runs at once inside one cell (its clipped run spans).
+  const overlap = (spans) => { let n = 0, best = 0; for (const [, d] of spans.flatMap(([s, e]) => [[s, 1], [e, -1]]).sort((a, b) => a[0] - b[0] || a[1] - b[1])) best = Math.max(best, n += d); return best; };
+  function heatSummary(c, h) {
+    const agentMs = sum([...h.cells.values()], (x) => x.ms);
+    if (!agentMs) return c.you.length ? `No agent work in this range; you sent ${plural(c.you.length, 'message')}.` : 'No activity in this range.';
+    const days = new Set([...h.cells].filter(([, x]) => x.ms).map(([key]) => key.split('|')[0])).size;
+    const away = awayShare(c);
+    const [bk, bx] = [...h.cells].sort((a, b) => b[1].ms - a[1].ms)[0];
+    const [r, hr] = bk.split('|').map(Number);
+    const busiest = `${h.byDay ? new Date(r).toLocaleDateString([], { weekday: 'short', day: 'numeric' }) : `${weekdayName(r)}s`}, ${hourName(hr)}`;
+    return `Agents worked ${hrs(agentMs)} across ${plural(days, h.byDay ? 'day' : 'weekday')}` +
+      `${away && away.share >= 0.05 ? `, ${pct(away.share)} of it while you were away (no message from you in the hour before)` : ''}. ` +
+      `Busiest: ${busiest} (${hrs(bx.ms)}${overlap(bx.spans) > 1 ? `, ${overlap(bx.spans)} at once` : ''}).`;
+  }
+  function heatmap(c, h = heatData(c)) {
+    const { byDay, rows, cells, max } = h;
     const grid = el('div', 'sx-heat');
     grid.setAttribute('role', 'img');
-    const totalAway = awayShare(c);
-    grid.setAttribute('aria-label', `Agent time and your messages by ${byDay ? 'day' : 'weekday'} and hour${totalAway ? `; ${pct(totalAway.share)} of agent time was while you were away` : ''}`);
+    grid.setAttribute('aria-label', `Agent time and your messages by ${byDay ? 'day' : 'weekday'} and hour. ${heatSummary(c, h)}`);
     grid.append(el('span', 'sx-heat-corner'));
-    for (let h = 0; h < 24; h++) grid.append(el('span', 'sx-heat-h', h % 6 === 0 ? hourName(h) : ''));
-    const nowH = Math.floor(Date.now() / H);
+    for (let hr = 0; hr < 24; hr++) grid.append(el('span', `sx-heat-h${hr % 6 ? ' sx-heat-h3' : ''}`, hr % 3 === 0 ? hourName(hr) : ''));
+    grid.append(el('span', 'sx-heat-tot sx-heat-tot-h', 'Total'));
+    const nowH = Math.floor(Date.now() / H), thisHour = Math.floor(Date.now() / H) * H;
+    const hourTotals = Array.from({ length: 24 }, () => 0);
+    const taskTitle = (id) => SX.data.tasks.find((t) => t.id === id)?.title || '';
     for (const r of rows) {
       grid.append(el('span', 'sx-heat-row', byDay ? new Date(r).toLocaleDateString([], { weekday: 'short', day: 'numeric' }) : weekdayName(r)));
-      for (let h = 0; h < 24; h++) {
-        const key = `${r}|${h}`, v = cells.get(key) || 0, n = msgs.get(key) || 0;
+      let rowMs = 0, rowMsgs = 0;
+      for (let hr = 0; hr < 24; hr++) {
+        const x = cells.get(`${r}|${hr}`), v = x?.ms || 0, n = x?.msgs || 0;
+        rowMs += v; rowMsgs += n; hourTotals[hr] += v;
         const cell = el('span', 'sx-heat-c');
-        const cellStart = byDay ? new Date(new Date(r).setHours(h)).getTime() : null;
+        const cellStart = byDay ? new Date(new Date(r).setHours(hr)).getTime() : null;
         if (byDay && (cellStart + H <= c.from || cellStart > c.to || Math.floor(cellStart / H) > nowH)) cell.classList.add('out');
-        const step = v ? Math.min(5, Math.ceil((v / max) * 5)) : 0;
-        cell.dataset.s = String(step);
-        if (n) cell.append(el('i', 'msg'));
-        const when = byDay ? `${dayName(r)}, ${hourName(h)}` : `${weekdayName(r)}s, ${hourName(h)}`;
-        const tasks = tasksIn.get(key)?.size || 0;
-        if (v || n) cell.dataset.tip = `${v ? `${hrs(v)} of agent time${tasks ? ` · ${plural(tasks, 'task')}` : ''}` : 'No agent work'}\n${when}${n ? ` · you sent ${plural(n, 'message')}` : ''}`;
+        if (byDay && cellStart === thisHour) cell.classList.add('now');
+        cell.dataset.s = String(v ? Math.min(5, Math.ceil((v / max) * 5)) : 0);
+        if (n) { const dot = el('i', `msg${n >= 5 ? ' l' : n >= 2 ? ' m' : ''}`); cell.append(dot); }
+        if (v || n) {
+          const when = byDay ? `${dayName(r)}, ${hourName(hr)}–${hourName((hr + 1) % 24)}` : `${weekdayName(r)}s, ${hourName(hr)}–${hourName((hr + 1) % 24)}`;
+          const lines = [when];
+          if (v) {
+            const at = overlap(x.spans);
+            lines.push(`${hrs(v)} of agent time${at > 1 ? ` · ${at} at once` : ''}`);
+            lines.push([...x.agents].sort((a, b) => b[1] - a[1]).map(([a, ms]) => `${safeAgent(a)} ${hrs(ms)}`).join(' · '));
+            const ids = [...x.tasks];
+            lines.push(ids.slice(0, 3).map((id) => `#${id} ${taskTitle(id)}`.trim()).join('\n') + (ids.length > 3 ? `\n+${ids.length - 3} more` : ''));
+          } else lines.push('No agent work');
+          if (n) lines.push(`You sent ${plural(n, 'message')}`);
+          cell.dataset.tip = lines.join('\n');
+        }
         grid.append(cell);
       }
+      const tot = el('span', 'sx-heat-tot', rowMs ? hrs(rowMs) : '–');
+      if (rowMsgs) tot.append(el('small', '', ` · ${plural(rowMsgs, 'msg')}`));
+      grid.append(tot);
     }
+    // All rows by hour of day: when the agents usually work.
+    const hmax = Math.max(1, ...hourTotals);
+    grid.append(el('span', 'sx-heat-row sx-heat-sumlab', byDay ? 'All days' : 'All'));
+    hourTotals.forEach((v, hr) => {
+      const b = el('span', 'sx-heat-sum');
+      const bar = el('i'); bar.style.height = `${Math.round((v / hmax) * 100)}%`; b.append(bar);
+      if (v) b.dataset.tip = `${hrs(v)} of agent time\n${hourName(hr)}–${hourName((hr + 1) % 24)}, all ${byDay ? 'days' : 'weekdays'} in range`;
+      grid.append(b);
+    });
+    grid.append(el('span', 'sx-heat-tot')); // the totals column's empty foot
     const wrap = el('div', 'sx-heat-wrap');
     const scale = el('div', 'sx-heat-scale');
-    scale.append(el('span', '', 'Less'));
+    scale.append(el('span', '', 'Agent time in an hour: 0'));
     for (let s = 0; s <= 5; s++) { const i = el('i'); i.dataset.s = String(s); scale.append(i); }
-    scale.append(el('span', '', `More agent time (max ${hrs(max)}/h)`));
-    const you = el('span', 'sx-heat-you', 'You sent a message');
-    scale.append(you);
+    scale.append(el('span', '', hrs(max)));
+    const you = el('span', 'sx-heat-you', 'Your messages (bigger dot = more)');
+    scale.append(you, el('span', 'sx-heat-hint', 'Hover a square for its agents and tasks'));
     wrap.append(grid, scale);
     return wrap;
   }
@@ -542,8 +597,9 @@
     ins.append(insightList(insights(c, m, pm)));
     out.push(ins);
 
-    const hm = card('Who worked when', 'Shaded: agent time in each hour of your local time. Dots: your messages.', 'wide');
-    hm.append(c.runs.length || c.you.length ? heatmap(c) : empty('No activity in this range.'));
+    const hd = heatData(c);
+    const hm = card('Who worked when', heatSummary(c, hd), 'wide');
+    if (c.runs.length || c.you.length) hm.append(heatmap(c, hd));
     out.push(hm);
 
     const sp = card('Shipped per day', 'Work tasks that finished, by who asked for them');
@@ -632,13 +688,6 @@
     } else ask.append(empty('No messages in this range.'));
     out.push(ask);
 
-    const first = SX.data.you.find((x) => SX.project === 'all' || String(x.p) === SX.project);
-    if (first) {
-      const fc = card('Where it began', dayName(first.t), 'wide');
-      const q = el('blockquote', 'sx-quote', first.text.length >= 600 ? `${first.text}…` : first.text);
-      fc.append(q);
-      out.push(fc);
-    }
     return out;
   }
 

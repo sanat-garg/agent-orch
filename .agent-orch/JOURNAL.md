@@ -607,3 +607,7 @@ resources.mjs classifier, safe reaper, /api/resources, and tests all pass
 ## 2026-09-26 21:32 — #211 Fix leaking CLI model-discovery processes (opencode models orphans) [done (check passed)]
 
 Discovery helpers run group-killed and single-flight; no orphans remain
+
+## 2026-09-27 12:15 — #216 Cluster design doc and shared wire protocol [done (check passed)]
+
+CLUSTER.md and tested cluster-protocol.mjs added; npm test passes

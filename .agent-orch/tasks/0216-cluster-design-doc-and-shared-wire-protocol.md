@@ -13,3 +13,7 @@ Write .agent-orch/CLUSTER.md and cluster-protocol.mjs, the contract for running 
 ## Done when
 
 .agent-orch/CLUSTER.md exists with sections Roles, Transport, Messages, Code movement, Scheduling, Failure modes and Security, and `npm test` passes including test/cluster-protocol.test.mjs
+
+## Result — done (check passed) (2026-09-27 12:15)
+
+AGENT-ORCH-STATUS: done — CLUSTER.md and tested cluster-protocol.mjs added; npm test passes

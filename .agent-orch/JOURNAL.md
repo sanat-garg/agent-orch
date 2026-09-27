@@ -627,3 +627,7 @@ Command: npm test
 ## 2026-09-27 12:21 — #215 Integrate #201: Review checkpoints in the queue: wait for owner approval after a task [done (check passed)]
 
 merged latest main; npm test passes 256/256 with checkpoint tests
+
+## 2026-09-27 12:30 — #217 Controller: node registry, pairing tokens and cluster WebSocket hub [done (check passed)]
+
+cluster hub with pairing/auth/heartbeat/revocation; npm test passes

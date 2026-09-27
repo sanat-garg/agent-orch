@@ -9,7 +9,8 @@ import crypto from 'node:crypto';
 
 export const PROTOCOL_VERSION = 1;
 export const WS_PATH = '/api/cluster/ws';
-export const PAIR_PATH = '/api/cluster/pair';
+export const PAIR_PATH = '/api/cluster/pair'; // owner (signed in): POST → a one-time pairing code
+export const CLAIM_PATH = '/api/cluster/claim'; // worker: POST {code, name, os, arch} → {node, token} once
 export const HEARTBEAT_MS = 10_000;
 export const HEARTBEAT_MISSES = 3; // no frame for 3 heartbeats = disconnected (the grace period starts then)
 export const GRACE_MS = { mac: 5 * 60_000, vps: 2 * 60_000 };
@@ -177,12 +178,17 @@ export function backoffMs(attempt, rand = Math.random) {
 // How long the controller waits for a vanished node before reassigning its jobs.
 export const graceMs = (os) => (os === 'darwin' ? GRACE_MS.mac : GRACE_MS.vps);
 
-// Pairing: the owner gets a short one-time code in the UI; the worker trades it (POST PAIR_PATH) for a node id and a
+// Pairing: the owner gets a short one-time code in the UI; the worker trades it (POST CLAIM_PATH) for a node id and a
 // long bearer token. The controller stores only sha256 hashes of both.
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I
 export function newPairingCode(bytes = crypto.randomBytes(8)) {
   const c = [...bytes].map((b) => CODE_ALPHABET[b % CODE_ALPHABET.length]).join('');
   return `${c.slice(0, 4)}-${c.slice(4, 8)}`;
+}
+// The code as typed by the owner (any case, with or without the dash) → canonical `XXXX-XXXX`, or null.
+export function normalizePairingCode(s) {
+  const c = String(s || '').toUpperCase().replace(/[\s-]/g, '');
+  return c.length === 8 && [...c].every((x) => CODE_ALPHABET.includes(x)) ? `${c.slice(0, 4)}-${c.slice(4)}` : null;
 }
 export const newNodeToken = () => `aon_${crypto.randomBytes(32).toString('base64url')}`;
 export const hashSecret = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');

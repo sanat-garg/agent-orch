@@ -18,7 +18,9 @@ import { createConnections, SPECS, codexAccount, onPath } from './connections.mj
 import { mediaCollector, MEDIA_ID_RE, MEDIA_TYPES, toolResultImages } from './media.mjs';
 import { createUsageLog, createLimitStore, RANGES as USAGE_RANGES } from './usage.mjs';
 import { healthRow } from './health.mjs';
-import { createResources, registerPid, withOwner } from './resources.mjs';
+import { createResources, registerPid, withOwner, readSystem } from './resources.mjs';
+import { createCluster } from './cluster.mjs';
+import { WS_PATH, PAIR_PATH, CLAIM_PATH } from './cluster-protocol.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -684,6 +686,23 @@ const resources = createResources({
 });
 if (orch) resources.start();
 
+// Cluster (cluster.mjs, BRIEF goal 11): node registry in the orchestrator DB + the worker hub at WS_PATH. The controller
+// is node 'controller'; its capacity comes from /proc. CW_CLUSTER_HEARTBEAT_MS shortens liveness in tests.
+const cluster = orch && createCluster({
+  dbFile: path.join(DATA, 'orchestrator', 'agent-orch.db'),
+  heartbeatMs: Number(process.env.CW_CLUSTER_HEARTBEAT_MS) || undefined,
+  local: () => {
+    const sys = readSystem(), swapUsed = sys.swapTotal ? (sys.swapTotal - (sys.swapFree || 0)) / sys.swapTotal : 0;
+    return {
+      inventory: { cores: os.cpus().length, mem: os.totalmem(),
+        agents: Object.values(AGENTS).map((a) => { const installed = !!a.available(); return { id: a.id, installed, signedIn: installed && !!a.loggedIn() }; }) },
+      resources: { memAvailable: sys.memAvailable ?? os.freemem(), load: sys.load, swapUsedPct: Math.round(swapUsed * 1000) / 10, at: Date.now() },
+    };
+  },
+  log: (m) => console.log(`[cluster] ${m}`),
+  onChange: () => { for (const ws of allClients) send(ws, { t: 'cluster' }); },
+});
+
 // convo.repo mirrors the folder's real `origin` (a stale copy survives repo moves); cleared when there is none.
 async function refreshRepo(convo) {
   if (!fs.existsSync(convo.cwd)) return false;
@@ -1188,6 +1207,15 @@ async function handleRequest(req, res) {
 
   if (req.method === 'POST' && !sameOrigin(req)) return json(res, 403, { error: 'Bad origin' });
 
+  // A worker trades a one-time pairing code for its node token (no session: the code is the credential).
+  if (p === CLAIM_PATH && req.method === 'POST') {
+    if (!cluster) return json(res, 503, { error: 'cluster unavailable' });
+    const ip = clientIp(req), wait = lockedFor(ip);
+    if (wait) return json(res, 429, { error: 'locked', retryInSec: Math.ceil(wait / 1000) });
+    const r = cluster.claim(await readBody(req));
+    if (r.status === 401) recordFailure(ip);
+    return r.error ? json(res, r.status, { error: r.error }) : json(res, 200, r);
+  }
   if (p === '/api/login' && req.method === 'POST') {
     const ip = clientIp(req);
     const wait = lockedFor(ip);
@@ -1328,6 +1356,14 @@ async function handleRequest(req, res) {
       broadcastConvos();
       return json(res, 200, c);
     }
+  }
+  if (p.startsWith('/api/cluster/') && !cluster) return json(res, 503, { error: 'cluster unavailable' });
+  if (p === '/api/cluster/nodes' && req.method === 'GET') return json(res, 200, { nodes: cluster.listNodes() });
+  if (p === PAIR_PATH && req.method === 'POST') return json(res, 200, cluster.createPairing());
+  const cnode = p.match(/^\/api\/cluster\/nodes\/([\w-]+)$/);
+  if (cnode && (req.method === 'PATCH' || req.method === 'DELETE')) {
+    const r = req.method === 'PATCH' ? cluster.update(cnode[1], await readBody(req)) : cluster.revoke(cnode[1]);
+    return r.error ? json(res, r.status, { error: r.error }) : json(res, 200, r);
   }
   if (p === '/api/resources' && req.method === 'GET') return json(res, 200, resources.summary());
   if (p === '/api/resources/kill' && req.method === 'POST') {
@@ -1543,6 +1579,7 @@ function handleUpgrade(req, socket, head) {
     socket.end(`HTTP/1.1 ${ok ? '200 OK' : '401 Unauthorized'}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`);
     return;
   }
+  if (p === WS_PATH) { if (cluster) return cluster.handleUpgrade(req, socket, head); socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n'); return socket.destroy(); }
   if (p !== '/ws' || !isAuthed(req) || !sameOrigin(req)) {
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     return socket.destroy();

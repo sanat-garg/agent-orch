@@ -14,3 +14,7 @@ Implement the controller side per .agent-orch/CLUSTER.md and cluster-protocol.mj
 ## Done when
 
 `npm test` passes with cluster pairing/auth/heartbeat/revocation tests, and GET /api/cluster/nodes on a test server lists the local 'controller' node
+
+## Result — done (check passed) (2026-09-27 12:30)
+
+AGENT-ORCH-STATUS: done — cluster hub with pairing/auth/heartbeat/revocation; npm test passes

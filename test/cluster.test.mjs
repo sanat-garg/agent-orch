@@ -1,0 +1,168 @@
+// Controller cluster hub (cluster.mjs): pairing + claim, bearer-token auth on the worker socket, heartbeat timeout,
+// revocation, and the local 'controller' node in GET /api/cluster/nodes.
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import WebSocket from 'ws';
+import { PROTOCOL_VERSION, WS_PATH, PAIR_PATH, CLAIM_PATH, createSender } from '../cluster-protocol.mjs';
+import { waitFor } from './helpers/wait.mjs';
+
+const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+const PASSWORD = 'cluster-test-password';
+const HEARTBEAT_MS = 200; // offline after 3 silent intervals
+let child, base, dataDir, cookie, out = '';
+
+const freePort = () => new Promise((resolve, reject) => {
+  const s = net.createServer().listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); });
+  s.on('error', reject);
+});
+const api = (p, { method = 'GET', body, auth = true } = {}) => fetch(base + p, {
+  method, headers: { 'content-type': 'application/json', ...(auth ? { cookie } : {}) }, body: body && JSON.stringify(body),
+});
+const nodes = async () => (await (await api('/api/cluster/nodes')).json()).nodes;
+const nodeOf = async (id) => (await nodes()).find((n) => n.id === id);
+
+async function pair(name = 'worker-1') {
+  const { code } = await (await api(PAIR_PATH, { method: 'POST' })).json();
+  const r = await api(CLAIM_PATH, { method: 'POST', auth: false, body: { code, name, os: 'linux', arch: 'arm64' } });
+  assert.equal(r.status, 200);
+  return r.json();
+}
+// Opens the worker socket; resolves {ws, frames} or rejects with the HTTP status of a refused upgrade.
+function connect(headers) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(base.replace('http', 'ws') + WS_PATH, { headers });
+    const frames = [];
+    ws.on('message', (d) => frames.push(JSON.parse(d)));
+    ws.on('open', () => resolve({ ws, frames }));
+    ws.on('unexpected-response', (_req, res) => reject(Object.assign(new Error(`HTTP ${res.statusCode}`), { status: res.statusCode })));
+    ws.on('error', reject);
+  });
+}
+async function helloed({ node, token }) {
+  const c = await connect({ authorization: `Bearer ${token}` });
+  const send = createSender('w');
+  c.send = (t, f) => c.ws.send(send(t, f));
+  c.send('hello', { node, protocol: PROTOCOL_VERSION, version: 'test', jobs: [] });
+  await waitFor(() => c.frames.find((f) => f.t === 'welcome'), { timeout: 5000 });
+  return c;
+}
+const closed = (ws) => new Promise((resolve) => ws.readyState === WebSocket.CLOSED ? resolve({ code: null }) : ws.on('close', (code) => resolve({ code })));
+
+before(async () => {
+  dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-cluster-'));
+  const salt = crypto.randomBytes(16).toString('hex');
+  fs.writeFileSync(path.join(dataDir, 'auth.json'), JSON.stringify({ salt, hash: crypto.scryptSync(PASSWORD, salt, 64).toString('hex') }));
+  const port = await freePort();
+  base = `http://127.0.0.1:${port}`;
+  child = spawn(process.execPath, ['server.mjs'], {
+    cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, PORT: String(port), CW_DATA_DIR: dataDir, CW_NO_ORCHESTRATOR: '1', CW_CLUSTER_HEARTBEAT_MS: String(HEARTBEAT_MS) },
+  });
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`server did not start:\n${out}`)), 20000);
+    const onData = (d) => { out += d; if (out.includes(`127.0.0.1:${port}`)) { clearTimeout(timer); resolve(); } };
+    child.stdout.on('data', onData);
+    child.stderr.on('data', onData);
+    child.on('exit', (code) => { clearTimeout(timer); reject(new Error(`server exited (${code}):\n${out}`)); });
+  });
+  const r = await fetch(base + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: PASSWORD }) });
+  assert.equal(r.status, 200);
+  cookie = r.headers.get('set-cookie').split(';')[0];
+});
+
+after(() => {
+  child?.kill('SIGKILL');
+  if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
+});
+
+test('GET /api/cluster/nodes lists the local controller node (login required)', async () => {
+  assert.equal((await api('/api/cluster/nodes', { auth: false })).status, 401);
+  const c = await nodeOf('controller');
+  assert.ok(c, 'controller node listed');
+  assert.equal(c.local, true);
+  assert.equal(c.status, 'online');
+  assert.equal(c.os, process.platform);
+  assert.ok(c.inventory.cores >= 1 && c.inventory.mem > 0);
+  assert.ok(c.resources.memAvailable > 0);
+  assert.equal((await api('/api/cluster/nodes/controller', { method: 'DELETE' })).status, 400);
+});
+
+test('pairing: login-protected code, single-use claim, token returned once and stored hashed', async () => {
+  assert.equal((await api(PAIR_PATH, { method: 'POST', auth: false })).status, 401);
+  const { code, expiresAt } = await (await api(PAIR_PATH, { method: 'POST' })).json();
+  assert.match(code, /^[A-Z2-9]{4}-[A-Z2-9]{4}$/);
+  assert.ok(expiresAt - Date.now() > 9 * 60_000 && expiresAt - Date.now() <= 10 * 60_000);
+  const body = { code: code.toLowerCase().replace('-', ''), name: 'mac', os: 'darwin', arch: 'arm64' };
+  assert.equal((await api(CLAIM_PATH, { method: 'POST', auth: false, body: { ...body, os: 'windows' } })).status, 400);
+  const r = await api(CLAIM_PATH, { method: 'POST', auth: false, body });
+  assert.equal(r.status, 200);
+  const { node, token } = await r.json();
+  assert.match(token, /^aon_/);
+  assert.equal((await api(CLAIM_PATH, { method: 'POST', auth: false, body })).status, 401, 'codes are single use');
+  const n = await nodeOf(node);
+  assert.equal(n.name, 'mac');
+  assert.equal(n.status, 'offline');
+  const raw = JSON.stringify(await nodes());
+  assert.ok(!raw.includes(token) && !raw.includes('token_hash'), 'the token never comes back');
+  const db = fs.readFileSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
+  assert.ok(!db.includes(token), 'only the hash is stored');
+});
+
+test('the worker socket refuses missing, unknown and cookie credentials', async () => {
+  await assert.rejects(connect({}), { status: 401 });
+  await assert.rejects(connect({ authorization: 'Bearer aon_nope' }), { status: 401 });
+  await assert.rejects(connect({ cookie }), { status: 401 });
+});
+
+test('hello/inventory mark a node online; invalid frames get errors; silence marks it offline', async () => {
+  const w = await pair('vps-2');
+  const c = await helloed(w);
+  const welcome = c.frames.find((f) => f.t === 'welcome');
+  assert.equal(welcome.node, w.node);
+  assert.equal(welcome.heartbeatMs, HEARTBEAT_MS);
+  c.send('inventory', { node: w.node, name: 'vps-2', os: 'linux', arch: 'arm64', cores: 4, mem: 24e9, agents: [{ id: 'claude', installed: true, signedIn: true }], versions: {} });
+  c.send('resources', { memAvailable: 12e9, load: [0.1, 0.2, 0.3], running: [] });
+  c.ws.send('{"t":"job.offer","seq":9,"ts":1,"job":1,"agent":"claude"}'); // controller-only type from a worker
+  await waitFor(async () => (await nodeOf(w.node))?.resources?.memAvailable === 12e9, { timeout: 5000 });
+  const n = await nodeOf(w.node);
+  assert.equal(n.status, 'online');
+  assert.equal(n.connected, true);
+  assert.equal(n.inventory.cores, 4);
+  await waitFor(() => c.frames.find((f) => f.t === 'error' && /may not be sent by the worker/.test(f.message)), { timeout: 5000 });
+  // Keep heartbeating for a while: still online. Then go silent (no frames; pongs don't count).
+  for (let i = 0; i < 6; i++) { c.send('heartbeat'); await new Promise((r) => setTimeout(r, HEARTBEAT_MS / 2)); }
+  assert.equal((await nodeOf(w.node)).status, 'online');
+  const t0 = Date.now();
+  await closed(c.ws);
+  assert.ok(Date.now() - t0 >= HEARTBEAT_MS * 2, 'not dropped before the heartbeat window');
+  assert.equal((await nodeOf(w.node)).status, 'offline');
+});
+
+test('PATCH edits name, draining and max slots', async () => {
+  const w = await pair('laptop');
+  const c = await helloed(w);
+  const r = await api(`/api/cluster/nodes/${w.node}`, { method: 'PATCH', body: { name: 'MacBook', draining: true, maxSlots: 2 } });
+  assert.equal(r.status, 200);
+  const n = (await r.json()).node;
+  assert.deepEqual([n.name, n.draining, n.maxSlots, n.status], ['MacBook', true, 2, 'draining']);
+  assert.equal((await api(`/api/cluster/nodes/${w.node}`, { method: 'PATCH', body: { maxSlots: -1 } })).status, 400);
+  assert.equal((await (await api(`/api/cluster/nodes/${w.node}`, { method: 'PATCH', body: { enabled: false } })).json()).node.status, 'disabled');
+  c.ws.close();
+});
+
+test('revoking a node closes its socket and its token stops working', async () => {
+  const w = await pair('to-remove');
+  const c = await helloed(w);
+  const done = closed(c.ws);
+  assert.equal((await api(`/api/cluster/nodes/${w.node}`, { method: 'DELETE' })).status, 200);
+  assert.equal((await done).code, 4003);
+  assert.equal(await nodeOf(w.node), undefined);
+  await assert.rejects(connect({ authorization: `Bearer ${w.token}` }), { status: 401 });
+});

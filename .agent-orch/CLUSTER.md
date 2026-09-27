@@ -28,8 +28,9 @@ supply the CPU/RAM. They do not supply quota (see the caveat at the end).
   behind NAT/home Wi-Fi. server.mjs handles the upgrade on the existing `ws` server by path.
 - **Pairing** (one time per node): the owner presses "Add machine" in the UI, which shows a one-time code
   (`newPairingCode`, `XXXX-XXXX`, valid `PAIRING_TTL_MS` = 10 min, single use) and the install command. On the worker,
-  `agent-orch-worker pair https://<controller> XXXX-XXXX` POSTs the code plus the machine name to `PAIR_PATH`
-  (`/api/cluster/pair`, rate-limited like login). The controller answers `{node, token}` once; the token
+  `agent-orch-worker pair https://<controller> XXXX-XXXX` POSTs `{code, name, os, arch}` to `CLAIM_PATH`
+  (`/api/cluster/claim`, rate-limited like login; the owner's UI creates the code with a signed-in POST to `PAIR_PATH`,
+  `/api/cluster/pair`). The controller answers `{node, token}` once; the token
   (`newNodeToken`, 256-bit, `aon_` prefix) is stored on the worker in `~/.agent-orch-worker/config.json` (mode 0600).
 - **Auth**: every connection sends `Authorization: Bearer <token>` on the upgrade request (`bearerToken`). The
   controller compares its sha256 against the node's stored hash (`secretMatches`, constant time) and refuses the
@@ -106,8 +107,9 @@ verify-failed prompt, same as the local flow) or `job.cancel`. The controller ke
 
 ## Scheduling
 
-- The controller keeps a node table (`nodes`: id, name, os, token_hash, revoked, last_seen, inventory JSON,
-  resources JSON, draining). The local node is a row too, fed by resources.mjs/parallel.mjs directly.
+- The controller keeps a node table (cluster.mjs `nodes`: id, name, os, arch, token_hash, created_at, last_seen, status
+  online/offline/draining/disabled, inventory JSON, resources JSON, max_slots, enabled, draining). The local node is
+  the row `controller`, fed from /proc directly. Revoking a node deletes its row.
 - `claimNext` becomes claim + place. A task is placeable on a node when: the node is connected (or local), not
   draining, its task's resolved agent is `installed && signedIn` there (for the account the route wants), the node has
   a free slot, and `memAvailable - footprint(agent)` stays above the node's floor (the local node keeps today's
@@ -155,7 +157,7 @@ verify-failed prompt, same as the local flow) or `job.cancel`. The controller ke
 - **Tokens**: the controller stores only `hashSecret(token)` (sha256) and `hashSecret(code)` for pending pairing
   codes; codes are single-use and expire in 10 min. Tokens are compared in constant time. The worker keeps its token
   in a 0600 file under `~/.agent-orch-worker/`.
-- **Revocation**: removing a node in the UI sets `revoked`, closes its socket, and requeues its jobs; a revoked token
+- **Revocation**: removing a node in the UI deletes its row (and token hash), closes its socket (code 4003), and requeues its jobs; a revoked token
   is refused at the upgrade. Re-adding needs a new pairing code.
 - **Only controller-originated jobs**: workers accept `job.*` commands only from the socket they dialled (TLS to the
   configured controller URL, certificate verified); `validate(msg, {from})` rejects worker-originated commands on the

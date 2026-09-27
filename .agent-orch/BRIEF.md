@@ -38,11 +38,11 @@ was retired when benchmark ranking was removed in #152/#153. Current work harden
    When a task's model is rate-limited, it moves to the first fallback that has usage left. With an empty list the
    task waits. The UI must make it obvious which model a task is on, whether it was delegated, and what happens
    when a limit hits. Keep it simple and foolproof.
-9. Parallel agents: resource-aware (owner, 2026-09-26 19:40). Parallel runs had kept the VPS RAM at 100%. Now a
-   resource monitor measures CPU and RAM per process, reaps leftover processes (orphaned agent CLIs, stale test
-   servers, headless browsers, dead login sessions), and grants extra task slots only while there's measured
-   headroom. The default is one task at a time. Plan sequential chains with true prerequisites; the scheduler adds
-   parallelism only when the machine can afford it. Worktrees must stay cheap on disk and memory.
+9. Parallel agents: capacity-driven (owner, 2026-09-27). On a single machine, the default is one task at a time (RAM
+   is tight). Once the cluster (goal 11) is working, the goal is MAXIMUM development speed: run as many tasks in
+   parallel as the whole cluster's CPU and RAM can take (the owner will add 4 MacBooks plus a second VPS). The
+   planner should then split work into file-disjoint parallel tasks with integrator tasks, and the scheduler fills
+   every node's measured headroom. Remember that rate limits per account are shared across machines.
 10. Removed agent CLIs (owner, 2026-09-27): Antigravity, OpenCode, Kiro and GitHub Copilot were uninstalled and all
    their code deleted. Claude Code and Codex are the only agents; never re-add the others.
 
@@ -53,6 +53,9 @@ was retired when benchmark ranking was removed in #152/#153. Current work harden
    locally in its own checkout of the project's GitHub repo. Task branches are pushed to GitHub and merged by the
    controller. Nodes can come and go: work on a node that disappears is recovered from its pushed WIP branch.
    Design doc: .agent-orch/CLUSTER.md.
+   Workers are compute-only (owner, 2026-09-27): no chat, prompts, planner, settings or management UI on a
+   worker, and they accept jobs only from the head. The only UI a worker has is a read-only, local 'what I'm doing
+   now' status screen in the app's design theme. Everything is controlled from the head.
    Caveat: the same subscription signed in on several machines shares ONE set of rate limits, so more machines
    add CPU/RAM, not quota.
 

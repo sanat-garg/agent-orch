@@ -11,6 +11,7 @@
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/files.css">
 <link rel="preload" href="/mascot.png" as="image">
 </head>
 <body>
@@ -90,7 +91,11 @@
       <div class="seg" role="tablist" aria-label="View">
         <button role="tab" data-view="chat" aria-selected="true">
           <svg viewBox="0 0 24 24" width="16" height="16"><path d="M4 5h16v11H9l-5 4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
-          <span>Chat</span>
+          <span>Vibecode</span>
+        </button>
+        <button role="tab" data-view="files" aria-selected="false">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+          <span>Files</span>
         </button>
         <button role="tab" data-view="term" aria-selected="false">
           <svg viewBox="0 0 24 24" width="16" height="16"><path d="M5 7l5 5-5 5M12 17h7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -147,21 +152,20 @@
                 <svg class="caret" viewBox="0 0 24 24" width="12" height="12"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
               </button>
               -->
-              <label class="chip select-chip" id="modeChip" title="Permission mode (Shift+Tab to cycle)">
-                <select id="mode" aria-label="Permission mode">
-                  <option value="bypassPermissions">Full access</option>
-                  <option value="acceptEdits">Auto-accept edits</option>
-                  <option value="default">Ask before acting</option>
-                  <option value="plan">Plan mode</option>
-                  <option value="orchestrator">Orchestrator Mode</option>
-                </select>
-              </label>
-              <label class="chip select-chip" id="modelChip" title="Agent and model">
-                <select id="model" aria-label="Agent and model">
-                  <option value="claude|">Claude Code</option>
-                </select>
-              </label>
-              <button type="button" class="chip eff-chip" id="effChip" aria-haspopup="dialog" aria-controls="effModal" hidden><span class="eff-k">Effort: </span><span id="effVal">default</span></button>
+              <!-- Mode, model and effort chips open .cmenu listboxes (app.js composer menus); the hidden selects hold the values. -->
+              <button type="button" class="chip menu-chip" id="modeChip" aria-haspopup="listbox" aria-controls="modePop" aria-expanded="false" aria-label="Permission mode" title="Permission mode (Shift+Tab to cycle)"><span id="modeLabel">Full access</span><svg class="caret" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></button>
+              <select id="mode" aria-label="Permission mode" hidden tabindex="-1">
+                <option value="bypassPermissions">Full access</option>
+                <option value="acceptEdits">Auto-accept edits</option>
+                <option value="default">Ask before acting</option>
+                <option value="plan">Plan mode</option>
+                <option value="orchestrator">Orchestrator Mode</option>
+              </select>
+              <button type="button" class="chip menu-chip" id="modelChip" aria-haspopup="listbox" aria-controls="modelPop" aria-expanded="false" title="Agent and model"><span id="modelLabel">Claude Code</span><svg class="caret" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></button>
+              <select id="model" aria-label="Agent and model" hidden tabindex="-1">
+                <option value="claude|">Claude Code</option>
+              </select>
+              <button type="button" class="chip menu-chip eff-chip" id="effChip" aria-haspopup="listbox" aria-controls="effPop" aria-expanded="false" hidden><span class="eff-k">Effort: </span><span id="effVal">default</span><svg class="caret" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></button>
               <button type="button" class="chip fb-chip" id="fbChip" aria-haspopup="dialog" aria-controls="fbModal">No fallbacks</button>
             </div>
             <button type="submit" class="send" id="send" aria-label="Send">
@@ -172,6 +176,8 @@
         </div>
       </form>
     </section>
+
+    <section class="files" id="filesView" hidden aria-label="Project files"></section>
 
     <section class="term" id="termView" hidden>
       <div class="term-tabs" id="termTabs" role="tablist" aria-label="Terminals">
@@ -364,37 +370,13 @@
   </div>
 </div>
 
-<!-- Reasoning effort (Claude and Codex): a popover over the composer's Effort pill; a bottom sheet on phones. -->
-<div class="modal sheet fb-pop eff-pop" id="effModal" hidden>
-  <div class="modal-backdrop" data-close></div>
-  <div class="modal-panel fb eff" role="dialog" aria-modal="true" aria-labelledby="effTitle">
-    <div class="sheet-grip" aria-hidden="true"></div>
-    <div class="m-head">
-      <div>
-        <h2 id="effTitle">Effort</h2>
-        <p class="m-sub" id="effSub"></p>
-      </div>
-      <button class="icon-btn" data-close aria-label="Close">
-        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-      </button>
-    </div>
-    <div class="m-body eff-body">
-      <div class="eff-now"><strong id="effLevel"></strong><span class="eff-tag" id="effTag"></span></div>
-      <input type="range" id="effRange" min="0" max="4" step="1" value="0" aria-labelledby="effTitle" aria-describedby="effHint">
-      <div class="eff-ticks" id="effTicks" aria-hidden="true"></div>
-      <p class="eff-hint" id="effHint"></p>
-      <p class="eff-note" id="effNote" hidden></p>
-      <div class="eff-foot">
-        <button type="button" class="btn small" id="effDefault" aria-pressed="false">Default</button>
-        <span class="eff-def" id="effDefNote"></span>
-      </div>
-    </div>
-  </div>
-</div>
-<div class="modal sheet fb-pop" id="fbModal" hidden>
+<!-- Composer menus: compact listbox popovers above their chips (app.js openMenu). -->
+<div class="cmenu" id="modePop" role="listbox" aria-label="Permission mode" hidden></div>
+<div class="cmenu model-menu" id="modelPop" role="listbox" aria-label="Agent and model" hidden></div>
+<div class="cmenu" id="effPop" role="listbox" aria-label="Effort" hidden></div>
+<div class="modal fb-pop" id="fbModal" hidden>
   <div class="modal-backdrop" data-close></div>
   <div class="modal-panel fb" role="dialog" aria-modal="true" aria-labelledby="fbTitle">
-    <div class="sheet-grip" aria-hidden="true"></div>
     <div class="m-head">
       <div>
         <h2 id="fbTitle">Fallbacks</h2>
@@ -433,7 +415,6 @@
         <h2 id="lbTitle"></h2>
         <p class="m-sub" id="lbSub"></p>
       </div>
-      <button class="btn small" id="lbFit" type="button" aria-pressed="false">Fit to screen</button>
       <a class="btn small lb-open" id="lbOpen" target="_blank" rel="noopener">Open original</a>
       <button class="icon-btn" data-close aria-label="Close">
         <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
@@ -546,5 +527,6 @@
 <script src="/vendor/marked.js"></script>
 <script src="/vendor/purify.js"></script>
 <script src="/app.js"></script>
+<script src="/files.js"></script>
 </body>
 </html>

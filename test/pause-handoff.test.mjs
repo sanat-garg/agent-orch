@@ -166,7 +166,7 @@ describe('pause, resume and handoff', { concurrency: true, timeout: 120000 }, ()
 
   test('races: a pause that lands during the done-when check pauses it; one on a finished task is refused', async () => {
     const r = await scenario(`
-      const id = add('Checked', 'QUICK build it', 'Done when \`node -e "setTimeout(() => {}, 2500)"\` passes');
+      const id = add('Checked', 'QUICK build it', 'Done when \`node -e "setTimeout(Boolean, 2500)"\` passes');
       await until(() => db.prepare("SELECT 1 AS x FROM events WHERE message LIKE 'checking #%'").get());
       const paused = await o.pauseTask(id);
       const mid = { status: get(id).status, attempts: get(id).attempts, session: get(id).session_id };

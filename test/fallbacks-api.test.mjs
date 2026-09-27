@@ -285,3 +285,29 @@ test('PUT /api/orch/reflect-settings and the task sound upload (Settings sheet)'
   assert.equal((await get('/api/settings')).body.sound.custom, false);
   assert.equal((await fetch(base + '/api/settings/sound', { headers: { cookie } })).status, 404);
 });
+
+test('POST /api/orch/tasks/:id/pause | resume | handoff: queued and paused tasks over HTTP', { timeout: 60000 }, async () => {
+  await discovered();
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
+  const post = async (p, body) => { const r = await fetch(base + p, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body || {}) }); return { status: r.status, body: JSON.parse(await r.text()) }; };
+  try {
+    const pid = Number(db.prepare("INSERT INTO projects(path,name,status,created_at) VALUES(?,?,'paused',0)").run(path.join(dataDir, 'ctl'), 'ctl').lastInsertRowid);
+    const id = Number(db.prepare("INSERT INTO tasks(project_id,title,prompt,agent,model,created_at) VALUES(?,'Ctl','code','codex','gpt-5.5',0)").run(pid).lastInsertRowid);
+    const status = () => db.prepare('SELECT status FROM tasks WHERE id=?').get(id).status;
+    assert.equal((await post('/api/orch/tasks/99999/pause')).status, 404);
+    assert.equal((await post(`/api/orch/tasks/${id}/resume`)).status, 409, 'a queued task is not paused');
+    let r = await post(`/api/orch/tasks/${id}/pause`);
+    assert.equal(r.status, 200); assert.equal(r.body.task.status, 'paused'); assert.equal(status(), 'paused');
+    assert.equal((await post(`/api/orch/tasks/${id}/handoff`, { agent: 'codex', model: 'gpt-9000' })).status, 400);
+    assert.equal((await post(`/api/orch/tasks/${id}/handoff`, { agent: 'codex', model: 'gpt-5.5' })).status, 409, 'already on that model');
+    r = await post(`/api/orch/tasks/${id}/handoff`, { agent: 'codex', model: 'gpt-6-sol' });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual([r.body.task.status, r.body.task.model, r.body.task.delegated_reason], ['queued', 'gpt-6-sol', 'moved by owner']);
+    assert.equal(r.body.task.moves.at(-1).by, 'owner');
+    assert.equal(db.prepare('SELECT handoff FROM tasks WHERE id=?').get(id).handoff, null, 'never ran: nothing to hand over');
+    r = await post(`/api/orch/tasks/${id}/pause`);
+    assert.equal(status(), 'paused');
+    assert.equal((await post(`/api/orch/tasks/${id}/resume`)).body.task.status, 'queued');
+  } finally { db.close(); }
+});

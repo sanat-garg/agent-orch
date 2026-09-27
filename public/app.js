@@ -89,16 +89,18 @@ const state = {
 // Saved chat messages still editable/retractable (see markPending): msgId -> { bubble, status, notice, editing, state }.
 const pendingMsgs = new Map();
 
-// ---------- view toggle (chat / terminals) ----------
+// ---------- view toggle (Vibecode chat / Files / Terminal) ----------
 function setView(view) {
-  if (view !== 'term') view = 'chat';
+  if (view !== 'term' && view !== 'files') view = 'chat';
   $('app').dataset.view = view;
   document.querySelectorAll('.seg button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.view === view)));
   $('chatView').hidden = view !== 'chat';
+  $('filesView').hidden = view !== 'files';
   $('termView').hidden = view !== 'term';
   $('title').textContent = view === 'term' ? 'Terminal' : currentTitle();
   $('cwdLabel').textContent = view === 'term' ? '~/workspace · bash' : currentCwdLabel();
   if (view === 'term') openTerminals();
+  else if (view === 'files') window.FilesView?.show(); // public/files.js
   else $('input').focus({ preventScroll: true });
   store.set('cw.view', view);
 }
@@ -698,7 +700,7 @@ function draftSlug() {
   return state.draft.type === 'new' ? slugify(state.draft.name) || slugify($('input').value, true) : '';
 }
 function updateHeader() {
-  if ($('app').dataset.view !== 'chat') { $('repoLink').hidden = true; return; }
+  if ($('app').dataset.view === 'term') { $('repoLink').hidden = true; return; }
   $('title').textContent = currentTitle();
   $('cwdLabel').textContent = currentCwdLabel();
   document.title = `${currentTitle()} · agent-orch`;
@@ -749,6 +751,7 @@ function updateFolderChip() {
 function setModeUI(mode) {
   $('mode').value = mode;
   $('modeChip').dataset.mode = mode;
+  $('modeLabel').textContent = $('mode').selectedOptions[0]?.textContent || mode;
   $('input').placeholder = mode === 'orchestrator'
     ? 'Tell the orchestrator what to build or fix…'
     : 'Ask Claude to build something…';
@@ -771,7 +774,8 @@ function openConvo(cid) {
   updateHeader();
   renderConvoList();
   send({ t: 'open', cid });
-  $('input').focus({ preventScroll: true });
+  if ($('app').dataset.view === 'files') window.FilesView?.show(); // Files follows the chat's project
+  else $('input').focus({ preventScroll: true });
 }
 
 function resetMessages() {
@@ -948,12 +952,11 @@ function openShot(fig) {
   list = list.filter((i) => i.id && !seen.has(i.id) && seen.add(i.id));
   LB.list = list;
   LB.lastFocus = document.activeElement;
-  setShotFit(false); // every open starts at actual size
   showShot(Math.max(0, list.findIndex((i) => i.id === fig.dataset.id)));
   $('lightbox').hidden = false;
   $('lightbox').querySelector('[data-close].icon-btn').focus();
 }
-const LB = { list: [], i: 0, lastFocus: null, fit: false, size: '' };
+const LB = { list: [], i: 0, lastFocus: null, size: '' };
 function showShot(i) {
   const n = LB.list.length;
   if (!n) return;
@@ -974,13 +977,6 @@ function shotCaption() {
   const n = LB.list.length;
   $('lbSub').textContent = [LB.size, n > 1 ? `${LB.i + 1} of ${n} · use ← → to browse` : ''].filter(Boolean).join(' · ');
 }
-// Actual size (default) shows the natural pixel dimensions and scrolls; Fit to screen only ever shrinks.
-function setShotFit(fit) {
-  LB.fit = fit;
-  $('lbView').classList.toggle('fit', fit);
-  $('lbFit').textContent = fit ? 'Actual size' : 'Fit to screen';
-  $('lbFit').setAttribute('aria-pressed', String(fit));
-}
 function closeShot() {
   $('lightbox').hidden = true;
   $('lbImg').removeAttribute('src');
@@ -991,11 +987,10 @@ $('lbImg').addEventListener('load', () => {
   if (im.naturalWidth) { LB.size = `${im.naturalWidth} × ${im.naturalHeight} px`; shotCaption(); }
 });
 $('lbImg').addEventListener('error', () => { if ($('lbImg').getAttribute('src')) { $('lbView').hidden = true; $('lbMissing').hidden = false; } });
-$('lbFit').addEventListener('click', () => setShotFit(!LB.fit));
 // Mouse drag pans a large image (touch scrolls natively, and pinch-zoom stays allowed).
 $('lbView').addEventListener('pointerdown', (e) => {
   const v = $('lbView');
-  if (e.pointerType !== 'mouse' || e.button !== 0 || LB.fit) return;
+  if (e.pointerType !== 'mouse' || e.button !== 0) return;
   const x = e.clientX + v.scrollLeft, y = e.clientY + v.scrollTop;
   v.setPointerCapture(e.pointerId);
   v.classList.add('panning');
@@ -1526,6 +1521,96 @@ $('messages').addEventListener('click', (e) => {
   if (r) chooseFolder(r.dataset.path);
 });
 
+// ---------- composer menus (mode, model, effort) ----------
+// One compact listbox popover (.cmenu) in the app's menu style: it opens above its chip (the composer sits at the bottom;
+// below when there is more room there), options are .cm-opt buttons (role=option; aria-selected marks the current one),
+// arrows/Home/End move, Enter or a click picks, Esc, Tab or a click outside closes. Phones get the same menu.
+const CM = { open: null }; // { chip, menu, pick }
+function menuOpt(label, { value, selected = false, hint = '', title = '', disabled = false } = {}) {
+  const b = el('button', 'cm-opt');
+  b.type = 'button';
+  b.setAttribute('role', 'option');
+  b.setAttribute('aria-selected', String(selected));
+  b.dataset.value = value ?? '';
+  b.disabled = disabled;
+  if (title) b.title = title;
+  b.append(el('span', 'cm-l', label));
+  if (hint) b.append(el('span', 'cm-h', hint));
+  return b;
+}
+function placeMenu(menu, anchor) {
+  const r = anchor.getBoundingClientRect(), gap = 6, edge = 8, vh = window.visualViewport?.height || innerHeight;
+  Object.assign(menu.style, { left: '', top: '', bottom: '', maxHeight: '' });
+  const above = r.top - gap - edge, below = vh - r.bottom - gap - edge;
+  if (above >= below || above >= 240) { menu.style.bottom = `${innerHeight - r.top + gap}px`; menu.style.maxHeight = `${Math.min(440, above)}px`; }
+  else { menu.style.top = `${r.bottom + gap}px`; menu.style.maxHeight = `${Math.min(440, below)}px`; }
+  menu.style.left = `${Math.max(edge, Math.min(r.left, innerWidth - menu.offsetWidth - edge))}px`;
+}
+function openMenu(chip, menu, build, pick) {
+  closeMenu(false);
+  menu.replaceChildren();
+  build(menu);
+  menu.hidden = false;
+  chip.setAttribute('aria-expanded', 'true');
+  CM.open = { chip, menu, pick };
+  placeMenu(menu, chip);
+  const cur = menu.querySelector('.cm-opt[aria-selected="true"]:not(:disabled)') || menu.querySelector('.cm-opt:not(:disabled)')
+    || menu.querySelector('input') || menu.querySelector('button'); // a menu without options: Effort's slider
+  cur?.scrollIntoView({ block: 'nearest' });
+  cur?.focus({ preventScroll: true });
+}
+function closeMenu(refocus = true) {
+  const o = CM.open;
+  if (!o) return;
+  CM.open = null;
+  o.menu.hidden = true;
+  o.chip.setAttribute('aria-expanded', 'false');
+  if (refocus) o.chip.focus();
+}
+// The open menu, rebuilt in place (its options changed underneath it, e.g. the agent list loaded).
+function refreshMenu(menu, build) {
+  if (CM.open?.menu !== menu) return;
+  const cur = document.activeElement?.closest?.('.cm-opt')?.dataset.value;
+  menu.replaceChildren();
+  build(menu);
+  placeMenu(menu, CM.open.chip);
+  if (cur != null) menu.querySelector(`.cm-opt[data-value="${CSS.escape(cur)}"]`)?.focus({ preventScroll: true });
+}
+function bindMenu(chip, menu, build, pick) {
+  chip.addEventListener('click', () => (CM.open?.menu === menu ? closeMenu() : openMenu(chip, menu, build, pick)));
+  chip.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); openMenu(chip, menu, build, pick); }
+  });
+  menu.addEventListener('click', (e) => {
+    const b = e.target.closest('.cm-opt');
+    if (!b || b.disabled || CM.open?.menu !== menu) return;
+    closeMenu();
+    pick(b.dataset.value);
+  });
+  menu.addEventListener('keydown', (e) => {
+    if (!e.target.closest('.cm-opt') && e.key !== 'Escape' && e.key !== 'Tab') return; // e.g. arrows on a slider
+    const opts = [...menu.querySelectorAll('.cm-opt:not(:disabled)')], i = opts.indexOf(document.activeElement);
+    const go = (j) => { e.preventDefault(); opts[Math.max(0, Math.min(opts.length - 1, j))]?.focus(); };
+    if (e.key === 'ArrowDown') go(i + 1);
+    else if (e.key === 'ArrowUp') go(i - 1);
+    else if (e.key === 'Home') go(0);
+    else if (e.key === 'End') go(opts.length - 1);
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeMenu(); }
+    else if (e.key === 'Tab') closeMenu(false);
+  });
+}
+document.addEventListener('pointerdown', (e) => {
+  if (CM.open && !e.target.closest('.cmenu') && !CM.open.chip.contains(e.target)) closeMenu(false);
+}, true);
+addEventListener('resize', () => { if (CM.open) placeMenu(CM.open.menu, CM.open.chip); });
+// Mode: its four permission levels, then Orchestrator Mode.
+bindMenu($('modeChip'), $('modePop'), (menu) => {
+  for (const o of $('mode').options) {
+    if (o.value === 'orchestrator') menu.append(el('div', 'cm-sep'));
+    menu.append(menuOpt(o.textContent, { value: o.value, selected: o.value === $('mode').value }));
+  }
+}, (v) => changeMode(v));
+
 function changeMode(mode) {
   setModeUI(mode);
   if (state.cid) send({ t: 'set_mode', cid: state.cid, mode });
@@ -1534,7 +1619,6 @@ function changeMode(mode) {
 $('mode').addEventListener('change', () => changeMode($('mode').value));
 $('model').addEventListener('change', () => {
   const v = $('model').value;
-  if (v === CONNECT_PICK) { $('model').value = $('model').dataset.prev || 'claude|'; fitPick(); openConnections(); return; }
   $('model').dataset.prev = v;
   clampEffortForAgent(parsePick(v).agent);
   renderPickChip();
@@ -1547,27 +1631,14 @@ $('model').addEventListener('change', () => {
 let AGENT_LIST = [];
 // A model's display name as its CLI reports it (the id when the agent's list doesn't name it).
 const modelLabel = (agent, id) => AGENT_LIST.find((a) => a.id === agent)?.models.find((m) => m.id === id || m.resolved === id)?.label || id;
-const CONNECT_PICK = '__connect'; // the picker's last option: opens the Connections window
-// Size the model picker to its selected option's text (a native <select> is as wide as its longest option);
-// CSS clamps it and ellipsizes, the title keeps the full name.
-let fitSpan;
+// The model chip's label: 'Claude · Opus 5.5', or 'Claude · default' while it follows the agent's default model.
 function fitPick() {
-  const sel = $('model'), text = sel.selectedOptions[0]?.text || '';
-  const cs = getComputedStyle(sel);
-  if (!fitSpan) {
-    fitSpan = el('span');
-    fitSpan.setAttribute('aria-hidden', 'true');
-    fitSpan.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;left:-9999px;top:0';
-    document.body.append(fitSpan);
-  }
-  fitSpan.style.font = cs.font;
-  fitSpan.style.letterSpacing = cs.letterSpacing;
-  fitSpan.textContent = text;
-  const pad = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight); // right padding holds the chevron
-  sel.style.width = Math.ceil(fitSpan.getBoundingClientRect().width + pad + 2) + 'px';
-  sel.title = text;
+  const v = $('model').value, { agent, model } = parsePick(v || 'claude|');
+  const text = model ? `${shortLabel(agent)} · ${modelLabel(agent, model)}` : `${shortLabel(agent)} · default`;
+  $('modelLabel').textContent = text;
+  $('modelChip').title = `Agent and model: ${text}`;
+  $('modelChip').setAttribute('aria-label', `Agent and model: ${text}`);
 }
-document.fonts?.ready.then(fitPick);
 // ---------- fallbacks (BRIEF goal 8) ----------
 // One sheet (#fbModal) edits an ordered fallback list: a chat's (the tasks its messages queue snapshot it and move down
 // it when their model hits its limit; empty = they wait) or a project's list for reflection tasks. It renders from what
@@ -1587,11 +1658,38 @@ function fbLimit({ agent, model }) {
   const b = O.state?.blocks?.[agent || 'claude'];
   return b && b.until > Date.now() / 1000 ? b : null;
 }
-const fbCount = (list) => (list?.length ? `Fallbacks · ${list.length}` : 'No fallbacks');
+// A model's usage right now, for the fallback chip's dots: 'limited' (at its limit), 'high' (a plan window at 80%+),
+// 'ok', or 'unknown' (signed out, or no reading yet). Antigravity limits are per model group (gemini / third-party).
+const HEALTH_TEXT = { ok: 'usage left', high: 'near its limit', limited: 'at its limit', unknown: 'usage unknown' };
+function modelHealth({ agent = 'claude', model }) {
+  const a = AGENT_LIST.find((x) => x.id === agent);
+  if (a && (!a.available || a.loggedIn === false)) return 'unknown';
+  const group = agent === 'antigravity' ? (/gemini/i.test(fbModelOf({ agent, model })) ? 'gemini' : '3p') : null;
+  const now = Date.now() / 1000;
+  const blocked = Object.entries(O.state?.blocks || {}).some(([k, b]) => b.until > now && (k === agent || (group && k === `${agent}:${group}`)));
+  if (blocked) return 'limited';
+  const pcts = agent === 'claude' ? [M.usage?.session?.pct, M.usage?.weekly?.pct]
+    : Object.entries(usageSlides.data?.[agent]?.status?.windows || {})
+      .filter(([id, w]) => !w.stale && (!w.resetsAt || w.resetsAt > now) && (!group || id.startsWith(group)))
+      .map(([, w]) => w.pct);
+  const known = pcts.filter((p) => p != null);
+  if (!known.length) return 'unknown';
+  return Math.max(...known) >= 100 ? 'limited' : Math.max(...known) >= 80 ? 'high' : 'ok';
+}
+// The fallback chip names the list ("→ ● Astra → ● Sol", two at most, then "+N"), each with its usage dot.
 function fbChipText(c, primary, list, what) {
-  c.textContent = fbCount(list);
+  c.replaceChildren();
   c.classList.toggle('none', !list?.length);
-  c.title = list?.length ? `If ${fbName(primary)} hits its limit, ${what} move to ${list.map(fbName).join(', then ')}`
+  if (!list?.length) c.textContent = 'No fallbacks';
+  for (const r of (list || []).slice(0, 2)) {
+    const dot = el('span', `fb-dot ${modelHealth(r)}`);
+    dot.setAttribute('aria-hidden', 'true');
+    c.append(el('span', 'fb-arrow', '→'), dot, el('span', 'fb-name', fbName(r)));
+  }
+  if (list?.length > 2) c.append(el('span', 'fb-more', `+${list.length - 2}`));
+  const named = (list || []).map((r) => `${fbName(r)} (${HEALTH_TEXT[modelHealth(r)]})`);
+  c.setAttribute('aria-label', named.length ? `Fallbacks: ${named.join(', then ')}` : 'No fallbacks');
+  c.title = named.length ? `If ${fbName(primary)} hits its limit, ${what} move to ${named.join(', then ')}`
     : `If ${fbName(primary)} hits its limit, ${what} wait for it to reset`;
 }
 // Hosts: primary {agent, model}; list() → [{agent, model}] | null; url: the PUT (null = the new-chat draft);
@@ -1630,8 +1728,8 @@ function taskFallbacks(id) {
     if (O.drawer === id) renderDrawer();
   };
   return { what: 'this task', primary: { agent, model }, method: 'PATCH',
-    sub: `This task moves to the first model below with usage left. With none, it waits.${t.status === 'running' ? ' Changes apply from the next resume or limit event.' : ''}`,
-    empty: (name) => `No fallbacks: this task waits for ${name} to reset.`,
+    sub: t.status === 'running' ? 'Changes apply from the next resume or limit event.' : '',
+    empty: () => 'No fallbacks. This task waits for the reset.',
     list: () => task().fallbacks ?? null,
     url: `/api/orch/tasks/${id}/fallbacks`,
     apply: set,
@@ -1643,6 +1741,8 @@ function taskFallbacks(id) {
 function renderFbChip() {
   const h = chatFallbacks();
   fbChipText($('fbChip'), h.primary, h.list(), h.what);
+  // Non-Claude usage windows (the dots) come with the usage history; load them once if nothing has yet.
+  if (h.list()?.some((r) => r.agent !== 'claude') && !usageSlides.at && !usageSlides.loading) loadSidebarUsage();
 }
 function renderReflectBtn() {
   const h = reflectFallbacks();
@@ -1673,17 +1773,10 @@ function openFallbacks(host, anchor) {
   host.confirmed = host.list();
   FB.fe = { refresh: fbRender };
   m.hidden = false;
-  // Desktop: a small popover next to its button; mobile (≤800px): the .modal.sheet bottom sheet.
-  const panel = m.querySelector('.modal-panel');
-  panel.style.left = panel.style.top = panel.style.bottom = '';
-  if (matchMedia('(min-width: 801px)').matches) {
-    const r = anchor.getBoundingClientRect(), w = Math.min(440, innerWidth - 24);
-    panel.style.left = `${Math.max(12, Math.min(r.left, innerWidth - w - 12))}px`;
-    if (r.top > innerHeight / 2) panel.style.bottom = `${innerHeight - r.top + 8}px`;
-    else panel.style.top = `${r.bottom + 8}px`;
-  }
   fbRender();
-  m.querySelector('[data-close].icon-btn').focus();
+  // A composer-style menu next to its button, on phones too (placeMenu); Esc or a click outside closes it.
+  placeMenu(m.querySelector('.modal-panel'), anchor);
+  (m.querySelector('#fbBody .fe-row') || m.querySelector('#fbBody .fe-add-btn'))?.focus();
 }
 function closeFallbacks() {
   $('fbModal').hidden = true;
@@ -1698,8 +1791,8 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('fbMo
 
 // ---------- reasoning effort (Claude and Codex only: agents that list `efforts` in /api/agents) ----------
 // The composer's pill shows the chat's effort ('Effort: high'; the level word alone on phones) while the picked agent has
-// levels, and opens #effModal: a popover over the pill on desktop, the .modal.sheet bottom sheet on phones. A discrete
-// slider spans the agent's levels; every change saves at once (PUT /api/convos/:id/effort). null = the model's default.
+// levels, and opens #effPop, a composer menu holding a slider over the agent's levels (tick labels under it, a Default
+// toggle above). Every change saves at once (PUT /api/convos/:id/effort). null = the model's default.
 // A new chat keeps it as its draft and sends it with its first set_model. Tasks read the chat's effort live when a session
 // starts (orchestrator taskEffort), so the toast says when it takes effect.
 const EFFORT_ORDER = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
@@ -1736,7 +1829,7 @@ function composerEffort() {
   const { agent, model } = parsePick($('model').dataset.prev || 'claude|');
   return { agent, model: model || null, effort: (state.cid ? currentConvo()?.effort : state.draftEffort) ?? null };
 }
-const EF = { lastFocus: null, chain: Promise.resolve(), seq: 0, toast: null };
+const EF = { chain: Promise.resolve(), seq: 0, toast: null };
 function renderEffChip() {
   const chip = $('effChip'), { agent, model, effort } = composerEffort();
   const levels = effortLevels(agent);
@@ -1751,25 +1844,54 @@ function renderEffChip() {
 }
 function renderEff() {
   renderEffChip();
-  if ($('effModal').hidden) return;
-  const { agent, model, effort } = composerEffort(), levels = effortLevels(agent);
-  if (!levels.length) return closeEffort();
-  const ok = modelEfforts(agent, model), def = defaultEffort(agent, model);
-  const level = effort ? clampEffortTo(levels, effort) : null;
-  const at = level || clampEffortTo(levels, def) || levels[Math.floor(levels.length / 2)];
+  if (CM.open?.menu !== $('effPop')) return;
+  if (!effortLevels(composerEffort().agent).length) return closeMenu(false);
+  syncEffMenu();
+}
+// Built once per open; syncEffMenu updates it in place so a drag or keyboard focus survives saves.
+function buildEffMenu(menu) {
+  menu.classList.add('eff-menu');
+  const top = el('div', 'eff-top'), def = el('button', 'eff-def-btn', 'Default');
+  def.type = 'button';
+  def.id = 'effDefault';
+  def.addEventListener('click', () => { effSave(null); $('effRange').focus(); });
+  top.append(el('span', 'cm-head', 'Effort'), def);
+  const range = el('input');
+  range.type = 'range';
+  range.id = 'effRange';
+  range.min = '0';
+  range.step = '1';
+  range.setAttribute('aria-label', 'Effort');
+  // Arrow keys, Home/End and dragging move it; `input` previews, `change` saves.
+  range.addEventListener('input', () => syncEffMenu(effortLevels(composerEffort().agent)[Number(range.value)]));
+  range.addEventListener('change', () => effSave(effortLevels(composerEffort().agent)[Number(range.value)] || null));
+  const note = el('p', 'eff-note');
+  note.id = 'effNote';
+  const ticks = el('div', 'eff-ticks');
+  ticks.id = 'effTicks';
+  ticks.setAttribute('aria-hidden', 'true');
+  menu.append(top, range, ticks, note);
+  syncEffMenu();
+}
+// preview: a level being dragged to (not saved yet).
+function syncEffMenu(preview) {
   const range = $('effRange');
+  if (!range) return;
+  const { agent, model, effort } = composerEffort(), levels = effortLevels(agent);
+  const ok = modelEfforts(agent, model), def = defaultEffort(agent, model);
+  const level = preview || (effort ? clampEffortTo(levels, effort) : null);
+  const at = level || clampEffortTo(levels, def) || levels[Math.floor(levels.length / 2)];
   range.max = String(levels.length - 1);
   range.value = String(levels.indexOf(at));
   range.classList.toggle('is-default', !level);
-  range.setAttribute('aria-valuetext', level ? `${level}. ${effortHint(levels, level)}` : `Default, ${at}`);
   range.style.setProperty('--fill', `${levels.length > 1 ? (levels.indexOf(at) / (levels.length - 1)) * 100 : 0}%`);
-  $('effSub').textContent = `${agentEntry(agent)?.label || shortLabel(agent)} · ${model ? modelLabel(agent, model) : 'default model'}`;
-  $('effLevel').textContent = level || 'Default';
-  $('effTag').textContent = level ? '' : `runs as ${at}`;
-  $('effHint').textContent = level ? effortHint(levels, level) : `Uses the model's own setting (${at}). ${effortHint(levels, at)}`;
+  range.setAttribute('aria-valuetext', level ? `${level}. ${effortHint(levels, level)}` : `Default, ${at}`);
+  range.title = level ? effortHint(levels, level) : `The model's own setting: ${at}`;
+  $('effDefault').setAttribute('aria-pressed', String(!level));
+  $('effDefault').title = def ? `The model's own setting: ${def}` : "The model's own setting";
   const runsAs = level && clampEffortTo(ok, level);
   $('effNote').hidden = !runsAs || runsAs === level;
-  if (runsAs && runsAs !== level) $('effNote').textContent = `${modelName(agent, model)} tops out at ${ok.at(-1)}, so it runs as ${runsAs}.`;
+  if (runsAs && runsAs !== level) $('effNote').textContent = `${modelName(agent, model)} runs this as ${runsAs}`;
   const ticks = $('effTicks');
   ticks.textContent = '';
   ticks.style.setProperty('--n', String(Math.max(1, levels.length - 1)));
@@ -1778,13 +1900,10 @@ function renderEff() {
     b.type = 'button';
     b.tabIndex = -1; // the slider has the keyboard; ticks are for pointers
     b.style.setProperty('--i', String(i));
-    if (!ok.includes(l)) b.title = `${modelName(agent, model)} runs this as ${clampEffortTo(ok, l)}`;
+    b.title = ok.includes(l) ? effortHint(levels, l) : `${modelName(agent, model)} runs this as ${clampEffortTo(ok, l)}`;
     b.onclick = () => { effSave(l); range.focus(); };
     ticks.append(b);
   });
-  $('effDefault').setAttribute('aria-pressed', String(!level));
-  $('effDefault').disabled = !level;
-  $('effDefNote').textContent = def ? `The model's own setting: ${def}` : "The model's own setting";
 }
 function effToast(level) {
   EF.toast?.close?.();
@@ -1818,40 +1937,7 @@ function effSave(level) {
     toast(`Could not save effort: ${e.message}`, { kind: 'error' });
   });
 }
-function openEffort() {
-  const m = $('effModal'), anchor = $('effChip');
-  if (m.hidden) EF.lastFocus = anchor;
-  m.hidden = false;
-  // Desktop: a popover above the pill (the composer sits at the bottom); phones (≤800px): the bottom sheet.
-  const panel = m.querySelector('.modal-panel');
-  panel.style.left = panel.style.top = panel.style.bottom = '';
-  if (matchMedia('(min-width: 801px)').matches) {
-    const r = anchor.getBoundingClientRect(), w = Math.min(380, innerWidth - 24);
-    panel.style.left = `${Math.max(12, Math.min(r.left, innerWidth - w - 12))}px`;
-    if (r.top > innerHeight / 2) panel.style.bottom = `${innerHeight - r.top + 8}px`;
-    else panel.style.top = `${r.bottom + 8}px`;
-  }
-  renderEff();
-  $('effRange').focus();
-}
-function closeEffort() {
-  if ($('effModal').hidden) return;
-  $('effModal').hidden = true;
-  if (EF.lastFocus?.isConnected && !EF.lastFocus.hidden) EF.lastFocus.focus();
-}
-$('effChip').addEventListener('click', openEffort);
-$('effModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeEffort(); });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('effModal').hidden) { e.stopImmediatePropagation(); closeEffort(); } }, true);
-// Arrow keys, Home/End and dragging move the slider (the native range); `input` previews, `change` saves.
-$('effRange').addEventListener('input', () => {
-  const levels = effortLevels(composerEffort().agent), l = levels[Number($('effRange').value)];
-  $('effRange').style.setProperty('--fill', `${(Number($('effRange').value) / Math.max(1, levels.length - 1)) * 100}%`);
-  $('effLevel').textContent = l;
-  $('effTag').textContent = '';
-  $('effHint').textContent = effortHint(levels, l);
-});
-$('effRange').addEventListener('change', () => effSave(effortLevels(composerEffort().agent)[Number($('effRange').value)] || null));
-$('effDefault').addEventListener('click', () => { effSave(null); $('effRange').focus(); });
+bindMenu($('effChip'), $('effPop'), buildEffMenu, () => {});
 // Switching the picker between agents keeps the chat's effort at the nearest level the new agent takes (the server
 // clamps the saved chat the same way on set_model; this keeps the draft and the pill in step).
 function clampEffortForAgent(agent) {
@@ -1869,17 +1955,18 @@ function fbRender() {
   if (focused && !FB.fe.focusKey) FB.fe.focusKey = focused;
   const list = (FB.local?.url === h.url ? FB.local.list : h.list()) || [], name = fbName(h.primary);
   $('fbTitle').textContent = `If ${name} hits its limit`;
-  $('fbSub').textContent = h.sub || `${h.what[0].toUpperCase()}${h.what.slice(1)} move to the first model below with usage left. With none, they wait.`;
+  $('fbSub').textContent = h.sub || ''; // the title says it; a sub only for what's specific (a running task, a custom list)
   // A task's own list that differs from its chat's can go back to the chat's.
   const back = !FB.pending && h.reset?.();
   if (back !== undefined && back !== false) {
     const rb = el('button', 'link-btn inline', "Reset to chat's list");
     rb.type = 'button';
     rb.onclick = () => fbSave(back);
-    $('fbSub').append(el('br'), el('span', '', 'Custom list for this task · '), rb);
+    if ($('fbSub').textContent) $('fbSub').append(el('br'));
+    $('fbSub').append(el('span', '', 'Custom list for this task · '), rb);
   }
   renderFallbackEditor($('fbBody'), { list, onChange: fbSave, ui: FB.fe,
-    exclude: [{ agent: h.primary.agent, model: fbModelOf(h.primary) }], empty: h.empty ? h.empty(name) : `No fallbacks: ${h.what} wait for ${name} to reset.` });
+    exclude: [{ agent: h.primary.agent, model: fbModelOf(h.primary) }], empty: h.empty ? h.empty(name) : `No fallbacks. ${h.what[0].toUpperCase()}${h.what.slice(1)} wait for the reset.` });
 }
 // Chats that had the old per-chat delegation flag on (#153 removed it; it lived in localStorage) with no list get an empty one.
 function migrateAutoDelegate() {
@@ -2089,7 +2176,7 @@ function renderAgentPicker() {
   sel.textContent = '';
   for (const a of AGENT_LIST) {
     const g = document.createElement('optgroup');
-    g.label = !a.available ? `${a.label} (not installed)` : a.loggedIn === false ? `${a.label} (sign in via Connections)` : a.label;
+    g.label = !a.available ? `${a.label} (not installed)` : a.loggedIn === false ? `${a.label} (signed out)` : a.label;
     g.disabled = !(a.available && a.loggedIn !== false);
     const def = el('option', '', `${a.label} · default model`);
     def.value = pickVal({ agent: a.id });
@@ -2111,12 +2198,31 @@ function renderAgentPicker() {
     }
     sel.append(g);
   }
-  const off = AGENT_LIST.filter((a) => !a.available || a.loggedIn === false).length;
-  const link = el('option', '', off ? 'Sign in to more agents…' : 'Connections…');
-  link.value = CONNECT_PICK;
-  sel.append(link);
   setPick(keep);
+  refreshMenu($('modelPop'), buildModelMenu);
 }
+// The model menu: one group per usable agent (its Default, then its models), unusable agents last as faint headers.
+// The <select> stays the source of truth: a pick sets its value and fires its change event.
+function buildModelMenu(menu) {
+  const sel = $('model');
+  const groups = [...sel.children].filter((g) => g.tagName === 'OPTGROUP').sort((a, b) => a.disabled - b.disabled);
+  for (const g of groups) {
+    menu.append(el('div', 'cm-head' + (g.disabled ? ' off' : ''), g.label));
+    if (g.disabled) continue; // signed out / not installed: the header says so
+    const def = [...g.children].find((o) => / \(default\)$/.test(o.textContent));
+    for (const o of g.children) {
+      const isDef = o.value.endsWith('|');
+      const label = isDef ? 'Default' : o.textContent.replace(/^[^·]+ · /, '').replace(/ \(default\)$/, '');
+      const hint = isDef && def ? def.textContent.replace(/^[^·]+ · /, '').replace(/ \(default\)$/, '') : '';
+      menu.append(menuOpt(label, { value: o.value, selected: o.value === sel.value, hint, title: o.title, disabled: o.disabled }));
+    }
+  }
+}
+bindMenu($('modelChip'), $('modelPop'), buildModelMenu, (v) => {
+  const sel = $('model');
+  sel.value = v;
+  sel.dispatchEvent(new Event('change', { bubbles: true }));
+});
 api('/api/agents').then((d) => { AGENT_LIST = d.agents || []; renderAgentPicker(); }).catch(() => {});
 // Which model a task is on and what happens at a limit: the one vocabulary for cards, the drawer and the chat.
 //   normal:    'Opus'                     (running, done, or queued with no fallbacks)
@@ -2966,6 +3072,8 @@ function sidebarUsage() {
   };
 }
 function renderUsage(fresh = false) {
+  renderFbChip(); // its usage dots follow the same readings
+  renderReflectBtn();
   const ids = runningUsageAgents();
   usageSlides.ids = ids;
   if (!ids.includes(usageSlides.agent)) usageSlides.agent = ids[0];
@@ -3592,6 +3700,8 @@ function taskState(t) {
       const m = /^blocked: #(\d+)/.exec(t.summary || '');
       return { cls: 'failed', label: m ? `Blocked because #${m[1]} failed` : `Failed${t.summary ? ` · ${t.summary}` : ''}` };
     }
+    case 'paused': // the owner stopped it: session and worktree kept, the scheduler skips it until Resume
+      return { cls: 'paused', label: 'Paused by you' };
     case 'needs_integration': // its branch conflicted with main; an integrator task merges it (worktrees.mjs)
       return { cls: 'waiting', label: `Needs integration${t.summary ? ` · ${t.summary}` : ''}` };
     case 'cancelled': {
@@ -3660,6 +3770,7 @@ function fillCard(b, id) {
   if (open && t.urgency === 'background') tags.append(el('span', 'tc-tag', 'Later'));
   if (open && t.deadline) tags.append(el('span', 'tc-tag due', `Due ${fmtDue(t.deadline)}`));
   if (t.kind !== 'plan' && t.kind !== 'review') tags.append(modelChip(t));
+  if (t.kind === 'work' && ['running', 'paused'].includes(t.status)) tags.append(cardControl(t));
   if (canAddBreak(t)) {
     const rb = el('span', 'tc-tag tc-rb');
     rb.innerHTML = `${FLAG_SVG}<span class="rb-t">+ Review break</span>`;
@@ -3677,6 +3788,44 @@ function fillCard(b, id) {
   b.classList.toggle('active', O.drawer === id);
   // Waiting checkpoints in the chat and the queue get their review panel right under the card.
   if (b.isConnected) syncReviewPanel(b, t); else queueMicrotask(() => b.isConnected && syncReviewPanel(b, O.tasks.get(id)));
+}
+// A running work task's card pauses it; a paused one's resumes it (the card itself is a button, so this is a role=button span).
+function cardControl(t) {
+  const paused = t.status === 'paused', busy = TC.busy.has(t.id);
+  const c = el('span', `tc-tag tc-ctl${paused ? ' resume' : ''}`, busy ? (paused ? 'Resuming…' : 'Pausing…') : paused ? 'Resume' : 'Pause');
+  c.setAttribute('role', 'button');
+  c.setAttribute('aria-label', `${paused ? 'Resume' : 'Pause'} #${t.id}`);
+  c.setAttribute('aria-disabled', String(busy));
+  c.tabIndex = 0;
+  c.title = paused ? 'Continue the same session where it stopped' : 'Stop the agent now; its session and worktree are kept';
+  const go = (e) => { e.stopPropagation(); e.preventDefault(); if (!busy) taskControl(t.id, paused ? 'resume' : 'pause'); };
+  c.addEventListener('click', go);
+  c.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') go(e); });
+  c.addEventListener('pointerdown', (e) => e.stopPropagation()); // not a queue drag
+  return c;
+}
+// POST /api/orch/tasks/:id/pause | resume | handoff. Pause and handoff answer once the run has stopped.
+const TC = { busy: new Set() };
+async function taskControl(id, what, body) {
+  TC.busy.add(id);
+  refreshCards(id);
+  if (O.drawer === id) renderDrawer();
+  try {
+    const r = await api(`/api/orch/tasks/${id}/${what}`, 'POST', body);
+    if (r.task) O.tasks.set(r.task.id, { ...(O.tasks.get(r.task.id) || {}), ...r.task });
+    const done = { pause: `#${id} paused`, resume: `#${id} resumed`, handoff: `#${id} handed off to ${body ? fbName(body) : 'another agent'}` }[what];
+    toast(r.note || (r.pending ? `#${id} is still stopping; it will be ${what === 'pause' ? 'paused' : 'handed off'} when it does` : done), { kind: r.note || r.warning ? 'info' : 'success' });
+    if (r.warning) toast(r.warning, { kind: 'info' });
+    return r;
+  } catch (e) {
+    toast(e.message, { kind: 'error' });
+    throw e;
+  } finally {
+    TC.busy.delete(id);
+    refreshCards(id);
+    scheduleQueue();
+    if (O.drawer === id) loadDetail();
+  }
 }
 const FLAG_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M5 21V4M5 4h11l-2 4 2 4H5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 // '+ Review break' fits after a queued or running work task that doesn't already have one waiting.
@@ -4039,8 +4188,6 @@ function modelSection(t) {
     }
   }
   c.append(row);
-  const eff = effortRow(t);
-  if (eff) c.append(eff);
   if (ms.kind === 'waiting' || ms.kind === 'delegated') c.append(el('div', 'dr-check', ms.text));
   // Remote runs (cluster workers) name their machine; the controller's own runs don't.
   if (t.waiting_for) c.append(el('div', 'dr-check', `Waiting for ${t.waiting_for} to come back`));
@@ -4058,43 +4205,6 @@ function modelSection(t) {
     c.append(ul);
   }
   return c;
-}
-
-// The Effort row (Claude/Codex tasks): the level its next session starts with, from its chat's live effort or its own
-// override ('this task'), a select to override it while it is queued or running, and the level each run used.
-function effortRow(t) {
-  const queued = t.status === 'queued';
-  const [agent, model] = queued && t.runs_on ? [t.runs_on, t.runs_model || null] : t.ran_agent ? [t.ran_agent, t.ran_model || null] : [t.agent || 'claude', t.model || null];
-  const runs = (O.detail?.task.id === t.id ? O.detail.runs : []).filter((r) => effortLevels(r.agent).length);
-  const levels = effortLevels(agent);
-  if (!levels.length && !runs.length) return null;
-  const wrap = el('div', 'dr-effort');
-  const chat = state.convos.find((c) => c.id === O.detail?.project?.convo_id);
-  const ok = modelEfforts(agent, model), def = defaultEffort(agent, model);
-  const asRun = (l) => (l ? clampEffortTo(ok, l) : null);
-  const chatLevel = asRun(chat?.effort ?? null), own = asRun(t.effort || null);
-  if (levels.length) {
-    const line = el('div', 'dr-eff-line');
-    const now = own || chatLevel;
-    line.append(el('span', 'dr-eff-now', `Effort: ${now || `default${def ? ` (${def})` : ''}`}`),
-      el('span', 'muted', own ? ' (this task)' : ' (from chat)'));
-    if (t.kind !== 'plan' && ['queued', 'running'].includes(t.status)) {
-      const sel = el('select', 'btn small dr-eff-sel');
-      sel.setAttribute('aria-label', 'Effort for this task');
-      const follow = el('option', '', `Follow chat (${chatLevel || 'default'})`);
-      follow.value = '';
-      sel.append(follow);
-      for (const l of levels) { const o = el('option', '', ok.includes(l) ? l : `${l} (runs as ${clampEffortTo(ok, l)})`); o.value = l; sel.append(o); }
-      sel.value = t.effort && levels.includes(t.effort) ? t.effort : '';
-      sel.title = t.status === 'running' ? 'Applies from its next session (a resume, retry or handoff)' : 'Used when it starts';
-      sel.onchange = () => orchAction('effort', sel.value || null);
-      line.append(sel);
-    }
-    wrap.append(line);
-    if (t.status === 'running' && runs.length && (runs.at(-1).effort ?? null) !== now) wrap.append(el('div', 'dr-check', `This session runs at ${runs.at(-1).effort || 'the default'}; ${now || 'the default'} applies from its next session.`));
-  }
-  if (runs.length) wrap.append(el('div', 'dr-check', `Runs used: ${runs.map((r) => r.effort || 'default').join(' → ')}`));
-  return wrap;
 }
 
 function section(title) {
@@ -4170,6 +4280,19 @@ function renderDrawer(fromLive = false) {
       row.append(dg);
     }
   }
+  if (t.kind === 'work' && ['running', 'paused'].includes(t.status)) {
+    const paused = t.status === 'paused', busy = TC.busy.has(t.id);
+    const pr = el('button', `btn small${paused ? ' primary' : ''}`, busy ? (paused ? 'Resuming…' : 'Pausing…') : paused ? 'Resume' : 'Pause');
+    pr.disabled = busy;
+    pr.title = paused ? 'Continue the same session, on the same agent, in the same worktree' : 'Stop the agent now; its session and worktree are kept until you resume';
+    pr.onclick = () => taskControl(t.id, paused ? 'resume' : 'pause').catch(() => {});
+    row.append(pr);
+    const ho = el('button', 'btn small', 'Hand off…');
+    ho.disabled = busy;
+    ho.title = 'Stop this session and continue in the same worktree on another agent or model';
+    ho.onclick = () => openDelegate(t.id);
+    row.append(ho);
+  }
   if (canAddBreak(t)) {
     const rb = el('button', 'btn small', '+ Review break');
     rb.title = 'Stop after this task and wait for your review before anything that depends on it runs';
@@ -4181,7 +4304,7 @@ function renderDrawer(fromLive = false) {
     rm.title = 'What waits for this review goes ahead without it';
     rm.onclick = () => orchAction('cancel');
     row.append(rm);
-  } else if (isOpen || t.status === 'needs_integration') {
+  } else if (isOpen || t.status === 'needs_integration' || t.status === 'paused') {
     const cancel = el('button', 'btn small danger', 'Cancel');
     cancel.onclick = () => { if (confirm(`Cancel #${t.id}? Tasks waiting on it are cancelled too.`)) orchAction('cancel'); };
     row.append(cancel);
@@ -4233,10 +4356,9 @@ function renderDrawer(fromLive = false) {
   } else {
     s3.append(el('div', 'out-live', t.status === 'running' ? 'Starting…' : 'Nothing yet. It starts when an agent picks it up.'));
   }
-  // The latest screenshots; the rest sit in order under Details → Commands and output.
+  // Every screenshot, oldest first, as a compact gallery (the drawer's .shots are small tiles; see app.css).
   const shots = d.runs.flatMap((r) => r.entries.filter((e) => e.k === 'image'));
-  if (shots.length) s3.append(shotGrid(shots.slice(-4)));
-  if (shots.length > 4) s3.append(el('div', 'muted shots-more', `${shots.length - 4} more under Details`));
+  if (shots.length) s3.append(el('div', 'dr-shots-head', `Screenshots · ${shots.length}`), shotGrid(shots));
   if (t.status === 'running') {
     const live = el('div', 'out-live');
     live.append(el('span', 'spark'), document.createTextNode('Working…'));
@@ -4476,8 +4598,10 @@ function renderDelegate() {
   const body = $('dgBody'), d = DG.data;
   body.textContent = '';
   const t = O.tasks.get(DG.id) || d?.task;
-  $('dgTitle').textContent = `Delegate #${DG.id}`;
+  const handoff = !!t && t.status !== 'queued';
+  $('dgTitle').textContent = `${handoff ? 'Hand off' : 'Delegate'} #${DG.id}`;
   $('dgSub').textContent = t ? displayTitle(t) : '';
+  if (handoff) body.append(el('p', 'muted', 'Stops the current session. The new agent continues in the same worktree, with the work so far, the last messages and the git diff.'));
   if (DG.err) body.append(el('div', 'dr-err', DG.err));
   if (!d) { if (!DG.err) body.append(el('div', 'out-live', 'Loading…')); return; }
   const cur = el('div', 'dg-row current');
@@ -4503,7 +4627,9 @@ async function pickDelegate(r) {
   DG.busy = true;
   renderDelegate();
   try {
-    const res = await api(`/api/orch/tasks/${DG.id}/delegate`, 'POST', { agent: r.agent, model: r.model });
+    const t = O.tasks.get(DG.id) || DG.data?.task;
+    const res = t && t.status !== 'queued' ? await taskControl(DG.id, 'handoff', { agent: r.agent, model: r.model })
+      : await api(`/api/orch/tasks/${DG.id}/delegate`, 'POST', { agent: r.agent, model: r.model });
     if (res.task) O.tasks.set(res.task.id, { ...(O.tasks.get(res.task.id) || {}), ...res.task });
     O.err = '';
     closeDelegate();
@@ -4684,6 +4810,13 @@ function renderQueue() {
     body.append(el('h3', 'dg-group', 'Running'));
     const box = el('div', 'q-list');
     for (const t of running) box.append(queueCard(t.id, false));
+    body.append(box);
+  }
+  const paused = [...O.tasks.values()].filter((t) => t.status === 'paused' && t.project_id === O.project?.id);
+  if (paused.length) {
+    body.append(el('h3', 'dg-group', 'Paused'));
+    const box = el('div', 'q-list');
+    for (const t of paused) box.append(queueCard(t.id, false));
     body.append(box);
   }
   body.append(el('h3', 'dg-group', `Up next · ${queued.length}`));

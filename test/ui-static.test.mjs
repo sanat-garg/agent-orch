@@ -12,8 +12,9 @@ const appJs = read('public/app.js');
 const indexHtml = read('public/index.html');
 const appCss = read('public/app.css');
 
-// Ids that app.js creates itself before looking them up with $(): qList is the queue sheet's list (renderQueue).
-const DYNAMIC_IDS = new Set(['qList']);
+// Ids that app.js creates itself before looking them up with $(): qList is the queue sheet's list (renderQueue); the
+// eff* ones are the effort menu's slider, Default toggle, tick labels and note (buildEffMenu).
+const DYNAMIC_IDS = new Set(['qList', 'effRange', 'effDefault', 'effTicks', 'effNote']);
 
 test('public/app.js parses', () => {
   assert.doesNotThrow(() => new vm.Script(appJs, { filename: 'public/app.js' }));
@@ -49,7 +50,9 @@ test('screenshots render as /api/media images in chat and in the task drawer', (
   assert.match(appJs, /im\.src = mediaUrl\(img\.id\)/);
   assert.match(appJs, /case 'image':[^]*?shotNode\(ev\)/, 'chat renderEvent handles t:image');
   assert.match(appJs, /e\.k === 'image'\)[^]*?shotNode\(e\)/, 'drawer output renders k:image entries');
-  assert.match(appJs, /shotGrid\(shots\.slice\(-4\)\)/, "drawer 'What happened' shows the latest 4");
+  assert.match(appJs, /el\('div', 'dr-shots-head', `Screenshots · \$\{shots\.length\}`\), shotGrid\(shots\)/, "drawer 'What happened' shows every screenshot");
+  assert.doesNotMatch(appJs, /more under Details/);
+  assert.match(appCss, /#drBody \.shots \{ display: grid; grid-template-columns: repeat\(auto-fill, minmax\(76px, 1fr\)\)/, 'as a compact gallery');
   assert.match(indexHtml, /id="lightbox"/);
 });
 
@@ -75,7 +78,7 @@ test('the model picker picks the primary model only; a Fallbacks button opens th
   assert.match(appJs, /send\(\{ t: 'send', cid: state\.cid, text \}\)/);
   assert.doesNotMatch(appJs, /autoDelegate|delegate\/preview|Forecast/);
   assert.match(indexHtml, /class="chip fb-chip" id="fbChip"/);
-  assert.match(indexHtml, /class="modal sheet fb-pop" id="fbModal"/);
+  assert.match(indexHtml, /class="modal fb-pop" id="fbModal"/);
   assert.match(appJs, /\/api\/convos\/\$\{cid\}\/fallbacks/);
   assert.match(appJs, /`If \$\{name\} hits its limit`/);
   assert.doesNotMatch(appJs, /Pinned:/);
@@ -107,4 +110,41 @@ test('the sidebar gear opens Settings: sound + MP3 upload, max parallel tasks, r
   assert.match(appJs, /url: '\/api\/orch\/reflect-settings'/);
   assert.match(appJs, /fetch\('\/api\/settings\/sound', \{ method: 'POST'/);
   assert.match(appJs, /sound\?\.custom \? `\/api\/settings\/sound\?v=\$\{sound\.at\}` : DEFAULT_TASK_SOUND/);
+});
+
+test('the model picker has no Connections entry, opens upward on desktop, and the fallback chip names its models with usage dots', () => {
+  assert.doesNotMatch(appJs, /CONNECT_PICK|'Connections…'|Sign in to more agents/);
+  assert.match(indexHtml, /id="modelChip"[^>]*aria-controls="modelPop"[\s\S]*?<select id="model"[^>]*hidden[\s\S]*?id="modelPop" role="listbox"/);
+  assert.match(appCss, /\.pop-wrap \.popover|\.popover \{\s*position: absolute; bottom: calc\(100% \+ 6px\)/, 'popovers open upward');
+  assert.match(appJs, /el\('span', 'fb-arrow', '→'\), dot, el\('span', 'fb-name', fbName\(r\)\)/);
+  assert.match(appJs, /return Math\.max\(\.\.\.known\) >= 100 \? 'limited' : Math\.max\(\.\.\.known\) >= 80 \? 'high' : 'ok'/);
+  for (const k of ['ok', 'high', 'limited']) assert.match(appCss, new RegExp(`\\.fb-dot\\.${k} \\{ background: var\\(--`));
+});
+
+test('running and paused tasks: Pause/Resume on the card and in the drawer, Hand off reuses the delegate sheet', () => {
+  assert.match(appJs, /case 'paused':[^\n]*\n\s*return \{ cls: 'paused', label: 'Paused by you' \}/);
+  assert.match(appJs, /if \(t\.kind === 'work' && \['running', 'paused'\]\.includes\(t\.status\)\) tags\.append\(cardControl\(t\)\)/);
+  assert.match(appJs, /api\(`\/api\/orch\/tasks\/\$\{id\}\/\$\{what\}`, 'POST', body\)/);
+  assert.match(appJs, /el\('button', 'btn small', 'Hand off…'\)/);
+  assert.match(appJs, /t && t\.status !== 'queued' \? await taskControl\(DG\.id, 'handoff'/);
+  assert.match(appJs, /body\.append\(el\('h3', 'dg-group', 'Paused'\)\)/);
+  assert.match(appCss, /\.tc-glyph\.paused::before/);
+});
+
+test('composer menus: mode, model and effort chips open compact .cmenu listboxes (no native pickers)', () => {
+  for (const [chip, menu] of [['modeChip', 'modePop'], ['modelChip', 'modelPop'], ['effChip', 'effPop']]) {
+    assert.match(indexHtml, new RegExp(`<button type="button" class="chip menu-chip[^"]*" id="${chip}" aria-haspopup="listbox" aria-controls="${menu}"`));
+    assert.match(indexHtml, new RegExp(`<div class="cmenu[^"]*" id="${menu}" role="listbox"`));
+    assert.match(appJs, new RegExp(`bindMenu\\(\\$\\('${chip}'\\), \\$\\('${menu}'\\)`));
+  }
+  // The selects stay as hidden value holders; the mode menu lists every one of its options.
+  assert.match(indexHtml, /<select id="mode" aria-label="Permission mode" hidden/);
+  assert.match(appJs, /for \(const o of \$\('mode'\)\.options\)/);
+  // Effort is a slider inside the same compact menu: no dialog, title or explanation paragraphs.
+  assert.match(appJs, /range\.id = 'effRange'/);
+  for (const gone of ['effModal', 'effHint', 'effSub', 'eff-foot', 'finePointer', 'mp-opt']) {
+    assert.ok(!indexHtml.includes(gone) && !appJs.includes(gone) && !appCss.includes(gone), `${gone} removed`);
+  }
+  assert.match(appCss, /\.cmenu \{ position: fixed;/);
+  assert.match(appCss, /\.cm-opt\[aria-selected="true"\]::after \{ background: var\(--accent\);/);
 });

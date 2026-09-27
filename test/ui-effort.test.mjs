@@ -89,33 +89,34 @@ async function page(opts = {}) {
   return p;
 }
 
-test('the pill opens a slider; arrow keys save at once with a toast; Esc closes; Default resets', { skip, timeout: 60000 }, async () => {
+test('the pill opens a compact slider menu; arrow keys save at once with a toast; Esc closes; Default resets', { skip, timeout: 60000 }, async () => {
   const p = await page();
   await p.goto(`${base}/#${CLAUDE_CHAT}`);
-  const chip = p.locator('#effChip');
+  const chip = p.locator('#effChip'), menu = p.locator('#effPop');
   await chip.waitFor();
   assert.equal((await chip.textContent()).trim(), 'Effort: high');
   await chip.click();
-  await p.locator('#effModal').waitFor();
+  await menu.waitFor();
   assert.equal(await p.evaluate(() => document.activeElement.id), 'effRange');
   assert.deepEqual(await p.locator('#effTicks .eff-tick').allTextContents(), ['low', 'medium', 'high', 'xhigh', 'max']);
   assert.equal(await p.locator('#effTicks .eff-tick.on').textContent(), 'high');
+  assert.equal(await menu.locator('p, .m-sub, .eff-hint').filter({ visible: true }).count(), 0, 'no explanations');
   await p.keyboard.press('ArrowRight');
   await p.waitForFunction(() => /Effort set to xhigh\. Queued tasks use it when they start; running tasks switch at their next session\./.test(document.querySelector('#toasts').textContent));
   assert.equal(convo(CLAUDE_CHAT).effort, 'xhigh');
-  assert.equal(await p.locator('#effLevel').textContent(), 'xhigh');
-  assert.match(await p.locator('#effHint').textContent(), /Deeper reasoning/);
+  assert.equal(await p.locator('#effTicks .eff-tick.on').textContent(), 'xhigh');
+  assert.equal(await p.evaluate(() => document.activeElement.id), 'effRange', 'the slider keeps focus after a save');
   await p.keyboard.press('Escape');
-  await p.locator('#effModal').waitFor({ state: 'hidden' });
+  await menu.waitFor({ state: 'hidden' });
   assert.equal(await p.evaluate(() => document.activeElement.id), 'effChip');
   assert.equal((await chip.textContent()).trim(), 'Effort: xhigh');
   await chip.click();
   await p.locator('#effDefault').click();
   await p.waitForFunction(() => /Effort set to the model default/.test(document.querySelector('#toasts').textContent));
   assert.equal(convo(CLAUDE_CHAT).effort, null);
-  assert.equal(await p.locator('#effLevel').textContent(), 'Default');
-  assert.equal(await p.locator('#effTag').textContent(), 'runs as high');
   assert.equal(await p.locator('#effDefault').getAttribute('aria-pressed'), 'true');
+  assert.equal(await p.locator('#effRange').evaluate((r) => r.classList.contains('is-default')), true);
+  assert.equal(await p.locator('#effTicks .eff-tick.on').textContent(), 'high', 'Default rests on the level it runs as');
   await p.locator('#effTicks .eff-tick', { hasText: 'medium' }).click();
   await p.waitForFunction(() => /Effort set to medium/.test(document.querySelector('#toasts').textContent));
   assert.equal(convo(CLAUDE_CHAT).effort, 'medium');
@@ -128,7 +129,8 @@ test('switching Codex → Claude clamps ultra to max; the pill hides for an agen
   await p.goto(`${base}/#${CODEX_CHAT}`);
   await p.locator('#effChip').waitFor();
   assert.equal((await p.locator('#effChip').textContent()).trim(), 'Effort: ultra');
-  await p.locator('#model').selectOption('claude|');
+  // Claude is signed out in this temp HOME, so its menu group has no rows: pick it the way the menu does.
+  await p.evaluate(() => { $('model').value = 'claude|'; $('model').dispatchEvent(new Event('change', { bubbles: true })); });
   await p.waitForFunction(() => document.querySelector('#effChip').textContent.trim() === 'Effort: max');
   for (let i = 0; i < 50 && convo(CODEX_CHAT).effort !== 'max'; i++) await p.waitForTimeout(100);
   assert.equal(convo(CODEX_CHAT).effort, 'max', 'the server clamped the saved chat on set_model');
@@ -139,7 +141,7 @@ test('switching Codex → Claude clamps ultra to max; the pill hides for an agen
   await p.context().close();
 });
 
-test('390px: the pill collapses to the level word and the popover is a bottom sheet', { skip, timeout: 60000 }, async () => {
+test('390px: the pill collapses to the level word and its menu opens above it, on screen', { skip, timeout: 60000 }, async () => {
   const p = await page({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
   await p.goto(`${base}/#${CLAUDE_CHAT}`);
   const chip = p.locator('#effChip');
@@ -149,32 +151,25 @@ test('390px: the pill collapses to the level word and the popover is a bottom sh
   const box = await chip.boundingBox();
   assert.ok(box.x >= 0 && box.x + box.width <= 390, JSON.stringify(box));
   await chip.tap();
-  const panel = p.locator('#effModal .modal-panel');
-  await panel.waitFor();
-  await p.waitForTimeout(300); // the sheet's slide-up
-  const pb = await panel.boundingBox();
-  assert.ok(Math.abs(pb.y + pb.height - 844) <= 2 && pb.width >= 388, `a bottom sheet: ${JSON.stringify(pb)}`);
+  const menu = p.locator('#effPop');
+  await menu.waitFor();
+  const mb = await menu.boundingBox();
+  assert.ok(mb.x >= 8 && mb.x + mb.width <= 382 && mb.y >= 0, `on screen: ${JSON.stringify(mb)}`);
+  assert.ok(mb.y + mb.height <= box.y, `above the pill: ${JSON.stringify({ mb, box })}`);
+  assert.equal(await p.evaluate(() => document.activeElement.id), 'effRange');
   assert.deepEqual(p.errors, []);
   await p.context().close();
 });
 
-test('the task drawer shows where its effort comes from, overrides it, and lists each run\'s level', { skip, timeout: 60000 }, async () => {
+test('the task drawer has no effort selection; Details still notes the level each run used', { skip, timeout: 60000 }, async () => {
   const p = await page();
   await p.goto(`${base}/#${CLAUDE_CHAT}`);
   await p.locator('#effChip').waitFor();
   await p.evaluate((id) => openTask(id), taskId);
-  const row = p.locator('#drBody .dr-effort');
-  await row.waitFor();
-  const chatLevel = convo(CLAUDE_CHAT).effort;
-  assert.match(await row.textContent(), new RegExp(`Effort: ${chatLevel} \\(from chat\\)`));
-  assert.match(await row.textContent(), /Runs used: low → high/);
+  await p.locator('#drBody .dr-model').waitFor();
+  assert.equal(await p.locator('#drBody .dr-effort, #drBody select[aria-label="Effort for this task"]').count(), 0);
+  assert.doesNotMatch(await p.locator('#drBody').textContent(), /Follow chat|Runs used|Effort:/);
   assert.match(await p.locator('#drBody .out-run').first().textContent(), /effort low/);
-  await row.locator('select').selectOption('max');
-  await p.waitForFunction(() => /Effort: max \(this task\)/.test(document.querySelector('#drBody .dr-effort')?.textContent || ''));
-  assert.equal(db.prepare('SELECT effort FROM tasks WHERE id=?').get(taskId).effort, 'max');
-  await p.locator('#drBody .dr-effort select').selectOption('');
-  await p.waitForFunction(() => /\(from chat\)/.test(document.querySelector('#drBody .dr-effort')?.textContent || ''));
-  assert.equal(db.prepare('SELECT effort FROM tasks WHERE id=?').get(taskId).effort, null);
   assert.deepEqual(p.errors, []);
   await p.context().close();
 });

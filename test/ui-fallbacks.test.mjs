@@ -106,7 +106,7 @@ test('chat fallbacks: the picker has no Auto Delegate; the sheet removes, undoes
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto(`${base}/#${CID}`);
   const chip = page.locator('#fbChip');
-  await page.waitForFunction(() => document.querySelector('#fbChip')?.textContent === 'Fallbacks · 3');
+  await page.waitForFunction(() => ((document.querySelector('#fbChip')?.getAttribute('aria-label') || '').match(/^Fallbacks: /) ? document.querySelector('#fbChip').getAttribute('aria-label').split(', then ').length : 0) === 3);
   assert.equal(await page.evaluate(() => [...document.querySelectorAll('#model option')].some((o) => /auto/i.test(o.value + o.textContent))), false);
   assert.equal(await page.evaluate((cid) => localStorage.getItem(`cw.auto.${cid}`), CID), null);
   await chip.click();
@@ -125,7 +125,8 @@ test('chat fallbacks: the picker has no Auto Delegate; the sheet removes, undoes
   await rows.nth(1).locator('.fe-rm').click();
   await until(['gpt-6-sol', 'gpt-6-nova'], 'remove persisted');
   assert.deepEqual(await names(), ['GPT-6-Sol', 'GPT-6-Nova']);
-  assert.equal(await chip.innerText(), 'Fallbacks · 2');
+  assert.equal(await page.evaluate(() => document.querySelectorAll('#fbChip .fb-name').length), 2);
+  assert.match(await chip.getAttribute('aria-label'), /^Fallbacks: .+ \(.+\), then .+ \(.+\)$/, 'named, with usage status');
   // Undo from the toast puts it back in place.
   await page.locator('#toasts .toast-act').click();
   await until(['gpt-6-sol', 'gpt-6-astra', 'gpt-6-nova'], 'undo persisted');
@@ -178,7 +179,7 @@ test('reflection fallbacks: the sidebar Settings sheet opens the same fallback s
   await page.goto(`${base}/#${CID}`);
   await page.waitForLoadState('networkidle');
   await page.locator('#settingsBtn').click();
-  await page.waitForFunction(() => document.querySelector('#stReflectBtn')?.textContent === 'Fallbacks · 1');
+  await page.waitForFunction(() => ((document.querySelector('#stReflectBtn')?.getAttribute('aria-label') || '').match(/^Fallbacks: /) ? document.querySelector('#stReflectBtn').getAttribute('aria-label').split(', then ').length : 0) === 1);
   const requests = [];
   page.on('request', (r) => requests.push(r.url()));
   // Rendered in the same task as the click: no fetch, no loading state.
@@ -200,7 +201,7 @@ test('reflection fallbacks: the sidebar Settings sheet opens the same fallback s
   for (let i = 0; i < 50 && stored().length < 2; i++) await new Promise((r) => setTimeout(r, 100));
   assert.deepEqual(stored(), [{ agent: 'codex', model: 'gpt-6-astra' }, { agent: 'codex', model: 'gpt-6-sol' }]);
   assert.ok(requests.some((u) => u.endsWith('/api/orch/reflect-settings')));
-  assert.equal(await page.locator('#stReflectBtn').innerText(), 'Fallbacks · 2');
+  assert.equal(await page.locator('#stReflectBtn .fb-name').count(), 2);
   assert.deepEqual(errors, []);
   await ctx.close();
 });

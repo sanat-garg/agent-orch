@@ -1,6 +1,6 @@
 // Screenshots in a real browser: boots server.mjs (CW_NO_ORCHESTRATOR=1, temp data dir) on a spare port with a chat whose
 // log holds images of very different sizes. Every thumbnail is the same fixed 160×100 box (two per row on phones), and the
-// lightbox shows the image at its natural pixel size, scrolling when larger, with a Fit to screen / Actual size toggle.
+// lightbox always shows the image at its natural pixel size (no fit option), scrolling when larger.
 // Skips when Playwright's Chromium can't launch. CW_SHOTS_KEEP=1 leaves the server running for bin/shot.mjs.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -21,7 +21,8 @@ const CID = 'chat-shots';
 const SIZES = [[2400, 1500], [390, 2400], [900, 180], [120, 80], [1280, 800]];
 let browser, skip = false;
 try { browser = await chromium.launch(); } catch (e) { skip = `cached Chromium unavailable: ${e.message.split('\n')[0]}`; }
-let child, base, dataDir, cookie, imgs;
+let child, base, dataDir, cookie, imgs, taskId;
+const GALLERY = 12;
 
 // A w×h RGB PNG with diagonal bands, so object-position and scrolling are visible in screenshots.
 function png(w, h, seed) {
@@ -77,6 +78,18 @@ before(async () => {
   const r = await fetch(base + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: PASSWORD }) });
   cookie = r.headers.get('set-cookie').split(';')[0];
   await r.arrayBuffer();
+  // A finished task whose run log holds 12 screenshots: the drawer shows them all as a compact gallery.
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
+  db.exec('PRAGMA busy_timeout=5000');
+  const pid = Number(db.prepare("INSERT INTO projects(path,name,status,created_at) VALUES(?,?,'active',0)").run(path.join(dataDir, 'gallery'), 'gallery').lastInsertRowid);
+  taskId = Number(db.prepare("INSERT INTO tasks(project_id,kind,title,prompt,status,ran_agent,started_at,finished_at,created_at) VALUES(?,'work','Shoot every page','shoot','done','claude',1,2,0)").run(pid).lastInsertRowid);
+  const gallery = Array.from({ length: GALLERY }, (_, i) => saveMedia(dataDir, png(320 + i * 20, 200, i % 5), `page-${i + 1}.png`));
+  const log = path.join(dataDir, 'gallery-run.jsonl');
+  fs.writeFileSync(log, [{ k: 'start', at: 1, agent: 'claude' }, { k: 'text', text: 'Shot every page.' }, ...gallery.map((m) => ({ k: 'image', ...m })), { k: 'end', at: 2, outcome: 'ok' }]
+    .map((e) => JSON.stringify(e)).join('\n') + '\n');
+  db.prepare("INSERT INTO runs(task_id,purpose,agent,outcome,started_at,finished_at,log_path) VALUES(?,'work','claude','ok',1,2,?)").run(taskId, log);
+  db.close();
   if (process.env.CW_SHOTS_KEEP) console.log(`KEEP ${base} ${cookie}`);
 });
 
@@ -103,7 +116,7 @@ const boxes = (page) => page.locator('#messages .shots .shot button').evaluateAl
   return { w: Math.round(r.width), h: Math.round(r.height), top: Math.round(r.top) };
 }));
 
-test('desktop: every thumbnail is the same 160×100 box; the lightbox opens at actual size and toggles fit', { skip, timeout: 60000 }, async () => {
+test('desktop: every thumbnail is the same 160×100 box; the lightbox always shows actual size, with no fit option', { skip, timeout: 60000 }, async () => {
   const { ctx, page, errors } = await open({ width: 1280, height: 800 });
   const b = await boxes(page);
   assert.deepEqual(b.map(({ w, h }) => [w, h]), SIZES.map(() => [160, 100]));
@@ -111,7 +124,7 @@ test('desktop: every thumbnail is the same 160×100 box; the lightbox opens at a
   assert.deepEqual(grid, ['flex', 'wrap', '8px']);
   assert.deepEqual(await page.locator('#messages .shot img').first().evaluate((i) => [getComputedStyle(i).objectFit, getComputedStyle(i).objectPosition]), ['cover', '50% 0%']);
 
-  // The 2400×1500 image: natural size, larger than the view, so the view scrolls both ways.
+  // The 2400×1500 image: natural size, larger than the view, so the view scrolls both ways. There is no fit toggle.
   await page.locator('#messages .shot button').first().click();
   const lb = page.locator('#lightbox');
   await lb.waitFor();
@@ -119,32 +132,25 @@ test('desktop: every thumbnail is the same 160×100 box; the lightbox opens at a
   const img = () => page.locator('#lbImg').evaluate((i) => [i.offsetWidth, i.offsetHeight]); // layout size (the panel's rise animation scales)
   assert.deepEqual(await img(), [2400, 1500]);
   assert.match(await page.locator('#lbSub').innerText(), /^2400 × 1500 px · 1 of 5/);
-  assert.equal(await page.locator('#lbFit').innerText(), 'Fit to screen');
+  assert.equal(await page.locator('#lightbox').getByText(/Fit to|Actual size/).count(), 0, 'no fit option');
   const scroll = await page.locator('#lbView').evaluate((v) => { v.scrollTo(300, 200); return [v.scrollLeft, v.scrollTop]; });
   assert.deepEqual(scroll, [300, 200]);
-  // Fit shrinks it inside the view; Actual size restores it.
-  await page.locator('#lbFit').click();
-  assert.equal(await page.locator('#lbFit').innerText(), 'Actual size');
-  const [fw, fh] = await img();
-  const view = await page.locator('#lbView').evaluate((v) => [v.clientWidth, v.clientHeight]);
-  assert.ok(fw <= view[0] && fh <= view[1] && (fw === view[0] || fh === view[1]), `fit ${fw}×${fh} in ${view}`);
-  assert.ok(Math.abs(fw / fh - 1.6) < 0.01);
-  await page.locator('#lbFit').click();
-  assert.deepEqual(await img(), [2400, 1500]);
 
-  // Small images are never upscaled, in either mode; prev/next and Esc still work.
-  await page.keyboard.press('ArrowRight'); await page.keyboard.press('ArrowRight'); await page.keyboard.press('ArrowRight');
+  // Every image is at its own pixel size: small ones are never upscaled, tall/wide ones never shrunk; prev/next and Esc work.
+  for (let i = 1; i < SIZES.length; i++) {
+    await page.keyboard.press('ArrowRight');
+    await page.waitForFunction((w) => document.querySelector('#lbImg').naturalWidth === w && document.querySelector('#lbImg').complete, SIZES[i][0]);
+    assert.deepEqual(await img(), SIZES[i], `image ${i + 1}`);
+  }
+  await page.keyboard.press('ArrowLeft');
   await page.waitForFunction(() => document.querySelector('#lbImg').naturalWidth === 120);
-  assert.deepEqual(await img(), [120, 80]);
   assert.match(await page.locator('#lbSub').innerText(), /^120 × 80 px · 4 of 5/);
-  await page.locator('#lbFit').click();
-  assert.deepEqual(await img(), [120, 80]);
   assert.match(await page.locator('#lbOpen').getAttribute('href'), new RegExp(`/api/media/${imgs[3].id}$`));
   await page.keyboard.press('Escape');
   assert.equal(await lb.isHidden(), true);
-  // Reopening starts at actual size again.
   await page.locator('#messages .shot button').nth(1).click();
-  assert.equal(await page.locator('#lbFit').innerText(), 'Fit to screen');
+  await page.waitForFunction(() => document.querySelector('#lbImg').naturalWidth === 390 && document.querySelector('#lbImg').complete);
+  assert.deepEqual(await img(), [390, 2400]);
   assert.deepEqual(errors, []);
   await ctx.close();
 });
@@ -164,6 +170,46 @@ test('phone: thumbnails are two per row filling the width at 16:10; the lightbox
   assert.deepEqual([w, h], [390, 2400]);
   assert.ok(sh > ch);
   assert.match(await page.locator('#lbView').evaluate((v) => getComputedStyle(v).touchAction), /pinch-zoom|manipulation|auto/); // pan-x pan-y pinch-zoom computes to manipulation
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+// The task drawer: every screenshot (not the last four plus "N more under Details") in a compact grid of equal small tiles.
+async function drawerGallery(viewport, mobile) {
+  const { ctx, page, errors } = await open(viewport, mobile);
+  await page.evaluate((id) => openTask(id), taskId);
+  await page.locator('#drBody .dr-shots-head').waitFor();
+  const head = await page.locator('#drBody .dr-shots-head').innerText();
+  const grid = page.locator('#drBody .dr-shots-head + .shots');
+  const tiles = await grid.locator('.shot button').evaluateAll((els) => els.map((e) => { const r = e.getBoundingClientRect(); return { w: Math.round(r.width), h: Math.round(r.height), top: Math.round(r.top) }; }));
+  const info = await grid.evaluate((g) => ({ display: getComputedStyle(g).display, height: g.getBoundingClientRect().height, captions: [...g.querySelectorAll('figcaption')].some((f) => f.offsetHeight) }));
+  const text = await page.locator('#drBody').innerText();
+  return { ctx, page, errors, head, tiles, info, text };
+}
+test('task drawer: all screenshots in a compact gallery grid of small tiles; the lightbox pages through all of them', { skip, timeout: 60000 }, async () => {
+  const { ctx, page, errors, head, tiles, info, text } = await drawerGallery({ width: 1280, height: 800 });
+  assert.equal(head, `Screenshots · ${GALLERY}`);
+  assert.equal(tiles.length, GALLERY);
+  assert.doesNotMatch(text, /more under Details/);
+  assert.equal(info.display, 'grid');
+  assert.equal(info.captions, false, 'names are tooltips, not captions');
+  assert.equal(new Set(tiles.map((t) => `${t.w}×${t.h}`)).size, 1, JSON.stringify(tiles));
+  assert.ok(tiles[0].w <= 110 && tiles[0].w >= 70, `small tiles: ${tiles[0].w}px`);
+  assert.ok(Math.abs(tiles[0].w / tiles[0].h - 1.6) < 0.05);
+  const perRow = tiles.filter((t) => t.top === tiles[0].top).length;
+  assert.ok(perRow >= 4, `${perRow} per row`);
+  assert.ok(info.height < 260, `the gallery stays compact: ${info.height}px`);
+  await page.locator('#drBody .dr-shots-head + .shots .shot button').nth(2).click();
+  await page.locator('#lightbox').waitFor();
+  assert.match(await page.locator('#lbSub').innerText(), new RegExp(`· 3 of ${GALLERY}`));
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+test('task drawer on a phone: the gallery fills the width with four small tiles per row', { skip, timeout: 60000 }, async () => {
+  const { ctx, errors, tiles } = await drawerGallery({ width: 390, height: 844 }, true);
+  assert.equal(tiles.length, GALLERY);
+  assert.equal(tiles.filter((t) => t.top === tiles[0].top).length, 4, JSON.stringify(tiles.slice(0, 5)));
+  assert.equal(new Set(tiles.map((t) => `${t.w}×${t.h}`)).size, 1);
   assert.deepEqual(errors, []);
   await ctx.close();
 });

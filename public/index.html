@@ -336,11 +336,6 @@
       </button>
     </div>
     <div class="m-body">
-      <h3 class="st-sec">Skills &amp; tools</h3>
-      <button type="button" class="st-row st-link" data-ext-open="skills"><span class="st-text"><strong>Skills</strong><small>Know-how an agent loads when a task needs it</small></span><span class="st-count" id="stExtSkills"></span><svg class="st-chev" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>
-      <button type="button" class="st-row st-link" data-ext-open="mcp"><span class="st-text"><strong>MCP servers</strong><small>Extra tools: a browser, a database, docs, other apps</small></span><span class="st-count" id="stExtMcp"></span><svg class="st-chev" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>
-      <button type="button" class="st-row st-link" data-ext-open="agents"><span class="st-text"><strong>Subagents</strong><small>Specialists Claude hands part of a task to</small></span><span class="st-count" id="stExtAgents"></span><svg class="st-chev" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>
-      <button type="button" class="st-row st-link" data-ext-open="personas"><span class="st-text"><strong>Personas</strong><small>How a chat's agents work and talk; pick one per chat</small></span><span class="st-count" id="stExtPersonas"></span><svg class="st-chev" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>
       <h3 class="st-sec">Sound</h3>
       <div class="st-row st-sound">
         <label class="st-text" for="stSound"><strong>Sound when a task finishes</strong><small>Plays while this tab is in the background · <span id="stSoundName">Default chime</span></small></label>
@@ -352,20 +347,18 @@
       </div>
       <h3 class="st-sec">Tasks</h3>
       <label class="st-row">
-        <span class="st-text"><strong>Max parallel tasks</strong><small>Across all projects. 2 only while the server has spare memory</small></span>
-        <select id="stParallel"><option value="1">1 (recommended)</option><option value="2">2</option></select>
+        <span class="st-text"><strong>Parallel tasks</strong><small id="stParHint">Checking what can run…</small></span>
+        <select id="stParallel" aria-describedby="stParHint"></select>
       </label>
-      <h3 class="st-sec">Reflection</h3>
-      <label class="st-row">
-        <span class="st-text"><strong>Reflection model</strong><small>Runs the "what next?" check when a queue empties</small></span>
-        <select id="stReflectModel"></select>
-      </label>
-      <div class="st-row">
-        <span class="st-text"><strong>Reflection fallbacks</strong><small>Where reflection (and the work it queues) moves when its model hits a limit</small></span>
-        <button type="button" class="chip fb-chip" id="stReflectBtn" aria-haspopup="dialog" aria-controls="fbModal">No fallbacks</button>
-      </div>
+      <h3 class="st-sec">Agents</h3>
+      <button type="button" class="st-row st-link" data-ext-open="skills"><span class="st-text"><strong>Skills &amp; tools</strong><small id="stExtSummary">Skills, MCP servers, subagents and personas</small></span><svg class="st-chev" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>
       <div id="stProject" hidden>
         <h3 class="st-sec" id="stProjectTitle">This project</h3>
+        <div class="st-row st-reflect">
+          <label class="st-text" for="stReflectModel"><strong>Reflection</strong><small>Plans what's next when the queue empties</small></label>
+          <select id="stReflectModel" aria-label="Reflection model"></select>
+          <button type="button" class="chip fb-chip" id="stReflectBtn" aria-haspopup="dialog" aria-controls="fbModal">No fallbacks</button>
+        </div>
         <div class="st-row st-dir">
           <label class="st-text" for="stDirection"><strong>Reflection direction</strong><small id="stDirHint">Optional. Leave blank and it decides what matters most</small></label>
           <textarea id="stDirection" rows="2" maxlength="1000" placeholder="e.g. Make it feel polished on phones" aria-describedby="stDirHint stDirSaved"></textarea>

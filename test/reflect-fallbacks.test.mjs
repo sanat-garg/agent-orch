@@ -64,8 +64,8 @@ test('reflection-queued tasks snapshot the project reflection fallbacks', { time
   }
 });
 
-// Settings sheet (kv reflect_settings): one reflection model + fallback list for every project, over each project's own list.
-test('reflection settings: the reflect task runs on the chosen model; the global list beats the project list', { timeout: 60000 }, async () => {
+// Settings → This project: each project's reflection model and fallbacks (projects.reflect_agent/_model/_fallbacks).
+test('reflection settings are per project: its reflect task runs on its model; the work it queues snapshots its list', { timeout: 60000 }, async () => {
   const dirs = ['cw-rs-', 'cw-rs-p-'].map((p) => fs.mkdtempSync(path.join(os.tmpdir(), p)));
   const [dataDir, root] = dirs;
   try {
@@ -82,31 +82,78 @@ test('reflection settings: the reflect task runs on the chosen model; the global
       const models = [];
       const query = ({ options }) => (async function* () {
         models.push(options.model || null);
-        yield { type: 'result', subtype: 'success', result: 'AGENT-ORCH-STATUS: done — ok' + (models.length === 1 ? block : ''), session_id: 's', num_turns: 1 };
+        yield { type: 'result', subtype: 'success', result: 'AGENT-ORCH-STATUS: done — ok' + (options.model === 'sonnet' ? block : ''), session_id: 's', num_turns: 1 };
       })();
       const o = createOrchestrator({ query, dataDir, config: { pollMs: 100 }, claudeEnv: { PATH: process.env.PATH, HOME: process.env.HOME }, getLimits: () => [], onSubscription: () => true,
         broadcast() {}, emitChat() {}, convoExists: () => false });
       const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
-      const p = path.join(root, 'proj'); fs.mkdirSync(p);
-      const before = o.stateView().reflect;
-      const saved = o.setReflectSettings({ model: { agent: 'claude', model: 'sonnet' }, fallbacks: [{ agent: 'codex', model: 'gpt-a' }] });
-      const pid = Number(db.prepare("INSERT INTO projects(path,name,status,perpetual,created_at) VALUES(?,?,'active',1,0)").run(p, 'proj').lastInsertRowid);
-      o.setReflectFallbacks(pid, [{ agent: 'claude', model: 'opus' }]);
+      const project = (name) => { const p = path.join(root, name); fs.mkdirSync(p);
+        return Number(db.prepare("INSERT INTO projects(path,name,status,perpetual,created_at) VALUES(?,?,'paused',1,0)").run(p, name).lastInsertRowid); };
+      const tuned = project('tuned'), plain = project('plain');
+      const saved = o.setReflectSettings(tuned, { model: { agent: 'claude', model: 'sonnet' }, fallbacks: [{ agent: 'codex', model: 'gpt-a' }] });
+      const missing = o.setReflectSettings(999, { model: null });
       // Reflection starts only after some work has landed and the queue is empty.
-      db.prepare("INSERT INTO tasks(project_id,kind,title,prompt,status,created_at) VALUES(?,'work','Seed','seed','done',0)").run(pid);
-      const rows = () => db.prepare("SELECT kind, agent, model, fallbacks FROM tasks WHERE title != 'Seed' ORDER BY id").all();
+      for (const pid of [tuned, plain]) db.prepare("INSERT INTO tasks(project_id,kind,title,prompt,status,created_at) VALUES(?,'work','Seed','seed','done',0)").run(pid);
+      db.exec("UPDATE projects SET status='active'");
+      const rows = (pid) => db.prepare("SELECT kind, agent, model, fallbacks FROM tasks WHERE project_id=? AND title != 'Seed' ORDER BY id").all(pid).map((r) => ({ ...r }));
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-      for (let i = 0; i < 300 && !rows().some((t) => t.kind === 'work'); i++) await sleep(100);
-      console.log(JSON.stringify({ before, saved, state: o.stateView().reflect, rows: rows(), models }));
+      for (let i = 0; i < 300 && !(rows(tuned).some((t) => t.kind === 'work') && rows(plain).some((t) => t.kind === 'reflect')); i++) await sleep(100);
+      console.log(JSON.stringify({ saved, missing, tuned: rows(tuned), plain: rows(plain), models }));
       process.exit(0);`;
     const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script, dataDir, root], { encoding: 'utf8', timeout: 50000 });
     const r = JSON.parse(stdout.trim().split('\n').pop());
-    assert.deepEqual(r.before, { agent: null, model: null, fallbacks: null });
-    assert.deepEqual(r.state, { agent: 'claude', model: 'sonnet', fallbacks: [{ agent: 'codex', model: 'gpt-a' }] });
-    const reflect = r.rows.find((t) => t.kind === 'reflect'), work = r.rows.find((t) => t.kind === 'work');
+    assert.deepEqual(r.saved.reflect, { agent: 'claude', model: 'sonnet', fallbacks: [{ agent: 'codex', model: 'gpt-a' }] });
+    assert.deepEqual(r.saved.project.reflect, r.saved.reflect);
+    assert.equal(r.missing.status, 404);
+    const reflect = r.tuned.find((t) => t.kind === 'reflect'), work = r.tuned.find((t) => t.kind === 'work');
     assert.deepEqual([reflect?.agent, reflect?.model], ['claude', 'sonnet'], JSON.stringify(r));
-    assert.equal(r.models[0], 'sonnet', 'the reflection ran on the chosen model');
-    assert.deepEqual(JSON.parse(work.fallbacks), [{ agent: 'codex', model: 'gpt-a' }], 'the global list wins over the project list');
+    assert.ok(r.models.includes('sonnet'), 'the reflection ran on the project\'s model');
+    assert.deepEqual(JSON.parse(work.fallbacks), [{ agent: 'codex', model: 'gpt-a' }], 'its queued work snapshots the project\'s list');
+    const other = r.plain.find((t) => t.kind === 'reflect');
+    assert.deepEqual([other?.agent, other?.model, other?.fallbacks], [null, null, null], 'another project keeps the defaults');
+  } finally {
+    for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
+  }
+});
+
+// Upgrading: the old every-project kv reflect_settings is copied into each project once; an install that ran one task at
+// a time (no stored parallelTasks 2) keeps that as a cap of 1 (maxTasks); a fresh install has no cap.
+test('migrations: global reflection settings move into every project; the old one-at-a-time default becomes a cap of 1', { timeout: 60000 }, async () => {
+  const dirs = ['cw-rsm-', 'cw-rsm-fresh-'].map((p) => fs.mkdtempSync(path.join(os.tmpdir(), p)));
+  const [dataDir, freshDir] = dirs;
+  try {
+    const url = (f) => JSON.stringify(new URL(`../${f}`, import.meta.url).href);
+    // Boots the orchestrator on dataDir, prints what `body` returns and exits.
+    const boot = async (dir, body) => {
+      const script = `import { createOrchestrator } from ${url('orchestrator.mjs')};
+        const [dataDir] = process.argv.slice(1);
+        const o = createOrchestrator({ query: () => (async function* () {})(), dataDir, disabled: true, claudeEnv: {}, getLimits: () => [], onSubscription: () => false,
+          broadcast() {}, emitChat() {}, convoExists: () => false });
+        console.log(JSON.stringify(await (async () => { ${body} })()));
+        process.exit(0);`;
+      const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script, dir], { encoding: 'utf8', timeout: 30000 });
+      return JSON.parse(stdout.trim().split('\n').pop());
+    };
+    const fresh = await boot(freshDir, 'return o.stateView().capacity;');
+    assert.equal(fresh.cap, null, 'a fresh install has no cap');
+    await boot(dataDir, 'return null;');
+    // Make it look like an install from before this change.
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
+    const pid = Number(db.prepare("INSERT INTO projects(path,name,status,created_at) VALUES('/x/a','a','paused',0)").run().lastInsertRowid);
+    const pid2 = Number(db.prepare("INSERT INTO projects(path,name,status,reflect_fallbacks,created_at) VALUES('/x/b','b','paused',?,0)").run('[{"agent":"claude","model":"opus"}]').lastInsertRowid);
+    db.prepare("INSERT INTO tasks(project_id,title,prompt,status,created_at) VALUES(?,'old','old','done',0)").run(pid);
+    db.prepare("INSERT OR REPLACE INTO kv(key,value) VALUES('reflect_settings',?)").run(JSON.stringify({ agent: 'codex', model: 'gpt-a', fallbacks: [{ agent: 'claude', model: 'sonnet' }] }));
+    db.exec("DELETE FROM kv WHERE key IN ('parallel_cap_migrated','parallel_settings')");
+    db.close();
+    const after = await boot(dataDir, `return { cap: o.stateView().capacity.cap, reflect: o.convoSnapshot({ cwd: '/x/a' }).project.reflect,
+      reflect2: o.convoSnapshot({ cwd: '/x/b' }).project.reflect };`);
+    assert.equal(after.cap, 1);
+    assert.deepEqual(after.reflect, { agent: 'codex', model: 'gpt-a', fallbacks: [{ agent: 'claude', model: 'sonnet' }] });
+    assert.deepEqual(after.reflect2, after.reflect, 'the global list replaced the project\'s (it used to win anyway)');
+    const db2 = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
+    assert.equal(db2.prepare("SELECT 1 AS x FROM kv WHERE key='reflect_settings'").get(), undefined, 'the global setting is gone');
+    db2.close();
   } finally {
     for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
   }

@@ -16,8 +16,12 @@
   // Agents keep one color everywhere (validated set: blue, orange, aqua); "you" is blue and the orchestrator orange.
   const AGENT_VAR = { codex: 'var(--sx-c1)', claude: 'var(--sx-c2)' };
   const agentColor = (a) => AGENT_VAR[a] || 'var(--sx-c3)';
-  const STACK_ORDER = ['codex', 'claude']; // adjacent pairs as validated: blue|orange|aqua
+  // Past Claude and Codex, agents fold into one "Other" (a fourth hue would be indistinguishable). Stack order keeps
+  // the validated neighbours: blue | orange | aqua.
+  const agentGroup = (a) => (AGENT_VAR[a] ? a : 'other');
+  const GROUPS = ['codex', 'claude', 'other'];
   const OUTCOMES = [['ok', 'Finished', 'var(--ok)'], ['rate_limited', 'Hit a limit', 'var(--warn)'], ['aborted', 'Stopped', 'var(--faint)'], ['error', 'Error', 'var(--danger)']];
+  const NOTES = /^\.(agent-orch|ao2)\//; // the agents' own memory files (journal, context), touched by every task
   const STEER = { reorder: 'Reordered', cancel: 'Cancelled', settings: 'Changed settings', delegate: 'Moved to another model', urgency: 'Changed urgency', retry: 'Retried', review: 'Reviewed', pause: 'Paused or handed off' };
   const STOP = new Set(('a an the and or of for to in on with me my our your i we you it its it\'s this that these those please can could would should make ' +
     'be is are was were been being do does did done have has had not no yes so if then than but also just like as at by from into out up down ' +
@@ -45,7 +49,8 @@
   const countBy = (xs, f) => { const m = new Map(); for (const x of xs) { const k = f(x); if (k != null) m.set(k, (m.get(k) || 0) + 1); } return m; };
   const top = (m) => [...m].sort((a, b) => b[1] - a[1]);
   const words = (s) => String(s || '').toLowerCase().replace(/```[\s\S]*?```/g, ' ').replace(/https?:\/\/\S+/g, ' ').match(/[a-z][a-z'-]{2,}/g) || [];
-  const safeModel = (agent, model) => { try { return modelName(agent, model); } catch { return model || agent; } };
+  // A model's display name; runs from before models were recorded have none.
+  const safeModel = (agent, model) => { if (!model) return 'Model not recorded'; try { return modelName(agent, model); } catch { return model; } };
   const safeAgent = (a) => { try { return agentLabel(a); } catch { return a; } };
   const svgNs = (tag, attrs = {}) => { const n = document.createElementNS('http://www.w3.org/2000/svg', tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v); return n; };
 
@@ -408,7 +413,7 @@
 
     // Quota use: how full each Claude 5-hour window got before it reset.
     for (const [agent, win, name] of [['claude', 'five_hour', '5-hour'], ['claude', 'seven_day', 'weekly'], ['codex', '5h', 'Codex 5-hour']]) {
-      const ws = c.windows.filter((w) => w.agent === agent && w.window === win && w.n >= 3);
+      const ws = c.windows.filter((w) => w.agent === agent && w.window === win && w.n >= 2);
       if (ws.length < 2) continue;
       const avg = sum(ws, (w) => w.peak) / ws.length, full = ws.filter((w) => w.peak >= 90).length;
       add(win === 'five_hour' ? 85 : 55, 'Quota', `${name} windows peaked at ${Math.round(avg)}% on average before resetting (${full} of ${ws.length} reached 90%+)${avg < 70 ? ` — about ${Math.round(100 - avg)}% of that quota went unused` : ''}.`);
@@ -421,11 +426,15 @@
 
     // Speed by model: median finished run.
     const byModel = new Map();
-    for (const r of c.runs) if (r.outcome === 'ok' && r.end && r.purpose === 'work') (byModel.get(`${r.agent}|${r.model}`) || byModel.set(`${r.agent}|${r.model}`, []).get(`${r.agent}|${r.model}`)).push(r.end - r.start);
+    for (const r of c.runs) {
+      if (r.outcome !== 'ok' || !r.end || r.purpose !== 'work' || !r.model) continue;
+      const k = `${safeModel(r.agent, r.model)} (${safeAgent(r.agent)})`;
+      (byModel.get(k) || byModel.set(k, []).get(k)).push(r.end - r.start);
+    }
     const meds = [...byModel].filter(([, xs]) => xs.length >= 3).map(([k, xs]) => [k, median(xs)]).sort((a, b) => a[1] - b[1]);
     if (meds.length >= 2) {
-      const [fk, fv] = meds[0], [sk, sv] = meds[meds.length - 1], name = (k) => { const [a, mo] = k.split('|'); return safeModel(a, mo === 'null' ? null : mo); };
-      if (sv / fv >= 1.3) add(50, 'Agents', `${name(fk)} finishes a task run in ${dur(fv)} (median); ${name(sk)} takes ${dur(sv)} — ${(sv / fv).toFixed(1)}× as long.`);
+      const [fk, fv] = meds[0], [sk, sv] = meds[meds.length - 1];
+      if (sv / fv >= 1.3) add(50, 'Agents', `${fk} finishes a task run in ${dur(fv)} (median); ${sk} takes ${dur(sv)} — ${(sv / fv).toFixed(1)}× as long.`);
     }
 
     // Cache.
@@ -433,7 +442,8 @@
     if (inAll > 1e6 && m.tok.cached / inAll > 0.5) add(45, 'Tokens', `${pct(m.tok.cached / inAll)} of input tokens were cache reads — ${compact(m.tok.cached)} tokens the agents didn't have to re-read from scratch.`);
     if (m.shipped.length >= 3) {
       const perTask = median(m.shipped.map((t) => sum(c.runs.filter((r) => r.task === t.id), (r) => r.in + r.out + r.cached)).filter((x) => x > 0));
-      if (perTask) add(40, 'Tokens', `A typical shipped task used ${compact(perTask)} tokens and ${num(median(m.shipped.map((t) => sum(c.commits.filter((x) => x.task === t.id), (x) => x.add + x.del))) || 0)} changed lines.`);
+      const lines = median(m.shipped.map((t) => sum(c.commits.filter((x) => x.task === t.id), (x) => x.add + x.del)).filter((x) => x > 0));
+      if (perTask) add(40, 'Tokens', `A typical shipped task used ${compact(perTask)} tokens${lines ? ` and changed ${num(lines)} lines` : ''}.`);
     }
 
     // Busiest day and streak.
@@ -445,7 +455,7 @@
 
     // Hotspot.
     const files = countBy(c.commits.flatMap((x) => x.files), (f) => f);
-    const hot = top(files).filter(([f]) => !/^\.agent-orch\//.test(f))[0];
+    const hot = top(files).filter(([f]) => !NOTES.test(f))[0];
     if (hot && hot[1] >= 5) add(42, 'Code', `Hotspot: ${hot[0]} changed in ${plural(hot[1], 'commit')} — ${pct(hot[1] / Math.max(1, c.commits.length))} of all commits.`);
     const agentLines = sum(c.commits.filter((x) => x.by === 'task' || x.by === 'reflect'), (x) => x.add), allLines = sum(c.commits, (x) => x.add);
     if (allLines > 200) add(47, 'Code', `Agents wrote ${pct(agentLines / allLines)} of the lines added (${num(agentLines)} of ${num(allLines)}); the rest came from chat edits and manual commits.`);
@@ -483,7 +493,7 @@
     return xs.length >= 2 ? median(xs) : null;
   }
 
-  function insightList(list, n = 8) {
+  function insightList(list, n = 10) {
     if (!list.length) return empty('Not enough activity in this range for insights yet.');
     const ul = el('ul', 'sx-insights');
     for (const i of list.slice(0, n)) { const li = el('li'); li.append(el('span', 'sx-tag', i.tag), el('span', 'sx-ins', i.text)); ul.append(li); }
@@ -520,7 +530,7 @@
     );
     out.push(g);
 
-    const ins = card('What stands out', 'Generated from this range');
+    const ins = card('What stands out', 'Generated from this range', 'wide');
     ins.append(insightList(insights(c, m, pm)));
     out.push(ins);
 
@@ -549,8 +559,9 @@
     if (longest) rows.push(['Longest task', `#${longest[0]} ${title(longest[0])}`, hrs(longest[1].ms)]);
     if (hungriest) rows.push(['Most tokens', `#${hungriest[0]} ${title(hungriest[0])}`, compact(hungriest[1].tok)]);
     if (stubborn && stubborn[1].runs > 1) rows.push(['Most sessions', `#${stubborn[0]} ${title(stubborn[0])}`, plural(stubborn[1].runs, 'session')]);
-    const fastest = m.shipped.filter((t) => t.started).sort((a, b) => (a.finished - a.started) - (b.finished - b.started))[0];
-    if (fastest) rows.push(['Fastest ship', `#${fastest.id} ${fastest.title}`, dur(fastest.finished - fastest.started)]);
+    // Fastest ship: least agent time across all of a shipped task's runs.
+    const fastest = m.shipped.map((t) => [t, byTask.get(t.id)?.ms]).filter(([, v]) => v > 0).sort((a, b) => a[1] - b[1])[0];
+    if (fastest) rows.push(['Fastest ship', `#${fastest[0].id} ${fastest[0].title}`, dur(fastest[1])]);
     const biggest = [...c.commits].filter((x) => x.by !== 'other').sort((a, b) => (b.add + b.del) - (a.add + a.del))[0];
     if (biggest) rows.push(['Biggest commit', `${biggest.sha}${biggest.task ? ` · task #${biggest.task}` : biggest.by === 'you' ? ' · your chat edits' : ''}`, `+${num(biggest.add)} −${num(biggest.del)}`]);
     if (!rows.length) { r.append(empty('No runs in this range.')); return r; }
@@ -600,8 +611,11 @@
     st.append(c.owner.length ? bars(top(steer).map(([k, v]) => ({ label: STEER[k] || k, v, color: 'var(--sx-c1)' }))) : empty('No reorders, cancels or setting changes in this range.'));
     out.push(st);
 
-    const ask = card('What you ask for', 'Most-used words in your messages');
-    const wc = top(countBy(wordsAll.filter((w) => !STOP.has(w) && w.length > 2), (w) => w)).slice(0, 24);
+    const ask = card('What you ask for', 'Most-used words in your messages', 'wide');
+    const counts = countBy(wordsAll.filter((w) => !STOP.has(w) && w.length > 2), (w) => w);
+    // "tasks" counts as "task" when both appear.
+    for (const [w, n] of [...counts]) if (w.endsWith('s') && counts.has(w.slice(0, -1))) { counts.set(w.slice(0, -1), counts.get(w.slice(0, -1)) + n); counts.delete(w); }
+    const wc = top(counts).slice(0, 24);
     if (wc.length) {
       const chips = el('div', 'sx-words');
       const maxW = wc[0][1];
@@ -623,49 +637,68 @@
   function agentsTab(c, m) {
     const out = [];
     // Agent time split by agent, then a card per model.
-    const byAgent = new Map();
-    for (const r of c.runs) byAgent.set(r.agent, (byAgent.get(r.agent) || 0) + runMs(r, c.from, c.to));
-    const order = [...STACK_ORDER, ...[...byAgent.keys()].filter((a) => !STACK_ORDER.includes(a)).sort()];
+    const byAgent = new Map(), others = new Set();
+    for (const r of c.runs) {
+      const g = agentGroup(r.agent);
+      if (g === 'other') others.add(safeAgent(r.agent));
+      byAgent.set(g, (byAgent.get(g) || 0) + runMs(r, c.from, c.to));
+    }
     const share = card('Agent time by agent', `${hrs(m.agentMs)} in total`, 'wide');
-    share.append(byAgent.size ? splitBar(order.filter((a) => byAgent.has(a)).map((a) => ({ label: safeAgent(a), v: byAgent.get(a), color: agentColor(a) })), hrs) : empty('No runs in this range.'));
+    const groupLabel = (g) => (g === 'other' ? (others.size === 1 ? [...others][0] : `Other (${[...others].join(', ')})`) : safeAgent(g));
+    share.append(byAgent.size ? splitBar(GROUPS.filter((g) => byAgent.has(g)).map((g) => ({ label: groupLabel(g), v: byAgent.get(g), color: agentColor(g) })), hrs) : empty('No runs in this range.'));
     out.push(share);
 
+    // One row per model (by display name, so an alias and its full id are one row).
     const models = new Map();
     for (const r of c.runs) {
-      const k = `${r.agent}|${r.model || ''}`;
-      const b = models.get(k) || { agent: r.agent, model: r.model, runs: [], ms: 0, tok: 0, out: 0, cached: 0, in: 0 };
+      const label = safeModel(r.agent, r.model), k = `${r.agent}|${label}`;
+      const b = models.get(k) || { agent: r.agent, label, runs: [], ms: 0, tok: 0, cached: 0, in: 0 };
       b.runs.push(r); b.ms += runMs(r, c.from, c.to);
-      if (c.inR(r.end ?? r.start)) { b.tok += r.in + r.out + r.cached; b.out += r.out; b.cached += r.cached; b.in += r.in; }
+      if (c.inR(r.end ?? r.start)) { b.tok += r.in + r.out + r.cached; b.cached += r.cached; b.in += r.in; }
       models.set(k, b);
     }
     const mc = card('Models', 'Every model that ran a task or reflection in this range', 'wide');
+    const COLS = ['Model', 'Agent time', 'Runs', 'Median run', 'Shipped', 'Tokens', 'Per task', 'Cache hits', 'Outcomes'];
     if (!models.size) mc.append(empty('No runs in this range.'));
-    const list = el('div', 'sx-models');
-    for (const b of [...models.values()].sort((x, y) => y.ms - x.ms)) {
-      const row = el('div', 'sx-model');
-      const head = el('div', 'sx-model-head');
-      const sw = el('i', 'sx-sw'); sw.style.background = agentColor(b.agent);
-      head.append(sw, el('strong', '', safeModel(b.agent, b.model)), el('span', 'sx-model-agent', safeAgent(b.agent)));
-      const ok = b.runs.filter((r) => r.outcome === 'ok');
-      const shippedN = m.shipped.filter((t) => t.agent === b.agent && (t.model || '') === (b.model || '')).length;
-      const facts = el('div', 'sx-facts');
-      for (const [k, v] of [['Agent time', hrs(b.ms)], ['Runs', num(b.runs.length)], ['Finished', b.runs.length ? pct(ok.length / b.runs.length) : '–'],
-        ['Median run', ok.length ? dur(median(ok.filter((r) => r.end).map((r) => r.end - r.start))) : '–'], ['Tasks shipped', num(shippedN)],
-        ['Tokens', compact(b.tok)], ['Cache hits', b.in + b.cached ? pct(b.cached / (b.in + b.cached)) : '–'], ['Per shipped task', shippedN ? compact(b.tok / shippedN) : '–']]) {
-        const f = el('span'); f.append(el('small', '', k), el('b', '', v)); facts.append(f);
+    else {
+      const table = el('div', 'sx-table');
+      table.setAttribute('role', 'table');
+      table.setAttribute('aria-label', 'Models');
+      const hr = el('div', 'sx-tr sx-th');
+      hr.setAttribute('role', 'row');
+      for (const h of COLS) { const x = el('span', '', h); x.setAttribute('role', 'columnheader'); if (h === 'Per task') x.title = 'Tokens per shipped task'; hr.append(x); }
+      table.append(hr);
+      for (const b of [...models.values()].sort((x, y) => y.ms - x.ms)) {
+        const ok = b.runs.filter((r) => r.outcome === 'ok');
+        const shippedN = m.shipped.filter((t) => (t.agent || 'claude') === b.agent && safeModel(t.agent || 'claude', t.model) === b.label).length;
+        const tr = el('div', 'sx-tr');
+        tr.setAttribute('role', 'row');
+        const name = el('span', 'sx-td-name');
+        const sw = el('i', 'sx-sw'); sw.style.background = agentColor(b.agent);
+        const nm = el('span'); nm.append(el('strong', '', b.label), el('small', '', safeAgent(b.agent)));
+        name.append(sw, nm);
+        const cells = [name];
+        for (const [i, v] of [hrs(b.ms), num(b.runs.length), ok.length ? dur(median(ok.filter((r) => r.end).map((r) => r.end - r.start))) : '–', num(shippedN),
+          compact(b.tok), shippedN ? compact(b.tok / shippedN) : '–', b.in + b.cached ? pct(b.cached / (b.in + b.cached)) : '–'].entries()) {
+          const x = el('span', 'sx-td', v); x.dataset.label = COLS[i + 1]; cells.push(x);
+        }
+        const oc = countBy(b.runs, (r) => r.outcome || 'running');
+        const outcome = el('span', 'sx-td sx-outcome');
+        outcome.dataset.label = 'Outcomes';
+        const bar = el('span', 'sx-split-bar thin');
+        for (const [id, label, color] of OUTCOMES) {
+          const v = oc.get(id) || 0; if (!v) continue;
+          const seg = el('i'); seg.style.flexGrow = String(v); seg.style.background = color; seg.dataset.tip = `${plural(v, 'run')}\n${label}`; bar.append(seg);
+        }
+        outcome.append(bar, el('small', '', b.runs.length ? `${pct(ok.length / b.runs.length)} finished` : ''));
+        outcome.title = OUTCOMES.filter(([id]) => oc.get(id)).map(([id, label]) => `${label} ${oc.get(id)}`).join(' · ');
+        cells.push(outcome);
+        for (const x of cells) x.setAttribute('role', 'cell');
+        tr.append(...cells);
+        table.append(tr);
       }
-      const oc = countBy(b.runs, (r) => r.outcome || 'running');
-      const outcome = el('div', 'sx-outcome');
-      const bar = el('div', 'sx-split-bar thin');
-      for (const [id, label, color] of OUTCOMES) {
-        const v = oc.get(id) || 0; if (!v) continue;
-        const seg = el('i'); seg.style.flexGrow = String(v); seg.style.background = color; seg.dataset.tip = `${plural(v, 'run')}\n${label}`; bar.append(seg);
-      }
-      outcome.append(bar, el('span', 'sx-outcome-text', OUTCOMES.filter(([id]) => oc.get(id)).map(([id, label]) => `${label} ${oc.get(id)}`).join(' · ')));
-      row.append(head, facts, outcome);
-      list.append(row);
+      mc.append(table, legend(OUTCOMES.map(([, label, color]) => [label, color])));
     }
-    if (models.size) mc.append(list);
     out.push(mc);
 
     // Plan quota: each finished window as a meter of how much of it was used.
@@ -771,12 +804,18 @@
 
     const wc = card('Who wrote the code', 'Lines added, by where the commit came from');
     const byWho = (k) => sum(c.commits.filter((x) => x.by === k), (x) => x.add);
-    if (c.commits.length) wc.append(splitBar([{ label: 'Your chat and manual edits', v: byWho('you') + byWho('other'), color: 'var(--sx-c1)' }, { label: 'Agent tasks', v: byWho('task'), color: 'var(--sx-c2)' }, { label: 'Reflection', v: byWho('reflect'), color: 'var(--sx-c3)' }], (v) => `${num(v)} lines`));
-    else wc.append(empty('No commits in this range.'));
+    const nWho = (k) => c.commits.filter((x) => x.by === k).length;
+    if (c.commits.length) {
+      const parts = (f, unit) => [{ label: 'You (chat and manual edits)', v: f('you') + f('other'), color: 'var(--sx-c1)' }, { label: 'Agent tasks', v: f('task'), color: 'var(--sx-c2)' }, { label: 'Reflection', v: f('reflect'), color: 'var(--sx-c3)' }]
+        .map((p) => ({ ...p, unit }));
+      wc.append(el('h4', 'sx-sub', 'Lines added'), splitBar(parts(byWho), (v) => `${num(v)} lines`), el('h4', 'sx-sub', 'Commits'), splitBar(parts(nWho), (v) => plural(v, 'commit')));
+      const perTask = median(c.commits.filter((x) => x.by === 'task').map((x) => x.add + x.del));
+      if (perTask != null) wc.append(el('p', 'sx-note', `A typical agent commit changes ${num(perTask)} lines; ${pct(c.commits.filter((x) => x.by === 'task' && x.files.some((f) => /(^|\/)test\/|\.test\./.test(f))).length / Math.max(1, nWho('task')))} of them touch tests.`));
+    } else wc.append(empty('No commits in this range.'));
     out.push(wc);
 
-    const hc = card('Hotspots', 'Files changed in the most commits');
-    const files = top(countBy(c.commits.flatMap((x) => x.files), (f) => f)).slice(0, 10);
+    const hc = card('Hotspots', 'Files changed in the most commits (the agents\' .agent-orch notes left out)');
+    const files = top(countBy(c.commits.flatMap((x) => x.files.filter((f) => !NOTES.test(f))), (f) => f)).slice(0, 10);
     hc.append(files.length ? bars(files.map(([f, v]) => ({ label: f, v, text: plural(v, 'commit'), tip: `${plural(v, 'commit')}\n${f}` }))) : empty('No commits in this range.'));
     out.push(hc);
     return out;

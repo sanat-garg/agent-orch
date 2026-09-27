@@ -100,11 +100,16 @@ test('the orchestrator bar is a status word plus Queue and Pause only', () => {
   assert.match(appCss, /\.ob-pause \{ color: var\(--accent\); border-color: var\(--accent\); background: transparent;/);
 });
 
-test('the sidebar gear opens Settings: sound + MP3 upload, max parallel tasks, reflection model and fallbacks', () => {
+test('the sidebar gear opens Settings: sound + MP3 upload, parallel tasks (what can run, a cap), per-project reflection', () => {
   const side = indexHtml.slice(indexHtml.indexOf('id="sidebar"'), indexHtml.indexOf('</aside>'));
   assert.match(side, /id="settingsBtn"[^>]*aria-label="Settings"/);
   const sheet = indexHtml.slice(indexHtml.indexOf('id="settingsModal"'), indexHtml.indexOf('id="fbModal"'));
-  assert.deepEqual([...sheet.matchAll(/class="st-sec"[^>]*>([^<]+)</g)].map((m) => m[1]), ['Sound', 'Tasks', 'Reflection', 'This project']);
+  const sections = [...sheet.matchAll(/class="st-sec"[^>]*>([^<]+)</g)].map((m) => m[1]);
+  assert.deepEqual(sections, ['Sound', 'Tasks', 'Agents', 'This project']);
+  // Skills & tools is one row (a summary line) that opens the sheet, whose tabs hold the four kinds.
+  assert.deepEqual([...sheet.matchAll(/data-ext-open="(\w+)"/g)].map((m) => m[1]), ['skills']);
+  assert.match(sheet, /id="stExtSummary"/);
+  assert.match(sheet, /<div class="modal sheet" id="extModal" hidden>[\s\S]*role="tablist"[\s\S]*id="extBody" role="tabpanel"/);
   assert.match(sheet, /id="stSoundUpload"[\s\S]*id="stSoundFile" accept="audio\/mpeg,\.mp3"[\s\S]*id="stSound"[\s\S]*id="stParallel"[\s\S]*id="stReflectModel"[\s\S]*id="stReflectBtn"[\s\S]*id="stDirection"/);
   // Sound is one row: the switch, the current file, Test and Upload together.
   const sound = sheet.slice(sheet.indexOf('class="st-row st-sound"'), sheet.indexOf('class="st-sec">Tasks'));
@@ -112,9 +117,17 @@ test('the sidebar gear opens Settings: sound + MP3 upload, max parallel tasks, r
   assert.equal((sound.match(/class="st-row/g) || []).length, 1);
   // Orchestrator Mode already means "keep improving": no toggle for it.
   assert.doesNotMatch(sheet + appJs, /stPerpetual|Keep improving/);
+  // Reflection is per project and one row: the model and its fallbacks together, inside This project.
+  const project = sheet.slice(sheet.indexOf('id="stProject"'));
+  const reflect = project.slice(project.indexOf('class="st-row st-reflect"'), project.indexOf('st-dir'));
+  assert.ok(reflect.includes('id="stReflectModel"') && reflect.includes('id="stReflectBtn"'));
+  assert.match(appJs, /\/api\/orch\/projects\/\$\{O\.project\.id\}\/reflect-settings/);
+  // Parallel tasks: a live readout and a cap, not a 1-or-2 choice.
+  assert.match(sheet, /id="stParHint"/);
+  assert.doesNotMatch(sheet, /1 \(recommended\)|Max parallel tasks/);
+  assert.match(appJs, /saveParallel\(\{ maxTasks: /);
   assert.doesNotMatch(sheet, /stRank|stRoutes|Project priority|Routes/, 'no priority or routes rows in project settings');
   assert.match(appJs, /openFallbacks\(reflectFallbacks\(\), /);
-  assert.match(appJs, /url: '\/api\/orch\/reflect-settings'/);
   assert.match(appJs, /fetch\('\/api\/settings\/sound', \{ method: 'POST'/);
   assert.match(appJs, /sound\?\.custom \? `\/api\/settings\/sound\?v=\$\{sound\.at\}` : DEFAULT_TASK_SOUND/);
 });

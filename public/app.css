@@ -771,6 +771,11 @@ label.st-row, label.st-text { cursor: pointer; }
 /* Sound: one row (title and file | Test, Upload, Reset | the switch); on phones the buttons and switch go under the text. */
 .st-sound .st-switch { margin-left: 4px; }
 @media (max-width: 600px) { .st-sound .st-switch { margin-left: auto; } }
+/* Reflection: one row (model, then its fallbacks); on phones both go under the text, the model select taking the width. */
+.st-reflect { flex-wrap: wrap; row-gap: 8px; }
+.st-reflect .st-text { flex-basis: 100%; }
+.st-reflect select { flex: 1; min-width: 0; max-width: none; }
+.st-reflect .fb-chip { flex: none; height: 34px; }
 .st-dir { flex-wrap: wrap; }
 .st-dir .st-text { flex-basis: 100%; }
 .st-dir textarea { flex-basis: 100%; min-height: 56px; max-height: 180px; resize: vertical; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; font-size: 13.5px; line-height: 1.4; }

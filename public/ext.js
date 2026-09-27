@@ -6,16 +6,16 @@
 // store, state, currentConvo, menuOpt, bindMenu, closeSettings, CM).
 const EX = { data: null, err: '', tab: 'skills', edit: null, dirty: false, saving: false, lastFocus: null, seq: 0, personas: null, draft: store.get('cw.persona') || null };
 const EX_KINDS = {
-  skills: { one: 'skill', key: (s) => s.folder,
+  skills: { label: 'Skills', one: 'skill', key: (s) => s.folder,
     sub: 'Instructions, and any files they need, that an agent loads when a task calls for them. Saved in ~/.claude/skills and ~/.codex/skills, so chats, tasks and the Terminal all use them.',
     empty: 'No skills yet. Write one, or import a folder from GitHub (for example from github.com/anthropics/skills).' },
-  mcp: { one: 'server', key: (s) => s.name,
-    sub: 'Servers that give agents extra tools: a browser, a database, docs, other apps. agent-orch starts each server that is on for every chat turn and task run on this server, so each one uses some memory while they run.',
+  mcp: { label: 'MCP servers', one: 'server', key: (s) => s.name,
+    sub: 'Servers that give agents extra tools: a browser, a database, docs, other apps. agent-orch starts the ones that are on for its chat turns and task runs on this server (not for the Terminal), so each uses some memory while they run.',
     empty: 'No MCP servers yet.' },
-  agents: { one: 'subagent', key: (a) => a.file,
+  agents: { label: 'Subagents', one: 'subagent', key: (a) => a.file,
     sub: 'Specialists Claude Code can hand part of a task to, each with its own instructions, tools and model. Saved in ~/.claude/agents. Claude Code only: Codex has no subagents.',
     empty: 'No subagents yet.' },
-  personas: { one: 'persona', key: (p) => p.id,
+  personas: { label: 'Personas', one: 'persona', key: (p) => p.id,
     sub: "How a chat's agents work and talk. Pick one per chat with the persona button next to the model; the chat's planner and tasks follow it too.",
     empty: 'No personas yet. Start from a suggestion or write your own.' },
 };
@@ -51,12 +51,15 @@ function exApply(r) {
   exCounts();
   exRenderChip();
 }
+// Settings → Agents → Skills & tools: one line summing up what is set up ("2 skills · 1 MCP server"), enabled MCP servers only.
 function exCounts() {
-  const ids = { skills: 'stExtSkills', mcp: 'stExtMcp', agents: 'stExtAgents', personas: 'stExtPersonas' };
-  for (const [k, id] of Object.entries(ids)) {
-    const list = EX.data?.[k];
-    $(id).textContent = list ? String(k === 'mcp' ? list.filter((s) => s.enabled !== false).length : list.length) : '';
-  }
+  if (!EX.data) return;
+  const names = { skills: ['skill', 'skills'], mcp: ['MCP server', 'MCP servers'], agents: ['subagent', 'subagents'], personas: ['persona', 'personas'] };
+  const parts = Object.entries(names).map(([k, [one, many]]) => {
+    const list = EX.data[k] || [], n = k === 'mcp' ? list.filter((s) => s.enabled !== false).length : list.length;
+    return n ? `${n} ${n === 1 ? one : many}` : null;
+  }).filter(Boolean);
+  $('stExtSummary').textContent = parts.length ? parts.join(' · ') : 'Skills, MCP servers, subagents and personas';
 }
 
 // ----- sheet
@@ -133,7 +136,7 @@ function exRender() {
   else if (!items.length) frag.append(el('p', 'ext-empty', k.empty));
   else {
     const ul = el('ul', 'ext-list');
-    ul.setAttribute('aria-label', EX.tab === 'mcp' ? 'MCP servers' : EX.tab[0].toUpperCase() + EX.tab.slice(1));
+    ul.setAttribute('aria-label', k.label);
     for (const it of items) ul.append(exRow(it));
     frag.append(ul);
   }
@@ -249,8 +252,8 @@ function exEdit(item, mode = null) {
   const head = el('div', 'ext-edit-head');
   const back = exBtn('', 'link-btn ext-back', () => exBack());
   back.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
-  back.append(el('span', null, 'All'));
-  back.setAttribute('aria-label', `Back to all ${k.one === 'server' ? 'MCP servers' : `${k.one}s`}`);
+  back.append(el('span', null, k.label));
+  back.setAttribute('aria-label', `Back to ${k.label}`);
   const title = mode === 'import' ? 'Import a skill from GitHub' : item ? item.name : `New ${k.one}`;
   head.append(back, el('h3', null, title));
   form.append(head);

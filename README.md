@@ -155,6 +155,15 @@ checks the one agent it is showing (`POST /api/limits/<agent>/refresh`, or the C
 minute per agent. Orchestrated Claude runs still report their limits as they go, and a limit hit by any run is
 recorded when it happens.
 
+**Stats.** The chart button at the foot of the sidebar opens Stats: what you and the orchestrator did, for all
+time or the last 30 days, 7 days or 24 hours, for every project or just one. *Overview* leads with tasks shipped and
+generated insights (how much agent time ran while you were away, how full each 5-hour window got before it reset, what
+the done-when checks caught, ask-to-ship time), a who-worked-when heatmap and records. *You* covers your rhythm, how you
+steer and what you ask for; *Agents* compares every model (time, runs, outcomes, tokens per shipped task, cache hits)
+and shows plan-window use, limit hits and hand-offs; *Projects* shows code growth, who wrote the code and hotspots.
+`GET /api/stats` (stats.mjs) returns the raw records from the task DB, chat logs, usage log, server metrics and git
+history; the browser does the slicing, in your timezone.
+
 **Subscription only, never API keys.** Each adapter removes its billing variables from the environment
 before starting the CLI:
 
@@ -194,6 +203,25 @@ When a queued task's model is at its usage limit, it moves to the first model in
 signed in, still lists that model, isn't blocked and has no usage window at 90% or more. Each move is
 recorded on the task. With an empty list, the task waits for its own model. Limits are per agent, so one agent's
 limit never blocks another's.
+
+## Skills, MCP servers, subagents and personas
+
+**Settings → Skills & tools** (the sidebar gear) has one tab for each:
+
+- **Skills** are instructions, plus any files they need, that an agent loads when a task calls for them. They are
+  saved where the CLIs look for them: `~/.claude/skills/<name>/SKILL.md` for Claude Code and `~/.codex/skills/<name>/`
+  for Codex. Chats, tasks and the Terminal all use them. Skills you installed by hand show up there too. You can write
+  one, or import a folder from GitHub (for example `https://github.com/anthropics/skills/tree/main/skills/pdf`). An
+  import is a shallow, sparse clone of just that folder, so private repos work with your git credentials.
+- **MCP servers** give agents extra tools. They are saved in `data/extensions/mcp.json` and started for every chat
+  turn and task run on this server. They reach the CLIs through `0600` files, never command-line arguments:
+  Claude gets `--mcp-config data/extensions/claude-mcp.json` and Codex gets `-p agent-orch`
+  (`~/.codex/agent-orch.config.toml`). The page shows saved env values and headers as `••••••`.
+- **Subagents** are specialists Claude Code can hand part of a task to: `~/.claude/agents/<name>.md` (Claude only).
+- **Personas** set how a chat's agents work and talk. Pick one per chat with the persona button in the composer.
+  It is added to that chat's system prompt and to its project's planner and task runs, and applies from the next message.
+
+Worker machines get a task's persona, but not yet the skills, subagents or MCP servers.
 
 ## Parallel tasks and git worktrees
 
@@ -326,6 +354,7 @@ All runtime state lives in `data/` (or `CW_DATA_DIR`). The JSON state files (`au
 | `orchestrator/runs/` | per-run agent logs |
 | `orchestrator/lock` | PID of the process that runs the orchestrator; a second instance on the same dir won't schedule tasks |
 | `orchestrator/bin/` | `python`/`pip` shims |
+| `extensions/` | MCP servers (`mcp.json`, with their secrets), the `--mcp-config` file Claude runs read, and personas (`personas.json`) |
 
 `data/` is in `.gitignore` and must never be committed. It contains the password hash, live session
 tokens and private chat content. An earlier history of this repo tracked `data/auth.json`, which is why

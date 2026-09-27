@@ -117,7 +117,7 @@ export function createUsageLog(dataDir, { now = Date.now } = {}) {
       state = null;
       return lines.length - keep.length;
     },
-    history(range) { return usageHistory(readRecords(file, now() - KEEP_MS), range, now()); },
+    history(range, agents = null) { return usageHistory(readRecords(file, now() - KEEP_MS), range, now(), agents); },
   };
 }
 
@@ -148,7 +148,8 @@ const WINDOW_MS = { '5h': 5 * 3600e3, five_hour: 5 * 3600e3, weekly: 7 * 86400e3
 const windowMs = (w) => WINDOW_MS[w] ?? (/(?:^|-)5h$/.test(w) ? 5 * 3600e3 : /weekly$/.test(w) ? 7 * 86400e3 : null);
 
 // The /api/usage/history payload: per agent, window series, token buckets, limit events and current status.
-export function usageHistory(records, rangeKey, at = Date.now()) {
+// onlyAgents: the ids to include (null = all); records of removed agents (still in the 30-day log) are left out.
+export function usageHistory(records, rangeKey, at = Date.now(), onlyAgents = null) {
   const range = RANGES[rangeKey] ? rangeKey : '24h';
   const { ms, bucket } = RANGES[range];
   const from = at - ms;
@@ -156,7 +157,7 @@ export function usageHistory(records, rangeKey, at = Date.now()) {
   const of = (id) => (agents[id] ||= { windows: {}, tokens: [], limits: [], status: { windows: {}, blocked: false, resetsAt: null } });
   const byAgent = new Map();
   for (const r of records) {
-    if (!r?.agent || !Number.isFinite(r.t)) continue;
+    if (!r?.agent || !Number.isFinite(r.t) || (onlyAgents && !onlyAgents.includes(r.agent))) continue;
     if (!byAgent.has(r.agent)) byAgent.set(r.agent, []);
     byAgent.get(r.agent).push(r);
   }

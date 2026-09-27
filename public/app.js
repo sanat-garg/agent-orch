@@ -1712,15 +1712,16 @@ function chatFallbacks() {
 // when their model is at its limit, and the work they queue snapshots it. Its primary is the reflection model: the
 // Settings choice, else what a reflect task routes to (a 'reflect' route, else the chat's model).
 function reflectPrimary() {
-  const r = O.state?.reflect || {};
+  const r = O.project?.reflect || {};
   return r.agent ? { agent: r.agent, model: r.model || '' } : O.project?.reflect_route || O.project?.work_route || { agent: 'claude', model: '' };
 }
+// Per project (Settings → This project): PUT /api/orch/projects/:id/reflect-settings.
 function reflectFallbacks() {
-  const r = () => O.state?.reflect || {};
+  const r = () => O.project?.reflect || {};
   return { what: 'reflection tasks', primary: reflectPrimary(),
     list: () => r().fallbacks ?? null,
-    url: '/api/orch/reflect-settings',
-    apply: (list) => { if (O.state) O.state.reflect = { ...r(), fallbacks: list }; renderReflectBtn(); },
+    url: O.project ? `/api/orch/projects/${O.project.id}/reflect-settings` : null,
+    apply: (list) => { if (O.project) O.project.reflect = { ...r(), fallbacks: list }; renderReflectBtn(); },
     confirmedOf: (res) => res.reflect?.fallbacks ?? null };
 }
 // One task's own fallback snapshot (PATCH /api/orch/tasks/:id/fallbacks). reset: back to its chat's list when it differs.
@@ -4024,7 +4025,7 @@ $('obPause').addEventListener('click', async () => {
   } catch (e) { toast(e.message, { kind: 'error' }); }
   finally { obTogglePending = null; renderOrchBar(); }
 });
-// ----- Settings (sidebar gear): sound, parallel tasks and reflection for every project; the open project's options
+// ----- Settings (sidebar gear): sound and parallel tasks for every project; the open project's reflection and options
 function openSettings() {
   if ($('settingsModal').hidden) ST.lastFocus = document.activeElement;
   $('settingsModal').hidden = false;
@@ -4042,7 +4043,7 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('sett
 function renderSettings() {
   if ($('settingsModal').hidden) return;
   const s = O.state || {}, p = O.project;
-  $('stParallel').value = String(s.parallel?.parallelTasks ?? 1);
+  renderParallel(s);
   renderReflectModel();
   renderReflectBtn();
   $('stProject').hidden = !p;
@@ -4055,9 +4056,8 @@ function renderSettings() {
 function renderReflectModel() {
   const sel = $('stReflectModel');
   if (document.activeElement === sel) return;
-  const r = O.state?.reflect || {}, cur = r.agent ? `${r.agent}\n${r.model || ''}` : '';
-  // The default names what it resolves to for the open project (a 'reflect' route, else the chat's model).
-  sel.replaceChildren(new Option(O.project?.reflect_route ? `Default · ${fbName(O.project.reflect_route)}` : "Default (the chat's model)", ''));
+  const r = O.project?.reflect || {}, cur = r.agent ? `${r.agent}\n${r.model || ''}` : '';
+  sel.replaceChildren(new Option('Default', ''));
   for (const a of AGENT_LIST) {
     if (!a.models?.length || !a.available || a.loggedIn === false) continue;
     const g = document.createElement('optgroup');
@@ -4071,13 +4071,36 @@ function renderReflectModel() {
 $('stReflectModel').addEventListener('change', async (e) => {
   const [agent, model] = e.target.value.split('\n');
   try {
-    const d = await api('/api/orch/reflect-settings', 'PUT', { model: agent ? { agent, model } : null });
-    if (O.state) O.state.reflect = d.reflect;
+    if (!O.project) return;
+    const d = await api(`/api/orch/projects/${O.project.id}/reflect-settings`, 'PUT', { model: agent ? { agent, model } : null });
+    if (d.project && O.project?.id === d.project.id) O.project = d.project;
   } catch (err) { toast(err.message, { kind: 'error' }); }
   e.target.blur();
   renderSettings();
 });
-$('stParallel').addEventListener('change', (e) => saveParallel({ parallelTasks: Number(e.target.value) }));
+// Parallel tasks: what can run right now (state.capacity: this server's memory-guarded slots plus online workers') and
+// how many run; the owner can only cap it lower ('' = no limit, else maxTasks).
+function renderParallel(s) {
+  const sel = $('stParallel');
+  // A server that predates state.capacity (not restarted since this page's code changed): show what it does report.
+  const c = s.capacity || (s.parallel && { running: s.workRunning ?? s.running ?? 0, max: s.slots ?? 0, controller: s.slots ?? 0,
+    controllerMax: s.slots ?? 0, workers: 0, pacing: null, cap: s.parallel.maxTasks ?? null });
+  sel.disabled = !c;
+  if (!c) { $('stParHint').textContent = 'Checking what can run…'; if (!sel.options.length) sel.append(new Option('No limit', '')); return; }
+  const tight = c.controller < c.controllerMax ? ` of ${c.controllerMax}, needs more free memory` : '';
+  const where = c.workers ? ` (this server ${c.controller}${tight}, workers ${c.workers})` : tight ? ` (this server ${c.controller}${tight})` : '';
+  const bits = [`${c.running} running`, `up to ${c.max} can run now${where}`];
+  if (c.pacing != null && c.pacing < c.max) bits.push(`usage pacing allows ${c.pacing}`);
+  if (!c.max) bits[1] = 'none can start now: memory is low';
+  $('stParHint').textContent = bits.join(' · ');
+  if (document.activeElement === sel) return; // not rebuilt while the owner is choosing
+  const opts = [new Option(`No limit${c.max ? ` (${c.max})` : ''}`, '')];
+  const top = Math.max(c.max - 1, c.cap || 0, 1);
+  for (let n = 1; n <= top; n++) opts.push(new Option(`At most ${n}`, String(n)));
+  sel.replaceChildren(...opts);
+  sel.value = c.cap ? String(c.cap) : '';
+}
+$('stParallel').addEventListener('change', (e) => { saveParallel({ maxTasks: e.target.value ? Number(e.target.value) : null }); e.target.blur(); });
 // Reflection direction (per project, optional): saved as you type (debounced) and on blur; blank = the reflector decides.
 const DIR = { timer: null, saving: false };
 // The box grows with its text (CSS caps it; past that it scrolls).

@@ -1003,6 +1003,34 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   if (!db.prepare("SELECT 1 FROM kv WHERE key='perpetual_always'").get()) {
     db.exec("UPDATE projects SET perpetual=1, next_reflect_at=0 WHERE perpetual=0; INSERT INTO kv(key,value) VALUES('perpetual_always','1')");
   }
+  // Reflection is set per project (Settings → This project): projects.reflect_agent/reflect_model run its reflect tasks
+  // (NULL = routes, else Claude); projects.reflect_fallbacks is where they, and the work they queue, move at a limit.
+  // The old global kv reflect_settings is copied into every project once, then dropped.
+  for (const col of ['reflect_agent', 'reflect_model']) {
+    if (!db.prepare('PRAGMA table_info(projects)').all().some((c) => c.name === col)) db.exec(`ALTER TABLE projects ADD COLUMN ${col} TEXT`);
+  }
+  {
+    const row = db.prepare("SELECT value FROM kv WHERE key='reflect_settings'").get();
+    if (row) {
+      let g = {};
+      try { g = JSON.parse(row.value || '{}') || {}; } catch {}
+      if (g.agent) db.prepare('UPDATE projects SET reflect_agent=?, reflect_model=? WHERE reflect_agent IS NULL').run(g.agent, g.model || null);
+      if (Array.isArray(g.fallbacks)) db.prepare('UPDATE projects SET reflect_fallbacks=?').run(JSON.stringify(g.fallbacks));
+      db.exec("DELETE FROM kv WHERE key='reflect_settings'");
+    }
+  }
+  // Parallel tasks: the owner no longer picks the controller's 1 or 2 slots; Settings shows what can run and caps it
+  // (maxTasks). Once, an existing install that ran one at a time keeps doing so as a cap of 1.
+  if (!db.prepare("SELECT 1 FROM kv WHERE key='parallel_cap_migrated'").get()) {
+    const row = db.prepare("SELECT value FROM kv WHERE key='parallel_settings'").get();
+    let s = {};
+    try { s = JSON.parse(row?.value || '{}') || {}; } catch {}
+    const existing = !!db.prepare('SELECT 1 FROM tasks LIMIT 1').get();
+    if ((existing || 'parallelTasks' in s) && s.maxTasks == null && s.parallelTasks !== 2) s.maxTasks = 1;
+    delete s.parallelTasks;
+    db.prepare("INSERT OR REPLACE INTO kv(key,value) VALUES('parallel_settings', ?)").run(JSON.stringify(s));
+    db.exec("INSERT INTO kv(key,value) VALUES('parallel_cap_migrated','1')");
+  }
   // projects.position: the owner's sidebar order (1 = top = highest priority; see reorderProjects). Existing rows
   // start in the order the scheduler already ranked them: priority, then age.
   if (!db.prepare('PRAGMA table_info(projects)').all().some((c) => c.name === 'position')) {
@@ -1280,6 +1308,18 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     kvSet('parallel_settings', JSON.stringify(next));
     pushState(); setTimeout(tick, 0);
     return { ok: true, state: stateView() };
+  }
+  // What can run right now (Settings shows it; the owner can only cap it): the controller's slots (memory-guarded; none
+  // while workers are online unless controllerWork), each usable worker's max_slots, pacing's limit, the owner's cap.
+  function capacityView(d = decisionCache?.d, mem = readMemInfo(CFG.meminfo)) {
+    const settings = parallelSettings();
+    const workers = nodesNow().filter((n) => !n.local && n.status === 'online' && n.connected && n.enabled !== false && !n.draining);
+    const controller = workers.length && !settings.controllerWork ? 0 : taskSlots({ setting: settings.parallelTasks, mem });
+    const pacing = d && (d.scarce || d.concurrency < CFG.concurrency) ? Math.max(1, d.concurrency) : null;
+    const max = controller + workers.reduce((sum, n) => sum + (n.maxSlots || 0), 0);
+    // controllerMax: what the controller takes when memory allows (controller < controllerMax: memory is holding it back).
+    return { controller, controllerMax: workers.length && !settings.controllerWork ? 0 : settings.parallelTasks, workers: max - controller, max, pacing, cap: settings.maxTasks, running: workEverywhere(),
+      effective: Math.min(max, pacing ?? Infinity, settings.maxTasks ?? Infinity) };
   }
   // Slots and agentSlots count the controller's own runs; each worker has its own (nodes.max_slots, headroom).
   const runningOn = (agent) => [...running.values()].filter((r) => r.agent === agent && r.node === LOCAL_NODE).length;
@@ -2361,7 +2401,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       // Nothing to improve until the owner has said what the project is and some work has landed.
       if (!q1("SELECT 1 AS x FROM tasks WHERE project_id=:p AND kind='work' AND status='done' LIMIT 1", { p: p.id })) continue;
       run('UPDATE projects SET next_reflect_at=:u WHERE id=:id', { u: t + 120, id: p.id });
-      const rs = reflectSettings();
+      const rs = reflectFor(p);
       // The reflection fallbacks move the reflect task itself too when its model is at its limit (delegate).
       const id = addTask(p.id, { title: 'Reflect: what else should be done?', prompt: '(reflection)', kind: 'reflect', source: 'reflection', agent: rs.agent, model: rs.model,
         fallbacks: reflectFallbacksFor(p) });
@@ -3216,24 +3256,22 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     logEvent(`reflection fallbacks: ${list == null ? 'none' : list.map((f) => `${f.agent}/${f.model}`).join(' → ') || 'none'}`, { projectId: id });
     return { ok: true, project: projectView(getProject(id)) };
   }
-  // kv reflect_settings {agent, model, fallbacks} from the Settings sheet, for every project: reflect tasks run on
-  // agent/model (null = routes, else Claude); the work they queue snapshots fallbacks (null = the project's own list).
-  function reflectSettings() {
-    let s = {};
-    try { s = JSON.parse(kvGet('reflect_settings') || '{}') || {}; } catch {}
-    return { agent: s.agent || null, model: s.model || null, fallbacks: Array.isArray(s.fallbacks) ? s.fallbacks : null };
-  }
+  // A project's reflection settings (Settings → This project): its reflect tasks run on agent/model (null = routes, else
+  // Claude), and they and the work they queue snapshot fallbacks (null = none: they wait at a limit).
+  const reflectFor = (p) => ({ agent: p.reflect_agent || null, model: p.reflect_model || null, fallbacks: parseFallbacks(p.reflect_fallbacks) });
   // v: {model?: {agent, model} | null, fallbacks?: [{agent, model}] | null}, already validated by the server.
-  function setReflectSettings(v) {
-    const next = reflectSettings();
-    if ('model' in v) { next.agent = v.model?.agent || null; next.model = v.model?.model || null; }
-    if ('fallbacks' in v) next.fallbacks = v.fallbacks;
-    kvSet('reflect_settings', JSON.stringify(next));
-    logEvent(`reflection settings: ${next.agent ? `${next.agent}/${next.model || 'default'}` : 'default model'}; fallbacks ${next.fallbacks?.map((f) => `${f.agent}/${f.model}`).join(' → ') || 'none'}`);
-    pushState();
-    return { ok: true, reflect: next };
+  function setReflectSettings(id, v) {
+    const p = getProject(id);
+    if (!p) return { error: 'No such project', status: 404 };
+    const f = {};
+    if ('model' in v) { f.reflect_agent = v.model?.agent || null; f.reflect_model = v.model?.model || null; }
+    if ('fallbacks' in v) f.reflect_fallbacks = v.fallbacks == null ? null : JSON.stringify(v.fallbacks);
+    updateProject(id, f);
+    const next = reflectFor(getProject(id));
+    logEvent(`reflection: ${next.agent ? `${next.agent}/${next.model || 'default'}` : 'default model'}; fallbacks ${next.fallbacks?.map((x) => `${x.agent}/${x.model}`).join(' → ') || 'none'}`, { projectId: id });
+    return { ok: true, reflect: next, project: projectView(getProject(id)) };
   }
-  const reflectFallbacksFor = (p) => reflectSettings().fallbacks ?? parseFallbacks(p.reflect_fallbacks);
+  const reflectFallbacksFor = (p) => reflectFor(p).fallbacks;
   function pauseProject(id) {
     for (const [tid, r] of running) if (r.projectId === id) r.abort.abort(); // sessions are kept and resumed
   }
@@ -3300,7 +3338,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       id: p.id, name: p.name, path: p.path, convo_id: p.convo_id, status: p.status, priority: p.priority, position: p.position ?? null, mode: p.mode,
       perpetual: !!p.perpetual, autonomous: !!p.autonomous, next_reflect_at: p.next_reflect_at, ready: !!projectReady(p.path),
       counts: { queued: c.queued || 0, running: c.running || 0, done: c.done || 0, failed: c.failed || 0 },
-      reflect_fallbacks: parseFallbacks(p.reflect_fallbacks), reflect_direction: p.reflect_direction || null,
+      reflect_fallbacks: parseFallbacks(p.reflect_fallbacks), reflect_direction: p.reflect_direction || null, reflect: reflectFor(p),
       // What a reflect task starts on when Settings names no reflection model (a 'reflect' route, else the chat's model).
       reflect_route: (({ agent, model }) => ({ agent, model: model || delegator.defaultModel(agent) }))(intendedRoute({ kind: 'reflect', title: 'Reflect: what else should be done?', prompt: '' }, p)),
       // What its work tasks (and so reflection-queued ones) start on: the "primary" the reflection fallbacks back up.
@@ -3325,7 +3363,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         activity: r.activity || null, started_at: r.startedAt, elapsed: Math.max(0, now() - r.startedAt), node: r.node, node_name: r.node === LOCAL_NODE ? null : nodeName(r.node), waiting_for: r.waiting || null };
     });
     return { activeUsage, blocks, blockedUntil: blockedUntil(), blockedReason: kvGet('blocked_reason'),
-      pacing: d?.reason || kvGet('budget_reason'), slots: slotCount(d, mem), parallel, lanes, reflect: reflectSettings(),
+      pacing: d?.reason || kvGet('budget_reason'), slots: slotCount(d, mem), parallel, lanes, capacity: capacityView(d, mem),
       running: running.size, workRunning: workRunning(), remoteRunning: workEverywhere() - workRunning(), draining, subscription: onSubscription() };
   }
   function pushTask(id) {

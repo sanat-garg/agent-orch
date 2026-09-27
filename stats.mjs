@@ -85,6 +85,19 @@ export function windowPeriods(records, now = Date.now()) {
   return [...by.values()].map((p) => ({ ...p, closed: p.resetsAt <= now })).sort((a, b) => a.resetsAt - b.resetsAt);
 }
 
+// Runs don't record their model: it is the task's model at the time, i.e. where its last move before the run went (the
+// first move's origin before any move), else what the task ran on; null = the agent's default.
+export function runModel(agent, start, task) {
+  const moves = (safeJson(task?.moves) || []).filter((m) => m?.from?.agent && m?.to?.agent).sort((a, b) => a.at - b.at);
+  if (moves.length) {
+    const before = moves.filter((m) => m.at * 1000 <= start + 5e3);
+    const cur = before.length ? before[before.length - 1].to : moves[0].from;
+    if (cur.agent === agent) return cur.model || null;
+  }
+  if ((task?.ran_agent || task?.agent || 'claude') === agent) return task?.ran_model || task?.model || null;
+  return moves.flatMap((m) => [m.from, m.to]).find((x) => x.agent === agent)?.model || null;
+}
+
 // Owner actions the orchestrator logged as events: what you steered, by kind.
 export function ownerAction(message) {
   const m = String(message || '');
@@ -101,6 +114,20 @@ export function ownerAction(message) {
 
 export function createStats({ dataDir, dbFile = path.join(dataDir, 'orchestrator', 'agent-orch.db'), convos = () => [], now = Date.now, log = () => {} }) {
   const gitCache = new Map(); // repo path -> { head, commits }
+  const logModels = new Map(); // run id -> {agent, model} from its log's start line (never changes once written)
+  // A run log's first line is {k:'start', agent, model} (runs before that field existed have none).
+  function logModel(r) {
+    if (logModels.has(r.id)) return logModels.get(r.id);
+    let found = null, fd;
+    try {
+      fd = fs.openSync(r.log_path, 'r');
+      const buf = Buffer.alloc(1024), n = fs.readSync(fd, buf, 0, buf.length, 0);
+      const first = safeJson(buf.subarray(0, n).toString('utf8').split('\n')[0]);
+      if (first?.k === 'start' && first.model) found = { agent: first.agent || null, model: first.model };
+    } catch {} finally { if (fd != null) fs.closeSync(fd); }
+    if (found || r.finished_at) logModels.set(r.id, found);
+    return found;
+  }
   let cached = null, cachedAt = 0, inflight = null;
 
   async function commitsFor(repo) {
@@ -124,7 +151,7 @@ export function createStats({ dataDir, dbFile = path.join(dataDir, 'orchestrator
       return {
         projects: all('SELECT id, name, path, status, created_at FROM projects'),
         tasks: all('SELECT id, project_id, kind, title, status, urgency, source, origin, attempts, continuations, created_at, started_at, finished_at, agent, model, ran_agent, ran_model, commit_sha, moves, node_id, effort FROM tasks'),
-        runs: all('SELECT id, task_id, purpose, outcome, agent, node_id, effort, input_tokens, output_tokens, cache_read_tokens, num_turns, started_at, finished_at FROM runs'),
+        runs: all('SELECT id, task_id, purpose, outcome, agent, node_id, effort, input_tokens, output_tokens, cache_read_tokens, num_turns, started_at, finished_at, log_path FROM runs'),
         events: all('SELECT ts, level, project_id, task_id, message FROM events'),
       };
     } catch (e) { log(`db: ${e.message}`); return empty; }
@@ -163,7 +190,7 @@ export function createStats({ dataDir, dbFile = path.join(dataDir, 'orchestrator
     const taskTok = new Map();
     for (const r of tokenRecs) if (r.source === 'task' && r.ref != null) (taskTok.get(r.ref) || taskTok.set(r.ref, []).get(r.ref)).push(r);
     const runRows = runs.map((r) => {
-      const task = taskById.get(r.task_id);
+      const task = taskById.get(r.task_id), agent = r.agent || 'claude'; // runs from before the agent column were Claude's
       const end = ms(r.finished_at);
       let tok = { in: r.input_tokens || 0, out: r.output_tokens || 0, cached: r.cache_read_tokens || 0 };
       const recs = taskTok.get(r.task_id);
@@ -173,8 +200,7 @@ export function createStats({ dataDir, dbFile = path.join(dataDir, 'orchestrator
       }
       return {
         id: r.id, task: r.task_id, p: task?.project_id ?? null, purpose: r.purpose, outcome: r.outcome,
-        // Runs from before the agent column were Claude's.
-        agent: r.agent || 'claude', model: task?.ran_model || task?.model || null, node: r.node_id || 'controller', effort: r.effort || null,
+        agent, model: (r.log_path && logModel(r)?.model) || runModel(agent, ms(r.started_at), task), node: r.node_id || 'controller', effort: r.effort || null,
         start: ms(r.started_at), end, turns: r.num_turns || 0, ...tok,
       };
     });
@@ -198,7 +224,8 @@ export function createStats({ dataDir, dbFile = path.join(dataDir, 'orchestrator
     const commits = [];
     for (const p of projects) {
       if (!fs.existsSync(path.join(p.path, '.git'))) continue;
-      for (const c of await commitsFor(p.path)) commits.push({ ...c, p: p.id });
+      // git lists newest first; oldest first here, so commits in the same second keep their real order after the sort.
+      for (const c of (await commitsFor(p.path)).toReversed()) commits.push({ ...c, p: p.id });
     }
 
     let machine = [];

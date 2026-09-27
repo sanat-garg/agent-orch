@@ -127,6 +127,13 @@ test('6h range buckets tokens per 15 minutes', () => {
   assert.equal(b.reduce((s, x) => s + x.input, 0), 16);
 });
 
+test('usageHistory leaves out agents that are no longer installed (their readings stay in the log)', () => {
+  const at = Date.UTC(2026, 8, 25, 12);
+  const recs = ['claude', 'codex', 'antigravity', 'copilot'].map((agent) => ({ t: at - H, agent, kind: 'window', window: '5h', pct: 10, resetsAt: at / 1000 + 3600 }));
+  assert.deepEqual(Object.keys(usageHistory(recs, '6h', at).agents), ['claude', 'codex', 'antigravity', 'copilot']);
+  assert.deepEqual(Object.keys(usageHistory(recs, '6h', at, ['claude', 'codex']).agents), ['claude', 'codex']);
+});
+
 test('usageHistory groups by agent with limit events and current status', () => {
   const at = Date.UTC(2026, 8, 25, 12);
   const s = at / 1000;

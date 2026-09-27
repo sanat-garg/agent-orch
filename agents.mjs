@@ -179,8 +179,9 @@ function* claudeEvents(m) {
   } else if (m.type === 'result') yield { k: 'result', usage: m.usage || {} };
 }
 
-// MCP servers every run gets (extensions.mjs, set by the server): agent id -> Claude's mcpServers record or codex's
-// `-c` overrides, null/[] for none. A run's own `mcp` option replaces it.
+// MCP servers every run gets (extensions.mjs mcpRun, set by the server): Claude → an --mcp-config file, codex → a config
+// profile layered on ~/.codex/config.toml (codex -p <name>); null for none. Files, so no secret is on a command line.
+// A run's own `mcp` option replaces it.
 let mcpSource = () => null;
 export const setMcpSource = (fn) => { mcpSource = fn || (() => null); };
 const mcpOf = (agent, own) => { if (own !== undefined) return own; try { return mcpSource(agent); } catch (e) { console.error('[agents] mcp source failed', e); return null; } };
@@ -200,7 +201,7 @@ async function runClaude({ model, prompt, cwd, resume, systemAppend, signal, onE
       prompt,
       options: {
         cwd, resume: resume || undefined, model: model || undefined, ...(effort && { effort }),
-        ...(mcp && Object.keys(mcp).length && { mcpServers: mcp }),
+        ...(mcp && { extraArgs: { 'mcp-config': mcp } }),
         pathToClaudeCodeExecutable: bin || CLAUDE.bin, env: stripEnv(env, CLAUDE.envFilter), abortController: ac,
         systemPrompt: systemAppend ? { type: 'preset', preset: 'claude_code', append: systemAppend } : { type: 'preset', preset: 'claude_code' },
         // The owner runs this on a disposable server and gave every agent full access (including
@@ -524,10 +525,11 @@ function* codexEvents(m, started = new Set()) {
 async function runCodex({ model, prompt, cwd, resume, systemAppend, signal, onEvent, bin, env = process.env, autonomous = true, onMessage, codexHome, effort, mcp }) {
   const res = { outcome: 'error', text: '', sessionId: resume || null, usage: {}, numTurns: 0, resetsAt: null, limitType: null, stderr: '', errorCode: null, windows: null };
   const startedAt = Date.now();
-  const args = ['exec', ...(resume ? ['resume'] : []), '--json', '--skip-git-repo-check', '-c', 'forced_login_method="chatgpt"'];
+  // The MCP profile goes before `exec`: `exec resume` has no -p of its own.
+  const profile = mcpOf('codex', mcp);
+  const args = [...(profile ? ['-p', profile] : []), 'exec', ...(resume ? ['resume'] : []), '--json', '--skip-git-repo-check', '-c', 'forced_login_method="chatgpt"'];
   if (model) args.push('-m', model);
   if (effort) args.push('-c', `model_reasoning_effort=${effort}`);
-  for (const kv of mcpOf('codex', mcp) || []) args.push('-c', kv); // mcp_servers.<name>.<key>=<toml>, also on resume
   if (autonomous) args.push('--dangerously-bypass-approvals-and-sandbox');
   else args.push('-c', 'sandbox_mode="workspace-write"', '-c', 'approval_policy="never"');
   const text = systemAppend ? `${systemAppend}\n\n${prompt}` : prompt;

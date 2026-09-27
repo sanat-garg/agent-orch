@@ -3,9 +3,10 @@
 // the web terminal) sees them and ones installed by hand show up too:
 //   skills    ~/.claude/skills/<name>/SKILL.md (Claude) and ~/.codex/skills/<name>/SKILL.md (Codex), plus any other files
 //   subagents ~/.claude/agents/<name>.md (Claude only; Codex has no file-defined subagents)
-// MCP servers and personas are agent-orch's own (<DATA>/extensions/, 0600): MCP servers are handed to every run
-// agent-orch starts (the SDK's mcpServers option, codex `-c mcp_servers.<name>.*`), so secrets stay out of the CLIs'
-// config files; a persona is a named set of instructions a chat picks, appended to its system prompt and to the
+// MCP servers and personas are agent-orch's own (<DATA>/extensions/, 0600). MCP servers are handed to every run agent-orch
+// starts, through 0600 files so env values and headers never sit on a command line (`ps`): Claude gets
+// `--mcp-config <DATA>/extensions/claude-mcp.json`, codex `-p agent-orch` (~/.codex/agent-orch.config.toml, a profile
+// layered on the owner's config.toml). The terminal's own CLI sessions don't load them. A persona is a named set of instructions a chat picks, appended to its system prompt and to the
 // system prompt of its project's planner and task runs.
 import fs from 'node:fs';
 import os from 'node:os';
@@ -69,7 +70,7 @@ export function splitCommand(s) {
 }
 export const joinCommand = (parts) => parts.map((p) => (p && /^[\w@%+=:,./-]+$/.test(p) ? p : `'${String(p).replace(/'/g, `'\\''`)}'`)).join(' ');
 
-// TOML for a codex `-c key=value` override: JSON strings/arrays are valid TOML; tables become inline tables.
+// A TOML value for codex's config: JSON strings/arrays are valid TOML; objects become inline tables.
 const tomlVal = (v) => (v && typeof v === 'object' && !Array.isArray(v)
   ? `{${Object.entries(v).map(([k, x]) => `${JSON.stringify(k)}=${JSON.stringify(String(x))}`).join(',')}}`
   : JSON.stringify(v));
@@ -137,12 +138,15 @@ export function parseGitHubUrl(url) {
   return { repo: `https://github.com/${owner}/${repo.replace(/\.git$/, '')}.git`, ref: ref || null, dir };
 }
 
+export const CODEX_PROFILE = 'agent-orch';
+
 export function createExtensions({ dataDir, home = os.homedir(), claudeDir, codexDir, gitBin = 'git', importTimeoutMs = 120_000 } = {}) {
-  const claude = claudeDir || process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
-  const roots = { claude: path.join(claude, 'skills'), codex: path.join(codexDir || path.join(home, '.codex'), 'skills') };
+  const claude = claudeDir || process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude'), codexHome = codexDir || path.join(home, '.codex');
+  const roots = { claude: path.join(claude, 'skills'), codex: path.join(codexHome, 'skills') };
   const agentsDir = path.join(claude, 'agents');
   const extDir = path.join(dataDir, 'extensions');
   const mcpFile = path.join(extDir, 'mcp.json'), personasFile = path.join(extDir, 'personas.json');
+  const claudeMcpFile = path.join(extDir, 'claude-mcp.json'), codexMcpFile = path.join(codexHome, `${CODEX_PROFILE}.config.toml`);
   const listeners = new Set();
   const changed = (kind) => { for (const fn of listeners) { try { fn(kind); } catch (e) { console.error('[ext] listener failed', e); } } };
 
@@ -341,27 +345,30 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
     changed('mcp');
     return publicMcp(s);
   }
-  // What a run on `agent` gets: Claude → the SDK's mcpServers record (null when none); Codex → `-c` overrides.
+  // The servers a run on `agent` gets: Claude → an SDK/--mcp-config mcpServers record, codex → config.toml tables; null for none.
   function mcpFor(agent) {
-    const on = readMcp().filter((s) => s.enabled !== false && (s.agents || SKILL_AGENTS).includes(agent));
+    const on = readMcp().filter((s) => s.enabled !== false && (s.agents || SKILL_AGENTS).includes(agent) && (agent !== 'codex' || s.type !== 'sse'));
+    if (!on.length || !SKILL_AGENTS.includes(agent)) return null;
     if (agent === 'codex') {
-      const args = [];
-      for (const s of on) {
-        const k = `mcp_servers.${s.name}`;
-        if (s.type === 'stdio') {
-          args.push(`${k}.command=${tomlVal(s.command)}`, `${k}.args=${tomlVal(s.args || [])}`);
-          if (Object.keys(s.env || {}).length) args.push(`${k}.env=${tomlVal(s.env)}`);
-        } else if (s.type === 'http') {
-          args.push(`${k}.url=${tomlVal(s.url)}`);
-          if (Object.keys(s.headers || {}).length) args.push(`${k}.http_headers=${tomlVal(s.headers)}`);
-        }
-      }
-      return args;
+      const toml = on.map((s) => [`[mcp_servers.${s.name}]`, ...(s.type === 'stdio'
+        ? [`command = ${tomlVal(s.command)}`, `args = ${tomlVal(s.args || [])}`, ...(Object.keys(s.env || {}).length ? [`env = ${tomlVal(s.env)}`] : [])]
+        : [`url = ${tomlVal(s.url)}`, ...(Object.keys(s.headers || {}).length ? [`http_headers = ${tomlVal(s.headers)}`] : [])])].join('\n'));
+      return `# Written by agent-orch (Settings → Skills & tools) for its codex runs (codex -p ${CODEX_PROFILE}). Changes here are overwritten.\n\n${toml.join('\n\n')}\n`;
     }
-    if (agent !== 'claude' || !on.length) return null;
     return Object.fromEntries(on.map((s) => [s.name, s.type === 'stdio'
       ? { type: 'stdio', command: s.command, args: s.args || [], ...(Object.keys(s.env || {}).length && { env: s.env }) }
       : { type: s.type, url: s.url, ...(Object.keys(s.headers || {}).length && { headers: s.headers }) }]));
+  }
+  // What a run passes (writing the file first when it changed): Claude → the --mcp-config file, codex → the profile name.
+  function mcpRun(agent) {
+    const cfg = mcpFor(agent), file = agent === 'codex' ? codexMcpFile : claudeMcpFile;
+    if (!SKILL_AGENTS.includes(agent)) return null;
+    const text = cfg == null ? null : agent === 'codex' ? cfg : JSON.stringify({ mcpServers: cfg }, null, 2);
+    let cur = null;
+    try { cur = fs.readFileSync(file, 'utf8'); } catch {}
+    if (text == null) { if (cur != null) fs.rmSync(file, { force: true }); return null; }
+    if (cur !== text) writeAtomic(file, text);
+    return agent === 'codex' ? CODEX_PROFILE : file;
   }
 
   // ---------- personas
@@ -403,7 +410,7 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
 
   return {
     list, listSkills, saveSkill, removeSkill, importSkill, listAgents, saveAgent, removeAgent,
-    saveMcp, removeMcp, setMcpEnabled, mcpFor, savePersona, removePersona, persona, personaPrompt,
+    saveMcp, removeMcp, setMcpEnabled, mcpFor, mcpRun, savePersona, removePersona, persona, personaPrompt,
     onChange: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
   };
 }

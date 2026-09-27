@@ -1,7 +1,7 @@
 // The fallback sheet in a real browser: boots server.mjs (stub codex CLI with a wide catalog, CW_NO_ORCHESTRATOR=1, temp data dir) on a
 // spare port. Chat: the composer's Fallbacks button opens it, and remove, undo, reorder (Alt+↑ and drag) and add each
 // persist through PUT /api/convos/:id/fallbacks. Reflection: the Settings sheet opens the same sheet at once, without
-// any request, and saves via PUT /api/orch/reflect-settings. Skips when Playwright's Chromium can't launch.
+// any request, and saves via PUT /api/orch/projects/:id/reflect-settings. Skips when Playwright's Chromium can't launch.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -166,14 +166,14 @@ test('chat fallbacks: the picker has no Auto Delegate; the sheet removes, undoes
   await ctx.close();
 });
 
-test('reflection fallbacks: the sidebar Settings sheet opens the same fallback sheet instantly, without any request, and saves for every project', { skip, timeout: 90000 }, async () => {
+test('reflection fallbacks: the sidebar Settings sheet opens the same fallback sheet instantly, without any request, and saves for this project', { skip, timeout: 90000 }, async () => {
   const [name, value] = cookie.split('=');
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
   await ctx.addCookies([{ name, value, url: base }]);
   const page = await ctx.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
-  const seed = await fetch(base + '/api/orch/reflect-settings', { method: 'PUT', headers: { cookie, 'content-type': 'application/json' },
+  const seed = await fetch(base + `/api/orch/projects/${pid}/reflect-settings`, { method: 'PUT', headers: { cookie, 'content-type': 'application/json' },
     body: JSON.stringify({ fallbacks: [{ agent: 'codex', model: 'gpt-6-astra' }] }) });
   assert.equal(seed.status, 200); await seed.json();
   await page.goto(`${base}/#${CID}`);
@@ -197,10 +197,10 @@ test('reflection fallbacks: the sidebar Settings sheet opens the same fallback s
   await page.locator('#fbModal .fe-add-btn').click();
   await page.locator('#fbModal .fe-search').fill('sol');
   await page.locator('#fbModal .fe-opt', { hasText: 'GPT-6-Sol' }).click();
-  const stored = () => JSON.parse(db.prepare("SELECT value FROM kv WHERE key='reflect_settings'").get()?.value || '{}').fallbacks || [];
+  const stored = () => JSON.parse(db.prepare('SELECT reflect_fallbacks FROM projects WHERE id=?').get(pid)?.reflect_fallbacks || '[]');
   for (let i = 0; i < 50 && stored().length < 2; i++) await new Promise((r) => setTimeout(r, 100));
   assert.deepEqual(stored(), [{ agent: 'codex', model: 'gpt-6-astra' }, { agent: 'codex', model: 'gpt-6-sol' }]);
-  assert.ok(requests.some((u) => u.endsWith('/api/orch/reflect-settings')));
+  assert.ok(requests.some((u) => u.endsWith(`/api/orch/projects/${pid}/reflect-settings`)));
   assert.equal(await page.locator('#stReflectBtn .fb-name').count(), 2);
   assert.deepEqual(errors, []);
   await ctx.close();
@@ -323,7 +323,7 @@ test('fallback sheets name the model they back up: the chat\'s new model at once
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   const queued = Number(db.prepare("INSERT INTO tasks(project_id,title,prompt,created_at) VALUES(?,'Unrouted work','code',0)").run(pid).lastInsertRowid);
-  const reset = await fetch(base + '/api/orch/reflect-settings', { method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ model: null }) });
+  const reset = await fetch(base + `/api/orch/projects/${pid}/reflect-settings`, { method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ model: null }) });
   assert.equal(reset.status, 200); await reset.json();
   try {
     await page.goto(`${base}/#${CID}`);
@@ -336,7 +336,7 @@ test('fallback sheets name the model they back up: the chat\'s new model at once
     await page.waitForFunction((id) => O.tasks.get(id)?.runs_model === 'claude-fable-5-1', queued);
     await page.evaluate(() => openSettings());
     assert.match(await page.locator('#stReflectBtn').getAttribute('title'), /^If claude-fable-5-1 hits its limit, reflection tasks/);
-    assert.match(await page.locator('#stReflectModel option').first().innerText(), /^Default · claude-fable-5-1/);
+    assert.equal(await page.locator('#stReflectModel option').first().innerText(), 'Default');
     await page.locator('#stReflectBtn').click();
     assert.equal(await page.locator('#fbTitle').innerText(), 'If claude-fable-5-1 hits its limit');
     await page.keyboard.press('Escape');
@@ -355,7 +355,7 @@ test('fallback sheets name the model they back up: the chat\'s new model at once
   } finally {
     await page.evaluate(() => send({ t: 'set_model', cid: state.cid, agent: 'codex', model: 'gpt-5.5' })).catch(() => {});
     db.prepare("UPDATE tasks SET status='cancelled' WHERE id=?").run(queued);
-    const r = await fetch(base + '/api/orch/reflect-settings', { method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ model: null }) });
+    const r = await fetch(base + `/api/orch/projects/${pid}/reflect-settings`, { method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ model: null }) });
     await r.arrayBuffer();
     await ctx.close();
   }

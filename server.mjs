@@ -636,14 +636,11 @@ const allClients = new Set();
 
 // ---------- Skills, MCP servers, subagents and personas (extensions.mjs; Settings → Skills & tools) ----------
 const ext = createExtensions({ dataDir: DATA });
-setMcpSource((agent) => ext.mcpFor(agent)); // every runAgentCli run (tasks, planner, non-Claude chats)
-ext.onChange((kind) => {
-  for (const ws of allClients) send(ws, { t: 'ext', kind });
-  // Live Claude chats swap their MCP servers in place; every other run reads the list when it starts.
-  if (kind === 'mcp') for (const [cid, rt] of runtimes) rt.q?.setMcpServers(ext.mcpFor('claude') || {}).catch((e) => console.error('[ext] mcp not applied', cid.slice(0, 8), e?.message || e));
-});
-// A chat's persona as its system-prompt block (null: none, or deleted).
+setMcpSource((agent) => ext.mcpRun(agent)); // every runAgentCli run (tasks, planner, non-Claude chats) reads the list as it starts
+ext.onChange((kind) => { for (const ws of allClients) send(ws, { t: 'ext', kind }); });
+// A chat's persona as its system-prompt block (null: none, or deleted), and the MCP servers Claude chats get.
 const personaOf = (convo) => ext.personaPrompt(convo.persona);
+const mcpSet = () => JSON.stringify(ext.mcpFor('claude'));
 
 function send(ws, msg) { if (ws.readyState === 1) ws.send(JSON.stringify(msg)); }
 function broadcast(cid, msg) { for (const ws of subscribers.get(cid) || []) send(ws, { cid, ...msg }); }
@@ -662,6 +659,8 @@ function emit(cid, ev) {
 // CW_NO_ORCHESTRATOR=1 (preflight against a copy of real data): the DB is opened and migrated, but nothing runs or pushes.
 const NO_ORCH = process.env.CW_NO_ORCHESTRATOR === '1';
 const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
+  // The controller runs up to 2 work tasks when memory allows (parallel.mjs taskSlots); the owner caps it in Settings.
+  config: { parallelTasks: 2 },
   query,
   claudeBin: CLAUDE_BIN,
   claudeEnv: CLAUDE_ENV,
@@ -856,7 +855,8 @@ const clip = (s, n = 30000) => (s.length > n ? s.slice(0, n) + `\n… (${s.lengt
 
 function startRuntime(convo) {
   const input = inputQueue();
-  const rt = { push: input.push, busy: false, pending: new Map(), q: null, persona: personaOf(convo) };
+  // What the session starts with; a change to either restarts it at the next message (sendUserMessage).
+  const rt = { push: input.push, busy: false, pending: new Map(), q: null, persona: personaOf(convo), mcp: ext.mcpRun('claude'), mcpSet: mcpSet() };
 
   const canUseTool = (toolName, toolInput, { signal, suggestions }) =>
     new Promise((resolve) => {
@@ -881,7 +881,7 @@ function startRuntime(convo) {
       allowDangerouslySkipPermissions: true,
       includePartialMessages: true,
       systemPrompt: { type: 'preset', preset: 'claude_code', append: chatSystemAppend(convo) },
-      ...(ext.mcpFor('claude') && { mcpServers: ext.mcpFor('claude') }),
+      ...(rt.mcp && { extraArgs: { 'mcp-config': rt.mcp } }),
       pathToClaudeCodeExecutable: CLAUDE_BIN,
       env: withOwner(CLAUDE_ENV, 'chat', convo.id),
       canUseTool,
@@ -1101,9 +1101,9 @@ async function sendUserMessage(convo, text) {
     emit(convo.id, { t: 'notice', text: 'This chat was getting long, so it continues in a fresh session with the project memory and a recap of the recent conversation. That keeps replies fast and uses less of your plan.' });
     prompt = `[This conversation continues from an earlier session in this project that grew too long. Recent conversation:]\n${recap}\n\n[New message]\n${text}`;
   }
-  // A persona picked (or edited) since the session started applies from the next message: a fresh runtime, same session.
+  // A persona or MCP servers changed since the session started apply from the next message: a fresh runtime, same session.
   const live = runtimes.get(convo.id);
-  if (live && !live.busy && live.persona !== personaOf(convo)) retireRuntime(runtimes, convo.id);
+  if (live && !live.busy && (live.persona !== personaOf(convo) || live.mcpSet !== mcpSet())) retireRuntime(runtimes, convo.id);
   const rt = runtimes.get(convo.id) || startRuntime(convo);
   rt.lastUserText = text;
   if (!rt.busy || !rt.media) rt.media = mediaCollector(DATA, convo.cwd); // a queued message keeps the running turn's snapshot
@@ -1139,7 +1139,7 @@ function personaSwitch(convo, text) {
 // Every chat session starts knowing the project's durable memory, shared with the orchestrator, and the chat's persona.
 function chatSystemAppend(convo) {
   orch.initMemory(convo.cwd);
-  const mem = orch.readMemory(convo.cwd);
+  const mem = orch.readMemory(convo.cwd), persona = personaOf(convo);
   return `This project keeps durable memory in .agent-orch/, shared with the project's orchestrator:
 - .agent-orch/BRIEF.md: what the project is, its goals and definition of done
 - .agent-orch/CONTEXT.md: architecture, conventions, decisions, gotchas
@@ -1152,7 +1152,7 @@ Current .agent-orch/BRIEF.md:
 ${mem.brief || '(empty)'}
 
 Current .agent-orch/CONTEXT.md:
-${mem.context || '(empty)'}${personaOf(convo) ? `\n\n${personaOf(convo)}` : ''}`;
+${mem.context || '(empty)'}${persona ? `\n\n${persona}` : ''}`;
 }
 
 function answerPermission(convo, msg) {
@@ -1388,7 +1388,7 @@ async function handleRequest(req, res) {
   if (p === '/api/usage/history') {
     const range = url.searchParams.get('range') || '24h';
     if (!USAGE_RANGES[range]) return json(res, 400, { error: 'range must be 6h, 24h, 7d or 30d' });
-    return json(res, 200, usageLog.history(range));
+    return json(res, 200, usageLog.history(range, Object.keys(AGENTS))); // removed agents' old readings stay out
   }
   if (p === '/api/metrics') {
     return json(res, 200, await metrics(Number(url.searchParams.get('since')) || 0));
@@ -1461,8 +1461,9 @@ async function handleRequest(req, res) {
     const r = resources.killPid(pid);
     return json(res, r.error ? r.status : 200, r);
   }
-  // Settings sheet: reflection model {model: {agent, model} | null} and/or fallbacks {fallbacks: [...] | null}, every project.
-  if (p === '/api/orch/reflect-settings' && req.method === 'PUT') {
+  // Settings → This project: its reflection model {model: {agent, model} | null} and/or fallbacks {fallbacks: [...] | null}.
+  const rs = p.match(/^\/api\/orch\/projects\/(\d+)\/reflect-settings$/);
+  if (rs && req.method === 'PUT') {
     const body = await readBody(req), v = {};
     if ('model' in body) {
       if (body.model == null) v.model = null;
@@ -1478,7 +1479,8 @@ async function handleRequest(req, res) {
       v.fallbacks = list;
     }
     if (!Object.keys(v).length) return json(res, 400, { error: 'Expected model and/or fallbacks' });
-    return json(res, 200, orch.setReflectSettings(v));
+    const r = orch.setReflectSettings(Number(rs[1]), v);
+    return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r);
   }
   // The task-finished sound: an owner-uploaded MP3 (<DATA>/sounds/task-done.mp3) replaces /sounds/task-done.mp3.
   if (p === '/api/settings') {

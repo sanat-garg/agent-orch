@@ -202,6 +202,22 @@ test('parallel settings validate, persist, and appear in state', async () => {
   assert.equal((await put(url, { parallelTasks: 1 })).body.state.parallel.parallelTasks, 1);
 });
 
+test('state.capacity shows what can run and what runs; the owner can only cap it (maxTasks)', async () => {
+  const url = '/api/orch/parallel';
+  let c = (await put(url, { parallelTasks: 2 })).body.state.capacity;
+  assert.deepEqual(Object.keys(c).sort(), ['cap', 'controller', 'controllerMax', 'effective', 'max', 'pacing', 'running', 'workers']);
+  assert.equal(c.workers, 0, 'no workers connected');
+  assert.equal(c.max, c.controller);
+  assert.ok(c.max >= 0 && c.max <= 2, JSON.stringify(c));
+  assert.equal(c.running, 0);
+  assert.equal(c.cap, null);
+  c = (await put(url, { maxTasks: 1 })).body.state.capacity;
+  assert.equal(c.cap, 1);
+  assert.equal(c.effective, Math.min(1, c.max));
+  for (const bad of [{ maxTasks: 0 }, { maxTasks: 1.5 }, { maxTasks: '1' }]) assert.equal((await put(url, bad)).status, 400, JSON.stringify(bad));
+  assert.equal((await put(url, { maxTasks: null })).body.state.capacity.cap, null);
+});
+
 test('POST /api/orch/projects/reorder: sets positions, derives priority 90 → 10 and broadcasts the order', { timeout: 30000 }, async () => {
   const { DatabaseSync } = await import('node:sqlite');
   const { default: WebSocket } = await import('ws');
@@ -254,18 +270,30 @@ test('PUT /api/convos/:id/effort: validated against the chat agent\'s levels; sa
   assert.equal((await put(url, { effort: null })).body.effort, null);
 });
 
-test('PUT /api/orch/reflect-settings and the task sound upload (Settings sheet)', { timeout: 60000 }, async () => {
+test('PUT /api/orch/projects/:id/reflect-settings (per project) and the task sound upload (Settings sheet)', { timeout: 60000 }, async () => {
   await discovered();
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
+  const add = (name) => Number(db.prepare("INSERT INTO projects(path,name,status,created_at) VALUES(?,?,'paused',0)").run(path.join(dataDir, name), name).lastInsertRowid);
+  const pid = add('rs-one'), other = add('rs-two');
+  const url = `/api/orch/projects/${pid}/reflect-settings`;
   for (const bad of [{}, { model: { agent: 'codex', model: 'gpt-9000' } }, { fallbacks: [{ agent: 'nope', model: 'x' }] }]) {
-    assert.equal((await put('/api/orch/reflect-settings', bad)).status, 400, JSON.stringify(bad));
+    assert.equal((await put(url, bad)).status, 400, JSON.stringify(bad));
   }
-  let r = await put('/api/orch/reflect-settings', { model: { agent: 'codex', model: 'gpt-5.5' } });
+  assert.equal((await put('/api/orch/projects/999999/reflect-settings', { model: null })).status, 404);
+  const gone = await fetch(base + '/api/orch/reflect-settings', { method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: '{"model":null}' });
+  assert.equal(gone.status, 404, 'the old every-project route is gone'); await gone.arrayBuffer();
+  let r = await put(url, { model: { agent: 'codex', model: 'gpt-5.5' } });
   assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.deepEqual(r.body.reflect, { agent: 'codex', model: 'gpt-5.5', fallbacks: null });
-  r = await put('/api/orch/reflect-settings', { fallbacks: [{ agent: 'codex', model: 'gpt-5.5' }] });
+  assert.deepEqual(r.body.project.reflect, r.body.reflect);
+  r = await put(url, { fallbacks: [{ agent: 'codex', model: 'gpt-5.5' }] });
   assert.deepEqual(r.body.reflect, { agent: 'codex', model: 'gpt-5.5', fallbacks: [{ agent: 'codex', model: 'gpt-5.5' }] }, 'fields save independently');
-  r = await put('/api/orch/reflect-settings', { model: null });
+  const row = (id) => ({ ...db.prepare('SELECT reflect_agent, reflect_model, reflect_fallbacks FROM projects WHERE id=?').get(id) });
+  assert.deepEqual(row(other), { reflect_agent: null, reflect_model: null, reflect_fallbacks: null }, 'another project is untouched');
+  r = await put(url, { model: null });
   assert.deepEqual([r.body.reflect.agent, r.body.reflect.model], [null, null]);
+  db.close();
 
   assert.deepEqual((await get('/api/settings')).body.sound, { custom: false, at: null });
   const post = (buf) => fetch(base + '/api/settings/sound', { method: 'POST', headers: { cookie, 'content-type': 'audio/mpeg' }, body: buf });

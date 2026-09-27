@@ -170,9 +170,9 @@ test('a reflect task moves to the reflection fallbacks when its model is limited
         broadcast() {}, emitChat() {}, convoExists: () => false });
       const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
       db.prepare('INSERT OR REPLACE INTO kv(key,value) VALUES(?,?)').run('blocked_until', String(Date.now() / 1000 + 3600));
-      o.setReflectSettings({ model: { agent: 'claude', model: 'claude-fable-5-1' }, fallbacks: [{ agent: 'codex', model: 'gpt-a' }] });
       const p = path.join(root, 'proj'); fs.mkdirSync(p);
       const pid = Number(db.prepare("INSERT INTO projects(path,name,status,perpetual,created_at) VALUES(?,?,'active',1,0)").run(p, 'proj').lastInsertRowid);
+      o.setReflectSettings(pid, { model: { agent: 'claude', model: 'claude-fable-5-1' }, fallbacks: [{ agent: 'codex', model: 'gpt-a' }] });
       db.prepare("INSERT INTO tasks(project_id,kind,title,prompt,status,created_at) VALUES(?,'work','Seed','seed','done',0)").run(pid);
       const reflect = () => db.prepare("SELECT * FROM tasks WHERE kind='reflect'").get();
       await until(() => ['done', 'failed'].includes(reflect()?.status), { timeout: 30000 }).catch(() => {});

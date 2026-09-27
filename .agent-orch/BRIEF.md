@@ -54,8 +54,9 @@ was retired when benchmark ranking was removed in #152/#153. Current work harden
    controller. Nodes can come and go: work on a node that disappears is recovered from its pushed WIP branch.
    Design doc: .agent-orch/CLUSTER.md.
    Workers are compute-only (owner, 2026-09-27): no chat, prompts, planner, settings or management UI on a
-   worker, and they accept jobs only from the head. The only UI a worker has is a read-only, local 'what I'm doing
-   now' status screen in the app's design theme. Everything is controlled from the head.
+   worker, and they accept jobs only from the head. The only local UI is a TERMINAL status view (`node worker.mjs status`),
+   with no web page. The only local setting is a cap on how much CPU/RAM that machine contributes
+   (`node worker.mjs limit …`), which the head must respect. Everything else is controlled from the head.
    Caveat: the same subscription signed in on several machines shares ONE set of rate limits, so more machines
    add CPU/RAM, not quota.
 

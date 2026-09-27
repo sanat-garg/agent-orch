@@ -757,7 +757,7 @@ code, pre, kbd { font-family: var(--mono); }
 .side-settings { width: 32px; height: 32px; }
 .modal-panel.st { width: min(520px, 100%); }
 .st-sec { margin: 18px 0 4px; font-size: 11.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
-.st-sec:first-child { margin-top: 2px; }
+.m-body > .st-sec:first-child { margin-top: 2px; }
 .st-row { display: flex; align-items: center; gap: 10px; min-height: 56px; padding: 6px 0; border-bottom: 1px solid var(--border); margin: 0; font-weight: 400; }
 .st-text { flex: 1; min-width: 0; font-size: 14px; }
 .st-text strong { display: block; font-weight: 550; }
@@ -1194,6 +1194,48 @@ pre.copy-cmd:hover::after { opacity: .7; }
   .fb-pop .modal-panel.fb { position: fixed; max-height: min(70dvh, 560px); }
   .fb-pop .m-head h2 { font-size: 17px; }
 }
+
+/* Effort pill (composer, next to the model picker; Claude/Codex only) and its popover / bottom sheet (#effModal). */
+.eff-chip { flex: none; font: inherit; font-size: 13px; }
+.eff-chip:not(.none) { color: var(--text); }
+.eff-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 420px) { .eff-chip .eff-k { display: none; } } /* phones: just the level word */
+.modal-panel.eff { width: min(380px, calc(100vw - 24px)); }
+@media (max-width: 800px) { .modal-panel.eff { width: 100%; } }
+.m-body.eff-body { padding-top: 2px; padding-bottom: max(18px, env(safe-area-inset-bottom)); }
+.eff-now { display: flex; align-items: baseline; gap: 8px; margin: 0 0 10px; }
+.eff-now strong { font-size: 20px; font-weight: 650; }
+.eff-tag { font-size: 12.5px; color: var(--muted); }
+#effRange { -webkit-appearance: none; appearance: none; display: block; width: 100%; height: 32px; margin: 0; background: transparent; cursor: pointer; touch-action: pan-y; }
+#effRange::-webkit-slider-runnable-track { height: 6px; border-radius: 3px; background: linear-gradient(to right, var(--accent) var(--fill, 0%), var(--border-strong) var(--fill, 0%)); }
+#effRange::-moz-range-track { height: 6px; border-radius: 3px; background: linear-gradient(to right, var(--accent) var(--fill, 0%), var(--border-strong) var(--fill, 0%)); }
+#effRange::-webkit-slider-thumb { -webkit-appearance: none; width: 22px; height: 22px; margin-top: -8px; border-radius: 50%; background: var(--accent); border: 3px solid var(--panel); box-shadow: 0 0 0 1px var(--accent), 0 1px 4px rgba(0, 0, 0, .25); }
+#effRange::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; background: var(--accent); border: 3px solid var(--panel); box-shadow: 0 0 0 1px var(--accent), 0 1px 4px rgba(0, 0, 0, .25); }
+/* Default: an empty track and a hollow thumb resting on the level the model uses by itself. */
+#effRange.is-default::-webkit-slider-runnable-track { background: var(--border-strong); }
+#effRange.is-default::-moz-range-track { background: var(--border-strong); }
+#effRange.is-default::-webkit-slider-thumb { background: var(--panel); box-shadow: 0 0 0 2px var(--muted); }
+#effRange.is-default::-moz-range-thumb { background: var(--panel); box-shadow: 0 0 0 2px var(--muted); }
+#effRange:focus-visible { outline: none; }
+#effRange:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 1px var(--accent), 0 0 0 5px color-mix(in srgb, var(--accent) 35%, transparent); }
+#effRange:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 1px var(--accent), 0 0 0 5px color-mix(in srgb, var(--accent) 35%, transparent); }
+/* Labelled ticks under each stop (the thumb's centre runs from 11px to 100% - 11px). */
+.eff-ticks { position: relative; height: 34px; margin: 0 11px; }
+.eff-tick { position: absolute; top: 0; left: calc(var(--i) / var(--n) * 100%); transform: translateX(-50%); min-height: 34px; padding: 10px 6px 4px;
+  border: 0; background: none; font: inherit; font-size: 12px; line-height: 1.2; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.eff-tick::before { content: ''; position: absolute; top: 1px; left: 50%; width: 2px; height: 6px; border-radius: 1px; background: var(--border-strong); transform: translateX(-50%); }
+.eff-tick:hover { color: var(--text); }
+.eff-tick.on { color: var(--text); font-weight: 650; }
+.eff-tick.eff-off { color: var(--faint); }
+.eff-hint { margin: 10px 0 0; min-height: 2.8em; font-size: 13.5px; line-height: 1.4; color: var(--text); }
+.eff-note { margin: 4px 0 0; font-size: 12.5px; color: var(--warn); }
+.eff-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.eff-def { font-size: 12.5px; color: var(--muted); }
+/* Task drawer: the Effort row under the Model chip. */
+.dr-effort { margin-top: 10px; }
+.dr-eff-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 4px; font-size: 13.5px; }
+.dr-eff-now { font-weight: 600; }
+.dr-eff-sel { margin-left: auto; max-width: 100%; }
 
 /* delegate sheet */
 .modal-panel.dg { width: min(640px, 100%); }

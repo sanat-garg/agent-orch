@@ -1557,6 +1557,16 @@ async function handleRequest(req, res) {
       return json(res, r.error ? r.status || 400 : 200, r.error ? { error: r.error } : r);
     }
   }
+  // Owner controls on a running task: pause (stop the session, keep worktree + session; the scheduler skips 'paused'),
+  // resume (same session, same agent) and handoff {agent, model, account?} (a fresh session on another agent in the same
+  // worktree). Pause and handoff answer once the run has stopped (pending: true if it hasn't yet; it still applies).
+  const octl = p.match(/^\/api\/orch\/tasks\/(\d+)\/(pause|resume|handoff)$/);
+  if (octl && req.method === 'POST') {
+    const id = Number(octl[1]), body = octl[2] === 'handoff' ? await readBody(req) : null;
+    const r = octl[2] === 'pause' ? await orch.pauseTask(id) : octl[2] === 'resume' ? orch.resumeTask(id)
+      : await orch.handoffTask(id, { agent: String(body.agent || ''), model: body.model || null, account: body.account || null });
+    return json(res, r.error ? r.status || 400 : 200, r.error ? { error: r.error } : r);
+  }
   // Queue reorder: POST {before: id|null, after: id|null} moves a queued task with its dependent subtree (409 if it
   // would go ahead of a prerequisite, or the task isn't queued).
   const omv = p.match(/^\/api\/orch\/tasks\/(\d+)\/move$/);

@@ -165,22 +165,25 @@ test('chat fallbacks: the picker has no Auto Delegate; the sheet removes, undoes
   await ctx.close();
 });
 
-test('reflection fallbacks: the settings popover opens the same sheet instantly, without any request, and saves', { skip, timeout: 90000 }, async () => {
+test('reflection fallbacks: the sidebar Settings sheet opens the same fallback sheet instantly, without any request, and saves for every project', { skip, timeout: 90000 }, async () => {
   const [name, value] = cookie.split('=');
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
   await ctx.addCookies([{ name, value, url: base }]);
   const page = await ctx.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
+  const seed = await fetch(base + '/api/orch/reflect-settings', { method: 'PUT', headers: { cookie, 'content-type': 'application/json' },
+    body: JSON.stringify({ fallbacks: [{ agent: 'codex', model: 'gpt-6-astra' }] }) });
+  assert.equal(seed.status, 200); await seed.json();
   await page.goto(`${base}/#${CID}`);
-  await page.waitForFunction(() => document.querySelector('#obReflectBtn')?.textContent === 'Fallbacks · 1');
   await page.waitForLoadState('networkidle');
+  await page.locator('#settingsBtn').click();
+  await page.waitForFunction(() => document.querySelector('#stReflectBtn')?.textContent === 'Fallbacks · 1');
   const requests = [];
   page.on('request', (r) => requests.push(r.url()));
-  await page.locator('#obSettingsBtn').click();
   // Rendered in the same task as the click: no fetch, no loading state.
   const shown = await page.evaluate(() => {
-    document.querySelector('#obReflectBtn').click();
+    document.querySelector('#stReflectBtn').click();
     return { open: !document.querySelector('#fbModal').hidden, title: document.querySelector('#fbTitle').textContent,
       rows: [...document.querySelectorAll('#fbModal .fe-row .fe-model')].map((e) => e.textContent) };
   });
@@ -193,11 +196,11 @@ test('reflection fallbacks: the settings popover opens the same sheet instantly,
   await page.locator('#fbModal .fe-add-btn').click();
   await page.locator('#fbModal .fe-search').fill('sol');
   await page.locator('#fbModal .fe-opt', { hasText: 'GPT-6-Sol' }).click();
-  const stored = () => db.prepare('SELECT reflect_fallbacks FROM projects WHERE id=?').get(pid).reflect_fallbacks;
-  for (let i = 0; i < 50 && JSON.parse(stored()).length < 2; i++) await new Promise((r) => setTimeout(r, 100));
-  assert.deepEqual(JSON.parse(stored()), [{ agent: 'codex', model: 'gpt-6-astra' }, { agent: 'codex', model: 'gpt-6-sol' }]);
-  assert.ok(requests.some((u) => u.endsWith(`/api/orch/projects/${pid}/reflect-fallbacks`)));
-  assert.equal(await page.locator('#obReflectBtn').innerText(), 'Fallbacks · 2');
+  const stored = () => JSON.parse(db.prepare("SELECT value FROM kv WHERE key='reflect_settings'").get()?.value || '{}').fallbacks || [];
+  for (let i = 0; i < 50 && stored().length < 2; i++) await new Promise((r) => setTimeout(r, 100));
+  assert.deepEqual(stored(), [{ agent: 'codex', model: 'gpt-6-astra' }, { agent: 'codex', model: 'gpt-6-sol' }]);
+  assert.ok(requests.some((u) => u.endsWith('/api/orch/reflect-settings')));
+  assert.equal(await page.locator('#stReflectBtn').innerText(), 'Fallbacks · 2');
   assert.deepEqual(errors, []);
   await ctx.close();
 });

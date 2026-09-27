@@ -45,6 +45,7 @@ const CFG = {
   maxReflectCooldownSec: 12 * 3600,
   verifyTimeoutSec: 600,
   taskTimeoutSec: 3 * 3600,
+  stopWaitMs: 20000,            // pause/handoff answer once the run has stopped, or after this long (it still applies later)
   pollMs: 3000,
   autoCommit: true,
   worktrees: true,             // work tasks in git projects run in their own worktree (worktrees.mjs) and merge back
@@ -291,6 +292,18 @@ function handoffPrompt(project, task, environment, { node, sha, stat, texts, too
     `Its work up to ${sha ? sha.slice(0, 12) : 'its last push'} is on this branch (${taskBranch(task.id)}), which you are on now. ` +
     'Its session can\'t be resumed (it lives on the other machine): read `git log` and the changes, check what is already done, then finish the task.',
   '', '## Changed so far (git diff --stat against the main branch)', stat || '(nothing pushed yet)'];
+  if (texts.length) parts.push('', "## The previous agent's last messages", ...texts.map((t) => `> ${t.replace(/\n/g, '\n> ')}`));
+  if (tools.length) parts.push('', '## Its last tool calls', ...tools.map((t) => `- ${t}`));
+  return taskBody(task, [`Project: ${project.name} (${project.path})`, environment, '', ...parts, '']);
+}
+// The owner moved a running task to another agent (POST /api/orch/tasks/:id/handoff): same worktree, uncommitted
+// changes and all. The new agent gets the task plus the previous session's last messages and tool calls and the
+// worktree's state, and continues from there.
+function ownerHandoffPrompt(project, task, environment, { from, texts, tools, status, stat, log }) {
+  const parts = [`The owner moved this task to you from ${from} while it was in progress. That session was stopped; its work so far is ` +
+    'in this checkout (committed and uncommitted). Continue from the current state: check what is already done, do not redo it, then finish the task.',
+  '', '## git status', status || '(clean)', '', '## git diff --stat (uncommitted changes)', stat || '(none)'];
+  if (log) parts.push('', '## Commits on this branch so far', log);
   if (texts.length) parts.push('', "## The previous agent's last messages", ...texts.map((t) => `> ${t.replace(/\n/g, '\n> ')}`));
   if (tools.length) parts.push('', '## Its last tool calls', ...tools.map((t) => `- ${t}`));
   return taskBody(task, [`Project: ${project.name} (${project.path})`, environment, '', ...parts, '']);
@@ -925,7 +938,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     ['tasks', 'node_id'], ['tasks', 'wip_sha'], ['runs', 'node_id'],
     // Reasoning effort: tasks.effort is the owner's per-task override (drawer only; NULL = the chat's live effort), and
     // runs.effort the level a run actually started with (NULL = the agent's default). See taskEffort.
-    ['tasks', 'effort'], ['runs', 'effort']]) {
+    ['tasks', 'effort'], ['runs', 'effort'],
+    // tasks.handoff: JSON {agent, model, reason} of the session the owner moved the task off (POST .../handoff); its next
+    // fresh session starts with ownerHandoffPrompt. Cleared once the new agent has a session of its own.
+    ['tasks', 'handoff']]) {
     if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} TEXT`);
   }
   // Delegation (delegate.mjs): tasks.origin ('reflection' | 'chat' | null), tasks.category (legacy, unused),
@@ -1362,7 +1378,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   function cascadeBlock(taskId, status, reason) {
     const blocked = [];
-    for (const r of qa("SELECT t.id FROM all_deps x JOIN tasks t ON t.id=x.task_id WHERE x.depends_on=:id AND t.status IN ('queued','running')", { id: taskId })) {
+    for (const r of qa("SELECT t.id FROM all_deps x JOIN tasks t ON t.id=x.task_id WHERE x.depends_on=:id AND t.status IN ('queued','running','paused')", { id: taskId })) {
       run('UPDATE tasks SET status=:s, finished_at=:f, result=:r WHERE id=:id', { s: status, f: now(), r: reason, id: r.id });
       running.get(r.id)?.abort.abort();
       pushTask(r.id);
@@ -1764,7 +1780,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
           if (path.dirname(w.dir) !== worktreesRoot(info.top)) continue;
           const t = getTask(w.id);
           if (t && t.project_id !== p.id) continue;
-          if (t && ['queued', 'running', 'needs_integration'].includes(t.status)) continue;
+          if (t && ['queued', 'running', 'paused', 'needs_integration'].includes(t.status)) continue;
           await parkWorktree(info, w.id, `agent-orch #${w.id}: unfinished work`);
           const merged = await isMerged(info, w.id);
           if (merged) await removeWorktree(info, w.id);
@@ -1904,6 +1920,95 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     logEvent(`#${id} delegated by the owner from ${fromName} to ${agent}/${model || 'default'}`, { projectId: task.project_id, taskId: id });
     setTimeout(tick, 100);
     return { ok: true, task: taskView(getTask(id)) };
+  }
+  // ---- owner controls on a running task (drawer and card): pause and hand off. Aborting only asks the session to stop;
+  // the intent is applied once the run has really ended (applyStopIntent, from execute), so a run that finishes in the
+  // meantime simply finishes, and a limit that hits mid-handoff is recorded as usual and the handoff still happens.
+  const stopIntents = new Map(); // task id -> { kind: 'pause' } | { kind: 'handoff', agent, model, account }
+  const stopWaiters = new Map(); // task id -> [resolve]: callers waiting for the run to end
+  const runEnded = (id, ms) => new Promise((resolve) => {
+    if (!running.has(id)) return resolve(true);
+    const t = setTimeout(() => resolve(false), ms);
+    stopWaiters.set(id, [...(stopWaiters.get(id) || []), () => { clearTimeout(t); resolve(true); }]);
+  });
+  const stopNote = (t, what) => (t.status === 'done' ? `#${t.id} finished before it could ${what}` : `#${t.id} is ${t.status}; it could not ${what}`);
+  async function stopRunning(task, intent, what) {
+    if (stopIntents.has(task.id)) return { error: `#${task.id} is already being paused or handed off`, status: 409 };
+    stopIntents.set(task.id, intent);
+    running.get(task.id)?.abort.abort();
+    if (!running.has(task.id)) applyStopIntent(task.id); // marked running with no live run (a restart race)
+    const ended = await runEnded(task.id, CFG.stopWaitMs);
+    const t = getTask(task.id), applied = intent.kind === 'pause' ? t.status === 'paused' : !!t.handoff && t.agent === intent.agent && !t.finished_at;
+    return { ok: true, task: taskView(t), ...(!ended ? { pending: true } : !applied ? { note: stopNote(t, what) } : {}) };
+  }
+  // Called once a run has ended: turn a requeued task into what the owner asked for. Anything else (done, failed,
+  // cancelled) means the run ended on its own first, and the intent is dropped.
+  function applyStopIntent(id) {
+    const intent = stopIntents.get(id);
+    stopIntents.delete(id);
+    const task = getTask(id);
+    if (!intent || !['queued', 'running'].includes(task?.status)) return;
+    if (intent.kind === 'pause') {
+      // Pinned to the agent/model it ran on, so Resume continues that session (a session resumes only on its agent).
+      updateTask(id, { status: 'paused', not_before: 0, agent: task.ran_agent || task.agent, model: task.ran_agent ? task.ran_model : task.model });
+      logEvent(`⏸ #${id} paused by the owner (session and worktree kept)`, { projectId: task.project_id, taskId: id });
+    } else moveTo(task, intent);
+    pushState(); setTimeout(tick, 100);
+  }
+  // Hand a task to another agent: a fresh session there, in the same worktree, starting with ownerHandoffPrompt.
+  function moveTo(task, { agent, model, account }) {
+    const fromAgent = task.ran_agent || task.agent || 'claude', fromModel = task.ran_agent ? task.ran_model : task.model;
+    const fromName = `${fromAgent}/${fromModel || delegator.defaultModel(fromAgent) || 'default'}`;
+    const ran = !!q1('SELECT 1 AS x FROM runs WHERE task_id=:t LIMIT 1', { t: task.id }); // nothing to hand over before a first run
+    updateTask(task.id, { status: 'queued', not_before: 0, agent, model, session_id: null, last_error: null,
+      handoff: ran ? JSON.stringify({ agent: fromAgent, model: fromModel || null, reason: 'moved by owner' }) : null,
+      delegated_from: task.delegated_from || fromName, delegated_reason: 'moved by owner',
+      moves: addMove(task, { from: { agent: fromAgent, model: fromModel || delegator.defaultModel(fromAgent) }, to: { agent, model: model || delegator.defaultModel(agent), ...(account && { account }) }, until: null, by: 'owner' }) });
+    logEvent(`⇄ #${task.id} moved by the owner from ${fromName} to ${agent}/${model || 'default'}; it continues in the same worktree`, { projectId: task.project_id, taskId: task.id });
+  }
+  async function pauseTask(id) {
+    const task = getTask(id);
+    if (!task) return { error: 'No such task', status: 404 };
+    if ((task.kind || 'work') !== 'work') return { error: 'Only work tasks can be paused', status: 409 };
+    if (task.status === 'queued' && !running.has(id)) {
+      updateTask(id, { status: 'paused' });
+      logEvent(`⏸ #${id} paused by the owner`, { projectId: task.project_id, taskId: id });
+      return { ok: true, task: taskView(getTask(id)) };
+    }
+    if (task.status !== 'running') return { error: `#${id} is ${task.status}, not running`, status: 409 };
+    return stopRunning(task, { kind: 'pause' }, 'pause');
+  }
+  function resumeTask(id) {
+    const task = getTask(id);
+    if (!task) return { error: 'No such task', status: 404 };
+    if (task.status !== 'paused') return { error: `#${id} is ${task.status}, not paused`, status: 409 };
+    updateTask(id, { status: 'queued', not_before: 0 });
+    logEvent(`▶ #${id} resumed by the owner${task.session_id ? ' (same session)' : ''}`, { projectId: task.project_id, taskId: id });
+    setTimeout(tick, 100);
+    return { ok: true, task: taskView(getTask(id)) };
+  }
+  async function handoffTask(id, { agent, model, account } = {}) {
+    const task = getTask(id);
+    if (!task) return { error: 'No such task', status: 404 };
+    if ((task.kind || 'work') !== 'work') return { error: 'Only work tasks can be handed off', status: 409 };
+    // Queued too: a run that just ended on a limit (or was otherwise interrupted) is back in the queue by the time the owner acts.
+    if (!['running', 'paused', 'queued'].includes(task.status)) return { error: `Only running, paused or queued tasks can be handed off (#${id} is ${task.status})`, status: 409 };
+    if (task.status === 'running' && (running.get(id)?.node || LOCAL_NODE) !== LOCAL_NODE) return { error: `#${id} runs on another machine; pause it or let it finish there`, status: 409 };
+    if (!AGENTS[agent]) return { error: 'Unknown agent' };
+    model = model ? String(model) : null;
+    if (unlistedModel(agent, model)) return { error: `${model} is not a ${agent} model` };
+    const connected = agent === 'claude' ? onSubscription() : agentStatus(agent) === true && !(kvTime(`agent_auth_failed:${agent}`) > now());
+    if (!connected) return { error: `${agentName(agent)} is not signed in`, status: 409 };
+    const curAgent = task.ran_agent || task.agent || 'claude', curModel = task.ran_agent ? task.ran_model : task.model;
+    if (curAgent === agent && (curModel || null) === model) return { error: `#${id} already runs on ${agent}/${model || 'default'}`, status: 409 };
+    const intent = { kind: 'handoff', agent, model, account: account ? String(account) : null };
+    const limited = agentUsage(agent, model).status === 'limited' ? { warning: `${agentName(agent)} is at its usage limit; the task waits for it` } : {};
+    if (task.status !== 'running' || !running.has(id)) {
+      moveTo(task, intent);
+      pushState(); setTimeout(tick, 100);
+      return { ok: true, task: taskView(getTask(id)), ...limited };
+    }
+    return { ...(await stopRunning(task, intent, 'be handed off')), ...limited };
   }
   function routesText(projectId) {
     const agents = Object.values(AGENTS).map((a) => {
@@ -2197,6 +2302,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       .catch((e) => console.error('[orchestrator] task crashed', e))
       .finally(() => {
         running.delete(task.id); pushState(); setTimeout(tick, 200);
+        for (const w of stopWaiters.get(task.id) || []) w();
+        stopWaiters.delete(task.id);
         if (!running.size) for (const r of drained.splice(0)) r();
       });
   }
@@ -2219,7 +2326,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       if (p.next_reflect_at > t) continue;
       if (planningProjects.has(p.id)) continue; // the owner is mid-conversation with the planner
       if (!projectReady(p.path)) continue;
-      if (q1("SELECT 1 AS x FROM tasks WHERE project_id=:p AND status IN ('queued','running','awaiting_review')", { p: p.id })) continue;
+      if (q1("SELECT 1 AS x FROM tasks WHERE project_id=:p AND status IN ('queued','running','paused','awaiting_review')", { p: p.id })) continue;
       // Nothing to improve until the owner has said what the project is and some work has landed.
       if (!q1("SELECT 1 AS x FROM tasks WHERE project_id=:p AND kind='work' AND status='done' LIMIT 1", { p: p.id })) continue;
       run('UPDATE projects SET next_reflect_at=:u WHERE id=:id', { u: t + 120, id: p.id });
@@ -2303,6 +2410,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       if (attempts >= CFG.maxAttempts) await fail(getTask(task.id), project, 'crash', String(e?.message || e));
       else requeueIfRunning(task.id, { attempts, not_before: now() + Math.min(300 * 2 ** (attempts - 1), 3600), last_error: `[crash] ${e?.message || e}`.slice(0, 2000) });
     } finally {
+      applyStopIntent(task.id);
       const wt = taskWts.get(task.id);
       taskWts.delete(task.id);
       // A task's own worktree outlives a requeue (the next run reuses it) and 'needs_integration'; an integrator's
@@ -2351,9 +2459,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       autonomous = false;
     } else {
       // A warm session from another task was made in another checkout, so worktree tasks always start fresh.
-      if (!resume && route.agent === 'claude' && !wt && !lostHandoff(task)) { resume = pickSession(task); reused = !!resume; }
+      if (!resume && route.agent === 'claude' && !wt && !lostHandoff(task) && !task.handoff) { resume = pickSession(task); reused = !!resume; }
       const where = wt ? { ...project, path: cwd } : project, env = wt ? `${ENVIRONMENT}\n${worktreeNote(wt, project)}` : ENVIRONMENT;
-      body = reused ? nextTaskPrompt(task) : !resume && lostHandoff(task) ? handoffPrompt(where, task, env, await handoffInfo(task, project)) : workerTaskPrompt(where, task, env);
+      body = reused ? nextTaskPrompt(task) : !resume && lostHandoff(task) ? handoffPrompt(where, task, env, await handoffInfo(task, project))
+        : !resume && task.handoff ? ownerHandoffPrompt(where, task, env, await ownerHandoffInfo(task, project, cwd)) : workerTaskPrompt(where, task, env);
       system = WORKER_SYSTEM;
       tools = CFG.safeTools;
       autonomous = !!project.autonomous;
@@ -2371,6 +2480,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       signal, timeoutSec: CFG.taskTimeoutSec, taskId: task.id, runId, logPath,
     });
     finishRun(runId, res);
+    if (task.handoff && res.sessionId) updateTask(task.id, { handoff: null }); // the new agent's own session carries on from here
     // A missing session (Claude's 'no conversation found', a codex errorCode 'no_session') is dropped; the task
     // requeues without spending an attempt and starts fresh.
     if (resume && isMissingSession(res)) {
@@ -2578,13 +2688,31 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   // What a handoff run is told about the lost one: its last messages and tool calls (its run log) and the pushed
   // branch's diff stat against the main branch. The branch is fetched here (a local run's worktree starts from it).
-  async function handoffInfo(task, project) {
-    const last = q1('SELECT * FROM runs WHERE task_id=:t ORDER BY id DESC LIMIT 1', { t: task.id });
+  // The last run's final messages (last 3, 1500 chars each) and tool calls (last 12), from its run log.
+  function lastRunDigest(taskId) {
+    const last = q1('SELECT * FROM runs WHERE task_id=:t ORDER BY id DESC LIMIT 1', { t: taskId });
     let entries = [];
     try { entries = parseJsonl(fs.readFileSync(last.log_path, 'utf8')); } catch {}
     const texts = entries.filter((e) => e.k === 'text' && String(e.text || '').trim()).slice(-3)
       .map((e) => { const t = String(e.text).trim(); return t.length > 1500 ? `…${t.slice(-1500)}` : t; });
     const tools = entries.filter((e) => e.k === 'tool').slice(-12).map(toolLine);
+    return { last, texts, tools };
+  }
+  // An owner handoff: the digest plus the checkout's git status, uncommitted diff stat and the branch's own commits.
+  async function ownerHandoffInfo(task, project, cwd) {
+    const { texts, tools } = lastRunDigest(task.id);
+    let h = {};
+    try { h = JSON.parse(task.handoff) || {}; } catch {}
+    const out = (args) => git(cwd, args).then((s) => s.trim(), () => '');
+    const main = (await repoInfo(project.path).catch(() => null))?.branch;
+    const inWorktree = cwd !== project.path;
+    return { from: `${agentName(h.agent || 'claude')} (${h.model || 'default model'})`, texts, tools,
+      // The orchestrator's own untracked task spec (.agent-orch/) isn't the previous agent's work.
+      status: (await out(['status', '--short'])).split('\n').filter((l) => l !== '?? .agent-orch/').join('\n'), stat: await out(['diff', '--stat', 'HEAD']),
+      log: inWorktree && main ? await out(['log', '--oneline', '-20', `${main}..HEAD`]) : '' };
+  }
+  async function handoffInfo(task, project) {
+    const { last, texts, tools } = lastRunDigest(task.id);
     let sha = task.wip_sha || null, stat = '';
     await serialGit(project.path, async () => {
       const info = await repoInfo(project.path);
@@ -2679,10 +2807,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       if (attempts >= CFG.maxAttempts) return fail(task, project, 'lost', res.text);
       return requeueIfRunning(tid, { session_id: null, attempts, not_before: 0, last_error: res.text.slice(0, 2000) });
     }
+    if (res.outcome === 'aborted' && stopIntents.has(tid)) return requeueIfRunning(tid, { session_id: res.sessionId || task.session_id }); // applyStopIntent takes it from here
     if (res.outcome === 'aborted') {
       requeueIfRunning(tid, { session_id: res.sessionId || task.session_id, not_before: now() + 5 });
       return logEvent(`#${tid} interrupted; will continue later`, { projectId: pid, taskId: tid });
     }
+    // Stopped by the owner (pause/handoff) and the agent exited with an error on the way out: no attempt is spent.
+    if (stopIntents.has(tid)) return requeueIfRunning(tid, { session_id: res.sessionId || task.session_id });
     // max_turns, timeout, error: retry with bounded attempts, resuming the same session.
     const attempts = task.attempts + 1;
     const detail = String(res.text || res.stderr || res.outcome).trim();
@@ -2970,7 +3101,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         return { ok: true };
       }
       case 'cancel': {
-        if (!['queued', 'running', 'needs_integration', 'awaiting_review'].includes(task.status)) return { error: 'Only waiting or running tasks can be cancelled' };
+        if (!['queued', 'running', 'paused', 'needs_integration', 'awaiting_review'].includes(task.status)) return { error: 'Only waiting, paused or running tasks can be cancelled' };
         updateTask(id, { status: 'cancelled', finished_at: now() });
         if (task.kind === 'review') { // removing a review break: what waited for it follows its prerequisites again
           const deps = depsOf(id);
@@ -2980,6 +3111,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
           return { ok: true };
         }
         running.get(id)?.abort.abort();
+        // A paused task has no run whose end would park its worktree: park it here (the work stays on its branch).
+        if (task.status === 'paused' && task.worktree) parkTask(getProject(task.project_id), id, `agent-orch #${id} cancelled: ${task.title} (partial work)`).catch(() => {});
         if (task.status === 'needs_integration') {
           // Its integrators go too, and the worktree is parked on its branch.
           for (const r of qa("SELECT id FROM tasks WHERE integrates=:id AND status IN ('queued','running')", { id })) {
@@ -3256,7 +3389,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   return {
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
-    planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, insertCheckpoint, approveCheckpoint, requestChanges, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setReflectFallbacks, setReflectSettings, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
+    planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, insertCheckpoint, approveCheckpoint, requestChanges, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setReflectFallbacks, setReflectSettings, pauseTask, resumeTask, handoffTask, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
     drain, undrain, chatPlanning, stateView, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, reconcileClaudeLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     // A sidebar chat's project rank ({id, position, priority}), or null when its folder has no orchestrator project.
     projectRank: (cwd) => q1('SELECT id, position, priority FROM projects WHERE path=:p', { p: cwd }) ?? null,

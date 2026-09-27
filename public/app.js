@@ -1763,7 +1763,7 @@ function renderEff() {
   range.classList.toggle('is-default', !level);
   range.setAttribute('aria-valuetext', level ? `${level}. ${effortHint(levels, level)}` : `Default, ${at}`);
   range.style.setProperty('--fill', `${levels.length > 1 ? (levels.indexOf(at) / (levels.length - 1)) * 100 : 0}%`);
-  $('effSub').textContent = `${shortLabel(agent)} · ${modelName(agent, model)}`;
+  $('effSub').textContent = `${agentEntry(agent)?.label || shortLabel(agent)} · ${model ? modelLabel(agent, model) : 'default model'}`;
   $('effLevel').textContent = level || 'Default';
   $('effTag').textContent = level ? '' : `runs as ${at}`;
   $('effHint').textContent = level ? effortHint(levels, level) : `Uses the model's own setting (${at}). ${effortHint(levels, at)}`;
@@ -1774,7 +1774,7 @@ function renderEff() {
   ticks.textContent = '';
   ticks.style.setProperty('--n', String(Math.max(1, levels.length - 1)));
   levels.forEach((l, i) => {
-    const b = el('button', 'eff-tick' + (l === at ? ' on' : '') + (ok.includes(l) ? '' : ' na'), l);
+    const b = el('button', 'eff-tick' + (l === at ? ' on' : '') + (ok.includes(l) ? '' : ' eff-off'), l);
     b.type = 'button';
     b.tabIndex = -1; // the slider has the keyboard; ticks are for pointers
     b.style.setProperty('--i', String(i));
@@ -3881,7 +3881,7 @@ function renderSettings() {
   renderReflectBtn();
   $('stProject').hidden = !p;
   if (!p) return;
-  $('stProjectTitle').textContent = `This project · ${folderName(p.path)}`;
+  $('stProjectTitle').textContent = `This project · ${p.path.split('/').pop()}`;
   $('stPerpetual').checked = p.perpetual;
   const ids = rankedProjectIds(), at = ids.indexOf(p.id) + 1;
   $('stRank').textContent = at ? `#${at} of ${ids.length}` : '';
@@ -4031,7 +4031,7 @@ function modelSection(t) {
     chip.setAttribute('aria-label', `${chain.map((x) => x.name).join(', then ')}. Edit fallbacks`);
     chip.onclick = () => openFallbacks(taskFallbacks(t.id), chip);
     if (chain.length === 1) {
-      const add = el('button', 'tc-tag model dr-chip-btn', 'Add fallback');
+      const add = el('button', 'tc-tag model normal dr-chip-btn', 'Add fallback'); // the model chip's own style
       add.type = 'button';
       add.title = `Pick models to move this task to if ${ms.model} hits its limit`;
       add.onclick = () => openFallbacks(taskFallbacks(t.id), add);
@@ -4039,6 +4039,8 @@ function modelSection(t) {
     }
   }
   c.append(row);
+  const eff = effortRow(t);
+  if (eff) c.append(eff);
   if (ms.kind === 'waiting' || ms.kind === 'delegated') c.append(el('div', 'dr-check', ms.text));
   // Remote runs (cluster workers) name their machine; the controller's own runs don't.
   if (t.waiting_for) c.append(el('div', 'dr-check', `Waiting for ${t.waiting_for} to come back`));
@@ -4056,6 +4058,43 @@ function modelSection(t) {
     c.append(ul);
   }
   return c;
+}
+
+// The Effort row (Claude/Codex tasks): the level its next session starts with, from its chat's live effort or its own
+// override ('this task'), a select to override it while it is queued or running, and the level each run used.
+function effortRow(t) {
+  const queued = t.status === 'queued';
+  const [agent, model] = queued && t.runs_on ? [t.runs_on, t.runs_model || null] : t.ran_agent ? [t.ran_agent, t.ran_model || null] : [t.agent || 'claude', t.model || null];
+  const runs = (O.detail?.task.id === t.id ? O.detail.runs : []).filter((r) => effortLevels(r.agent).length);
+  const levels = effortLevels(agent);
+  if (!levels.length && !runs.length) return null;
+  const wrap = el('div', 'dr-effort');
+  const chat = state.convos.find((c) => c.id === O.detail?.project?.convo_id);
+  const ok = modelEfforts(agent, model), def = defaultEffort(agent, model);
+  const asRun = (l) => (l ? clampEffortTo(ok, l) : null);
+  const chatLevel = asRun(chat?.effort ?? null), own = asRun(t.effort || null);
+  if (levels.length) {
+    const line = el('div', 'dr-eff-line');
+    const now = own || chatLevel;
+    line.append(el('span', 'dr-eff-now', `Effort: ${now || `default${def ? ` (${def})` : ''}`}`),
+      el('span', 'muted', own ? ' (this task)' : ' (from chat)'));
+    if (t.kind !== 'plan' && ['queued', 'running'].includes(t.status)) {
+      const sel = el('select', 'btn small dr-eff-sel');
+      sel.setAttribute('aria-label', 'Effort for this task');
+      const follow = el('option', '', `Follow chat (${chatLevel || 'default'})`);
+      follow.value = '';
+      sel.append(follow);
+      for (const l of levels) { const o = el('option', '', ok.includes(l) ? l : `${l} (runs as ${clampEffortTo(ok, l)})`); o.value = l; sel.append(o); }
+      sel.value = t.effort && levels.includes(t.effort) ? t.effort : '';
+      sel.title = t.status === 'running' ? 'Applies from its next session (a resume, retry or handoff)' : 'Used when it starts';
+      sel.onchange = () => orchAction('effort', sel.value || null);
+      line.append(sel);
+    }
+    wrap.append(line);
+    if (t.status === 'running' && runs.length && (runs.at(-1).effort ?? null) !== now) wrap.append(el('div', 'dr-check', `This session runs at ${runs.at(-1).effort || 'the default'}; ${now || 'the default'} applies from its next session.`));
+  }
+  if (runs.length) wrap.append(el('div', 'dr-check', `Runs used: ${runs.map((r) => r.effort || 'default').join(' → ')}`));
+  return wrap;
 }
 
 function section(title) {
@@ -4280,7 +4319,8 @@ function renderOutput(container, runs, isRunning) {
   runs.forEach((run, ri) => {
     const prev = runs[ri - 1];
     const how = ri === 0 ? 'Started' : prev?.outcome === 'ok' ? 'Continued' : ['error', 'max_turns', 'timeout'].includes(prev?.outcome) ? 'Retried' : 'Resumed';
-    container.append(el('div', 'out-run', `${how} ${fmtClock(run.started_at)}${run.outcome ? ` · ${OUTCOME_TEXT[run.outcome] || run.outcome}` : ''}`));
+    const effort = effortLevels(run.agent).length ? ` · effort ${run.effort || 'default'}` : '';
+    container.append(el('div', 'out-run', `${how} ${fmtClock(run.started_at)}${effort}${run.outcome ? ` · ${OUTCOME_TEXT[run.outcome] || run.outcome}` : ''}`));
     const results = new Map(run.entries.filter((e) => e.k === 'result').map((e) => [e.id, e]));
     let group = null, shots = null;
     for (const e of run.entries) {

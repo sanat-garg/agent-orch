@@ -6,15 +6,18 @@ import vm from 'node:vm';
 const source = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 function fixture(saved = null) {
   let plays = 0, time = 0;
-  const elements = Object.fromEntries(['obSound', 'obSoundTest'].map(id => [id, { addEventListener(type, fn) { this[type] = fn; } }]));
+  const elements = Object.fromEntries(['stSound', 'stSoundTest', 'stSoundName', 'stSoundReset', 'stSoundUpload', 'stSoundFile']
+    .map(id => [id, { addEventListener(type, fn) { this[type] = fn; } }]));
+  const settings = { sound: { custom: false, at: null } };
   const listeners = new Map();
   const document = { visibilityState: 'hidden', hasFocus: () => false,
     addEventListener: (key, fn) => listeners.set(key, fn), removeEventListener: key => listeners.delete(key) };
   const context = vm.createContext({ document, performance: { now: () => time },
     $: id => elements[id], store: { get: () => saved, set: (_, value) => { saved = value; } },
+    api: async () => settings, toast() {},
     Audio: class { play() { if (!this.muted) plays++; return Promise.resolve(); } pause() {} } });
   vm.runInContext(source.split('// ---------- task completion sound ----------')[1].split('// ---------- WebSocket ----------')[0], context);
-  return { context, document, elements, listeners, get plays() { return plays; }, get saved() { return saved; },
+  return { context, document, elements, listeners, settings, get plays() { return plays; }, get saved() { return saved; },
     advance() { time += 3001; }, run: code => vm.runInContext(code, context),
     async event(id, status, kind = 'work') { context.observeTaskCompletion({ id, status, kind }); await Promise.resolve(); } };
 }
@@ -48,16 +51,30 @@ test('completion sound: live transitions, replay, first completion, focus, kinds
 
 test('sound preference, manual test and one-time muted unlock', async () => {
   const f = fixture('off');
-  assert.equal(f.elements.obSound.checked, false);
+  assert.equal(f.elements.stSound.checked, false);
   f.run('syncCompletionSound([])');
   await f.event(1, 'running'); await f.event(1, 'done'); assert.equal(f.plays, 0);
   f.listeners.get('pointerdown')();
-  await f.elements.obSoundTest.click();
+  await f.elements.stSoundTest.click();
   assert.equal(f.plays, 1, 'manual test works even with preference off');
   assert.equal(f.listeners.size, 0);
   assert.equal(f.run('taskSound.muted'), false);
   assert.equal(f.run('taskSound.volume'), 0.6);
-  f.elements.obSound.change({ target: { checked: true } }); assert.equal(f.saved, 'on');
+  f.elements.stSound.change({ target: { checked: true } }); assert.equal(f.saved, 'on');
   f.run('taskSound.play = () => Promise.reject(new Error("autoplay"))');
   await f.context.playTaskSound();
+});
+
+test('an uploaded MP3 replaces the default chime; Reset brings it back', async () => {
+  const f = fixture();
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(f.run('taskSound.src'), '/sounds/task-done.mp3');
+  assert.equal(f.elements.stSoundName.textContent, 'Default chime');
+  assert.equal(f.elements.stSoundReset.hidden, true);
+  f.run("setSoundInfo({ custom: true, at: 42 })");
+  assert.equal(f.run('taskSound.src'), '/api/settings/sound?v=42');
+  assert.equal(f.elements.stSoundName.textContent, 'Your MP3');
+  assert.equal(f.elements.stSoundReset.hidden, false);
+  f.run("setSoundInfo({ custom: false, at: null })");
+  assert.equal(f.run('taskSound.src'), '/sounds/task-done.mp3');
 });

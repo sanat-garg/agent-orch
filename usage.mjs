@@ -1,12 +1,11 @@
 // Usage history: an append-only log at <DATA>/metrics/usage.jsonl, one JSON record per line (t = epoch ms,
 // resetsAt = epoch s or null), kept for 30 days:
 //   {t, agent, kind:'window', window, pct, resetsAt, at?}      a plan window reading (dedupe: unchanged within 5 min);
-//     claude: five_hour/seven_day/…, codex: 5h/weekly (from window_minutes), antigravity: <group>-5h/<group>-weekly;
-//     OpenCode currently exposes per-turn tokens but no live subscription windows or reset times.
+//     claude: five_hour/seven_day/…, codex: 5h/weekly (from window_minutes);
 //     at = when the reading was taken (epoch ms) if earlier than t, e.g. a polled codex rollout snapshot
-//   {t, agent, kind:'tokens', input, output, cached, premiumRequests?, source, ref}  one chat turn or task run
+//   {t, agent, kind:'tokens', input, output, cached, source, ref}  one chat turn or task run
 //   {t, agent, kind:'limit', status:'hit'|'cleared', resetsAt, window?}
-// `input` is uncached input (Claude: input + cache writes; codex/agy report input including the cached part).
+// `input` is uncached input (Claude: input + cache writes; codex reports input including the cached part).
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -31,9 +30,7 @@ export function normUsage(agent, u = {}) {
   if (agent === 'claude' || u.cache_read_input_tokens != null) {
     return { input: num(u.input_tokens) + num(u.cache_creation_input_tokens), output: num(u.output_tokens), cached: num(u.cache_read_input_tokens) };
   }
-  // agy reports cache reads beside input (total_tokens = input + output; live runs read more cached than input);
   // codex's cached_input_tokens are part of input_tokens.
-  if (agent === 'antigravity') return { input: num(u.input_tokens), output: num(u.output_tokens), cached: num(u.cache_read_tokens) };
   const cached = num(u.cached_input_tokens ?? u.cache_read_tokens ?? u.cached);
   return { input: Math.max(0, num(u.input_tokens) - cached), output: num(u.output_tokens), cached };
 }
@@ -49,11 +46,9 @@ export function readRecords(file, since = 0) {
   return out;
 }
 
-const limitId = (agent, group) => (group ? `${agent}\n${group}` : agent);
-
 export function createUsageLog(dataDir, { now = Date.now } = {}) {
   const file = path.join(dataDir, 'metrics', 'usage.jsonl');
-  let state = null; // agent/window -> last window record; agent(/group) -> last limit record
+  let state = null; // agent/window -> last window record; agent -> last limit record
   const load = () => {
     if (state) return state;
     state = { windows: new Map(), limits: new Map() };
@@ -62,7 +57,7 @@ export function createUsageLog(dataDir, { now = Date.now } = {}) {
   };
   const note = (r) => {
     if (r.kind === 'window') state.windows.set(`${r.agent}\n${r.window}`, r);
-    else if (r.kind === 'limit') state.limits.set(limitId(r.agent, r.group), r);
+    else if (r.kind === 'limit') state.limits.set(r.agent, r);
   };
   const append = (r) => {
     load();
@@ -90,26 +85,24 @@ export function createUsageLog(dataDir, { now = Date.now } = {}) {
       for (const r of load().windows.values()) if (r.agent === agent && (r.resetsAt == null || r.resetsAt * 1000 > now())) out.push({ window: r.window, pct: r.pct, resetsAt: r.resetsAt });
       return out;
     },
-    // An adapter's res.windows ([{window, pct, resetsAt}], e.g. codex '5h'/'weekly', agy 'gemini-5h').
+    // An adapter's res.windows ([{window, pct, resetsAt}], e.g. codex '5h'/'weekly').
     windows(agent, list) { return (list || []).map((w) => this.window(agent, w.window, w.pct, w.resetsAt)).filter(Boolean); },
     tokens(agent, usage, source, ref) {
       const u = normUsage(agent, usage);
-      const premiumRequests = agent === 'copilot' && Number.isFinite(Number(usage?.premiumRequests)) ? Number(usage.premiumRequests) : null;
-      if (!u.input && !u.output && !u.cached && !premiumRequests) return null;
-      return append({ agent, kind: 'tokens', ...u, ...(premiumRequests != null && { premiumRequests }), source, ref: ref ?? null });
+      if (!u.input && !u.output && !u.cached) return null;
+      return append({ agent, kind: 'tokens', ...u, source, ref: ref ?? null });
     },
     // A repeated hit with the same reset is skipped; 'cleared' is only written while the agent is marked hit.
-    // `group` (antigravity's 'gemini'/'3p') keeps each model group's limit separate.
-    limitHit(agent, resetsAt, window, group) {
-      const last = load().limits.get(limitId(agent, group)), at = toEpochSec(resetsAt);
+    limitHit(agent, resetsAt, window) {
+      const last = load().limits.get(agent), at = toEpochSec(resetsAt);
       if (last?.status === 'hit' && last.resetsAt === at) return null;
-      return append({ agent, kind: 'limit', status: 'hit', resetsAt: at, ...(window && { window }), ...(group && { group }) });
+      return append({ agent, kind: 'limit', status: 'hit', resetsAt: at, ...(window && { window }) });
     },
-    lastLimit(agent, group) { return load().limits.get(limitId(agent, group)) || null; },
-    limitCleared(agent, group) {
-      const last = load().limits.get(limitId(agent, group));
+    lastLimit(agent) { return load().limits.get(agent) || null; },
+    limitCleared(agent) {
+      const last = load().limits.get(agent);
       if (last?.status !== 'hit') return null;
-      return append({ agent, kind: 'limit', status: 'cleared', resetsAt: last.resetsAt, ...(last.window && { window: last.window }), ...(group && { group }) });
+      return append({ agent, kind: 'limit', status: 'cleared', resetsAt: last.resetsAt, ...(last.window && { window: last.window }) });
     },
     // Drops records older than 30 days (and unparseable lines); run on startup.
     compact() {
@@ -140,12 +133,12 @@ export function downsample(points, max = MAX_POINTS) {
 export function bucketTokens(records, from, to, size) {
   const start = Math.floor(from / size) * size;
   const buckets = [];
-  for (let b = start; b <= to; b += size) buckets.push({ t: b, input: 0, output: 0, cached: 0, premiumRequests: 0, turns: 0 });
+  for (let b = start; b <= to; b += size) buckets.push({ t: b, input: 0, output: 0, cached: 0, turns: 0 });
   for (const r of records) {
     if (r.kind !== 'tokens' || r.t < from || r.t > to) continue;
     const b = buckets[Math.floor((r.t - start) / size)];
     if (!b) continue;
-    b.input += num(r.input); b.output += num(r.output); b.cached += num(r.cached); b.premiumRequests += num(r.premiumRequests); b.turns++;
+    b.input += num(r.input); b.output += num(r.output); b.cached += num(r.cached); b.turns++;
   }
   return buckets;
 }
@@ -170,7 +163,7 @@ export function usageHistory(records, rangeKey, at = Date.now()) {
   for (const [id, recs] of byAgent) {
     recs.sort((a, b) => a.t - b.t);
     const a = of(id);
-    const lastLimit = new Map(); // group ('' for the whole agent) -> latest limit record
+    let lastLimit = null;
     for (const r of recs) {
       if (r.kind === 'window') {
         const read = r.at ?? r.t, len = windowMs(r.window);
@@ -178,33 +171,26 @@ export function usageHistory(records, rangeKey, at = Date.now()) {
           stale: (r.resetsAt != null && r.resetsAt * 1000 <= at) || (len != null && at - read > len) };
         if (r.t >= from) (a.windows[r.window] ||= []).push({ t: r.t, pct: r.pct, resetsAt: r.resetsAt ?? null });
       } else if (r.kind === 'limit') {
-        lastLimit.set(r.group || '', r);
-        if (r.t >= from) a.limits.push({ t: r.t, status: r.status, resetsAt: r.resetsAt ?? null, ...(r.window && { window: r.window }), ...(r.group && { group: r.group }) });
+        lastLimit = r;
+        if (r.t >= from) a.limits.push({ t: r.t, status: r.status, resetsAt: r.resetsAt ?? null, ...(r.window && { window: r.window }) });
       }
     }
     for (const w of Object.keys(a.windows)) a.windows[w] = downsample(a.windows[w]);
     a.tokens = bucketTokens(recs, from, at, bucket);
-    // Blocked while the latest limit event (per group) is a hit whose reset (if known) is still ahead.
-    // status.groups: antigravity's blocked groups → resetsAt; blocked/resetsAt cover any of them.
-    for (const [g, l] of lastLimit) {
-      if (l.status !== 'hit' || (l.resetsAt != null && l.resetsAt * 1000 <= at)) continue;
-      a.status.blocked = true;
-      a.status.resetsAt = Math.max(a.status.resetsAt ?? 0, l.resetsAt ?? 0) || null;
-      if (g) (a.status.groups ||= {})[g] = l.resetsAt ?? null;
-    }
+    // Blocked while the latest limit event is a hit whose reset (if known) is still ahead.
+    const l = lastLimit;
+    if (l?.status === 'hit' && (l.resetsAt == null || l.resetsAt * 1000 > at)) { a.status.blocked = true; a.status.resetsAt = l.resetsAt ?? null; }
   }
   return { range, from, to: at, bucketMs: bucket, agents };
 }
 
 // Plan-limit checks per agent (agents.mjs `fetchLimits`), for the health view: <DATA>/limits.json keeps each agent's
 // {source, exposed, windows, error, at (last successful reading), checkedAt}; readings also go to the usage log.
-// Refreshed on start, every 6 h, after a sign-in change and from the Connections modal's Refresh; `note` takes a
-// reading made elsewhere (the server's 3-minute Claude poll). fetch(id) is injectable for tests. Reads (get) never check;
+// Refreshed only when asked (the usage card's refresh, one agent); `note` takes a reading made elsewhere (the server's
+// Claude check). fetch(id) is injectable for tests. Reads (get) never check;
 // like the model store, one check per agent per minGapMs (earlier requests are deferred to the gap's end, coalesced).
-export const LIMITS_TTL = 6 * 3600e3;
-export function createLimitStore({ file, ids, fetch, usageLog = null, intervalMs = LIMITS_TTL, minGapMs = 60_000, onChange = () => {}, log = () => {}, now = Date.now }) {
+export function createLimitStore({ file, ids, fetch, usageLog = null, minGapMs = 60_000, onChange = () => {}, log = () => {}, now = Date.now }) {
   const status = new Map(), inflight = new Map(), last = new Map(), deferred = new Map();
-  let timer = null;
   try {
     for (const [id, e] of Object.entries(JSON.parse(fs.readFileSync(file, 'utf8')).agents || {})) {
       if (!ids.includes(id)) continue;
@@ -257,7 +243,6 @@ export function createLimitStore({ file, ids, fetch, usageLog = null, intervalMs
     refresh,
     note(id, r) { if (!ids.includes(id)) return; set(id, { ...status.get(id), ...r, error: null }); save(); },
     get: (id) => status.get(id) || null,
-    start() { const p = refresh(); timer = setInterval(() => refresh().catch(() => {}), intervalMs); timer.unref?.(); return p; },
-    stop: () => { clearInterval(timer); for (const t of deferred.values()) clearTimeout(t); deferred.clear(); },
+    stop: () => { for (const t of deferred.values()) clearTimeout(t); deferred.clear(); },
   };
 }

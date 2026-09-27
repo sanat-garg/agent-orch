@@ -11,10 +11,10 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createOrchestrator, parseJsonl, SHOT_HINT } from './orchestrator.mjs';
 import { createGitHub } from './github.mjs';
 import { retireRuntime, chatIdle, whenIdle } from './runtimes.mjs';
-import { AGENTS, runAgentCli, clearLoginCache, isMissingSession, modelCatalog, codexLatestSnapshot, claudeWindows, fetchLimits, agentVersion, readVersion, windowLabel, AGY_GROUPS, agyGroup, opencodeProviders } from './agents.mjs';
+import { AGENTS, runAgentCli, clearLoginCache, isMissingSession, modelCatalog, claudeWindows, fetchLimits, agentVersion, readVersion, windowLabel } from './agents.mjs';
 import { createModelStore } from './models.mjs';
 import { runHelper, claudeHelperSpawn } from './helpers.mjs';
-import { createConnections, SPECS, codexAccount, agyAccount, onPath } from './connections.mjs';
+import { createConnections, SPECS, codexAccount, onPath } from './connections.mjs';
 import { mediaCollector, MEDIA_ID_RE, MEDIA_TYPES, toolResultImages } from './media.mjs';
 import { createUsageLog, createLimitStore, RANGES as USAGE_RANGES } from './usage.mjs';
 import { healthRow } from './health.mjs';
@@ -199,7 +199,8 @@ function checkFallbacks(v) {
 }
 function publicConvo(c) {
   const rt = runtimes.get(c.id);
-  return { ...c, fallbacks: c.fallbacks ?? null, busy: !!rt?.busy || planning.has(c.id) || agentTurns.has(c.id) };
+  // project: its orchestrator project's {id, position, priority} (the sidebar's drag order), null for a plain chat.
+  return { ...c, fallbacks: c.fallbacks ?? null, busy: !!rt?.busy || planning.has(c.id) || agentTurns.has(c.id), project: orch?.projectRank(c.cwd) ?? null };
 }
 const planning = new Set(); // convo ids with an orchestrator planner turn in progress
 const agentTurns = new Map(); // convo id -> AbortController of a running non-Claude chat turn
@@ -353,9 +354,9 @@ const RAW_FILE = path.join(METRICS_DIR, 'raw.jsonl');
 // Per-agent usage history (plan windows, tokens per turn/run, limit events): usage.mjs.
 const usageLog = createUsageLog(DATA);
 try { usageLog.compact(); } catch (e) { console.error('[usage] compact failed', e); }
-// Every agent's latest plan-limit check (usage.mjs createLimitStore): on start, every 6 h, after sign-in changes and
-// from the Connections modal's Refresh. Claude goes through refreshUsage (it also feeds the sidebar); the others ask
-// their CLI (agents.mjs fetchLimits). Readings land in usageLog; the check itself feeds each connection's health.
+// Every agent's latest plan-limit check (usage.mjs createLimitStore): only when the owner presses refresh on the usage
+// card, for that one agent (each check can start a CLI). Claude goes through refreshUsage (it also feeds the sidebar);
+// codex reads its newest rollout (agents.mjs fetchLimits). Readings land in usageLog and feed each connection's health.
 const limitStore = createLimitStore({ file: path.join(DATA, 'limits.json'), ids: Object.keys(AGENTS), usageLog,
   log: (m) => console.log(`[limits] ${m}`),
   fetch: async (id) => {
@@ -482,7 +483,6 @@ function pushMetrics() {
 // Uses the data behind Claude Code's /usage screen. It is a control call to the CLI and uses
 // no model tokens. The SDK marks it experimental, so every field is read defensively.
 let usage = { available: false, updatedAt: 0 };
-let usageTimer = null;
 let usageRun = null;
 // One check at a time: callers during a check wait for its answer (the limit store reads `usage` afterwards).
 function refreshUsage(liveQuery) { return (usageRun ||= refreshUsageNow(liveQuery).finally(() => { usageRun = null; })); }
@@ -519,6 +519,7 @@ async function refreshUsageNow(liveQuery) {
       extraUsage: rl.extra_usage ? !!rl.extra_usage.is_enabled : null,
       breakdown: Array.isArray(rl.seven_day_breakdown?.rows) ? rl.seven_day_breakdown.rows.map((r) => ({ name: r.display_name, pct: r.percent })) : null,
       updatedAt: Date.now(),
+      readAt: Date.now(), // a failed refresh moves updatedAt but not this: the numbers are still this old
     };
     const windows = claudeWindows(rl);
     for (const w of windows) usageLog.window('claude', w.window, w.pct, w.resetsAt);
@@ -530,26 +531,14 @@ async function refreshUsageNow(liveQuery) {
   }
   for (const ws of allClients) send(ws, { t: 'usage', usage });
 }
-function refreshUsageSoon(liveQuery) {
-  clearTimeout(usageTimer);
-  usageTimer = setTimeout(() => refreshUsage(liveQuery).catch((e) => console.error('[usage] refresh failed', e)), 1500);
+// No check at boot, on a timer or after replies (each probe starts a Claude process): the card shows the last saved
+// reading until the owner presses its refresh. Orchestrated Claude runs still report their limits as they go.
+{
+  const saved = limitStore.get('claude'), find = (id) => saved?.windows?.find((w) => w.window === id);
+  const win = (w) => w && { pct: w.pct, resetsAt: w.resetsAt ? new Date(w.resetsAt * 1000).toISOString() : null };
+  if (saved?.at && find('five_hour')) usage = { available: true, session: win(find('five_hour')), weekly: win(find('seven_day')), updatedAt: saved.at, readAt: saved.at };
 }
-refreshClaudeAuth().then(() => refreshUsage()).catch((e) => console.error('[usage] refresh failed', e));
-setInterval(() => refreshUsage().catch((e) => console.error('[usage] refresh failed', e)), 3 * 60e3);
-
-// Codex plan windows while codex is idle (its runs and chat turns record their own): the newest rollout snapshot,
-// every 5 min, recorded only when it changed; `at` keeps the snapshot's time so an old one reads as stale.
-let codexSnapAt = 0;
-function pollCodexUsage() {
-  const busy = [...agentTurns.keys()].some((cid) => findConvo(cid)?.agent === 'codex') || orch?.stateView().activeUsage.some((a) => a.agent === 'codex');
-  if (busy) return;
-  const s = codexLatestSnapshot();
-  if (!s?.windows || s.t <= codexSnapAt) return;
-  codexSnapAt = s.t;
-  for (const w of s.windows) usageLog.window('codex', w.window, w.pct, w.resetsAt, s.t);
-}
-setTimeout(() => { try { pollCodexUsage(); } catch (e) { console.error('[usage] codex poll failed', e); } }, 2000);
-setInterval(() => { try { pollCodexUsage(); } catch (e) { console.error('[usage] codex poll failed', e); } }, 5 * 60e3);
+refreshClaudeAuth().catch((e) => console.error('[auth] refresh failed', e));
 
 let instance = null;
 fetch('http://169.254.169.254/opc/v2/instance/', { headers: { Authorization: 'Bearer Oracle' }, signal: AbortSignal.timeout(3000) })
@@ -644,7 +633,7 @@ const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
   usageLog,
   getLimits: () => {
     if (!usage.available) return [];
-    const observed = usage.updatedAt / 1000;
+    const observed = (usage.readAt || usage.updatedAt) / 1000;
     const row = (type, w) => w && { limit_type: type, status: w.pct >= 100 ? 'rejected' : 'allowed', utilization: w.pct / 100,
       resets_at: w.resetsAt ? Date.parse(w.resetsAt) / 1000 : null, observed_at: observed };
     return [row('five_hour', usage.session), row('seven_day', usage.weekly)].filter(Boolean);
@@ -667,12 +656,11 @@ const gh = createGitHub({ env: CLAUDE_ENV, log: (m) => console.log(`[github] ${m
 // ---------- Sign-in connections (agent CLIs + GitHub), driven from the web UI ----------
 // Each agent's models, discovered from its CLI (models.mjs); clients refetch /api/agents on {t:'models'}.
 const modelStore = createModelStore({ file: path.join(DATA, 'models.json'), log: (m) => console.log(`[models] ${m}`),
-  // New lists can change a connection's state too (OpenCode is ready once it lists free Zen models).
+  // New lists can change a connection's state too.
   onChange: () => { const list = connections.list(); for (const ws of allClients) { send(ws, { t: 'models' }); send(ws, { t: 'connections', connections: list }); } } });
 modelStore.start().catch((e) => console.error('[models] discovery failed', e));
-limitStore.start().catch((e) => console.error('[limits] check failed', e));
-// A sign-in or sign-out re-checks the login and rediscovers that agent's models and limits (in the background).
-const signInChanged = (id) => () => { clearLoginCache(); modelStore.refresh([id]).catch(() => {}); limitStore.refresh([id]).catch(() => {}); };
+// A sign-in or sign-out re-checks the login and rediscovers that agent's models (in the background).
+const signInChanged = (id) => () => { clearLoginCache(); modelStore.refresh([id]).catch(() => {}); };
 // health: the compact status each Connections row shows (health.mjs), from the cached model and limit checks.
 const agentEntry = (a, extra = {}) => ({ id: a.id, label: a.label, installed: () => a.available(), signedIn: () => a.loggedIn(), envFilter: a.envFilter, afterChange: signInChanged(a.id),
   health: (st) => healthRow(a.id, { ...st, version: st.installed ? agentVersion(a.id) : null, models: modelCatalog(a.id), limits: limitStore.get(a.id) }), ...extra });
@@ -680,13 +668,6 @@ const connections = createConnections({
   entries: [
     agentEntry(AGENTS.claude, { spec: SPECS.claude, account: () => AGENTS.claude.account() }),
     agentEntry(AGENTS.codex, { spec: SPECS.codex, account: () => codexAccount() }),
-    agentEntry(AGENTS.antigravity, { spec: SPECS.antigravity, account: () => agyAccount(), probe: () => AGENTS.antigravity.probe() }),
-    agentEntry(AGENTS.opencode, { spec: SPECS.opencode, accounts: () => opencodeProviders(), detail: () => {
-      const free = AGENTS.opencode.freeModels();
-      return free.length ? { ready: 'free Zen models', freeModels: free.map((m) => ({ id: m.id, label: m.label })) } : {};
-    } }),
-    agentEntry(AGENTS.kiro, { spec: SPECS.kiro, account: () => AGENTS.kiro.account() }),
-    agentEntry(AGENTS.copilot, { spec: SPECS.copilot, account: () => AGENTS.copilot.account(), afterChange: () => { gh.refresh(); signInChanged('copilot')(); } }),
     { id: 'github', label: 'GitHub', installed: () => onPath('gh'), signedIn: () => gh.status().linked, account: () => gh.status().login,
       spec: SPECS.github, afterChange: () => gh.refresh() },
   ],
@@ -780,7 +761,6 @@ async function orchestratorTurn(convo, text) {
     if (findConvo(convo.id)) { convo.updatedAt = Date.now(); saveConvos(); }
     broadcast(convo.id, { t: 'busy', busy: false });
     broadcastConvos();
-    refreshUsageSoon();
   }
 }
 
@@ -915,13 +895,9 @@ function handleMessage(convo, rt, m) {
       }
       break;
     }
-    case 'rate_limit_event':
-      refreshUsageSoon(rt.q);
-      break;
     case 'result':
       rt.busy = false;
       if (rt.media) emitShots(cid, rt.media);
-      refreshUsageSoon(rt.q);
       usageLog.tokens('claude', m.usage, 'chat', cid);
       if (m.subtype === 'success' && !m.is_error) usageLog.limitCleared('claude');
       emit(cid, {
@@ -975,7 +951,7 @@ async function agentChatTurn(convo, text) {
     // Only this chat's own agent's limit matters (never Claude's): while it's limited, say so and skip the turn.
     const lim = orch.limitResetFor(agent, convo.model);
     if (lim) {
-      emit(cid, { t: 'error', until: lim.at, untilKnown: lim.known, text: `Not sent: ${lim.name} is at its ${agent === 'antigravity' ? lim.reason : 'usage limit'}${lim.known ? ' until {until}' : "; the reset time isn't known yet. Try again around {until}"}.` });
+      emit(cid, { t: 'error', until: lim.at, untilKnown: lim.known, text: `Not sent: ${lim.name} is at its usage limit${lim.known ? ' until {until}' : "; the reset time isn't known yet. Try again around {until}"}.` });
       emit(cid, { t: 'result', ok: false, text: 'rate_limited', ms: 0 });
       next = agentQueue.get(cid)?.splice(0).join('\n\n') || null;
       continue;
@@ -1013,9 +989,9 @@ async function agentChatTurn(convo, text) {
     emitShots(cid, media);
     usageLog.tokens(agent, res.usage, 'chat', cid);
     usageLog.windows(agent, res.windows);
-    orch.recordLimit(res, agent, convo.model); // blocks/unblocks only this agent (antigravity: its model group; tasks routed to it follow) and logs usage history
+    orch.recordLimit(res, agent, convo.model); // blocks/unblocks only this agent (tasks routed to it follow) and logs usage history
     if (res.outcome === 'auth_error') emit(cid, { t: 'error', text: `${a.label} is not signed in on this server. ${a.login}.` });
-    else if (res.outcome === 'rate_limited') emit(cid, { t: 'error', text: `${a.label} hit its ${res.limitType ? windowLabel(res.limitType) : agent === 'antigravity' ? AGY_GROUPS[agyGroup(convo.model)] : 'usage'} limit${res.resetsAt ? '; it resets {until}' : ''}.`, ...(res.resetsAt && { until: res.resetsAt, untilKnown: true }) });
+    else if (res.outcome === 'rate_limited') emit(cid, { t: 'error', text: `${a.label} hit its ${res.limitType ? windowLabel(res.limitType) : 'usage'} limit${res.resetsAt ? '; it resets {until}' : ''}.`, ...(res.resetsAt && { until: res.resetsAt, untilKnown: true }) });
     else if (res.outcome === 'aborted') emit(cid, { t: 'notice', text: 'Interrupted' });
     else if (res.outcome !== 'ok') emit(cid, { t: 'error', text: `${a.label} failed: ${String(res.text || res.stderr || res.outcome).trim().slice(-600)}` });
     emit(cid, { t: 'result', ok: res.outcome === 'ok', text: res.outcome === 'ok' ? '' : res.outcome, ms: Date.now() - started, turns: res.numTurns });
@@ -1464,6 +1440,12 @@ async function handleRequest(req, res) {
     const r = orch.changeMessage(Number(om[1]), body ? body.text : null);
     return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r);
   }
+  // Sidebar drag order: POST {ids: [project id, …]}, top (highest priority) first. Sets positions and derives each
+  // project's priority from its place (90 → 10); every client gets the new order ('oprojects').
+  if (p === '/api/orch/projects/reorder' && req.method === 'POST') {
+    const r = orch.reorderProjects((await readBody(req)).ids);
+    return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r);
+  }
   const op = p.match(/^\/api\/orch\/project\/(\d+)$/);
   if (op && req.method === 'POST') {
     const r = orch.projectAction(Number(op[1]), await readBody(req));
@@ -1473,11 +1455,19 @@ async function handleRequest(req, res) {
     if (Date.now() - gh.status().checkedAt > 15000) await gh.refresh();
     return json(res, 200, { connections: connections.list() });
   }
-  // The Connections modal's Refresh: re-checks every sign-in, version, model list and limit reading, then answers with the rows.
+  // The Connections modal's Refresh: re-checks every sign-in and version, then answers with the rows. Model lists refresh
+  // once a day (models.mjs) and limits from the usage card, so neither is fetched here.
   if (p === '/api/connections/refresh' && req.method === 'POST') {
     clearLoginCache();
-    await Promise.all([modelStore.refresh(), limitStore.refresh(), gh.refresh(), ...Object.keys(AGENTS).map(readVersion)].map((x) => x.catch(() => {})));
+    await Promise.all([gh.refresh(), ...Object.keys(AGENTS).map(readVersion)].map((x) => x.catch(() => {})));
     return json(res, 200, { connections: connections.list() });
+  }
+  // The usage card's refresh for one agent: its only limit check (at most one per agent per minute).
+  const lr = p.match(/^\/api\/limits\/([\w-]+)\/refresh$/);
+  if (lr && req.method === 'POST') {
+    if (!AGENTS[lr[1]]) return json(res, 404, { error: 'No such agent' });
+    await limitStore.refresh([lr[1]]).catch(() => {});
+    return json(res, 200, { limits: limitStore.get(lr[1]) });
   }
   const cn = p.match(/^\/api\/connections\/([\w-]+)\/(start|code|cancel|logout)$/);
   if (cn && req.method === 'POST') {

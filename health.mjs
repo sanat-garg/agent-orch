@@ -1,17 +1,12 @@
 // One health row per agent CLI: install + version, sign-in + account, discovered models, plan-limit windows and their
 // source, when each was last fetched, and what is wrong. Shared by bin/agent-health.mjs (live checks) and the
 // Connections modal (the server's cached model/limit stores).
-import { AGENTS, readVersion, opencodeProviders, LIMITS_NOT_EXPOSED } from './agents.mjs';
-import { codexAccount, agyAccount } from './connections.mjs';
+import { AGENTS, readVersion, LIMITS_NOT_EXPOSED } from './agents.mjs';
+import { codexAccount } from './connections.mjs';
 
 export function agentAccount(id) {
   const a = AGENTS[id];
   if (id === 'codex') return codexAccount();
-  if (id === 'antigravity') return agyAccount();
-  if (id === 'opencode') {
-    const p = opencodeProviders().map((x) => x.account || x.id);
-    return p.length ? p.join(', ') : 'free Zen models (no sign-in)';
-  }
   return a.account?.() || null;
 }
 

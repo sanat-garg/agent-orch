@@ -24,6 +24,7 @@
       New project
     </button>
     <nav class="convo-list" id="convoList" aria-label="Chats"></nav>
+    <div class="sr-only" id="rankLive" aria-live="polite"></div>
     <div class="mini-stats">
       <button class="ms-server" id="miniStats" aria-haspopup="dialog" title="Open server details">
         <span class="ms-head">
@@ -109,49 +110,54 @@
       </button>
 
       <div class="orch-bar" id="orchBar" hidden>
-        <span class="ob-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="16" height="16"><circle cx="12" cy="12" r="3" fill="currentColor"/><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-dasharray="3 3"/></svg>
-        </span>
-        <span class="ob-title">Orchestrator</span>
-        <span class="ob-status" id="obStatus"></span>
-        <span class="ob-counts" id="obCounts"></span>
-        <button type="button" class="chip" id="obQueue" hidden>
-          <svg viewBox="0 0 24 24" width="14" height="14"><path d="M4 6h16M4 12h16M4 18h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-          <span>Queue</span>
+        <span class="ob-state" id="obState"><span class="ob-dot" aria-hidden="true"></span><span id="obStatus" role="status">Idle</span></span>
+        <button type="button" class="btn ob-btn" id="obQueue" aria-label="Queue" hidden>
+          <svg class="ob-ico" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <span class="ob-label">Queue</span><span class="ob-badge" id="obQueueCount" hidden></span>
         </button>
-        <div id="obLaneStrip" class="lanes-compact" aria-label="Agent lanes"></div>
         <div class="pop-wrap">
-          <button type="button" class="chip" id="obSettingsBtn" aria-haspopup="true">
-            <svg viewBox="0 0 24 24" width="14" height="14"><path d="M4 7h10M18 7h2M4 17h2M10 17h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="7" r="2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="8" cy="17" r="2" fill="none" stroke="currentColor" stroke-width="2"/></svg>
-            <span>Settings</span>
+          <button type="button" class="btn ob-btn" id="obSettingsBtn" aria-label="Settings" aria-haspopup="dialog" aria-expanded="false" aria-controls="obPop">
+            <svg class="ob-ico" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="7" r="2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="8" cy="17" r="2" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+            <span class="ob-label">Settings</span>
           </button>
-          <div class="popover ob-pop" id="obPop" hidden>
+          <div class="popover ob-pop" id="obPop" role="dialog" aria-labelledby="obPopTitle" hidden>
+            <div class="ob-pop-head">
+              <strong id="obPopTitle">Orchestrator settings</strong>
+              <button type="button" class="icon-btn" id="obPopClose" aria-label="Close">
+                <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+              </button>
+            </div>
+            <h4 class="ob-sec">General</h4>
             <label class="ob-opt">
-              <span><strong>Keep improving</strong><small>When the queue is empty, look at the project and queue the next most valuable steps.</small></span>
+              <span class="ob-text"><strong>Keep improving</strong><small>Plan next steps when idle</small></span>
               <input type="checkbox" id="obPerpetual">
             </label>
-            <label class="ob-opt">
-              <span><strong>Project priority</strong><small>How this project ranks against your other orchestrated projects.</small></span>
-              <select id="obPriority"><option value="25">Low</option><option value="50">Normal</option><option value="80">High</option></select>
-            </label>
             <div class="ob-opt">
-              <label for="obSound">Sound when tasks finish</label>
+              <span class="ob-text"><strong>Project priority</strong><small>Drag projects in the sidebar to set priority</small></span>
+              <span class="ob-rank" id="obRank"></span>
+            </div>
+            <div class="ob-opt">
+              <label class="ob-text" for="obSound"><strong>Sound</strong><small>Chime when a task finishes</small></label>
               <button type="button" class="btn small" id="obSoundTest">Test</button>
               <input type="checkbox" id="obSound" checked>
             </div>
+            <h4 class="ob-sec">Running</h4>
             <label class="ob-opt">
-              <span><strong>Parallel tasks</strong><small>Across all projects. 2 only while the server has over 2.5 GB of free memory and under 25% swap in use.</small></span>
+              <span class="ob-text"><strong>Parallel tasks</strong><small>2 only with spare memory</small></span>
               <select id="obParallel"><option value="1">1 (recommended)</option><option value="2">2</option></select>
             </label>
-            <div class="ob-routes" id="obLanes" aria-live="polite"></div>
+            <h4 class="ob-sec">Models</h4>
             <div class="ob-routes" id="obRoutes"></div>
             <div class="ob-opt" id="obReflect">
-              <span><strong>Reflection fallbacks</strong><small>Where reflection tasks go when their model hits its limit.</small></span>
+              <span class="ob-text"><strong>Reflection fallbacks</strong><small>If reflection hits a limit</small></span>
               <button type="button" class="chip fb-chip" id="obReflectBtn" aria-haspopup="dialog" aria-controls="fbModal">No fallbacks</button>
             </div>
           </div>
         </div>
-        <button type="button" class="btn ob-pause" id="obPause">⏸ Pause</button>
+        <button type="button" class="btn ob-btn ob-pause" id="obPause" aria-label="Pause" hidden>
+          <svg class="ob-ico" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path class="i-pause" d="M9 6v12M15 6v12" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path class="i-play" d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg>
+          <span class="ob-label">Pause</span>
+        </button>
       </div>
       <form class="composer" id="composer">
         <div class="box">

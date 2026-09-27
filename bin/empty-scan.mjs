@@ -74,8 +74,7 @@ for (const f of !runsOnly && fs.existsSync(logsDir) ? fs.readdirSync(logsDir).so
   totals.chats++;
   const convoAgent = convos.find((c) => `${c.id}.jsonl` === f)?.agent || 'claude';
   // A chat can move between agents (delegation); a tool id's shape tells which one answered.
-  const agentOf = (id) => (/^toolu_/.test(id) ? 'claude' : /^(item_|exec-)/.test(id) ? 'codex' : /^\d+$/.test(id) ? 'antigravity'
-    : /^(call_|custom_call_|toolu_vrtx)/.test(id) ? 'copilot' : convoAgent);
+  const agentOf = (id) => (/^toolu_/.test(id) ? 'claude' : /^(item_|exec-)/.test(id) ? 'codex' : convoAgent);
   let agent = convoAgent;
   const names = new Map();
   let texts = 0;

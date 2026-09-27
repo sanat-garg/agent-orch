@@ -17,7 +17,7 @@ import path from 'node:path';
 import { spawn, execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
-import { AGENTS, AGY_GROUPS, agentStatus, codexExhausted, codexLatestSnapshot, isMissingSession, limitScope, limitScopes, modelCatalog, modelNames, runAgentCli, scopeGroup, scopeWindows, toolInputSummary, windowLabel } from './agents.mjs';
+import { AGENTS, agentStatus, codexExhausted, codexLatestSnapshot, isMissingSession, limitScope, limitScopes, modelCatalog, modelNames, runAgentCli, toolInputSummary, windowLabel } from './agents.mjs';
 import { mediaCollector } from './media.mjs';
 import { createUsageLog } from './usage.mjs';
 import { DELEGATE_CFG, createDelegator, parseFallbacks } from './delegate.mjs';
@@ -37,6 +37,7 @@ const CFG = {
   maxAttempts: 3,               // non-limit failures before a task is marked failed
   maxContinuations: 4,          // times a worker may say "not finished yet"
   resetBufferSec: 20,           // added after a reported reset time
+  usageClearTrustSec: 900,      // a Claude limit hit this soon after /usage cleared one keeps its block until the reset
   unknownResetBackoffSec: [300, 600, 1200, 1800, 3600],
   idleReflectCooldownSec: 3600, // wait after a reflection that found nothing
   maxReflectCooldownSec: 12 * 3600,
@@ -92,7 +93,7 @@ export const TASKS_FORMAT = `Emit work as a fenced block exactly like this (stri
     "deadline": "2026-09-19T18:00 or null",
     "after": [0],
     "files": ["src/api/users.mjs", "test/users.test.mjs", "public/css/*.css"],
-    "agent": "optional: claude | codex | antigravity",
+    "agent": "optional: claude | codex",
     "model": "optional model id"}
  ],
  "routes": [{"match": "tests", "agent": "codex", "model": null, "scope": "project"}, {"remove": 3}]}
@@ -130,8 +131,7 @@ current routing rules. A task runs on, in order: its own \`agent\`/\`model\` (om
 needs something special), else the first matching project route, else the first matching global route, else
 Claude on the chat's model. A route's \`match\` is a task kind (\`work\`, \`reflect\`, \`plan\`) or a keyword
 looked for in task titles (\`tests\`, \`ui\`, \`docs\`, \`refactor\`, …), so title tasks with that word.
-When the owner states a lasting preference ("use codex for writing tests", "use opus for planning", "gemini for
-UI work"), save it in \`routes\`: \`agent\` and/or \`model\`, \`scope\` "project" (default) or "global" (every
+When the owner states a lasting preference ("use codex for writing tests", "use opus for planning"), save it in \`routes\`: \`agent\` and/or \`model\`, \`scope\` "project" (default) or "global" (every
 project), optional \`note\`. A new route with the same match and scope replaces the old one; \`{"remove": id}\`
 deletes one. A \`plan\` route may only pick a Claude model. Unavailable agents fall back to Claude.
 While a task's agent is at its usage limit, it moves down the owner's fallback list for that chat (or, for
@@ -471,14 +471,14 @@ export function extractTasks(text) {
 
 // ---- routing: which agent/model runs a task
 
-const AGENT_ALIASES = { claude: 'claude', 'claude-code': 'claude', codex: 'codex', openai: 'codex', antigravity: 'antigravity', agy: 'antigravity', gemini: 'antigravity' };
-// A known agent id (accepting aliases such as 'gemini' → 'antigravity'), or null.
+const AGENT_ALIASES = { claude: 'claude', 'claude-code': 'claude', codex: 'codex', openai: 'codex' };
+// A known agent id (accepting aliases such as 'openai' → 'codex'), or null.
 export function normalizeAgent(name) {
   const id = AGENT_ALIASES[String(name || '').trim().toLowerCase()];
   return id && AGENTS[id] ? id : null;
 }
 // The agent a model belongs to: the agent whose discovered list names it, else its family by name; null if unknown.
-const MODEL_FAMILIES = [[/^(gpt|o\d|codex)/i, 'codex'], [/^gemini/i, 'antigravity'], [/^(claude|opus|sonnet|haiku)/i, 'claude']];
+const MODEL_FAMILIES = [[/^(gpt|o\d|codex)/i, 'codex'], [/^(claude|opus|sonnet|haiku)/i, 'claude']];
 function agentForModel(model) {
   if (!model) return null;
   const listed = Object.keys(AGENTS).find((id) => modelNames(id).includes(model));
@@ -487,7 +487,7 @@ function agentForModel(model) {
   return fam && AGENTS[fam] ? fam : null;
 }
 // An explicit agent paired with another agent's model keeps the agent and drops the model (null when they fit).
-// The agent's own list wins: agy also serves claude-sonnet-4-6, which Claude's list names too.
+// The agent's own list wins when another agent's list names the same model.
 const foreignModel = (agent, model) => {
   if (agent && modelNames(agent).includes(model)) return null;
   const fam = agentForModel(model);
@@ -510,7 +510,7 @@ export function routeMatches(match, task) {
 // Resolution order: the task's own agent/model, the first matching project route, the first matching
 // global route, then the project default (Claude on project.model). An agent that isn't installed or
 // logged in falls back to Claude; `fellBack` names it and `reason` says why, so the caller can log it.
-// isAvailable(id, model) returns true, or false / a reason string (the model matters for antigravity's per-group limits).
+// isAvailable(id, model) returns true, or false / a reason string.
 export function resolveRoute(task, project, routes = [], isAvailable = agentStatus) {
   // A model from another agent's family is dropped (`dropped` names it) in favour of the agent's default.
   const pick = (agent, model, source) => {
@@ -531,7 +531,7 @@ export function resolveRoute(task, project, routes = [], isAvailable = agentStat
       : { agent: 'claude', model: project?.model || null, source: 'default' };
   }
   const ok = r.agent === 'claude' || isAvailable(r.agent, r.model);
-  // The fallback always runs Claude's default model, never the unavailable agent's (e.g. gemini-2.5-pro).
+  // The fallback always runs Claude's default model, never the unavailable agent's (e.g. a codex model).
   if (ok !== true) return { agent: 'claude', model: project?.model || null, source: r.source, fellBack: r.agent, reason: typeof ok === 'string' ? ok : 'not available',
     ...(r.dropped && { dropped: r.dropped }) };
   return r;
@@ -691,6 +691,12 @@ export function limitReset(limits, { reason, blockedUntil, known, bufferSec = 0,
   if (hit.length) return { at: Math.max(...hit.map((l) => l.resets_at)), known: true };
   if (known) return { at: blockedUntil - bufferSec, known: true };
   return { at: blockedUntil, known: false };
+}
+// A Claude limit ends early when a /usage reading taken after the hit (`since`, epoch s) shows every window under
+// 100%: a plan upgrade, or a reset that came sooner than reported. Returns those windows, or null (no such reading).
+export function usageHeadroom(limits, since) {
+  const fresh = (limits || []).filter((l) => l.utilization != null && l.observed_at > since);
+  return fresh.length && fresh.every((l) => l.utilization < 1) ? fresh : null;
 }
 // Server-side time for log lines: includes the date and timezone, since the viewer may be elsewhere.
 const fmtAt = (sec) => new Date(sec * 1000).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
@@ -921,6 +927,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       ORDER BY ${EFFECTIVE_SQL.replaceAll(':now', String(Date.now() / 1000))} DESC, t.created_at ASC, t.id ASC) AS rn
       FROM tasks t JOIN projects p ON p.id=t.project_id) o WHERE o.id=tasks.id)`);
   }
+  // projects.position: the owner's sidebar order (1 = top = highest priority; see reorderProjects). Existing rows
+  // start in the order the scheduler already ranked them: priority, then age.
+  if (!db.prepare('PRAGMA table_info(projects)').all().some((c) => c.name === 'position')) {
+    db.exec('ALTER TABLE projects ADD COLUMN position REAL');
+    db.exec(`UPDATE projects SET position=(SELECT rn FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY priority DESC, created_at, id) AS rn
+      FROM projects) o WHERE o.id=projects.id)`);
+  }
 
   const q1 = (sql, p = {}) => db.prepare(sql).get(p);
   const qa = (sql, p = {}) => db.prepare(sql).all(p);
@@ -997,7 +1010,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       CASE WHEN status IN ('running','queued') THEN -priority ELSE -id END LIMIT :n`, { p: projectId, n: limit }).map((r) => ({ ...r, deps: depsOf(r.id) }));
   }
 
-  const RUNNABLE = `SELECT t.*, ${EFFECTIVE_SQL} AS eff FROM tasks t JOIN projects p ON p.id=t.project_id
+  const RUNNABLE = `SELECT t.*, ${EFFECTIVE_SQL} AS eff, p.position AS project_position FROM tasks t JOIN projects p ON p.id=t.project_id
     WHERE t.status='queued' AND p.status='active' AND t.not_before<=:now
       AND NOT EXISTS(SELECT 1 FROM all_deps x LEFT JOIN tasks d ON d.id=x.depends_on WHERE x.task_id=t.id AND d.status IS NOT 'done')`;
   function runnable(allowed, exclusive, limit) {
@@ -1030,7 +1043,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // (urgency, deadline, project priority) only breaks ties. Three things still go first regardless of position:
   // plan/reflect tasks and anything the owner queued directly (source 'user'), and tasks a deadline under 24 h away
   // promotes to urgent. Across projects the scheduler takes each project's head in effective-priority order
-  // (only one task per project runs at a time anyway). Rows need `eff` (EFFECTIVE_SQL).
+  // (only one task per project runs at a time anyway), the owner's sidebar order breaking ties. Rows need `eff`
+  // (EFFECTIVE_SQL) and `project_position`.
   const goesFirst = (r) => r.kind !== 'work' || r.source === 'user' || (r.deadline != null && r.deadline - now() < 86400);
   const byPosition = (a, b) => (a.position ?? Infinity) - (b.position ?? Infinity) || 0;
   const withinProject = (a, b) => goesFirst(b) - goesFirst(a) || byPosition(a, b) || b.eff - a.eff
@@ -1039,7 +1053,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const groups = new Map();
     for (const r of rows) (groups.get(r.project_id) || groups.set(r.project_id, []).get(r.project_id)).push(r);
     const lists = [...groups.values()].map((g) => g.sort(withinProject));
-    lists.sort((a, b) => goesFirst(b[0]) - goesFirst(a[0]) || b[0].eff - a[0].eff || a[0].created_at - b[0].created_at);
+    lists.sort((a, b) => goesFirst(b[0]) - goesFirst(a[0]) || b[0].eff - a[0].eff
+      || (a[0].project_position ?? Infinity) - (b[0].project_position ?? Infinity) || a[0].created_at - b[0].created_at);
     return lists.flat();
   }
   // A project's queued tasks in manual order (the list the UI reorders).
@@ -1122,6 +1137,46 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       if (db.isTransaction) db.exec('ROLLBACK');
       throw e;
     }
+  }
+  // ---- project order. The owner drags projects in the sidebar; the top one matters most. Positions become 1..n and
+  // priority is spread evenly from 90 (top) to 10 (bottom), so the scheduler's cross-project ranking (effective
+  // priority, then position) follows the list. kv projects_ordered = '1' once the owner has set an order: from then on
+  // new projects join at the bottom and the planner no longer changes project priority.
+  const projectsInOrder = () => qa('SELECT * FROM projects ORDER BY position IS NULL, position, priority DESC, created_at, id');
+  const rankPriority = (i, n) => (n > 1 ? Math.round(90 - (80 * i) / (n - 1)) : 90);
+  const projectOrderView = (rows = projectsInOrder()) => rows.map((p) => ({ id: p.id, path: p.path, position: p.position, priority: p.priority }));
+  const projectsOrdered = () => kvGet('projects_ordered') === '1';
+  function applyProjectOrder(order) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      order.forEach((p, i) => {
+        p.position = i + 1;
+        p.priority = rankPriority(i, order.length);
+        run('UPDATE projects SET position=:pos, priority=:pri WHERE id=:id', { pos: p.position, pri: p.priority, id: p.id });
+      });
+      db.exec('COMMIT');
+    } catch (e) {
+      if (db.isTransaction) db.exec('ROLLBACK');
+      throw e;
+    }
+    const view = projectOrderView(order);
+    broadcast({ t: 'oprojects', order: view });
+    for (const p of order) pushProject(p.id);
+    return view;
+  }
+  // `ids`: project ids, top (highest priority) first. Projects left out (no sidebar chat) keep their order below them.
+  function reorderProjects(ids) {
+    if (!Array.isArray(ids) || !ids.length || !ids.every((x) => Number.isInteger(x) && x > 0)) return { error: 'ids must be a non-empty list of project ids', status: 400 };
+    if (new Set(ids).size !== ids.length) return { error: 'ids lists a project twice', status: 400 };
+    const all = projectsInOrder(), byId = new Map(all.map((p) => [p.id, p]));
+    const missing = ids.find((id) => !byId.has(id));
+    if (missing) return { error: `No such project #${missing}`, status: 404 };
+    const listed = new Set(ids);
+    const order = applyProjectOrder([...ids.map((id) => byId.get(id)), ...all.filter((p) => !listed.has(p.id))]);
+    kvSet('projects_ordered', '1');
+    logEvent(`project order: ${order.map((p) => `${path.basename(p.path)} (${p.priority})`).join(' > ')}`);
+    setTimeout(tick, 100);
+    return { ok: true, order };
   }
   // kv parallel_settings { parallelTasks: 1 | 2 } (older shapes read as the default of one).
   function parallelSettings() {
@@ -1284,17 +1339,14 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     for (const l of getLimits() || []) upsertLimit(l.limit_type, l.status || 'allowed', l.resets_at, l.utilization, l.observed_at);
   }
   const limitsRows = () => qa('SELECT * FROM limits');
-  // Every agent's usage limit is independent, and antigravity's per model group (agents.mjs limitScope: a Gemini
-  // limit never blocks its third-party models). Claude keeps the original kv keys (blocked_until, blocked_known,
-  // blocked_reason); other scopes use the same keys suffixed with :<scope> (blocked_until:antigravity:3p).
-  // `model` only matters for antigravity; without one it's agy's default (a Gemini model).
+  // Every agent's usage limit is independent (agents.mjs limitScope). Claude keeps the original kv keys (blocked_until,
+  // blocked_known, blocked_reason); other agents use the same keys suffixed with :<agent> (blocked_until:codex).
   const limitKey = (k, scope) => (scope === 'claude' ? k : `${k}:${scope}`);
   const blockedUntilOf = (scope) => { const u = parseFloat(kvGet(limitKey('blocked_until', scope), '0')) || 0; return u > now() ? u : null; };
   const blockedUntilFor = (agent = 'claude', model) => blockedUntilOf(limitScope(agent, model));
   const blockedUntil = () => blockedUntilFor('claude');
   const agentName = (agent) => (agent === 'claude' ? 'Claude' : AGENTS[agent]?.label || agent);
-  // 'Antigravity CLI (third-party models)' for a group scope.
-  const scopeName = (scope) => { const g = scopeGroup(scope), a = agentName(scope.split(':')[0]); return g ? `${a} (${AGY_GROUPS[g]?.toLowerCase() || g} models)` : a; };
+  const scopeName = (scope) => agentName(scope);
   const limitName = (agent, model) => scopeName(limitScope(agent, model));
   // When `agent`'s current limit really resets, for display: { at, known, reason }, or null when it isn't blocked.
   function limitResetFor(agent = 'claude', model) {
@@ -1303,9 +1355,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (agent === 'claude') syncUsageLimits();
     const reason = kvGet(limitKey('blocked_reason', scope));
     const r = limitReset(agent === 'claude' ? limitsRows() : [], { reason, blockedUntil: until, known: kvGet(limitKey('blocked_known', scope), '0') === '1', bufferSec: CFG.resetBufferSec, t: now() });
-    return { ...r, reason: reason || 'usage limit', name: scopeName(scope), notice: agent === 'antigravity' && reason ? reason : 'usage limit' };
+    return { ...r, reason: reason || 'usage limit', name: scopeName(scope), notice: 'usage limit' };
   }
-  // Only a Claude limit blocks Claude; a codex/agy limit sets kv blocked_until:<scope>, and while that is in the
+  // Only a Claude limit blocks Claude; a codex limit sets kv blocked_until:<scope>, and while that is in the
   // future routeFor sends the scope's tasks to Claude (or they wait if Claude is blocked too). An ok run clears only
   // its own scope's block.
   function recordGovernor(res, agent = 'claude', model) {
@@ -1314,10 +1366,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     for (const l of res.limits || []) { // only the Claude adapter reports these
       upsertLimit(l.rateLimitType || 'unknown', l.status || 'allowed', l.resetsAt ? Number(l.resetsAt) : null, null);
     }
-    const scope = limitScope(agent, model), group = scopeGroup(scope) || undefined;
+    const scope = limitScope(agent, model);
     const key = (k) => limitKey(k, scope);
-    if (res.outcome === 'rate_limited') usageLog.limitHit(agent, res.resetsAt, res.limitType || undefined, group);
-    else if (res.outcome === 'ok') usageLog.limitCleared(agent, group);
+    if (res.outcome === 'rate_limited') usageLog.limitHit(agent, res.resetsAt, res.limitType || undefined);
+    else if (res.outcome === 'ok') usageLog.limitCleared(agent);
     if (res.outcome === 'rate_limited') {
       let resetsAt = res.resetsAt;
       if (resetsAt) kvSet(key('unknown_limit_streak'), 0);
@@ -1328,8 +1380,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       }
       kvSet(key('blocked_until'), resetsAt + CFG.resetBufferSec);
       kvSet(key('blocked_known'), res.resetsAt ? 1 : 0);
+      // Only /usage readings after the hit can end it early; hit again right after one did, it runs to the reset.
+      if (agent === 'claude') kvSet('blocked_at', now() - kvTime('usage_cleared_at') < CFG.usageClearTrustSec ? resetsAt + CFG.resetBufferSec : now());
       // Claude's reason names its limit row (limitReset matches it); other agents' is the window's display name.
-      kvSet(key('blocked_reason'), res.limitType ? (agent !== 'antigravity' ? res.limitType : `${windowLabel(res.limitType)} limit`) : 'usage limit');
+      kvSet(key('blocked_reason'), res.limitType || 'usage limit');
       if (agent !== 'claude') logEvent(`${scopeName(scope)} usage limit reached; its tasks run on Claude until ${fmtAt(resetsAt + CFG.resetBufferSec)}`, { level: 'warn' });
       else logEvent(`Claude usage limit reached (${res.limitType || 'unknown'}); ${res.resetsAt ? 'resuming' : 'reset time unknown, retrying'} at ${fmtAt(resetsAt + CFG.resetBufferSec)}`, { level: 'warn' });
       pushState();
@@ -1337,6 +1391,20 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       kvSet(key('unknown_limit_streak'), 0);
       if (kvGet(key('blocked_until'), '0') !== '0') { kvSet(key('blocked_until'), 0); pushState(); }
     }
+  }
+
+  // A Claude limit with headroom on a later /usage reading (reconcileCodexLimit's counterpart, run every 15 s):
+  // tasks start as soon as capacity is back instead of waiting out the old reset time.
+  function reconcileClaudeLimit() {
+    if (!blockedUntilOf('claude')) return false;
+    const free = usageHeadroom(getLimits() || [], kvTime('blocked_at'));
+    if (!free) return false;
+    kvSet('blocked_until', 0); kvSet('unknown_limit_streak', 0); kvSet('usage_cleared_at', now());
+    usageLog.limitCleared('claude');
+    decisionCache = null;
+    logEvent(`Claude usage limit cleared early: /usage now shows ${free.map((l) => `${windowLabel(l.limit_type)} ${Math.round(l.utilization * 100)}%`).join(', ')}`);
+    pushState();
+    return true;
   }
 
   // A codex limit held without a reset time (e.g. an unparsed 'try again at'): the newest rollout decides at startup.
@@ -1629,7 +1697,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     agents: () => Object.keys(AGENTS),
     connected: (id) => (id === 'claude' ? onSubscription() : agentStatus(id) === true && !(kvTime(`agent_auth_failed:${id}`) > now())),
     blockedUntil: (id, model) => blockedUntilFor(id, model),
-    windows: (id, model) => scopeWindows(limitScope(id, model), usageLog.current?.(id)),
+    windows: (id) => usageLog.current?.(id) || [],
     models: (id) => modelCatalog(id).models || [],
     cfg: CFG.delegate,
   });
@@ -1664,7 +1732,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   function agentUsage(agent, model) {
     const until = blockedUntilFor(agent, model);
     if (until) return { status: 'limited', until };
-    const hot = scopeWindows(limitScope(agent, model), usageLog.current?.(agent)).filter((w) => Number(w.pct) >= CFG.delegate.maxWindowPct);
+    const hot = (usageLog.current?.(agent) || []).filter((w) => Number(w.pct) >= CFG.delegate.maxWindowPct);
     if (hot.length) return { status: 'limited', until: Math.max(0, ...hot.map((w) => w.resetsAt || 0)) || null, window: hot[0].window };
     return { status: 'available', until: null };
   }
@@ -1712,7 +1780,12 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // origin: {origin, fallbacks} for every task in the payload (fallbacks: the chat's or project's list, snapshotted).
   function queuePayload(project, payload, source, origin = {}) {
     if (!payload) return [];
-    if (payload.project) updateProject(project.id, payload.project);
+    // Once the owner orders projects in the sidebar, that order alone sets project priority.
+    if (payload.project) {
+      const fields = { ...payload.project };
+      if (projectsOrdered()) delete fields.priority;
+      updateProject(project.id, fields);
+    }
     for (const d of payload.dropped || []) logEvent(`${source} ${d}`, { level: 'warn', projectId: project.id });
     for (const r of payload.routes || []) applyRoute(project, r);
     const ids = [], batch = [];
@@ -1767,10 +1840,14 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   function ensureProject(convo) {
     let p = q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd });
     if (!p) {
-      const r = run('INSERT INTO projects(path,name,convo_id,model,created_at) VALUES(:p,:n,:c,:m,:t)',
+      const r = run(`INSERT INTO projects(path,name,convo_id,model,position,created_at)
+        VALUES(:p,:n,:c,:m,(SELECT COALESCE(MAX(position), 0) + 1 FROM projects),:t)`,
         { p: convo.cwd, n: path.basename(convo.cwd), c: convo.id, m: convo.model || null, t: now() });
       p = getProject(Number(r.lastInsertRowid));
       logEvent(`project added: ${p.name}`, { projectId: p.id });
+      // A new project joins the bottom of the owner's order (and so gets the lowest priority).
+      if (projectsOrdered()) { applyProjectOrder(projectsInOrder()); p = getProject(p.id); }
+      else broadcast({ t: 'oprojects', order: projectOrderView() });
     } else if (p.convo_id !== convo.id || (convo.model || null) !== p.model) {
       run('UPDATE projects SET convo_id=:c, model=:m WHERE id=:id', { c: convo.id, m: convo.model || null, id: p.id });
       p = getProject(p.id);
@@ -2113,9 +2190,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       body = reused ? nextTaskPrompt(task) : workerTaskPrompt(wt ? { ...project, path: cwd } : project, task, wt ? `${ENVIRONMENT}\n${worktreeNote(wt, project)}` : ENVIRONMENT);
       system = WORKER_SYSTEM;
       tools = CFG.safeTools;
-      // agy has no sandboxed middle mode (codex keeps workspace-write): without skip-permissions headless agy denies
-      // every shell command, so a worker couldn't even run its check. Claude always bypasses anyway.
-      autonomous = !!project.autonomous || route.agent === 'antigravity';
+      autonomous = !!project.autonomous;
     }
     let prompt = body;
     if (resume && !reused) {
@@ -2135,7 +2210,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       signal, timeoutSec: CFG.taskTimeoutSec, taskId: task.id, runId, logPath,
     });
     finishRun(runId, res);
-    // A missing session (Claude's 'no conversation found', a codex/agy errorCode 'no_session') is dropped; the task
+    // A missing session (Claude's 'no conversation found', a codex errorCode 'no_session') is dropped; the task
     // requeues without spending an attempt and starts fresh.
     if (resume && isMissingSession(res)) {
       updateTask(task.id, { session_id: null });
@@ -2451,7 +2526,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       agent: t.agent, model: t.model, ran_agent: t.ran_agent, ran_model: t.ran_model, route_note: t.route_note ?? null,
       origin: t.origin ?? null, delegated_from: t.delegated_from ?? null, delegated_reason: t.delegated_reason ?? null, fallbacks: parseFallbacks(t.fallbacks), has_verify_failure: t.verify_output != null,
       // The agent a queued task would run on now: the UI shows it waiting only while its limit scope (limit_scope, a
-      // state.blocks key: the agent, or antigravity:gemini / antigravity:3p) is limited.
+      // state.blocks key: the agent) is limited.
       // runs_model: that route's model (the agent's default when the route names none). moves: every delegation, oldest first.
       moves: parseJsonList(t.moves),
       ...(() => { if (t.status !== 'queued') return { runs_on: null, runs_model: null, limit_scope: null };
@@ -2466,7 +2541,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const c = q1(`SELECT SUM(status='queued') AS queued, SUM(status='running') AS running, SUM(status='done') AS done,
       SUM(status='failed') AS failed FROM tasks WHERE project_id=:p AND kind!='plan'`, { p: p.id }) || {};
     return {
-      id: p.id, name: p.name, path: p.path, convo_id: p.convo_id, status: p.status, priority: p.priority, mode: p.mode,
+      id: p.id, name: p.name, path: p.path, convo_id: p.convo_id, status: p.status, priority: p.priority, position: p.position ?? null, mode: p.mode,
       perpetual: !!p.perpetual, autonomous: !!p.autonomous, next_reflect_at: p.next_reflect_at, ready: !!projectReady(p.path),
       counts: { queued: c.queued || 0, running: c.running || 0, done: c.done || 0, failed: c.failed || 0 },
       reflect_fallbacks: parseFallbacks(p.reflect_fallbacks),
@@ -2477,7 +2552,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
   function stateView() {
     const d = decisionCache?.d;
-    // blocks: every limit scope (agent, or antigravity:gemini / antigravity:3p) currently at its usage limit →
+    // blocks: every limit scope (agent) currently at its usage limit →
     // { until, known, reason } (`until` is when it really resets).
     const blocks = {};
     for (const id of limitScopes(Object.keys(AGENTS))) {
@@ -2488,7 +2563,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const mem = readMemInfo(CFG.meminfo), parallel = { ...parallelSettings(), memAvailable: mem.avail, swapPct: mem.swapPct };
     const lanes = [...running.entries()].map(([id, r]) => {
       const t = getTask(id);
-      return { agent: r.agent, task: id, title: t.title, model: t.ran_model || t.model || delegator.defaultModel(r.agent),
+      return { agent: r.agent, task: id, project_id: r.projectId, title: t.title, model: t.ran_model || t.model || delegator.defaultModel(r.agent),
         activity: r.activity || null, started_at: r.startedAt, elapsed: Math.max(0, now() - r.startedAt) };
     });
     return { activeUsage, blocks, blockedUntil: blockedUntil(), blockedReason: kvGet('blocked_reason'),
@@ -2565,10 +2640,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     setTimeout(tick, 5000);
     // A limit that has passed: capacity is back, so refresh usage for pacing.
     setInterval(() => {
+      if (reconcileClaudeLimit()) tick();
       for (const id of limitScopes(Object.keys(AGENTS))) {
         const key = limitKey('blocked_until', id);
         if (blockedUntilOf(id) || kvGet(key, '0') === '0') continue;
-        kvSet(key, 0); usageLog.limitCleared(id.split(':')[0], scopeGroup(id) || undefined); pushState();
+        kvSet(key, 0); usageLog.limitCleared(id); pushState();
         if (id === 'claude') refreshUsage?.();
       }
     }, 15000);
@@ -2593,8 +2669,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   return {
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
-    planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, changeMessage, projectAction, setTaskFallbacks, setReflectFallbacks, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
-    drain, undrain, chatPlanning, stateView, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
+    planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setReflectFallbacks, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
+    drain, undrain, chatPlanning, stateView, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, reconcileClaudeLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
+    // A sidebar chat's project rank ({id, position, priority}), or null when its folder has no orchestrator project.
+    projectRank: (cwd) => q1('SELECT id, position, priority FROM projects WHERE path=:p', { p: cwd }) ?? null,
     isRunning: (id) => running.has(Number(id)), logEvent,
     unwatch: (ws) => { for (const set of runSubs.values()) set.delete(ws); },
   };

@@ -1,13 +1,13 @@
 // Discovered model lists: every agent's models come from its own CLI (agents.mjs `discoverModels`), never a
 // hardcoded guess. Cached in <DATA>/models.json ({saved, agents: {id: {models, error, at}}}) so a restart shows the
-// last lists at once; refreshed on start, every 6 h, after a sign-in change (refresh([id])) and from the Connections
-// Refresh, never by reads (modelCatalog). At most one discovery per agent per MIN_GAP: an earlier request is deferred
-// to the end of the gap (coalesced) and answers from the cache meanwhile.
+// last lists at once. Each discovery starts a CLI, so a list is rediscovered only once it is a day old (checked hourly,
+// one agent at a time) or after that agent's sign-in changes (refresh([id])), never by reads (modelCatalog). At most
+// one discovery per agent per MIN_GAP: an earlier request is deferred to the end of the gap (coalesced).
 import fs from 'node:fs';
 import path from 'node:path';
 import { AGENTS, discoverModels, setModelCatalog, modelCatalog } from './agents.mjs';
 
-export const MODELS_TTL = 6 * 3600e3;
+export const MODELS_TTL = 24 * 3600e3;
 export const MIN_GAP = 60_000;
 
 // discover(id) -> {models, error, at} is injectable for tests; onChange(ids) fires after a refresh stored new lists.
@@ -60,14 +60,18 @@ export function createModelStore({ file, ids = Object.keys(AGENTS), discover = d
     save();
     try { onChange(want); } catch {}
   }
+  // Rediscovers only the lists older than intervalMs, one agent after another so CLIs never start side by side.
+  async function refreshStale() {
+    for (const id of ids) if (Date.now() - (last.get(id) ?? -Infinity) >= intervalMs) await refresh([id]).catch(() => {});
+  }
   function start() {
     load();
-    const p = refresh();
-    timer = setInterval(() => refresh().catch(() => {}), intervalMs);
+    const p = refreshStale();
+    timer = setInterval(() => refreshStale().catch(() => {}), Math.min(intervalMs, 3600e3));
     timer.unref?.();
     return p;
   }
   const stop = () => { clearInterval(timer); for (const t of deferred.values()) clearTimeout(t); deferred.clear(); };
 
-  return { load, refresh, start, stop, get: modelCatalog };
+  return { load, refresh, refreshStale, start, stop, get: modelCatalog };
 }

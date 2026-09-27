@@ -91,8 +91,8 @@ export function readSystem(dir = '/proc') {
 
 // ---- classification
 const base = (s) => path.basename(String(s || ''));
-const AGENT_BIN = /^(claude|codex|agy|opencode|kiro-cli|copilot|ccd-cli)$/;
-const AGENT_SCRIPT = /(^|\/)(claude|codex|opencode|copilot)(\.m?js)?$|@anthropic-ai\/claude|@openai\/codex|mcp|language-?server|langserver/i;
+const AGENT_BIN = /^(claude|codex|ccd-cli)$/;
+const AGENT_SCRIPT = /(^|\/)(claude|codex)(\.m?js)?$|@anthropic-ai\/claude|@openai\/codex|mcp|language-?server|langserver/i;
 const LANG_BIN = /(language-?server|langserver|^gopls$|^rust-analyzer$|^clangd$|mcp)/i;
 const SYSTEM = /^(systemd|\(sd-pam\)|sd-pam|dbus-daemon|dbus-broker|sshd|sshd-session|sshd-auth|agetty|cron|login|su|sudo|gpg-agent|ssh-agent|pipewire|wireplumber|at-spi.*)$/;
 export const isBrowser = (p) => /^(chrome|chromium|chromium-browser|headless_shell|chrome_crashpad_handler|chrome-headless-shell)$/.test(base(p.argv[0]) || p.comm) ||

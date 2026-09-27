@@ -17,9 +17,8 @@ export function parseFallbacks(v) {
 }
 
 // Live wiring. agents() → ids; connected(id) → bool (installed, signed in, on the subscription);
-// blockedUntil(id, model) → epoch s | 0; windows(id, model) → [{window, pct}] the plan windows that model counts against
-// (antigravity: its group's); models(id) → [{id, default?}]. Any such window ≥ maxWindowPct makes the model unavailable,
-// so a full Gemini window never hides antigravity's third-party models.
+// blockedUntil(id, model) → epoch s | 0; windows(id, model) → [{window, pct}] the agent's plan windows; models(id) →
+// [{id, default?}]. Any such window ≥ maxWindowPct makes the agent's models unavailable.
 export function createDelegator({ agents, connected, blockedUntil, windows = () => [], models, cfg = DELEGATE_CFG }) {
   const hasUsage = (id, model) => connected(id) && !blockedUntil(id, model) && !(windows(id, model) || []).some((w) => Number(w.pct) >= cfg.maxWindowPct);
   const listed = (id, model) => (models(id) || []).some((m) => m.id === model);

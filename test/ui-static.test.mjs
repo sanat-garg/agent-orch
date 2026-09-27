@@ -10,9 +10,10 @@ const ROOT = path.join(import.meta.dirname, '..');
 const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
 const appJs = read('public/app.js');
 const indexHtml = read('public/index.html');
+const appCss = read('public/app.css');
 
 // Ids that app.js creates itself before looking them up with $(): qList is the queue sheet's list (renderQueue).
-const DYNAMIC_IDS = new Set(['qList', 'qLanes']);
+const DYNAMIC_IDS = new Set(['qList']);
 
 test('public/app.js parses', () => {
   assert.doesNotThrow(() => new vm.Script(appJs, { filename: 'public/app.js' }));
@@ -78,6 +79,25 @@ test('the model picker picks the primary model only; a Fallbacks button opens th
   assert.doesNotMatch(appJs, /Pinned:/);
   assert.match(appJs, /\/api\/orch\/tasks\/\$\{[^}]+\}\/delegate/);
   assert.match(appJs, /'Delegate…'/);
+});
+
+test('the orchestrator bar is a status word plus Queue, Settings and Pause only', () => {
+  const bar = indexHtml.slice(indexHtml.indexOf('id="orchBar"'), indexHtml.indexOf('id="composer"'));
+  const outside = bar.slice(0, bar.indexOf('id="obPop"')) + bar.slice(bar.lastIndexOf('<button', bar.indexOf('id="obPause"')));
+  assert.deepEqual([...outside.matchAll(/<button[^>]*id="(\w+)"/g)].map((m) => m[1]), ['obQueue', 'obSettingsBtn', 'obPause']);
+  assert.match(bar, /class="ob-dot"[\s\S]*id="obStatus"/);
+  for (const gone of ['ob-icon', 'ob-title', 'obCounts', 'obLaneStrip', 'obLanes', 'lanes-compact']) {
+    assert.ok(!indexHtml.includes(gone) && !appJs.includes(gone) && !appCss.includes(gone), `${gone} removed`);
+  }
+  assert.doesNotMatch(bar, /[⏸▶]/, 'Pause/Resume are plain text');
+  assert.doesNotMatch(appJs, /[⏸▶] (Pause|Resume)/);
+  assert.match(appJs, /paused \? 'Paused' : running \? 'Running' : queued \? 'Waiting' : 'Idle'/);
+  assert.match(appJs, /\$\('obQueueCount'\)\.hidden = !queued/);
+  assert.match(appCss, /\.ob-pause \{ color: var\(--accent\); border-color: var\(--accent\); background: transparent;/);
+  const pop = bar.slice(bar.indexOf('id="obPop"'), bar.indexOf('id="obPause"'));
+  const secs = [...pop.matchAll(/class="ob-sec">(\w+)</g)].map((m) => m[1]);
+  assert.deepEqual(secs, ['General', 'Running', 'Models']);
+  assert.match(pop, /General[\s\S]*obPerpetual[\s\S]*obRank[\s\S]*obSound[\s\S]*Running[\s\S]*obParallel[\s\S]*Models[\s\S]*obRoutes[\s\S]*obReflectBtn/);
 });
 
 test('orchestrator settings popover opens the same fallback sheet for reflection', () => {

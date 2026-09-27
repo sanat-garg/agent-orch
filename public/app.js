@@ -20,7 +20,7 @@ const md = (text) => DOMPurify.sanitize(marked.parse(text || ''), { ADD_ATTR: ['
 // Markdown marks shell code blocks and command-like inline code with .copy-cmd; tool lines carry
 // data-copy. One capture-phase handler copies either (capture, so it runs before a row's toggle).
 const SHELL_LANG = /\blanguage-(?:bash|sh|shell|zsh|console)\b/;
-const SHELL_CMD = /^(?:git|npm|npx|node|python3?|sudo|cd|ls|codex|agy|claude|gh|tmux|systemctl)(?:\s|$)|\s&&\s|\s\|\s/;
+const SHELL_CMD = /^(?:git|npm|npx|node|python3?|sudo|cd|ls|codex|claude|gh|tmux|systemctl)(?:\s|$)|\s&&\s|\s\|\s/;
 DOMPurify.addHook('afterSanitizeAttributes', (n) => {
   if (n.nodeName !== 'CODE') return;
   const pre = n.parentNode?.nodeName === 'PRE' ? n.parentNode : null;
@@ -439,8 +439,16 @@ function folderName(cwd) {
   return cwd.startsWith(state.workspace + '/') ? cwd.slice(state.workspace.length + 1) : tilde(cwd);
 }
 
+// Chats whose folder has an orchestrator project sit on top in the owner's drag order: the top project is the highest
+// priority and the scheduler follows the list (POST /api/orch/projects/reorder). Plain chats follow, newest first.
+const rankedConvos = () => state.convos.filter((c) => c.project)
+  .sort((a, b) => (a.project.position ?? Infinity) - (b.project.position ?? Infinity) || a.project.id - b.project.id || b.updatedAt - a.updatedAt);
+const rankedProjectIds = (convos = rankedConvos()) => [...new Set(convos.map((c) => c.project.id))];
+
 function renderConvoList() {
+  if (drag.active) { drag.stale = true; return; } // re-rendering would pull the lifted card out from under the pointer
   const nav = $('convoList');
+  const focused = document.activeElement?.closest?.('#convoList .convo')?.dataset.cid;
   nav.textContent = '';
   if (!state.convos.length) {
     const p = el('p', 'group-label', 'No projects yet');
@@ -448,34 +456,188 @@ function renderConvoList() {
     nav.append(p);
     return;
   }
+  const ranked = rankedConvos();
+  if (ranked.length) {
+    const label = el('div', 'group-label', 'By priority');
+    label.title = 'Drag projects to set priority (Alt+↑/↓ with the keyboard): the top one runs first';
+    nav.append(label);
+    for (const c of ranked) nav.append(convoItem(c, true));
+  }
   const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
-  const sorted = [...state.convos].sort((a, b) => b.updatedAt - a.updatedAt);
+  const sorted = state.convos.filter((c) => !c.project).sort((a, b) => b.updatedAt - a.updatedAt);
   let lastGroup = '';
   for (const c of sorted) {
     const group = c.updatedAt >= dayStart ? 'Today' : c.updatedAt >= dayStart - 6 * 864e5 ? 'This week' : 'Older';
     if (group !== lastGroup) { nav.append(el('div', 'group-label', group)); lastGroup = group; }
-    const b = el('div', 'convo' + (c.id === state.cid ? ' active' : ''));
-    b.tabIndex = 0;
-    b.setAttribute('role', 'button');
-    b.title = tilde(c.cwd);
-    b.append(el('span', 'ct', c.title || folderName(c.cwd)));
-    const meta = el('span', 'cm');
-    if (c.busy) meta.append(el('span', 'busy-dot'));
-    const bits = [c.mode === 'orchestrator' ? 'Orchestrator' : 'Chat'];
-    if (c.git?.error) bits.push('not pushed');
-    bits.push(relTime(c.updatedAt));
-    meta.append(document.createTextNode(bits.join(' · ')));
-    b.append(meta);
-    const more = el('button', 'more');
-    more.setAttribute('aria-label', 'Project options');
-    more.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16"><circle cx="5" cy="12" r="1.8" fill="currentColor"/><circle cx="12" cy="12" r="1.8" fill="currentColor"/><circle cx="19" cy="12" r="1.8" fill="currentColor"/></svg>';
-    more.addEventListener('click', (e) => { e.stopPropagation(); convoMenu(c, more); });
-    b.append(more);
-    const open = () => { openConvo(c.id); closeSidebar(); setView('chat'); };
-    b.addEventListener('click', open);
-    b.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
-    nav.append(b);
+    nav.append(convoItem(c, false));
   }
+  if (focused) nav.querySelector(`.convo[data-cid="${CSS.escape(focused)}"]`)?.focus();
+}
+
+function convoItem(c, rankable) {
+  const b = el('div', 'convo' + (c.id === state.cid ? ' active' : ''));
+  b.tabIndex = 0;
+  b.setAttribute('role', 'button');
+  b.dataset.cid = c.id;
+  b.title = tilde(c.cwd);
+  b.append(el('span', 'ct', c.title || folderName(c.cwd)));
+  const meta = el('span', 'cm');
+  if (c.busy) meta.append(el('span', 'busy-dot'));
+  else if (c.project && runningProjectIds().has(c.project.id)) {
+    const dot = el('span', 'run-dot'); dot.title = 'Tasks running'; dot.setAttribute('role', 'img'); dot.setAttribute('aria-label', 'Tasks running');
+    meta.append(dot);
+  }
+  const bits = [c.mode === 'orchestrator' ? 'Orchestrator' : 'Chat'];
+  if (c.git?.error) bits.push('not pushed');
+  bits.push(relTime(c.updatedAt));
+  meta.append(document.createTextNode(bits.join(' · ')));
+  b.append(meta);
+  const more = el('button', 'more');
+  more.setAttribute('aria-label', 'Project options');
+  more.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16"><circle cx="5" cy="12" r="1.8" fill="currentColor"/><circle cx="12" cy="12" r="1.8" fill="currentColor"/><circle cx="19" cy="12" r="1.8" fill="currentColor"/></svg>';
+  more.addEventListener('click', (e) => { e.stopPropagation(); convoMenu(c, more); });
+  b.append(more);
+  const open = () => { openConvo(c.id); closeSidebar(); setView('chat'); };
+  b.addEventListener('click', () => { if (performance.now() - drag.droppedAt > 350) open(); });
+  b.addEventListener('keydown', (e) => {
+    if (e.target !== b) return;
+    if (e.key === 'Enter') open();
+    else if (rankable && e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) { e.preventDefault(); nudgeProject(c, e.key === 'ArrowUp' ? -1 : 1); }
+  });
+  if (rankable) {
+    b.classList.add('rankable');
+    b.dataset.pid = c.project.id;
+    b.title += ` · priority ${c.project.priority} · drag or Alt+↑/↓ to reorder`;
+    b.setAttribute('aria-keyshortcuts', 'Alt+ArrowUp Alt+ArrowDown');
+    b.addEventListener('pointerdown', (e) => dragPointerDown(e, b));
+    // Once lifted, a touch drag must not scroll the list (and so cancel the pointer); a long press must not open a menu.
+    b.addEventListener('touchmove', (e) => { if (drag.active) e.preventDefault(); }, { passive: false });
+    b.addEventListener('contextmenu', (e) => { if (drag.pending || drag.active) e.preventDefault(); });
+  }
+  return b;
+}
+
+// ----- project order: pointer drag (long-press on touch) and Alt+↑/↓
+let drag = { active: false, pending: false, stale: false, droppedAt: -Infinity };
+function nudgeProject(c, dir) {
+  const ids = rankedProjectIds(), i = ids.indexOf(c.project.id), j = i + dir;
+  if (i < 0 || j < 0 || j >= ids.length) return;
+  [ids[i], ids[j]] = [ids[j], ids[i]];
+  saveProjectOrder(ids, c);
+}
+// Positions (and priorities, when the server sent them) onto the chats; `path` also links a chat whose project is new.
+function applyProjectOrder(order) {
+  const byId = new Map(order.map((r) => [r.id, r])), byPath = new Map(order.filter((r) => r.path).map((r) => [r.path, r]));
+  for (const c of state.convos) {
+    const r = (c.project && byId.get(c.project.id)) || byPath.get(c.cwd);
+    if (!r) continue;
+    c.project = { id: r.id, position: r.position, priority: r.priority ?? c.project?.priority ?? null };
+  }
+  if (O.project) { const r = byId.get(O.project.id); if (r?.priority != null) O.project = { ...O.project, position: r.position, priority: r.priority }; }
+}
+async function saveProjectOrder(ids, c) {
+  const before = state.convos.map((x) => [x, x.project]);
+  applyProjectOrder(ids.map((id, i) => ({ id, position: i + 1 }))); // optimistic; the server answers with priorities
+  renderConvoList();
+  $('convoList').querySelector(`.convo[data-cid="${CSS.escape(c.id)}"]`)?.focus();
+  const at = ids.indexOf(c.project.id) + 1;
+  $('rankLive').textContent = `${c.title || folderName(c.cwd)}: priority ${at} of ${ids.length}`;
+  try {
+    applyProjectOrder((await api('/api/orch/projects/reorder', 'POST', { ids })).order);
+  } catch (e) {
+    for (const [x, p] of before) x.project = p;
+    toast(`Couldn't reorder projects: ${e.message}`, { kind: 'error' });
+  }
+  renderConvoList();
+  renderOrchBar();
+}
+function dragPointerDown(e, card) {
+  if (e.button !== 0 || drag.active || drag.pending || e.target.closest('.more')) return;
+  const touch = e.pointerType === 'touch', id = e.pointerId, x0 = e.clientX, y0 = e.clientY;
+  let timer = null;
+  drag.pending = true;
+  const done = () => {
+    clearTimeout(timer);
+    drag.pending = false;
+    removeEventListener('pointermove', move);
+    removeEventListener('pointerup', up);
+    removeEventListener('pointercancel', up);
+  };
+  function move(ev) {
+    if (ev.pointerId !== id) return;
+    if (drag.active) return dragMove(ev.clientY);
+    const d = Math.hypot(ev.clientX - x0, ev.clientY - y0);
+    if (touch) { if (d > 8) done(); return; } // the finger moved before the long press: it's a scroll
+    if (d > 5) { liftCard(card, y0); dragMove(ev.clientY); }
+  }
+  function up(ev) {
+    if (ev.pointerId !== id) return;
+    done();
+    if (drag.active) dropCard(ev.type === 'pointerup');
+  }
+  addEventListener('pointermove', move);
+  addEventListener('pointerup', up);
+  addEventListener('pointercancel', up);
+  if (touch) timer = setTimeout(() => { liftCard(card, y0); navigator.vibrate?.(10); }, 400);
+}
+function liftCard(card, y) {
+  const nav = $('convoList');
+  const cards = [...nav.querySelectorAll('.convo.rankable')];
+  drag = { ...drag, active: true, pending: false, stale: false, card, cards, y0: y, y, scroll0: nav.scrollTop, to: cards.indexOf(card), edge: 0, raf: 0 };
+  const line = el('div', 'drop-indicator');
+  line.setAttribute('aria-hidden', 'true');
+  nav.append(line);
+  drag.line = line;
+  nav.classList.add('sorting');
+  card.classList.add('lifted');
+  drag.onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); dropCard(false); } };
+  addEventListener('keydown', drag.onKey, true);
+  dragMove(y);
+}
+function dragMove(y) {
+  const nav = $('convoList'), { card, cards } = drag;
+  drag.y = y;
+  card.style.transform = `translateY(${y - drag.y0 + nav.scrollTop - drag.scroll0}px)`;
+  const others = cards.filter((c) => c !== card);
+  let to = others.findIndex((c) => { const r = c.getBoundingClientRect(); return y < r.top + r.height / 2; });
+  if (to < 0) to = others.length;
+  drag.to = to;
+  const ref = others[to] ?? others[others.length - 1];
+  drag.line.hidden = !ref;
+  if (ref) drag.line.style.top = `${(others[to] ? ref.offsetTop : ref.offsetTop + ref.offsetHeight) - 1}px`;
+  // Near the list's top or bottom edge, scroll it (and keep following the pointer while it rests there).
+  const box = nav.getBoundingClientRect();
+  drag.edge = y < box.top + 36 ? -1 : y > box.bottom - 36 ? 1 : 0;
+  if (drag.edge && !drag.raf) {
+    const step = () => {
+      drag.raf = 0;
+      if (!drag.active || !drag.edge) return;
+      nav.scrollTop += drag.edge * 8;
+      dragMove(drag.y);
+      drag.raf = requestAnimationFrame(step);
+    };
+    drag.raf = requestAnimationFrame(step);
+  }
+}
+function dropCard(commit) {
+  const { card, cards, to, line, raf, onKey, stale } = drag;
+  cancelAnimationFrame(raf);
+  removeEventListener('keydown', onKey, true);
+  line.remove();
+  card.classList.remove('lifted');
+  card.style.transform = '';
+  $('convoList').classList.remove('sorting');
+  drag = { active: false, pending: false, stale: false, droppedAt: performance.now() };
+  const from = cards.indexOf(card);
+  if (commit && to !== from) {
+    const order = cards.filter((c) => c !== card);
+    order.splice(to, 0, card);
+    const byCid = new Map(state.convos.map((c) => [c.id, c]));
+    const ids = rankedProjectIds(order.map((x) => byCid.get(x.dataset.cid)).filter((c) => c?.project));
+    const c = byCid.get(card.dataset.cid);
+    if (c && ids.join() !== rankedProjectIds().join()) return saveProjectOrder(ids, c);
+  }
+  if (stale) renderConvoList();
 }
 
 function convoMenu(c, anchor) {
@@ -1414,9 +1576,7 @@ function fbModelOf({ agent, model }) {
 const fbName = (r) => (fbModelOf(r) ? modelLabel(r.agent, fbModelOf(r)) : shortLabel(r.agent));
 // The model's usage limit while it is limited (state.blocks is keyed by agents.mjs limitScope), else null.
 function fbLimit({ agent, model }) {
-  const scope = agent === 'antigravity' ? `antigravity:${/^gemini-/i.test(model || '') ? 'gemini' : '3p'}`
-    : agent === 'opencode' ? `opencode:${String(model || 'openai/').split('/')[0]}` : agent || 'claude';
-  const b = O.state?.blocks?.[scope];
+  const b = O.state?.blocks?.[agent || 'claude'];
   return b && b.until > Date.now() / 1000 ? b : null;
 }
 const fbCount = (list) => (list?.length ? `Fallbacks · ${list.length}` : 'No fallbacks');
@@ -2085,6 +2245,7 @@ function send(msg) {
 
 function onServer(msg) {
   if (msg.t === 'mtick' || msg.t === 'mhist' || msg.t === 'mdetail' || msg.t === 'usage') return onMetrics(msg);
+  if (msg.t === 'oprojects') { applyProjectOrder(msg.order || []); renderConvoList(); return renderOrchBar(); }
   if (['otask', 'oproject', 'ostate', 'orun', 'oorder', 'olane'].includes(msg.t)) return onOrch(msg);
   if (msg.t === 'connections') return applyConnections(msg.connections);
   if (msg.t === 'models') return api('/api/agents').then((d) => { AGENT_LIST = d.agents || []; renderAgentPicker(); }).catch(() => {});
@@ -2529,13 +2690,10 @@ function sidebarUsage() {
   if (usageSlides.agent === 'claude') return M.usage;
   const windows = Object.entries(usageSlides.data?.[usageSlides.agent]?.status?.windows || {});
   const active = windows.filter(([, w]) => !w.stale && (!w.resetsAt || w.resetsAt * 1000 > Date.now()));
-  const shown = usageSlides.agent === 'antigravity'
-    ? ['gemini-5h', 'gemini-weekly', "3p-5h", "3p-weekly"].map((id) => active.find(([w]) => w === id) || [id, { pct: null }])
-    : active;
   return {
     available: !!active.length,
     updatedAt: windows.length ? Math.max(...windows.map(([, w]) => w.t)) : null,
-    windows: shown.sort(([a], [b]) => byWin(a, b)).map(([id, w]) => ({ ...w, id, label: winLabel(id), tip: winTip(id), resetsAt: w.resetsAt ? new Date(w.resetsAt * 1000).toISOString() : null })),
+    windows: active.sort(([a], [b]) => byWin(a, b)).map(([id, w]) => ({ ...w, id, label: winLabel(id), resetsAt: w.resetsAt ? new Date(w.resetsAt * 1000).toISOString() : null })),
   };
 }
 function renderUsage(fresh = false) {
@@ -2560,7 +2718,6 @@ function renderUsage(fresh = false) {
   }
   while (more.children.length > Math.max(0, windows.length - 2)) more.lastChild.remove();
   rows.push(...more.children);
-  $('usageCard').classList.toggle('groups', windows.some((w) => w.id && winGroup(w.id)));
   rows.forEach((row, i) => {
     const w = windows[i], [lab, bar, val] = row.children;
     blurSwap(lab, w?.label || (i ? 'Weekly' : '5-hour'));
@@ -2578,7 +2735,7 @@ function renderUsage(fresh = false) {
     if (u.extraUsage === true) note += ' ⚠ Extra usage is ON: it can bill beyond your plan';
   }
   $('usNote').title = note.trim();
-  blurSwap($('usNote'), id === 'antigravity' && u?.available ? 'Four independent model-group limits' : note.trim(), fresh);
+  blurSwap($('usNote'), note.trim(), fresh);
   renderUsageAge();
 }
 setInterval(() => {
@@ -2700,17 +2857,12 @@ setInterval(() => { if (M.usage) renderUsage(); }, 30e3); // keep the "in 2h 9m"
 // ---------- usage window ----------
 // Per-agent plan windows, tokens and limit hits over time (GET /api/usage/history, see usage.mjs).
 const U = { range: { '6h': 1, '24h': 1, '7d': 1, '30d': 1 }[store.get('cw.urange')] ? store.get('cw.urange') : '24h', data: null, err: '', at: 0, timer: null, lastFocus: null, draws: [] };
-const USAGE_AGENTS = ['claude', 'codex', 'antigravity', 'copilot'];
-const WIN_NAMES = { five_hour: '5-hour', seven_day: 'Weekly', '5h': '5-hour', weekly: 'Weekly', premium: 'Premium requests' };
+const USAGE_AGENTS = ['claude', 'codex'];
+const WIN_NAMES = { five_hour: '5-hour', seven_day: 'Weekly', '5h': '5-hour', weekly: 'Weekly' };
 const SERIES = ['var(--accent)', 'var(--chart-2)', 'var(--chart-3)', 'var(--faint)'];
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
-// Antigravity has a 5-hour and a weekly limit per model group: Gemini models, and third-party ones (agents.mjs agyGroup).
-const AGY_GROUPS = { gemini: 'Gemini', "3p": 'Third-party' };
-const winGroup = (w) => /^(gemini|3p)-/.exec(w)?.[1] || null;
-// claude five_hour/seven_day_opus, codex 5h/weekly, agy gemini-5h … 3p-weekly ('Third-party · Weekly').
+// claude five_hour/seven_day_opus, codex 5h/weekly.
 function winLabel(w) {
-  const g = winGroup(w);
-  if (g) return `${AGY_GROUPS[g]} · ${winLabel(w.slice(g.length + 1))}`;
   if (WIN_NAMES[w]) return WIN_NAMES[w];
   let m = w.match(/^seven_day_(.+)$/);
   if (m) return `Weekly ${cap(m[1].replace(/_/g, ' '))}`;
@@ -2718,21 +2870,10 @@ function winLabel(w) {
   if (m) return `${cap(m[1].replace(/-/g, ' '))} · ${WIN_NAMES[m[2]]}`;
   return cap(w.replace(/_/g, ' '));
 }
-// Which models count against an antigravity group ('' for other windows), for tooltips.
-function groupModels(g) {
-  const ms = (AGENT_LIST.find((a) => a.id === 'antigravity')?.models || []).filter((m) => (/^gemini-/i.test(m.id) ? 'gemini' : "3p") === g).map((m) => m.id);
-  return `${AGY_GROUPS[g]} models: ${ms.length ? ms.join(', ') : g === "3p" ? 'claude-sonnet-4-6, claude-opus-4-6-thinking, gpt-oss-120b-medium' : 'Gemini Flash, Gemini Pro'}`;
-}
-const winTip = (w) => (winGroup(w) ? groupModels(winGroup(w)) : '');
 const winRank = (w) => (/(^|-)5h$|five_hour/.test(w) ? 0 : /(^|-)weekly$|^seven_day$/.test(w) ? 1 : 2);
-const groupRank = (w) => ({ gemini: 0, "3p": 1 })[winGroup(w)] ?? -1;
-const byWin = (a, b) => groupRank(a) - groupRank(b) || winRank(a) - winRank(b) || a.localeCompare(b);
-// A limit scope (state.blocks key / task limit_scope: 'claude', 'codex', 'antigravity:3p') as a name.
-const limitName = (id) => {
-  const [a, g] = String(id).split(':');
-  const name = a === 'claude' ? 'Claude' : agentLabel(a);
-  return g ? `${name} (${AGY_GROUPS[g]?.toLowerCase() || g} models)` : name;
-};
+const byWin = (a, b) => winRank(a) - winRank(b) || a.localeCompare(b);
+// A limit scope (state.blocks key / task limit_scope: 'claude', 'codex') as a name.
+const limitName = (id) => (id === 'claude' ? 'Claude' : agentLabel(id));
 const fmtTok = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(n >= 1e4 ? 0 : 1)}k` : String(Math.round(n)));
 // Browser-local: "3:10 PM" today, "Tue 3:10 PM" within a week, else "Sep 20 3:10 PM".
 function fmtWhen(ms, now = Date.now()) {
@@ -2747,14 +2888,12 @@ const agentLabel = (id) => AGENT_LIST.find((a) => a.id === id)?.label || CONN.li
 function usageChips(a) {
   const box = el('div', 'ug-chips'), now = Date.now();
   const hit = (label, at) => { const c = el('span', 'ug-chip crit', `${label} · ${at ? `until ${fmtWhen(at * 1000)}` : 'reset time unknown'}`); box.append(c); return c; };
-  // Antigravity: one chip per blocked model group.
-  if (a.status.groups) for (const [g, at] of Object.entries(a.status.groups)) hit(`${AGY_GROUPS[g] || g} limit hit`, at).title = groupModels(g);
-  else if (a.status.blocked) hit('Limit hit', a.status.resetsAt);
+  if (a.status.blocked) hit('Limit hit', a.status.resetsAt);
   for (const w of Object.keys(a.status.windows).sort(byWin)) {
     const s = a.status.windows[w], reset = s.resetsAt ? s.resetsAt * 1000 : null;
     const c = el('span', `ug-chip ${reset && reset <= now ? '' : level(s.pct)[0]}`,
       reset && reset <= now ? `${winLabel(w)} · reset ${fmtWhen(reset)}` : `${winLabel(w)} ${Math.round(s.pct)}% · ${reset ? `resets ${fmtWhen(reset)}` : 'reset time unknown'}${s.stale ? ' · stale' : ''}`);
-    c.title = `${winTip(w) ? `${winTip(w)}\n` : ''}Read ${fmtWhen(s.t)}${s.stale ? ' (older than the window)' : ''}`;
+    c.title = `Read ${fmtWhen(s.t)}${s.stale ? ' (older than the window)' : ''}`;
     box.append(c);
   }
   return box;
@@ -2870,7 +3009,7 @@ function usageLineChart(host, wins, from, to) {
 function usageBarChart(host, buckets, bucketMs, from, to) {
   const c = usageChart(host, 'ug-bars', '<g class="bars"></g>');
   const sum = (k) => buckets.reduce((a, b) => a + b[k], 0);
-  c.lStat.textContent = `in ${fmtTok(sum('input'))} · out ${fmtTok(sum('output'))}${sum('premiumRequests') ? ` · ${sum('premiumRequests')} premium requests` : ''}`;
+  c.lStat.textContent = `in ${fmtTok(sum('input'))} · out ${fmtTok(sum('output'))}`;
   const daily = bucketMs >= 864e5;
   const when = (t) => daily ? new Date(t).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })
     : `${fmtWhen(t)}–${new Date(t + bucketMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
@@ -2901,27 +3040,27 @@ function usageBarChart(host, buckets, bucketMs, from, to) {
     pg.replaceChildren();
     if (hi < 0) { c.showTip(''); return; }
     const b = buckets[hi];
-    c.showTip(`${when(b.t)} · in ${fmtTok(b.input)} · out ${fmtTok(b.output)}${b.cached ? ` · cached ${fmtTok(b.cached)}` : ''}${b.premiumRequests ? ` · ${b.premiumRequests} premium requests` : ''} · ${b.turns} ${b.turns === 1 ? 'turn' : 'turns'}`,
+    c.showTip(`${when(b.t)} · in ${fmtTok(b.input)} · out ${fmtTok(b.output)}${b.cached ? ` · cached ${fmtTok(b.cached)}` : ''} · ${b.turns} ${b.turns === 1 ? 'turn' : 'turns'}`,
       x(b.t) + bw / 2, w);
   };
 }
 
-// Limit hits (newest first), each with when it cleared (paired per antigravity model group).
+// Limit hits (newest first), each with when it cleared.
 function usageLimits(a) {
-  const rows = [], open = new Map();
+  const rows = [];
+  let open = null;
   for (const e of a.limits) {
-    const g = e.group || '';
-    if (e.status === 'hit') { if (open.has(g)) rows.push({ hit: open.get(g) }); open.set(g, e); }
-    else { rows.push({ hit: open.get(g) || null, cleared: e }); open.delete(g); }
+    if (e.status === 'hit') { if (open) rows.push({ hit: open }); open = e; }
+    else { rows.push({ hit: open, cleared: e }); open = null; }
   }
-  for (const [g, e] of open) rows.push({ hit: e, still: g ? g in (a.status.groups || {}) : a.status.blocked });
+  if (open) rows.push({ hit: open, still: a.status.blocked });
   rows.sort((x, y) => (x.hit || x.cleared).t - (y.hit || y.cleared).t);
   if (!rows.length) return el('p', 'na', 'No limits hit in this range.');
   const ul = el('ul', 'm-list ug-limits');
   for (const r of rows.reverse()) {
     const li = el('li');
-    const { window: win, group } = r.hit || r.cleared;
-    const what = win ? winLabel(win) : group ? `${AGY_GROUPS[group] || group} models` : '';
+    const { window: win } = r.hit || r.cleared;
+    const what = win ? winLabel(win) : '';
     li.append(el('span', 'k', `${r.hit ? `Hit ${fmtWhen(r.hit.t)}` : 'Hit before this range'}${what ? ` · ${what}` : ''}`));
     const reset = r.hit?.resetsAt ? ` · resets ${fmtWhen(r.hit.resetsAt * 1000)}` : '';
     li.append(el('span', `v${r.still ? ' crit' : ''}`, r.cleared
@@ -2958,14 +3097,14 @@ function usageSection(id, a, conn, d) {
   const names = Object.keys(a.windows).sort(byWin);
   if (names.some((n) => a.windows[n].length)) {
     const legend = el('div', 'ug-legend');
-    names.forEach((n, i) => { const s = el('span', '', winLabel(n)); s.style.setProperty('--c', SERIES[i % SERIES.length]); s.title = winTip(n); legend.append(s); });
+    names.forEach((n, i) => { const s = el('span', '', winLabel(n)); s.style.setProperty('--c', SERIES[i % SERIES.length]); legend.append(s); });
     lc.append(legend);
     const host = el('div');
     lc.append(host);
     usageLineChart(host, a.windows, d.from, d.to);
   } else lc.append(el('p', 'na', limitsHidden(id) ? 'Limits not exposed by CLI' : 'No window readings in this range.'));
   const bc = col(d.bucketMs >= 864e5 ? 'Tokens per day' : d.bucketMs < 3600e3 ? 'Tokens per 15 min' : 'Tokens per hour');
-  if (a.tokens.some((b) => b.input || b.output || b.premiumRequests)) {
+  if (a.tokens.some((b) => b.input || b.output)) {
     const legend = el('div', 'ug-legend');
     for (const [k, t] of [['in', 'Input'], ['out', 'Output']]) { const s = el('span', k, t); legend.append(s); }
     bc.append(legend);
@@ -3173,16 +3312,13 @@ function applyOrchSnapshot(s) {
 }
 
 function onOrch(msg) {
-  if (msg.t === 'olane') { laneActivity.set(msg.taskId, msg.activity); renderLanes(); return; }
-  if (msg.t === 'orun' && msg.e?.k === 'tool') {
-    laneActivity.set(msg.taskId, `${msg.e.name || 'Tool'} · ${toolLine(msg.e)}`);
-    renderLanes();
-  }
+  if (msg.t === 'olane') return; // live lane activity: the Queue window no longer shows lanes
   if (msg.t === 'otask') {
     observeTaskCompletion(msg.task);
     const edit = taskFallbackEdits.get(msg.task.id);
     if (edit?.pending) msg.task.fallbacks = edit.list;
     O.tasks.set(msg.task.id, msg.task);
+    syncSidebarRunning();
     renderUsage();
     refreshCards(msg.task.id);
     for (const other of O.tasks.values()) if (taskDeps(other).includes(msg.task.id)) refreshCards(other.id);
@@ -3215,37 +3351,28 @@ function onOrch(msg) {
 let obTogglePending = null;
 function renderOrchBar() {
   renderConnFoot(); // routing rules decide whether a signed-out agent warrants the footer's warning
-  renderLanes();
+  syncSidebarRunning();
   const on = $('mode').value === 'orchestrator';
   $('orchBar').hidden = !on;
   if (!on) return;
-  const p = O.project, s = O.state || {}, nowS = Date.now() / 1000;
+  const p = O.project, s = O.state || {};
   const paused = (obTogglePending && obTogglePending.id === p?.id ? obTogglePending.status : p?.status) === 'paused';
   const running = p?.counts?.running || 0, queued = p?.counts?.queued || 0;
-  const status = paused ? 'Paused' : running || queued ? `Running ${running} · ${queued} queued` : 'Idle';
+  // One short word; detail belongs in the Queue modal (.agent-orch/CONTEXT.md: the bar stays minimal).
+  const status = paused ? 'Paused' : running ? 'Running' : queued ? 'Waiting' : 'Idle';
   blurSwap($('obStatus'), status);
-  $('obStatus').title = s.pacing ? `Pacing: ${s.pacing}` : '';
-  const counts = $('obCounts');
-  counts.textContent = '';
-  if (p) {
-    for (const [k, label] of [['done', 'done'], ['failed', 'failed']]) {
-      if (!p.counts[k]) continue;
-      const span = el('span');
-      span.append(el('b', '', String(p.counts[k])), document.createTextNode(` ${label}`));
-      counts.append(span);
-    }
-  }
+  $('obState').dataset.state = status.toLowerCase();
+  $('obState').title = s.pacing ? `Pacing: ${s.pacing}` : '';
+  $('obQueueCount').hidden = !queued;
+  $('obQueueCount').textContent = queued ? String(queued) : '';
+  $('obQueue').setAttribute('aria-label', queued ? `Queue, ${queued} queued` : 'Queue');
   $('obParallel').value = String(s.parallel?.parallelTasks ?? 1);
-  const lanes = $('obLanes');
-  lanes.textContent = '';
-  const memGB = s.parallel?.memAvailable ? ` · ${(s.parallel.memAvailable / 1024 ** 3).toFixed(1)} GB memory free` : '';
-  lanes.append(el('strong', '', s.slots === 0 ? `Waiting: server memory low${memGB}` : `${s.workRunning ?? s.running ?? 0} of ${s.slots ?? 1} running${memGB}`));
-  for (const lane of s.lanes || []) lanes.append(el('small', '', `${lane.agent} · #${lane.task} ${lane.title} · ${lane.model || 'default'} · ${fmtDur(lane.started_at ? Math.max(0, nowS - lane.started_at) : lane.elapsed)}`));
   const routes = $('obRoutes');
   routes.textContent = '';
   if (p) {
-    routes.append(el('strong', '', 'Routing rules'));
-    if (!p.routes?.length) routes.append(el('small', '', 'None: every task runs on Claude. Ask in chat, e.g. "use codex for tests".'));
+    const head = el('span', 'ob-text');
+    head.append(el('strong', '', 'Routes'), el('small', '', p.routes?.length ? 'Send matching tasks to an agent' : 'None yet. Ask in chat to add one'));
+    routes.append(head);
     for (const r of p.routes || []) {
       const row = el('div', 'ob-route');
       const what = el('span', '', `"${r.match}" → ${[r.agent, r.model].filter(Boolean).join(' · ')}`);
@@ -3255,7 +3382,7 @@ function renderOrchBar() {
         const hint = el('small', '', `${ag.available ? 'not signed in' : 'not installed'}, falls back to Claude · `);
         const go = el('button', 'link-btn inline', ag.available ? 'Sign in' : 'Connections');
         go.type = 'button';
-        go.onclick = (e) => { e.stopPropagation(); $('obPop').hidden = true; openConnections(ag.id); };
+        go.onclick = (e) => { e.stopPropagation(); closeObPop(); openConnections(ag.id); };
         hint.append(go);
         what.append(hint);
       }
@@ -3273,12 +3400,14 @@ function renderOrchBar() {
   $('obQueue').hidden = !p;
   $('obSettingsBtn').parentElement.hidden = !p;
   if (p) {
-    $('obPause').textContent = paused ? '▶ Resume' : '⏸ Pause';
+    $('obPause').querySelector('.ob-label').textContent = paused ? 'Resume' : 'Pause';
+    $('obPause').setAttribute('aria-label', paused ? 'Resume' : 'Pause');
     $('obPause').classList.toggle('primary', paused);
     $('obPause').disabled = obTogglePending?.id === p.id;
     $('obPause').setAttribute('aria-busy', String(obTogglePending?.id === p.id));
     $('obPerpetual').checked = p.perpetual;
-    $('obPriority').value = p.priority >= 65 ? '80' : p.priority <= 35 ? '25' : '50';
+    const ids = rankedProjectIds(), at = ids.indexOf(p.id) + 1;
+    $('obRank').textContent = at ? `#${at} of ${ids.length}` : '';
     renderReflectBtn();
   }
 }
@@ -3309,23 +3438,31 @@ $('obPause').addEventListener('click', async () => {
   finally { obTogglePending = null; renderOrchBar(); }
 });
 $('obPerpetual').addEventListener('change', (e) => orchProject({ perpetual: e.target.checked }));
-$('obPriority').addEventListener('change', (e) => orchProject({ priority: Number(e.target.value) }));
+function closeObPop(refocus) {
+  if ($('obPop').hidden) return;
+  $('obPop').hidden = true;
+  $('obSettingsBtn').setAttribute('aria-expanded', 'false');
+  if (refocus) $('obSettingsBtn').focus();
+}
 $('obSettingsBtn').addEventListener('click', (e) => {
   e.stopPropagation();
   const pop = $('obPop');
-  pop.hidden = !pop.hidden;
-  if (pop.hidden) return;
+  if (!pop.hidden) return closeObPop();
+  pop.hidden = false;
+  $('obSettingsBtn').setAttribute('aria-expanded', 'true');
   renderReflectBtn();
   const close = (ev) => {
-    if (!pop.hidden && pop.contains(ev.target)) return;
-    pop.hidden = true;
+    if (!pop.hidden && pop.contains(ev.target) && !ev.target.closest('#obPopClose')) return;
+    closeObPop(ev.type === 'keydown' || !!ev.target.closest?.('#obPopClose'));
     document.removeEventListener('click', close);
+    document.removeEventListener('keydown', esc, true);
   };
-  setTimeout(() => document.addEventListener('click', close));
+  const esc = (ev) => { if (ev.key === 'Escape') { ev.stopImmediatePropagation(); close(ev); } };
+  setTimeout(() => { document.addEventListener('click', close); document.addEventListener('keydown', esc, true); });
 });
 // Reflection fallbacks: the same sheet as a chat's, from the already-loaded project (no fetch).
 $('obReflectBtn').addEventListener('click', () => {
-  $('obPop').hidden = true;
+  closeObPop();
   openFallbacks(reflectFallbacks(), $('obSettingsBtn'));
 });
 
@@ -3938,102 +4075,23 @@ function toastLift() {
   if (!r || !r.width || r.right < innerWidth - 16 - 360) return 0;
   return Math.max(0, innerHeight - r.top - 4);
 }
-// Retain accounts seen in this session; historical tasks cover reloads (last 24 hours).
-const laneAccounts = new Map(), laneActivity = new Map();
+// Projects with a running task: state lanes cover every project, loaded tasks cover the open one before a server restart.
+function runningProjectIds() {
+  const ids = new Set((O.state?.lanes || []).map((l) => l.project_id).filter(Boolean));
+  for (const t of O.tasks.values()) if (t.status === 'running') ids.add(t.project_id);
+  return ids;
+}
+let sidebarRunKey = '';
+function syncSidebarRunning() {
+  const key = [...runningProjectIds()].sort().join(',');
+  if (key !== sidebarRunKey) { sidebarRunKey = key; renderConvoList(); }
+}
 function parallelInfo(t) {
   const deps = taskDeps(t);
   const integrates = t.integrates ? (Array.isArray(t.integrates) ? t.integrates : [t.integrates]) : deps.length > 1 ? deps : [];
   const parent = [...O.tasks.values()].find(p => p.project_id === t.project_id && taskDeps(p).length > 1 && taskDeps(p).includes(t.id));
   return { group: t.parallel_group || (parent ? `#${parent.id}` : integrates.length > 1 ? `#${t.id}` : ''), integrates };
 }
-function visibleLanes() {
-  const now = Date.now() / 1000;
-  const live = new Map();
-  for (const t of O.tasks.values()) {
-    if (t.status !== 'running' && !(t.finished_at > now - 86400)) continue;
-    const agent = t.ran_agent || t.agent || 'claude';
-    const key = `${agent}:${t.account_id || ''}`;
-    laneAccounts.set(key, { agent, account_label: t.account_label || t.account_id, seen: t.status === 'running' ? now : t.finished_at });
-    if (t.status === 'running') live.set(t.id, { agent, task: t.id, title: t.title, model: t.ran_model || t.model, started_at: t.started_at, account_id: t.account_id, account_label: t.account_label });
-  }
-  for (const lane of O.state?.lanes || []) {
-    const t = O.tasks.get(lane.task);
-    if (t && t.status !== 'running') continue;
-    live.set(lane.task, { ...live.get(lane.task), ...lane });
-  }
-  const rows = new Map();
-  for (const lane of live.values()) {
-    const key = `${lane.agent}:${lane.account_id || ''}`;
-    if (!rows.has(key)) rows.set(key, { ...lane, tasks: [] });
-    rows.get(key).tasks.push(lane);
-    laneAccounts.set(key, { agent: lane.agent, account_label: lane.account_label || lane.account_id, seen: now });
-  }
-  for (const [key, a] of laneAccounts) {
-    if (a.seen < now - 86400) { laneAccounts.delete(key); continue; }
-    if (!rows.has(key)) rows.set(key, { ...a, tasks: [] });
-  }
-  return [...rows.values()];
-}
-function renderLanes() {
-  const rows = visibleLanes(), compact = $('obLaneStrip');
-  const focused = document.activeElement?.dataset.laneTask;
-  const compactFocus = document.activeElement?.closest('#obLaneStrip') ? [...compact.children].indexOf(document.activeElement) : -1;
-  const compactScroll = compact.scrollLeft;
-  const scroll = $('qLanes')?.querySelector('.lanes-row')?.scrollLeft || 0;
-  compact.replaceChildren();
-  const section = el('section', 'lanes'); section.id = 'qLanes';
-  section.append(el('h3', '', 'Lanes'));
-  const running = rows.reduce((n, r) => n + r.tasks.length, 0);
-  const ready = [...O.tasks.values()].filter(t => t.project_id === O.project?.id && t.status === 'queued' && taskState(t).cls === 'queued').length;
-  section.append(el('p', 'lanes-summary', `Running ${running} · ${ready} queued`));
-  const strip = el('div', 'lanes-row');
-  for (const lane of rows) {
-    const name = ({ claude: 'Claude', codex: 'Codex', antigravity: 'Antigravity', opencode: 'OpenCode', kiro: 'Kiro', copilot: 'Copilot' })[lane.agent] || lane.agent;
-    const account = lane.account_label || lane.account_id;
-    const label = name + (account ? ` · ${account}` : '');
-    const conn = CONN.list.find(c => c.id === lane.agent);
-    // Antigravity limits are per model group (antigravity:gemini / antigravity:3p); show the soonest reset.
-    const block = Object.entries(O.state?.blocks || {}).filter(([k, b]) => (k === lane.agent || k.startsWith(lane.agent + ':')) && b.until > Date.now()/1000)
-      .map(([, b]) => b).sort((a, b) => a.until - b.until)[0];
-    const status = conn?.signedIn === false ? 'Signed out' : block?.until > Date.now()/1000 ? `Limited until ${fmtClock(block.until)}` : 'Idle';
-    const card = el('div', 'lane-card');
-    card.append(el('strong', '', label));
-    if (!lane.tasks.length) card.append(el('span', 'lane-status', status));
-    for (const task of lane.tasks) {
-      const b = el('button', 'lane-task'); b.type = 'button'; b.dataset.laneTask = task.task;
-      b.onclick = () => { closeQueue(false); openTask(task.task); };
-      b.append(el('span', 'lane-title', `#${task.task} ${task.title}`));
-      const since = task.started_at || Date.now()/1000 - (task.elapsed || 0);
-      const meta = el('small', '', laneMeta(task.model, since)); meta.dataset.laneSince = since; meta.dataset.laneModel = task.model || '';
-      b.append(meta);
-      const info = parallelInfo(O.tasks.get(task.task) || {});
-      if (info.group) b.append(el('small', 'lane-group', `Group ${info.group}`));
-      if (info.integrates.length) b.append(el('small', '', `Integrates ${info.integrates.map(id => `#${id}`).join(' ')}`));
-      b.append(el('span', 'lane-activity', laneActivity.get(task.task) || task.activity || 'Waiting for activity…'));
-      card.append(b);
-    }
-    strip.append(card);
-    const chip = el('button', 'chip', `${label} · ${lane.tasks.length ? lane.tasks.map(t => `#${t.task}`).join(' ') : status}`);
-    chip.type = 'button'; chip.onclick = lane.tasks.length === 1 ? () => openTask(lane.tasks[0].task) : openQueue;
-    compact.append(chip);
-  }
-  compact.scrollLeft = compactScroll;
-  if (compactFocus >= 0) compact.children[compactFocus]?.focus({ preventScroll: true });
-  if (!rows.length) strip.append(el('p', 'muted', 'No recent agent activity.'));
-  section.append(strip);
-  if (!$('queueModal').hidden) {
-    if ($('qLanes')) $('qLanes').replaceWith(section); else $('qBody').prepend(section);
-    strip.scrollLeft = scroll;
-    if (focused) section.querySelector(`[data-lane-task="${focused}"]`)?.focus({ preventScroll: true });
-  }
-}
-function laneMeta(model, since) { return `${model || 'Default model'} · ${fmtDur(Math.max(0, Date.now()/1000 - since))}`; }
-// Tick only the elapsed timers, so a tap on a lane is never lost to a rebuild mid-click.
-setInterval(() => {
-  if (document.hidden || $('queueModal').hidden) return;
-  for (const m of document.querySelectorAll('#qLanes [data-lane-since]')) m.textContent = laneMeta(m.dataset.laneModel, +m.dataset.laneSince);
-}, 1000);
-
 function openQueue() {
   if ($('queueModal').hidden) Q.lastFocus = document.activeElement;
   $('queueModal').hidden = false;
@@ -4081,7 +4139,6 @@ function renderQueue() {
     list.append(b);
   }
   body.append(list);
-  renderLanes();
   qLines();
   if (focused) body.querySelector(`.tcard[data-task="${focused}"]`)?.focus({ preventScroll: true });
 }

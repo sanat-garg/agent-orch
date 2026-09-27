@@ -1,4 +1,4 @@
-// Parallel lanes in an isolated server, seeded without running agent CLIs.
+// Running-project sidebar dot (and no lanes in the Queue window) in an isolated server, seeded without running agent CLIs.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -76,7 +76,7 @@ after(async () => {
 });
 
 
-test('seeded parallel lanes render and update at 390px', { skip }, async () => {
+test('running projects get a sidebar dot; the Queue window shows no lanes', { skip }, async () => {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
   const [name, value] = cookie.split('=');
   await ctx.addCookies([{ name, value, url: base }]);
@@ -84,28 +84,15 @@ test('seeded parallel lanes render and update at 390px', { skip }, async () => {
   await page.goto(`${base}/#${CID}`);
   await page.locator('#obQueue').click();
   if (process.env.CW_LANES_KEEP) return;
-  await page.waitForFunction(() => document.querySelectorAll('#qLanes .lane-card').length === 3);
-  assert.match(await page.locator('#qLanes').innerText(), /Running 3 · \d+ queued/);
+  await page.waitForFunction(() => document.querySelector('#qBody').textContent.includes('Build lanes UI'));
+  assert.equal(await page.locator('#qLanes, .lane-card').count(), 0);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-  assert.equal(await page.locator('#qLanes .lanes-row').evaluate(e => e.scrollWidth > e.clientWidth), true);
-  await page.evaluate(() => onOrch({ t: 'olane', taskId: 1, activity: 'Bash · npm test' }));
-  await page.waitForFunction(() => document.querySelector('#qLanes').textContent.includes('npm test'));
-  await page.evaluate(() => {
-    const tasks = [...O.tasks.values()];
-    onOrch({ t: 'ostate', state: { lanes: tasks.map(t => ({ agent: t.agent, task: t.id, title: t.title, model: 'live-model', started_at: t.started_at })), blocks: {} } });
-    onOrch({ t: 'otask', task: { id: 99, project_id: O.project.id, title: 'Integrate changes', status: 'queued', deps: [1, 2, 3] } });
-  });
-  await page.waitForFunction(() => document.querySelector('#qLanes').textContent.includes('live-model'));
-  await page.waitForFunction(() => document.querySelector('#qBody').textContent.includes('Integrates #1 #2 #3'));
-  assert.match(await page.locator('#qBody').innerText(), /Integrates #1 #2 #3/);
-  assert.match(await page.locator('#qLanes').innerText(), /Group #99/);
-  await page.evaluate(() => {
-    onOrch({ t: 'otask', task: { ...O.tasks.get(3), status: 'done', finished_at: Date.now()/1000 } });
-    onOrch({ t: 'ostate', state: { lanes: [], blocks: { antigravity: { until: Date.now()/1000 + 3600 } } } });
-  });
-  await page.waitForFunction(() => document.querySelector('#qLanes').textContent.includes('Limited until'));
-  assert.equal(await page.locator('#qLanes .lane-card').count(), 3);
-  await page.locator('#qLanes .lane-card').first().click();
-  assert.equal(await page.locator('#queueModal').isVisible(), false);
+  await page.evaluate(() => closeQueue());
+  await page.waitForFunction((cid) => document.querySelector(`.convo[data-cid="${cid}"] .run-dot`), CID);
+  await page.evaluate(() => { for (const t of O.tasks.values()) onOrch({ t: 'otask', task: { ...t, status: 'done', finished_at: Date.now()/1000 } }); });
+  await page.waitForFunction((cid) => !document.querySelector(`.convo[data-cid="${cid}"] .run-dot`), CID);
+  // Another project's running lane (from server state) marks it too.
+  await page.evaluate(() => onOrch({ t: 'ostate', state: { ...O.state, lanes: [{ agent: 'codex', task: 1, project_id: O.project.id, title: 'x' }] } }));
+  await page.waitForFunction((cid) => document.querySelector(`.convo[data-cid="${cid}"] .run-dot`), CID);
   await ctx.close();
 });

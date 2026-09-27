@@ -202,3 +202,35 @@ test('parallel settings validate, persist, and appear in state', async () => {
   db.close();
   assert.equal((await put(url, { parallelTasks: 1 })).body.state.parallel.parallelTasks, 1);
 });
+
+test('POST /api/orch/projects/reorder: sets positions, derives priority 90 → 10 and broadcasts the order', { timeout: 30000 }, async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const { default: WebSocket } = await import('ws');
+  const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
+  const add = (name) => Number(db.prepare("INSERT INTO projects(path,name,status,created_at) VALUES(?,?,'paused',0)").run(path.join(dataDir, name), name).lastInsertRowid);
+  const [a, b, c] = ['order-a', 'order-b', 'order-c'].map(add);
+  const post = async (body, headers = { cookie }) => {
+    const r = await fetch(base + '/api/orch/projects/reorder', { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    return { status: r.status, body: JSON.parse(await r.text()) };
+  };
+  const ws = new WebSocket(base.replace('http', 'ws') + '/ws', { headers: { cookie } });
+  try {
+    await new Promise((res, rej) => { ws.once('open', res); ws.once('error', rej); });
+    assert.equal((await post({ ids: [a] }, {})).status, 401);
+    for (const bad of [{}, { ids: [] }, { ids: 'x' }, { ids: [a, a] }, { ids: [a, '2'] }]) assert.equal((await post(bad)).status, 400, JSON.stringify(bad));
+    assert.equal((await post({ ids: [a, 999999] })).status, 404);
+
+    const broadcast = new Promise((res) => ws.on('message', (d) => { const m = JSON.parse(d); if (m.t === 'oprojects') res(m); }));
+    const r = await post({ ids: [c, a, b] });
+    assert.equal(r.status, 200);
+    const rows = db.prepare('SELECT id, position, priority FROM projects WHERE id IN (?,?,?) ORDER BY position').all(a, b, c).map((p) => ({ ...p }));
+    assert.deepEqual(rows.map((p) => p.id), [c, a, b]);
+    assert.deepEqual(rows.map((p) => p.position), [1, 2, 3], 'the listed projects are the top three');
+    const pri = rows.map((p) => p.priority);
+    assert.equal(pri[0], 90, 'the top project gets the highest priority');
+    assert.ok(pri[0] > pri[1] && pri[1] > pri[2], `priorities fall down the list: ${pri}`);
+    const msg = await broadcast;
+    assert.deepEqual(msg.order.slice(0, 3).map((p) => [p.id, p.position, p.priority]), rows.map((p) => [p.id, p.position, p.priority]));
+    assert.deepEqual(r.body.order, msg.order);
+  } finally { ws.close(); db.close(); }
+});

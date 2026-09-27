@@ -3,7 +3,7 @@
 // few ids), plan-limit windows (name, pct, resetsAt) and their source, when each was last fetched, and errors.
 // By default models and limits are fetched live from the CLIs (nothing is billed); --cached reads the server's caches
 // (<DATA>/models.json, <DATA>/limits.json) instead. A failed live fetch shows the cache's last successful time.
-//   node bin/agent-health.mjs [--json] [--cached] [--agent codex,copilot] [--data <dir>]
+//   node bin/agent-health.mjs [--json] [--cached] [--agent claude,codex] [--data <dir>]
 // Exit 1 when an installed, signed-in agent has 0 models, or a limit window without a reset time although its source
 // reports resets.
 
@@ -33,7 +33,7 @@ async function check(id) {
     const l = await fetchLimits(id);
     limits = l.error ? { ...l, at: limits?.at ?? null } : l;
   }
-  if (models) setModelCatalog(id, models); // OpenCode counts as ready once it lists free models
+  if (models) setModelCatalog(id, models);
   return healthRow(id, { ...(await agentState(id)), models, limits });
 }
 const rows = await Promise.all(ids.map(check));

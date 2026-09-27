@@ -3,7 +3,7 @@
 // runAgentCli, exactly as the orchestrator launches it (same adapter flags, cwd = project, autonomous, the systemd
 // service's minimal env), each in a fresh scratch git project, and checks every outcome on disk or against a random
 // token the agent can only know by using its tools. Prints a pass/fail table plus the failing tool events.
-//   node bin/agent-smoke.mjs --agent antigravity --model gemini-3.1-pro-high [--only read-line3,grep] [--timeout 300]
+//   node bin/agent-smoke.mjs --agent codex [--model <id>] [--only read-line3,grep] [--timeout 300]
 //        [--env service|inherit] [--keep] [--verbose] [--log <dir>]
 // --log writes each check's normalised events as a run log (<dir>/run-<check>.jsonl, the orchestrator's format, for
 // bin/empty-scan.mjs --runs <dir>) and the CLI's native events (<dir>/native-<check>.jsonl).
@@ -18,7 +18,7 @@ import { parseArgs } from 'node:util';
 import { AGENTS, runAgentCli } from '../agents.mjs';
 
 const { values: opt } = parseArgs({ options: {
-  agent: { type: 'string', default: 'antigravity' }, model: { type: 'string' }, only: { type: 'string' },
+  agent: { type: 'string', default: 'codex' }, model: { type: 'string' }, only: { type: 'string' },
   timeout: { type: 'string', default: '300' }, env: { type: 'string', default: 'service' }, keep: { type: 'boolean' }, verbose: { type: 'boolean' }, log: { type: 'string' },
 } });
 if (!AGENTS[opt.agent]) { console.error(`unknown agent: ${opt.agent}`); process.exit(2); }
@@ -30,7 +30,7 @@ const SERVICE_ENV = {
   PATH: `${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin`,
 };
 const env = opt.env === 'inherit' ? process.env : SERVICE_ENV;
-// Stands in for the orchestrator's worker preamble (agy and codex prepend it to the prompt, claude appends it).
+// Stands in for the orchestrator's worker preamble (codex prepends it to the prompt, claude appends it).
 const APPEND = 'You are an autonomous engineer. No human is watching this session: never ask questions or wait for confirmation. ' +
   'Work only inside the current working directory.';
 
@@ -157,7 +157,7 @@ for (const c of CHECKS) {
   rows.push(row);
   console.log(`${row.pass ? 'PASS' : 'FAIL'} ${c.id} (${row.secs}s)${reason ? ` — ${reason}` : ''}`);
   if (!opt.keep && row.pass) fs.rmSync(t.dir, { recursive: true, force: true });
-  // A plan limit fails every later check the same way (and agy retries each for minutes): stop here.
+  // A plan limit fails every later check the same way (and a CLI may retry each for minutes): stop here.
   if (r.res?.outcome === 'rate_limited') {
     const left = CHECKS.filter((x) => (!only || only.has(x.id)) && !rows.some((y) => y.id === x.id));
     for (const x of left) rows.push({ id: x.id, pass: false, secs: 0, tools: '', reason: 'skipped: agent rate limited', errors: [], dir: '-', stderr: '' });

@@ -4,7 +4,7 @@
 // (its `origin` is a local bare repo whose path contains github.com/…, so pushes stay on disk and no GitHub repo is
 // created), queues one small work task routed to the agent, and waits for claim → agent run → "Done when" check → done.
 // Prints the task/run ids, the run log's tool events, the usage records and a live-DB isolation check as JSON.
-//   node bin/orch-e2e.mjs --agent antigravity --model gemini-3.1-pro-high [--timeout 900] [--keep]
+//   node bin/orch-e2e.mjs --agent codex [--model <id>] [--timeout 900] [--keep]
 // Exit 0 only when the task ends 'done' with its check passing and every tool event on a file carries a path.
 // --parallel instead queues two work tasks with disjoint `files` and no `after`, and checks that they ran at the same
 // time, each in its own worktree under ../.agent-orch-worktrees, both merged onto main and pushed, and nothing was left
@@ -24,7 +24,7 @@ import WebSocket from 'ws';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const { values: opt } = parseArgs({ options: {
-  agent: { type: 'string', default: 'antigravity' }, model: { type: 'string' }, timeout: { type: 'string', default: '900' }, keep: { type: 'boolean' }, parallel: { type: 'boolean' },
+  agent: { type: 'string', default: 'codex' }, model: { type: 'string' }, timeout: { type: 'string', default: '900' }, keep: { type: 'boolean' }, parallel: { type: 'boolean' },
 } });
 const HOME = os.homedir();
 // The live service's minimal env (systemd unit), so the agent inherits no shell setup.
@@ -150,7 +150,7 @@ try {
     tmp,
   };
   result.ok = t.status === 'done' && npmTest.status === 0 && fileTools.length > 0 && fileTools.every((x) => x.input?.file_path || x.input?.path)
-    && !/Antigravity denied/.test(t.result || '') && !result.live.projectsHaveScratch && !result.delegated_from && !result.route_note;
+    && !result.live.projectsHaveScratch && !result.delegated_from && !result.route_note;
 } catch (e) {
   if (e) result.error = e.message;
 } finally {

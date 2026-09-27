@@ -6,15 +6,19 @@
 // tail on request, and it updates itself (git pull + service restart) when the controller asks while it is idle. On a
 // Mac it follows its power policy from the controller (power.mjs): no new jobs on low battery or when hot, and awake
 // (caffeinate) only while jobs run.
-// Compute-only (BRIEF goal 11): no UI, chat, planner, reflection or settings here, and nothing of the controller's is
+// Compute-only (BRIEF goal 11): no chat, planner, reflection or management here, and nothing of the controller's is
 // loaded (server.mjs, orchestrator.mjs, cluster.mjs). It acts only on the head's allow-listed frames (cluster-protocol.mjs
-// WORKER_ACCEPTS), rejecting and logging anything else; it opens no listening port; its slots, power policy and draining
-// come only from the head. These are its only commands (the installers add --uninstall):
+// WORKER_ACCEPTS), rejecting and logging anything else; it opens no TCP port; its slots, power policy and draining come
+// only from the head. The one local setting is the machine's contribution cap (cap.mjs), a ceiling the head keeps to and
+// the worker enforces itself (worker-cap.mjs); the one local UI is a terminal status view, fed over a unix socket in its
+// home (worker-status.mjs). These are its only commands (the installers add --uninstall):
 //   node worker.mjs pair --controller https://<host> --code ABCD-1234 [--name mac]   one time: stores the node token
 //   node worker.mjs run                                                              the daemon (systemd / launchd)
-//   node worker.mjs status                                                           the stored pairing (no token)
-// Everything lives in ~/.agent-orch-worker (AGENT_ORCH_WORKER_HOME overrides): config.json (0600), repos/ (bare cache
-// clones), worktrees/, deps/ (node_modules by lockfile hash), logs/. git and gh use the machine's own login.
+//   node worker.mjs status [--once]                                                  the live status view (q quits)
+//   node worker.mjs limit --cpu <cores|N%> --mem <GB|N%> [--max-tasks N] [--only-on-ac] | --show | --reset
+// Everything lives in ~/.agent-orch-worker (AGENT_ORCH_WORKER_HOME overrides): config.json (0600: the pairing and the
+// cap), worker.sock (the status socket, 0600), repos/ (bare cache clones), worktrees/, deps/ (node_modules by lockfile
+// hash), run/ (each job's wrapper scripts and pids), logs/. git and gh use the machine's own login.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -40,6 +44,9 @@ import { MEM } from './parallel.mjs';
 import { GIT_ID, commitAll, taskBranch } from './worktrees.mjs';
 import { extractCommand, runCheck, toolLine } from './taskrun.mjs';
 import { JOB_ENV, workerHome } from './role.mjs';
+import { FOOTPRINT, applyLimit, capRejection, capTasks, capText, fmtCores, fmtGB, resolveCap } from './cap.mjs';
+import { createJobUsage, createWrappers, heldBy, probeLimiter } from './worker-cap.mjs';
+import { request as statusRequest, serveStatus, statusCli } from './worker-status.mjs';
 
 const execFileP = promisify(execFile);
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -67,6 +74,12 @@ const POWER_FIXTURE = process.env.AGENT_ORCH_WORKER_POWER || null;
 const POWERED = process.platform === 'darwin' || !!POWER_FIXTURE;
 // The agent-orch checkout this worker runs from, which node.update pulls (tests point it at a scratch repo).
 const SRC_DIR = process.env.AGENT_ORCH_WORKER_SRC || ROOT;
+// The local cap (cap.mjs): running jobs' CPU/RAM are sampled this often; jobs over its RAM cap for CAP_PAUSE_MS pause the
+// newest, which isn't taken back here for CAP_DECLINE_MS (tests shorten the pause).
+const USAGE_MS = 2000;
+const CAP_PAUSE_MS = Number(process.env.AGENT_ORCH_WORKER_CAP_PAUSE_MS) || 30_000;
+const CAP_DECLINE_MS = 10 * 60_000;
+const RECENT = 5; // finished jobs the status view lists
 const EDIT_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
 // The files an edit tool call touched: Claude's file_path, or codex's file_change lines ("add hello.txt").
 const editedFiles = (e) => (EDIT_TOOLS.has(e.name) ? String(e.input?.file_path || e.input?.path || '').split('\n')
@@ -191,6 +204,17 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   // The power policy and task cap the controller set for this node (welcome.policy, node.policy); its OS defaults until then.
   let policy = effectivePolicy(process.platform), policyText = '';
   const awake = POWERED ? createKeepAwake({ log }) : null;
+  // The local cap (`node worker.mjs limit`, config.json; reloaded over the status socket) and how its jobs are held to it
+  // (worker-cap.mjs: probed once a CPU/RAM cap exists). use: the jobs' CPU/RAM, sampled while they run.
+  const machine = { cores: os.cpus().length, memTotal: os.totalmem() };
+  let cap = resolveCap(config.cap, machine), limiter = null, limiterBusy = null;
+  const wrappers = createWrappers({ dir: path.join(home, 'run'), cap: () => cap, mode: () => limiter || 'off' });
+  const usage = createJobUsage();
+  let use = { at: 0, cpu: 0, mem: 0, jobs: new Map() }, sampling = null, overSince = 0;
+  const capPaused = new Map(); // job id -> until (ms): the memory watch paused it; not taken back here meanwhile
+  // For the status view: the last finished jobs, the head's count of tasks up next for this machine, the connection.
+  const recent = [];
+  let queued = null, downSince = Date.now(), retryAt = 0, connError = null, status = null;
 
   // Model lists (once a day per agent, cached) and plan limits (only on limits.refresh): nothing polls (BRIEF goal 7).
   const models = createModelStore({ file: path.join(home, 'models.json'), log, onChange: () => sendInventory() });
@@ -241,6 +265,10 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       p.tools++;
       p.last = toolLine(s).slice(0, 200);
       for (const f of editedFiles(s)) if (p.files.size < 10_000) p.files.add(f);
+    }
+    if (s.k === 'tool' || (s.k === 'text' && String(s.text || '').trim())) { // its last activity, for the status view
+      job.activity = s.k === 'tool' ? job.progress.last : firstLine(s.text).slice(0, 200);
+      job.activityAt = Date.now();
     }
     job.ev.push(s);
     if (job.ev.length > MAX_PENDING_EVENTS) {
@@ -342,7 +370,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     return {
       node: config.node, name: config.name || os.hostname(), os: process.platform, arch: process.arch, cores: os.cpus().length, mem: os.totalmem(),
       agents, limits: Object.fromEntries(ids.map((id) => [id, limits.get(id)]).filter(([, v]) => v)),
-      versions: { agentOrch: VERSION, node: process.version, git: gitVersion },
+      versions: { agentOrch: VERSION, node: process.version, git: gitVersion }, cap,
     };
   }
   let invBusy = null;
@@ -380,8 +408,14 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     powerAt = Date.now();
     return powerBusy = readPower().then((p) => { power = p; syncAwake(); }, () => {}).finally(() => { powerBusy = null; });
   }
-  // ---- power policy (power.mjs): intake (no new jobs on low battery or when hot) and keep-awake while jobs run
-  const intakeNow = () => (POWERED ? intakeOf(policy, power) : { ok: true });
+  // ---- power policy (power.mjs): intake (no new jobs on low battery or when hot) and keep-awake while jobs run. The local
+  // cap's --only-on-ac comes first: on battery, no new jobs at any charge.
+  function intakeNow() {
+    if (!POWERED) return { ok: true };
+    const b = power?.battery;
+    if (cap?.onlyOnAc && b?.source === 'battery') return { ok: false, reason: 'battery', text: `On battery (${b.pct}%): this machine's local cap takes tasks only on AC power` };
+    return intakeOf(policy, power);
+  }
   const activeJobs = () => [...jobs.values()].filter((j) => j.state !== 'paused').length;
   // At most the head's max tasks (Auto: cores − 1 on a Mac, all cores elsewhere): slots are set on the head only.
   const maxJobs = () => policy.maxTasks ?? autoTasks(process.platform, os.cpus().length);
@@ -414,7 +448,102 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   function sendResources() {
     const sys = readSystem();
     const swapUsedPct = sys.swapTotal ? Math.round((sys.swapTotal - (sys.swapFree || 0)) / sys.swapTotal * 1000) / 10 : 0;
-    raw(MSG.RESOURCES, { memAvailable: sys.memAvailable ?? os.freemem(), load: sys.load, running: [...jobs.keys()], swapUsedPct, ...telemetry(sys) });
+    raw(MSG.RESOURCES, { memAvailable: sys.memAvailable ?? os.freemem(), load: sys.load, running: [...jobs.keys()], swapUsedPct, ...telemetry(sys),
+      cap, jobsMem: Math.round(use.mem), jobsCpu: use.cpu });
+  }
+
+  // ---- the local cap (cap.mjs; CLUSTER.md "Local cap"): re-read from config.json ({op: 'reload'} over the status socket,
+  // sent by `node worker.mjs limit`) and applied at once: the next offer and job, the memory watch, and the head, which
+  // hears it in the inventory and every resources frame.
+  function reloadCap() {
+    const saved = readConfig(home), next = resolveCap(saved?.cap, machine), changed = JSON.stringify(next) !== JSON.stringify(cap);
+    config.cap = saved?.cap ?? null;
+    cap = next;
+    if (changed) {
+      log(`local cap: ${cap ? capText(cap, machine) : 'none (lends everything)'}`);
+      overSince = 0;
+      ensureLimiter();
+      sendInventory();
+      sendResources();
+    }
+    return { ok: true, cap, text: capText(cap, machine), changed, connected: live() };
+  }
+  // How jobs are held to a CPU/RAM cap here, probed once one is set (a systemd scope per job on Linux, else nice).
+  function ensureLimiter() {
+    if (limiter || limiterBusy || (cap?.cpu == null && cap?.mem == null)) return limiterBusy;
+    return limiterBusy = probeLimiter().then((m) => { limiter = m; log(`the local cap holds jobs with ${heldBy(m, cap)}`); }, () => { limiter = 'nice'; })
+      .finally(() => { limiterBusy = null; });
+  }
+  // What the running jobs use (their process trees, from the pids their wrappers recorded), at most USAGE_MS old.
+  function sampleUsage() {
+    if (sampling) return sampling;
+    if (!jobs.size) { use = { at: Date.now(), cpu: 0, mem: 0, jobs: new Map() }; overSince = 0; return Promise.resolve(use); }
+    return sampling = usage.sample(new Map([...jobs.keys()].map((id) => [id, wrappers.pids(id)])))
+      .then((u) => { use = u; memWatch(); return u; }, () => use).finally(() => { sampling = null; });
+  }
+  const usageNow = () => (Date.now() - use.at < USAGE_MS ? Promise.resolve(use) : sampleUsage());
+  const sampler = setInterval(() => { if (jobs.size || use.mem) sampleUsage(); }, USAGE_MS);
+  // The memory watch: the jobs together over the RAM cap for CAP_PAUSE_MS → the newest running one stops, pushes its WIP
+  // and goes back to the head as aborted (it requeues and resumes its session, like the controller's memGuard); it isn't
+  // taken back here for CAP_DECLINE_MS. Another pause needs another full stretch over the cap.
+  function memWatch() {
+    if (cap?.mem == null || use.mem <= cap.mem) { overSince = 0; return; }
+    overSince ||= Date.now();
+    if (Date.now() - overSince < CAP_PAUSE_MS) return;
+    const job = [...jobs.values()].filter((j) => ['running', 'checking'].includes(j.state) && !j.stop).sort((a, b) => b.startedAt - a.startedAt)[0];
+    if (!job) return;
+    overSince = Date.now();
+    capPaused.set(job.id, Date.now() + CAP_DECLINE_MS);
+    const text = `paused by ${config.name || 'this machine'}'s local cap: its jobs used ${fmtGB(use.mem)} of ${fmtGB(cap.mem)} RAM for ${Math.round(CAP_PAUSE_MS / 1000)} s; it continues later`;
+    log(`job ${job.id} ${text}`, 'warn');
+    job.stop = { kind: 'cap', text };
+    job.ac?.abort();
+  }
+  // Why taking the offered job would go over the local cap (the reject reason), or null.
+  async function capCheck(msg) {
+    const paused = capPaused.get(msg.job) > Date.now();
+    if (!cap && !paused) return null;
+    const u = await usageNow();
+    const over = paused ? { kind: 'memory', text: `it was paused here for the local RAM cap less than ${CAP_DECLINE_MS / 60_000} min ago` }
+      : capRejection(cap, { jobs: activeJobs(), jobsMem: u.mem, footprint: msg.footprint || FOOTPRINT[msg.agent] || FOOTPRINT.claude });
+    if (!over) return null;
+    log(`declined job ${msg.job}: ${over.text} (node worker.mjs limit)`);
+    return peer.has('cap') ? 'cap' : over.kind === 'memory' ? 'low_memory' : 'busy';
+  }
+  // The finished jobs the status view lists (outcome, how long this run of it took).
+  function remember(job, outcome) {
+    recent.push({ id: job.id, title: job.spec.title, outcome, ms: Date.now() - job.startedAt, at: Date.now() });
+    if (recent.length > RECENT) recent.shift();
+  }
+
+  // ---- the status view's snapshot ({op: 'status'} on the status socket; worker-status.mjs draws it)
+  function connState(t) {
+    if (stopping) return { state: 'stopping', since: t };
+    if (live()) return { state: 'connected', since: connectedAt };
+    const refused = /refused this node token/.test(connError || '');
+    return { state: !refused && t - downSince < graceMs ? 'reconnecting' : 'offline', since: downSince, retryAt: reconnectTimer ? retryAt : null, error: connError };
+  }
+  function snapshot() {
+    const t = Date.now();
+    return {
+      ok: true, at: t, name: config.name || os.hostname(), node: config.node, controller: config.controller, version: VERSION, pid: process.pid, os: process.platform,
+      machine, connection: connState(t), cap, limiter: heldBy(limiter || 'off', cap),
+      usage: { cpu: use.cpu, mem: use.mem, at: use.at }, slots: Math.min(maxJobs(), capTasks(cap)), intake: intakeNow(),
+      draining: stopping ? 'the worker is stopping' : updating ? 'it is updating itself' : null,
+      jobs: [...jobs.values()].sort((a, b) => a.startedAt - b.startedAt).map((j) => ({
+        id: j.id, title: j.spec.title, agent: j.spec.agent, model: j.spec.model || null, state: j.state, phase: j.phase?.name || null, startedAt: j.startedAt,
+        activity: j.activity || null, activityAt: j.activityAt || null, cpu: use.jobs.get(j.id)?.cpu ?? null, mem: use.jobs.get(j.id)?.mem ?? null,
+      })),
+      queued: live() ? queued : null, finished: [...recent].reverse(),
+    };
+  }
+  function answer(req) {
+    switch (req?.op) {
+      case 'ping': return { ok: true, pid: process.pid };
+      case 'status': return snapshot();
+      case 'reload': return reloadCap();
+      default: return { ok: false, error: `unknown request ${JSON.stringify(req?.op ?? null)} (status, reload)` };
+    }
   }
 
   // ---- connection: dial out, hello, reconnect with backoff forever
@@ -438,7 +567,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
         jobs: allJobs().map((j) => ({ job: j.id, state: held.has(j.id) ? 'done' : j.state, next: evEnd(j), ...(j.pushed ? { sha: j.pushed } : {}) })) }));
     });
     sock.on('unexpected-response', (_req, res) => {
-      log(res.statusCode === 401 ? 'the controller refused this node token (revoked?): pair again' : `connection refused: HTTP ${res.statusCode}`, 'warn');
+      connError = res.statusCode === 401 ? 'the controller refused this node token (revoked?): pair again' : `connection refused: HTTP ${res.statusCode}`;
+      log(connError, 'warn');
       sock.terminate();
     });
     sock.on('message', (data, isBinary) => {
@@ -452,17 +582,18 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
         nodeError('exception', `handling ${msg.t} failed: ${e.message}`, { stack: e.stack });
       });
     });
-    sock.on('error', (e) => log(`connection error: ${e.message}`, 'warn'));
+    sock.on('error', (e) => { if (!/refused this node token/.test(connError || '')) connError = `connection error: ${e.message}`; log(`connection error: ${e.message}`, 'warn'); });
     sock.on('close', (code, reason) => {
       if (ws !== sock) return;
       ws = null; welcomed = false;
       clearInterval(beat); beat = null;
       for (const j of allJobs()) if (j.attached) { j.attached = false; j.detachedAt = Date.now(); }
-      if (connectedAt) log(`disconnected (${code}${reason?.length ? ` ${reason}` : ''})`);
+      if (connectedAt) { log(`disconnected (${code}${reason?.length ? ` ${reason}` : ''})`); downSince = Date.now(); connError ??= `disconnected (${code})`; }
       if (connectedAt && Date.now() - connectedAt > 60_000) attempt = 0;
       connectedAt = 0;
       if (stopping) return;
       const delay = Math.min(BACKOFF_MAX_MS, backoffMs(attempt++));
+      retryAt = Date.now() + delay;
       reconnectTimer = setTimeout(connect, delay);
     });
   }
@@ -473,6 +604,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     graceMs = msg.graceMs || graceMs;
     peer = new Set(Array.isArray(msg.features) ? msg.features : []);
     welcomed = true;
+    connError = null;
+    queued = Number.isSafeInteger(msg.queued) ? msg.queued : null;
     log(`welcomed as ${msg.node}`);
     if (msg.policy) setPolicy(msg.policy);
     clearInterval(beat);
@@ -506,7 +639,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   async function handle(msg) {
     switch (msg.t) {
       case MSG.WELCOME: return onWelcome(msg);
-      case MSG.HEARTBEAT: return;
+      case MSG.HEARTBEAT: if (Number.isSafeInteger(msg.queued)) queued = msg.queued; return;
       case MSG.ACK: { // the controller has a finished job's job.done: nothing of it is left to replay
         const j = msg.job != null && held.get(msg.job);
         if (j && j.ctl.some((c) => c.t === MSG.JOB_DONE && c.seqSent)) held.delete(msg.job);
@@ -545,15 +678,17 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     }
   }
 
-  // Declined while stopping or updating, without the agent or its sign-in, at the task cap, when the job would leave less
-  // free memory than the claim floor or the policy's reserve for the owner, or while the power policy pauses intake
-  // (checked on a reading at most 15 s old).
+  // Declined while stopping or updating, without the agent or its sign-in, at the task cap, over the local cap (its task
+  // count, CPU or RAM: capCheck), when the job would leave less free memory than the claim floor or the policy's reserve
+  // for the owner, or while the power policy pauses intake (checked on a reading at most 15 s old).
   async function offerRejection(msg) {
     if (stopping || updating) return 'draining';
     const st = agentStatus(msg.agent);
     if (st === 'not installed' || st === 'unknown agent') return 'agent_missing';
     if (st !== true) return 'not_signed_in';
     if (activeJobs() >= maxJobs()) return 'busy';
+    const over = await capCheck(msg);
+    if (over) return over;
     const avail = readSystem().memAvailable ?? os.freemem();
     if (avail - (msg.footprint || 0) < Math.max(MEM.claimFloor, reserveBytes(policy))) return 'low_memory';
     await probePower(15_000);
@@ -593,6 +728,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
 
   const newJob = (spec) => ({
     id: spec.job, spec, state: 'setup', ac: null, ev: [], evBase: 0, sent: 0, ctl: [], ctlSent: 0, attached: true, detachedAt: 0,
+    startedAt: Date.now(), activity: null, activityAt: 0,
     phase: null, progress: { tools: 0, files: new Set(), last: '' }, progressSig: '', progressAt: 0,
     cache: null, env: gitAuthEnv(spec.repo),
     dir: path.join(dirs.worktrees, `${cacheName(spec.repo).split('__').pop()}-task-${spec.job}`),
@@ -645,6 +781,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       await dropWorktree(job);
       jobs.delete(job.id);
       held.set(job.id, job);
+      wrappers.drop(job.id);
+      remember(job, 'setup_failed');
       setPhase(job, 'done', { outcome: 'setup_failed' });
       emit(job, MSG.JOB_DONE, { job: job.id, outcome: 'setup_failed', text });
       return false;
@@ -687,9 +825,11 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     const wip = setInterval(() => pushWip(job).catch(() => {}), wipPushMs);
     let res;
     try {
+      // The agent CLI runs through its wrapper: under the local cap, with its pid recorded for the usage sampler.
+      const bin = wrappers.wrap(job.id, spec.agent, [AGENTS[spec.agent]?.bin || spec.agent]);
       res = await runAgentCli({
         agent: spec.agent, model: spec.model || undefined, effort: spec.effort || undefined, prompt, cwd: job.dir, resume: resume || undefined, systemAppend: spec.systemAppend || undefined,
-        autonomous: spec.autonomous ?? true, signal: job.ac.signal, onEvent: (e) => pushEvent(job, e),
+        autonomous: spec.autonomous ?? true, signal: job.ac.signal, onEvent: (e) => pushEvent(job, e), bin,
         env: jobEnv(job), onSpawn: ({ pid, pgid }) => registerPid({ pid, pgid, kind: 'task', id: job.id }),
       });
     } catch (e) {
@@ -704,13 +844,15 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       jobError(job, 'agent_crash', firstLine(res.text) || `${spec.agent} exited with an error`, { stderr: res.stderr });
     }
     if (job.stop?.kind === 'timeout') res.outcome = 'timeout';
+    if (job.stop?.kind === 'cap') res = { ...res, outcome: 'aborted', text: job.stop.text };
     await finish(job, res);
   }
 
-  // A pause/cancel that landed while the agent (or the check) ran: pause keeps the worktree, cancel drops it.
+  // A pause/cancel that landed while the agent (or the check) ran: pause keeps the worktree, cancel drops it. A timeout or
+  // the memory watch's pause (kind 'cap') ends the job as usual instead: its WIP is pushed and job.done says why.
   async function stopped(job) {
     const s = job.stop;
-    if (!s || s.kind === 'timeout') return false;
+    if (!s || s.kind === 'timeout' || s.kind === 'cap') return false;
     if (s.kind === 'pause') {
       job.state = 'paused';
       await pushWip(job).catch((e) => log(`job ${job.id} WIP push on pause failed: ${e.message}`, 'warn'));
@@ -720,6 +862,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     if (s.reason !== 'reassigned' && s.reason !== 'disabled') await pushWip(job).catch((e) => log(`job ${job.id} WIP push on cancel failed: ${e.message}`, 'warn'));
     await dropWorktree(job);
     jobs.delete(job.id);
+    wrappers.drop(job.id);
+    remember(job, 'cancelled');
     log(`job ${job.id} cancelled${s.reason ? ` (${s.reason})` : ''}`);
     return true;
   }
@@ -731,11 +875,14 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       job.state = 'checking';
       setPhase(job, 'checking');
       let [pass, output, code] = [false, '', null];
-      try { [pass, output, code] = await runCheck(command, job.dir, jobEnv(job), spec.timeouts.verifySec || 600, job.ac.signal); }
+      try { [pass, output, code] = await runCheck(command, job.dir, jobEnv(job), spec.timeouts.verifySec || 600, job.ac.signal, wrappers.wrap(job.id, 'check', ['bash'])); }
       catch (e) { output = `verification crashed: ${e?.message || e}`; jobError(job, 'check_crashed', output, { stack: e?.stack }); }
       if (await stopped(job)) return;
-      log(`job ${job.id} check ${pass ? 'passed' : 'failed'}: ${command}`);
-      emit(job, MSG.JOB_CHECK, { job: job.id, command, output: String(output).slice(-3000), pass, ...(Number.isInteger(code) ? { code } : {}) });
+      if (job.stop?.kind === 'cap') res = { ...res, outcome: 'aborted', text: job.stop.text }; // stopped mid-check: no verdict
+      else {
+        log(`job ${job.id} check ${pass ? 'passed' : 'failed'}: ${command}`);
+        emit(job, MSG.JOB_CHECK, { job: job.id, command, output: String(output).slice(-3000), pass, ...(Number.isInteger(code) ? { code } : {}) });
+      }
     }
     job.state = 'pushing';
     let sha = null;
@@ -746,6 +893,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     const limitsOut = res.resetsAt || res.limitType || res.windows ? { resetsAt: res.resetsAt ?? null, limitType: res.limitType ?? null, windows: res.windows ?? null } : undefined;
     jobs.delete(job.id);
     held.set(job.id, job);
+    wrappers.drop(job.id);
+    remember(job, outcome);
     if (held.size > 50) held.delete(held.keys().next().value);
     setPhase(job, 'done', { outcome });
     emit(job, MSG.JOB_DONE, {
@@ -910,6 +1059,11 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
 
   async function start() {
     log(`agent-orch worker ${config.name || ''} (${config.node}) starting; home ${home}`);
+    // The status socket first: a second daemon on this home stops here, before it touches the first one's jobs.
+    status = await serveStatus({ home, answer, log });
+    wrappers.reset();
+    if (cap) log(`local cap: ${capText(cap, machine)}`);
+    ensureLimiter();
     srcSha = await git(srcDir, ['rev-parse', 'HEAD']).then((s) => s.trim(), () => null);
     if (srcSha && !/^[0-9a-f]{40}$/.test(srcSha)) srcSha = null;
     await sweepLeftovers().catch((e) => log(`leftover sweep failed: ${e.message}`, 'warn'));
@@ -933,18 +1087,78 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     ]);
     for (const j of allJobs()) flushJob(j);
     raw(MSG.BYE, { reason });
-    clearInterval(flusher); clearInterval(beat); clearInterval(clock);
+    clearInterval(flusher); clearInterval(beat); clearInterval(clock); clearInterval(sampler);
     models.stop(); limits.stop(); resources?.stop(); awake?.stop();
+    await status?.close().catch(() => {});
     // Let the bye and the close frame out before the process exits.
     const sock = ws;
     try { sock?.close(1000, reason); } catch {}
     if (sock && sock.readyState !== WebSocket.CLOSED) await new Promise((r) => { const t = setTimeout(r, 2000); sock.once('close', () => { clearTimeout(t); r(); }); });
   }
 
-  return { start, stop, jobs, isConnected: live, reportError };
+  return { start, stop, jobs, isConnected: live, reportError, snapshot, reloadCap };
 }
 
 // ---------------------------------------------------------------- CLI
+
+const LIMIT_USAGE = 'usage: node worker.mjs limit --cpu <cores|N%> --mem <GB|N%> [--max-tasks N] [--only-on-ac] | --show | --reset\n' +
+  '  sets only the parts given; "off" removes one (--cpu off); the worker applies it at once and the head keeps to it';
+// `limit` options: --cpu/--mem/--max-tasks take a value; --only-on-ac takes none (or on/off); --show and --reset none.
+export function limitArgs(argv) {
+  const opts = {}, keys = { cpu: 'cpu', mem: 'mem', 'max-tasks': 'maxTasks' };
+  for (let i = 0; i < argv.length; i++) {
+    const m = /^--([\w-]+)(?:=(.*))?$/.exec(argv[i]);
+    if (!m) return { error: `unexpected ${JSON.stringify(argv[i])}` };
+    const [, k, v] = m;
+    if (keys[k]) {
+      const x = v ?? argv[++i];
+      if (x == null || /^--/.test(x)) return { error: `--${k} needs a value` };
+      opts[keys[k]] = x;
+    } else if (k === 'only-on-ac') opts.onlyOnAc = v ?? (/^(on|off|yes|no|true|false)$/i.test(argv[i + 1] || '') ? argv[++i] : true);
+    else if (k === 'show' || k === 'reset') opts[k] = true;
+    else return { error: `unknown option --${k}` };
+  }
+  return { opts };
+}
+
+// `node worker.mjs limit …`: the machine's one local setting, how much CPU/RAM it lends (cap.mjs). Saved in config.json,
+// then the running daemon re-reads it over the status socket and reports it to the head.
+async function limitCli(argv) {
+  const home = workerHome(), cfg = readConfig(home), machine = { cores: os.cpus().length, memTotal: os.totalmem() };
+  if (!cfg?.node) {
+    console.error(`this account has no worker pairing (no ${configFile(home)}): there is nothing to cap${process.platform === 'darwin'
+      ? '. A Mac runs its worker as its own user: sudo -u agentorch -H node ~agentorch/agent-orch-worker/worker.mjs limit …' : ''}`);
+    return 1;
+  }
+  const a = limitArgs(argv);
+  if (a.error) { console.error(`${a.error}\n${LIMIT_USAGE}`); return 1; }
+  const { show, reset, ...set } = a.opts, changes = Object.keys(set).length;
+  if (reset && changes) { console.error(`--reset takes no other options\n${LIMIT_USAGE}`); return 1; }
+  if (show || (!reset && !changes)) {
+    const c = resolveCap(cfg.cap, machine), saved = cfg.cap || {};
+    if (!c) {
+      console.log(`No local cap: ${cfg.name || 'this machine'} lends all ${fmtCores(machine.cores)} and ${fmtGB(machine.memTotal)}; the head's own settings decide (Server details → Machines).`);
+    } else {
+      console.log(`Local cap on ${cfg.name || 'this machine'} (set here; the head keeps to it):`);
+      if (c.cpu != null) console.log(`  CPU        ${fmtCores(c.cpu)} of ${machine.cores}${typeof saved.cpu === 'string' ? ` (${saved.cpu})` : ''}`);
+      if (c.mem != null) console.log(`  RAM        ${fmtGB(c.mem)} of ${fmtGB(machine.memTotal)}${typeof saved.mem === 'string' ? ` (${saved.mem})` : ''}`);
+      if (c.maxTasks != null) console.log(`  Max tasks  ${c.maxTasks}`);
+      if (c.onlyOnAc) console.log('  Power      takes tasks only on AC power');
+    }
+    console.log(LIMIT_USAGE);
+    return 0;
+  }
+  const r = reset ? { cap: null } : applyLimit(cfg.cap, set, machine);
+  if (r.error) { console.error(r.error); return 1; }
+  writeConfig(home, { ...readConfig(home), cap: r.cap ?? undefined }); // re-read: everything else stays as it is
+  const c = resolveCap(r.cap, machine);
+  console.log(c ? `Local cap saved: ${capText(c, machine)}.` : `Local cap removed: ${cfg.name || 'this machine'} lends all its CPU and RAM (the head's settings apply).`);
+  if (c && (capTasks(c) < 1 || (c.mem != null && c.mem < FOOTPRINT.codex))) console.log('Note: that fits no task (each counts 1 core and about 0.8-1.2 GB), so this machine takes none.');
+  const ans = await statusRequest(home, { op: 'reload' }).catch(() => null);
+  console.log(ans?.ok ? `Applied now: the worker reloaded it${ans.connected ? ' and told the head' : '; the head hears it once the worker reconnects'}.`
+    : 'The worker isn\'t running here; it applies the cap when it starts.');
+  return 0;
+}
 
 function args(argv) {
   const out = { _: [] };
@@ -973,12 +1187,19 @@ async function main() {
     });
     await w.start();
   } else if (cmd === 'status') {
-    const c = readConfig();
-    console.log(c ? JSON.stringify({ ...c, token: undefined }, null, 1) : 'not paired');
+    const bad = rest.find((x) => x !== '--once');
+    if (bad) throw new Error(`unknown option ${JSON.stringify(bad)}: node worker.mjs status [--once]`);
+    const home = workerHome(), c = readConfig(home), machine = { cores: os.cpus().length, memTotal: os.totalmem() };
+    const live = !rest.includes('--once') && process.stdout.isTTY && process.stdin.isTTY;
+    process.exitCode = await statusCli({ home, once: !live, config: c && { ...c, token: undefined }, cap: resolveCap(c?.cap, machine), machine });
+    if (live) process.exit(process.exitCode);
+  } else if (cmd === 'limit') {
+    process.exitCode = await limitCli(rest);
   } else {
-    // Nothing else is local (compute-only): a worker's slots, power policy and draining are set on the head.
-    if (cmd) console.error(`unknown command ${JSON.stringify(cmd)}: this machine's max tasks, power policy and draining are set on the head (Server details → Machines)`);
-    console.log('usage: node worker.mjs pair --controller https://<host> --code <code> [--name <name>] | run | status');
+    // Nothing else is local (compute-only): a worker's slots, power policy and draining are set on the head; this machine
+    // only caps what it lends (limit).
+    if (cmd) console.error(`unknown command ${JSON.stringify(cmd)}: this machine's max tasks, power policy and draining are set on the head (Server details → Machines); here only \`limit\` caps the CPU/RAM it lends`);
+    console.log('usage: node worker.mjs pair --controller https://<host> --code <code> [--name <name>] | run | status [--once] | limit …');
     process.exitCode = cmd ? 1 : 0;
   }
 }

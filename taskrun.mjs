@@ -53,12 +53,13 @@ function checkCommand(cand, doneWhen) {
 
 // Resolves [ok, output, exitCode]. Runs without a login shell so the caller's PATH (the orchestrator's has its
 // `python` → python3 alias) is the one used. Aborting `signal` kills the check's process group; the group is
-// also killed when the check exits, so anything it started in the background doesn't outlive it.
-export function runCheck(command, cwd, env, timeoutSec, signal) {
+// also killed when the check exits, so anything it started in the background doesn't outlive it. shell: what runs
+// `-c <command>` (a worker's wrapper that execs bash under its local cap: worker-cap.mjs).
+export function runCheck(command, cwd, env, timeoutSec, signal, shell = 'bash') {
   return new Promise((resolve) => {
     let out = '';
     let done = false;
-    const child = spawn('bash', ['-c', command], { cwd, env, detached: true });
+    const child = spawn(shell, ['-c', command], { cwd, env, detached: true });
     const killGroup = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} };
     const onAbort = () => { killGroup(); finish(false, (out || '') + '\n(aborted)', null); };
     const finish = (ok, text, code) => {

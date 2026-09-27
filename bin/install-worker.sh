@@ -4,7 +4,8 @@
 #   curl -fsSL https://<head>/install/worker-linux.sh | bash -s -- --controller https://<head> --code ABCD-1234
 # Installs Node 22 if missing (nvm when present, else the official tarball in ~/.local/node), clones or updates
 # github.com/sanat-garg/agent-orch into ~/agent-orch-worker with the gh login, runs npm ci, optionally installs agent
-# CLIs, pairs the machine and installs agent-orch-worker.service (Restart=always, MemoryHigh leaves headroom).
+# CLIs, pairs the machine and installs agent-orch-worker.service (Restart=always, MemoryHigh leaves headroom). Lingering
+# keeps your systemd user manager running, so jobs can run in scopes under this machine's cap (node worker.mjs limit).
 # Idempotent: re-running updates the checkout and the unit; without --code an existing pairing is kept.
 # Only the worker service: no agent-orch web service, Caddy or ttyd (workers are compute-only; the head runs those).
 #   --controller URL  --code CODE  --name NAME (default: hostname)  --agents claude,codex
@@ -28,7 +29,7 @@ tty_run() { if ((DRY)); then printf '+ %s\n' "$*"; else "$@" </dev/tty; fi; }
 write_root() { if ((DRY)); then printf '+ write %s:\n' "$1"; sed 's/^/    /'; else sudo tee "$1" >/dev/null; fi; }
 SUDO() { if ((EUID == 0)); then run "$@"; else run sudo "$@"; fi; }
 
-usage() { sed -n '2,11p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,12p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; }
 
 parse() {
   while (($#)); do
@@ -161,6 +162,9 @@ install_service() {
   command -v systemctl >/dev/null || die "systemd not found; run it yourself: node $DIR/worker.mjs run"
   say "Installing $UNIT"
   unit | write_root "$UNIT_FILE"
+  # The worker runs each job in a transient scope of your systemd user manager (systemd-run --user --scope with
+  # CPUQuota/MemoryMax) when a local cap is set; lingering keeps that manager running without a login.
+  SUDO loginctl enable-linger "$(id -un)" || say "Warning: lingering is off, so a local cap is kept by task count, nice and a memory watch only"
   SUDO systemctl daemon-reload
   SUDO systemctl enable "$UNIT"
   SUDO systemctl restart "$UNIT"
@@ -179,7 +183,8 @@ main() {
   install_agents
   pair
   install_service
-  say "Done. Status: node $DIR/worker.mjs status · logs: journalctl -u $UNIT -f"
+  say "Done. Live status (connection, cap, running tasks; q quits): node $DIR/worker.mjs status · logs: journalctl -u $UNIT -f"
+  say "Cap what this machine lends the cluster: node $DIR/worker.mjs limit --cpu 2 --mem 4   (cores or %, GB or %; --show, --reset)"
   say "Next: sign the agents in on this machine (the head's Connections window, or run \`claude\` / \`codex login --device-auth\` here)."
 }
 

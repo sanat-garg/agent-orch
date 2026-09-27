@@ -14,3 +14,94 @@ Two worker-side features (BRIEF goal 11; this replaces the cancelled web status 
 ## Done when
 
 `npm test` passes with local-cap and status-socket tests, and `node worker.mjs status --once` against a test worker prints the connection state, cap and running job line
+
+## Result — verify failed (1) (2026-09-27 22:44)
+
+Command: npm test && node worker.mjs status --once
+
+ed
+  ---
+  duration_ms: 88.318376
+  type: 'test'
+  ...
+# Subtest: pause pushes WIP and keeps the worktree, resume finishes the job, cancel drops it
+ok 382 - pause pushes WIP and keeps the worktree, resume finishes the job, cancel drops it
+  ---
+  duration_ms: 1271.668064
+  type: 'test'
+  ...
+# error: could not apply bee35fb... mine
+# hint: Resolve all conflicts manually, mark them as resolved with
+# hint: "git add/rm <conflicted_files>", then run "git rebase --continue".
+# hint: You can instead skip this commit: run "git rebase --skip".
+# hint: To abort and get back to the state before "git rebase", run "git rebase --abort".
+# hint: Disable this message with "git config set advice.mergeConflict false"
+# Could not apply bee35fb... \# mine
+# Subtest: worktrees
+    # Subtest: two concurrent tasks editing different files both merge, and their worktrees are cleaned up
+    ok 1 - two concurrent tasks editing different files both merge, and their worktrees are cleaned up
+      ---
+      duration_ms: 7105.766403
+      type: 'test'
+      ...
+    # Subtest: two tasks editing the same line: the second needs integration, and its integrator merges it
+    ok 2 - two tasks editing the same line: the second needs integration, and its integrator merges it
+      ---
+      duration_ms: 8269.144619
+      type: 'test'
+      ...
+    # Subtest: boot keeps an interrupted task's worktree for reuse and parks an orphaned one on its branch
+    ok 3 - boot keeps an interrupted task's worktree for reuse and parks an orphaned one on its branch
+      ---
+      duration_ms: 7218.315595
+      type: 'test'
+      ...
+    # Subtest: a detached-HEAD worktree is re-attached to its branch with its uncommitted work, not deleted
+    ok 4 - a detached-HEAD worktree is re-attached to its branch with its uncommitted work, not deleted
+      ---
+      duration_ms: 1977.978113
+      type: 'test'
+      ...
+    # Subtest: mergeBack reports a conflict without touching main
+    ok 5 - mergeBack reports a conflict without touching main
+      ---
+      duration_ms: 1707.113231
+      type: 'test'
+      ...
+    # Subtest: a setext ======= heading merged in from main is not an unresolved conflict
+    ok 6 - a setext ======= heading merged in from main is not an unresolved conflict
+      ---
+      duration_ms: 1143.315464
+      type: 'test'
+      ...
+    # Subtest: a real integration conflict stays unresolved until its markers are removed
+    ok 7 - a real integration conflict stays unresolved until its markers are removed
+      ---
+      duration_ms: 1414.914589
+      type: 'test'
+      ...
+    1..7
+ok 383 - worktrees
+  ---
+  duration_ms: 8298.747546
+  type: 'suite'
+  ...
+# Subtest: non-object and odd WebSocket frames leave the server running (AUDIT \#33)
+ok 384 - non-object and odd WebSocket frames leave the server running (AUDIT \#33)
+  ---
+  duration_ms: 1902.879371
+  type: 'test'
+  ...
+1..384
+# tests 411
+# suites 12
+# pass 410
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 395547.317574
+
+## Result — done (check passed) (2026-09-27 23:00)
+
+AGENT-ORCH-STATUS: done — full test suite passes; worker status view and local cap verified

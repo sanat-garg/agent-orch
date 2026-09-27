@@ -26,6 +26,7 @@ import { registerPid, withOwner } from './resources.mjs';
 import { LOCAL_NODE, HEALTH } from './cluster.mjs';
 import { MSG, graceMs, isRepoUrl } from './cluster-protocol.mjs';
 import { autoTasks, reserveBytes } from './power.mjs';
+import { CPU_PER_TASK, FOOTPRINT, capSlots, localCap } from './cap.mjs';
 import { extractCommand, runCheck, toolLine } from './taskrun.mjs';
 import { commitAll, ensureWorktree, isMerged, listWorktrees, mergeBack, parkWorktree, removeWorktree, repoInfo, startIntegration, taskBranch, unresolvedFiles, worktreesRoot } from './worktrees.mjs';
 
@@ -58,10 +59,12 @@ const CFG = {
   contextBudgetBytes: 8000,
   delegate: { ...DELEGATE_CFG }, // maxWindowPct
   // Cluster placement (BRIEF goal 11). footprint: an agent run's memory on a node, kept free above MEM.claimFloor
-  // (a constant until #209 measures the per-agent p90). controllerWork: whether the controller also runs work tasks that
+  // (a constant until #209 measures the per-agent p90). cpuPerTask: the cores a task counts against a worker's local CPU
+  // cap, per agent (default CPU_PER_TASK until measured). controllerWork: whether the controller also runs work tasks that
   // an online worker could run (default: no, it keeps its CPU/RAM for chat and the planner); the owner's kv
   // parallel_settings overrides it. offerMs: a job.offer unanswered this long counts as a reject.
-  footprint: { claude: 1.2 * 1024 ** 3, codex: 0.8 * 1024 ** 3 },
+  footprint: { ...FOOTPRINT },
+  cpuPerTask: {},
   controllerWork: false,
   offerMs: 10_000,
   // Tools a worker may use without full autonomy. Anything else is refused, never prompted.
@@ -1308,13 +1311,23 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // the RAM the node's power policy leaves free for its owner when that is more (a Mac: 3 GB; power.mjs).
   const headroom = (n, agent) => spareMem(n) - footprint(agent);
   const floorOf = (n) => Math.max(MEM.claimFloor, reserveBytes(n.policy));
+  // What a worker's jobs use: its last measured reading (resources.jobsMem), plus the footprint of runs placed there since
+  // (all its runs' footprints from a worker that doesn't measure).
+  function jobsMem(n) {
+    const res = n.resources || {}, runs = nodeRuns(n.id), fresh = runs.filter((r) => r.startedAt * 1000 > (res.at || 0));
+    const sum = (list) => list.reduce((a, r) => a + footprint(r.agent), 0);
+    return (Number.isFinite(res.jobsMem) ? res.jobsMem : sum(runs.filter((r) => !fresh.includes(r)))) + sum(fresh);
+  }
   // A worker's slots: the owner's cap (nodes.max_slots), or Auto (null) = min(its cores (a Mac keeps one for its owner),
-  // its runs + the Claude-sized runs its spare memory fits above its floor). Headroom is checked per claim either way.
-  const nodeCap = (n) => n.maxSlots ?? Math.min(autoTasks(n.os, n.inventory?.cores || 1),
-    nodeRuns(n.id).length + Math.max(0, Math.floor((spareMem(n) - floorOf(n)) / footprint('claude'))));
-  const freeWorkers = (agent, taskId) => workerNodes(agent).filter((n) => nodeRuns(n.id).length < nodeCap(n)
+  // its runs + the Claude-sized runs its spare memory fits above its floor); and never more than its local cap allows
+  // (`node worker.mjs limit` on that machine, a hard ceiling: cap.mjs capSlots = its max tasks, its CPU at cpuPerTask cores
+  // a task, its runs + what fits in the rest of its RAM cap at the agent's footprint). Headroom is checked per claim either way.
+  const nodeCap = (n, agent = 'claude') => Math.min(n.maxSlots ?? Math.min(autoTasks(n.os, n.inventory?.cores || 1),
+    nodeRuns(n.id).length + Math.max(0, Math.floor((spareMem(n) - floorOf(n)) / footprint('claude')))),
+  capSlots(localCap(n), { runs: nodeRuns(n.id).length, jobsMem: jobsMem(n), footprint: footprint(agent), cpuPerTask: CFG.cpuPerTask?.[agent] ?? CPU_PER_TASK }));
+  const freeWorkers = (agent, taskId) => workerNodes(agent).filter((n) => nodeRuns(n.id).length < nodeCap(n, agent)
     && headroom(n, agent) >= floorOf(n) && !(rejected.get(`${n.id}/${taskId}`) > Date.now()));
-  const workerSlots = (agent) => freeWorkers(agent).reduce((sum, n) => sum + nodeCap(n) - nodeRuns(n.id).length, 0);
+  const workerSlots = (agent) => freeWorkers(agent).reduce((sum, n) => sum + nodeCap(n, agent) - nodeRuns(n.id).length, 0);
   // The owner drained the controller (Machines view): it starts no new work tasks; plan tasks still run here.
   const localDraining = () => !!nodesNow().find((n) => n.local)?.draining;
   // The project's GitHub clone URL (never with credentials), or null: remote nodes need one, and a project that is a
@@ -2768,7 +2781,24 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     c.onMessage(onClusterMessage);
     // A worker counts as busy while we have a job placed or offered there: it is sent node.update only once idle.
     c.setBusy?.((nodeId) => nodeRuns(nodeId).length > 0 || [...jobs.values()].some((j) => j.node === nodeId));
+    c.setUpNext?.(upNext);
     for (const id of adoptable.splice(0)) adopt(id);
+  }
+  // "Up next" on a worker's status view (sent with every heartbeat): the queued work tasks ready to start now that could
+  // run there (remote-capable, with their agent signed in on it). The ready list is read at most every 3 s.
+  let upNextAt = 0, upNextAgents = [];
+  function upNext(nodeId) {
+    const n = nodesNow().find((x) => x.id === nodeId);
+    if (!n || n.local) return null;
+    if (Date.now() - upNextAt > 3000) {
+      upNextAt = Date.now();
+      upNextAgents = runnable(null, false, 500).flatMap((r) => {
+        const project = getProject(r.project_id);
+        return project && remoteCapable(r, project) ? [routeNow(r, project).agent] : [];
+      });
+    }
+    const signed = new Set((n.inventory?.agents || []).filter((a) => a.installed && a.signedIn).map((a) => a.id));
+    return upNextAgents.filter((a) => signed.has(a)).length;
   }
   // Auto-health: a worker where HEALTH.failures different tasks failed within HEALTH.windowMs (a crashed agent, a failed
   // setup or install, no reply, a lost sign-in), none of which failed on another machine too (then the task is at fault),

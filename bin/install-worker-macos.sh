@@ -19,6 +19,7 @@
 #   --controller URL  --code CODE  --name NAME (default: "<model> (<host name>)")  --agents claude,codex
 #   --service daemon|login  --user NAME (dedicated user, default agentorch)
 #   --no-dedicated-user (run as yourself from your own LaunchAgent, without sudo; not advised)
+#   --status-window (also open the live status view, worker.mjs status, in a Terminal window at every login)
 #   --dry-run (print what would run, change nothing)  --uninstall [--purge] (also delete the worker home)
 set -euo pipefail
 
@@ -27,7 +28,12 @@ LABEL=com.agent-orch.worker
 LAUNCHER=/usr/local/bin/agent-orch-worker-run
 SUDOERS=/etc/sudoers.d/agent-orch-worker
 DAEMON_PLIST=/Library/LaunchDaemons/$LABEL.plist
-CONTROLLER='' CODE='' NAME='' AGENTS='' WUSER=agentorch SERVICE='' SELF=0 DRY=0 UNINSTALL=0 PURGE=0
+# --status-window: a root-owned script that opens the status view as the worker's user (a sudoers rule allows exactly
+# that one command), and your LaunchAgent that opens it in Terminal when you log in.
+STATUS_LABEL=$LABEL.status
+STATUS_BIN=/usr/local/bin/agent-orch-worker-status
+STATUS_SUDOERS=/etc/sudoers.d/agent-orch-worker-status
+CONTROLLER='' CODE='' NAME='' AGENTS='' WUSER=agentorch SERVICE='' SELF=0 DRY=0 UNINSTALL=0 PURGE=0 STATUS_WINDOW=0 STATUS_NOTE=''
 
 say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -47,7 +53,7 @@ write_root() {
 # ~NAME, or /Users/NAME for an account that doesn't exist (yet).
 home_of() { local h; h="$(eval echo "~$1")"; [[ "$h" == "~"* ]] && h="/Users/$1"; echo "$h"; }
 
-usage() { sed -n '2,22p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,23p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; }
 
 parse() {
   while (($#)); do
@@ -59,6 +65,7 @@ parse() {
       --service) SERVICE="${2:?--service needs daemon or login}"; shift ;;
       --user) WUSER="${2:?--user needs a name}"; shift ;;
       --no-dedicated-user) SELF=1 ;;
+      --status-window) STATUS_WINDOW=1 ;;
       --dry-run) DRY=1 ;;
       --uninstall) UNINSTALL=1 ;;
       --purge) PURGE=1 ;;
@@ -205,9 +212,9 @@ env_keys() { # env_keys HOME PATH [USER]
 worker_path() { echo "$(dirname "$1"):$2/.local/bin:$2/.local/node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"; }
 
 # A LaunchAgent lives in a GUI login session: it runs while that user is logged in.
-load_agent() { # load_agent USER PLIST
+load_agent() { # load_agent USER PLIST [LABEL]
   local uid; uid="$(id -u "$1")"
-  run launchctl bootout "gui/$uid/$LABEL" 2>/dev/null || true
+  run launchctl bootout "gui/$uid/${3:-$LABEL}" 2>/dev/null || true
   run launchctl bootstrap "gui/$uid" "$2"
 }
 
@@ -262,6 +269,53 @@ remove_daemon() {
   run rm -f "$DAEMON_PLIST"
 }
 
+# --status-window: the live status view (worker.mjs status, q quits) opens in a Terminal window each time OWNER logs in:
+# their LaunchAgent runs `open -a Terminal SCRIPT` once per login. With the dedicated user, SCRIPT is root-owned and
+# re-runs itself as that user (the status socket is theirs, 0600) under a sudoers rule for exactly it.
+status_script() { # status_script NODE WORKER-HOME [RUN-AS]
+  printf '#!/bin/sh\n# agent-orch worker status (install-worker-macos.sh --status-window): the live view of this Mac'"'"'s worker; q quits.\n'
+  if [[ -n "${3:-}" ]]; then printf '[ "$(id -un)" = %s ] || exec /usr/bin/sudo -u %s -H "$0" "$@"\n' "$3" "$3"; fi
+  printf 'exec "%s" "%s/agent-orch-worker/worker.mjs" status "$@"\n' "$1" "$2"
+}
+install_status_window() { # install_status_window OWNER NODE WORKER-HOME
+  local ohome script; if ((SELF)); then ohome="$HOME"; else ohome="$(home_of "$1")"; fi
+  local plistf="$ohome/Library/LaunchAgents/$STATUS_LABEL.plist"
+  if ((SELF)); then
+    script="$3/.agent-orch-worker/status.command"
+    say "Adding the status view to your logins ($script, opened in Terminal)"
+    run mkdir -p "$3/.agent-orch-worker"
+    status_script "$2" "$3" | write "$script"
+    run chmod 0755 "$script"
+  else
+    script="$STATUS_BIN"
+    say "Installing $STATUS_BIN and allowing $1 to run it as $WUSER ($STATUS_SUDOERS); it opens in Terminal at each login"
+    status_script "$2" "$3" "$WUSER" | write_root "$STATUS_BIN" 0755
+    printf '%s ALL=(%s) NOPASSWD: %s\n' "$1" "$WUSER" "$STATUS_BIN" | write_root "$STATUS_SUDOERS" 0440 check
+  fi
+  if ((SELF)); then run mkdir -p "$ohome/Library/LaunchAgents"; else run sudo -u "$1" mkdir -p "$ohome/Library/LaunchAgents"; fi
+  cat <<EOF | write "$plistf"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$STATUS_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/open</string>
+    <string>-a</string>
+    <string>Terminal</string>
+    <string>$script</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>LimitLoadToSessionType</key><string>Aqua</string>
+</dict>
+</plist>
+EOF
+  run chown "$1" "$plistf"
+  load_agent "$1" "$plistf" "$STATUS_LABEL"
+  STATUS_NOTE="The status view also opens in Terminal each time $1 logs in ($STATUS_LABEL)."
+}
+
 # The power policy the worker follows (the head sends it: power.mjs). Nothing to install: caffeinate and pmset ship with
 # macOS, and caffeinate needs no root.
 power_policy() {
@@ -281,10 +335,11 @@ uninstall() {
   say "Removing the service $LABEL"
   if ((EUID == 0 || DRY)) && ((!SELF)); then
     run launchctl bootout "system/$LABEL" 2>/dev/null || true
-    run rm -f "$DAEMON_PLIST" "$SUDOERS" "$LAUNCHER"
+    run rm -f "$DAEMON_PLIST" "$SUDOERS" "$LAUNCHER" "$STATUS_BIN" "$STATUS_SUDOERS"
   fi
   run launchctl bootout "gui/$(id -u "$owner")/$LABEL" 2>/dev/null || true
-  run rm -f "$(home_of "$owner")/Library/LaunchAgents/$LABEL.plist"
+  run launchctl bootout "gui/$(id -u "$owner")/$STATUS_LABEL" 2>/dev/null || true
+  run rm -f "$(home_of "$owner")/Library/LaunchAgents/$LABEL.plist" "$(home_of "$owner")/Library/LaunchAgents/$STATUS_LABEL.plist"
   local home="$HOME"
   if ((EUID == 0 || DRY)) && ((!SELF)); then home="$(home_of "$WUSER")"; fi
   say "Removing $home/agent-orch-worker"
@@ -314,6 +369,7 @@ main() {
 $(env_keys "$HOME" "$(worker_path "$node_bin" "$HOME")")
 " plist "$node_bin" "$HOME/agent-orch-worker/worker.mjs" run | write "$plistf"
     load_agent "$(id -un)" "$plistf"
+    ((STATUS_WINDOW)) && install_status_window "$(id -un)" "$node_bin" "$HOME"
     power_policy
     FINISH="Done. The worker runs while you're logged in and restarts if it stops. Log: $LOG"
     finish "$HOME" ''
@@ -356,13 +412,17 @@ $(env_keys "$HOME" "$(worker_path "$node_bin" "$HOME")")
   [[ "$node_bin" == /* ]] || die "the worker stage didn't report a node binary"
 
   if [[ "$SERVICE" == daemon ]]; then install_daemon "$owner" "$node_bin" "$whome"; else install_login "$owner" "$node_bin" "$whome"; fi
+  ((STATUS_WINDOW)) && install_status_window "$owner" "$node_bin" "$whome"
   power_policy
   finish "$whome" "sudo -u $WUSER -H "
 }
 
+# How to open the status view and set the one local setting, the cap on what this Mac lends (the head keeps to it).
 finish() { # finish WORKER-HOME RUN-AS-PREFIX
   say "$FINISH"
-  say "Status: ${2}node $1/agent-orch-worker/worker.mjs status"
+  say "Live status (connection, cap, running tasks; q quits): ${2}node $1/agent-orch-worker/worker.mjs status"
+  if [[ -n "$STATUS_NOTE" ]]; then say "$STATUS_NOTE"; else say "To open it in Terminal at every login, run this installer again with --status-window."; fi
+  say "Cap what this Mac lends the cluster: ${2}node $1/agent-orch-worker/worker.mjs limit --cpu 4 --mem 8   (cores or %, GB or %; --show, --reset)"
   say "Next: sign the agents in on this machine (the head's Connections window)."
 }
 

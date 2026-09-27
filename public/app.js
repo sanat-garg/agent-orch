@@ -3498,6 +3498,8 @@ function machineCard(n) {
     li.append(mcMeter('Disk', [{ b: fmtGB(res.disk.free) }, ` free of ${fmtGB(res.disk.total)}`], (used / res.disk.total) * 100));
   }
   if (!inv.cores && res.memAvailable == null) li.append(el('p', 'mc-idle', 'No readings yet: they arrive once its worker connects.'));
+  const pool = !n.local && poolLine(n);
+  if (pool) li.append(pool);
   const health = machineHealth(n);
   if (health.length) li.append(...health);
 
@@ -3534,6 +3536,18 @@ function machineCard(n) {
   li.append(machineControls(n));
   if (MC.power.has(n.id) && n.policy) li.append(powerPanel(n));
   return li;
+}
+// A worker's local cap (`node worker.mjs limit` on that machine, cap.mjs; the scheduler never gives it more), from its
+// latest reading: 'Pooled: 4 cores · 8 GB (set on this Mac)'. Parts it doesn't cap show the machine's whole.
+function poolLine(n) {
+  const res = n.resources || {}, inv = n.inventory || {}, c = 'cap' in res ? res.cap : inv.cap;
+  if (!c) return null;
+  const cores = c.cpu ?? inv.cores, mem = c.mem ?? inv.mem;
+  const parts = [cores != null && `${+Number(cores).toFixed(2)} ${cores === 1 ? 'core' : 'cores'}`, mem != null && `${+(mem / 2 ** 30).toFixed(1)} GB`,
+    c.maxTasks != null && `at most ${plural(c.maxTasks, 'task')}`, c.onlyOnAc && 'on AC power only'].filter(Boolean);
+  const p = el('p', 'mc-health mc-pool', `Pooled: ${parts.join(' · ')} (set on this ${n.os === 'darwin' ? 'Mac' : 'machine'})`);
+  p.title = "This machine's own cap on what it lends the cluster (node worker.mjs limit, run on it). The scheduler never gives it more.";
+  return p;
 }
 // A running remote task's step on its card ('installing deps'; nothing extra while the agent itself runs).
 const PHASE_DOING = { queued: 'starting', cloning: 'cloning', fetching: 'fetching', installing: 'installing deps', checking: 'checking', committing: 'committing', pushing: 'pushing', done: 'finishing' };

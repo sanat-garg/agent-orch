@@ -3,8 +3,9 @@
 // head (a bare `ws` server that sends whatever it likes). The head's hub never sends anything else, and its scheduler
 // never places plan (the owner's chat with the planner) or reflect work on a worker: the orchestrator in a child process
 // with a stub hub whose one worker is idle, online and signed in to everything. server.mjs refuses to start on a paired
-// worker. And the worker has no local control surface: nothing of the head in its module graph, no listening port, no
-// CLI command but pair/run/status, installers that set up only the worker service.
+// worker. And the worker has no local control surface: nothing of the head in its module graph, no TCP port (only its
+// status socket, a 0600 unix socket in its home), no CLI command but pair/run/status and limit (its one local setting, the
+// CPU/RAM it lends), installers that set up only the worker service.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process';
@@ -73,7 +74,7 @@ test('the head\'s hub never sends a worker anything off the allow-list', () => {
   } finally { hub.close(); }
 });
 
-test('the worker rejects and logs every frame off the allow-list, still acts on allowed ones, and listens on no port', { timeout: 60_000 }, async () => {
+test('the worker rejects and logs every frame off the allow-list, still acts on allowed ones, and listens on no TCP port', { timeout: 60_000 }, async () => {
   const home = dir('w-home'), bin = dir('w-bin');
   isolatedPath(bin); // no agent CLIs: inventory says so, and a job offer is declined as agent_missing
   const frames = [], errors = () => frames.filter((f) => f.t === MSG.ERROR);
@@ -131,7 +132,8 @@ test('the worker rejects and logs every frame off the allow-list, still acts on 
     assert.ok(logs.lines.some((l) => l.includes('rejected "prompt" from the controller')));
     // Nothing else came back for the rejected frames: no job, sign-in, model or policy activity.
     assert.deepEqual([...new Set(frames.map((f) => f.t))].filter((t) => ![MSG.HELLO, MSG.INVENTORY, MSG.RESOURCES, MSG.HEARTBEAT, MSG.ERROR, MSG.JOB_REJECT, MSG.LOGS].includes(t)), []);
-    // No local control surface: the daemon itself holds no listening TCP or unix socket.
+    // No local control surface: the daemon itself holds no listening TCP socket; its only listener is the status view's
+    // unix socket in its home, readable by its own user alone.
     const inodes = new Set(fs.readdirSync(`/proc/${worker.pid}/fd`).map((fd) => { try { return /^socket:\[(\d+)\]$/.exec(fs.readlinkSync(`/proc/${worker.pid}/fd/${fd}`))?.[1]; } catch { return null; } }).filter(Boolean));
     assert.ok(inodes.size > 0, 'sees the worker\'s sockets (its connection to the head)');
     const listening = [];
@@ -145,7 +147,10 @@ test('the worker rejects and logs every frame off the allow-list, still acts on 
       const c = l.trim().split(/\s+/);
       if (c.length > 6 && (parseInt(c[3], 16) & 0x10000) && inodes.has(c[6])) listening.push(`unix ${c[7] || '(anonymous)'}`);
     }
-    assert.deepEqual(listening, []);
+    // A long home is bound by its name relative to the home (worker-status.mjs), so match the socket by its name.
+    const statusSock = path.join(home, '.agent-orch-worker', 'worker.sock');
+    assert.deepEqual(listening.map((l) => (/^unix (\S*\/)?worker\.sock$/.test(l) ? 'unix worker.sock' : l)), ['unix worker.sock']);
+    assert.equal(fs.statSync(statusSock).mode & 0o777, 0o600);
   } finally {
     clearInterval(beat);
     worker.kill('SIGTERM');
@@ -276,14 +281,14 @@ test('worker.mjs loads nothing of the head: no server, orchestrator (planner, re
   for (const f of ['server.mjs', 'orchestrator.mjs', 'cluster.mjs', 'runtimes.mjs']) assert.ok(!seen.has(f), `worker.mjs loads ${f}`);
 });
 
-test('the worker CLI has no local settings: pair, run and status only; its slots, policy and draining come from the head', () => {
+test('the worker CLI has one local setting (limit): pair, run, status and limit only; its slots, policy and draining come from the head', () => {
   const home = dir('c-home'), whome = pairedHome(home), cfg = path.join(whome, 'config.json'), before = fs.readFileSync(cfg, 'utf8');
   for (const argv of [['drain'], ['slots', '4'], ['policy', '--min-battery', '10'], ['set', 'maxJobs', '8']]) {
     const r = spawnSync(process.execPath, ['worker.mjs', ...argv], { cwd: ROOT, encoding: 'utf8', timeout: 30_000,
       env: { PATH: process.env.PATH, HOME: home, TMPDIR: tmp, AGENT_ORCH_REAPER: 'off' } });
     assert.equal(r.status, 1, argv.join(' '));
     assert.match(r.stderr, /set on the head/);
-    assert.match(r.stdout, /^usage: node worker\.mjs pair .*\| run \| status$/m);
+    assert.match(r.stdout, /^usage: node worker\.mjs pair .*\| run \| status \[--once\] \| limit …$/m);
   }
   assert.equal(fs.readFileSync(cfg, 'utf8'), before);
 });

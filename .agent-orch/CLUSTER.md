@@ -62,14 +62,14 @@ Direction: C = controller → worker, W = worker → controller (`DIRECTION`; `v
 | type | dir | fields | meaning |
 | --- | --- | --- | --- |
 | `hello` | W | node, protocol, version, jobs[{job, state, sha, next}], sha, features | first frame; `jobs` = work still on this machine, finished ones whose `job.done` wasn't acked included (re-attach); `sha` = its agent-orch checkout; `features` see Health |
-| `welcome` | C | node, protocol, heartbeatMs, wipPushMs, graceMs, features, policy | settings for this node; `policy` see Power policy |
-| `inventory` | W | node, name, os (linux/darwin), arch, cores, mem, agents[{id, installed, version, signedIn, account, models}], limits, versions{agentOrch, node, git} | after `welcome` and whenever it changes |
-| `resources` | W | memAvailable, load[1,5,15], running[job ids], swapUsedPct + health telemetry: cpu[% per core], memTotal, swapTotal, swapUsed, disk{path, free, total}, net{host, ok, ms, at, error}, agents[{id, installed, version, signedIn}], uptime, procUptime, version, sha, battery{pct, charging, source}, thermal{pressure, speedLimit, level}, intake{ok, reason, text}, awake | every heartbeat (10 s), from /proc or `vm_stat`/`sysctl`/`pmset`/`notifyutil` on macOS; see Health and Power policy |
-| `heartbeat` | both | — | liveness |
+| `welcome` | C | node, protocol, heartbeatMs, wipPushMs, graceMs, features, policy, queued | settings for this node; `policy` see Power policy; `queued` see Local cap and status view |
+| `inventory` | W | node, name, os (linux/darwin), arch, cores, mem, agents[{id, installed, version, signedIn, account, models}], limits, versions{agentOrch, node, git}, cap | after `welcome` and whenever it changes; `cap` see Local cap and status view |
+| `resources` | W | memAvailable, load[1,5,15], running[job ids], swapUsedPct + health telemetry: cpu[% per core], memTotal, swapTotal, swapUsed, disk{path, free, total}, net{host, ok, ms, at, error}, agents[{id, installed, version, signedIn}], uptime, procUptime, version, sha, battery{pct, charging, source}, thermal{pressure, speedLimit, level}, intake{ok, reason, text}, awake, cap, jobsMem, jobsCpu | every heartbeat (10 s), from /proc or `vm_stat`/`sysctl`/`pmset`/`notifyutil` on macOS; see Health, Power policy and Local cap |
+| `heartbeat` | both | queued (C) | liveness; the controller's carries `queued` |
 | `ack` / `error` / `bye` | both | re (+job) / message / reason | replies; the controller acks each `job.done` with its `job` (the worker then forgets the job); `bye` before a clean shutdown |
 | `wake` | W | sleptAt, sleptMs | a time jump on the worker (a laptop's sleep), sent after the next `welcome` |
 | `job.offer` | C | job, agent, model, footprint | "can you take this?" |
-| `job.accept` / `job.reject` | W | job / job, reason (busy, low_memory, agent_missing, not_signed_in, draining, version, other, power) | answer within 10 s or counts as reject; `power` only to a controller with feature `policy` |
+| `job.accept` / `job.reject` | W | job / job, reason (busy, low_memory, agent_missing, not_signed_in, draining, version, other, power, cap) | answer within 10 s or counts as reject; `power` only to a controller with feature `policy`, `cap` only with feature `cap` |
 | `job.start` | C | job, title, prompt, systemAppend, agent, model, account, repo, baseSha, branch, doneWhen, resume, timeouts{taskSec, verifySec, installSec}, autonomous, tools, install[argv] | run it |
 | `job.event` | W | job, from, events[≤200 normalised agent events] | batched every ~1 s; `from` = index of the first event so resends dedupe |
 | `job.check` | W | job, command, output, pass, code | result of the done-when check, run on the worker in the task's worktree |
@@ -132,8 +132,9 @@ verify-failed prompt, same as the local flow) or `job.cancel`. The controller ke
   API `maxSlots: null`), else the owner's number from the Machines view; headroom is checked per claim either way. A
   Mac's Auto keeps a core and its policy's RAM reserve for its owner: `min(cores − 1, (memAvailable − max(floor,
   reserve)) / footprint)` (power.mjs `autoTasks`, orchestrator `nodeCap`/`floorOf`). New Linux nodes start at 1 task,
-  new Macs on Auto. A node whose worker reports no intake (status `paused`, see Power policy) gets nothing new. The
-  local node keeps its current `taskSlots` rule.
+  new Macs on Auto. Either way a worker's own local cap is a hard ceiling on top (see Local cap and status view). A
+  node whose worker reports no intake (status `paused`, see Power policy) gets nothing new. The local node keeps its
+  current `taskSlots` rule.
 - Placement picks the placeable node with the most headroom, preferring: the node that last ran the task (warm
   worktree and session), then remote nodes over the local one (the controller also serves the UI and merges). Plan and
   reflect tasks always run on the local node: they need the DB and project context (asserted, see Compute-only workers).
@@ -187,7 +188,8 @@ verify-failed prompt, same as the local flow) or `job.cancel`. The controller ke
 Workers report richly; the controller keeps what the owner needs and acts on it.
 
 - **Features**: `hello.features` / `welcome.features` list what each side reads (`FEATURES` in cluster-protocol.mjs:
-  phases, errors, logs, update). A peer sends a newer frame type only when the other side lists its feature, so a worker
+  phases, errors, logs, update, policy, plus `cap` for the reject reason `cap`). A peer sends a newer frame type only
+  when the other side lists its feature, so a worker
   updated ahead of the controller's running code (or behind it) never trips the invalid-frame limit. Fields added to
   existing frames (the telemetry on `resources`, `hello.sha`) need no flag.
 - **Phases**: `job.phase` frames ride the job's stream (held while away, replayed after `job.attach`, deduped by phase +
@@ -282,12 +284,47 @@ UI runs on it, and it takes work only from the head.
   creates anything (role.mjs `headRefusal`). Processes a job runs carry `AGENT_ORCH_WORKER_JOB` and are exempt, so a
   project's own tests that start server.mjs (agent-orch's suite, screenshots) still run on a worker. To make a worker a
   head, unpair it first (the installer's `--uninstall --purge`).
-- **No local control surface**: the worker opens no listening port, and its only commands are `pair`, `run` and `status`
-  (the installers add `--uninstall`); any other says that its max tasks, power policy and draining are set on the head.
-  They come only from there (`welcome.policy`, `node.policy`; draining is the head's own scheduling), with no local
-  override.
+- **No local control surface**: the worker opens no TCP port, and its only commands are `pair`, `run`, `status` and
+  `limit` (the installers add `--uninstall`); any other says that its max tasks, power policy and draining are set on
+  the head. They come only from there (`welcome.policy`, `node.policy`; draining is the head's own scheduling), with no
+  local override. The one exception (#234, the owner's rule) is the machine's local cap, `limit`, which can only lower
+  what it lends; its one local UI is the terminal status view over a 0600 unix socket (see Local cap and status view).
 - **Installers**: bin/install-worker*.sh set up only the worker service (the systemd unit or launchd plist that runs
   `worker.mjs run`): no agent-orch web service, Caddy or ttyd.
+
+## Local cap and status view (#234)
+
+A worker's owner decides how much of the machine the cluster may use; everything else stays on the head.
+
+- **The cap** (cap.mjs): `node worker.mjs limit --cpu <cores or N%> --mem <GB or N%> [--max-tasks N] [--only-on-ac]`,
+  `--show`, `--reset`; only the parts given change, `off` removes one. Saved as typed in `config.json` (`cap: {cpu: 4 |
+  '50%', mem: 8 | '50%', maxTasks, onlyOnAc, at}`) and resolved for the machine (`{cpu: cores, mem: bytes, maxTasks,
+  onlyOnAc}`, null = none). `limit` asks the running daemon to reload it over the status socket (`{op: 'reload'}`), so
+  it applies at once, and the daemon reports it in `inventory.cap` and every `resources.cap`, with what its jobs use
+  (`jobsMem` bytes, `jobsCpu` cores: their process trees, from /proc or `ps`).
+- **The head's ceiling** (orchestrator `nodeCap`, cap.mjs `capSlots`, `localCap` = `resources.cap` over
+  `inventory.cap`): slots = min(the head's own setting (max tasks or Auto), the cap's max tasks, its CPU cap at
+  `CFG.cpuPerTask` cores a task (1 until measured), and its running jobs + (RAM cap − `jobsMem` − footprints placed
+  since that reading) / the agent's footprint). `--only-on-ac` makes a Mac on battery report no intake (`paused`).
+  The Machines card says "Pooled: 4 cores · 8 GB (set on this Mac)".
+- **The worker enforces it too** (worker.mjs, worker-cap.mjs): it declines a `job.offer` that would go over it (reason
+  `cap`; `busy`/`low_memory` to an older head); every agent CLI and done-when check runs through a wrapper in
+  `<home>/run` that records its pid and execs it under the cap: on Linux a transient scope per job (`systemd-run --user
+  --scope -p CPUQuota=… -p MemoryMax=…`, the user manager kept by lingering; checked per spawn, else nice), on macOS a
+  low priority (`nice -n 10`; no per-process quota without root, and `taskpolicy -b` would confine jobs to the
+  efficiency cores); and a memory watch pauses the newest job when its jobs stay over the RAM cap for 30 s: WIP pushed,
+  `job.done {outcome: 'aborted'}` with its session, so the head requeues it to resume later, and it isn't taken back
+  there for 10 min. `AGENT_ORCH_WORKER_LIMITER=off|nice|systemd` overrides the choice.
+- **Status view** (worker-status.mjs): `node worker.mjs status` draws, every second until q or Ctrl-C (plain ANSI,
+  alternate screen), what the daemon answers on `~/.agent-orch-worker/worker.sock` (0600 in a 0700 dir; `{op:
+  'status'}`): machine name, connection (Connected; Reconnecting while away less than its grace; Offline after that or
+  when the token is refused), the cap and how jobs are held to it, CPU/RAM bars of the jobs' use against the cap,
+  one line per running job (#id, title, agent·model, phase, elapsed, last activity), `queued` (the head's count of
+  ready work tasks it could take, from `welcome`/`heartbeat`; orchestrator `upNext`) and the last 5 finished
+  (outcome, duration). `--once`, or a stdout that isn't a terminal, prints one snapshot; a daemon that isn't running
+  shows as such from `config.json` (exit 0). A socket that answers means another daemon runs with that home, and the
+  new one exits before touching anything. macOS: `--status-window` adds a Terminal login item (a LaunchAgent running
+  `open -a Terminal` on a root-owned script that re-runs itself as the worker's user under one sudoers rule).
 
 ## Security
 

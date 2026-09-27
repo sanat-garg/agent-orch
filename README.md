@@ -364,6 +364,8 @@ repo checked out, `npm ci`):
 ```sh
 node worker.mjs pair --controller https://<your-host> --code ABCD-1234   # code from "Add machine"; --name to pick its name
 node worker.mjs run                                                      # the daemon
+node worker.mjs status [--once]                                          # the live status view (q quits)
+node worker.mjs limit --cpu 4 --mem 8 [--max-tasks 2] [--only-on-ac]     # cap what it lends; --show, --reset
 ```
 
 - Pairing stores the node token in `~/.agent-orch-worker/config.json` (mode 0600). Everything else lives there
@@ -375,10 +377,23 @@ node worker.mjs run                                                      # the d
 - Run it as a dedicated unprivileged user under systemd (`Restart=always`) or, on macOS, a LaunchDaemon with
   `UserName` (see Adding machines). On stop it pauses running jobs and pushes their work first. It reconnects with
   backoff forever and runs its own reaper for leftover agent processes (`AGENT_ORCH_REAPER=off` disables it).
-- **It is compute-only**: no chat, planner, reflection, settings or web UI, and no listening port. It acts only on the
-  head's job, sign-in, refresh, log, update and policy messages, and rejects (and logs) anything else. Its only
-  commands are `pair`, `run` and `status`. `node server.mjs` refuses to start on a paired worker; to make the machine a
+- **It is compute-only**: no chat, planner, reflection or web UI, and no TCP port. It acts only on the head's job,
+  sign-in, refresh, log, update and policy messages, and rejects (and logs) anything else. Its only commands are
+  `pair`, `run`, `status` and `limit`. `node server.mjs` refuses to start on a paired worker; to make the machine a
   head instead, unpair it first (the installer's `--uninstall --purge`).
+- **Status view**: `node worker.mjs status` is a live terminal view (refreshed every second, q or Ctrl-C quits;
+  `--once` prints one snapshot): the connection to the head (Connected, Reconnecting, Offline), the cap in effect, the
+  CPU and RAM its jobs use against it, one line per running job (phase, time, last activity), how many tasks are up
+  next on the head for it, and the last five finished. It reads the daemon over a unix socket in its home
+  (`worker.sock`, mode 0600). On a Mac run it as the worker's user (`sudo -u agentorch -H node …/worker.mjs status`);
+  the installer's `--status-window` opens it in Terminal at every login.
+- **Its one local setting is a cap on what it lends**: `node worker.mjs limit --cpu <cores or N%> --mem <GB or N%>
+  [--max-tasks N] [--only-on-ac]` (only the parts given change; `off` removes one; `--show`, `--reset`). It is saved in
+  `config.json`, the running worker applies it at once, and the head treats it as a hard ceiling: that machine's slots
+  are at most its max tasks, its CPU cap at one core a task, and its running jobs plus what fits in the rest of its RAM
+  cap. The worker also declines offers over it, runs each job in a systemd scope with `CPUQuota`/`MemoryMax` on Linux
+  (the installer enables lingering for that) or at a low priority, and pauses its newest job when its jobs stay over
+  the RAM cap for 30 s (the task resumes later). Machines shows it as "Pooled: 4 cores · 8 GB (set on this Mac)".
 - **It follows the power policy and caps the head sets for it** (Machines → Power, Max tasks): on a Mac, no new tasks
   on low battery or when hot, and `caffeinate` only while tasks run (see Adding machines).
 - **It reports to this server**: each job's steps (shown as a timeline in the task drawer), health telemetry every

@@ -185,6 +185,8 @@
   .modal-panel.sx { width: 100%; height: 92dvh; }
   .sx .m-head { flex-wrap: nowrap; }
   .sx .m-head > div { flex-basis: auto; }
+  /* One line beside the two buttons: a long subtitle ("… · updated 10:44 PM") would otherwise wrap and grow the header. */
+  .sx .m-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .sx-bar { padding: 0 16px 10px; }
   #sxBody { padding-left: 16px; padding-right: 16px; }
   .sx-filters { margin-left: 0; }

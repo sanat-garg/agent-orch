@@ -1,7 +1,8 @@
 // Controller side of the cluster (BRIEF goal 11, design: .agent-orch/CLUSTER.md, wire format: cluster-protocol.mjs).
 // Node registry in the orchestrator DB, pairing codes (one-time or multi-use), each node's power policy (power.mjs), and
 // the worker WebSocket hub at WS_PATH. The scheduler uses listNodes() / send(nodeId, msg) / onMessage(handler) /
-// version(); the UI reads listNodes() via GET /api/cluster/nodes.
+// version(), and feeds setBusy() (the update's idle check) and setUpNext() (each worker's "up next" count, sent with
+// welcome and every heartbeat); the UI reads listNodes() via GET /api/cluster/nodes.
 // Health (CLUSTER.md, Health): each worker's telemetry as a 24 h series (node-metrics.mjs), its log tail on demand,
 // its last error, auto-drain, and the version check that updates an outdated worker once it is idle.
 import os from 'node:os';
@@ -115,6 +116,12 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
   const failedFor = new Map(); // node id -> the origin/main sha an automatic update failed for (not retried on its own)
   const requests = new Map(); // request id -> { node, done(frame) } (log tails)
   let busy = () => false; // setBusy: the scheduler's view (jobs placed or offered there) for the update's idle check
+  // setUpNext: how many queued tasks the scheduler could give a worker next; it rides welcome and every heartbeat, for
+  // the worker's status view (`node worker.mjs status`). null = unknown.
+  let upNext = () => null;
+  const queuedFor = (id) => {
+    try { const n = upNext(id); return Number.isSafeInteger(n) && n >= 0 ? { queued: n } : {}; } catch (e) { log(`up next for ${id} failed: ${e.message}`); return {}; }
+  };
   const notice = (n) => { try { onNotice(n); } catch (e) { log(`onNotice failed: ${e.message}`); } };
 
   // The controller is a node too; it never connects, so it is online while this process runs.
@@ -348,7 +355,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
           touch();
           setStatus(row, true);
           touch({ away: null });
-          c.send(MSG.WELCOME, { node: id, protocol: PROTOCOL_VERSION, heartbeatMs, wipPushMs, graceMs: nodeGrace(row), features: FEATURE_LIST, policy: wirePolicy(row) });
+          c.send(MSG.WELCOME, { node: id, protocol: PROTOCOL_VERSION, heartbeatMs, wipPushMs, graceMs: nodeGrace(row), features: FEATURE_LIST, policy: wirePolicy(row), ...queuedFor(id) });
           helloUpdate(id, row, c.hello.sha);
           changed();
           break;
@@ -428,7 +435,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
         c.ws.terminate();
         changed();
       } else if (c.ws.readyState === 1) {
-        try { c.send(MSG.HEARTBEAT); c.ws.ping(); } catch {}
+        try { c.send(MSG.HEARTBEAT, c.hello ? queuedFor(id) : {}); c.ws.ping(); } catch {}
         checkUpdate(id);
       }
     }
@@ -574,5 +581,5 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
   }
 
   return { listNodes, node, createPairing, pairing, revokePairing, claim, update, revoke, handleUpgrade, send, onMessage, isConnected: (id) => conns.has(id), version: () => version, close,
-    autoDrain, requestUpdate, logsTail, metrics: metricsOf, setBusy: (fn) => { busy = fn; }, health };
+    autoDrain, requestUpdate, logsTail, metrics: metricsOf, setBusy: (fn) => { busy = fn; }, setUpNext: (fn) => { upNext = fn; }, health };
 }

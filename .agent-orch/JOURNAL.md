@@ -699,3 +699,11 @@ multi-use pairing, Mac power policy, LaunchDaemon installer; tests pass
 ## 2026-09-27 20:57 — #232 Lock workers to compute-only: no prompts, UI or management on worker machines [done (check passed)]
 
 workers compute-only; npm test passes 403/403 with new tests
+
+## 2026-09-27 22:44 — #234 Worker terminal status view and a local cap on pooled CPU/RAM [verify failed (1)]
+
+Command: npm test && node worker.mjs status --once
+
+## 2026-09-27 23:00 — #234 Worker terminal status view and a local cap on pooled CPU/RAM [done (check passed)]
+
+full test suite passes; worker status view and local cap verified

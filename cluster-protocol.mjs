@@ -49,10 +49,11 @@ export const DIRECTION = {
 // Frame types a peer sends only when the other side lists the feature (hello.features: the worker's, welcome.features:
 // the controller's), so a worker updated ahead of the controller's running code (or the reverse) never sends a type the
 // other can't read. Additive fields need no flag: validators ignore unknown fields.
-// Feature 'policy' also covers the job.reject reason 'power'.
+// Feature 'policy' also covers the job.reject reason 'power'; feature 'cap' (no frame type of its own) is the job.reject
+// reason 'cap': the worker's local cap (cap.mjs) is full.
 export const FEATURES = { 'job.phase': 'phases', 'job.error': 'errors', 'node.error': 'errors', 'logs.tail': 'logs', logs: 'logs', 'node.update': 'update',
   'node.policy': 'policy' };
-export const FEATURE_LIST = [...new Set(Object.values(FEATURES))];
+export const FEATURE_LIST = [...new Set([...Object.values(FEATURES), 'cap'])];
 // Compute-only workers (BRIEF goal 11): the only frames a worker acts on, all from the head it dialled. Connection
 // upkeep; jobs (job.*, plus git.credential for their pushes); remote sign-in driven from the head's Connections (login.*);
 // model and limit refreshes; its log tail; self-update; and the node's policy (max tasks, power), which like draining is
@@ -71,7 +72,8 @@ export const EVENT_KINDS = ['text', 'tool', 'tool_result', 'result', 'limit', 'i
 // runAgentCli outcomes plus the worker's own: setup_failed (clone/worktree/install), lost (controller gave up on it).
 export const OUTCOMES = ['ok', 'rate_limited', 'auth_error', 'aborted', 'timeout', 'max_turns', 'error', 'empty_response', 'setup_failed', 'lost'];
 // power: its power policy pauses intake (on battery, running hot); sent only to a controller with feature 'policy'.
-export const REJECT_REASONS = ['busy', 'low_memory', 'agent_missing', 'not_signed_in', 'draining', 'version', 'other', 'power'];
+// cap: taking it would go over the machine's local cap (`node worker.mjs limit`); only to a controller with feature 'cap'.
+export const REJECT_REASONS = ['busy', 'low_memory', 'agent_missing', 'not_signed_in', 'draining', 'version', 'other', 'power', 'cap'];
 // starting → url (open it; a device code may ride along) or waiting_code (paste the page's code back) → done | failed |
 // cancelled; signed_out answers login.logout.
 export const LOGIN_STATES = ['starting', 'url', 'waiting_code', 'done', 'failed', 'cancelled', 'signed_out'];
@@ -84,19 +86,22 @@ const S = {
   // sha: the worker's agent-orch checkout (the controller compares it with its origin/main); features: see FEATURES.
   hello: { node: 'str', protocol: 'int', version: 'str', jobs: 'arr', sha: 'sha?', features: 'arr?' },
   // policy: the node's power policy and caps (power.mjs: minBattery, keepAwake, thermal, reserveGB, plus maxTasks).
-  welcome: { node: 'str', protocol: 'int', heartbeatMs: 'int', wipPushMs: 'int', graceMs: 'int', features: 'arr?', policy: 'obj?' },
-  inventory: { node: 'str', name: 'str', os: 'os', arch: 'str', cores: 'int', mem: 'int', agents: 'arr', limits: 'obj?', versions: 'obj' },
+  // queued: work tasks on the head ready to start that this node could take ("up next" in its status view).
+  welcome: { node: 'str', protocol: 'int', heartbeatMs: 'int', wipPushMs: 'int', graceMs: 'int', features: 'arr?', policy: 'obj?', queued: 'int?' },
+  // cap: the machine's local cap in effect (cap.mjs resolveCap: {cpu: cores, mem: bytes, maxTasks, onlyOnAc}; null = none).
+  inventory: { node: 'str', name: 'str', os: 'os', arch: 'str', cores: 'int', mem: 'int', agents: 'arr', limits: 'obj?', versions: 'obj', cap: 'obj?' },
   // Also the worker's health telemetry (every heartbeat, the controller keeps a 24 h series): cpu (% per core), memTotal,
   // swapTotal/swapUsed (bytes), disk {path, free, total} (the volume holding its repos), net {host, ok, ms, at, error}
   // (reachability of GitHub), agents [{id, installed, version, signedIn}] (as last checked, never polled), uptime (s),
   // procUptime (s), version, sha, and on macOS battery {pct, charging, source} and thermal {pressure, speedLimit, level}.
   // intake: whether its power policy lets it take new jobs ({ok} or {ok: false, reason, text}); awake: caffeinate holds it awake.
+  // cap: its local cap in effect (as in inventory; null = none); jobsMem (bytes) / jobsCpu (cores): what its jobs use now.
   resources: {
     memAvailable: 'int', load: 'arr', running: 'arr', swapUsedPct: 'num?', cpu: 'arr?', memTotal: 'int?', swapTotal: 'int?', swapUsed: 'int?',
     disk: 'obj?', net: 'obj?', agents: 'arr?', uptime: 'num?', procUptime: 'num?', version: 'str?', sha: 'sha?', battery: 'obj?', thermal: 'obj?',
-    intake: 'obj?', awake: 'bool?',
+    intake: 'obj?', awake: 'bool?', cap: 'obj?', jobsMem: 'int?', jobsCpu: 'num?',
   },
-  heartbeat: {},
+  heartbeat: { queued: 'int?' }, // queued: the controller's, as in welcome
   ack: { re: 'int', job: 'int?' }, // job: the controller acks a job.done (the worker then forgets the job)
   error: { message: 'str', re: 'int?', job: 'int?' },
   bye: { reason: 'str?' },

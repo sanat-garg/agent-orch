@@ -58,7 +58,7 @@ test('GET / without a session redirects to the login page', async () => {
 });
 
 test('public static assets are served without a session', async () => {
-  for (const p of ['/login.css', '/icon.svg', '/manifest.webmanifest']) {
+  for (const p of ['/login.css', '/manifest.webmanifest', '/favicon.ico', '/favicon-32.png', '/apple-touch-icon.png', '/icon-192.png', '/icon-512.png', '/logo.png', '/mascot.png']) {
     const r = await get(p);
     assert.equal(r.status, 200, p);
     await r.arrayBuffer();

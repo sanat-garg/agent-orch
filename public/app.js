@@ -2160,6 +2160,27 @@ async function renderRecentProjects() {
   }
 }
 
+// ---------- Splash ----------
+// index.html opens on a splash with the app inert behind it. It lifts once the first connection has delivered what the
+// first screen shows: the chat list, and the open chat's history when there is one. While the server is unreachable it
+// says so and, after a few seconds, offers "Open anyway". Later reconnects never bring it back.
+const splash = { need: new Set(['convos']), skipTimer: null };
+function splashStatus(text) { if ($('splash')) $('splashStatus').textContent = text; }
+function splashReady(what) {
+  if (splash.need.delete(what) && !splash.need.size) hideSplash();
+}
+function hideSplash() {
+  const s = $('splash');
+  if (!s || s.classList.contains('done')) return;
+  clearTimeout(splash.skipTimer);
+  $('app').inert = false;
+  s.classList.add('done');
+  setTimeout(() => s.remove(), 400); // after the fade (instant when reduced motion turns transitions off)
+  $('input').focus({ preventScroll: true });
+}
+$('splashSkip').addEventListener('click', hideSplash);
+splash.skipTimer = setTimeout(() => { if ($('splash')) $('splashSkip').hidden = false; }, 8000);
+
 // ---------- task completion sound ----------
 const taskSound = new Audio('/sounds/task-done.mp3');
 taskSound.preload = 'auto';
@@ -2226,6 +2247,7 @@ function connect() {
   state.ws = ws;
   ws.onopen = () => {
     retry = 0;
+    splashStatus('Loading your chats…');
     renderConnFoot();
     send({ t: 'open', cid: state.cid });
     pollUpdates();
@@ -2239,7 +2261,9 @@ function connect() {
     if (e.code === 4001) { location.href = '/login'; return; }
     // A failed upgrade usually means the login expired; check before retrying.
     fetch('/api/status').then((r) => { if (r.status === 401) location.href = '/login'; }).catch(() => {});
-    setTimeout(connect, Math.min(1000 * 2 ** retry++, 15000));
+    const wait = Math.min(1000 * 2 ** retry++, 15000);
+    setTimeout(connect, wait);
+    splashStatus(`Can't reach the server yet · retrying in ${Math.round(wait / 1000)} s`);
     renderConnFoot();
   };
   ws.onmessage = (m) => onServer(JSON.parse(m.data));
@@ -2267,6 +2291,8 @@ function onServer(msg) {
     renderFbChip();
     fbRender();
     renderUsage();
+    if (!state.cid) splash.need.delete('history'); // no chat open (or it was deleted): nothing more to wait for
+    splashReady('convos');
     return;
   }
   if (msg.cid && msg.cid !== state.cid) return;
@@ -2287,6 +2313,7 @@ function onServer(msg) {
       updateSendButton();
       stick = true;
       scrollDown(true);
+      splashReady('history');
       break;
     }
     case 'busy':
@@ -4893,6 +4920,7 @@ setInterval(() => { if (!document.hidden) markSeen(); }, 60e3);
   await checkStatus();
   const cid = location.hash.slice(1) || null;
   openConvo(cid);
+  if (state.cid) splash.need.add('history'); // the open chat's messages are part of the first screen
   connect();
   setView(store.get('cw.view') || 'chat');
   setInterval(renderConvoList, 60e3);

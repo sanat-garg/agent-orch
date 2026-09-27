@@ -3,17 +3,29 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-<meta name="theme-color" content="#1f1e1c">
+<meta name="theme-color" content="#faf9f5" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1f1e1c" media="(prefers-color-scheme: dark)">
 <title>agent-orch</title>
-<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
+<link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/app.css">
+<link rel="preload" href="/mascot.png" as="image">
 </head>
 <body>
-<div class="app" id="app" data-view="chat">
+<!-- Shown until the first connection has loaded the chat list (and the open chat); app.js hideSplash() removes it. -->
+<div class="splash" id="splash" role="status" aria-live="polite">
+  <img class="splash-art" src="/mascot.png" width="561" height="411" alt="">
+  <h1 class="splash-name">agent-orch</h1>
+  <p class="splash-status" id="splashStatus">Connecting…</p>
+  <div class="splash-bar" aria-hidden="true"><i></i></div>
+  <button type="button" class="btn small splash-skip" id="splashSkip" hidden>Open anyway</button>
+</div>
+<div class="app" id="app" data-view="chat" inert>
   <aside class="sidebar" id="sidebar">
     <div class="side-head">
-      <img src="/icon.svg" width="24" height="24" alt="">
+      <img src="/logo.png" width="24" height="24" alt="">
       <span class="side-title">agent-orch</span>
       <button class="icon-btn only-mobile" id="closeSidebar" aria-label="Close sidebar">
         <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
@@ -452,7 +464,7 @@
 
 <template id="emptyTpl">
   <div class="empty">
-    <img src="/icon.svg" width="48" height="48" alt="">
+    <img class="empty-art" src="/mascot.png" width="82" height="60" alt="">
     <h2>What should we build?</h2>
     <div class="project-line">
       <span>Project</span>

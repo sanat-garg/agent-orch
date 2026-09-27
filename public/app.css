@@ -338,6 +338,24 @@ code, pre, kbd { font-family: var(--mono); }
 .scroller:has(.empty) .messages { flex: 1; width: 100%; display: flex; flex-direction: column; justify-content: center; padding-top: 0; }
 .empty h2 { font-size: 26px; margin: 16px 0 6px; letter-spacing: -0.01em; }
 .empty p { color: var(--muted); margin: 0 auto 22px; max-width: 420px; }
+.empty-art { display: block; margin: 0 auto; width: 82px; height: auto; }
+
+/* ---------- Splash: covers the app until the first connection has loaded it (app.js hideSplash) ---------- */
+.splash {
+  position: fixed; inset: 0; z-index: 10000; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 6px; padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom); background: var(--bg); color: var(--text);
+  transition: opacity .28s ease, visibility 0s linear .28s;
+}
+.splash.done { opacity: 0; visibility: hidden; pointer-events: none; }
+.splash-art { width: min(200px, 52vw); height: auto; margin-bottom: 10px; animation: splash-hop 1.1s ease-in-out infinite; transform-origin: 50% 100%; }
+@keyframes splash-hop { 0%, 100% { transform: translateY(0); } 45% { transform: translateY(-7px); } }
+.splash-name { margin: 0; font-size: 26px; font-weight: 700; letter-spacing: -0.02em; }
+.splash-status { margin: 0; min-height: 1.4em; color: var(--muted); font-size: 14px; text-align: center; }
+.splash-bar { position: relative; width: 132px; height: 3px; margin-top: 10px; border-radius: 2px; background: var(--raised); overflow: hidden; }
+.splash-bar i { position: absolute; inset: 0 auto 0 0; width: 40%; border-radius: inherit; background: var(--accent); animation: splash-bar 1.2s ease-in-out infinite; }
+@keyframes splash-bar { 0% { transform: translateX(-100%); } 100% { transform: translateX(250%); } }
+.splash-skip { margin-top: 14px; }
+@media (pointer: coarse) { .splash-skip { height: 44px; } }
 
 .jump {
   position: absolute; left: 50%; bottom: 150px; transform: translateX(-50%);

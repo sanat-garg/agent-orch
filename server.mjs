@@ -1178,7 +1178,9 @@ function readBody(req) {
   });
 }
 
-const PUBLIC_PATHS = new Set(['/login', '/login.css', '/icon.svg', '/manifest.webmanifest']);
+// The sign-in page, the manifest and the app icons (favicons, home-screen icons, the splash mascot) load without a session.
+const PUBLIC_PATHS = new Set(['/login', '/login.css', '/manifest.webmanifest', '/favicon.ico', '/favicon-16.png', '/favicon-32.png', '/apple-touch-icon.png',
+  '/icon-192.png', '/icon-512.png', '/icon-maskable-512.png', '/logo.png', '/mascot.png']);
 
 // Last-resort guard: a throw in a handler must answer 500, not take the process down.
 const server = http.createServer(async (req, res) => {

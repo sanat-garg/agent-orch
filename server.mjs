@@ -22,6 +22,7 @@ import { healthRow } from './health.mjs';
 import { createResources, registerPid, withOwner, readSystem } from './resources.mjs';
 import { createCluster } from './cluster.mjs';
 import { WS_PATH, PAIR_PATH, CLAIM_PATH } from './cluster-protocol.mjs';
+import { createRemoteLogins } from './remote-login.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -375,7 +376,7 @@ const limitStore = createLimitStore({ file: path.join(DATA, 'limits.json'), ids:
     return usage.available && !usage.error ? { ...limitStore.get('claude'), error: null }
       : { source: AGENTS.claude.limitSource, exposed: true, error: usage.error || 'Plan limits unavailable' };
   },
-  onChange: () => { try { const list = connections.list(); for (const ws of allClients) send(ws, { t: 'connections', connections: list }); } catch {} } });
+  onChange: () => { try { const list = connList(); for (const ws of allClients) send(ws, { t: 'connections', connections: list }); } catch {} } });
 const MINUTE_FILE = path.join(METRICS_DIR, 'minutes.jsonl');
 
 function loadSeries(file, keepMs) {
@@ -667,7 +668,7 @@ const gh = createGitHub({ env: CLAUDE_ENV, log: (m) => console.log(`[github] ${m
 // Each agent's models, discovered from its CLI (models.mjs); clients refetch /api/agents on {t:'models'}.
 const modelStore = createModelStore({ file: path.join(DATA, 'models.json'), log: (m) => console.log(`[models] ${m}`),
   // New lists can change a connection's state too.
-  onChange: () => { const list = connections.list(); for (const ws of allClients) { send(ws, { t: 'models' }); send(ws, { t: 'connections', connections: list }); } } });
+  onChange: () => { const list = connList(); for (const ws of allClients) { send(ws, { t: 'models' }); send(ws, { t: 'connections', connections: list }); } } });
 modelStore.start().catch((e) => console.error('[models] discovery failed', e));
 // A sign-in or sign-out re-checks the login and rediscovers that agent's models (in the background).
 const signInChanged = (id) => () => { clearLoginCache(); modelStore.refresh([id]).catch(() => {}); };
@@ -681,8 +682,12 @@ const connections = createConnections({
     { id: 'github', label: 'GitHub', installed: () => onPath('gh'), signedIn: () => gh.status().linked, account: () => gh.status().login,
       spec: SPECS.github, afterChange: () => gh.refresh() },
   ],
-  onChange: (list) => { for (const ws of allClients) send(ws, { t: 'connections', connections: list }); },
+  onChange: () => { const list = connList(); for (const ws of allClients) send(ws, { t: 'connections', connections: list }); },
 });
+// Remote sign-in on worker machines (remote-login.mjs); set once the cluster hub exists. The controller's own rows carry
+// `sharedWith`: the other machines signed in to the same account (they share one set of limits).
+let remoteLogins = null;
+const connList = () => (remoteLogins ? remoteLogins.annotate(connections.list()) : connections.list());
 
 // Resource analyzer + reaper (resources.mjs). AGENT_ORCH_REAPER=on|dry|off; test instances (CW_DATA_DIR) only dry-run.
 const resources = createResources({
@@ -712,6 +717,8 @@ const cluster = orch && createCluster({
 });
 // The scheduler places work on online workers through the hub (orchestrator.mjs `place`/`runRemote`).
 if (cluster && !NO_ORCH) orch.attachCluster(cluster);
+if (cluster) remoteLogins = createRemoteLogins({ cluster, local: () => connections.list(),
+  onChange: (node) => { const list = remoteLogins.list(node); for (const ws of allClients) send(ws, { t: 'connections', node, connections: list }); } });
 
 // convo.repo mirrors the folder's real `origin` (a stale copy survives repo moves); cleared when there is none.
 async function refreshRepo(convo) {
@@ -1605,16 +1612,34 @@ async function handleRequest(req, res) {
     const r = orch.projectAction(Number(op[1]), await readBody(req));
     return json(res, r.error ? 400 : 200, r);
   }
+  // ?node=<id>: a worker machine's rows (remote-login.mjs), from its inventory; sign-ins are proxied over the hub.
+  const rnode = url.searchParams.get('node');
+  if (rnode && rnode !== 'controller' && p.startsWith('/api/connections')) {
+    if (!remoteLogins) return json(res, 503, { error: 'cluster unavailable' });
+    let r;
+    const rc = p.match(/^\/api\/connections\/([\w-]+)\/(start|code|cancel|logout)$/);
+    if (p === '/api/connections' && req.method === 'GET') {
+      const list = remoteLogins.list(rnode);
+      r = list ? { status: 200, connections: list } : { status: 404, error: 'No such machine' };
+    } else if (p === '/api/connections/refresh' && req.method === 'POST') r = remoteLogins.refresh(rnode);
+    else if (rc && req.method === 'POST') {
+      const [, id, action] = rc, body = await readBody(req);
+      r = action === 'start' ? remoteLogins.start(rnode, id) : action === 'code' ? remoteLogins.submitCode(rnode, id, body.code)
+        : action === 'cancel' ? remoteLogins.cancel(rnode, id) : await remoteLogins.logout(rnode, id, body);
+    } else r = { status: 404, error: 'Not found' };
+    const { status, ...body } = r;
+    return json(res, status, body);
+  }
   if (p === '/api/connections' && req.method === 'GET') {
     if (Date.now() - gh.status().checkedAt > 15000) await gh.refresh();
-    return json(res, 200, { connections: connections.list() });
+    return json(res, 200, { connections: connList() });
   }
   // The Connections modal's Refresh: re-checks every sign-in and version, then answers with the rows. Model lists refresh
   // once a day (models.mjs) and limits from the usage card, so neither is fetched here.
   if (p === '/api/connections/refresh' && req.method === 'POST') {
     clearLoginCache();
     await Promise.all([gh.refresh(), ...Object.keys(AGENTS).map(readVersion)].map((x) => x.catch(() => {})));
-    return json(res, 200, { connections: connections.list() });
+    return json(res, 200, { connections: connList() });
   }
   // The usage card's refresh for one agent: its only limit check (at most one per agent per minute).
   const lr = p.match(/^\/api\/limits\/([\w-]+)\/refresh$/);

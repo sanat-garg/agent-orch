@@ -28,7 +28,7 @@ export const MSG = {
   JOB_EVENT: 'job.event', JOB_CHECK: 'job.check', JOB_WIP: 'job.wip', JOB_DONE: 'job.done',
   JOB_CANCEL: 'job.cancel', JOB_PAUSE: 'job.pause', JOB_RESUME: 'job.resume', JOB_ATTACH: 'job.attach', WAKE: 'wake',
   GIT_CREDENTIAL: 'git.credential',
-  LOGIN_START: 'login.start', LOGIN_STATE: 'login.state', LOGIN_CODE: 'login.code', LOGIN_CANCEL: 'login.cancel',
+  LOGIN_START: 'login.start', LOGIN_STATE: 'login.state', LOGIN_CODE: 'login.code', LOGIN_CANCEL: 'login.cancel', LOGIN_LOGOUT: 'login.logout',
   MODELS_REFRESH: 'models.refresh', MODELS: 'models', LIMITS_REFRESH: 'limits.refresh', LIMITS: 'limits',
 };
 
@@ -38,7 +38,7 @@ export const DIRECTION = {
   hello: W, welcome: C, inventory: W, resources: W, heartbeat: B, ack: B, error: B, bye: B,
   'job.offer': C, 'job.accept': W, 'job.reject': W, 'job.start': C, 'job.event': W, 'job.check': W, 'job.wip': W,
   'job.done': W, 'job.cancel': C, 'job.pause': C, 'job.resume': C, 'job.attach': C, wake: W, 'git.credential': C,
-  'login.start': C, 'login.state': W, 'login.code': C, 'login.cancel': C,
+  'login.start': C, 'login.state': W, 'login.code': C, 'login.cancel': C, 'login.logout': C,
   'models.refresh': C, models: W, 'limits.refresh': C, limits: W,
 };
 
@@ -48,7 +48,9 @@ export const EVENT_KINDS = ['text', 'tool', 'tool_result', 'result', 'limit', 'i
 // runAgentCli outcomes plus the worker's own: setup_failed (clone/worktree/install), lost (controller gave up on it).
 export const OUTCOMES = ['ok', 'rate_limited', 'auth_error', 'aborted', 'timeout', 'max_turns', 'error', 'empty_response', 'setup_failed', 'lost'];
 export const REJECT_REASONS = ['busy', 'low_memory', 'agent_missing', 'not_signed_in', 'draining', 'version', 'other'];
-export const LOGIN_STATES = ['starting', 'url', 'waiting_code', 'done', 'failed', 'cancelled'];
+// starting → url (open it; a device code may ride along) or waiting_code (paste the page's code back) → done | failed |
+// cancelled; signed_out answers login.logout.
+export const LOGIN_STATES = ['starting', 'url', 'waiting_code', 'done', 'failed', 'cancelled', 'signed_out'];
 
 // Field specs: type name, '?' suffix = optional. Types: str, int, num, bool, obj, arr, sha, agent, os, plus enums above.
 const S = {
@@ -82,10 +84,13 @@ const S = {
   // A time jump on the worker (a laptop's sleep): it was suspended from sleptAt (epoch ms) for sleptMs.
   wake: { sleptAt: 'num', sleptMs: 'int' },
   'git.credential': { host: 'str', token: 'str' },
+  // Remote sign-in (the worker runs connections.mjs locally): `login` = the controller's id for this attempt.
+  // login.state.prompt: a CLI question nobody auto-answers; message: the error on failed.
   'login.start': { login: 'str', agent: 'agent' },
-  'login.state': { login: 'str', state: 'login', url: 'str?', code: 'str?', account: 'str?', message: 'str?' },
+  'login.state': { login: 'str', state: 'login', url: 'str?', code: 'str?', account: 'str?', message: 'str?', prompt: 'str?' },
   'login.code': { login: 'str', code: 'str' },
   'login.cancel': { login: 'str' },
+  'login.logout': { login: 'str', agent: 'agent' },
   'models.refresh': { agent: 'agent' },
   models: { agent: 'agent', models: 'arr', error: 'str?' },
   'limits.refresh': { agent: 'agent' },

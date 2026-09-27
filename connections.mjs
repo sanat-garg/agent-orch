@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 
 export const SOCKET = 'agent-orch-login';
 export const LOGIN_TIMEOUT = 3 * 60_000;
@@ -76,9 +76,57 @@ export const onPath = (bin, env = process.env) => String(env.PATH || '').split('
   try { fs.accessSync(path.join(d || '.', bin), fs.constants.X_OK); return true; } catch { return false; }
 });
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
-export const tmuxRunner = (args) => new Promise((resolve) => {
-  execFile('tmux', ['-L', SOCKET, ...args], { timeout: 5000 }, (err, out) => resolve({ ok: !err, out: String(out || '') }));
+export const tmuxRunnerFor = (socket) => (args) => new Promise((resolve) => {
+  execFile('tmux', ['-L', socket, ...args], { timeout: 5000 }, (err, out) => resolve({ ok: !err, out: String(out || '') }));
 });
+export const tmuxRunner = tmuxRunnerFor(SOCKET);
+
+// The tmux subset createConnections uses (new-session, capture-pane, send-keys, kill-session, kill-server), backed by
+// `script` (a pty from util-linux or BSD) for machines without tmux (a Mac without Homebrew's tmux). Each session is
+// its own process group; the pane is the last 64 KB of output with ANSI escapes stripped.
+const KEYS = { Enter: '\r', Escape: '\x1b', Space: ' ', Tab: '\t', BSpace: '\x7f' };
+const ANSI_RE = /\x1b(?:\[[0-?]*[ -\/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()][0-9A-B]|[=>78])/g;
+export function ptyRunner({ platform = process.platform, script = 'script' } = {}) {
+  const sessions = new Map(); // name -> {child, out}
+  const target = (args) => String(args[args.indexOf('-t') + 1] || '').replace(/^=/, '').replace(/:.*$/, '');
+  const kill = (s) => { try { process.kill(-s.child.pid, 'SIGKILL'); } catch {} };
+  return async (args) => {
+    const [cmd, ...rest] = args;
+    if (cmd === 'kill-server') { for (const s of sessions.values()) kill(s); sessions.clear(); return { ok: true, out: '' }; }
+    if (cmd === 'new-session') {
+      const name = rest[rest.indexOf('-s') + 1], cwd = rest.includes('-c') ? rest[rest.indexOf('-c') + 1] : os.homedir();
+      const x = rest.includes('-x') ? rest[rest.indexOf('-x') + 1] : '250', y = rest.includes('-y') ? rest[rest.indexOf('-y') + 1] : '50';
+      const line = `stty cols ${x} rows ${y} 2>/dev/null; ${rest[rest.length - 1]}`;
+      const argv = platform === 'darwin' ? ['-q', '/dev/null', 'sh', '-c', line] : ['-qfc', `sh -c ${shq(line)}`, '/dev/null'];
+      let child;
+      try { child = spawn(script, argv, { cwd, detached: true, stdio: ['pipe', 'pipe', 'pipe'] }); } catch { return { ok: false, out: '' }; }
+      const s = { child, out: '', exited: false };
+      const add = (d) => { s.out = (s.out + d).slice(-65536); };
+      child.stdout.on('data', add); child.stderr.on('data', add);
+      child.on('error', () => { s.exited = true; });
+      child.on('exit', () => { s.exited = true; });
+      child.stdin.on('error', () => {});
+      await new Promise((r) => setTimeout(r, 50));
+      if (s.exited && !s.out) return { ok: false, out: '' };
+      sessions.set(name, s);
+      return { ok: true, out: '' };
+    }
+    const name = target(rest), s = sessions.get(name);
+    if (cmd === 'kill-session') { if (s) { kill(s); sessions.delete(name); } return { ok: !!s, out: '' }; }
+    if (!s) return { ok: false, out: '' };
+    if (cmd === 'capture-pane') return { ok: true, out: s.out.replace(ANSI_RE, '') };
+    if (cmd === 'send-keys') {
+      const i = rest.indexOf('-t'), keys = rest.filter((_, j) => j !== i && j !== i + 1);
+      const literal = keys[0] === '-l';
+      const words = literal ? keys.slice(keys[1] === '--' ? 2 : 1) : keys;
+      const text = literal ? words.join(' ') : words.map((k) => KEYS[k] ?? k).join('');
+      if (s.exited || !s.child.stdin.writable) return { ok: false, out: '' };
+      s.child.stdin.write(text);
+      return { ok: true, out: '' };
+    }
+    return { ok: false, out: '' };
+  };
+}
 
 // entries: [{id, label, installed(), signedIn(), account?(), detail?(), health?(), spec?, envFilter?, afterChange?()}]. detail: extra
 // row fields while signed in. health({installed, signedIn, account}):

@@ -19,7 +19,9 @@ import {
   PROTOCOL_VERSION, WS_PATH, CLAIM_PATH, HEARTBEAT_MS, HEARTBEAT_MISSES, WIP_PUSH_MS, SLEEP_JUMP_MS, MAX_FRAME, MAX_BATCH, MSG, OUTCOMES,
   EVENT_KINDS, OS_KINDS, GRACE_MS, backoffMs, createSender, decode,
 } from './cluster-protocol.mjs';
-import { AGENTS, agentStatus, fetchLimits, modelCatalog, readVersion, runAgentCli } from './agents.mjs';
+import { AGENTS, agentStatus, clearLoginCache, fetchLimits, modelCatalog, readVersion, runAgentCli } from './agents.mjs';
+import { agentAccount } from './health.mjs';
+import { createNodeLogins } from './remote-login.mjs';
 import { createModelStore } from './models.mjs';
 import { createLimitStore } from './usage.mjs';
 import { createResources, readSystem, registerPid, withOwner } from './resources.mjs';
@@ -121,9 +123,15 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   // Model lists (once a day per agent, cached) and plan limits (only on limits.refresh): nothing polls (BRIEF goal 7).
   const models = createModelStore({ file: path.join(home, 'models.json'), log, onChange: () => sendInventory() });
   const limits = createLimitStore({ file: path.join(home, 'limits.json'), ids, fetch: (id) => fetchLimits(id), log });
+  // Remote sign-in: the controller's Connections window drives this machine's CLI logins (remote-login.mjs).
+  const logins = createNodeLogins({ send: (t, f) => raw(t, f), log, afterChange: (id) => {
+    clearLoginCache();
+    sendInventory();
+    models.refresh([id]).catch(() => {});
+  } });
   const reaperMode = process.env.AGENT_ORCH_REAPER || 'on';
   const resources = fs.existsSync('/proc/self/stat') && reaperMode !== 'off' ? createResources({
-    mode: reaperMode, isActive: (o) => o.kind === 'task' && jobs.get(Number(o.id))?.state === 'running', log,
+    mode: reaperMode, isActive: (o) => o.kind === 'task' && jobs.get(Number(o.id))?.state === 'running', loginActive: () => logins.active(), log,
   }) : null;
 
   // ---- frames
@@ -208,7 +216,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       const installed = !!a.available(), signedIn = installed && !!a.loggedIn();
       const version = installed ? await readVersion(a.id).catch(() => null) : null;
       const cat = modelCatalog(a.id);
-      return { id: a.id, installed, version, signedIn, account: signedIn ? a.account?.() ?? null : null, models: cat.models, modelsError: cat.error };
+      return { id: a.id, installed, version, signedIn, account: signedIn ? agentAccount(a.id) : null, models: cat.models, modelsError: cat.error };
     }));
     let gitVersion = null;
     try { gitVersion = /\d+\.\d+[\w.]*/.exec(await git(home, ['--version']))?.[0] || null; } catch {}
@@ -330,7 +338,9 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       case MSG.JOB_RESUME: return resumeJob(msg);
       case MSG.GIT_CREDENTIAL: gitCreds.set(msg.host, msg.token); return log(`received a git credential for ${msg.host}`);
       case MSG.MODELS_REFRESH: {
+        clearLoginCache();
         await models.refresh([msg.agent]);
+        sendInventory();
         const c = modelCatalog(msg.agent);
         return raw(MSG.MODELS, { agent: msg.agent, models: c.models, ...(c.error ? { error: c.error } : {}) });
       }
@@ -340,8 +350,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
         raw(MSG.LIMITS, { agent: msg.agent, windows: l?.windows || [], ...(l?.error ? { error: l.error } : {}) });
         return sendInventory();
       }
-      case MSG.LOGIN_START:
-        return raw(MSG.LOGIN_STATE, { login: msg.login, state: 'failed', message: `remote sign-in is not supported by this worker yet: sign ${msg.agent} in on ${config.name || os.hostname()} itself` });
+      case MSG.LOGIN_START: case MSG.LOGIN_CODE: case MSG.LOGIN_CANCEL: case MSG.LOGIN_LOGOUT: return logins.handle(msg);
       default: return;
     }
   }

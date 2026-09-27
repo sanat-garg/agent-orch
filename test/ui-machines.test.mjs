@@ -117,3 +117,31 @@ test('UI: Add machine shows a command per OS with a fresh code, then the machine
   await ctx.close();
   assert.deepEqual(errors, []);
 });
+
+test('UI: Connections shows a machine switcher once workers exist, and a worker tab shows that machine', { skip: noBrowser, timeout: 60000 }, async () => {
+  const [name, value] = cookie.split('=');
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await ctx.addCookies([{ name, value, url: base }]);
+  const page = await ctx.newPage();
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  await page.goto(`${base}/`);
+  await page.locator('#connFoot').dispatchEvent('click'); // the sidebar is off-canvas on a phone
+  const tabs = page.locator('#connsMachines button');
+  await tabs.nth(1).waitFor();
+  assert.equal(await page.locator('#connsMachines').isVisible(), true);
+  const names = await tabs.allTextContents();
+  assert.equal(names[0], 'Controller');
+  assert.ok(names.includes('vps-2') && names.includes('mac-mini'), names.join(','));
+  assert.equal(await tabs.first().getAttribute('aria-selected'), 'true');
+  assert.match(await page.locator('#connsApp').textContent(), /agent-orch server/);
+  await page.locator('#connsMachines button', { hasText: 'vps-2' }).click();
+  await page.locator('#connsApp', { hasText: 'vps-2' }).waitFor();
+  assert.match(await page.locator('#connsList').textContent(), /vps-2 is offline/);
+  const fits = await page.locator('#connsModal .modal-panel').evaluate((p) => p.scrollWidth <= p.clientWidth + 1);
+  assert.ok(fits, 'the switcher does not widen the sheet');
+  await page.locator('#connsMachines button', { hasText: 'Controller' }).click();
+  await page.locator('#connsApp', { hasText: 'agent-orch server' }).waitFor();
+  await ctx.close();
+  assert.deepEqual(errors, []);
+});

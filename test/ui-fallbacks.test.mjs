@@ -1,7 +1,7 @@
 // The fallback sheet in a real browser: boots server.mjs (stub codex CLI with a wide catalog, CW_NO_ORCHESTRATOR=1, temp data dir) on a
 // spare port. Chat: the composer's Fallbacks button opens it, and remove, undo, reorder (Alt+↑ and drag) and add each
-// persist through PUT /api/convos/:id/fallbacks. Reflection: the settings popover opens the same sheet at once, without
-// any request, and saves via PUT /api/orch/projects/:id/reflect-fallbacks. Skips when Playwright's Chromium can't launch.
+// persist through PUT /api/convos/:id/fallbacks. Reflection: the Settings sheet opens the same sheet at once, without
+// any request, and saves via PUT /api/orch/reflect-settings. Skips when Playwright's Chromium can't launch.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';

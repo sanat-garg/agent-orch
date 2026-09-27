@@ -72,8 +72,8 @@ Direction: C = controller → worker, W = worker → controller (`DIRECTION`; `v
 | `job.cancel` / `job.pause` / `job.resume` | C | job (+reason / +prompt) | cancel = kill + push WIP + drop worktree (reason `reassigned`/`disabled`: no push); pause = kill + keep worktree + push WIP; resume = continue the session |
 | `job.attach` | C | job, from | after a reconnect: the controller still wants the job and has its events up to `from`; the worker replays from there |
 | `git.credential` | C | host, token | the only frame that may carry a secret (see Security) |
-| `login.start` / `login.code` / `login.cancel` | C | login, agent / login, code / login | remote sign-in: connections.mjs runs on the worker, same tmux scraping |
-| `login.state` | W | login, state (starting, url, waiting_code, done, failed, cancelled), url, code, account, message | relayed to the owner's Connections sheet for that node |
+| `login.start` / `login.code` / `login.cancel` / `login.logout` | C | login, agent / login, code / login / login, agent | remote sign-in and sign-out: connections.mjs runs on the worker (tmux, or a `script` pty when tmux is missing) |
+| `login.state` | W | login, state (starting, url, waiting_code, done, failed, cancelled, signed_out), url, code, account, message, prompt | relayed to the owner's Connections sheet for that node |
 | `models.refresh` / `limits.refresh` | C | agent | the owner pressed refresh for that node's agent (nothing polls: BRIEF goal 7) |
 | `models` / `limits` | W | agent, models[] / windows[], error | the answer, from the worker's own `discoverModels` / `fetchLimits` |
 

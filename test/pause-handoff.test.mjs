@@ -164,6 +164,7 @@ describe('pause, resume and handoff', { concurrency: true, timeout: 120000 }, ()
     assert.match(r.codexCall.argv.at(-1), /\?\? wip\.txt/);
   });
 
+  // No `=>` in the check: extractCommand refuses any `>` (a possible redirect), and then nothing would be checked.
   test('races: a pause that lands during the done-when check pauses it; one on a finished task is refused', async () => {
     const r = await scenario(`
       const id = add('Checked', 'QUICK build it', 'Done when \`node -e "setTimeout(Boolean, 2500)"\` passes');

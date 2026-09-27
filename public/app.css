@@ -540,6 +540,12 @@ code, pre, kbd { font-family: var(--mono); }
 .cn-err { margin: 0; color: var(--danger); font-size: 12px; word-break: break-word; }
 .cn-health { padding-left: 24px; font-size: 12px; color: var(--faint); overflow-wrap: anywhere; }
 .cn-health.bad { color: var(--warn); }
+.cn-shared { padding-left: 24px; font-size: 12px; color: var(--accent); }
+.cn-empty { padding: 14px 4px; font-size: 13px; color: var(--muted); }
+.cn-machines { display: flex; max-width: 100%; overflow-x: auto; margin-bottom: 10px; scrollbar-width: none; }
+.cn-machines button { display: inline-flex; align-items: center; gap: 6px; flex: none; min-height: 32px; white-space: nowrap; }
+.cn-machines button[aria-selected="true"] { background: var(--panel); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+.cn-machines .dot { width: 7px; height: 7px; }
 .cn-bar { display: flex; align-items: center; gap: 8px; margin-top: 12px; padding: 0 4px; }
 .cn-checked { flex: 1; min-width: 0; font-size: 12px; color: var(--muted); }
 .cn-acts { display: flex; justify-content: flex-end; align-items: center; gap: 6px; }

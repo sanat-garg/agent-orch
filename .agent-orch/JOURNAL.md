@@ -647,3 +647,19 @@ Waiting for the full `npm test` run to finish.
 ## 2026-09-27 13:55 — #221 Install scripts for Linux VPS and macOS workers, plus an 'Add machine' wizard [done (check passed)]
 
 The full test suite is still running; I'll check the result when it finishes.
+
+## 2026-09-27 14:22 — #222 Remote sign-in and per-machine agent status in Connections [in progress (1)]
+
+remote sign-in works; five older test failures on main block `npm test`
+
+## 2026-09-27 14:32 — #222 Remote sign-in and per-machine agent status in Connections [done (check passed)]
+
+Full suite running; waiting for its completion notice.
+
+## 2026-09-27 15:00 — #238 Integrate #222: Remote sign-in and per-machine agent status in Connections [verify failed (1)]
+
+Command: npm test
+
+## 2026-09-27 15:16 — #238 Integrate #222: Remote sign-in and per-machine agent status in Connections [done (check passed)]
+
+npm test passes 310/310, merge conflicts resolved

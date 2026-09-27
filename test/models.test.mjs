@@ -47,6 +47,7 @@ test('codex: `codex debug models` (stub) → listed models in priority order, hi
   const models = await AGENTS.codex.listModels({ bin: fixture('codex-stub.mjs') });
   assert.deepEqual(models.map((m) => m.id), ['gpt-6-astra', 'gpt-6-sol', 'gpt-5.5']);
   // efforts: the model's supported_reasoning_levels (gpt-5.5 stops at xhigh in codex-cli 0.157).
+  // defaultEffort: the model's default_reasoning_level.
   assert.deepEqual(models[1], { id: 'gpt-6-sol', label: 'GPT-6-Sol', description: 'Workhorse model for coding and everyday work.',
     efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], defaultEffort: 'medium' });
   assert.deepEqual(models[2].efforts, ['low', 'medium', 'high', 'xhigh']);

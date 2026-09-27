@@ -452,3 +452,8 @@ Every async throw in `handleRequest` becomes a 500, and the process keeps runnin
 - **Fix:** Check agents with `Object.hasOwn(AGENTS, x)` (or a `Set` of ids) in `set_model`, `chatAgent`,
   `delegateTask`, `checkFallbacks` and `agentStatus`. Validate `body.mode` and `msg.nextMode` against `MODES`, and use
   the default when a value isn't listed.
+
+### 36. [low] Five stale tests failed on main 79c34bf (found 2026-09-27 in #222)
+**Fixed** (#222): models.test expects `defaultEffort`; task-sound fixture uses the Settings sheet's `st*` ids; ui-fallbacks
+reads reflection fallbacks from the global kv `reflect_settings` (Settings sheet), and the task drawer's "Add fallback"
+carries the chip's `normal` class.

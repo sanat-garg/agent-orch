@@ -14,3 +14,11 @@ Let the owner sign agents in on worker machines from the web UI. The Connections
 ## Done when
 
 `npm test` passes with the remote login round-trip test, and the Connections modal renders a machine switcher when nodes exist
+
+## Result — in progress (1) (2026-09-27 14:22)
+
+AGENT-ORCH-STATUS: continue — remote sign-in works; five older test failures on main block `npm test`
+
+## Result — done (check passed) (2026-09-27 14:32)
+
+Full suite running; waiting for its completion notice.

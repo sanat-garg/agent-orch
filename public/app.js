@@ -2576,7 +2576,8 @@ function observeTaskCompletion(t) {
 
 // ---------- WebSocket ----------
 let retry = 0; // failed attempts since the last open: 0 before the first open reads as "Connecting…"
-const CONN = { list: [], sig: '', drafts: {}, sent: {}, dismissed: {}, justDone: {}, lastFocus: null };
+// node: the machine the Connections window shows ('controller' or a worker id); remote: that worker's rows.
+const CONN = { list: [], sig: '', drafts: {}, sent: {}, dismissed: {}, justDone: {}, lastFocus: null, node: 'controller', nodes: [], remote: [] };
 function connect() {
   resetCompletionSync();
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
@@ -2614,8 +2615,8 @@ function onServer(msg) {
   if (msg.t === 'mtick' || msg.t === 'mhist' || msg.t === 'mdetail' || msg.t === 'usage') return onMetrics(msg);
   if (msg.t === 'oprojects') { applyProjectOrder(msg.order || []); renderConvoList(); return renderOrchBar(); }
   if (['otask', 'oproject', 'ostate', 'orun', 'oorder', 'olane'].includes(msg.t)) return onOrch(msg);
-  if (msg.t === 'connections') return applyConnections(msg.connections);
-  if (msg.t === 'cluster') { if (!$('serverModal').hidden) loadMachines(); return checkPairing(); }
+  if (msg.t === 'connections') return msg.node ? applyRemote(msg.node, msg.connections) : applyConnections(msg.connections);
+  if (msg.t === 'cluster') { if (!$('serverModal').hidden) loadMachines(); if (!$('connsModal').hidden) loadConnNodes(); return checkPairing(); }
   if (msg.t === 'models') return api('/api/agents').then((d) => { AGENT_LIST = d.agents || []; renderAgentPicker(); }).catch(() => {});
   if (msg.t === 'status') { upd.pending = !!msg.restartPending; return renderUpdateBanner(); }
   if (msg.t === 'convos') {
@@ -5117,6 +5118,56 @@ const connIcon = (id) => {
 };
 async function refreshConnections() {
   try { applyConnections((await api('/api/connections')).connections); } catch {}
+  if (CONN.node !== 'controller') {
+    const node = CONN.node;
+    try { applyRemote(node, (await api(`/api/connections?node=${encodeURIComponent(node)}`)).connections); } catch {}
+  }
+}
+// Per-machine keys for drafts, sent codes and dismissed panels; `?node=` on every call about a worker's rows.
+const ck = (c) => `${c.node || 'controller'}:${c.id}`;
+const nodeQ = (c) => (c.node ? `?node=${encodeURIComponent(c.node)}` : '');
+const connRows = () => (CONN.node === 'controller' ? CONN.list : CONN.remote);
+function applyRemote(node, list) {
+  if (node !== CONN.node) return;
+  const prev = new Map(CONN.remote.map((c) => [c.id, c]));
+  CONN.remote = list || [];
+  for (const c of CONN.remote) {
+    if (prev.get(c.id)?.login?.state === 'waiting' && c.login?.state === 'done') {
+      CONN.justDone[ck(c)] = true;
+      setTimeout(() => { delete CONN.justDone[ck(c)]; renderConnections(true); }, 6000);
+    }
+  }
+  renderConnections();
+}
+// The machine switcher (Controller / each worker), shown once a worker is paired.
+async function loadConnNodes() {
+  try { CONN.nodes = (await api('/api/cluster/nodes')).nodes || []; } catch { CONN.nodes = []; }
+  if (!CONN.nodes.some((n) => n.id === CONN.node)) { CONN.node = 'controller'; CONN.remote = []; }
+  renderConnNodes();
+  if (CONN.node !== 'controller') refreshConnections();
+}
+function renderConnNodes() {
+  const box = $('connsMachines'), workers = CONN.nodes.filter((n) => !n.local);
+  box.hidden = !workers.length;
+  box.replaceChildren(...[{ id: 'controller', name: 'Controller', connected: true }, ...workers].map((n) => {
+    const b = el('button', '', '');
+    b.type = 'button';
+    b.setAttribute('role', 'tab');
+    b.setAttribute('aria-selected', String(n.id === CONN.node));
+    b.dataset.node = n.id;
+    b.title = n.id === 'controller' ? 'This server' : n.connected ? `${n.name} · online` : `${n.name} · ${n.awayLabel || 'offline'}`;
+    b.append(el('span', `dot ${n.connected ? 'on' : 'off'}`), el('span', '', n.name));
+    b.onclick = () => selectConnNode(n.id);
+    return b;
+  }));
+}
+function selectConnNode(id) {
+  if (id === CONN.node) return;
+  CONN.node = id;
+  CONN.remote = [];
+  renderConnNodes();
+  renderConnections(true);
+  refreshConnections();
 }
 function applyConnections(list) {
   const prev = new Map(CONN.list.map((c) => [c.id, c]));
@@ -5125,8 +5176,8 @@ function applyConnections(list) {
   for (const c of CONN.list) {
     const p = prev.get(c.id);
     if (p?.login?.state === 'waiting' && c.login?.state === 'done') {
-      CONN.justDone[c.id] = true;
-      setTimeout(() => { delete CONN.justDone[c.id]; renderConnections(true); }, 6000);
+      CONN.justDone[ck(c)] = true;
+      setTimeout(() => { delete CONN.justDone[ck(c)]; renderConnections(true); }, 6000);
     }
     if (p && (p.signedIn !== c.signedIn || p.installed !== c.installed)) {
       if (c.id === 'github') refreshGitHub().then(() => { if (!$('pickerModal').hidden) renderGhRow(); });
@@ -5159,6 +5210,8 @@ function renderConnFoot() {
   $('connFoot').title = out.length ? `${out.map((c) => c.label).join(', ')} ${out.length > 1 ? 'are' : 'is'} in use but signed out` : 'Open connections';
   const app = $('connsApp');
   app.textContent = '';
+  const node = CONN.node !== 'controller' && CONN.nodes.find((n) => n.id === CONN.node);
+  if (node) return app.append(connNodeRow(node));
   const main = el('div', 'cn-main');
   const info = el('div', 'cn-info');
   info.append(el('span', 'cn-label', 'agent-orch server'));
@@ -5170,6 +5223,18 @@ function renderConnFoot() {
   main.append(icon.firstChild, info);
   app.append(main);
 }
+// A worker's header row: its name, whether it is connected, and its OS.
+function connNodeRow(n) {
+  const main = el('div', 'cn-main'), info = el('div', 'cn-info'), st = el('span', 'cn-status');
+  info.append(el('span', 'cn-label', n.name));
+  const os = n.os === 'darwin' ? 'macOS' : n.os === 'linux' ? 'Linux' : n.os || '';
+  st.append(el('span', `dot ${n.connected ? 'on' : 'off'}`), el('span', 'cn-st', [n.connected ? NODE_ST[n.status] || 'Online' : cap(n.awayLabel || 'offline'), os].filter(Boolean).join(' · ')));
+  info.append(st);
+  const icon = el('span');
+  icon.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect x="3" y="5" width="18" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8 20h8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+  main.append(icon.firstChild, info);
+  return main;
+}
 // The footer, the model picker's "sign in" option and routing hints open this window (optionally at one agent).
 function openConnections(id) {
   closeSidebar();
@@ -5177,8 +5242,11 @@ function openConnections(id) {
   $('connsModal').hidden = false;
   renderConnFoot();
   if (!$('connsRefresh').disabled) $('connsChecked').textContent = 'Models refresh once a day and after a sign-in; limits from the usage card.';
+  if (id) { CONN.node = 'controller'; CONN.remote = []; }
+  renderConnNodes();
   renderConnections(true);
   refreshConnections();
+  loadConnNodes();
   $('connsModal').querySelector('[data-close].icon-btn').focus();
   const row = id && $('connsList').querySelector(`[data-conn="${id}"]`);
   if (!row) return;
@@ -5198,18 +5266,19 @@ document.addEventListener('keydown', (e) => {
 }, true);
 async function connAction(c, action, body) {
   try {
-    const r = await api(`/api/connections/${c.id}/${action}`, 'POST', body);
+    const r = await api(`/api/connections/${c.id}/${action}${nodeQ(c)}`, 'POST', body);
     if ('login' in r) { c.login = r.login; renderConnections(true); }
     return r;
   } catch (e) { alert(`${c.label}: ${e.message}`); return null; }
 }
 async function connStart(c) {
-  delete CONN.sent[c.id];
-  delete CONN.drafts[c.id];
+  delete CONN.sent[ck(c)];
+  delete CONN.drafts[ck(c)];
   await connAction(c, 'start');
 }
 async function connLogout(c) {
-  if (!confirm(c.logoutWarning ? `Sign out of ${c.label}?\n\n${c.logoutWarning}` : `Sign out of ${c.label} on this server?`)) return;
+  const where = c.node ? CONN.nodes.find((n) => n.id === c.node)?.name || 'that machine' : 'this server';
+  if (!confirm(c.logoutWarning ? `Sign out of ${c.label} on ${where}?\n\n${c.logoutWarning}` : `Sign out of ${c.label} on ${where}?`)) return;
   await connAction(c, 'logout', c.logoutWarning ? { confirm: true } : {});
 }
 // An agent CLI whose limits can't be read at all (health.limits.exposed false; see .agent-orch/AGENTS.md).
@@ -5238,6 +5307,12 @@ async function refreshHealth() {
   b.disabled = true; b.textContent = 'Checking…';
   blurSwap($('connsChecked'), 'Checking sign-ins…');
   try {
+    if (CONN.node !== 'controller') {
+      const node = CONN.node, r = await api(`/api/connections/refresh?node=${encodeURIComponent(node)}`, 'POST');
+      applyRemote(node, r.connections);
+      blurSwap($('connsChecked'), `Asked ${CONN.nodes.find((n) => n.id === node)?.name || 'the machine'} to re-check ${fmtWhen(Date.now())}`);
+      return;
+    }
     const r = await api('/api/connections/refresh', 'POST');
     AGENT_LIST = (await api('/api/agents')).agents || AGENT_LIST;
     renderAgentPicker();
@@ -5265,7 +5340,7 @@ function connPanel(c) {
     again.onclick = () => connStart(c);
     const close = el('button', 'link-btn', 'Close');
     close.type = 'button';
-    close.onclick = () => { CONN.dismissed[c.id] = l.startedAt; renderConnections(true); };
+    close.onclick = () => { CONN.dismissed[ck(c)] = l.startedAt; renderConnections(true); };
     acts.append(again, close);
     box.append(acts);
     return box;
@@ -5314,20 +5389,20 @@ function connPanel(c) {
     inp.placeholder = 'Authorization code';
     inp.autocomplete = 'off';
     inp.spellcheck = false;
-    inp.dataset.connInput = c.id;
-    inp.value = CONN.drafts[c.id] || '';
-    inp.oninput = () => { CONN.drafts[c.id] = inp.value; };
+    inp.dataset.connInput = ck(c);
+    inp.value = CONN.drafts[ck(c)] || '';
+    inp.oninput = () => { CONN.drafts[ck(c)] = inp.value; };
     const go = el('button', 'btn small primary', 'Submit');
     f.append(inp, go);
     f.onsubmit = async (e) => {
       e.preventDefault();
       if (!inp.value.trim()) return inp.focus();
       go.disabled = true;
-      if (await connAction(c, 'code', { code: inp.value.trim() })) { CONN.sent[c.id] = true; CONN.drafts[c.id] = ''; }
+      if (await connAction(c, 'code', { code: inp.value.trim() })) { CONN.sent[ck(c)] = true; CONN.drafts[ck(c)] = ''; }
       renderConnections(true);
     };
     box.append(f);
-    if (CONN.sent[c.id]) box.append(el('div', 'cn-step muted', 'Code sent, checking…'));
+    if (CONN.sent[ck(c)]) box.append(el('div', 'cn-step muted', 'Code sent, checking…'));
   } else box.append(el('div', 'cn-step muted', 'This panel updates by itself once you finish in the other tab.'));
   const acts = el('div', 'cn-acts');
   const cancel = el('button', 'link-btn', 'Cancel');
@@ -5338,13 +5413,15 @@ function connPanel(c) {
   return box;
 }
 function renderConnections(force) {
-  const list = CONN.list;
-  const sig = JSON.stringify([list, CONN.justDone, CONN.dismissed, CONN.sent]);
+  const list = connRows();
+  const sig = JSON.stringify([CONN.node, list, CONN.nodes, CONN.justDone, CONN.dismissed, CONN.sent]);
   if (!force && sig === CONN.sig) return;
   CONN.sig = sig;
   const box = $('connsList'), focused = document.activeElement?.dataset?.connInput;
   box.textContent = '';
   renderConnFoot();
+  const node = CONN.node !== 'controller' && CONN.nodes.find((n) => n.id === CONN.node);
+  if (node && !list.length) box.append(el('div', 'cn-empty', node.connected ? `Waiting for ${node.name} to report its agents…` : `${node.name} is offline. Its agents show here once it reconnects.`));
   for (const c of list) {
     const row = el('div', 'cn-row');
     row.dataset.conn = c.id;
@@ -5353,7 +5430,7 @@ function renderConnections(force) {
     const info = el('div', 'cn-info');
     info.append(el('span', 'cn-label', c.label));
     const st = el('span', 'cn-status');
-    st.append(el('span', `dot ${dot}`), el('span', 'cn-st', CONN.justDone[c.id] && c.signedIn ? `✓ ${text}` : text));
+    st.append(el('span', `dot ${dot}`), el('span', 'cn-st', CONN.justDone[ck(c)] && c.signedIn ? `✓ ${text}` : text));
     st.title = text;
     info.append(st);
     main.append(connIcon(c.id), info);
@@ -5376,8 +5453,14 @@ function renderConnections(force) {
       hd.title = hl.title || hl.text;
       row.append(hd);
     }
+    // One subscription signed in on several machines = one set of limits (more machines add CPU/RAM, not quota).
+    if (c.sharedWith?.length) {
+      const sh = el('div', 'cn-shared', `Same account as ${c.sharedWith.join(', ')}: shares limits`);
+      sh.title = 'These machines run on one subscription, so their usage counts against the same plan limits.';
+      row.append(sh);
+    }
     const l = c.login;
-    if (l && (l.state === 'waiting' || (l.state === 'failed' && !c.signedIn && CONN.dismissed[c.id] !== l.startedAt))) row.append(connPanel(c));
+    if (l && (l.state === 'waiting' || (l.state === 'failed' && !c.signedIn && CONN.dismissed[ck(c)] !== l.startedAt))) row.append(connPanel(c));
     box.append(row);
   }
   if (focused) box.querySelector(`[data-conn-input="${focused}"]`)?.focus();

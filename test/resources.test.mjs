@@ -63,9 +63,9 @@ const FIXTURE = [
   // task 9's codex, registered by pid only, re-parented to init
   [{ pid: 221, ppid: 1, argv: ['codex', 'exec', '--json'], cgroup: SERVICE, age: 5 * MIN }, 'orphaned agent'],
   // a CLI whose server (pid 777) is gone
-  [{ pid: 225, ppid: 1, argv: ['opencode', 'run'], env: { AGENT_ORCH_OWNER: '777:task:3' }, age: 5 * MIN }, 'orphaned agent'],
-  [{ pid: 230, ppid: 1, argv: ['/home/ubuntu/.local/bin/kiro-cli', 'chat'], age: 10 * MIN }, 'orphaned agent'],
-  [{ pid: 231, ppid: 1, argv: ['/home/ubuntu/.local/bin/agy', '-p'], age: 1 * MIN }, 'orphaned agent'], // too young to reap
+  [{ pid: 225, ppid: 1, argv: ['codex', 'exec', '--json'], env: { AGENT_ORCH_OWNER: '777:task:3' }, age: 5 * MIN }, 'orphaned agent'],
+  [{ pid: 230, ppid: 1, argv: ['/home/ubuntu/.local/bin/claude', '-p'], age: 10 * MIN }, 'orphaned agent'],
+  [{ pid: 231, ppid: 1, argv: ['node', '/usr/lib/node_modules/@openai/codex/bin/codex.js', 'exec'], age: 1 * MIN }, 'orphaned agent'], // too young to reap
   [{ pid: 240, ppid: 1, argv: ['node', 'server.mjs'], env: { PORT: '3999', CW_DATA_DIR: '/tmp/cw-x' }, cgroup: SERVICE, age: 40 * MIN }, 'test server'],
   [{ pid: 241, ppid: 1, argv: ['node', 'server.mjs'], env: { PORT: '4001' }, age: 5 * MIN }, 'test server'], // too young
   [{ pid: 250, ppid: 1, argv: ['/home/ubuntu/.cache/ms-playwright/chromium-1243/chrome-linux/headless_shell', '--headless'], age: 20 * MIN }, 'browser'],

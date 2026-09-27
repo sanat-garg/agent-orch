@@ -1,7 +1,0 @@
-{"type":"session.tools_updated","data":{"model":"gpt-5.6-luna"}}
-{"type":"tool.execution_start","data":{"toolCallId":"call_1","toolName":"bash","arguments":{"command":"cat notes/a.txt"}}}
-{"type":"tool.execution_complete","data":{"toolCallId":"call_1","success":true,"result":{"content":"hello\n"},"shellExecution":{"exitCode":0}}}
-{"type":"assistant.message_delta","data":{"deltaContent":"Hi"}}
-{"type":"assistant.message","data":{"model":"gpt-5.6-luna","content":"Hi!","phase":"final_answer"}}
-{"type":"session.usage_checkpoint","data":{"totalPremiumRequests":1,"totalNanoAiu":277497000}}
-{"type":"result","sessionId":"copilot-session","exitCode":0,"usage":{"premiumRequests":1,"totalApiDurationMs":2317}}

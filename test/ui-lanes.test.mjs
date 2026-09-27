@@ -35,7 +35,6 @@ before(async () => {
   const bin = path.join(home, '.local/bin');
   fs.mkdirSync(bin, { recursive: true });
   fs.symlinkSync(path.join(ROOT, 'test/fixtures/codex-stub.mjs'), path.join(bin, 'codex'));
-  fs.symlinkSync(path.join(ROOT, 'test/fixtures/agy-stub.mjs'), path.join(bin, 'agy'));
   const port = await freePort();
   assert.notEqual(port, 3000);
   base = `http://127.0.0.1:${port}`;
@@ -59,7 +58,7 @@ before(async () => {
   db.exec('PRAGMA busy_timeout=5000');
   pid = Number(db.prepare("INSERT INTO projects(path,name,status,convo_id,created_at) VALUES(?,?,'active',?,0)")
     .run(PROJECT(), 'Lanes', CID).lastInsertRowid);
-  for (const [i, agent] of ['claude', 'codex', 'antigravity'].entries()) {
+  for (const [i, agent] of ['claude', 'codex', 'claude'].entries()) {
     db.prepare("INSERT INTO tasks(project_id,kind,title,prompt,status,agent,ran_agent,ran_model,started_at,created_at) VALUES(?,'work',?,'seed','running',?,?,?, ?,0)")
       .run(pid, ['Build lanes UI', 'Verify scheduler', 'Document parallel work'][i], agent, agent, 'test-model', Math.floor(Date.now()/1000)-120);
   }

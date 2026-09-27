@@ -28,12 +28,10 @@ before(async () => {
   // A logged-out `codex` on PATH (the stub answers `codex login status` with "Not logged in").
   binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-bin-'));
   fs.symlinkSync(path.join(ROOT, 'test/fixtures/codex-stub.mjs'), path.join(binDir, 'codex'));
-  // An `opencode` with no provider sign-in that lists only Zen models (two free, one paid).
-  fs.symlinkSync(path.join(ROOT, 'test/fixtures/opencode-stub.mjs'), path.join(binDir, 'opencode'));
   const port = await freePort();
   assert.notEqual(port, 3000);
   base = `http://127.0.0.1:${port}`;
-  child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, CODEX_STUB_LOGIN: 'out', OPENCODE_STUB_MODELS: 'zen', CW_WS_KEEPALIVE_MS: '200', PORT: String(port), CW_DATA_DIR: dataDir }, stdio: ['ignore', 'pipe', 'pipe'] });
+  child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, CODEX_STUB_LOGIN: 'out', CW_WS_KEEPALIVE_MS: '200', PORT: String(port), CW_DATA_DIR: dataDir }, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`server did not start:\n${out}`)), 20000);
@@ -219,16 +217,16 @@ test('GET /api/agents lists the agent registry, including claude', async () => {
 test('boot discovery caches every agent in models.json; a signed-out agent is stored empty with the reason', async () => {
   const file = path.join(dataDir, 'models.json');
   let saved = null;
-  for (let i = 0; i < 150 && !saved; i++) {
-    try { saved = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { await new Promise((r) => setTimeout(r, 200)); }
+  // Agents are discovered one after another, so wait for codex's entry, not just the first write.
+  for (let i = 0; i < 150 && !saved?.agents?.codex?.at; i++) {
+    try { saved = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+    if (!saved?.agents?.codex?.at) await new Promise((r) => setTimeout(r, 200));
   }
   assert.ok(saved, 'models.json written');
   assert.ok(saved.saved > 0);
-  assert.deepEqual(Object.keys(saved.agents).sort(), ['antigravity', 'claude', 'codex', 'copilot', 'kiro', 'opencode']);
+  assert.deepEqual(Object.keys(saved.agents).sort(), ['claude', 'codex']);
   assert.deepEqual(saved.agents.codex.models, []);
   assert.equal(saved.agents.codex.error, 'not signed in');
-  // No sign-in, yet OpenCode lists its free Zen models (never the paid one).
-  assert.deepEqual(saved.agents.opencode.models.map((m) => m.id), ['opencode/big-pickle', 'opencode/nemotron-3-ultra-free']);
   assert.ok(saved.agents.codex.at > 0);
 });
 
@@ -242,7 +240,7 @@ test('GET /api/connections lists coding agents and github; actions are login-pro
   const r = await get('/api/connections', { cookie });
   assert.equal(r.status, 200);
   const { connections } = await r.json();
-  assert.deepEqual(connections.map((c) => c.id), ['claude', 'codex', 'antigravity', 'opencode', 'kiro', 'copilot', 'github']);
+  assert.deepEqual(connections.map((c) => c.id), ['claude', 'codex', 'github']);
   for (const c of connections) {
     assert.equal(typeof c.installed, 'boolean', `${c.id} reports installed`);
     assert.equal(typeof c.signedIn, 'boolean', `${c.id} reports signedIn`);
@@ -250,15 +248,12 @@ test('GET /api/connections lists coding agents and github; actions are login-pro
   }
   const codex = connections.find((c) => c.id === 'codex');
   assert.deepEqual([codex.installed, codex.signedIn, codex.canLogin, codex.canLogout], [true, false, true, true]);
-  const oc = connections.find((c) => c.id === 'opencode');
-  assert.deepEqual([oc.signedIn, oc.accounts, oc.ready], [true, [], 'free Zen models'], 'OpenCode is ready without a provider login');
-  assert.deepEqual(oc.freeModels.map((m) => m.label), ['Zen · Big Pickle (free)', 'Zen · Nemotron 3 Ultra Free (free)']);
   const post = (p, headers = {}) => fetch(base + p, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: '{}' });
   const anon = await post('/api/connections/codex/cancel');
   assert.equal(anon.status, 401);
   await anon.arrayBuffer();
-  const claude = connections.find((c) => c.id === 'claude'), agy = connections.find((c) => c.id === 'antigravity');
-  assert.deepEqual([claude.canLogin, claude.canLogout, agy.canLogin, agy.canLogout], [true, true, true, true]);
+  const claude = connections.find((c) => c.id === 'claude');
+  assert.deepEqual([claude.canLogin, claude.canLogout], [true, true]);
   assert.match(claude.logoutWarning, /Every chat and orchestrator agent/);
   const nope = await post('/api/connections/claude/logout', { cookie });
   assert.equal(nope.status, 409); // needs {confirm: true}: nothing is signed out
@@ -266,6 +261,16 @@ test('GET /api/connections lists coding agents and github; actions are login-pro
   const code = await post('/api/connections/codex/code', { cookie });
   assert.equal(code.status, 409); // no sign-in in progress
   await code.arrayBuffer();
+  // The usage card's refresh checks one agent's limits (codex is signed out here); unknown agents are 404.
+  const lim = await post('/api/limits/codex/refresh', { cookie });
+  assert.equal(lim.status, 200);
+  assert.equal((await lim.json()).limits.error, 'not signed in');
+  const unknown = await post('/api/limits/nope/refresh', { cookie });
+  assert.equal(unknown.status, 404);
+  await unknown.arrayBuffer();
+  const anonLim = await post('/api/limits/codex/refresh');
+  assert.equal(anonLim.status, 401);
+  await anonLim.arrayBuffer();
 });
 
 test('WebSockets of removed or expired sessions close with 4001 (AUDIT #9)', async () => {

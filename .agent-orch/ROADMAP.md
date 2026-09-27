@@ -24,6 +24,5 @@ and touch disjoint files, except the three server.mjs fixes, which serialise on 
 - UI-REVIEW #2 (visualViewport keyboard handling; hide the orch bar while typing), then #3–#5 (task-card titles, settings
   as a bottom sheet, 44pt touch targets), then #6–#8 (contrast, type size, bottom chrome). Mark each one done in UI-REVIEW.md.
 - The lasting fix for #34 is a hostname under a domain the owner controls. That's the owner's decision.
-- Kiro live smoke once the owner signs in. Copilot's model list stays `auto`.
 - Split public/app.js (~4.5k lines) into native ESM modules, guarded by test/ui-static.test.mjs.
 - SIGTERM handler that marks runs interrupted (low value).

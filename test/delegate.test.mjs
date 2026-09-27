@@ -10,13 +10,14 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { createDelegator, parseFallbacks } from '../delegate.mjs';
 
-const models = { claude: [{ id: 'opus', default: true }], codex: [{ id: 'gpt-a' }, { id: 'gpt-mini' }], antigravity: [{ id: 'gemini-x' }, { id: 'claude-sonnet-4-6' }] };
+// 'third' is a stand-in agent: the delegator only sees ids and model lists.
+const models = { claude: [{ id: 'opus', default: true }], codex: [{ id: 'gpt-a' }, { id: 'gpt-mini' }], third: [{ id: 'third-x' }] };
 const mk = (over = {}) => createDelegator({ agents: () => Object.keys(models), models: (id) => models[id], connected: () => true, blockedUntil: () => 0, windows: () => [], ...over });
 const current = { agent: 'claude', model: 'opus' };
 const pick = (d, fallbacks, cur = current) => d.nextModel({ fallbacks }, cur)?.model ?? null;
 
 test('nextModel: the first listed model with usage left, in the owner\'s order; none without a list', () => {
-  const list = [{ agent: 'codex', model: 'gpt-mini' }, { agent: 'codex', model: 'gpt-a' }, { agent: 'antigravity', model: 'gemini-x' }];
+  const list = [{ agent: 'codex', model: 'gpt-mini' }, { agent: 'codex', model: 'gpt-a' }, { agent: 'third', model: 'third-x' }];
   const d = mk();
   assert.deepEqual(d.nextModel({ fallbacks: JSON.stringify(list) }, current), { agent: 'codex', model: 'gpt-mini', rank: 1, reason: "owner's fallback #1" });
   assert.equal(pick(d, null), null, 'no list: the task waits');
@@ -25,23 +26,10 @@ test('nextModel: the first listed model with usage left, in the owner\'s order; 
   assert.equal(pick(d, [{ agent: 'claude', model: 'opus' }, ...list]), 'gpt-mini', 'the current model is skipped');
   assert.equal(pick(d, [{ agent: 'claude', model: 'opus' }], { agent: 'claude', model: null }), null, "a route without a model is the agent's default");
   assert.equal(pick(mk({ windows: (a, m) => m === 'gpt-mini' ? [{ pct: 95 }] : [] }), list), 'gpt-a', 'a window at ≥90% counts as limited');
-  assert.equal(pick(mk({ blockedUntil: (a) => a === 'codex' ? 123 : 0 }), list), 'gemini-x');
-  assert.equal(pick(mk({ connected: (a) => a !== 'codex' }), list), 'gemini-x');
+  assert.equal(pick(mk({ blockedUntil: (a) => a === 'codex' ? 123 : 0 }), list), 'third-x');
+  assert.equal(pick(mk({ connected: (a) => a !== 'codex' }), list), 'third-x');
   assert.equal(pick(d, [{ agent: 'codex', model: 'gone' }, { agent: 'nope', model: 'x' }]), null, 'unknown models and agents are skipped');
   assert.equal(parseFallbacks('bad'), null);
-});
-
-test('delegator: antigravity groups are independent: a Gemini block or full Gemini window keeps third-party models', () => {
-  const grp = (m) => (/^gemini/.test(m || '') ? 'gemini' : '3p');
-  const ids = (d) => d.available().map((m) => `${m.agent}/${m.model}`);
-  const list = [{ agent: 'antigravity', model: 'gemini-x' }, { agent: 'antigravity', model: 'claude-sonnet-4-6' }];
-  let d = mk({ blockedUntil: (id, m) => (id === 'antigravity' && grp(m) === 'gemini' ? 123 : 0) });
-  assert.deepEqual(ids(d), ['claude/opus', 'codex/gpt-a', 'codex/gpt-mini', 'antigravity/claude-sonnet-4-6']);
-  assert.equal(d.hasUsage('antigravity', 'gemini-x'), false);
-  assert.equal(pick(d, list), 'claude-sonnet-4-6');
-  d = mk({ windows: (id, m) => (id === 'antigravity' ? [{ window: `${grp(m)}-5h`, pct: grp(m) === '3p' ? 95 : 10 }] : []) });
-  assert.deepEqual(ids(d), ['claude/opus', 'codex/gpt-a', 'codex/gpt-mini', 'antigravity/gemini-x']);
-  assert.equal(pick(d, list.slice(1)), null);
 });
 
 // ---- orchestrator integration: a child process (createOrchestrator starts timers) with Claude blocked.
@@ -62,7 +50,6 @@ test('a queued task moves to its first available fallback when its primary is li
       const [dataDir, root] = process.argv.slice(1);
       setModelCatalog('claude', { models: [{ id: 'opus', default: true }], error: null, at: 1 });
       setModelCatalog('codex', { models: [{ id: 'gpt-a' }, { id: 'gpt-mini' }], error: null, at: 1 });
-      setModelCatalog('antigravity', { models: [], error: null, at: 1 });
       let claude = 0;
       const query = () => (async function* () { claude++; yield { type: 'result', subtype: 'success', result: 'AGENT-ORCH-STATUS: done — ok', session_id: 's', num_turns: 1 }; })();
       const chat = [];
@@ -75,10 +62,10 @@ test('a queued task moves to its first available fallback when its primary is li
       const task = (n, origin, fallbacks = null) => Number(db.prepare('INSERT INTO tasks(project_id,title,prompt,origin,fallbacks,created_at) VALUES(?,?,?,?,?,0)')
         .run(pid(n), 'Fix the parser bug', 'code', origin, fallbacks).lastInsertRowid);
       const list = JSON.stringify([{ agent: 'codex', model: 'gpt-a' }]);
-      // curated: its first fallback (antigravity) is not connected, so it moves to the second.
+      // curated: its first fallback is a model codex doesn't list, so it moves to the second.
       const ids = { reflect: task('a', 'reflection', list), chat: task('b', 'chat', list), nolist: task('g', 'chat'), empty: task('f', 'chat', '[]'),
         curated: task('e', 'chat', list) };
-      o.setTaskFallbacks(ids.curated, [{ agent: 'antigravity', model: 'gemini-x' }, { agent: 'codex', model: 'gpt-mini' }]);
+      o.setTaskFallbacks(ids.curated, [{ agent: 'codex', model: 'gone' }, { agent: 'codex', model: 'gpt-mini' }]);
       db.prepare("UPDATE projects SET convo_id='cb' WHERE name='b'").run();
       const get = (id) => db.prepare('SELECT * FROM tasks WHERE id=?').get(id);
       await until(() => ['reflect', 'chat', 'curated'].every((k) => get(ids[k]).status === 'done'));
@@ -136,7 +123,7 @@ test("a chat's fallback list is snapshotted onto the tasks its messages queue (l
       })();
       const convo = { id: 'c1', cwd: proj, fallbacks: [{ agent: 'codex', model: 'gpt-a' }] };
       const o = createOrchestrator({ config: { pollMs: 100 }, query, dataDir, claudeEnv: { PATH: process.env.PATH, HOME: process.env.HOME }, getLimits: () => [], onSubscription: () => true,
-        broadcast() {}, emitChat() {}, convoExists: () => true, convoFallbacks: () => [{ agent: 'antigravity', model: 'gemini-x' }] });
+        broadcast() {}, emitChat() {}, convoExists: () => true, convoFallbacks: () => [{ agent: 'codex', model: 'gpt-mini' }] });
       await o.planTurn(convo, 'FIRST');
       const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
       const pid = db.prepare('SELECT id FROM projects').get().id;
@@ -152,7 +139,7 @@ test("a chat's fallback list is snapshotted onto the tasks its messages queue (l
     const rows = JSON.parse(stdout.trim().split('\n').pop());
     assert.deepEqual(rows.map((r) => [r.title, JSON.parse(r.fallbacks)]), [
       ['Task one', [{ agent: 'codex', model: 'gpt-a' }]],
-      ['Task two', [{ agent: 'antigravity', model: 'gemini-x' }]],
+      ['Task two', [{ agent: 'codex', model: 'gpt-mini' }]],
     ]);
   } finally {
     for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });

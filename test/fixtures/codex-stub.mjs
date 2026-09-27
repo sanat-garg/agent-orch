@@ -12,10 +12,14 @@ if (process.argv[2] === 'login' && process.argv[3] === 'status') {
   process.exit(0);
 }
 
-// `debug models`: a trimmed catalog recorded from codex-cli 0.157.0 (codex-models.json); CODEX_STUB_MODELS=fail errors out.
+// `debug models`: a trimmed catalog recorded from codex-cli 0.157.0 (codex-models.json); CODEX_STUB_MODELS=fail errors out,
+// =wide adds two more listed models (for UI tests that need several fallbacks).
 if (process.argv[2] === 'debug' && process.argv[3] === 'models') {
   if (process.env.CODEX_STUB_MODELS === 'fail') { process.stderr.write('Error: failed to refresh the model catalog: 503 Service Unavailable\n'); process.exit(1); }
-  process.stdout.write(fs.readFileSync(new URL('./codex-models.json', import.meta.url), 'utf8'));
+  const catalog = JSON.parse(fs.readFileSync(new URL('./codex-models.json', import.meta.url), 'utf8'));
+  if (process.env.CODEX_STUB_MODELS === 'wide') catalog.models.push({ slug: 'gpt-6-nova', display_name: 'GPT-6-Nova', visibility: 'list', priority: 4 },
+    { slug: 'gpt-6-lumen', display_name: 'GPT-6-Lumen', visibility: 'list', priority: 5 });
+  process.stdout.write(JSON.stringify(catalog));
   process.exit(0);
 }
 

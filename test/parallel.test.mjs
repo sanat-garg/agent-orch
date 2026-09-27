@@ -74,10 +74,10 @@ describe('agent spreading (spreadAssign)', () => {
     const ready = [
       { task: 1, options: opts([{ agent: 'codex', model: 'gpt-a' }]) },
       { task: 2, options: opts([{ agent: 'codex', model: 'gpt-a' }]) },
-      { task: 3, options: opts([{ agent: 'antigravity', model: 'g' }, { agent: 'codex', model: 'gpt-a' }]) },
+      { task: 3, options: opts([{ agent: 'third', model: 'g' }, { agent: 'codex', model: 'gpt-a' }]) },
       { task: 4, options: opts([]) },
     ];
-    const got = spreadAssign(ready, { slotsFree: (a) => ({ claude: 1, codex: 2, antigravity: 1 })[a], hasUsage: (a) => a !== 'antigravity' });
+    const got = spreadAssign(ready, { slotsFree: (a) => ({ claude: 1, codex: 2, third: 1 })[a], hasUsage: (a) => a !== 'third' }); // 'third': a stand-in agent id
     assert.deepEqual(got.map((g) => [g.task, g.agent, g.spilled]), [[1, 'claude', false], [2, 'codex', true], [3, 'codex', true]]);
     // With room on the primary nothing spills.
     assert.deepEqual(spreadAssign(ready.slice(0, 2), { slotsFree: () => 5, hasUsage: () => true }).map((g) => g.agent), ['claude', 'claude']);

@@ -1,11 +1,11 @@
-// agents.mjs: the adapter registry and each adapter's event normalisation (claude via a fake SDK stream, codex and antigravity via stub binaries).
+// agents.mjs: the adapter registry and each adapter's event normalisation (claude via a fake SDK stream, codex via a stub binary).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AGENTS, runAgentCli, codexResetsAt, codexWindows, codexRolloutState, codexLatestSnapshot, isMissingSession, agyGroup, windowGroup, limitScope, limitScopes, scopeWindows } from '../agents.mjs';
+import { AGENTS, runAgentCli, codexResetsAt, codexWindows, codexRolloutState, codexLatestSnapshot, isMissingSession, limitScope, limitScopes, windowLabel } from '../agents.mjs';
 import { createUsageLog } from '../usage.mjs';
 
 const fakeQuery = (msgs, seen = {}) => (args) => { Object.assign(seen, args); return (async function* () { for (const m of msgs) yield m; })(); };
@@ -273,197 +273,10 @@ test('codex: background commands left by a clean run are killed (SIGKILL for one
   assert.ok(!alive(stubborn), 'SIGTERM-ignoring member survived the SIGKILL follow-up');
 });
 
-// ---- antigravity: runs test/fixtures/agy-stub.mjs, which prints recorded `agy --output-format stream-json` events.
-
-const AGY = fileURLToPath(new URL('./fixtures/agy-stub.mjs', import.meta.url));
-const noSettings = '/nonexistent/agy-settings.json';
-const AGY_WINDOWS = [
-  { window: 'gemini-weekly', pct: 0.13, resetsAt: Date.parse('2026-09-26T22:58:53Z') / 1000 },
-  { window: 'gemini-5h', pct: 0, resetsAt: Date.parse('2026-09-25T18:36:12Z') / 1000 },
-  { window: '3p-weekly', pct: 0, resetsAt: Date.parse('2026-10-02T13:36:12Z') / 1000 },
-  { window: '3p-5h', pct: 0, resetsAt: Date.parse('2026-09-25T18:36:12Z') / 1000 },
-];
-
-test('antigravity: NDJSON events become normalised text/tool/result events; API vars are stripped', async () => {
-  const dir = tmp(), log = path.join(dir, 'log.json'), events = [];
-  const res = await runAgentCli({
-    agent: 'antigravity', bin: AGY, model: 'gemini-3.8-flash-high', prompt: 'say hello', systemAppend: 'extra', cwd: dir, settingsPath: noSettings,
-    env: { PATH: process.env.PATH, AGY_STUB: 'ok', AGY_STUB_LOG: log, GEMINI_API_KEY: 'g', GOOGLE_API_KEY: 'k', GOOGLE_GENAI_USE_VERTEXAI: '1',
-      GOOGLE_APPLICATION_CREDENTIALS: '/c.json', GOOGLE_CLOUD_PROJECT: 'p', AGY_ADC_AUTH: '1' },
-    onEvent: (e) => events.push(e),
-  });
-  assert.deepEqual(events.map(({ lines, ...e }) => e), [
-    { k: 'text', text: 'Sure, looking' },
-    { k: 'tool', id: '2', name: 'Bash', input: { command: 'echo hello' } },
-    { k: 'tool_result', id: '2', text: 'hello\n', isError: false },
-    { k: 'tool', id: '3', name: 'view_file', input: { file_path: '/x/a.js' } },
-    { k: 'tool_result', id: '3', text: 'no such file', isError: true },
-    { k: 'text', text: 'hello' },
-    { k: 'result', usage: { input_tokens: 10418, output_tokens: 589, thinking_tokens: 551, cache_read_tokens: 8113, total_tokens: 11007 } },
-    { k: 'windows', windows: AGY_WINDOWS },
-  ]);
-  assert.equal(res.outcome, 'ok');
-  assert.equal(res.text, 'hello');
-  // The windows come from a follow-up `agy -p /usage` (the recorded agy-usage.jsonl), one 5h + weekly pair per model group.
-  assert.deepEqual(res.windows, AGY_WINDOWS);
-  assert.equal(res.sessionId, '3f0c9a2e-agy');
-  assert.equal(res.numTurns, 1);
-  assert.equal(res.usage.total_tokens, 11007);
-  const seen = JSON.parse(fs.readFileSync(log, 'utf8'));
-  assert.equal(fs.realpathSync(seen.cwd), fs.realpathSync(dir));
-  assert.deepEqual(seen.argv, ['-p', 'extra\n\nsay hello', '--output-format', 'stream-json', '--print-timeout', '0',
-    '--model', 'gemini-3.8-flash-high', '--dangerously-skip-permissions']);
-  // Billing stays on the Google account login: API-key / Vertex / ADC vars never reach the CLI.
-  for (const k of ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_GENAI_USE_VERTEXAI', 'GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_CLOUD_PROJECT', 'AGY_ADC_AUTH']) assert.ok(!(k in seen.env), k);
-  assert.equal(seen.env.AGY_STUB, 'ok');
-});
-
-test('antigravity: resume passes --conversation; non-autonomous drops the skip-permissions flag', async () => {
-  const dir = tmp(), log = path.join(dir, 'log.json');
-  const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'more', cwd: dir, resume: 'abc', autonomous: false, settingsPath: noSettings,
-    env: { PATH: process.env.PATH, AGY_STUB: 'ok', AGY_STUB_LOG: log } });
-  assert.equal(res.outcome, 'ok');
-  assert.deepEqual(JSON.parse(fs.readFileSync(log, 'utf8')).argv, ['-p', 'more', '--output-format', 'stream-json', '--print-timeout', '0', '--conversation', 'abc']);
-});
-
-test('antigravity: a tool headless agy denied is reported, not a silent empty success', async () => {
-  // Recorded live (2026-09-26, gemini-3.1-pro-high, autonomous: false): the denied run_command looks DONE with no output
-  // and the turn ends SUCCESS with an empty response; only result.denied_actions says what happened.
-  const events = [];
-  const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'run echo', cwd: tmp(), autonomous: false,
-    settingsPath: noSettings, usageProbe: false, env: { PATH: process.env.PATH, AGY_STUB: 'denied' }, onEvent: (e) => events.push(e) });
-  assert.equal(res.outcome, 'ok');
-  assert.match(res.text, /^Antigravity denied RunCommand without asking: .*--dangerously-skip-permissions/);
-  assert.deepEqual(events.filter((e) => e.k === 'text').map((e) => e.text), [res.text]);
-  assert.deepEqual(events.find((e) => e.k === 'tool'), { k: 'tool', id: '2', name: 'Bash', input: { command: 'echo DENY_PROBE_42' } });
-});
-
-test('antigravity: recorded file tools retain paths, native errors and successful reads', async () => {
-  // Live read-only control: absent file followed by an existing file (2026-09-25).
-  const events = [];
-  const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'read files', cwd: tmp(),
-    settingsPath: noSettings, usageProbe: false, env: { PATH: process.env.PATH, AGY_STUB: 'file-tools' },
-    onEvent: (e) => events.push(e) });
-  assert.equal(res.outcome, 'ok'); // a recoverable tool error does not fail the turn
-  assert.deepEqual(events.filter((e) => e.k === 'tool'), [
-    { k: 'tool', id: '2', name: 'view_file', input: { file_path: '/workspace/missing.txt' } },
-    { k: 'tool', id: '4', name: 'view_file', input: { file_path: '/workspace/present.txt' } },
-  ]);
-  const results = events.filter((e) => e.k === 'tool_result');
-  assert.equal(results.length, 2);
-  assert.equal(results[0].id, '2');
-  assert.equal(results[0].isError, true);
-  assert.equal(results[0].text, 'declaring permissions: cortex tool view_file: convert tool call for permissions: model output error: invalid tool call error (invalid_args) failed to read file: stat /workspace/missing.txt: no such file or directory');
-  assert.deepEqual(results[1], { k: 'tool_result', id: '4', text: '2 lines, 24 bytes', isError: false, lines: 1 });
-  assert.match(res.text, /ANTIGRAVITY_READ_OK_134/);
-});
-
-test('antigravity: recorded write/edit tools keep their TargetFile path; search tools keep theirs', async () => {
-  // Live gemini-3.1-pro-high run (2026-09-26, #148): write_to_file and replace_file_content only carry TargetFile.
-  const events = [];
-  const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'edit', cwd: tmp(), settingsPath: noSettings, usageProbe: false,
-    env: { PATH: process.env.PATH, AGY_STUB: 'edit-tools' }, onEvent: (e) => events.push(e) });
-  assert.equal(res.outcome, 'ok');
-  assert.deepEqual(events.filter((e) => e.k === 'tool'), [
-    { k: 'tool', id: '4', name: 'write_to_file', input: { file_path: '/workspace/notes/new.txt' } },
-    { k: 'tool', id: '5', name: 'replace_file_content', input: { file_path: '/workspace/math.mjs' } },
-  ]);
-  assert.deepEqual(events.filter((e) => e.k === 'tool_result').map((e) => [e.id, e.isError]), [['4', false], ['5', false]]);
-  const tool = (tool_name, parameters) => [...AGENTS.antigravity.events({ event: 'step_update', step_update: { step_index: 1, state: 'ACTIVE', step_type: 'tool', tool_name, tool_info: { parameters } } })][0].input;
-  assert.deepEqual(tool('grep_search', { SearchPath: '/w/src', Query: 'export', IsRegex: false }), { path: '/w/src', query: 'export' });
-  assert.deepEqual(tool('find_by_name', { SearchDirectory: '/w', Pattern: '*.mjs' }), { path: '/w', pattern: '*.mjs' });
-  assert.deepEqual(tool('list_dir', { DirectoryPath: '/w' }), { path: '/w' });
-});
-
-test('antigravity: resuming a missing conversation is errorCode no_session', async () => {
-  const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'more', cwd: tmp(), resume: '9', settingsPath: noSettings,
-    env: { PATH: process.env.PATH, AGY_STUB: 'nosession' } });
-  assert.equal(res.outcome, 'error');
-  assert.equal(res.errorCode, 'no_session');
-  assert.ok(isMissingSession(res));
-});
-
-test('antigravity: a RESOURCE_EXHAUSTED result is rate_limited with resetsAt', async () => {
-  const events = [];
-  const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'hi', cwd: tmp(), settingsPath: noSettings,
-    env: { PATH: process.env.PATH, AGY_STUB: 'limit' }, onEvent: (e) => events.push(e) });
-  const reset = Date.parse('2030-01-01T00:00:00Z') / 1000;
-  assert.equal(res.outcome, 'rate_limited');
-  assert.equal(res.errorCode, 'rate_limit');
-  assert.equal(res.resetsAt, reset);
-  assert.match(res.text, /RESOURCE_EXHAUSTED/);
-  assert.deepEqual(events, [{ k: 'limit', resetsAt: reset }, { k: 'windows', windows: AGY_WINDOWS }]);
-  assert.equal(res.limitType, null); // no bucket is empty in the recorded /usage
-});
-
-test('antigravity: an empty /usage bucket names the limit window; usageProbe false skips the probe', async () => {
-  const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'hi', cwd: tmp(), settingsPath: noSettings,
-    env: { PATH: process.env.PATH, AGY_STUB: 'limit', AGY_STUB_USAGE: 'exhausted' } });
-  assert.equal(res.outcome, 'rate_limited');
-  assert.equal(res.limitType, 'gemini-5h');
-  assert.equal(res.resetsAt, Date.parse('2030-01-01T00:00:00Z') / 1000); // the error's own hint wins
-  assert.deepEqual(res.windows.find((w) => w.window === 'gemini-5h'), { window: 'gemini-5h', pct: 100, resetsAt: Date.parse('2026-09-25T18:36:12Z') / 1000 });
-  const off = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'hi', cwd: tmp(), settingsPath: noSettings, usageProbe: false,
-    env: { PATH: process.env.PATH, AGY_STUB: 'ok' } });
-  assert.equal(off.outcome, 'ok');
-  assert.equal(off.windows, null);
-});
-
-test('antigravity: stderr mentioning quota does not make a failed run a limit', async () => {
-  const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'hi', cwd: tmp(), settingsPath: noSettings,
-    env: { PATH: process.env.PATH, AGY_STUB: 'quota-log' } });
-  assert.equal(res.outcome, 'error');
-  assert.equal(res.resetsAt, null);
-});
-
-test('antigravity: a signed-out CLI waiting on OAuth is killed at once as auth_error', async () => {
-  const t0 = Date.now();
-  const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'hi', cwd: tmp(), settingsPath: noSettings, env: { PATH: process.env.PATH, AGY_STUB: 'auth' } });
-  assert.equal(res.outcome, 'auth_error');
-  assert.equal(res.errorCode, 'authentication_failed');
-  assert.ok(Date.now() - t0 < 5000);
-});
-
-test('antigravity: API-key mode in settings.json is refused without spawning', async () => {
-  const dir = tmp(), settingsPath = path.join(dir, 'settings.json'), log = path.join(dir, 'log.json');
-  fs.writeFileSync(settingsPath, JSON.stringify({ modelProvider: 'gemini' }));
-  const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'hi', cwd: dir, settingsPath, env: { PATH: process.env.PATH, AGY_STUB: 'ok', AGY_STUB_LOG: log } });
-  assert.equal(res.outcome, 'auth_error');
-  assert.match(res.text, /API-key mode/);
-  assert.ok(!fs.existsSync(log));
-});
-
-test('antigravity: abort kills the process group and ends with outcome aborted', async () => {
-  const dir = tmp(), pids = path.join(dir, 'pids'), ac = new AbortController();
-  const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'hi', cwd: dir, signal: ac.signal, settingsPath: noSettings,
-    env: { PATH: process.env.PATH, AGY_STUB: 'hang', AGY_STUB_PIDS: pids }, onEvent: (e) => { if (e.k === 'tool') ac.abort(); } });
-  assert.equal(res.outcome, 'aborted');
-  const g = Number(fs.readFileSync(pids, 'utf8'));
-  for (let i = 0; i < 50 && alive(g); i++) await new Promise((r) => setTimeout(r, 20));
-  assert.ok(!alive(g), 'grandchild survived the abort');
-});
-
-test('antigravity: the model id picks the limit group (gemini-* → Gemini, anything else → third-party)', () => {
-  for (const m of ['gemini-3.8-flash-high', 'gemini-3.1-pro-low', 'Gemini-2.5-pro', null, undefined, '']) assert.equal(agyGroup(m), 'gemini', String(m));
-  for (const m of ['geminix', 'claude-sonnet-4-6', 'claude-opus-4-6-thinking', 'gpt-oss-120b-medium']) assert.equal(agyGroup(m), '3p', m);
-  assert.equal(limitScope('antigravity', 'claude-sonnet-4-6'), 'antigravity:3p');
-  assert.equal(limitScope('antigravity', 'gemini-3.8-flash-high'), 'antigravity:gemini');
-  assert.equal(limitScope('antigravity'), 'antigravity:gemini');
-  // Other agents have one limit whatever the model (Claude's own claude-sonnet-4-6 is not "third-party").
+test('limits: every agent is its own limit scope; windows get display names', () => {
   assert.equal(limitScope('claude', 'claude-sonnet-4-6'), 'claude');
   assert.equal(limitScope('codex', 'gpt-6-sol'), 'codex');
-  assert.deepEqual(limitScopes(['claude', 'codex', 'antigravity']), ['claude', 'codex', 'antigravity:gemini', 'antigravity:3p']);
-  assert.deepEqual(['gemini-5h', 'gemini-weekly', '3p-5h', '3p-weekly', '5h', 'five_hour'].map(windowGroup), ['gemini', 'gemini', '3p', '3p', null, null]);
-  assert.deepEqual(scopeWindows('antigravity:3p', AGY_WINDOWS).map((w) => w.window), ['3p-weekly', '3p-5h']);
-  assert.deepEqual(scopeWindows('antigravity:gemini', AGY_WINDOWS).map((w) => w.window), ['gemini-weekly', 'gemini-5h']);
-  assert.deepEqual(scopeWindows('codex', [{ window: '5h' }]), [{ window: '5h' }]);
-});
-
-test('antigravity: a limit names only an exhausted window in the model\'s own group', async () => {
-  // The recorded exhausted /usage has gemini-5h at 100%: a third-party run's limit isn't blamed on it.
-  const res = await runAgentCli({ agent: 'antigravity', bin: AGY, prompt: 'hi', cwd: tmp(), settingsPath: noSettings, model: 'claude-sonnet-4-6',
-    env: { PATH: process.env.PATH, AGY_STUB: 'limit', AGY_STUB_USAGE: 'exhausted' } });
-  assert.equal(res.outcome, 'rate_limited');
-  assert.equal(res.limitType, null);
-  assert.equal(res.windows.length, 4);
+  assert.equal(limitScope(), 'claude');
+  assert.deepEqual(limitScopes(['claude', 'codex']), ['claude', 'codex']);
+  assert.deepEqual(['five_hour', 'seven_day', '5h', 'weekly', 'seven_day_opus'].map(windowLabel), ['5-hour', 'Weekly', '5-hour', 'Weekly', 'Seven day opus']);
 });

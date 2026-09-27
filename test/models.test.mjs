@@ -5,8 +5,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AGENTS, agyModels, claudeModels, clearLoginCache, codexModels, discoverModels, modelCatalog, setModelCatalog } from '../agents.mjs';
-import { createModelStore } from '../models.mjs';
+import { AGENTS, claudeModels, clearLoginCache, codexModels, discoverModels, modelCatalog, setModelCatalog } from '../agents.mjs';
+import { createModelStore, MODELS_TTL } from '../models.mjs';
 
 const fixture = (f) => fileURLToPath(new URL(`./fixtures/${f}`, import.meta.url));
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'ao-models-'));
@@ -51,17 +51,6 @@ test('codex: `codex debug models` (stub) → listed models in priority order, hi
   assert.deepEqual(codexModels({}), []);
 });
 
-test('antigravity: `agy models` (stub) → id and display name per line', async () => {
-  const models = await AGENTS.antigravity.listModels({ bin: fixture('agy-stub.mjs') });
-  assert.deepEqual(models, [
-    { id: 'gemini-3.8-flash-high', label: 'Gemini 3.8 Flash (High)' },
-    { id: 'gemini-3.1-pro-high', label: 'Gemini 3.1 Pro (High)' },
-    { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6 (Thinking)' },
-  ]);
-  await assert.rejects(AGENTS.antigravity.listModels({ bin: fixture('agy-stub.mjs'), env: { ...process.env, AGY_STUB_LOGIN: 'out' } }), /Please sign in/);
-  assert.deepEqual(agyModels('Fetching available models...\n\n'), []);
-});
-
 test('discoverModels: signed out or failing → empty list with the reason', async (t) => {
   const bin = tmp(), path0 = process.env.PATH;
   fs.symlinkSync(fixture('codex-stub.mjs'), path.join(bin, 'codex'));
@@ -89,12 +78,12 @@ test('discoverModels: signed out or failing → empty list with the reason', asy
 
 test('model store: caches to models.json with a timestamp, reloads it, and refreshes on a timer and on demand', async (t) => {
   const dir = tmp(), file = path.join(dir, 'models.json');
-  t.after(() => { for (const id of ['codex', 'antigravity']) setModelCatalog(id, { models: [], error: 'loading', at: null }); fs.rmSync(dir, { recursive: true, force: true }); });
+  t.after(() => { for (const id of ['codex', 'claude']) setModelCatalog(id, { models: [], error: 'loading', at: null }); fs.rmSync(dir, { recursive: true, force: true }); });
   let n = 0;
-  const lists = { codex: [{ id: 'gpt-6-sol', label: 'GPT-6-Sol' }], antigravity: [] };
+  const lists = { codex: [{ id: 'gpt-6-sol', label: 'GPT-6-Sol' }], claude: [] };
   const discover = async (id) => { n++; return lists[id].length ? { models: lists[id], error: null, at: 1000 + n } : { models: [], error: 'not signed in', at: 1000 + n }; };
   const changes = [];
-  const store = createModelStore({ file, ids: ['codex', 'antigravity'], discover, intervalMs: 40, minGapMs: 0, onChange: (ids) => changes.push(ids) });
+  const store = createModelStore({ file, ids: ['codex', 'claude'], discover, intervalMs: 40, minGapMs: 0, onChange: (ids) => changes.push(ids) });
   assert.equal(modelCatalog('codex').error, 'loading');
   await store.start();
   t.after(() => store.stop());
@@ -102,13 +91,13 @@ test('model store: caches to models.json with a timestamp, reloads it, and refre
   assert.ok(saved.saved > 0);
   assert.deepEqual(saved.agents.codex.models, lists.codex);
   assert.ok(saved.agents.codex.at);
-  assert.deepEqual(saved.agents.antigravity, { models: [], error: 'not signed in', at: saved.agents.antigravity.at });
-  assert.deepEqual(changes[0], ['codex', 'antigravity']);
+  assert.deepEqual(saved.agents.claude, { models: [], error: 'not signed in', at: saved.agents.claude.at });
+  assert.deepEqual(changes.slice(0, 2), [['codex'], ['claude']]); // one agent at a time
   // A sign-in refreshes just that agent.
-  lists.antigravity = [{ id: 'gemini-3.8-flash-high', label: 'Gemini 3.8 Flash (High)' }];
-  await store.refresh(['antigravity']);
-  assert.deepEqual(modelCatalog('antigravity').models.map((m) => m.id), ['gemini-3.8-flash-high']);
-  assert.deepEqual(changes.at(-1), ['antigravity']);
+  lists.claude = [{ id: 'opus', label: 'Opus' }];
+  await store.refresh(['claude']);
+  assert.deepEqual(modelCatalog('claude').models.map((m) => m.id), ['opus']);
+  assert.deepEqual(changes.at(-1), ['claude']);
   // The periodic refresh keeps running.
   const before = n;
   await new Promise((r) => setTimeout(r, 150));
@@ -141,4 +130,21 @@ test('model store: at most one discovery per agent per minimum gap; an early req
   await again.start();
   again.stop();
   assert.equal(n, 2);
+});
+
+test('model store: a cached list younger than a day is not rediscovered at boot; an older one is', async (t) => {
+  const dir = tmp(), file = path.join(dir, 'models.json');
+  t.after(() => { for (const id of ['codex', 'claude']) setModelCatalog(id, { models: [], error: 'loading', at: null }); fs.rmSync(dir, { recursive: true, force: true }); });
+  const now = Date.now();
+  fs.writeFileSync(file, JSON.stringify({ agents: { codex: { models: [{ id: 'old', label: 'Old' }], error: null, at: now - 25 * 3600e3 },
+    claude: { models: [{ id: 'opus', label: 'Opus' }], error: null, at: now - 3600e3 } } }));
+  const asked = [];
+  const store = createModelStore({ file, ids: ['codex', 'claude'], discover: async (id) => { asked.push(id); return { models: [{ id: 'new', label: 'New' }], error: null, at: Date.now() }; } });
+  t.after(() => store.stop());
+  assert.equal(MODELS_TTL, 24 * 3600e3);
+  await store.start();
+  assert.deepEqual(asked, ['codex']);
+  assert.deepEqual(modelCatalog('claude').models.map((m) => m.id), ['opus']);
+  await store.refreshStale();
+  assert.deepEqual(asked, ['codex'], 'nothing is a day old now');
 });

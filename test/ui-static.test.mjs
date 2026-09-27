@@ -62,7 +62,9 @@ test('the sidebar usage card opens the Usage modal with per-agent charts', () =>
   assert.match(appJs, /usageCard\.addEventListener\('click', \(e\) => \{ if \(!e\.target\.closest\('#usRefresh'\)\) openUsage\(\); \}\)/, 'refresh button does not open the modal');
   assert.match(appJs, /e\.key !== 'Enter' && e\.key !== ' '/, 'Enter/Space open it');
   assert.match(appJs, /api\(`\/api\/usage\/history\?range=\$\{range\}`\)/);
-  assert.match(appJs, /U\.timer = setInterval\(loadUsageHistory, 60e3\)/, 'live refresh while open');
+  // No polling (owner, 2026-09-27: CPU): the modal loads on open and on a range change; limits refresh one agent on click.
+  assert.doesNotMatch(appJs, /setInterval\(loadUsageHistory/, 'no live refresh timer');
+  assert.match(appJs, /api\(`\/api\/limits\/\$\{usageSlides\.agent\}\/refresh`, 'POST'\)/, 'the card refreshes the one agent it shows');
   assert.match(appJs, /openConnections\(id\)/);
 });
 

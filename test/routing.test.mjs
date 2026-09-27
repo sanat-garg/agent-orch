@@ -14,8 +14,8 @@ const project = { id: 1, model: 'sonnet' };
 const all = () => true;
 const routes = [
   { id: 1, project_id: 1, match: 'tests', agent: 'codex', model: 'gpt-5-codex' },
-  { id: 2, project_id: null, match: 'tests', agent: 'antigravity', model: null },
-  { id: 3, project_id: null, match: 'ui', agent: 'antigravity', model: 'gemini-3.8-flash-high' },
+  { id: 2, project_id: null, match: 'tests', agent: 'codex', model: null },
+  { id: 3, project_id: null, match: 'ui', agent: 'codex', model: 'gpt-6-sol' },
   { id: 4, project_id: 2, match: 'docs', agent: 'codex', model: null },
   { id: 5, project_id: null, match: 'reflect', agent: null, model: 'opus' },
 ];
@@ -28,9 +28,9 @@ test('a task with no explicit agent picks the matching project route first', () 
 
 test('then the matching global route', () => {
   const r = resolveRoute(task('Polish the UI header'), project, routes, all);
-  assert.deepEqual(r, { agent: 'antigravity', model: 'gemini-3.8-flash-high', source: 'global', routeId: 3 });
+  assert.deepEqual(r, { agent: 'codex', model: 'gpt-6-sol', source: 'global', routeId: 3 });
   // With the project route gone, 'tests' falls through to its global route.
-  assert.equal(resolveRoute(task('Write tests'), project, routes.slice(1), all).agent, 'antigravity');
+  assert.deepEqual(resolveRoute(task('Write tests'), project, routes.slice(1), all), { agent: 'codex', model: null, source: 'global', routeId: 2 });
 });
 
 test('then the project default (Claude on project.model)', () => {
@@ -42,7 +42,7 @@ test('then the project default (Claude on project.model)', () => {
 
 test('explicit task fields win over routes', () => {
   assert.deepEqual(resolveRoute(task('Add tests', { agent: 'claude', model: 'opus' }), project, routes, all), { agent: 'claude', model: 'opus', source: 'task' });
-  assert.deepEqual(resolveRoute(task('Add tests', { agent: 'antigravity' }), project, routes, all), { agent: 'antigravity', model: null, source: 'task' });
+  assert.deepEqual(resolveRoute(task('Add tests', { agent: 'codex' }), project, routes, all), { agent: 'codex', model: null, source: 'task' });
   // A model alone implies its agent; an unknown model stays on Claude.
   assert.equal(resolveRoute(task('Add tests', { model: 'gpt-5' }), project, routes, all).agent, 'codex');
   assert.deepEqual(resolveRoute(task('Add tests', { model: 'haiku' }), project, routes, all), { agent: 'claude', model: 'haiku', source: 'task' });
@@ -54,12 +54,12 @@ test('routes match a task kind; a model-only route keeps Claude', () => {
 });
 
 test('a model not in any list implies its agent by family; a foreign model is dropped', () => {
-  const gem = [{ id: 7, project_id: null, match: 'ui', agent: null, model: 'gemini-2.5-pro' }];
-  assert.deepEqual(resolveRoute(task('Polish the UI'), project, gem, all),
-    { agent: 'antigravity', model: 'gemini-2.5-pro', source: 'global', routeId: 7 });
-  // With antigravity unavailable, Claude runs its own default, never gemini-2.5-pro.
-  const r = resolveRoute(task('Polish the UI'), project, gem, (id) => id !== 'antigravity');
-  assert.deepEqual(r, { agent: 'claude', model: 'sonnet', source: 'global', fellBack: 'antigravity', reason: 'not available' });
+  const gpt = [{ id: 7, project_id: null, match: 'ui', agent: null, model: 'gpt-5' }];
+  assert.deepEqual(resolveRoute(task('Polish the UI'), project, gpt, all),
+    { agent: 'codex', model: 'gpt-5', source: 'global', routeId: 7 });
+  // With codex unavailable, Claude runs its own default, never gpt-5.
+  const r = resolveRoute(task('Polish the UI'), project, gpt, (id) => id !== 'codex');
+  assert.deepEqual(r, { agent: 'claude', model: 'sonnet', source: 'global', fellBack: 'codex', reason: 'not available' });
   assert.equal(resolveRoute(task('x', { model: 'o3' }), project, [], all).agent, 'codex');
   assert.equal(resolveRoute(task('x', { model: 'claude-sonnet-4' }), project, [], all).agent, 'claude');
   // codex + opus → codex on its default model, noted.
@@ -68,50 +68,48 @@ test('a model not in any list implies its agent by family; a foreign model is dr
   assert.equal(routeNote(m), 'model opus is not a codex model, used the default');
   assert.equal(routeNote({ agent: 'claude', fellBack: 'codex', reason: 'not installed' }), 'codex not installed, ran on Claude');
   assert.equal(routeNote({ agent: 'claude', model: 'sonnet' }), null);
-  assert.deepEqual(resolveRoute(task('x', { agent: 'claude', model: 'gemini-2.5-pro' }), project, [], all),
-    { agent: 'claude', model: 'sonnet', source: 'task', dropped: 'gemini-2.5-pro' });
+  assert.deepEqual(resolveRoute(task('x', { agent: 'claude', model: 'gpt-5' }), project, [], all),
+    { agent: 'claude', model: 'sonnet', source: 'task', dropped: 'gpt-5' });
 });
 
 test('discovered model lists decide the agent and drop a model the agent does not list', (t) => {
   const at = Date.now();
   setModelCatalog('claude', { models: [{ id: 'opus', label: 'Opus 5.5', resolved: 'claude-opus-5-5' }], error: null, at });
-  setModelCatalog('codex', { models: [{ id: 'gpt-6-sol', label: 'GPT-6-Sol' }], error: null, at });
-  setModelCatalog('antigravity', { models: [{ id: 'gemini-3.8-flash-high', label: 'Gemini 3.8 Flash (High)' }, { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' }], error: null, at });
-  t.after(() => { for (const id of ['claude', 'codex', 'antigravity']) setModelCatalog(id, { models: [], error: 'loading', at: null }); });
-  // A listed model names its agent even against the family guess (agy serves some Claude models).
-  assert.equal(resolveRoute(task('x', { model: 'claude-sonnet-4-6' }), project, [], all).agent, 'antigravity');
+  setModelCatalog('codex', { models: [{ id: 'gpt-6-sol', label: 'GPT-6-Sol' }, { id: 'sol-mini', label: 'Sol Mini' }], error: null, at });
+  t.after(() => { for (const id of ['claude', 'codex']) setModelCatalog(id, { models: [], error: 'loading', at: null }); });
+  // A listed model names its agent even when its name matches no family.
+  assert.equal(resolveRoute(task('x', { model: 'sol-mini' }), project, [], all).agent, 'codex');
   // An alias's resolved id counts as listed.
   assert.deepEqual(resolveRoute(task('x', { model: 'claude-opus-5-5' }), project, [], all), { agent: 'claude', model: 'claude-opus-5-5', source: 'task' });
   // Unlisted on an agent with a known list: the agent runs its default model instead.
   assert.deepEqual(resolveRoute(task('x', { agent: 'codex', model: 'gpt-5-codex' }), project, [], all), { agent: 'codex', model: null, source: 'task', dropped: 'gpt-5-codex' });
-  assert.deepEqual(resolveRoute(task('x', { model: 'gemini-2.5-pro' }), project, [], all), { agent: 'antigravity', model: null, source: 'task', dropped: 'gemini-2.5-pro' });
   assert.deepEqual(resolveRoute(task('x', { agent: 'codex', model: 'gpt-6-sol' }), project, [], all), { agent: 'codex', model: 'gpt-6-sol', source: 'task' });
 });
 
 test('an explicit agent keeps a model its own list names, even when another agent lists it too', (t) => {
-  // #149: claude-sonnet-4-6 is in both Claude's and agy's lists; an antigravity task asking for it ran agy's default model.
+  // #149: a model in two agents' lists made an explicit agent run its default model instead.
   const at = Date.now();
-  setModelCatalog('claude', { models: [{ id: 'sonnet' }, { id: 'claude-sonnet-4-6' }], error: null, at });
-  setModelCatalog('antigravity', { models: [{ id: 'gemini-3.1-pro-high' }, { id: 'claude-sonnet-4-6' }], error: null, at });
-  t.after(() => { for (const id of ['claude', 'antigravity']) setModelCatalog(id, { models: [], error: 'loading', at: null }); });
-  const r = resolveRoute(task('x', { agent: 'antigravity', model: 'claude-sonnet-4-6' }), project, [], all);
-  assert.deepEqual(r, { agent: 'antigravity', model: 'claude-sonnet-4-6', source: 'task' });
+  setModelCatalog('claude', { models: [{ id: 'sonnet' }, { id: 'shared-model' }], error: null, at });
+  setModelCatalog('codex', { models: [{ id: 'gpt-6-sol' }, { id: 'shared-model' }], error: null, at });
+  t.after(() => { for (const id of ['claude', 'codex']) setModelCatalog(id, { models: [], error: 'loading', at: null }); });
+  const r = resolveRoute(task('x', { agent: 'codex', model: 'shared-model' }), project, [], all);
+  assert.deepEqual(r, { agent: 'codex', model: 'shared-model', source: 'task' });
   assert.equal(routeNote(r), null);
-  assert.deepEqual(resolveRoute(task('x', { agent: 'claude', model: 'claude-sonnet-4-6' }), project, [], all), { agent: 'claude', model: 'claude-sonnet-4-6', source: 'task' });
-  // A model-only route still goes to the first agent that lists it; a Gemini model on Claude is still dropped.
-  assert.equal(resolveRoute(task('x', { model: 'claude-sonnet-4-6' }), project, [], all).agent, 'claude');
-  assert.equal(resolveRoute(task('x', { agent: 'claude', model: 'gemini-3.1-pro-high' }), project, [], all).dropped, 'gemini-3.1-pro-high');
+  assert.deepEqual(resolveRoute(task('x', { agent: 'claude', model: 'shared-model' }), project, [], all), { agent: 'claude', model: 'shared-model', source: 'task' });
+  // A model-only route still goes to the first agent that lists it; another agent's model on Claude is still dropped.
+  assert.equal(resolveRoute(task('x', { model: 'shared-model' }), project, [], all).agent, 'claude');
+  assert.equal(resolveRoute(task('x', { agent: 'claude', model: 'gpt-6-sol' }), project, [], all).dropped, 'gpt-6-sol');
 });
 
 test('extractTasks strips a model that belongs to another agent, with a reason', () => {
   const block = { tasks: [{ title: 'T', prompt: 'p', agent: 'codex', model: 'opus' }],
-    routes: [{ match: 'ui', agent: 'codex', model: 'gemini-2.5-pro' }, { match: 'docs', model: 'gemini-2.5-pro' }] };
+    routes: [{ match: 'ui', agent: 'codex', model: 'sonnet' }, { match: 'docs', model: 'sonnet' }] };
   const [, payload] = extractTasks(`\`\`\`agent-orch-tasks\n${JSON.stringify(block)}\n\`\`\``);
   assert.equal(payload.tasks[0].agent, 'codex');
   assert.equal(payload.tasks[0].model, null);
-  assert.deepEqual(payload.routes.map((r) => [r.match, r.agent, r.model]), [['ui', 'codex', null], ['docs', null, 'gemini-2.5-pro']]);
+  assert.deepEqual(payload.routes.map((r) => [r.match, r.agent, r.model]), [['ui', 'codex', null], ['docs', null, 'sonnet']]);
   assert.equal(payload.dropped.length, 2);
-  assert.match(payload.dropped[1], /route 'ui': dropped model gemini-2.5-pro \(belongs to antigravity\) for agent codex/);
+  assert.match(payload.dropped[1], /route 'ui': dropped model sonnet \(belongs to claude\) for agent codex/);
 });
 
 test('an unavailable agent falls back to Claude and says which', () => {
@@ -156,8 +154,8 @@ test('routeMatches matches words, plurals and kinds, not substrings', () => {
 });
 
 test('normalizeAgent accepts aliases and rejects unknown agents', () => {
-  assert.equal(normalizeAgent('Gemini'), 'antigravity');
-  assert.equal(normalizeAgent('agy'), 'antigravity');
+  assert.equal(normalizeAgent('OpenAI'), 'codex');
+  assert.equal(normalizeAgent('claude-code'), 'claude');
   assert.equal(normalizeAgent('codex'), 'codex');
   assert.equal(normalizeAgent('cursor'), null);
   assert.equal(normalizeAgent(null), null);
@@ -172,7 +170,7 @@ test('extractTasks reads per-task agent/model and top-level routes', () => {
     routes: [
       { match: 'Tests', agent: 'codex' },
       { match: 'plan', model: 'opus', scope: 'global', note: 'owner: use opus for planning' },
-      { match: 'ui', agent: 'gemini', model: 'gemini-3.8-flash-high', scope: 'weird' },
+      { match: 'ui', agent: 'OpenAI', model: 'gpt-6-sol', scope: 'weird' },
       { match: 'nothing' },
       { agent: 'codex' },
       { remove: '#4' },
@@ -188,7 +186,7 @@ test('extractTasks reads per-task agent/model and top-level routes', () => {
   assert.deepEqual(payload.routes, [
     { match: 'tests', agent: 'codex', model: null, scope: 'project', note: null },
     { match: 'plan', agent: null, model: 'opus', scope: 'global', note: 'owner: use opus for planning' },
-    { match: 'ui', agent: 'antigravity', model: 'gemini-3.8-flash-high', scope: 'project', note: null },
+    { match: 'ui', agent: 'codex', model: 'gpt-6-sol', scope: 'project', note: null },
     { remove: 4 },
   ]);
   // A routes-only block still parses.

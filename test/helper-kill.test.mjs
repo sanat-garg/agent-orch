@@ -67,15 +67,16 @@ test('nothing outlives the parent: a SIGKILLed parent\'s helper tree is killed b
 
 test('single-flight: 5 concurrent discoveries of one agent spawn its CLI once', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'helper-sf-')), count = path.join(dir, 'count'), prev = process.env.PATH;
-  fs.symlinkSync(stub, path.join(dir, 'opencode'));
+  fs.symlinkSync(stub, path.join(dir, 'codex'));
   process.env.PATH = `${dir}:${prev}`;
-  t.after(() => { process.env.PATH = prev; clearLoginCache(); setModelCatalog('opencode', { models: [], error: 'reset', at: Date.now() }); fs.rmSync(dir, { recursive: true, force: true }); });
+  t.after(() => { process.env.PATH = prev; clearLoginCache(); setModelCatalog('codex', { models: [], error: 'reset', at: Date.now() }); fs.rmSync(dir, { recursive: true, force: true }); });
   const opts = { bin: stub, env: { ...process.env, TREE_STUB_COUNT: count }, home: dir };
-  const all = await Promise.all(Array.from({ length: 5 }, () => discoverModels('opencode', opts)));
+  clearLoginCache();
+  const all = await Promise.all(Array.from({ length: 5 }, () => discoverModels('codex', opts)));
   assert.equal(fs.readFileSync(count, 'utf8').split('\n').filter(Boolean).length, 1);
-  for (const e of all) assert.deepEqual(e.models.map((m) => m.id), ['opencode/big-pickle']);
+  for (const e of all) assert.deepEqual(e.models.map((m) => m.id), ['gpt-x']);
   // A later call starts a fresh discovery.
-  await discoverModels('opencode', opts);
+  await discoverModels('codex', opts);
   assert.equal(fs.readFileSync(count, 'utf8').split('\n').filter(Boolean).length, 2);
   let n = 0;
   await Promise.all([1, 2, 3].map(() => singleFlight('k', async () => { n++; })));

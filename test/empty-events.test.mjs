@@ -12,36 +12,6 @@ const DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures/em
 const read = (f) => fs.readFileSync(path.join(DIR, f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 const empty = (v) => v == null || v === '' || (typeof v === 'object' && !Object.values(v).some((x) => x != null && x !== '' && !(Array.isArray(x) && !x.length)));
 
-// A fake agy home holding what agy saves per step: brain/<id>/.system_generated/steps/<i>/output.txt and
-// conversations/<id>.db (steps.step_payload, protobuf: field 5.4.3 = the call's JSON args, 140.2.1 = its output).
-// Only some steps get an output.txt, so both sources are exercised.
-function pbEncode(fields) {
-  const varint = (n) => { const b = []; do { let c = n & 0x7f; n = Math.floor(n / 128); if (n) c |= 0x80; b.push(c); } while (n); return Buffer.from(b); };
-  return Buffer.concat(fields.map(([f, v]) => { const b = Buffer.isBuffer(v) ? v : Buffer.from(String(v)); return Buffer.concat([varint(f * 8 + 2), varint(b.length), b]); }));
-}
-function agyHome() {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-home-'));
-  const native = JSON.parse(fs.readFileSync(path.join(DIR, 'antigravity-native.json'), 'utf8'));
-  fs.mkdirSync(path.join(home, 'conversations'));
-  const { DatabaseSync } = process.getBuiltinModule('node:sqlite');
-  for (const [cid, steps] of Object.entries(native)) {
-    const db = new DatabaseSync(path.join(home, 'conversations', `${cid}.db`));
-    db.exec('CREATE TABLE steps (idx integer PRIMARY KEY, step_payload blob)');
-    for (const [i, s] of Object.entries(steps)) {
-      const payload = pbEncode([[1, 'x'], [5, pbEncode([[4, pbEncode([[1, `call_${i}`], [2, 'tool'], [3, JSON.stringify(s.args)]])]])],
-        [140, pbEncode([[2, pbEncode([[1, s.output]])]])]]);
-      db.prepare('INSERT INTO steps VALUES (?, ?)').run(Number(i), payload);
-      if (Number(i) % 4 === 0) {
-        const dir = path.join(home, 'brain', cid, '.system_generated/steps', i);
-        fs.mkdirSync(dir, { recursive: true });
-        fs.writeFileSync(path.join(dir, 'output.txt'), s.output);
-      }
-    }
-    db.close();
-  }
-  return { home, native };
-}
-
 // Each fixture's native tool calls: id -> the arguments the CLI sent (merged over all its events).
 const NATIVE = {
   claude: (m, add) => { if (m.type === 'assistant') for (const b of m.message.content) if (b.type === 'tool_use') add(b.id, b.input); },
@@ -50,33 +20,20 @@ const NATIVE = {
     if (!it || !['command_execution', 'web_search', 'mcp_tool_call', 'file_change'].includes(it.type)) return;
     add(it.id, { command: it.command, query: it.query, arguments: it.arguments, changes: it.changes, ...(it.action || {}), type: undefined });
   },
-  antigravity: (m, add, native) => {
-    const u = m.step_update;
-    if (u?.step_type === 'tool') add(String(u.step_index), { ...(native?.[u.conversation_id]?.[u.step_index]?.args || {}), ...u.tool_info?.parameters });
-  },
-  opencode: (m, add) => { if (m.type === 'tool_use') add(m.part.callID, m.part.state?.input); },
-  kiro: (m, add) => { const u = m.params?.update; if (u?.toolCallId) add(u.toolCallId, { ...(u.rawInput || {}), locations: u.locations }); },
-  copilot: (m, add) => { if (m.type === 'tool.execution_start') add(m.data.toolCallId, typeof m.data.arguments === 'string' ? { patch: m.data.arguments } : m.data.arguments); },
 };
-const FIXTURES = [
-  ['claude', 'claude.jsonl'], ['codex', 'codex.jsonl'], ['antigravity', 'antigravity.jsonl'], ['antigravity', 'antigravity-run136.jsonl'],
-  ['opencode', 'opencode.jsonl'], ['kiro', 'kiro.jsonl'], ['copilot', 'copilot.jsonl'],
-];
-function replay(agent, file, home) {
-  const st = agent === 'codex' ? new Set() : agent === 'antigravity' ? { text: new Map(), started: new Set(), home } : { tools: new Set() };
+const FIXTURES = [['claude', 'claude.jsonl'], ['codex', 'codex.jsonl']];
+function replay(agent, file) {
+  const st = agent === 'codex' ? new Set() : { tools: new Set() };
   const msgs = read(file), events = [];
   for (const m of msgs) for (const e of AGENTS[agent].events(m, st)) events.push(e);
   return { msgs, events };
 }
 
-const { home, native } = agyHome();
-process.on('exit', () => fs.rmSync(home, { recursive: true, force: true }));
-
 for (const [agent, file] of FIXTURES) {
   test(`invariant (${file}): a native call with arguments never becomes an empty input; every result has text`, () => {
-    const { msgs, events } = replay(agent, file, home);
+    const { msgs, events } = replay(agent, file);
     const args = new Map();
-    for (const m of msgs) NATIVE[agent](m, (id, a) => { if (!empty(a)) args.set(id, { ...(args.get(id) || {}), ...a }); else if (!args.has(id)) args.set(id, {}); }, native);
+    for (const m of msgs) NATIVE[agent](m, (id, a) => { if (!empty(a)) args.set(id, { ...(args.get(id) || {}), ...a }); else if (!args.has(id)) args.set(id, {}); });
     const tools = events.filter((e) => e.k === 'tool'), results = events.filter((e) => e.k === 'tool_result');
     assert.ok(tools.length, 'fixture has tool calls');
     for (const [id, a] of args) {
@@ -115,62 +72,16 @@ test('codex: web_search is announced with its query from the action; silent and 
   assert.equal(byId('tool_result', 'item_5')[0].text, 'node:test docs');
 });
 
-test('antigravity: exit codes, edit output and missing args come from the saved conversation', () => {
-  const { events } = replay('antigravity', 'antigravity.jsonl', home);
-  const r = (id) => events.find((e) => e.k === 'tool_result' && e.id === id);
-  const t = (id) => events.find((e) => e.k === 'tool' && e.id === id);
-  assert.deepEqual([r('2').text, r('2').isError], ['(no output)', false]);
-  assert.deepEqual([r('4').text, r('4').isError], ['(exit code 1, no output)', true], '`false` is a failure');
-  assert.equal(r('8').text, 'Created file file:///workspace/b.txt with requested content.');
-  assert.match(r('10').text, /^The following changes were made by the replace_file_content tool[\s\S]*-hello\n\+hi/);
-  assert.match(r('12').text, /^total 20/);
-  assert.deepEqual(t('8').input, { file_path: '/workspace/b.txt' });
-  const old = replay('antigravity', 'antigravity-run136.jsonl', home).events;
-  const ot = (id) => old.find((e) => e.k === 'tool' && e.id === id);
-  assert.deepEqual(ot('2').input, { file_path: '/workspace/.agent-orch/BRIEF.md' }, 'no stream params: the saved call has them');
-  assert.deepEqual(ot('87').input, { action: 'status', task_id: 'agy-run136-fixture/task-75' });
-  assert.equal(ot('89').input.timer_condition, 'agy-run136-fixture/task-75');
-});
-
-test('copilot: apply_patch keeps its patch and files; shell exit codes mark failures', () => {
-  const { events } = replay('copilot', 'copilot.jsonl');
-  const patches = events.filter((e) => e.k === 'tool' && e.name === 'apply_patch');
-  assert.equal(patches.length, 2);
-  assert.equal(patches[0].input.file_path, '/workspace/b.txt');
-  assert.match(patches[0].input.content, /^\*\*\* Begin Patch/);
-  const bash = events.filter((e) => e.k === 'tool' && e.name === 'Bash');
-  const res = (id) => events.find((e) => e.k === 'tool_result' && e.id === id);
-  assert.equal(res(bash[0].id).isError, false);
-  assert.equal(res(bash[1].id).isError, true, '`false` exited 1');
-});
-
-test('opencode: edit keeps oldString/newString; bash exit codes mark failures', () => {
-  const { events } = replay('opencode', 'opencode.jsonl');
-  const edit = events.find((e) => e.k === 'tool' && e.name === 'edit');
-  assert.deepEqual(edit.input, { file_path: '/workspace/a.txt', old_string: 'hello', new_string: 'hi' });
-  const bash = events.filter((e) => e.k === 'tool' && e.name === 'Bash');
-  const res = (id) => events.find((e) => e.k === 'tool_result' && e.id === id);
-  assert.deepEqual([res(bash[0].id).isError, res(bash[1].id).isError], [false, true]);
-});
-
-test('kiro: a call announced without rawInput waits for it; locations and nested content are used', () => {
-  const { events } = replay('kiro', 'kiro.jsonl');
-  const tools = events.filter((e) => e.k === 'tool');
-  assert.deepEqual(tools.map((e) => [e.name, e.input]), [['read', { file_path: '/workspace/notes/a.txt' }], ['shell', { command: 'false' }]]);
-  const results = events.filter((e) => e.k === 'tool_result');
-  assert.deepEqual(results.map((e) => [e.text, e.isError]), [['hello\n', false], ['(exit code 1, no output)', true]]);
-});
-
 test('nativeInput: every argument shape flattens to the UI field names', () => {
-  assert.deepEqual(nativeInput('{"CommandLine":"ls","Cwd":"/w"}'), { command: 'ls', cwd: '/w' });
-  assert.deepEqual(nativeInput({ parameters: { AbsolutePath: '/a' } }), { file_path: '/a' });
+  assert.deepEqual(nativeInput('{"cmd":"ls","Cwd":"/w"}'), { command: 'ls', cwd: '/w' });
+  assert.deepEqual(nativeInput({ parameters: { file: '/a' } }), { file_path: '/a' });
   assert.deepEqual(nativeInput({ arguments: '{"filePath":"/b","oldString":"x"}' }), { file_path: '/b', old_string: 'x' });
   assert.deepEqual(nativeInput({ cmd: ['bash', '-lc', 'ls'] }), { command: 'bash -lc ls' });
-  assert.deepEqual(nativeInput({ SearchDirectory: '/s', Pattern: '*.js' }), { path: '/s', pattern: '*.js' });
+  assert.deepEqual(nativeInput({ dir: '/s', Pattern: '*.js' }), { path: '/s', pattern: '*.js' });
   assert.deepEqual(nativeInput('*** Begin Patch'), { input: '*** Begin Patch' });
   assert.deepEqual(nativeInput(''), {});
   assert.deepEqual(nativeInput(null), {});
-  assert.deepEqual(toolInputSummary('read_bash', { shell_id: '1', delay: 5 }), { shell_id: '1', delay: 5 });
+  assert.deepEqual(toolInputSummary('poll', { shell_id: '1', delay: 5 }), { shell_id: '1', delay: 5 });
   assert.deepEqual(toolInputSummary('x', { opts: { a: 1 } }), { opts: '{"a":1}' });
   assert.equal(outputText({ stdout: 'out', stderr: 'err' }), 'out\nerr');
   assert.equal(outputText([{ type: 'content', content: { type: 'text', text: 'nested' } }]), 'nested');

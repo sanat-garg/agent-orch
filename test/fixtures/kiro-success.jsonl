@@ -1,6 +1,0 @@
-{"type":"session","sessionId":"kiro_session"}
-{"method":"session/update","params":{"sessionId":"kiro_session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Checking "}}}}
-{"method":"session/update","params":{"sessionId":"kiro_session","update":{"sessionUpdate":"tool_call","toolCallId":"call_1","title":"Bash","kind":"execute","status":"in_progress","rawInput":{"command":"cat notes/a.txt"}}}}
-{"method":"session/update","params":{"sessionId":"kiro_session","update":{"sessionUpdate":"tool_call_update","toolCallId":"call_1","status":"completed","content":[{"type":"text","text":"hello\n"}]}}}
-{"method":"session/update","params":{"sessionId":"kiro_session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Done"}}}}
-{"type":"result","sessionId":"kiro_session","usage":{"input_tokens":10,"output_tokens":5}}

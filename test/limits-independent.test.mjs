@@ -11,17 +11,14 @@ import { fileURLToPath } from 'node:url';
 const fixture = (f) => fileURLToPath(new URL(`./fixtures/${f}`, import.meta.url));
 
 // createOrchestrator starts timers, so each scenario runs in a child process with a fake SDK query() (it counts
-// Claude runs) and HOME/PATH pointing at the codex and agy stubs. `block` rows go into kv before anything runs.
+// Claude runs) and HOME/PATH pointing at the codex stub. `block` rows go into kv before anything runs.
 async function scenario(body, block) {
   const dirs = ['cw-ind-', 'cw-ind-p-', 'cw-ind-home-'].map((p) => fs.mkdtempSync(path.join(os.tmpdir(), p)));
   const [dataDir, root, home] = dirs;
   try {
     fs.mkdirSync(path.join(home, '.local/bin'), { recursive: true });
-    fs.symlinkSync(fixture('agy-stub.mjs'), path.join(home, '.local/bin/agy'));
     fs.symlinkSync(fixture('codex-stub.mjs'), path.join(home, '.local/bin/codex'));
     const script = `import { createOrchestrator } from ${JSON.stringify(new URL('../orchestrator.mjs', import.meta.url).href)};
-      import { setModelCatalog } from ${JSON.stringify(new URL('../agents.mjs', import.meta.url).href)};
-      setModelCatalog('antigravity', { models: ['gemini-3.8-flash-high', 'claude-sonnet-4-6', 'gpt-oss-120b-medium'].map((id) => ({ id, label: id })), error: null, at: Date.now() });
       import { waitFor as until } from ${JSON.stringify(new URL('./helpers/wait.mjs', import.meta.url).href)};
       import { DatabaseSync } from 'node:sqlite';
       import fs from 'node:fs';
@@ -55,16 +52,16 @@ async function scenario(body, block) {
   }
 }
 
-test('a Claude block does not defer an antigravity chat turn; a Claude chat is deferred with a notice naming Claude', { timeout: 60000 }, async () => {
+test('a Claude block does not defer a codex chat turn; a Claude chat is deferred with a notice naming Claude', { timeout: 60000 }, async () => {
   const r = await scenario(`
-    await o.planTurn({ id: 'agy', cwd: dir(), agent: 'antigravity', model: 'gemini-3.8-flash-high' }, 'hello agy');
-    const agyChat = chat.filter((m) => m.id === 'agy'), pendingAfterAgy = pending();
+    await o.planTurn({ id: 'cx', cwd: dir(), agent: 'codex' }, 'hello codex');
+    const cxChat = chat.filter((m) => m.id === 'cx'), pendingAfterCx = pending();
     await o.planTurn({ id: 'cl', cwd: dir() }, 'hello claude');
-    return { agyChat, pendingAfterAgy, claudeChat: chat.filter((m) => m.id === 'cl'), pending: pending(), claudePrompts: claudePrompts.length,
+    return { cxChat, pendingAfterCx, claudeChat: chat.filter((m) => m.id === 'cl'), pending: pending(), claudePrompts: claudePrompts.length,
       plans: db.prepare("SELECT agent FROM tasks WHERE kind='plan'").all(), blocks: o.stateView().blocks };`, { blocked_until: 3600 });
-  assert.equal(r.pendingAfterAgy, 0);
-  assert.ok(!r.agyChat.some((m) => /usage limit/.test(m.text || '')), JSON.stringify(r.agyChat));
-  assert.ok(r.agyChat.some((m) => m.t === 'text' && /hello/.test(m.text)), JSON.stringify(r.agyChat));
+  assert.equal(r.pendingAfterCx, 0);
+  assert.ok(!r.cxChat.some((m) => /usage limit/.test(m.text || '')), JSON.stringify(r.cxChat));
+  assert.ok(r.cxChat.some((m) => m.t === 'text' && /Done/.test(m.text)), JSON.stringify(r.cxChat));
   // The Claude chat's own agent is blocked: saved, and the notice names Claude.
   assert.equal(r.claudePrompts, 0);
   assert.equal(r.pending, 1);
@@ -91,56 +88,21 @@ test('a Claude block does not stop claiming a codex-routed task; Claude tasks wa
   assert.equal(r.claudePrompts, 0);
 });
 
-test('an antigravity block does not affect Claude: its chat turn and tasks run, and only agy shows as blocked', { timeout: 60000 }, async () => {
+test('a codex block does not affect Claude: its chat turn and tasks run, and only codex shows as blocked', { timeout: 60000 }, async () => {
   const r = await scenario(`
     const pid = project(), pid2 = project();
-    const plain = task(pid, 'Plain'), agy = task(pid2, 'UI work', 'antigravity');
+    const plain = task(pid, 'Plain'), cx = task(pid2, 'Add tests', 'codex');
     await o.planTurn({ id: 'cl', cwd: dir() }, 'hello claude');
-    await until(() => get(plain).status === 'done' && get(agy).status === 'done');
-    return { plain: get(plain), agy: get(agy), chat, pending: pending(), blocks: o.stateView().blocks, blockedUntil: o.stateView().blockedUntil };`,
-  { 'blocked_until:antigravity:gemini': 3600, 'blocked_until:antigravity:3p': 3600 });
+    await until(() => get(plain).status === 'done' && get(cx).status === 'done');
+    return { plain: get(plain), cx: get(cx), chat, pending: pending(), blocks: o.stateView().blocks, blockedUntil: o.stateView().blockedUntil };`,
+  { 'blocked_until:codex': 3600 });
   assert.equal(r.pending, 0);
   assert.ok(!r.chat.some((m) => /usage limit/.test(m.text || '')), JSON.stringify(r.chat));
   assert.equal(r.plain.status, 'done');
   assert.equal(r.plain.ran_agent, 'claude');
-  // The agy-routed task falls back to the unblocked Claude.
-  assert.equal(r.agy.status, 'done');
-  assert.equal(r.agy.ran_agent, 'claude');
-  assert.deepEqual(Object.keys(r.blocks), ['antigravity:gemini', 'antigravity:3p']);
+  // The codex-routed task falls back to the unblocked Claude.
+  assert.equal(r.cx.status, 'done');
+  assert.equal(r.cx.ran_agent, 'claude');
+  assert.deepEqual(Object.keys(r.blocks), ['codex']);
   assert.equal(r.blockedUntil, null);
-});
-
-// Antigravity's Gemini and third-party (Claude/GPT-OSS) models have separate limits: one group's block never
-// defers, reroutes or delegates away the other group's work.
-test('antigravity: a Gemini block leaves third-party models running on agy; Gemini work falls back to Claude', { timeout: 60000 }, async () => {
-  const r = await scenario(`
-    const pid = project(), pid2 = project(), pid3 = project();
-    const tp = task(pid, 'Third-party work', 'antigravity', 'claude-sonnet-4-6'), gem = task(pid2, 'Gemini work', 'antigravity', 'gemini-3.8-flash-high');
-    const def = task(pid3, 'Default agy work', 'antigravity');
-    const views = [tp, gem, def].map((id) => o.taskDetail(id).task);
-    await until(() => [tp, gem, def].every((id) => get(id).status === 'done'));
-    return { tp: get(tp), gem: get(gem), def: get(def), views: views.map((v) => [v.runs_on, v.limit_scope]), blocks: o.stateView().blocks };`,
-  { 'blocked_until:antigravity:gemini': 3600 });
-  assert.equal(r.tp.ran_agent, 'antigravity');
-  assert.equal(r.tp.ran_model, 'claude-sonnet-4-6');
-  assert.equal(r.gem.ran_agent, 'claude');
-  assert.equal(r.def.ran_agent, 'claude'); // agy's default model is a Gemini one
-  assert.deepEqual(r.views, [['antigravity', 'antigravity:3p'], ['claude', 'claude'], ['claude', 'claude']]);
-  assert.deepEqual(Object.keys(r.blocks), ['antigravity:gemini']);
-});
-
-test('antigravity: a third-party block defers only a third-party chat, naming the group; a Gemini chat still runs', { timeout: 60000 }, async () => {
-  const r = await scenario(`
-    await o.planTurn({ id: 'gem', cwd: dir(), agent: 'antigravity', model: 'gemini-3.8-flash-high' }, 'hello gemini');
-    const pendingAfterGem = pending();
-    await o.planTurn({ id: 'tp', cwd: dir(), agent: 'antigravity', model: 'gpt-oss-120b-medium' }, 'hello gpt');
-    return { gemChat: chat.filter((m) => m.id === 'gem'), tpChat: chat.filter((m) => m.id === 'tp'), pendingAfterGem, pending: pending(), blocks: o.stateView().blocks,
-      plans: db.prepare("SELECT agent, model FROM tasks WHERE kind='plan'").all() };`,
-  { 'blocked_until:antigravity:3p': 3600 });
-  assert.equal(r.pendingAfterGem, 0);
-  assert.ok(r.gemChat.some((m) => m.t === 'text' && /hello/.test(m.text)), JSON.stringify(r.gemChat));
-  assert.equal(r.pending, 1);
-  assert.ok(r.tpChat.some((m) => m.t === 'notice' && /^Saved\. Antigravity CLI \(third-party models\) is at its usage limit/.test(m.text)), JSON.stringify(r.tpChat));
-  assert.deepEqual(r.plans, [{ agent: 'antigravity', model: 'gpt-oss-120b-medium' }]);
-  assert.deepEqual(Object.keys(r.blocks), ['antigravity:3p']);
 });

@@ -1,5 +1,5 @@
 // Fallback lists over HTTP (save/load for a chat and for a project's reflection tasks) and manual delegation: boots
-// server.mjs with stub codex/agy CLIs (signed in, fixture model lists) and no Claude.
+// server.mjs with a stub codex CLI (signed in, fixture model list) and no Claude.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -30,10 +30,9 @@ before(async () => {
   const bin = path.join(home, '.local/bin');
   fs.mkdirSync(bin, { recursive: true });
   fs.symlinkSync(path.join(ROOT, 'test/fixtures/codex-stub.mjs'), path.join(bin, 'codex'));
-  fs.symlinkSync(path.join(ROOT, 'test/fixtures/agy-stub.mjs'), path.join(bin, 'agy'));
   const port = await freePort();
   base = `http://127.0.0.1:${port}`;
-  // PATH without the real claude/codex/agy: only the stubs in the temp HOME.
+  // PATH without the real claude/codex: only the stub in the temp HOME.
   const PATH = isolatedPath(bin);
   child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: { ...process.env, HOME: home, PATH, PORT: String(port), CW_DATA_DIR: dataDir, CW_NO_ORCHESTRATOR: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
@@ -59,7 +58,7 @@ const get = async (p) => { const r = await fetch(base + p, { headers: { cookie }
 async function discovered() {
   for (let i = 0; i < 100; i++) {
     const { body } = await get('/api/agents');
-    if (['codex', 'antigravity'].every((id) => body.agents?.find((a) => a.id === id)?.models.length)) return;
+    if (body.agents?.find((a) => a.id === 'codex')?.models.length) return;
     await new Promise((res) => setTimeout(res, 200));
   }
   assert.fail('model discovery never finished');
@@ -76,14 +75,14 @@ test('PUT /api/convos/:id/fallbacks: validated against the discovered models; sa
   const unauth = await fetch(base + `/api/convos/${CID}/fallbacks`, { method: 'PUT', body: '{"fallbacks":null}' });
   assert.equal(unauth.status, 401);
   await unauth.arrayBuffer();
-  for (const bad of [[{ agent: 'nope', model: 'gpt-5.5' }], [{ agent: 'codex', model: 'gpt-9000' }], [{ agent: 'antigravity', model: 'gpt-5.5' }], [{ agent: 'codex' }], 'codex', undefined]) {
+  for (const bad of [[{ agent: 'nope', model: 'gpt-5.5' }], [{ agent: 'codex', model: 'gpt-9000' }], [{ agent: 'claude', model: 'gpt-5.5' }], [{ agent: 'codex' }], 'codex', undefined]) {
     const r = await put(`/api/convos/${CID}/fallbacks`, { fallbacks: bad });
     assert.equal(r.status, 400, JSON.stringify(bad));
   }
   assert.equal((await put('/api/convos/nope/fallbacks', { fallbacks: null })).status, 404);
   assert.equal((await get('/api/convos')).body.find((c) => c.id === CID).fallbacks, null, 'none by default');
 
-  const list = [{ agent: 'codex', model: 'gpt-6-sol' }, { agent: 'antigravity', model: 'gemini-3.1-pro-high' }, { agent: 'codex', model: 'gpt-6-sol' }];
+  const list = [{ agent: 'codex', model: 'gpt-6-sol' }, { agent: 'codex', model: 'gpt-6-astra' }, { agent: 'codex', model: 'gpt-6-sol' }];
   const r = await put(`/api/convos/${CID}/fallbacks`, { fallbacks: list });
   assert.equal(r.status, 200);
   assert.deepEqual(r.body.fallbacks, list.slice(0, 2), 'duplicates dropped, order kept');
@@ -107,14 +106,14 @@ test('PUT /api/orch/projects/:id/reflect-fallbacks: validated against the discov
     assert.equal(unauth.status, 401);
     await unauth.arrayBuffer();
     assert.equal(stored(), null, 'none by default');
-    for (const bad of [[{ agent: 'nope', model: 'gpt-5.5' }], [{ agent: 'codex', model: 'gpt-9000' }], [{ agent: 'antigravity', model: 'gpt-5.5' }], [{ agent: 'codex' }], 'codex', undefined]) {
+    for (const bad of [[{ agent: 'nope', model: 'gpt-5.5' }], [{ agent: 'codex', model: 'gpt-9000' }], [{ agent: 'claude', model: 'gpt-5.5' }], [{ agent: 'codex' }], 'codex', undefined]) {
       const r = await put(url, { fallbacks: bad });
       assert.equal(r.status, 400, JSON.stringify(bad));
     }
     assert.equal(stored(), null, 'rejected lists are not saved');
     assert.equal((await put('/api/orch/projects/99999/reflect-fallbacks', { fallbacks: null })).status, 404);
 
-    const list = [{ agent: 'antigravity', model: 'gemini-3.1-pro-high' }, { agent: 'codex', model: 'gpt-6-sol' }, { agent: 'antigravity', model: 'gemini-3.1-pro-high' }];
+    const list = [{ agent: 'codex', model: 'gpt-6-astra' }, { agent: 'codex', model: 'gpt-6-sol' }, { agent: 'codex', model: 'gpt-6-astra' }];
     const r = await put(url, { fallbacks: list });
     assert.equal(r.status, 200);
     assert.deepEqual(r.body.project.reflect_fallbacks, list.slice(0, 2), 'duplicates dropped, order kept');
@@ -135,7 +134,7 @@ test('manual delegation lists every connected model with its status; the owner\'
     const id = Number(db.prepare("INSERT INTO tasks(project_id,title,prompt,agent,model,created_at) VALUES(?,'Fix code','code','codex','gpt-5.5',0)").run(pid).lastInsertRowid);
     const manual = (await get(`/api/orch/tasks/${id}/delegate`)).body;
     assert.equal(manual.current.model, 'gpt-5.5', 'explicit task route is retained');
-    assert.ok(manual.candidates.some((c) => c.model === 'gemini-3.1-pro-high' && c.status === 'available'));
+    assert.ok(manual.candidates.some((c) => c.model === 'gpt-6-astra' && c.status === 'available'));
     assert.ok(manual.candidates.every((c) => !('score' in c) && !('metrics' in c)));
     const target = manual.candidates.find((c) => c.model === 'gpt-6-sol');
     const response = await fetch(base + `/api/orch/tasks/${id}/delegate`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ agent: target.agent, model: target.model }) });
@@ -165,7 +164,7 @@ test('PATCH task fallbacks validates models, isolates the snapshot and rejects f
       assert.equal((await patch(id, bad)).status, 400);
     }
     assert.equal((await patch(999999, [])).status, 404);
-    const list = [{ agent: 'codex', model: 'gpt-6-sol' }, { agent: 'antigravity', model: 'gemini-3.1-pro-high' }];
+    const list = [{ agent: 'codex', model: 'gpt-6-sol' }, { agent: 'codex', model: 'gpt-6-astra' }];
     const r = await patch(id, [...list, list[0]]);
     assert.equal(r.status, 200);
     assert.deepEqual(r.body.task.fallbacks, list);

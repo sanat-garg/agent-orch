@@ -1,4 +1,4 @@
-// The fallback sheet in a real browser: boots server.mjs (stub codex/agy CLIs, CW_NO_ORCHESTRATOR=1, temp data dir) on a
+// The fallback sheet in a real browser: boots server.mjs (stub codex CLI with a wide catalog, CW_NO_ORCHESTRATOR=1, temp data dir) on a
 // spare port. Chat: the composer's Fallbacks button opens it, and remove, undo, reorder (Alt+↑ and drag) and add each
 // persist through PUT /api/convos/:id/fallbacks. Reflection: the settings popover opens the same sheet at once, without
 // any request, and saves via PUT /api/orch/projects/:id/reflect-fallbacks. Skips when Playwright's Chromium can't launch.
@@ -19,8 +19,8 @@ const PASSWORD = 'fallbacks-ui-password';
 const CID = 'chat-fb';
 const START = [
   { agent: 'codex', model: 'gpt-6-sol' },
-  { agent: 'antigravity', model: 'gemini-3.1-pro-high' },
-  { agent: 'antigravity', model: 'claude-sonnet-4-6' },
+  { agent: 'codex', model: 'gpt-6-astra' },
+  { agent: 'codex', model: 'gpt-6-nova' },
 ];
 let browser, skip = false;
 try { browser = await chromium.launch(); } catch (e) { skip = `cached Chromium unavailable: ${e.message.split('\n')[0]}`; }
@@ -43,12 +43,11 @@ before(async () => {
   const bin = path.join(home, '.local/bin');
   fs.mkdirSync(bin, { recursive: true });
   fs.symlinkSync(path.join(ROOT, 'test/fixtures/codex-stub.mjs'), path.join(bin, 'codex'));
-  fs.symlinkSync(path.join(ROOT, 'test/fixtures/agy-stub.mjs'), path.join(bin, 'agy'));
   const port = await freePort();
   assert.notEqual(port, 3000);
   base = `http://127.0.0.1:${port}`;
   const PATH = isolatedPath(bin);
-  child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: { ...process.env, HOME: home, PATH, AA_API_KEY: '', CW_AA_BASE: 'http://127.0.0.1:9',
+  child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: { ...process.env, HOME: home, PATH, CODEX_STUB_MODELS: 'wide', AA_API_KEY: '', CW_AA_BASE: 'http://127.0.0.1:9',
     PORT: String(port), CW_DATA_DIR: dataDir, CW_NO_ORCHESTRATOR: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   await new Promise((resolve, reject) => {
@@ -61,10 +60,10 @@ before(async () => {
   const r = await fetch(base + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: PASSWORD }) });
   cookie = r.headers.get('set-cookie').split(';')[0];
   await r.arrayBuffer();
-  // PUT validates against discovered models: wait for both stub catalogs.
+  // PUT validates against discovered models: wait for the stub catalog.
   for (let i = 0; ; i++) {
     const a = await (await fetch(base + '/api/agents', { headers: { cookie } })).json();
-    if (['codex', 'antigravity'].every((id) => a.agents.find((x) => x.id === id)?.models.length)) break;
+    if (a.agents.find((x) => x.id === 'codex')?.models.length) break;
     if (i > 100) assert.fail('model discovery never finished');
     await new Promise((res) => setTimeout(res, 200));
   }
@@ -73,7 +72,7 @@ before(async () => {
   db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
   db.exec('PRAGMA busy_timeout=5000');
   pid = Number(db.prepare("INSERT INTO projects(path,name,status,convo_id,reflect_fallbacks,created_at) VALUES(?,?,'paused',?,?,0)")
-    .run(PROJECT(), 'fb', CID, JSON.stringify([{ agent: 'antigravity', model: 'gemini-3.1-pro-high' }])).lastInsertRowid);
+    .run(PROJECT(), 'fb', CID, JSON.stringify([{ agent: 'codex', model: 'gpt-6-astra' }])).lastInsertRowid);
   db.prepare('INSERT OR REPLACE INTO kv(key,value) VALUES(?,?)').run('blocked_until:codex', String(Math.floor(Date.now() / 1000) + 3600));
 });
 
@@ -115,32 +114,32 @@ test('chat fallbacks: the picker has no Auto Delegate; the sheet removes, undoes
   const rows = page.locator('#fbModal .fe-list .fe-row');
   const names = () => rows.locator('.fe-model').allInnerTexts();
   await assert.doesNotReject(rows.nth(2).waitFor());
-  assert.deepEqual(await names(), ['GPT-6-Sol', 'Gemini 3.1 Pro (High)', 'Claude Sonnet 4.6 (Thinking)']);
+  assert.deepEqual(await names(), ['GPT-6-Sol', 'GPT-6-Astra', 'GPT-6-Nova']);
   assert.deepEqual(await rows.locator('.fe-pos').allInnerTexts(), ['1', '2', '3']);
-  assert.deepEqual(await rows.locator('.fe-agent').allInnerTexts(), ['Codex', 'Antigravity', 'Antigravity']);
-  // Only codex is limited: one small dot, nothing else about usage.
-  assert.deepEqual(await rows.evaluateAll((els) => els.map((e) => !!e.querySelector('.fe-lim'))), [true, false, false]);
+  assert.deepEqual(await rows.locator('.fe-agent').allInnerTexts(), ['Codex', 'Codex', 'Codex']);
+  // Codex is limited: a small dot on each of its models, nothing else about usage.
+  assert.deepEqual(await rows.evaluateAll((els) => els.map((e) => !!e.querySelector('.fe-lim'))), [true, true, true]);
   assert.equal(await page.locator('#fbModal .fe-reset').count(), 0);
 
   // Remove the second model: saved at once, the composer button follows.
   await rows.nth(1).locator('.fe-rm').click();
-  await until(['gpt-6-sol', 'claude-sonnet-4-6'], 'remove persisted');
-  assert.deepEqual(await names(), ['GPT-6-Sol', 'Claude Sonnet 4.6 (Thinking)']);
+  await until(['gpt-6-sol', 'gpt-6-nova'], 'remove persisted');
+  assert.deepEqual(await names(), ['GPT-6-Sol', 'GPT-6-Nova']);
   assert.equal(await chip.innerText(), 'Fallbacks · 2');
   // Undo from the toast puts it back in place.
   await page.locator('#toasts .toast-act').click();
-  await until(['gpt-6-sol', 'gemini-3.1-pro-high', 'claude-sonnet-4-6'], 'undo persisted');
+  await until(['gpt-6-sol', 'gpt-6-astra', 'gpt-6-nova'], 'undo persisted');
   await rows.nth(1).locator('.fe-rm').click();
-  await until(['gpt-6-sol', 'claude-sonnet-4-6'], 'remove persisted again');
+  await until(['gpt-6-sol', 'gpt-6-nova'], 'remove persisted again');
 
   // Move the (now) second model up with Alt+↑ on the focused row; focus stays on it.
   await rows.nth(1).focus();
   await page.keyboard.press('Alt+ArrowUp');
-  await until(['claude-sonnet-4-6', 'gpt-6-sol'], 'Alt+↑ persisted');
-  assert.equal(await page.evaluate(() => document.activeElement?.dataset.key), 'antigravity/claude-sonnet-4-6');
+  await until(['gpt-6-nova', 'gpt-6-sol'], 'Alt+↑ persisted');
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.key), 'codex/gpt-6-nova');
 
   // Drag the second row above the first by its handle (pointer events, mouse).
-  await page.waitForFunction(() => document.querySelector('#fbModal .fe-list .fe-row')?.dataset.key === 'antigravity/claude-sonnet-4-6');
+  await page.waitForFunction(() => document.querySelector('#fbModal .fe-list .fe-row')?.dataset.key === 'codex/gpt-6-nova');
   await page.waitForTimeout(300);
   const grip = await rows.nth(1).locator('.fe-grip').boundingBox(), first = await rows.nth(0).boundingBox();
   await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
@@ -148,15 +147,15 @@ test('chat fallbacks: the picker has no Auto Delegate; the sheet removes, undoes
   await page.mouse.move(grip.x + grip.width / 2, grip.y - 10, { steps: 4 });
   await page.mouse.move(grip.x + grip.width / 2, first.y + 4, { steps: 6 });
   await page.mouse.up();
-  await until(['gpt-6-sol', 'claude-sonnet-4-6'], 'drag persisted');
+  await until(['gpt-6-sol', 'gpt-6-nova'], 'drag persisted');
 
   // Add from the searchable picker; the primary model can't be added.
   await page.locator('#fbModal .fe-add-btn').click();
   await page.locator('#fbModal .fe-search').fill('gpt-5.5');
   assert.equal(await page.locator('#fbModal .fe-opt', { hasText: 'GPT-5.5' }).first().isDisabled(), true);
-  await page.locator('#fbModal .fe-search').fill('flash');
-  await page.locator('#fbModal .fe-opt', { hasText: 'Gemini 3.8 Flash' }).click();
-  await until(['gpt-6-sol', 'claude-sonnet-4-6', 'gemini-3.8-flash-high'], 'add persisted');
+  await page.locator('#fbModal .fe-search').fill('lumen');
+  await page.locator('#fbModal .fe-opt', { hasText: 'GPT-6-Lumen' }).click();
+  await until(['gpt-6-sol', 'gpt-6-nova', 'gpt-6-lumen'], 'add persisted');
   // Removing every model leaves an empty list: tasks wait.
   for (let i = 0; i < 3; i++) await rows.nth(0).locator('.fe-rm').click();
   await until([], 'empty list persisted');
@@ -187,7 +186,7 @@ test('reflection fallbacks: the settings popover opens the same sheet instantly,
   });
   assert.equal(shown.open, true);
   assert.match(shown.title, /^If .+ hits its limit$/);
-  assert.deepEqual(shown.rows, ['Gemini 3.1 Pro (High)']);
+  assert.deepEqual(shown.rows, ['GPT-6-Astra']);
   await page.waitForTimeout(300);
   assert.deepEqual(requests, [], 'opening the reflection sheet fetches nothing');
 
@@ -196,7 +195,7 @@ test('reflection fallbacks: the settings popover opens the same sheet instantly,
   await page.locator('#fbModal .fe-opt', { hasText: 'GPT-6-Sol' }).click();
   const stored = () => db.prepare('SELECT reflect_fallbacks FROM projects WHERE id=?').get(pid).reflect_fallbacks;
   for (let i = 0; i < 50 && JSON.parse(stored()).length < 2; i++) await new Promise((r) => setTimeout(r, 100));
-  assert.deepEqual(JSON.parse(stored()), [{ agent: 'antigravity', model: 'gemini-3.1-pro-high' }, { agent: 'codex', model: 'gpt-6-sol' }]);
+  assert.deepEqual(JSON.parse(stored()), [{ agent: 'codex', model: 'gpt-6-astra' }, { agent: 'codex', model: 'gpt-6-sol' }]);
   assert.ok(requests.some((u) => u.endsWith(`/api/orch/projects/${pid}/reflect-fallbacks`)));
   assert.equal(await page.locator('#obReflectBtn').innerText(), 'Fallbacks · 2');
   assert.deepEqual(errors, []);
@@ -227,8 +226,8 @@ test('task drawer edits its own fallback snapshot', { skip, timeout: 60000 }, as
   assert.equal(await section.locator('.fe-row').count(), 3);
   await section.locator('.fe-row').nth(1).focus();
   await page.keyboard.press('Alt+ArrowUp');
-  await page.waitForFunction(async (id) => (await (await fetch('/api/orch/task/' + id)).json()).task.fallbacks[0].model === 'gemini-3.1-pro-high', id);
-  assert.match(await page.locator('#drBody .tc-tag.model').innerText(), /Gemini/);
+  await page.waitForFunction(async (id) => (await (await fetch('/api/orch/task/' + id)).json()).task.fallbacks[0].model === 'gpt-6-astra', id);
+  assert.match(await page.locator('#drBody .tc-tag.model').innerText(), /Astra/);
   await section.locator('.fe-rm').first().click();
   await section.getByText('Custom', { exact: true }).waitFor();
   await page.waitForFunction(async (id) => (await (await fetch('/api/orch/task/' + id)).json()).task.fallbacks.length === 2, id);

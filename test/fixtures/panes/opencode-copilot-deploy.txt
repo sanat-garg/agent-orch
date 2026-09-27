@@ -1,7 +1,0 @@
-
-┌  Add credential
-│
-◆  Select GitHub deployment type
-│  ● GitHub.com (Public)
-│  ○ GitHub Enterprise
-└

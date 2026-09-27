@@ -134,31 +134,26 @@ action without doing it. Because it restarts the app, don't run it from inside a
 
 ## Coding agents
 
-Chats and orchestrator tasks can run on six coding agent CLIs. The adapters live in `agents.mjs`, and
+Chats and orchestrator tasks can run on two coding agent CLIs. The adapters live in `agents.mjs`, and
 research notes on each CLI are in `.agent-orch/AGENTS.md`.
 
 | Agent | Binary | Install | Subscription login (once, over SSH or `/shell/`) |
 |---|---|---|---|
 | Claude Code (default) | `~/.local/bin/claude` | see Requirements | `claude`, then `/login` |
 | OpenAI Codex CLI | `codex` on `PATH` | `sudo npm i -g @openai/codex` | `codex login --device-auth`, then open the URL and enter the code. You may first need to enable device code authorization for Codex in ChatGPT's security settings. `codex login status` should say "Logged in using ChatGPT". |
-| Google Antigravity CLI | `~/.local/bin/agy` | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | run `agy` with no arguments, open the Google OAuth URL it prints, sign in, and paste the code back |
-| OpenCode CLI | `opencode` on `PATH` | `sudo npm i -g opencode-ai` | None needed for the free OpenCode Zen models (the Connections row reads "Ready · free Zen models"). **Connect a provider** in the Connections modal: pick ChatGPT Plus/Pro, GitHub Copilot or SuperGrok, then its device flow (`opencode auth login --provider <id> --method <subscription method>`) |
-| Kiro CLI | `~/.local/bin/kiro-cli` | `curl -fsSL https://cli.kiro.dev/install \| bash` (needs `unzip`) | Connections modal (`kiro-cli login --use-device-flow`) |
-| GitHub Copilot CLI | `copilot` on `PATH` | `sudo npm i -g @github/copilot` | Connections modal; it shares the GitHub (`gh`) login, so disconnecting one signs out both |
 
 **Connections.** The button at the foot of the sidebar (or **Connections…** at the end of the model picker)
 opens the Connections modal. It runs each CLI's login in a hidden tmux pane and shows the URL and one-time
-code to enter elsewhere; Antigravity asks you to paste its code back. Signing in there works for every agent above.
+code to enter elsewhere (Claude asks you to paste its code back). Signing in there works for every agent above.
 
 **Models.** Model lists come only from the CLIs themselves, never a hardcoded list. They are cached in
-`data/models.json` and refreshed at boot, every 6 hours and after a sign-in change. OpenCode runs
-`opencode models --verbose` once and keeps the signed-in subscription providers' models plus the free OpenCode Zen
-models (zero cost, shown as `Zen · <name> (free)`), Kiro lists `kiro-cli chat --list-models --format json`
-for the signed-in account, and Copilot asks the Copilot SDK's `listModels()`.
+`data/models.json`. Each discovery starts a CLI, so a list is only re-read once it is a day old (checked hourly,
+one agent at a time) or after that agent's sign-in changes.
 
-**Known limits.** Kiro isn't signed in on this server, so its authenticated headless use and stream format are
-unverified. Copilot's model list currently returns only `auto`, and Copilot reports no remaining usage or reset
-time, so its limit is only known when a run hits it. OpenCode limits are tracked per provider (`openai`, `github-copilot`, `xai`, and `opencode` for Zen).
+**Plan limits.** Nothing polls them. The sidebar usage card shows the last saved reading; its refresh button
+checks the one agent it is showing (`POST /api/limits/<agent>/refresh`, or the Claude usage probe), at most once a
+minute per agent. Orchestrated Claude runs still report their limits as they go, and a limit hit by any run is
+recorded when it happens.
 
 **Subscription only, never API keys.** Each adapter removes its billing variables from the environment
 before starting the CLI:
@@ -167,26 +162,14 @@ before starting the CLI:
 - Codex: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_ORG_ID`, `OPENAI_ORGANIZATION`, `OPENAI_PROJECT_ID`,
   `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, `CODEX_AUTH`, `CODEX_HOME` and every `AZURE_OPENAI_*`. Every run also
   passes `-c forced_login_method="chatgpt"`, and an API-key login counts as logged out.
-- Antigravity: `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_GEMINI_BASE_URL`, `GOOGLE_GENAI_USE_VERTEXAI|ENTERPRISE|GCA`,
-  `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_CLOUD_PROJECT(_ID)`, `GOOGLE_CLOUD_LOCATION`, `AGY_ADC_AUTH` and
-  `AGY_BUSINESS_PAYGO_TIER`. A run is refused if `~/.gemini/antigravity-cli/settings.json` sets
-  `"modelProvider": "gemini"` (API-key mode).
-- OpenCode: every `*_API_KEY` and `*_TOKEN`, `OPENAI_BASE_URL|ORG_ID|ORGANIZATION|PROJECT_ID`, every `AZURE_OPENAI_*`
-  and `OPENCODE_AUTH|CONFIG|CONFIG_DIR`. It is ready with an OAuth credential for `openai`, `github-copilot` or `xai`, or with no sign-in when it lists
-  free OpenCode Zen models (API-key providers never count). A run is refused if an OpenCode config or the project's
-  `.env` sets an API key or custom endpoint, or if it names a paid Zen model and no Zen key was added.
-- Kiro: `KIRO_API_KEY`. An API-key account from `kiro-cli whoami` counts as logged out.
-- Copilot: `COPILOT_GITHUB_TOKEN`, `COPILOT_PROVIDER_*`, `GH_TOKEN`, `GITHUB_TOKEN` and the OpenAI, Anthropic, Gemini and
-  Google API keys; `COPILOT_HOME` is pinned to `~/.copilot`. A run is refused if `~/.copilot/settings.json` or the
-  project's `.copilot/settings.json` sets a custom (BYOK) provider.
 
 **Chat picker.** The model menu in a chat is grouped by agent (fed by `GET /api/agents`). Pick an agent's
 default model or a specific one. Groups for agents that aren't installed or logged in are disabled and show
 why, including the login command. Non-Claude chats run one headless CLI turn per message and resume the
 agent's own session. They have no permission prompts. Orchestrator mode always plans on Claude.
 
-**Routing rules.** Tell the planner in chat, for example "use codex for tests" or "use gemini-3.8-flash-high
-for UI work". It saves a rule with a `match` (a task kind, `work`, `reflect` or `plan`, or a keyword in the
+**Routing rules.** Tell the planner in chat, for example "use codex for tests" or "use opus
+for planning". It saves a rule with a `match` (a task kind, `work`, `reflect` or `plan`, or a keyword in the
 task title), an agent and/or model, and a scope: this project (default) or all projects. A new rule with the
 same match and scope replaces the old one. For each task the orchestrator picks, in order:
 
@@ -209,8 +192,8 @@ one per chat (Auto Delegate in the model picker), used by the tasks that chat pl
 reflection tasks (**Settings → Reflection fallbacks** in the orchestrator bar). Each task keeps a copy of its list.
 When a queued task's model is at its usage limit, it moves to the first model in that list whose agent is
 signed in, still lists that model, isn't blocked and has no usage window at 90% or more. Each move is
-recorded on the task. With an empty list, the task waits for its own model. Limits are per agent (Antigravity:
-per model group), so one agent's limit never blocks another's.
+recorded on the task. With an empty list, the task waits for its own model. Limits are per agent, so one agent's
+limit never blocks another's.
 
 ## Parallel tasks and git worktrees
 

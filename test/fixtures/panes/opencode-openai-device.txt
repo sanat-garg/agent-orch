@@ -1,8 +1,0 @@
-
-┌  Add credential
-│
-●  Go to: https://auth.openai.com/codex/device
-│
-●  Enter code: Z28M-PTNE3
-│
-◑  Waiting for authorization...

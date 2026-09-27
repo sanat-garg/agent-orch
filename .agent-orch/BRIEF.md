@@ -9,7 +9,7 @@ an agent orchestrator that plans work and runs autonomous Claude Code tasks so t
 limits get used around the clock.
 
 ## Goals (current push, set 2026-09-24)
-(Earlier pushes are finished: Antigravity reliability landed in #148/#149, and the Auto Delegate popup work (#132/#133)
+(Earlier pushes are finished: the Auto Delegate popup work (#132/#133)
 was retired when benchmark ranking was removed in #152/#153. Current work hardens goals 8–10 below.)
 1. Repo hygiene: the GitHub repo is github.com/sanat-garg/agent-orch (private; `origin`). No secrets or
    runtime data are tracked, and a README explains setup.
@@ -21,10 +21,9 @@ was retired when benchmark ranking was removed in #152/#153. Current work harden
    "Claude Web", "claude-web" or "AO2" should remain. ("Claude Code" is the real product name of the CLI, so it stays.)
 
 5. Multi-agent (owner, 2026-09-25): besides Claude Code, chats and orchestrator tasks can run on other coding
-   agent CLIs: OpenAI Codex CLI and Google Antigravity's CLI (or Gemini CLI if Antigravity has no headless CLI).
-   The owner can say in chat, e.g., "use codex for tests" or "use gemini-2.5-pro for UI work", and the planner
-   records that as routing rules. Each task then runs on the agent and model its rule picks. Every agent must use
-   the owner's subscription login (ChatGPT / Google account), never a paid API key, just like Claude.
+   agent CLIs: the OpenAI Codex CLI. The owner can say in chat, e.g., "use codex for tests" or "use opus for
+   planning", and the planner records that as routing rules. Each task then runs on the agent and model its rule
+   picks. Every agent must use the owner's subscription login (ChatGPT account), never a paid API key, just like Claude.
 
 6. Mobile-first PWA (owner, 2026-09-25): agent-orch saved to the iPhone home screen must feel like a native app,
    good enough that the owner prefers it to desktop. Follow Apple's HIG via the apple-design skill
@@ -32,6 +31,8 @@ was retired when benchmark ranking was removed in #152/#153. Current work harden
    keyboard-aware composer, sheets instead of popovers, and smooth performance on iOS Safari.
 7. Honest data: model selectors list only the models each CLI actually reports, never hardcoded guesses. Each
    agent's rate limits are fully independent: one agent's limit never blocks or mislabels another's.
+   Low CPU (owner, 2026-09-27): nothing polls the CLIs on a timer. Plan limits are fetched only when the owner
+   presses refresh on the usage card, for that one agent; model lists at most once a day per agent (cached).
 8. Delegation (owner, revised 2026-09-26): no benchmarks or automatic ranking (LiveBench and Artificial Analysis
    are removed). The owner enters fallbacks by hand as an ordered list, per chat, plus one list for reflection tasks.
    When a task's model is rate-limited, it moves to the first fallback that has usage left. With an empty list the
@@ -42,8 +43,18 @@ was retired when benchmark ranking was removed in #152/#153. Current work harden
    servers, headless browsers, dead login sessions), and grants extra task slots only while there's measured
    headroom. The default is one task at a time. Plan sequential chains with true prerequisites; the scheduler adds
    parallelism only when the machine can afford it. Worktrees must stay cheap on disk and memory.
-10. More agent CLIs (owner, 2026-09-26): OpenCode CLI, Kiro CLI and GitHub Copilot CLI, each fully runnable
-   (headless commands, model discovery, limits) and connectable from the Connections modal.
+10. Removed agent CLIs (owner, 2026-09-27): Antigravity, OpenCode, Kiro and GitHub Copilot were uninstalled and all
+   their code deleted. Claude Code and Codex are the only agents; never re-add the others.
+
+11. Multi-machine cluster (owner, 2026-09-27, HIGHEST PRIORITY): the target is 6 agents running in parallel, which
+   one VPS can't handle. This VPS stays the controller (UI, DB, planner, merges). Worker machines (a second VPS of
+   the same spec, and the owner's MacBook whenever it's awake) run a worker daemon that dials OUT to the controller
+   over WSS with a pairing token (so it works behind NAT), reports CPU/RAM and its signed-in agents, and runs tasks
+   locally in its own checkout of the project's GitHub repo. Task branches are pushed to GitHub and merged by the
+   controller. Nodes can come and go: work on a node that disappears is recovered from its pushed WIP branch.
+   Design doc: .agent-orch/CLUSTER.md.
+   Caveat: the same subscription signed in on several machines shares ONE set of rate limits, so more machines
+   add CPU/RAM, not quota.
 
 ## Constraints & Preferences
 - Chat and agents must run on the Claude subscription, never on API credits (see API_ENV stripping in

@@ -2212,7 +2212,7 @@ function observeTaskCompletion(t) {
 
 // ---------- WebSocket ----------
 let retry = 0; // failed attempts since the last open: 0 before the first open reads as "Connecting…"
-const CONN = { list: [], sig: '', drafts: {}, sent: {}, dismissed: {}, justDone: {}, picking: {}, lastFocus: null };
+const CONN = { list: [], sig: '', drafts: {}, sent: {}, dismissed: {}, justDone: {}, lastFocus: null };
 function connect() {
   resetCompletionSync();
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
@@ -2707,8 +2707,7 @@ function renderUsage(fresh = false) {
   $('usageCard').title = `${name} subscription limits · open usage over time`;
   $('usRefresh').setAttribute('aria-label', `Refresh ${name} usage limits`);
   const windows = id === 'claude' ? [{ ...u?.session, label: '5-hour' }, { ...u?.weekly, label: 'Weekly' }] : (u?.windows || []);
-  // Two fixed rows; windows past those (antigravity's four: Gemini and third-party, 5-hour and weekly) get compact
-  // rows in #usMore, and grouped labels widen the label column.
+  // Two fixed rows; any windows past those get compact rows in #usMore.
   const more = $('usMore'), rows = [$('usSessionRow'), $('usWeeklyRow')];
   while (more.children.length < windows.length - 2) {
     const r = el('div', 'ms-row');
@@ -2726,7 +2725,7 @@ function renderUsage(fresh = false) {
     row.title = [w?.tip, w?.resetsAt ? fmtReset(w.resetsAt) : ''].filter(Boolean).join('\n');
   });
   let note;
-  if (id === 'claude' && !u?.updatedAt) note = 'Checking plan limits…';
+  if (id === 'claude' && !u?.updatedAt) note = 'Press refresh to check plan limits';
   else if (!u?.available) note = id === 'claude'
     ? (u?.error ? `Couldn't read limits: ${u.error}` : 'Plan limits unavailable')
     : usageSlides.error ? "Couldn't refresh limits" : limitsHidden(id) ? 'Limits not exposed by CLI' : 'No current limits reported by this agent';
@@ -2743,7 +2742,8 @@ setInterval(() => {
   const ids = runningUsageAgents();
   usageSlides.agent = ids[(ids.indexOf(usageSlides.agent) + 1) % ids.length];
   renderUsage();
-  if (ids.some((id) => id !== 'claude') && Date.now() - usageSlides.at > 30000) loadSidebarUsage();
+  // Other agents' readings come from the usage log: read once, then only on refresh (no polling).
+  if (ids.some((id) => id !== 'claude') && !usageSlides.at && !usageSlides.loading) loadSidebarUsage();
 }, 3000);
 function renderUsageAge() {
   const u = sidebarUsage();
@@ -2751,7 +2751,7 @@ function renderUsageAge() {
   if (!u?.updatedAt) { blurSwap($('usAge'), ''); return; }
   const m = Math.floor((Date.now() - u.updatedAt) / 60e3);
   blurSwap($('usAge'), m < 1 ? 'just now' : `${m}m ago`);
-  $('usAge').title = `Checked ${new Date(u.updatedAt).toLocaleTimeString()}. ${usageSlides.agent === 'claude' ? 'Updates every 3 minutes and after each chat reply.' : 'Latest reading reported by this agent.'}`;
+  $('usAge').title = `Checked ${new Date(u.updatedAt).toLocaleTimeString()}. Updates when you press refresh.`;
 }
 let refreshGuard;
 function setRefreshing(on) {
@@ -2765,8 +2765,9 @@ function setRefreshing(on) {
 }
 $('usRefresh').addEventListener('click', () => {
   setRefreshing(true);
+  // One agent per click: Claude answers over the socket; the others check their CLI, then the usage log is re-read.
   if (usageSlides.agent === 'claude') send({ t: 'usage_refresh' });
-  else loadSidebarUsage().finally(() => setRefreshing(false));
+  else api(`/api/limits/${usageSlides.agent}/refresh`, 'POST').catch(() => {}).then(loadSidebarUsage).finally(() => setRefreshing(false));
 });
 setInterval(renderUsageAge, 5000);
 
@@ -2856,7 +2857,7 @@ setInterval(() => { if (M.usage) renderUsage(); }, 30e3); // keep the "in 2h 9m"
 
 // ---------- usage window ----------
 // Per-agent plan windows, tokens and limit hits over time (GET /api/usage/history, see usage.mjs).
-const U = { range: { '6h': 1, '24h': 1, '7d': 1, '30d': 1 }[store.get('cw.urange')] ? store.get('cw.urange') : '24h', data: null, err: '', at: 0, timer: null, lastFocus: null, draws: [] };
+const U = { range: { '6h': 1, '24h': 1, '7d': 1, '30d': 1 }[store.get('cw.urange')] ? store.get('cw.urange') : '24h', data: null, err: '', at: 0, lastFocus: null, draws: [] };
 const USAGE_AGENTS = ['claude', 'codex'];
 const WIN_NAMES = { five_hour: '5-hour', seven_day: 'Weekly', '5h': '5-hour', weekly: 'Weekly' };
 const SERIES = ['var(--accent)', 'var(--chart-2)', 'var(--chart-3)', 'var(--faint)'];
@@ -3159,13 +3160,10 @@ function openUsage() {
   renderUsageModal();
   loadUsageHistory();
   if (!CONN.list.length) refreshConnections().then(renderUsageModal);
-  clearInterval(U.timer);
-  U.timer = setInterval(loadUsageHistory, 60e3); // live refresh while open
   $('usageModal').querySelector('[data-close].icon-btn').focus();
 }
 function closeUsage(restoreFocus = true) {
   $('usageModal').hidden = true;
-  clearInterval(U.timer);
   if (restoreFocus) U.lastFocus?.focus?.();
 }
 $('usageRange').addEventListener('click', (e) => {
@@ -4413,7 +4411,6 @@ async function linkGitHub() {
 const CONN_ICONS = {
   claude: '<path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6L5.6 18.4" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>',
   codex: '<path d="M12 2.8l8 4.6v9.2l-8 4.6-8-4.6V7.4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M9 10l2.5 2L9 14M13 14.5h3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
-  antigravity: '<path d="M12 3.5L21 19.5H3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M12 10v5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
 };
 const connIcon = (id) => {
   const s = id === 'github' ? $('repoLink').querySelector('svg').cloneNode(true) : null;
@@ -4483,7 +4480,7 @@ function openConnections(id) {
   if ($('connsModal').hidden) CONN.lastFocus = document.activeElement;
   $('connsModal').hidden = false;
   renderConnFoot();
-  if (!$('connsRefresh').disabled) $('connsChecked').textContent = 'Models and limits refresh every 6 h and after each sign-in.';
+  if (!$('connsRefresh').disabled) $('connsChecked').textContent = 'Models refresh once a day and after a sign-in; limits from the usage card.';
   renderConnections(true);
   refreshConnections();
   $('connsModal').querySelector('[data-close].icon-btn').focus();
@@ -4510,20 +4507,16 @@ async function connAction(c, action, body) {
     return r;
   } catch (e) { alert(`${c.label}: ${e.message}`); return null; }
 }
-// A harness with `providers` (OpenCode) signs into one of them: Connect opens a picker first.
-async function connStart(c, body = {}) {
+async function connStart(c) {
   delete CONN.sent[c.id];
   delete CONN.drafts[c.id];
-  delete CONN.picking[c.id];
-  await connAction(c, 'start', body);
+  await connAction(c, 'start');
 }
-async function connLogout(c, acct) {
-  const what = acct ? `${acct.label} in ${c.label}` : c.label;
-  if (!confirm(c.logoutWarning ? `Sign out of ${what}?\n\n${c.logoutWarning}` : `Sign out of ${what} on this server?`)) return;
-  await connAction(c, 'logout', { ...(c.logoutWarning ? { confirm: true } : {}), ...(acct ? { provider: acct.id } : {}) });
+async function connLogout(c) {
+  if (!confirm(c.logoutWarning ? `Sign out of ${c.label}?\n\n${c.logoutWarning}` : `Sign out of ${c.label} on this server?`)) return;
+  await connAction(c, 'logout', c.logoutWarning ? { confirm: true } : {});
 }
-const connVia = (a) => (a.account ? `${a.label} (${a.account})` : a.label);
-// An agent CLI whose limits can't be read at all (health.limits.exposed false: OpenCode, Kiro; see .agent-orch/AGENTS.md).
+// An agent CLI whose limits can't be read at all (health.limits.exposed false; see .agent-orch/AGENTS.md).
 const limitsHidden = (id) => CONN.list.find((c) => c.id === id)?.health?.limits?.exposed === false;
 // A row's compact health (health.mjs): version, models, limit windows, when they were last read, and what's wrong.
 function connHealth(c) {
@@ -4547,7 +4540,7 @@ function connHealth(c) {
 async function refreshHealth() {
   const b = $('connsRefresh');
   b.disabled = true; b.textContent = 'Checking…';
-  blurSwap($('connsChecked'), 'Checking every agent…');
+  blurSwap($('connsChecked'), 'Checking sign-ins…');
   try {
     const r = await api('/api/connections/refresh', 'POST');
     AGENT_LIST = (await api('/api/agents')).agents || AGENT_LIST;
@@ -4561,48 +4554,9 @@ async function refreshHealth() {
 $('connsRefresh').addEventListener('click', refreshHealth);
 function connStatus(c) {
   if (!c.installed) return ['', 'Not installed'];
-  if (c.signedIn && c.accounts?.length) return ['on', `Connected via ${c.accounts.map(connVia).join(', ')}${c.ready ? ` · ${c.ready}` : ''}`];
-  if (c.signedIn && c.ready) return ['on', `Ready · ${c.ready}`];
   if (c.signedIn) return ['on', c.account ? `Connected as ${c.account}` : 'Connected'];
-  if (c.login?.state === 'waiting') {
-    const p = c.providers?.find((x) => x.id === c.login.provider);
-    return ['wait', p ? `Signing in to ${p.label}…` : 'Signing in…'];
-  }
+  if (c.login?.state === 'waiting') return ['wait', 'Signing in…'];
   return ['warn', 'Not signed in'];
-}
-// The provider picker: a radio list (connected providers are disabled), then Continue starts that provider's flow.
-function connPick(c) {
-  const box = el('div', 'cn-panel cn-pick'), have = new Set((c.accounts || []).map((a) => a.id));
-  const f = el('form');
-  f.append(el('div', 'cn-step', `Choose what ${c.label.replace(/ CLI$/, '')} signs in to`));
-  const opts = el('div', 'cn-opts');
-  opts.setAttribute('role', 'radiogroup');
-  let first = true;
-  for (const p of c.providers) {
-    const lab = el('label', 'cn-opt');
-    const r = el('input');
-    Object.assign(r, { type: 'radio', name: `cnp-${c.id}`, value: p.id, disabled: have.has(p.id) });
-    if (!r.disabled && first) { r.checked = true; first = false; }
-    const tx = el('span', 'cn-opt-tx');
-    tx.append(el('span', 'cn-opt-name', p.label), el('span', 'cn-opt-sub', have.has(p.id) ? 'Already connected' : p.blurb || ''));
-    lab.append(r, tx);
-    opts.append(lab);
-  }
-  const acts = el('div', 'cn-acts');
-  const cancel = el('button', 'link-btn', 'Cancel');
-  cancel.type = 'button';
-  cancel.onclick = () => { delete CONN.picking[c.id]; renderConnections(true); };
-  const go = el('button', 'btn small primary', 'Continue');
-  go.disabled = first;
-  acts.append(cancel, go);
-  f.append(opts, acts);
-  f.onsubmit = (e) => {
-    e.preventDefault();
-    const v = f.querySelector('input:checked')?.value;
-    if (v) connStart(c, { provider: v });
-  };
-  box.append(f);
-  return box;
 }
 function connPanel(c) {
   const l = c.login, box = el('div', 'cn-panel');
@@ -4612,7 +4566,7 @@ function connPanel(c) {
     const acts = el('div', 'cn-acts');
     const again = el('button', 'btn small primary', 'Try again');
     again.type = 'button';
-    again.onclick = () => connStart(c, l.provider ? { provider: l.provider } : {});
+    again.onclick = () => connStart(c);
     const close = el('button', 'link-btn', 'Close');
     close.type = 'button';
     close.onclick = () => { CONN.dismissed[c.id] = l.startedAt; renderConnections(true); };
@@ -4689,7 +4643,7 @@ function connPanel(c) {
 }
 function renderConnections(force) {
   const list = CONN.list;
-  const sig = JSON.stringify([list, CONN.justDone, CONN.dismissed, CONN.sent, CONN.picking]);
+  const sig = JSON.stringify([list, CONN.justDone, CONN.dismissed, CONN.sent]);
   if (!force && sig === CONN.sig) return;
   CONN.sig = sig;
   const box = $('connsList'), focused = document.activeElement?.dataset?.connInput;
@@ -4707,47 +4661,17 @@ function renderConnections(force) {
     st.title = text;
     info.append(st);
     main.append(connIcon(c.id), info);
-    const waiting = c.login?.state === 'waiting', multi = !!c.providers;
-    const pick = () => { CONN.picking[c.id] = true; renderConnections(true); $('connsList').querySelector(`[data-conn="${c.id}"] .cn-pick input:checked`)?.focus(); };
-    if (multi && c.installed && c.signedIn && !waiting && !CONN.picking[c.id] && c.accounts?.length < c.providers.length) {
-      const b = el('button', 'btn small cn-btn', c.accounts.length ? 'Add' : 'Connect a provider');
-      b.type = 'button';
-      b.title = `Sign ${c.label} in to ${c.accounts.length ? 'another' : 'a'} provider`;
-      b.onclick = pick;
-      main.append(b);
-    } else if (multi && c.installed && !c.signedIn && !waiting && !CONN.picking[c.id]) {
-      const b = el('button', 'btn small primary cn-btn', 'Connect');
-      b.type = 'button';
-      b.onclick = pick;
-      main.append(b);
-    } else if (multi) {
-      // Disconnect is per provider (below); Connect is the picker.
-    } else if (c.installed && c.signedIn && c.canLogout && !waiting) {
+    const waiting = c.login?.state === 'waiting';
+    if (c.installed && c.signedIn && c.canLogout && !waiting) {
       const b = el('button', 'btn small cn-btn', 'Disconnect');
       b.type = 'button';
       b.onclick = () => connLogout(c);
       main.append(b);
     } else if (c.installed && !c.signedIn && c.canLogin && !waiting) {
-      if (c.id === 'kiro') {
-        const picker = el('div', 'cn-kiro-picker');
-        const select = el('select');
-        [['builder', 'Builder ID'], ['google', 'Google'], ['github', 'GitHub'], ['organization', 'Your organization']].forEach(([value, label]) => {
-          const o = el('option'); o.value = value; o.textContent = label; select.append(o);
-        });
-        const startUrl = el('input'); startUrl.placeholder = 'Organization start URL'; startUrl.hidden = true;
-        const region = el('input'); region.placeholder = 'Region (e.g. us-east-1)'; region.hidden = true;
-        select.onchange = () => { const org = select.value === 'organization'; startUrl.hidden = region.hidden = !org; };
-        const b = el('button', 'btn small primary cn-btn', 'Connect');
-        b.type = 'button';
-        b.onclick = () => connStart(c, { method: select.value, startUrl: startUrl.value, region: region.value });
-        picker.append(select, startUrl, region, b);
-        main.append(picker);
-      } else {
-        const b = el('button', 'btn small primary cn-btn', 'Connect');
-        b.type = 'button';
-        b.onclick = () => connStart(c);
-        main.append(b);
-      }
+      const b = el('button', 'btn small primary cn-btn', 'Connect');
+      b.type = 'button';
+      b.onclick = () => connStart(c);
+      main.append(b);
     }
     row.append(main);
     const hl = connHealth(c);
@@ -4756,18 +4680,6 @@ function renderConnections(force) {
       hd.title = hl.title || hl.text;
       row.append(hd);
     }
-    if (multi && c.signedIn && c.canLogout && !waiting) {
-      for (const a of c.accounts || []) {
-        const r = el('div', 'cn-acct');
-        const b = el('button', 'link-btn', 'Disconnect');
-        b.type = 'button';
-        b.setAttribute('aria-label', `Disconnect ${a.label}`);
-        b.onclick = () => connLogout(c, a);
-        r.append(el('span', 'cn-st', connVia(a)), b);
-        row.append(r);
-      }
-    }
-    if (multi && CONN.picking[c.id] && !waiting) row.append(connPick(c));
     const l = c.login;
     if (l && (l.state === 'waiting' || (l.state === 'failed' && !c.signedIn && CONN.dismissed[c.id] !== l.startedAt))) row.append(connPanel(c));
     box.append(row);

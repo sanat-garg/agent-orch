@@ -53,6 +53,17 @@ export const DIRECTION = {
 export const FEATURES = { 'job.phase': 'phases', 'job.error': 'errors', 'node.error': 'errors', 'logs.tail': 'logs', logs: 'logs', 'node.update': 'update',
   'node.policy': 'policy' };
 export const FEATURE_LIST = [...new Set(Object.values(FEATURES))];
+// Compute-only workers (BRIEF goal 11): the only frames a worker acts on, all from the head it dialled. Connection
+// upkeep; jobs (job.*, plus git.credential for their pushes); remote sign-in driven from the head's Connections (login.*);
+// model and limit refreshes; its log tail; self-update; and the node's policy (max tasks, power), which like draining is
+// set on the head only. A worker rejects and logs any other type, even one added here later, and the head's hub never
+// sends one: there is no chat, prompt, planner, reflection or settings frame for a worker.
+export const WORKER_ACCEPTS = Object.freeze([
+  MSG.WELCOME, MSG.HEARTBEAT, MSG.ACK, MSG.ERROR, MSG.BYE,
+  MSG.JOB_OFFER, MSG.JOB_START, MSG.JOB_CANCEL, MSG.JOB_PAUSE, MSG.JOB_RESUME, MSG.JOB_ATTACH, MSG.GIT_CREDENTIAL,
+  MSG.LOGIN_START, MSG.LOGIN_CODE, MSG.LOGIN_CANCEL, MSG.LOGIN_LOGOUT,
+  MSG.MODELS_REFRESH, MSG.LIMITS_REFRESH, MSG.LOGS_TAIL, MSG.NODE_UPDATE, MSG.NODE_POLICY,
+]);
 
 export const AGENT_IDS = ['claude', 'codex'];
 export const OS_KINDS = ['linux', 'darwin'];
@@ -209,12 +220,18 @@ export function createSender(from) {
 }
 
 // Parses and validates an incoming frame from `from`. Returns {msg} or {error}; the caller answers errors with MSG.ERROR.
-export function decode(raw, { from } = {}) {
+// accept: the only types this side acts on (a worker passes WORKER_ACCEPTS); any other is refused before it is validated,
+// as {error, refused: its type}.
+export function decode(raw, { from, accept } = {}) {
   const s = typeof raw === 'string' ? raw : Buffer.isBuffer(raw) ? raw.toString('utf8') : null;
   if (s == null) return { error: 'frame is not text' };
   if (Buffer.byteLength(s) > MAX_FRAME) return { error: `frame exceeds ${MAX_FRAME} bytes` };
   let msg;
   try { msg = JSON.parse(s); } catch { return { error: 'frame is not JSON' }; }
+  if (accept && !accept.includes(msg?.t)) {
+    const t = String(msg?.t ?? '(no type)').slice(0, 80);
+    return { error: `${JSON.stringify(t)} is not accepted here`, refused: t };
+  }
   const error = validate(msg, { from });
   return error ? { error } : { msg };
 }

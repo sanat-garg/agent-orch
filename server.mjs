@@ -25,12 +25,17 @@ import { createCluster } from './cluster.mjs';
 import { WS_PATH, PAIR_PATH, CLAIM_PATH } from './cluster-protocol.mjs';
 import { createRemoteLogins } from './remote-login.mjs';
 import { createExtensions } from './extensions.mjs';
+import { headRefusal } from './role.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DATA = process.env.CW_DATA_DIR ? path.resolve(process.env.CW_DATA_DIR) : path.join(ROOT, 'data');
+// Compute-only workers (BRIEF goal 11): a paired worker never runs the head (UI, chat, planner, orchestrator), and
+// set-password can't make it one. Checked before anything is created or started.
+const refusal = headRefusal({ dataDir: DATA });
+if (refusal) { console.error(refusal); process.exit(1); }
 const LOGS = path.join(DATA, 'logs');
 const PUBLIC = path.join(ROOT, 'public');
 const INSTALL_SCRIPTS = { '/install/worker-linux.sh': 'install-worker.sh', '/install/worker-macos.sh': 'install-worker-macos.sh' };

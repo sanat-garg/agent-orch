@@ -12,7 +12,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { WebSocketServer } from 'ws';
 import {
   PROTOCOL_VERSION, HEARTBEAT_MS, HEARTBEAT_MISSES, WIP_PUSH_MS, MAX_FRAME, PAIRING_TTL_MS, PAIRING_MULTI_TTL_MS, MAX_PAIRING_USES, OS_KINDS, MSG,
-  FEATURE_LIST, graceMs, newPairingCode, normalizePairingCode, newNodeToken, hashSecret, secretMatches, bearerToken, createSender, decode,
+  FEATURE_LIST, WORKER_ACCEPTS, graceMs, newPairingCode, normalizePairingCode, newNodeToken, hashSecret, secretMatches, bearerToken, createSender, decode,
 } from './cluster-protocol.mjs';
 import { createNodeMetrics, RANGES } from './node-metrics.mjs';
 import { checkPolicy, effectivePolicy } from './power.mjs';
@@ -29,6 +29,9 @@ export const HEALTH = { diskMinBytes: 2 * 1024 ** 3, drops: 3, failures: 3, wind
 // (bye, service restart, hello with the new sha).
 export const OUTDATED_AFTER = 20;
 const UPDATE_WAIT_MS = 10 * 60_000; // node.update sent and no hello with a new sha by then: the update failed
+// Compute-only workers (BRIEF goal 11): nothing off the worker's allow-list (a chat, a prompt, a setting) is ever sent to
+// one; a caller that tries is a bug, so it throws like any other invalid frame.
+const forWorker = (t) => { if (!WORKER_ACCEPTS.includes(t)) throw new Error(`${t} is not for a worker: workers are compute-only`); };
 const clip = (v, n) => (typeof v === 'string' && v.length > n ? `${v.slice(0, n)}…` : v);
 const gb = (b) => `${(b / 1024 ** 3).toFixed(1)} GB`;
 const execFileP = promisify(execFile);
@@ -310,7 +313,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     if (old) { conns.delete(id); old.ws.close(4000, 'replaced by a new connection'); }
     const sender = createSender('c');
     const c = { ws, lastFrame: Date.now(), hello: null, errors: 0, connectedAt: Date.now() };
-    c.send = (t, fields) => { if (ws.readyState === 1) ws.send(sender(t, fields)); };
+    c.send = (t, fields) => { forWorker(t); if (ws.readyState === 1) ws.send(sender(t, fields)); };
     conns.set(id, c);
     const own = () => conns.get(id) === c;
     const touch = (extra = {}) => {
@@ -555,6 +558,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
 
   // For the scheduler: msg = {t, ...fields}; stamped and validated as a controller frame. False when not connected.
   function send(id, { t, ...fields }) {
+    forWorker(t);
     const c = conns.get(id);
     if (!c?.hello || c.ws.readyState !== 1) return false;
     c.send(t, fields);

@@ -695,3 +695,7 @@ worker phases, telemetry, errors, log tail, auto-drain, updates; tests pass
 ## 2026-09-27 20:22 — #230 Many-MacBook support: multi-use pairing, battery and sleep policy [done (check passed)]
 
 multi-use pairing, Mac power policy, LaunchDaemon installer; tests pass
+
+## 2026-09-27 20:57 — #232 Lock workers to compute-only: no prompts, UI or management on worker machines [done (check passed)]
+
+workers compute-only; npm test passes 403/403 with new tests

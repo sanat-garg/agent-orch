@@ -15,6 +15,7 @@
 # Installs Node 22 if missing (nvm when present, else the official tarball in ~/.local/node), clones or updates
 # github.com/sanat-garg/agent-orch into ~/agent-orch-worker with the gh login, runs npm ci, optionally installs agent
 # CLIs and pairs the machine. Idempotent: re-running updates everything; without --code an existing pairing is kept.
+# Only the worker service: no agent-orch web service, Caddy or ttyd (workers are compute-only; the head runs those).
 #   --controller URL  --code CODE  --name NAME (default: "<model> (<host name>)")  --agents claude,codex
 #   --service daemon|login  --user NAME (dedicated user, default agentorch)
 #   --no-dedicated-user (run as yourself from your own LaunchAgent, without sudo; not advised)
@@ -46,7 +47,7 @@ write_root() {
 # ~NAME, or /Users/NAME for an account that doesn't exist (yet).
 home_of() { local h; h="$(eval echo "~$1")"; [[ "$h" == "~"* ]] && h="/Users/$1"; echo "$h"; }
 
-usage() { sed -n '2,21p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,22p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; }
 
 parse() {
   while (($#)); do

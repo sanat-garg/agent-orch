@@ -6,6 +6,7 @@
 # github.com/sanat-garg/agent-orch into ~/agent-orch-worker with the gh login, runs npm ci, optionally installs agent
 # CLIs, pairs the machine and installs agent-orch-worker.service (Restart=always, MemoryHigh leaves headroom).
 # Idempotent: re-running updates the checkout and the unit; without --code an existing pairing is kept.
+# Only the worker service: no agent-orch web service, Caddy or ttyd (workers are compute-only; the head runs those).
 #   --controller URL  --code CODE  --name NAME (default: hostname)  --agents claude,codex
 #   --dry-run (print what would run, change nothing)  --uninstall [--purge] (also delete ~/.agent-orch-worker)
 set -euo pipefail
@@ -27,7 +28,7 @@ tty_run() { if ((DRY)); then printf '+ %s\n' "$*"; else "$@" </dev/tty; fi; }
 write_root() { if ((DRY)); then printf '+ write %s:\n' "$1"; sed 's/^/    /'; else sudo tee "$1" >/dev/null; fi; }
 SUDO() { if ((EUID == 0)); then run "$@"; else run sudo "$@"; fi; }
 
-usage() { sed -n '2,12p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,11p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; }
 
 parse() {
   while (($#)); do

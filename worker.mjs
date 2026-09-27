@@ -6,11 +6,15 @@
 // tail on request, and it updates itself (git pull + service restart) when the controller asks while it is idle. On a
 // Mac it follows its power policy from the controller (power.mjs): no new jobs on low battery or when hot, and awake
 // (caffeinate) only while jobs run.
+// Compute-only (BRIEF goal 11): no UI, chat, planner, reflection or settings here, and nothing of the controller's is
+// loaded (server.mjs, orchestrator.mjs, cluster.mjs). It acts only on the head's allow-listed frames (cluster-protocol.mjs
+// WORKER_ACCEPTS), rejecting and logging anything else; it opens no listening port; its slots, power policy and draining
+// come only from the head. These are its only commands (the installers add --uninstall):
 //   node worker.mjs pair --controller https://<host> --code ABCD-1234 [--name mac]   one time: stores the node token
 //   node worker.mjs run                                                              the daemon (systemd / launchd)
 //   node worker.mjs status                                                           the stored pairing (no token)
 // Everything lives in ~/.agent-orch-worker (AGENT_ORCH_WORKER_HOME overrides): config.json (0600), repos/ (bare cache
-// clones), worktrees/, deps/ (node_modules by lockfile hash), logs/. No UI. git and gh use the machine's own login.
+// clones), worktrees/, deps/ (node_modules by lockfile hash), logs/. git and gh use the machine's own login.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -22,7 +26,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import WebSocket from 'ws';
 import {
   PROTOCOL_VERSION, WS_PATH, CLAIM_PATH, HEARTBEAT_MS, HEARTBEAT_MISSES, WIP_PUSH_MS, SLEEP_JUMP_MS, MAX_FRAME, MAX_BATCH, MSG, OUTCOMES,
-  EVENT_KINDS, OS_KINDS, GRACE_MS, FEATURES, FEATURE_LIST, backoffMs, createSender, decode,
+  EVENT_KINDS, OS_KINDS, GRACE_MS, FEATURES, FEATURE_LIST, WORKER_ACCEPTS, backoffMs, createSender, decode,
 } from './cluster-protocol.mjs';
 import { AGENTS, agentStatus, clearLoginCache, fetchLimits, modelCatalog, readVersion, runAgentCli } from './agents.mjs';
 import { agentAccount } from './health.mjs';
@@ -34,12 +38,12 @@ import { helperOut, runHelper } from './helpers.mjs';
 import { autoTasks, createKeepAwake, effectivePolicy, intake as intakeOf, readPower, reserveBytes, wantsAwake } from './power.mjs';
 import { MEM } from './parallel.mjs';
 import { GIT_ID, commitAll, taskBranch } from './worktrees.mjs';
-import { extractCommand, runCheck, toolLine } from './orchestrator.mjs';
+import { extractCommand, runCheck, toolLine } from './taskrun.mjs';
+import { JOB_ENV, workerHome } from './role.mjs';
 
 const execFileP = promisify(execFile);
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const VERSION = (() => { try { return JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version; } catch { return 'unknown'; } })();
-export const workerHome = () => process.env.AGENT_ORCH_WORKER_HOME || path.join(os.homedir(), '.agent-orch-worker');
 const RESUME_PROMPT = 'You were interrupted before finishing. Continue the same task from where you left off.';
 const EVENT_FLUSH_MS = 1000;
 const MAX_PENDING_EVENTS = 5000; // events kept per job for a replay after a reconnect (oldest dropped)
@@ -209,6 +213,12 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     if (!live() || !supports(t)) return false;
     try { ws.send(send(t, fields)); return true; } catch (e) { log(`could not send ${t}: ${e.message}`, 'warn'); return false; }
   }
+  // Compute-only: a frame type off the allow-list (WORKER_ACCEPTS: a chat, a prompt, a setting, a frame only a worker
+  // sends…) is never acted on: logged, and answered with an error.
+  function reject(t) {
+    log(`rejected ${JSON.stringify(t)} from the controller: not on the worker's allow-list (compute-only)`, 'warn');
+    return raw(MSG.ERROR, { message: `${JSON.stringify(t)} is not accepted by a worker: workers are compute-only (jobs, sign-in, refreshes, logs, updates and policy from the head)` });
+  }
 
   // ---- a job's stream: its events (index = position since the job started) and its other frames (job.check, job.wip,
   // job.done), each placed after the events emitted before it. Nothing is dropped once sent: after a reconnect the
@@ -373,8 +383,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   // ---- power policy (power.mjs): intake (no new jobs on low battery or when hot) and keep-awake while jobs run
   const intakeNow = () => (POWERED ? intakeOf(policy, power) : { ok: true });
   const activeJobs = () => [...jobs.values()].filter((j) => j.state !== 'paused').length;
-  // At most maxTasks jobs (Auto: cores − 1 on a Mac, all cores elsewhere), and never above a config.json maxJobs.
-  const maxJobs = () => Math.min(policy.maxTasks ?? autoTasks(process.platform, os.cpus().length), config.maxJobs || Infinity);
+  // At most the head's max tasks (Auto: cores − 1 on a Mac, all cores elsewhere): slots are set on the head only.
+  const maxJobs = () => policy.maxTasks ?? autoTasks(process.platform, os.cpus().length);
   function syncAwake() { awake?.set(!stopping && wantsAwake(policy, power, activeJobs())); }
   function setPolicy(p) {
     policy = { ...effectivePolicy(process.platform), ...p };
@@ -434,7 +444,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     sock.on('message', (data, isBinary) => {
       if (ws !== sock) return;
       lastFrame = Date.now();
-      const { msg, error } = decode(isBinary ? null : data.toString('utf8'), { from: 'c' });
+      const { msg, error, refused } = decode(isBinary ? null : data.toString('utf8'), { from: 'c', accept: WORKER_ACCEPTS });
+      if (refused != null) return reject(refused);
       if (error) { log(`bad frame from the controller: ${error}`, 'warn'); return raw(MSG.ERROR, { message: error }); }
       handle(msg).catch((e) => {
         log(`handling ${msg.t} failed: ${e.stack || e.message}`, 'error');
@@ -530,7 +541,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       case MSG.LOGS_TAIL: return raw(MSG.LOGS, { req: msg.req, lines: tailLines(logFile(home), Math.max(1, Math.min(2000, msg.lines))) });
       case MSG.NODE_UPDATE: return selfUpdate(msg);
       case MSG.NODE_POLICY: setPolicy(msg.policy); return sendResources(); // the controller sees the new intake at once
-      default: return;
+      default: return reject(msg.t); // allow-listed but not handled here: still never acted on
     }
   }
 
@@ -558,6 +569,10 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     return { AO_GIT_TOKEN: token, GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'credential.helper', GIT_CONFIG_VALUE_0: '',
       GIT_CONFIG_KEY_1: 'credential.helper', GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$AO_GIT_TOKEN"; }; f' };
   };
+
+  // What a job's agent and check run with: the reaper's owner tag, and JOB_ENV, so a server.mjs they start (the project's
+  // own tests or screenshots, when the project is agent-orch) is a throwaway instance, not a head (role.mjs).
+  const jobEnv = (job) => ({ ...withOwner(process.env, 'task', job.id), [JOB_ENV]: String(job.id) });
 
   // Bare cache clone (blob-less), fetched before each job; remote branches land in refs/remotes/origin/*.
   const cacheDir = (repo) => path.join(dirs.repos, `${cacheName(repo)}.git`);
@@ -675,7 +690,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       res = await runAgentCli({
         agent: spec.agent, model: spec.model || undefined, effort: spec.effort || undefined, prompt, cwd: job.dir, resume: resume || undefined, systemAppend: spec.systemAppend || undefined,
         autonomous: spec.autonomous ?? true, signal: job.ac.signal, onEvent: (e) => pushEvent(job, e),
-        env: withOwner(process.env, 'task', job.id), onSpawn: ({ pid, pgid }) => registerPid({ pid, pgid, kind: 'task', id: job.id }),
+        env: jobEnv(job), onSpawn: ({ pid, pgid }) => registerPid({ pid, pgid, kind: 'task', id: job.id }),
       });
     } catch (e) {
       res = { outcome: 'error', text: `agent crashed: ${e?.message || e}` };
@@ -716,7 +731,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       job.state = 'checking';
       setPhase(job, 'checking');
       let [pass, output, code] = [false, '', null];
-      try { [pass, output, code] = await runCheck(command, job.dir, withOwner(process.env, 'task', job.id), spec.timeouts.verifySec || 600, job.ac.signal); }
+      try { [pass, output, code] = await runCheck(command, job.dir, jobEnv(job), spec.timeouts.verifySec || 600, job.ac.signal); }
       catch (e) { output = `verification crashed: ${e?.message || e}`; jobError(job, 'check_crashed', output, { stack: e?.stack }); }
       if (await stopped(job)) return;
       log(`job ${job.id} check ${pass ? 'passed' : 'failed'}: ${command}`);
@@ -961,6 +976,8 @@ async function main() {
     const c = readConfig();
     console.log(c ? JSON.stringify({ ...c, token: undefined }, null, 1) : 'not paired');
   } else {
+    // Nothing else is local (compute-only): a worker's slots, power policy and draining are set on the head.
+    if (cmd) console.error(`unknown command ${JSON.stringify(cmd)}: this machine's max tasks, power policy and draining are set on the head (Server details → Machines)`);
     console.log('usage: node worker.mjs pair --controller https://<host> --code <code> [--name <name>] | run | status');
     process.exitCode = cmd ? 1 : 0;
   }

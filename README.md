@@ -375,6 +375,10 @@ node worker.mjs run                                                      # the d
 - Run it as a dedicated unprivileged user under systemd (`Restart=always`) or, on macOS, a LaunchDaemon with
   `UserName` (see Adding machines). On stop it pauses running jobs and pushes their work first. It reconnects with
   backoff forever and runs its own reaper for leftover agent processes (`AGENT_ORCH_REAPER=off` disables it).
+- **It is compute-only**: no chat, planner, reflection, settings or web UI, and no listening port. It acts only on the
+  head's job, sign-in, refresh, log, update and policy messages, and rejects (and logs) anything else. Its only
+  commands are `pair`, `run` and `status`. `node server.mjs` refuses to start on a paired worker; to make the machine a
+  head instead, unpair it first (the installer's `--uninstall --purge`).
 - **It follows the power policy and caps the head sets for it** (Machines → Power, Max tasks): on a Mac, no new tasks
   on low battery or when hot, and `caffeinate` only while tasks run (see Adding machines).
 - **It reports to this server**: each job's steps (shown as a timeline in the task drawer), health telemetry every

@@ -17,7 +17,8 @@ supply the CPU/RAM. They do not supply quota (see the caveat at the end).
   small daemon (`worker.mjs` in this repo, started by systemd on Linux or a launchd
   LaunchDaemon on macOS) that dials the controller, reports what it has, and runs the jobs it is given with the same
   adapters (`agents.mjs` `runAgentCli`, normalised events) and the same done-when check (`runCheck`). A worker has no
-  DB, no planner and no UI; it holds nothing the controller can't rebuild except in-flight work, which it pushes.
+  DB, no planner and no UI (it is compute-only, see Compute-only workers); it holds nothing the controller can't rebuild
+  except in-flight work, which it pushes.
 - **Node**: any machine that can run tasks (local node + workers). Identified by a stable `node` id (issued at
   pairing) and a display name.
 
@@ -135,7 +136,7 @@ verify-failed prompt, same as the local flow) or `job.cancel`. The controller ke
   local node keeps its current `taskSlots` rule.
 - Placement picks the placeable node with the most headroom, preferring: the node that last ran the task (warm
   worktree and session), then remote nodes over the local one (the controller also serves the UI and merges). Plan and
-  reflect tasks always run on the local node: they need the DB and project context.
+  reflect tasks always run on the local node: they need the DB and project context (asserted, see Compute-only workers).
 - The offer is a two-phase claim: the task stays `queued` with `offered_to` set until `job.accept`; a reject or 10 s
   timeout clears it and tries the next node. `files`/`filesOverlap` and `task_deps` rules apply across nodes
   unchanged, because they are checked on the controller before placement.
@@ -258,6 +259,36 @@ changes either, `node.policy`; the worker enforces it, and the scheduler keeps t
   needed) or with `--service login` from the owner's LaunchAgent via a sudoers-allowed launcher (while the owner is
   logged in). Both use `ProcessType Standard` with `Nice 5`.
 
+## Compute-only workers (#232)
+
+The owner's rule (BRIEF goal 11): a worker only computes. No chat, prompts, planner, reflection, settings or management
+UI runs on it, and it takes work only from the head.
+
+- **Allow-list** (cluster-protocol.mjs `WORKER_ACCEPTS`): connection upkeep (`welcome`, `heartbeat`, `ack`, `error`,
+  `bye`), jobs (`job.offer/start/cancel/pause/resume/attach`, plus `git.credential` for their pushes), remote sign-in
+  driven from the head's Connections (`login.*`), `models.refresh`, `limits.refresh`, `logs.tail`, `node.update` and
+  `node.policy`. The worker decodes with `decode(raw, {from: 'c', accept: WORKER_ACCEPTS})`, which refuses any other
+  type before validating it: the worker logs `rejected "<type>" from the controller` and answers `error`. A type added to
+  the protocol later is refused until it is put on the list, and the list may never hold a chat-, prompt-, planner- or
+  settings-like type (test/compute-only.test.mjs).
+- **The head sends nothing else**: the hub's `send` throws for a type off the list. Only work tasks go to workers
+  (orchestrator `remoteWork`: kind `work`, not an integrator); plan tasks (the owner's chat with the planner),
+  reflection and review checkpoints stay on the controller, and `assertPlacement` throws if that ever breaks: in
+  `claimNext` before the claim is recorded, and in `runRemote` before any frame goes out.
+- **Nothing of the head runs there**: worker.mjs loads no server.mjs, orchestrator.mjs, cluster.mjs or runtimes.mjs (what
+  it shares with the orchestrator, the done-when check and `toolLine`, is in taskrun.mjs). `node server.mjs` (and
+  `set-password`) refuses to start on a paired worker: when `~/.agent-orch-worker/config.json` (`AGENT_ORCH_WORKER_HOME`)
+  exists and the data dir holds no head state (`auth.json`, the orchestrator DB), it says why and exits 1 before it
+  creates anything (role.mjs `headRefusal`). Processes a job runs carry `AGENT_ORCH_WORKER_JOB` and are exempt, so a
+  project's own tests that start server.mjs (agent-orch's suite, screenshots) still run on a worker. To make a worker a
+  head, unpair it first (the installer's `--uninstall --purge`).
+- **No local control surface**: the worker opens no listening port, and its only commands are `pair`, `run` and `status`
+  (the installers add `--uninstall`); any other says that its max tasks, power policy and draining are set on the head.
+  They come only from there (`welcome.policy`, `node.policy`; draining is the head's own scheduling), with no local
+  override.
+- **Installers**: bin/install-worker*.sh set up only the worker service (the systemd unit or launchd plist that runs
+  `worker.mjs run`): no agent-orch web service, Caddy or ttyd.
+
 ## Security
 
 - **Tokens**: the controller stores only `hashSecret(token)` (sha256) and `hashSecret(code)` for pairing codes; a
@@ -268,7 +299,8 @@ changes either, `node.policy`; the worker enforces it, and the scheduler keeps t
   is refused at the upgrade. Re-adding needs a new pairing code.
 - **Only controller-originated jobs**: workers accept `job.*` commands only from the socket they dialled (TLS to the
   configured controller URL, certificate verified); `validate(msg, {from})` rejects worker-originated commands on the
-  controller and controller-only types on the worker. Workers run no listener at all: **no inbound ports**.
+  controller and controller-only types on the worker, and a worker acts only on its allow-list (`WORKER_ACCEPTS`, see
+  Compute-only workers). Workers run no listener at all: **no inbound ports**.
 - **Least privilege**: the worker runs as an unprivileged user with no sudo, touching only `~/.agent-orch-worker/`
   and its agent CLIs' own config dirs. On the Mac it runs as a **dedicated macOS user** (e.g. `agentorch`, standard
   account, FileVault on) so agents can't read the owner's home, keychain or browser profiles; launchd runs it as

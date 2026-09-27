@@ -14,3 +14,7 @@ Enforce BRIEF goal 11's compute-only rule for worker machines. 1) worker.mjs nev
 ## Done when
 
 `npm test` passes with the worker allow-list, scheduler-placement and server-refuses-in-worker-mode tests
+
+## Result — done (check passed) (2026-09-27 20:57)
+
+AGENT-ORCH-STATUS: done — workers compute-only; npm test passes 403/403 with new tests

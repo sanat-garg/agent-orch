@@ -18,7 +18,7 @@ import { chromium } from 'playwright-core';
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PASSWORD = 'away-ui-password';
 const VIEWPORTS = [{ width: 375, height: 667 }, { width: 390, height: 844 }];
-const MODALS = ['awayModal', 'connsModal', 'usageModal', 'serverModal', 'queueModal', 'fbModal', 'delegModal', 'lightbox', 'pickerModal'];
+const MODALS = ['awayModal', 'connsModal', 'usageModal', 'serverModal', 'queueModal', 'fbModal', 'delegModal', 'lightbox', 'pickerModal', 'machineModal'];
 let browser, skip = false;
 try { browser = await chromium.launch(); } catch (e) { skip = `cached Chromium unavailable: ${e.message.split('\n')[0]}`; }
 let child, base, dataDir, cookie;

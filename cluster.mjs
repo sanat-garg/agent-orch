@@ -39,7 +39,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
   const cols = db.prepare('PRAGMA table_info(nodes)').all().map((c) => c.name);
   for (const [c, type] of COLUMNS) if (!cols.includes(c)) db.exec(`ALTER TABLE nodes ADD COLUMN ${c} ${type}`);
   const conns = new Map(); // node id -> { ws, send, lastFrame, hello, errors }
-  const codes = new Map(); // hashSecret(code) -> expiry (epoch ms); single use
+  const codes = new Map(); // hashSecret(code) -> { expiresAt, node }; single use (node = the id that claimed it)
   const handlers = new Set();
   const get = (id) => db.prepare('SELECT * FROM nodes WHERE id=?').get(id);
 
@@ -93,21 +93,30 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
   // ---- pairing
   function createPairing() {
     const t = Date.now();
-    for (const [h, exp] of codes) if (exp < t) codes.delete(h);
+    for (const [h, c] of codes) if (c.expiresAt < t) codes.delete(h);
     const code = newPairingCode(), expiresAt = t + PAIRING_TTL_MS;
-    codes.set(hashSecret(code), expiresAt);
+    codes.set(hashSecret(code), { expiresAt, node: null });
     return { code, expiresAt };
+  }
+  // The "Add machine" wizard's view of its code: waiting → paired (node claimed it; node.connected once it dials in),
+  // or expired. Claimed codes are remembered until their original expiry so the wizard can see who took them.
+  function pairing(code) {
+    const c = normalizePairingCode(code), e = c && codes.get(hashSecret(c));
+    if (!e) return { state: 'unknown' };
+    const n = e.node && node(e.node);
+    if (n) return { state: 'paired', expiresAt: e.expiresAt, node: n };
+    return { state: e.expiresAt < Date.now() ? 'expired' : 'waiting', expiresAt: e.expiresAt };
   }
   // Worker side of pairing: a valid unexpired code → a new node and its token (returned only here, stored hashed).
   function claim({ code, name, os: kind, arch } = {}) {
-    const c = normalizePairingCode(code), h = c && hashSecret(c), exp = h && codes.get(h);
-    if (!exp || exp < Date.now()) { if (h) codes.delete(h); return { status: 401, error: 'invalid or expired pairing code' }; }
+    const c = normalizePairingCode(code), h = c && hashSecret(c), e = h && codes.get(h);
+    if (!e || e.node || e.expiresAt < Date.now()) { if (e && !e.node) codes.delete(h); return { status: 401, error: 'invalid or expired pairing code' }; }
     if (!OS_KINDS.includes(kind)) return { status: 400, error: `os must be one of ${OS_KINDS.join(', ')}` };
     if (typeof arch !== 'string' || !/^[\w.-]{1,20}$/.test(arch)) return { status: 400, error: 'arch required' };
     const label = cleanName(name);
     if (!label) return { status: 400, error: 'name required' };
-    codes.delete(h);
     const id = `n_${crypto.randomBytes(6).toString('hex')}`, token = newNodeToken();
+    e.node = id;
     db.prepare('INSERT INTO nodes (id, name, os, arch, token_hash, created_at, status) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(id, label, kind, arch, hashSecret(token), Date.now(), 'offline');
     log(`paired node ${id} (${label}, ${kind}/${arch})`);
@@ -279,5 +288,5 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     db.close();
   }
 
-  return { listNodes, node, createPairing, claim, update, revoke, handleUpgrade, send, onMessage, isConnected: (id) => conns.has(id), close };
+  return { listNodes, node, createPairing, pairing, claim, update, revoke, handleUpgrade, send, onMessage, isConnected: (id) => conns.has(id), close };
 }

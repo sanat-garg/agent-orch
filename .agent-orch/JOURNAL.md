@@ -643,3 +643,7 @@ remote placement, dispatch and merge-back work; cluster e2e passes
 ## 2026-09-27 13:37 — #220 Node failure handling: disconnects, laptop sleep, WIP recovery and reassignment [done (check passed)]
 
 Waiting for the full `npm test` run to finish.
+
+## 2026-09-27 13:55 — #221 Install scripts for Linux VPS and macOS workers, plus an 'Add machine' wizard [done (check passed)]
+
+The full test suite is still running; I'll check the result when it finishes.

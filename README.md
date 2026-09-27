@@ -222,6 +222,47 @@ worktree. That task merges the main branch in, resolves the conflict markers, re
 work, which marks the original task done. Failed or cancelled work is committed to its branch and the worktree
 removed, so a retry can pick it up.
 
+## Adding machines
+
+Open **Server details** (the stats card at the bottom of the sidebar) → **Machines** → **Add machine**. It creates a
+one-time pairing code (valid 10 minutes) and shows one line per OS with the code built in; click it to copy, then run
+it on the new machine:
+
+```sh
+# Linux VPS (systemd), as a normal sudo user
+curl -fsSL https://<your-host>/install/worker-linux.sh | bash -s -- --controller https://<your-host> --code ABCD-1234 --agents claude,codex
+# macOS (launchd), from your own logged-in account
+curl -fsSL https://<your-host>/install/worker-macos.sh | sudo bash -s -- --controller https://<your-host> --code ABCD-1234 --agents claude,codex
+```
+
+The wizard shows "Waiting for the machine to connect…", then the machine's name once it claims the code, then
+"Connected" when its worker dials in. After that, sign the agents in on that machine.
+
+The scripts are `bin/install-worker.sh` and `bin/install-worker-macos.sh` (the server serves them without a login at
+`/install/…`; the pairing code is the only secret). They:
+
+- install Node 22 if missing (nvm when present, else the official arm64/x64 tarball in `~/.local/node`);
+- install `gh` if needed (apt on Linux), run `gh auth login` if GitHub isn't signed in, then `gh auth setup-git`;
+- clone or update github.com/sanat-garg/agent-orch into `~/agent-orch-worker` and run `npm ci`;
+- with `--agents claude,codex`, install missing agent CLIs (`curl -fsSL https://claude.ai/install.sh | bash`,
+  `npm i -g @openai/codex`);
+- pair with `node worker.mjs pair --controller … --code … --name …` (`--name` defaults to the hostname);
+- install the service. Linux: `/etc/systemd/system/agent-orch-worker.service` with `Restart=always` and
+  `MemoryHigh=85%`, which throttles the worker before the machine runs short. macOS: a LaunchAgent,
+  `~/Library/LaunchAgents/com.agent-orch.worker.plist`, with `KeepAlive`. It runs only while you're logged in.
+
+**On a Mac, use a dedicated user (the default under sudo).** Agents run on their own with full permissions. Under
+your account they could read your documents, keychain, browser profiles and SSH keys. So the macOS script creates a
+hidden standard user, `agentorch` (`--user` to rename it), with `sysadminctl`, and installs and pairs everything as
+that user. Your own LaunchAgent starts the worker through a root-owned launcher,
+`/usr/local/bin/agent-orch-worker-run`. A sudoers rule (`/etc/sudoers.d/agent-orch-worker`) lets you run that one
+command as `agentorch` and nothing else. `--no-dedicated-user` installs under your own account (run it without sudo),
+but this isn't advised. Sign the agents in as that user too, for example `sudo -u agentorch -H claude`.
+
+Both scripts are idempotent: re-running updates the checkout and the service and keeps the existing pairing unless
+you pass a new `--code`. `--dry-run` prints every step without changing anything. `--uninstall` removes the service
+and the checkout. Add `--purge` to delete `~/.agent-orch-worker` too. Then remove the machine in the UI.
+
 ## Worker machines
 
 Extra machines (a second VPS, a Mac) run `worker.mjs`, which dials out to this server over WSS (no inbound port) and

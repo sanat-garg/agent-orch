@@ -2509,6 +2509,7 @@ function onServer(msg) {
   if (msg.t === 'oprojects') { applyProjectOrder(msg.order || []); renderConvoList(); return renderOrchBar(); }
   if (['otask', 'oproject', 'ostate', 'orun', 'oorder', 'olane'].includes(msg.t)) return onOrch(msg);
   if (msg.t === 'connections') return applyConnections(msg.connections);
+  if (msg.t === 'cluster') { if (!$('serverModal').hidden) loadMachines(); return checkPairing(); }
   if (msg.t === 'models') return api('/api/agents').then((d) => { AGENT_LIST = d.agents || []; renderAgentPicker(); }).catch(() => {});
   if (msg.t === 'status') { upd.pending = !!msg.restartPending; return renderUpdateBanner(); }
   if (msg.t === 'convos') {
@@ -3098,6 +3099,7 @@ function openServer() {
   renderMetrics();
   loadHistory();
   updateLive();
+  loadMachines();
   $('serverModal').querySelector('[data-close].icon-btn').focus();
 }
 function renderRangePicker() {
@@ -3119,9 +3121,102 @@ function closeServer() {
 $('miniStats').addEventListener('click', openServer);
 $('serverModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeServer(); });
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !$('serverModal').hidden) { e.stopImmediatePropagation(); closeServer(); }
+  if (e.key === 'Escape' && !$('serverModal').hidden && $('machineModal').hidden) { e.stopImmediatePropagation(); closeServer(); }
 }, true);
 setInterval(() => { if (M.usage) renderUsage(); }, 30e3); // keep the "in 2h 9m" countdowns current
+
+// ----- machines (cluster nodes) and the "Add machine" wizard -----
+// POST /api/cluster/pair → a one-time code, embedded in a one-line install command per OS (bin/install-worker*.sh,
+// served at /install/…). GET /api/cluster/pair/:code then reports waiting → paired (node) → node.connected.
+const AM = { code: null, expiresAt: 0, pairing: null, err: '', timer: null, lastFocus: null };
+const NODE_ST = { online: 'Online', draining: 'Draining', disabled: 'Disabled' };
+async function loadMachines() {
+  let nodes;
+  try { nodes = (await api('/api/cluster/nodes')).nodes || []; } catch { return; }
+  $('mMachines').replaceChildren(...nodes.map((n) => {
+    const li = el('li');
+    li.append(el('span', `dot ${n.connected ? 'on' : ''}`), el('span', 'mc-name', n.local ? `${n.name} (this server)` : n.name),
+      el('span', 'mc-st', n.connected ? NODE_ST[n.status] || n.status : cap(n.awayLabel || 'offline')));
+    return li;
+  }));
+}
+const installCmd = (os, code) => {
+  const o = location.origin;
+  return os === 'mac' ? `curl -fsSL ${o}/install/worker-macos.sh | sudo bash -s -- --controller ${o} --code ${code} --agents claude,codex`
+    : `curl -fsSL ${o}/install/worker-linux.sh | bash -s -- --controller ${o} --code ${code} --agents claude,codex`;
+};
+function renderAddMachine() {
+  const body = $('amBody'), p = AM.pairing, node = p?.node;
+  const nodes = [];
+  if (AM.err) nodes.push(el('p', 'cn-err', AM.err));
+  if (!AM.code) { body.replaceChildren(...nodes, el('p', 'am-note', AM.err ? '' : 'Getting a pairing code…')); return; }
+  if (!node) {
+    nodes.push(el('p', 'am-note', 'Run one line on the new machine. It installs Node 22 and the worker, signs in to GitHub if needed, pairs with this server and starts at boot (Linux) or login (Mac).'));
+    for (const [os, label, note] of [['linux', 'Linux VPS (systemd)', ''], ['mac', 'macOS (launchd)', 'Runs under a separate standard user, agentorch, so agents can’t see your files.']]) {
+      const cmd = installCmd(os, AM.code), pre = el('pre', 'am-cmd copy-cmd');
+      pre.dataset.copy = cmd;
+      pre.title = 'Click to copy';
+      pre.append(el('code', '', cmd));
+      const wrap = el('div');
+      wrap.append(el('p', 'am-os', label), pre);
+      if (note) wrap.append(el('p', 'am-note', note));
+      nodes.push(wrap);
+    }
+  }
+  const st = el('div', 'am-status');
+  st.setAttribute('role', 'status');
+  const expired = p?.state === 'expired' || (!node && AM.expiresAt && AM.expiresAt < Date.now());
+  const [dot, text] = node?.connected ? ['on', `Connected: ${node.name}`]
+    : node ? ['wait', `Paired: ${node.name}. Waiting for its worker to start…`]
+      : expired ? ['off', 'This code expired.']
+        : ['wait', `Waiting for the machine to connect… (code ${AM.code}, valid ${fmtDur(Math.max(0, Math.round((AM.expiresAt - Date.now()) / 1000)))})`];
+  st.append(el('span', `dot ${dot}`), el('span', '', text));
+  nodes.push(st);
+  if (node) nodes.push(el('p', 'am-next', `Next: sign the agents in on ${node.name}. Claude Code and Codex use that machine’s own login, so run \`claude\` and \`codex login --device-auth\` there once; signing in from here comes next.`));
+  const acts = el('div', 'am-acts');
+  if (expired || node) {
+    const again = el('button', 'btn', node ? 'Add another' : 'New code');
+    again.type = 'button';
+    again.addEventListener('click', newPairing);
+    acts.append(again);
+  }
+  const done = el('button', `btn${node?.connected ? ' primary' : ''}`, node ? 'Done' : 'Close');
+  done.type = 'button';
+  done.addEventListener('click', closeAddMachine);
+  acts.append(done);
+  nodes.push(acts);
+  body.replaceChildren(...nodes);
+}
+async function newPairing() {
+  Object.assign(AM, { code: null, pairing: null, err: '' });
+  renderAddMachine();
+  try { Object.assign(AM, await api('/api/cluster/pair', 'POST')); } catch (e) { AM.err = e.message; }
+  renderAddMachine();
+}
+async function checkPairing() {
+  if ($('machineModal').hidden || !AM.code || AM.pairing?.node?.connected) return;
+  try { AM.pairing = await api(`/api/cluster/pair/${encodeURIComponent(AM.code)}`); } catch { return; }
+  renderAddMachine();
+}
+function openAddMachine() {
+  AM.lastFocus = document.activeElement;
+  $('machineModal').hidden = false;
+  newPairing();
+  clearInterval(AM.timer);
+  AM.timer = setInterval(checkPairing, 4000); // the 'cluster' push usually gets here first; this also ticks the countdown
+  $('machineModal').querySelector('[data-close].icon-btn').focus();
+}
+function closeAddMachine() {
+  $('machineModal').hidden = true;
+  clearInterval(AM.timer);
+  if (!$('serverModal').hidden) loadMachines();
+  AM.lastFocus?.focus?.();
+}
+$('addMachine').addEventListener('click', openAddMachine);
+$('machineModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeAddMachine(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('machineModal').hidden) { e.stopImmediatePropagation(); closeAddMachine(); }
+}, true);
 
 // ---------- usage window ----------
 // Per-agent plan windows, tokens and limit hits over time (GET /api/usage/history, see usage.mjs).

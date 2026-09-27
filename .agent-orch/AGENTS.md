@@ -13,6 +13,9 @@ on 2026-09-27 (CLIs uninstalled, adapters, tests and UI deleted); the Gemini CLI
 | OpenAI Codex CLI | `/usr/bin/codex` | codex-cli 0.157.0 | `codex exec --json` | `codex exec resume <id>` | JSONL `thread.*`/`turn.*`/`item.*` |
 | Google Gemini CLI (no adapter) | `/usr/bin/gemini` | 0.61.0 | `gemini -p … -o stream-json` | `-r latest\|<index>` | NDJSON `init`/`message`/`tool_use`/`tool_result`/`error`/`result` |
 
+**Install on worker machines** (bin/install-worker*.sh `--agents`): Claude Code `curl -fsSL https://claude.ai/install.sh | bash`
+(native build in `~/.local/bin`); Codex `npm i -g @openai/codex` (see §1).
+
 **Model discovery (Task #98, verified 2026-09-25).** The model picker and routing only use lists the CLIs report
 (agents.mjs `listModels`/`discoverModels`, cached by models.mjs in `<DATA>/models.json`). Each discovery starts a
 CLI, so a list is re-read only once it is a day old (checked hourly, one agent at a time) or after that agent's

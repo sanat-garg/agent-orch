@@ -14,3 +14,7 @@ Make adding a machine a copy-paste job. 1) bin/install-worker.sh (Linux, systemd
 ## Done when
 
 `bash -n bin/install-worker.sh && bash -n bin/install-worker-macos.sh` passes, both support --dry-run (exit 0), `npm test` passes, and the UI 'Add machine' flow shows a command containing a fresh pairing code
+
+## Result — done (check passed) (2026-09-27 13:55)
+
+The full test suite is still running; I'll check the result when it finishes.

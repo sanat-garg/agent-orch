@@ -487,6 +487,25 @@ code, pre, kbd { font-family: var(--mono); }
 .term-bar .link-btn { color: #bdb9ae; }
 .term-bar .link-btn:hover { background: #262522; color: #fff; }
 
+/* server details: machines, and the "Add machine" wizard */
+.mc-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.mc-head h3 { margin: 0; }
+.mc-list { list-style: none; margin: 0; padding: 0; font-size: 13.5px; }
+.mc-list li { display: flex; align-items: center; gap: 8px; padding: 6px 0; min-width: 0; }
+.mc-list li + li { border-top: 1px solid var(--border); }
+.mc-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.mc-st { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+.am-body { display: flex; flex-direction: column; gap: 10px; }
+.am-os { margin: 0; color: var(--text); font-weight: 600; font-size: 13.5px; }
+.am-cmd { margin: 4px 0 0; padding: 9px 30px 9px 10px; border-radius: 9px; background: var(--code-bg); border: 1px solid var(--border);
+  font: 12px/1.45 var(--mono); color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
+.am-note { margin: 0; font-size: 12.5px; }
+.am-status { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--panel); color: var(--text); font-weight: 550; }
+.am-status .dot.wait { animation-duration: 1.6s; }
+.am-next { margin: 0; padding: 10px 12px; border-radius: 10px; background: var(--accent-soft); color: var(--text); }
+.am-acts { display: flex; gap: 8px; justify-content: flex-end; }
+@media (max-width: 700px) { .am-acts .btn { height: 44px; } #addMachine { height: 44px; } }
+
 /* sidebar connections (agent CLI + GitHub sign-ins) */
 .modal-panel.conns { width: min(520px, 100%); font-size: 13px; color: var(--muted); }
 .cn-body { padding: 0 20px 20px; overflow-y: auto; min-height: 0; }

@@ -29,6 +29,7 @@ const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DATA = process.env.CW_DATA_DIR ? path.resolve(process.env.CW_DATA_DIR) : path.join(ROOT, 'data');
 const LOGS = path.join(DATA, 'logs');
 const PUBLIC = path.join(ROOT, 'public');
+const INSTALL_SCRIPTS = { '/install/worker-linux.sh': 'install-worker.sh', '/install/worker-macos.sh': 'install-worker-macos.sh' };
 const HOME = os.homedir();
 const WORKSPACE = path.join(HOME, 'workspace');
 const PORT = Number(process.env.PORT || 3000);
@@ -1234,6 +1235,12 @@ async function handleRequest(req, res) {
 
   if (req.method === 'POST' && !sameOrigin(req)) return json(res, 403, { error: 'Bad origin' });
 
+  // The worker install scripts, for the "Add machine" one-liners (`curl … | bash`). Not secret: the pairing code is.
+  const inst = INSTALL_SCRIPTS[p];
+  if (inst && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'text/x-shellscript; charset=utf-8', 'Cache-Control': 'no-store' });
+    return res.end(fs.readFileSync(path.join(ROOT, 'bin', inst)));
+  }
   // A worker trades a one-time pairing code for its node token (no session: the code is the credential).
   if (p === CLAIM_PATH && req.method === 'POST') {
     if (!cluster) return json(res, 503, { error: 'cluster unavailable' });
@@ -1387,6 +1394,8 @@ async function handleRequest(req, res) {
   if (p.startsWith('/api/cluster/') && !cluster) return json(res, 503, { error: 'cluster unavailable' });
   if (p === '/api/cluster/nodes' && req.method === 'GET') return json(res, 200, { nodes: cluster.listNodes() });
   if (p === PAIR_PATH && req.method === 'POST') return json(res, 200, cluster.createPairing());
+  const pcode = p.match(/^\/api\/cluster\/pair\/([\w-]{1,20})$/);
+  if (pcode && req.method === 'GET') return json(res, 200, cluster.pairing(pcode[1]));
   const cnode = p.match(/^\/api\/cluster\/nodes\/([\w-]+)$/);
   if (cnode && (req.method === 'PATCH' || req.method === 'DELETE')) {
     const r = req.method === 'PATCH' ? cluster.update(cnode[1], await readBody(req)) : cluster.revoke(cnode[1]);

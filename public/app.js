@@ -939,7 +939,9 @@ function shotGrid(imgs = []) {
 // Prev/next goes through every image of the chat, or of the whole task in the drawer.
 function openShot(fig) {
   let list;
-  if (fig.closest('#drBody') && O.detail) list = O.detail.runs.flatMap((r) => r.entries.filter((e) => e.k === 'image'));
+  const panel = fig.closest('.rv-panel');
+  if (panel) list = [...panel.querySelectorAll('.shot')].map((f) => ({ id: f.dataset.id, name: f.dataset.name, w: +f.dataset.w || 0, h: +f.dataset.h || 0 }));
+  else if (fig.closest('#drBody') && O.detail) list = O.detail.runs.flatMap((r) => r.entries.filter((e) => e.k === 'image'));
   else list = [...$('messages').querySelectorAll('.shot')].map((f) => ({ id: f.dataset.id, name: f.dataset.name, w: +f.dataset.w || 0, h: +f.dataset.h || 0 }));
   const seen = new Set();
   list = list.filter((i) => i.id && !seen.has(i.id) && seen.add(i.id));
@@ -1126,7 +1128,8 @@ function renderEvent(ev, replay) {
     case 'tasks': {
       endLive();
       const box = el('div', 'task-cards');
-      box.append(el('div', 'tc-caption', ev.source === 'reflection'
+      box.append(el('div', 'tc-caption', ev.source === 'review' ? 'Waiting for your review'
+        : ev.source === 'reflection'
         ? `Queued ${ev.ids.length} next step${ev.ids.length === 1 ? '' : 's'}`
         : `Queued ${ev.ids.length} task${ev.ids.length === 1 ? '' : 's'}`));
       for (const id of ev.ids) box.append(taskCard(id));
@@ -2200,9 +2203,13 @@ function syncCompletionSound(tasks) {
 function observeTaskCompletion(t) {
   const previous = completionSound.statuses.get(t.id);
   completionSound.statuses.set(t.id, t.status);
-  if (t.status !== 'done' || completionSound.done.has(t.id)) return;
-  completionSound.done.add(t.id);
-  if (!completionSound.synced || !previous || previous === 'done' || !['work', 'reflect'].includes(t.kind)) return;
+  // A review break that starts waiting for the owner chimes like a finished task.
+  const review = t.status === 'awaiting_review' && completionSound.synced && previous && previous !== 'awaiting_review';
+  if (!review) {
+    if (t.status !== 'done' || completionSound.done.has(t.id)) return;
+    completionSound.done.add(t.id);
+    if (!completionSound.synced || !previous || previous === 'done' || !['work', 'reflect'].includes(t.kind)) return;
+  }
   if (!$('obSound').checked || (document.visibilityState !== 'hidden' && document.hasFocus())) return;
   const now = performance.now();
   if (now - completionSound.lastPlayed < 3000) return;
@@ -3211,10 +3218,15 @@ function fmtDur(sec) {
   return `${Math.floor(sec / 3600)}h ${Math.round((sec % 3600) / 60)}m`;
 }
 const displayTitle = (t) => (t.kind === 'reflect' ? 'Finding the next improvements' : t.kind === 'plan' ? 'Answering your saved message' : t.title);
-const kindLabel = (t) => (t.kind === 'reflect' ? 'Reflection' : t.kind === 'plan' ? 'Planner' : t.source === 'reflection' ? 'Task · from reflection' : 'Task');
+const kindLabel = (t) => (t.kind === 'reflect' ? 'Reflection' : t.kind === 'plan' ? 'Planner' : t.kind === 'review' ? 'Review break' : t.source === 'reflection' ? 'Task · from reflection' : 'Task');
 
 function taskState(t) {
   const nowS = Date.now() / 1000;
+  if (t.kind === 'review') { // a checkpoint (flag glyph): it never runs, it waits for the owner
+    if (t.status === 'awaiting_review') return { cls: 'review awaiting', label: `Waiting for your review${t.review?.task ? ` of #${t.review.task}` : ''}` };
+    if (t.status === 'queued') return { cls: 'review', label: 'Wait for your review' };
+    if (t.status === 'done') return { cls: 'review done', label: 'Approved' };
+  }
   switch (t.status) {
     case 'running':
       return { cls: 'running', label: `${t.kind === 'reflect' ? 'Looking through the project' : 'Running'} · ${fmtDur(nowS - (t.started_at || nowS))}` };
@@ -3291,8 +3303,99 @@ function fillCard(b, id) {
   if (open && t.urgency === 'urgent') tags.append(el('span', 'tc-tag urgent', 'Urgent'));
   if (open && t.urgency === 'background') tags.append(el('span', 'tc-tag', 'Later'));
   if (open && t.deadline) tags.append(el('span', 'tc-tag due', `Due ${fmtDue(t.deadline)}`));
-  if (t.kind !== 'plan') tags.append(modelChip(t));
+  if (t.kind !== 'plan' && t.kind !== 'review') tags.append(modelChip(t));
+  if (canAddBreak(t)) {
+    const rb = el('span', 'tc-tag tc-rb');
+    rb.innerHTML = `${FLAG_SVG}<span class="rb-t">+ Review break</span>`;
+    rb.setAttribute('role', 'button');
+    rb.setAttribute('aria-label', '+ Review break');
+    rb.tabIndex = 0;
+    rb.title = 'Stop after this task and wait for your review before anything that depends on it runs';
+    const go = (e) => { e.stopPropagation(); e.preventDefault(); addReviewBreak(t.id); };
+    rb.addEventListener('click', go);
+    rb.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') go(e); });
+    rb.addEventListener('pointerdown', (e) => e.stopPropagation()); // not a queue drag
+    tags.append(rb);
+  }
+  b.classList.toggle('review-card', t.kind === 'review');
   b.classList.toggle('active', O.drawer === id);
+  // Waiting checkpoints in the chat and the queue get their review panel right under the card.
+  if (b.isConnected) syncReviewPanel(b, t); else queueMicrotask(() => b.isConnected && syncReviewPanel(b, O.tasks.get(id)));
+}
+const FLAG_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M5 21V4M5 4h11l-2 4 2 4H5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+// '+ Review break' fits after a queued or running work task that doesn't already have one waiting.
+const canAddBreak = (t) => t.kind === 'work' && ['queued', 'running'].includes(t.status)
+  && ![...O.tasks.values()].some((r) => r.kind === 'review' && ['queued', 'awaiting_review'].includes(r.status) && taskDeps(r).includes(t.id));
+async function addReviewBreak(id) {
+  try {
+    const r = await api(`/api/orch/tasks/${id}/checkpoint`, 'POST', {});
+    if (r.task) O.tasks.set(r.task.id, r.task);
+    refreshCards(id);
+    scheduleQueue();
+    toast(`Review break added after #${id}`, { kind: 'success' });
+  } catch (e) { toast(e.message, { kind: 'error' }); }
+}
+function syncReviewPanel(b, t) {
+  const next = b.nextElementSibling, has = next?.classList.contains('rv-panel') ? next : null;
+  const show = t?.status === 'awaiting_review' && b.parentElement?.closest('.task-cards, .q-review');
+  if (!show) { has?.remove(); return; }
+  const sig = JSON.stringify(t.review || null);
+  if (has?.dataset.sig === sig) return;
+  const p = reviewPanel(t);
+  p.dataset.sig = sig;
+  if (has) has.replaceWith(p); else b.after(p);
+}
+// What the owner reviews: the reviewed task's summary, changed files and screenshots, then Approve / Request changes.
+function reviewPanel(t) {
+  const p = el('div', 'rv-panel');
+  const r = t.review || {};
+  if (r.task) {
+    const head = el('div', 'rv-head');
+    head.append(el('span', 'id', `#${r.task}`), document.createTextNode(` ${r.title || ''}`));
+    p.append(head);
+  }
+  if (r.summary) p.append(el('div', 'rv-summary', r.summary));
+  if (r.files?.length) {
+    const d = el('details', 'rv-files');
+    d.append(el('summary', '', `${r.files.length} file${r.files.length === 1 ? '' : 's'} changed${r.commit ? ` · ${String(r.commit).slice(0, 8)}` : ''}`));
+    const ul = el('ul');
+    for (const f of r.files) { const li = el('li'); li.append(el('b', `rv-st ${f.status}`, f.status), document.createTextNode(` ${f.path}`)); ul.append(li); }
+    d.append(ul);
+    p.append(d);
+  } else if (r.task) p.append(el('div', 'muted', r.commit ? 'Changed files are loading…' : 'No commit recorded for this task.'));
+  if (r.shots?.length) p.append(shotGrid(r.shots.slice(-4)));
+  const row = el('div', 'rv-actions');
+  const ok = el('button', 'btn small primary', 'Approve & continue');
+  const change = el('button', 'btn small', 'Request changes');
+  const form = el('form', 'rv-change');
+  form.hidden = true;
+  const note = el('textarea');
+  note.rows = 3;
+  note.placeholder = 'What should change? A fix task is queued before anything else continues.';
+  note.setAttribute('aria-label', 'Requested changes');
+  const send = el('button', 'btn small primary', 'Queue the fix');
+  form.append(note, send);
+  const busy = (on) => { for (const x of [ok, change, send]) x.disabled = on; };
+  ok.type = change.type = 'button';
+  ok.onclick = async () => {
+    busy(true);
+    try { const res = await api(`/api/orch/tasks/${t.id}/approve`, 'POST', {}); if (res.task) { O.tasks.set(t.id, res.task); refreshCards(t.id); scheduleQueue(); } }
+    catch (e) { busy(false); toast(e.message, { kind: 'error' }); }
+  };
+  change.onclick = () => { form.hidden = !form.hidden; if (!form.hidden) note.focus(); };
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    if (!note.value.trim()) return note.focus();
+    busy(true);
+    try {
+      const res = await api(`/api/orch/tasks/${t.id}/request-changes`, 'POST', { note: note.value.trim() });
+      if (res.task) { O.tasks.set(t.id, res.task); refreshCards(t.id); scheduleQueue(); }
+      toast(`Queued #${res.fix} with your changes; the review comes back after it`, { kind: 'success' });
+    } catch (err) { busy(false); toast(err.message, { kind: 'error' }); }
+  };
+  row.append(ok, change);
+  p.append(row, form);
+  return p;
 }
 const refreshCards = (id) => document.querySelectorAll(`.tcard[data-task="${id}"]`).forEach((b) => fillCard(b, id));
 const refreshAllCards = () => document.querySelectorAll('.tcard[data-task]').forEach((b) => fillCard(b, Number(b.dataset.task)));
@@ -3613,6 +3716,21 @@ function section(title) {
   return s;
 }
 
+// The drawer's 'Order' links: what a task starts after and what follows it.
+function orderSection(d) {
+  const after = d.after || (d.dependsOn ? [d.dependsOn] : []);
+  if (!after.length && !d.followers.length) return null;
+  const c = section('Order');
+  const links = el('div', 'dr-links');
+  if (after.length) links.append(el('div', 'dr-check', after.length > 1 ? `Starts after all ${after.length} of` : 'Starts after'));
+  for (const a of after) { O.tasks.set(a.id, { ...(O.tasks.get(a.id) || {}), ...a }); links.append(taskCard(a.id)); }
+  if (d.followers.length) {
+    links.append(el('div', 'dr-check', 'Then'));
+    for (const f of d.followers) { O.tasks.set(f.id, { ...(O.tasks.get(f.id) || {}), ...f }); links.append(taskCard(f.id)); }
+  }
+  c.append(links);
+  return c;
+}
 function renderDrawer(fromLive = false) {
   const id = O.drawer;
   if (!id) return;
@@ -3667,7 +3785,18 @@ function renderDrawer(fromLive = false) {
       row.append(dg);
     }
   }
-  if (isOpen || t.status === 'needs_integration') {
+  if (canAddBreak(t)) {
+    const rb = el('button', 'btn small', '+ Review break');
+    rb.title = 'Stop after this task and wait for your review before anything that depends on it runs';
+    rb.onclick = () => addReviewBreak(t.id);
+    row.append(rb);
+  }
+  if (t.kind === 'review' && ['queued', 'awaiting_review'].includes(t.status)) {
+    const rm = el('button', 'btn small danger', 'Remove break');
+    rm.title = 'What waits for this review goes ahead without it';
+    rm.onclick = () => orchAction('cancel');
+    row.append(rm);
+  } else if (isOpen || t.status === 'needs_integration') {
     const cancel = el('button', 'btn small danger', 'Cancel');
     cancel.onclick = () => { if (confirm(`Cancel #${t.id}? Tasks waiting on it are cancelled too.`)) orchAction('cancel'); };
     row.append(cancel);
@@ -3676,9 +3805,19 @@ function renderDrawer(fromLive = false) {
     retry.onclick = () => orchAction('retry');
     row.append(retry);
   }
+  if (t.status === 'awaiting_review') top.append(reviewPanel(t));
   if (row.children.length) top.append(row);
   if (O.err) top.append(el('div', 'dr-err', O.err));
   body.append(top);
+  if (t.kind === 'review') { // a checkpoint has no model, instructions or output of its own
+    const c = section('');
+    c.append(el('div', 'muted', 'A review break never runs an agent. When the task before it finishes, it waits here: approve to continue the queue, or request changes to queue a fix first.'));
+    body.append(c);
+    const order = orderSection(d);
+    if (order) body.append(order);
+    body.scrollTop = keep;
+    return;
+  }
 
   // Model: the same text as the card's chip, the ordered fallbacks (current one marked) and every move.
   if (t.kind !== 'plan') body.append(modelSection(t));
@@ -3745,19 +3884,8 @@ function renderDrawer(fromLive = false) {
     if (d.task.verify_output != null && t.status !== 'done') c.append(el('pre', 'dr-pre err', d.task.verify_output || '(no output)'));
     more.append(c);
   }
-  const after = d.after || (d.dependsOn ? [d.dependsOn] : []);
-  if (after.length || d.followers.length) {
-    const c = section('Order');
-    const links = el('div', 'dr-links');
-    if (after.length) links.append(el('div', 'dr-check', after.length > 1 ? `Starts after all ${after.length} of` : 'Starts after'));
-    for (const a of after) { O.tasks.set(a.id, { ...(O.tasks.get(a.id) || {}), ...a }); links.append(taskCard(a.id)); }
-    if (d.followers.length) {
-      links.append(el('div', 'dr-check', 'Then'));
-      for (const f of d.followers) { O.tasks.set(f.id, { ...(O.tasks.get(f.id) || {}), ...f }); links.append(taskCard(f.id)); }
-    }
-    c.append(links);
-    more.append(c);
-  }
+  const order = orderSection(d);
+  if (order) more.append(order);
   if (isOpen && t.kind === 'work') {
     const c = section('Deadline');
     const f = el('form', 'dr-due');
@@ -4117,6 +4245,13 @@ function renderQueue() {
   body.textContent = '';
   const running = [...O.tasks.values()].filter((t) => t.status === 'running' && t.project_id === O.project?.id);
   const queued = queuedTasks();
+  const reviews = [...O.tasks.values()].filter((t) => t.status === 'awaiting_review' && t.project_id === O.project?.id);
+  if (reviews.length) {
+    body.append(el('h3', 'dg-group', 'Waiting for your review'));
+    const box = el('div', 'q-list q-review');
+    for (const t of reviews) box.append(queueCard(t.id, false));
+    body.append(box);
+  }
   if (running.length) {
     body.append(el('h3', 'dg-group', 'Running'));
     const box = el('div', 'q-list');

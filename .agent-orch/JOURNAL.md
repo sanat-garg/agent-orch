@@ -611,3 +611,19 @@ Discovery helpers run group-killed and single-flight; no orphans remain
 ## 2026-09-27 12:15 — #216 Cluster design doc and shared wire protocol [done (check passed)]
 
 CLUSTER.md and tested cluster-protocol.mjs added; npm test passes
+
+## 2026-09-26 21:21 — #201 Review checkpoints in the queue: wait for owner approval after a task [verify failed (1)]
+
+Command: npm test
+
+## 2026-09-27 11:44 — #201 Review checkpoints in the queue: wait for owner approval after a task [done (check passed)]
+
+npm test passes (296/296) with checkpoint and review-break UI tests
+
+## 2026-09-27 12:07 — #215 Integrate #201: Review checkpoints in the queue: wait for owner approval after a task [verify failed (1)]
+
+Command: npm test
+
+## 2026-09-27 12:21 — #215 Integrate #201: Review checkpoints in the queue: wait for owner approval after a task [done (check passed)]
+
+merged latest main; npm test passes 256/256 with checkpoint tests

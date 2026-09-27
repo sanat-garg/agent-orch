@@ -1432,6 +1432,14 @@ async function handleRequest(req, res) {
     const r = orch.moveTask(Number(omv[1]), { before: body.before ?? null, after: body.after ?? null });
     return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r);
   }
+  // Review checkpoints: POST checkpoint inserts one after task :id (its dependents wait for it), approve releases what
+  // waits for an awaiting checkpoint, request-changes {note} queues a fix task first and re-arms the checkpoint after it.
+  const ock = p.match(/^\/api\/orch\/tasks\/(\d+)\/(checkpoint|approve|request-changes)$/);
+  if (ock && req.method === 'POST') {
+    const id = Number(ock[1]), body = await readBody(req);
+    const r = ock[2] === 'checkpoint' ? orch.insertCheckpoint(id) : ock[2] === 'approve' ? orch.approveCheckpoint(id) : await orch.requestChanges(id, body.note);
+    return json(res, r.error ? r.status || 400 : 200, r.error ? { error: r.error } : r);
+  }
   // A saved chat message (orchestrator deferMessage): PATCH {text} edits it, DELETE retracts it; 409 once a plan task took it.
   const om = p.match(/^\/api\/orch\/messages\/(\d+)$/);
   if (om && (req.method === 'PATCH' || req.method === 'DELETE')) {

@@ -136,7 +136,13 @@ project), optional \`note\`. A new route with the same match and scope replaces 
 deletes one. A \`plan\` route may only pick a Claude model. Unavailable agents fall back to Claude.
 While a task's agent is at its usage limit, it moves down the owner's fallback list for that chat (or, for
 reflection tasks, the project's list); with an empty list it waits for the reset.
-A block may contain only \`routes\` (with \`"tasks": []\`).`;
+A block may contain only \`routes\` (with \`"tasks": []\`).
+
+**Review breaks.** \`{"kind": "review", "title": "Review the new data model", "after": 2}\` is a checkpoint, not work: no agent
+runs it. Once the task(s) in its \`after\` finish, it waits for the owner to approve them (or request changes, which
+queues a fix first), and every task that needed them waits too; later tasks in the block can also list it in \`after\`.
+Add one after important, risky or direction-setting tasks (a new architecture, a UI redesign, a data migration), where
+going on in the wrong direction would waste the work after it. Don't add them after routine steps.`;
 
 const PLANNER_SYSTEM = `You are the planning mind of an agent orchestrator (agent-orch) running on the owner's server.
 You talk with the owner, understand exactly what they want, and turn it into small, well-specified steps
@@ -425,6 +431,10 @@ export function extractTasks(text) {
     return null;
   };
   for (const t of payload.tasks || []) {
+    if (t && typeof t === 'object' && String(t.kind || '').toLowerCase() === 'review') {
+      tasks.push({ kind: 'review', title: String(t.title || 'Review').slice(0, 200), after: t.after ?? null });
+      continue;
+    }
     if (!t || typeof t !== 'object' || !t.title || !t.prompt) continue;
     const u = String(t.urgency || 'normal').toLowerCase();
     tasks.push({
@@ -980,7 +990,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   // dependsOn: a task id or an array of them (all must be done first). files: [path or glob] it will modify, or null.
   function addTask(projectId, { title, prompt, kind = 'work', source = 'user', priority = null, urgency = 'normal', deadline = null, dependsOn = null, doneWhen = null, agent = null, model = null,
-    origin = source === 'reflection' ? 'reflection' : null, fallbacks = null, files = null }) {
+    origin = source === 'reflection' ? 'reflection' : null, fallbacks = null, files = null, position = null }) {
     const deps = [...new Set((Array.isArray(dependsOn) ? dependsOn : [dependsOn]).filter((d) => d != null).map(Number))];
     files = parseFiles(files);
     deadline = parseDeadline(deadline);
@@ -988,7 +998,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       priority = kind === 'plan' ? PRIORITY.plan : kind === 'reflect' ? PRIORITY.reflect
         : urgency !== 'normal' && URGENCY[urgency] ? URGENCY[urgency] : PRIORITY[source] ?? 50;
     }
-    const pos = insertPosition(projectId, effectivePriority({ priority, deadline }, getProject(projectId)), deps);
+    const pos = position ?? insertPosition(projectId, effectivePriority({ priority, deadline }, getProject(projectId)), deps);
     const r = run(`INSERT INTO tasks(project_id,kind,title,prompt,priority,urgency,deadline,depends_on,done_when,source,agent,model,origin,fallbacks,files,position,created_at)
       VALUES(:p,:k,:ti,:pr,:pri,:u,:d,:dep,:dw,:s,:ag,:mo,:or,:fb,:fi,:pos,:c)`,
       { p: projectId, k: kind, ti: title, pr: prompt, pri: priority, u: urgency, d: deadline, dep: deps[0] ?? null, dw: doneWhen, s: source, ag: agent, mo: model,
@@ -1011,7 +1021,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
 
   const RUNNABLE = `SELECT t.*, ${EFFECTIVE_SQL} AS eff, p.position AS project_position FROM tasks t JOIN projects p ON p.id=t.project_id
-    WHERE t.status='queued' AND p.status='active' AND t.not_before<=:now
+    WHERE t.status='queued' AND t.kind!='review' AND p.status='active' AND t.not_before<=:now
       AND NOT EXISTS(SELECT 1 FROM all_deps x LEFT JOIN tasks d ON d.id=x.depends_on WHERE x.task_id=t.id AND d.status IS NOT 'done')`;
   function runnable(allowed, exclusive, limit) {
     let sql = RUNNABLE;
@@ -1788,8 +1798,17 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     }
     for (const d of payload.dropped || []) logEvent(`${source} ${d}`, { level: 'warn', projectId: project.id });
     for (const r of payload.routes || []) applyRoute(project, r);
-    const ids = [], batch = [];
+    const ids = [], batch = [], checkpoints = [];
     for (const t of payload.tasks) {
+      if (t.kind === 'review') { // a checkpoint: what needed its prerequisites now waits for the owner's review too
+        const deps = resolveAfter(t.after, batch).filter((d) => getTask(d));
+        if (!deps.length) { logEvent(`${source} review break '${t.title}' has no \`after\`; skipped`, { level: 'warn', projectId: project.id }); batch.push(null); continue; }
+        const id = addCheckpoint(project.id, deps, { title: t.title, source, origin: origin.origin ?? null, relinkNow: false });
+        checkpoints.push([id, deps]);
+        ids.push(id);
+        batch.push(id);
+        continue;
+      }
       const dup = findDuplicate(project.id, t.title);
       if (dup) { logEvent(`skipped duplicate: ${t.title} (already #${dup.id})`, { projectId: project.id }); batch.push(dup.id); continue; }
       const dependsOn = resolveAfter(t.after, batch).filter((d) => getTask(d));
@@ -1799,6 +1818,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       ids.push(id);
       batch.push(id);
     }
+    for (const [cp, deps] of checkpoints) relinkTo(cp, deps); // once the whole block exists
     if (ids.length) logEvent(`${source} queued ${ids.length} task(s): ${ids.map((i) => `#${i}`).join(', ')}`, { projectId: project.id });
     return ids;
   }
@@ -1992,6 +2012,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (ticking || !leader.ok || draining) return;
     ticking = true;
     try {
+      armCheckpoints();
       if (kvGet('paused_all') === '1') return;
       if (!onSubscription()) {
         if (kvGet('announced_auth') !== '1') { kvSet('announced_auth', 1); logEvent('waiting: Claude Code is not signed in with the subscription', { level: 'warn' }); }
@@ -2058,7 +2079,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       if (p.next_reflect_at > t) continue;
       if (planningProjects.has(p.id)) continue; // the owner is mid-conversation with the planner
       if (!projectReady(p.path)) continue;
-      if (q1("SELECT 1 AS x FROM tasks WHERE project_id=:p AND status IN ('queued','running')", { p: p.id })) continue;
+      if (q1("SELECT 1 AS x FROM tasks WHERE project_id=:p AND status IN ('queued','running','awaiting_review')", { p: p.id })) continue;
       // Nothing to improve until the owner has said what the project is and some work has landed.
       if (!q1("SELECT 1 AS x FROM tasks WHERE project_id=:p AND kind='work' AND status='done' LIMIT 1", { p: p.id })) continue;
       run('UPDATE projects SET next_reflect_at=:u WHERE id=:id', { u: t + 120, id: p.id });
@@ -2388,6 +2409,113 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       : `reflection found nothing valuable; next check in ${Math.round(cooldown / 60)} min`, { projectId: project.id, taskId: task.id });
   }
 
+  // ---- review checkpoints (kind 'review'): never run an agent. A checkpoint stays queued until its prerequisites are
+  // done, then waits in 'awaiting_review' (tasks.result: JSON review context) until the owner approves it (→ done, which
+  // releases its dependents) or requests changes (a fix task goes ahead of it and it re-arms once the fix is done).
+  const followersOf = (id) => qa("SELECT DISTINCT x.task_id AS id FROM all_deps x JOIN tasks t ON t.id=x.task_id WHERE x.depends_on=:id AND t.status='queued'", { id }).map((r) => r.id);
+  // Task `t` stops waiting for `from` and waits for `to` (an id or ids) instead.
+  function relink(t, from, to) {
+    run('DELETE FROM task_deps WHERE task_id=:t AND depends_on=:f', { t, f: from });
+    const ids = (Array.isArray(to) ? to : [to]).filter((d) => d != null && d !== t);
+    for (const d of ids) run('INSERT OR IGNORE INTO task_deps(task_id, depends_on) VALUES(:t,:d)', { t, d });
+    run('UPDATE tasks SET depends_on=:d WHERE id=:t AND depends_on=:f', { t, f: from, d: ids[0] ?? null });
+    pushTask(t);
+  }
+  // A checkpoint after `deps`; the queued tasks that needed any of them now wait for the checkpoint instead.
+  function addCheckpoint(projectId, deps, { title, source = 'user', origin = null, relinkNow = true } = {}) {
+    const id = addTask(projectId, { title, prompt: '(review checkpoint)', kind: 'review', source, origin, dependsOn: deps, position: insertPosition(projectId, Infinity, deps) });
+    if (relinkNow) relinkTo(id, deps);
+    return id;
+  }
+  const relinkTo = (cp, deps) => { for (const d of deps) for (const f of followersOf(d)) if (f !== cp) relink(f, d, cp); };
+  function insertCheckpoint(id) {
+    const task = getTask(id);
+    if (!task) return { error: 'No such task', status: 404 };
+    if (task.kind !== 'work' || !['queued', 'running'].includes(task.status)) return { error: 'Review breaks go after queued or running work tasks', status: 409 };
+    const dup = qa("SELECT t.id FROM all_deps x JOIN tasks t ON t.id=x.task_id WHERE x.depends_on=:id AND t.kind='review' AND t.status IN ('queued','awaiting_review')", { id })[0];
+    if (dup) return { error: `#${id} already has a review break (#${dup.id})`, status: 409 };
+    db.exec('BEGIN IMMEDIATE'); // the checkpoint and its re-linked followers land together
+    let cp;
+    try { cp = addCheckpoint(task.project_id, [id], { title: `Review: ${task.title}`.slice(0, 200) }); db.exec('COMMIT'); }
+    catch (e) { db.exec('ROLLBACK'); throw e; }
+    logEvent(`⚑ review break #${cp} after #${id}`, { projectId: task.project_id, taskId: cp });
+    return { ok: true, task: taskView(getTask(cp)) };
+  }
+  // The task a checkpoint reviews: its most recently finished prerequisite (after a round of changes, the fix task).
+  const reviewedTask = (cp) => depsOf(cp.id).map(getTask).filter((t) => t?.status === 'done').sort((a, b) => (b.finished_at || 0) - (a.finished_at || 0))[0] || null;
+  function taskShots(taskId) {
+    const out = new Map();
+    for (const r of qa('SELECT log_path FROM runs WHERE task_id=:t ORDER BY id', { t: taskId })) {
+      try { for (const e of parseJsonl(fs.readFileSync(r.log_path, 'utf8'))) if (e.k === 'image' && e.id) out.set(e.id, { id: e.id, name: e.name, w: e.w, h: e.h }); } catch {}
+    }
+    return [...out.values()].slice(-12);
+  }
+  async function changedFiles(project, sha) {
+    if (!sha) return [];
+    try {
+      return (await git(project.path, ['show', '--name-status', '--format=', sha])).split('\n').filter(Boolean).slice(0, 200)
+        .map((l) => { const [st, ...f] = l.split('\t'); return { status: st[0], path: f[f.length - 1] }; });
+    } catch { return []; }
+  }
+  function armCheckpoints() {
+    for (const cp of qa(`SELECT t.* FROM tasks t WHERE t.kind='review' AND t.status='queued'
+      AND NOT EXISTS(SELECT 1 FROM all_deps x LEFT JOIN tasks d ON d.id=x.depends_on WHERE x.task_id=t.id AND d.status IS NOT 'done')`)) {
+      const reviewed = reviewedTask(cp), project = getProject(cp.project_id);
+      const ctx = reviewed ? { task: reviewed.id, title: reviewed.title, summary: parseStatus(reviewed.result)[1] || null, commit: reviewed.commit_sha || null,
+        files: [], shots: taskShots(reviewed.id) } : null;
+      if (!run("UPDATE tasks SET status='awaiting_review', started_at=:t, result=:r WHERE id=:id AND status='queued'", { t: now(), r: JSON.stringify(ctx), id: cp.id }).changes) continue;
+      pushTask(cp.id);
+      logEvent(`⚑ #${cp.id} waits for your review${reviewed ? ` of #${reviewed.id}` : ''}`, { projectId: cp.project_id, taskId: cp.id });
+      if (project.convo_id && convoExists(project.convo_id)) {
+        emitChat(project.convo_id, { t: 'notice', text: `Review break: ${reviewed ? `#${reviewed.id} ${reviewed.title} is done. ` : ''}Approve it to continue the queue, or request changes.` });
+        emitChat(project.convo_id, { t: 'tasks', ids: [cp.id], source: 'review' });
+      }
+      changedFiles(project, ctx?.commit).then((files) => {
+        if (!files.length || getTask(cp.id)?.status !== 'awaiting_review') return;
+        run('UPDATE tasks SET result=:r WHERE id=:id', { r: JSON.stringify({ ...ctx, files }), id: cp.id });
+        pushTask(cp.id);
+      });
+    }
+  }
+  function approveCheckpoint(id) {
+    const cp = getTask(id);
+    if (!cp || cp.kind !== 'review') return { error: 'No such review break', status: 404 };
+    if (cp.status !== 'awaiting_review') return { error: `#${id} is ${cp.status}, not waiting for review`, status: 409 };
+    updateTask(id, { status: 'done', finished_at: now() });
+    logEvent(`✔ #${id} approved; the queue continues`, { projectId: cp.project_id, taskId: id });
+    setTimeout(tick, 100);
+    return { ok: true, task: taskView(getTask(id)) };
+  }
+  const changing = new Set(); // checkpoint ids with a request-changes in flight (it awaits git)
+  async function requestChanges(id, note) {
+    const cp = getTask(id);
+    note = String(note ?? '').trim().slice(0, 8000);
+    if (!cp || cp.kind !== 'review') return { error: 'No such review break', status: 404 };
+    if (cp.status !== 'awaiting_review' || changing.has(id)) return { error: `#${id} is not waiting for review`, status: 409 };
+    if (!note) return { error: 'Say what should change', status: 400 };
+    changing.add(id);
+    try {
+      const project = getProject(cp.project_id), reviewed = reviewedTask(cp), deps = depsOf(id);
+      let diff = '';
+      if (reviewed?.commit_sha) diff = await git(project.path, ['show', '--stat', '--patch', '--format=%h %s', reviewed.commit_sha]).catch(() => '');
+      if (diff.length > 12000) diff = `${diff.slice(0, 12000)}\n… (diff truncated; run \`git show ${reviewed.commit_sha}\` for the rest)`;
+      const prompt = [`The owner reviewed #${reviewed?.id ?? '?'} "${reviewed?.title || cp.title}" and asked for changes:`, note,
+        reviewed ? `The reviewed task's instructions were:\n${String(reviewed.prompt).slice(0, 4000)}` : '',
+        diff ? `What it changed (commit ${reviewed.commit_sha}):\n\`\`\`diff\n${diff}\n\`\`\`` : '',
+        "Make the requested changes. Keep everything the owner didn't ask to change."].filter(Boolean).join('\n\n');
+      const fix = addTask(project.id, { title: `Changes after review: ${reviewed?.title || cp.title}`.slice(0, 200), prompt, kind: 'work', source: 'user', dependsOn: deps,
+        doneWhen: reviewed?.done_when ?? null, agent: reviewed?.agent ?? null, model: reviewed?.model ?? null, origin: reviewed?.origin ?? null,
+        fallbacks: parseFallbacks(reviewed?.fallbacks), files: reviewed?.files ?? null, position: insertPosition(project.id, Infinity, deps) });
+      writeTaskSpec(project.path, getTask(fix));
+      run('INSERT OR IGNORE INTO task_deps(task_id, depends_on) VALUES(:t,:d)', { t: id, d: fix });
+      run("UPDATE tasks SET status='queued', result=NULL, started_at=NULL WHERE id=:id", { id });
+      pushTask(id);
+      logEvent(`↺ #${id} changes requested: #${fix} queued, then the review break comes back`, { projectId: project.id, taskId: id });
+      setTimeout(tick, 100);
+      return { ok: true, fix, task: taskView(getTask(id)) };
+    } finally { changing.delete(id); }
+  }
+
   // ---- owner actions from the task drawer
   function taskAction(id, action, value) {
     const task = getTask(id);
@@ -2421,8 +2549,15 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         return { ok: true };
       }
       case 'cancel': {
-        if (!['queued', 'running', 'needs_integration'].includes(task.status)) return { error: 'Only waiting or running tasks can be cancelled' };
+        if (!['queued', 'running', 'needs_integration', 'awaiting_review'].includes(task.status)) return { error: 'Only waiting or running tasks can be cancelled' };
         updateTask(id, { status: 'cancelled', finished_at: now() });
+        if (task.kind === 'review') { // removing a review break: what waited for it follows its prerequisites again
+          const deps = depsOf(id);
+          for (const f of followersOf(id)) relink(f, id, deps);
+          logEvent(`■ review break #${id} removed`, { projectId: task.project_id, taskId: id });
+          setTimeout(tick, 100);
+          return { ok: true };
+        }
         running.get(id)?.abort.abort();
         if (task.status === 'needs_integration') {
           // Its integrators go too, and the worktree is parked on its branch.
@@ -2532,7 +2667,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       ...(() => { if (t.status !== 'queued') return { runs_on: null, runs_model: null, limit_scope: null };
         const r = routeNow(t, getProject(t.project_id));
         return { runs_on: r.agent, runs_model: r.model || delegator.defaultModel(r.agent), limit_scope: limitScope(r.agent, r.model) }; })(),
-      summary: t.status === 'done' ? parseStatus(t.result)[1] || null : ['failed', 'cancelled', 'needs_integration'].includes(t.status) ? String(t.result || '').slice(0, 200) : null,
+      summary: t.kind === 'review' ? (t.status === 'done' ? 'Approved' : ['failed', 'cancelled'].includes(t.status) ? String(t.result || '').slice(0, 200) || null : null)
+        : t.status === 'done' ? parseStatus(t.result)[1] || null : ['failed', 'cancelled', 'needs_integration'].includes(t.status) ? String(t.result || '').slice(0, 200) : null,
+      // A review checkpoint waiting for the owner: {task, title, summary, commit, files: [{status, path}], shots: [media]}.
+      review: t.kind === 'review' && t.status === 'awaiting_review' ? (() => { try { return JSON.parse(t.result); } catch { return null; } })() : null,
       worktree: t.worktree ?? null, integrates: t.integrates ?? null,
     };
   }
@@ -2669,7 +2807,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   return {
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
-    planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setReflectFallbacks, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
+    planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, insertCheckpoint, approveCheckpoint, requestChanges, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setReflectFallbacks, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
     drain, undrain, chatPlanning, stateView, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, reconcileClaudeLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     // A sidebar chat's project rank ({id, position, priority}), or null when its folder has no orchestrator project.
     projectRank: (cwd) => q1('SELECT id, position, priority FROM projects WHERE path=:p', { p: cwd }) ?? null,

@@ -14,3 +14,7 @@ Prepare for the owner adding 4 MacBooks plus a second VPS. 1) Pairing: 'Add mach
 ## Done when
 
 `npm test` passes with multi-use pairing and macOS power-policy tests, and `bash bin/install-worker-macos.sh --dry-run --code TEST` exits 0 and shows the caffeinate/LaunchDaemon setup
+
+## Result — done (check passed) (2026-09-27 20:22)
+
+AGENT-ORCH-STATUS: done — multi-use pairing, Mac power policy, LaunchDaemon installer; tests pass

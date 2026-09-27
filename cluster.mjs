@@ -1,6 +1,7 @@
 // Controller side of the cluster (BRIEF goal 11, design: .agent-orch/CLUSTER.md, wire format: cluster-protocol.mjs).
-// Node registry in the orchestrator DB, one-time pairing codes, and the worker WebSocket hub at WS_PATH. The scheduler
-// uses listNodes() / send(nodeId, msg) / onMessage(handler) / version(); the UI reads listNodes() via GET /api/cluster/nodes.
+// Node registry in the orchestrator DB, pairing codes (one-time or multi-use), each node's power policy (power.mjs), and
+// the worker WebSocket hub at WS_PATH. The scheduler uses listNodes() / send(nodeId, msg) / onMessage(handler) /
+// version(); the UI reads listNodes() via GET /api/cluster/nodes.
 // Health (CLUSTER.md, Health): each worker's telemetry as a 24 h series (node-metrics.mjs), its log tail on demand,
 // its last error, auto-drain, and the version check that updates an outdated worker once it is idle.
 import os from 'node:os';
@@ -10,10 +11,11 @@ import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { WebSocketServer } from 'ws';
 import {
-  PROTOCOL_VERSION, HEARTBEAT_MS, HEARTBEAT_MISSES, WIP_PUSH_MS, MAX_FRAME, PAIRING_TTL_MS, OS_KINDS, MSG, FEATURE_LIST,
-  graceMs, newPairingCode, normalizePairingCode, newNodeToken, hashSecret, secretMatches, bearerToken, createSender, decode,
+  PROTOCOL_VERSION, HEARTBEAT_MS, HEARTBEAT_MISSES, WIP_PUSH_MS, MAX_FRAME, PAIRING_TTL_MS, PAIRING_MULTI_TTL_MS, MAX_PAIRING_USES, OS_KINDS, MSG,
+  FEATURE_LIST, graceMs, newPairingCode, normalizePairingCode, newNodeToken, hashSecret, secretMatches, bearerToken, createSender, decode,
 } from './cluster-protocol.mjs';
 import { createNodeMetrics, RANGES } from './node-metrics.mjs';
+import { checkPolicy, effectivePolicy } from './power.mjs';
 
 export const LOCAL_NODE = 'controller';
 const MAX_ERRORS = 5; // invalid frames per connection before the worker is disconnected
@@ -65,13 +67,21 @@ CREATE TABLE IF NOT EXISTS nodes (
   inventory TEXT, resources TEXT, max_slots INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 1,
   draining INTEGER NOT NULL DEFAULT 0
 )`;
+// Pairing codes, as hashes: uses = how many machines may pair with it (1 = one-time), nodes = the ids that did (JSON),
+// revoked_at = the owner ended it early. Kept a day past expiry so the wizard can still show who paired.
+const PAIRINGS = `
+CREATE TABLE IF NOT EXISTS pairings (
+  code_hash TEXT PRIMARY KEY, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, uses INTEGER NOT NULL DEFAULT 1,
+  nodes TEXT NOT NULL DEFAULT '[]', revoked_at INTEGER
+)`;
 // Added later: grace_ms (the owner's per-node grace before its jobs are reassigned; NULL = graceMs(os)); away (why a
 // node is offline: 'bye' after a clean shutdown, 'asleep' when a Mac went silent, 'lost' otherwise); slept_at/slept_ms
 // (the last sleep a worker reported on wake). max_slots 0 = Auto (the scheduler sizes it from cores and free RAM).
 // drain_reason/drained_at: why and when auto-health drained it (NULL when the owner did); health_ack: when the owner last
 // undrained it (older evidence no longer counts); last_error: JSON of its last node.error {at, kind, message, stack, stderr}.
+// policy: JSON of the owner's power-policy settings (power.mjs; NULL = the defaults for its OS).
 const COLUMNS = [['grace_ms', 'INTEGER'], ['away', 'TEXT'], ['slept_at', 'INTEGER'], ['slept_ms', 'INTEGER'],
-  ['drain_reason', 'TEXT'], ['drained_at', 'INTEGER'], ['health_ack', 'INTEGER'], ['last_error', 'TEXT']];
+  ['drain_reason', 'TEXT'], ['drained_at', 'INTEGER'], ['health_ack', 'INTEGER'], ['last_error', 'TEXT'], ['policy', 'TEXT']];
 
 const statusOf = (row, connected) => (!row.enabled ? 'disabled' : !connected ? 'offline' : row.draining ? 'draining' : 'online');
 const parse = (s) => { try { return s ? JSON.parse(s) : null; } catch { return null; } };
@@ -90,10 +100,10 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
   const db = new DatabaseSync(dbFile);
   db.exec('PRAGMA busy_timeout=5000');
   db.exec(SCHEMA);
+  db.exec(PAIRINGS);
   const cols = db.prepare('PRAGMA table_info(nodes)').all().map((c) => c.name);
   for (const [c, type] of COLUMNS) if (!cols.includes(c)) db.exec(`ALTER TABLE nodes ADD COLUMN ${c} ${type}`);
   const conns = new Map(); // node id -> { ws, send, lastFrame, hello, errors, connectedAt }
-  const codes = new Map(); // hashSecret(code) -> { expiresAt, node }; single use (node = the id that claimed it)
   const handlers = new Set();
   const get = (id) => db.prepare('SELECT * FROM nodes WHERE id=?').get(id);
   const metrics = metricsDir ? createNodeMetrics({ dir: metricsDir, log }) : null;
@@ -140,14 +150,20 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
   const awayLabel = (row) => (row.away === 'asleep' ? 'Mac asleep' : row.away === 'bye' ? 'shut down' : 'offline');
   const nodeGrace = (row) => graceAll ?? row.grace_ms ?? graceMs(row.os);
 
-  // Public view: never the token hash. status 'updating': an update is pending (waiting for it to be idle) or sent.
+  // The node's power policy and task cap as its worker enforces them (welcome.policy, node.policy; power.mjs).
+  const wirePolicy = (row) => ({ ...effectivePolicy(row.os, parse(row.policy)), maxTasks: row.max_slots || null });
+
+  // Public view: never the token hash. status 'updating': an update is pending (waiting for it to be idle) or sent;
+  // 'paused': online, but its power policy holds new jobs back for now (on battery, running hot: the intake its worker
+  // reported on this connection), so the scheduler places nothing there meanwhile.
   function view(row) {
     const c = conns.get(row.id), isLocal = row.id === LOCAL_NODE, connected = isLocal || !!c, resources = parse(row.resources);
     const sha = c?.hello?.sha ?? resources?.sha ?? null, behind = !isLocal && versions ? versions.behind(sha) : null, u = updates.get(row.id);
     const updating = connected && row.enabled && !row.draining && (u?.state === 'pending' || u?.state === 'sent');
+    const paused = !!c && row.enabled && !row.draining && resources?.intake?.ok === false && resources.at >= c.connectedAt;
     return {
       id: row.id, name: row.name, os: row.os, arch: row.arch, local: isLocal, connected,
-      status: updating ? 'updating' : row.status, createdAt: row.created_at, lastSeen: row.last_seen,
+      status: updating ? 'updating' : paused ? 'paused' : row.status, createdAt: row.created_at, lastSeen: row.last_seen,
       away: connected ? null : row.away || 'lost', awayLabel: connected ? null : awayLabel(row),
       graceMs: nodeGrace(row), sleptAt: row.slept_at ?? null, sleptMs: row.slept_ms ?? null,
       enabled: !!row.enabled, draining: !!row.draining, maxSlots: row.max_slots || null, // null = Auto
@@ -157,6 +173,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
       protocol: c?.hello?.protocol ?? null, version: c?.hello?.version ?? null, features: c?.hello?.features ?? null,
       sha, behind, outdated: behind != null && behind > outdatedAfter,
       update: u ? { state: u.state, by: u.by, at: u.at, target: u.target ?? null, error: u.error ?? null } : null,
+      policy: isLocal ? null : effectivePolicy(row.os, parse(row.policy)),
     };
   }
   function listNodes() {
@@ -166,37 +183,61 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
   const node = (id) => { const r = get(id); return r ? view(r) : null; };
 
   // ---- pairing
-  function createPairing() {
+  // uses 1: a one-time code, valid PAIRING_TTL_MS (10 min). uses 2..MAX_PAIRING_USES: one code for that many machines
+  // ("Pair 4 Macs in one go"), valid PAIRING_MULTI_TTL_MS (1 h). Stored hashed, so they survive a controller restart.
+  function createPairing({ uses = 1 } = {}) {
+    const n = uses ?? 1;
+    if (!Number.isInteger(n) || n < 1 || n > MAX_PAIRING_USES) return { status: 400, error: `uses must be an integer 1-${MAX_PAIRING_USES}` };
     const t = Date.now();
-    for (const [h, c] of codes) if (c.expiresAt < t) codes.delete(h);
-    const code = newPairingCode(), expiresAt = t + PAIRING_TTL_MS;
-    codes.set(hashSecret(code), { expiresAt, node: null });
-    return { code, expiresAt };
+    db.prepare('DELETE FROM pairings WHERE expires_at < ?').run(t - 86400e3);
+    const code = newPairingCode(), expiresAt = t + (n > 1 ? PAIRING_MULTI_TTL_MS : PAIRING_TTL_MS);
+    db.prepare('INSERT INTO pairings (code_hash, created_at, expires_at, uses) VALUES (?, ?, ?, ?)').run(hashSecret(code), t, expiresAt, n);
+    return { code, expiresAt, ...(n > 1 ? { uses: n, used: 0, nodes: [] } : {}) };
   }
-  // The "Add machine" wizard's view of its code: waiting → paired (node claimed it; node.connected once it dials in),
-  // or expired. Claimed codes are remembered until their original expiry so the wizard can see who took them.
+  const pairRow = (code) => { const c = normalizePairingCode(code); return c ? db.prepare('SELECT * FROM pairings WHERE code_hash=?').get(hashSecret(c)) : null; };
+  // The "Add machine" wizard's view of its code: waiting → paired once every use is taken (node.connected once it dials
+  // in), else expired or revoked. A multi-use code also counts its uses and lists the machines that paired, oldest first.
   function pairing(code) {
-    const c = normalizePairingCode(code), e = c && codes.get(hashSecret(c));
+    const e = pairRow(code);
     if (!e) return { state: 'unknown' };
-    const n = e.node && node(e.node);
-    if (n) return { state: 'paired', expiresAt: e.expiresAt, node: n };
-    return { state: e.expiresAt < Date.now() ? 'expired' : 'waiting', expiresAt: e.expiresAt };
+    const ids = parse(e.nodes) || [], nodes = ids.map(node).filter(Boolean);
+    const state = ids.length >= e.uses ? 'paired' : e.revoked_at ? 'revoked' : e.expires_at < Date.now() ? 'expired' : 'waiting';
+    return { state, expiresAt: e.expires_at, ...(e.uses > 1 ? { uses: e.uses, used: ids.length, nodes } : nodes[0] ? { node: nodes[0] } : {}) };
   }
-  // Worker side of pairing: a valid unexpired code → a new node and its token (returned only here, stored hashed).
+  // The owner ends a code early ("Revoke code"): no more machines can pair with it; the ones that did stay.
+  function revokePairing(code) {
+    const e = pairRow(code);
+    if (!e) return { status: 404, error: 'no such pairing code' };
+    if (!e.revoked_at) db.prepare('UPDATE pairings SET revoked_at=? WHERE code_hash=?').run(Date.now(), e.code_hash);
+    log('a pairing code was revoked');
+    return pairing(code);
+  }
+  // A new machine's name, unique among the nodes ('MacBook Pro (Sanat-MBP)', then '… 2'), so the list stays unambiguous.
+  function uniqueName(label) {
+    const taken = new Set(db.prepare('SELECT name FROM nodes').all().map((r) => r.name.toLowerCase()));
+    let name = label;
+    for (let i = 2; taken.has(name.toLowerCase()); i++) name = `${label.slice(0, 60)} ${i}`;
+    return name;
+  }
+  // Worker side of pairing: a code with a use left, unexpired and not revoked → a new node and its token (returned only
+  // here, stored hashed). Each machine gets its own node and token, whichever code it used.
   function claim({ code, name, os: kind, arch } = {}) {
-    const c = normalizePairingCode(code), h = c && hashSecret(c), e = h && codes.get(h);
-    if (!e || e.node || e.expiresAt < Date.now()) { if (e && !e.node) codes.delete(h); return { status: 401, error: 'invalid or expired pairing code' }; }
+    const e = pairRow(code), ids = (e && parse(e.nodes)) || [];
+    const why = !e ? 'invalid or expired pairing code' : ids.length >= e.uses ? `this pairing code was already used${e.uses > 1 ? ` by ${e.uses} machines` : ''}`
+      : e.revoked_at ? 'this pairing code was revoked' : e.expires_at < Date.now() ? 'this pairing code expired' : null;
+    if (why) return { status: 401, error: e ? `${why}: make a new one with "Add machine"` : why };
     if (!OS_KINDS.includes(kind)) return { status: 400, error: `os must be one of ${OS_KINDS.join(', ')}` };
     if (typeof arch !== 'string' || !/^[\w.-]{1,20}$/.test(arch)) return { status: 400, error: 'arch required' };
     const label = cleanName(name);
     if (!label) return { status: 400, error: 'name required' };
-    const id = `n_${crypto.randomBytes(6).toString('hex')}`, token = newNodeToken();
-    e.node = id;
-    db.prepare('INSERT INTO nodes (id, name, os, arch, token_hash, created_at, status) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(id, label, kind, arch, hashSecret(token), Date.now(), 'offline');
-    log(`paired node ${id} (${label}, ${kind}/${arch})`);
+    const id = `n_${crypto.randomBytes(6).toString('hex')}`, token = newNodeToken(), unique = uniqueName(label);
+    db.prepare('UPDATE pairings SET nodes=? WHERE code_hash=?').run(JSON.stringify([...ids, id]), e.code_hash);
+    // A new Linux node starts at 1 task; a Mac on Auto, which its policy keeps to cores − 1 and 3 GB free for its owner.
+    db.prepare('INSERT INTO nodes (id, name, os, arch, token_hash, created_at, status, max_slots) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(id, unique, kind, arch, hashSecret(token), Date.now(), 'offline', kind === 'darwin' ? 0 : 1);
+    log(`paired node ${id} (${unique}, ${kind}/${arch})${e.uses > 1 ? `: use ${ids.length + 1} of ${e.uses}` : ''}`);
     changed();
-    return { node: id, name: label, token };
+    return { node: id, name: unique, token };
   }
 
   // ---- owner edits
@@ -223,9 +264,20 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
       if (slots !== null && !(Number.isInteger(slots) && slots >= 1 && slots <= 16)) return { status: 400, error: 'maxSlots must be null (Auto) or an integer 1-16' };
       set.max_slots = slots ?? 0;
     }
+    // Power policy (power.mjs): the keys given replace those settings; null goes back to the defaults for its OS.
+    if (body.policy !== undefined) {
+      if (id === LOCAL_NODE) return { status: 400, error: 'the controller keeps to its own memory guard; it has no power policy' };
+      const r = body.policy === null ? { value: null } : checkPolicy(body.policy);
+      if (r.error) return { status: 400, error: r.error };
+      set.policy = r.value ? JSON.stringify({ ...parse(row.policy), ...r.value }) : null;
+    }
     const keys = Object.keys(set);
     if (keys.length) db.prepare(`UPDATE nodes SET ${keys.map((k) => `${k}=?`).join(', ')} WHERE id=?`).run(...keys.map((k) => set[k]), id);
     setStatus(get(id), id === LOCAL_NODE || conns.has(id));
+    // Its worker enforces the policy and the task cap too: tell it now (one that predates node.policy reads it at its next welcome).
+    if ((set.policy !== undefined || set.max_slots !== undefined) && conns.get(id)?.hello?.features?.includes('policy')) {
+      send(id, { t: MSG.NODE_POLICY, policy: wirePolicy(get(id)) });
+    }
     changed();
     return { node: node(id) };
   }
@@ -293,7 +345,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
           touch();
           setStatus(row, true);
           touch({ away: null });
-          c.send(MSG.WELCOME, { node: id, protocol: PROTOCOL_VERSION, heartbeatMs, wipPushMs, graceMs: nodeGrace(row), features: FEATURE_LIST });
+          c.send(MSG.WELCOME, { node: id, protocol: PROTOCOL_VERSION, heartbeatMs, wipPushMs, graceMs: nodeGrace(row), features: FEATURE_LIST, policy: wirePolicy(row) });
           helloUpdate(id, row, c.hello.sha);
           changed();
           break;
@@ -517,6 +569,6 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     db.close();
   }
 
-  return { listNodes, node, createPairing, pairing, claim, update, revoke, handleUpgrade, send, onMessage, isConnected: (id) => conns.has(id), version: () => version, close,
+  return { listNodes, node, createPairing, pairing, revokePairing, claim, update, revoke, handleUpgrade, send, onMessage, isConnected: (id) => conns.has(id), version: () => version, close,
     autoDrain, requestUpdate, logsTail, metrics: metricsOf, setBusy: (fn) => { busy = fn; }, health };
 }

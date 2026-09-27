@@ -3,7 +3,9 @@
 // extra machines, dials OUT to the controller over WSS (no inbound port), reports its inventory and resources, and runs
 // the jobs it is given in local checkouts of the project's GitHub repo with the same adapters as the controller. It
 // reports richly: each job's phases with progress hints, health telemetry every heartbeat, structured errors, its log
-// tail on request, and it updates itself (git pull + service restart) when the controller asks while it is idle.
+// tail on request, and it updates itself (git pull + service restart) when the controller asks while it is idle. On a
+// Mac it follows its power policy from the controller (power.mjs): no new jobs on low battery or when hot, and awake
+// (caffeinate) only while jobs run.
 //   node worker.mjs pair --controller https://<host> --code ABCD-1234 [--name mac]   one time: stores the node token
 //   node worker.mjs run                                                              the daemon (systemd / launchd)
 //   node worker.mjs status                                                           the stored pairing (no token)
@@ -27,8 +29,9 @@ import { agentAccount } from './health.mjs';
 import { createNodeLogins } from './remote-login.mjs';
 import { createModelStore } from './models.mjs';
 import { createLimitStore } from './usage.mjs';
-import { cpuPercent, createResources, readPowerDarwin, readSystem, registerPid, withOwner } from './resources.mjs';
-import { runHelper } from './helpers.mjs';
+import { cpuPercent, createResources, readSystem, registerPid, withOwner } from './resources.mjs';
+import { helperOut, runHelper } from './helpers.mjs';
+import { autoTasks, createKeepAwake, effectivePolicy, intake as intakeOf, readPower, reserveBytes, wantsAwake } from './power.mjs';
 import { MEM } from './parallel.mjs';
 import { GIT_ID, commitAll, taskBranch } from './worktrees.mjs';
 import { extractCommand, runCheck, toolLine } from './orchestrator.mjs';
@@ -51,9 +54,13 @@ const CACHE_TTL_MS = 14 * 86400e3; // cached repos unused this long are pruned
 const LOG_MAX = 10 * 1024 ** 2;
 const PROGRESS_MS = 5000; // a running job's progress hints go out at most this often (when they changed)
 // Telemetry probes, cached between heartbeats: GitHub's reachability (a TCP connect; host:port, 'off' in tests) once a
-// minute, a Mac's battery and thermal state (pmset) once a minute.
+// minute, a Mac's battery and thermal state (pmset, notifyutil) once a minute and fresh before an offer is answered.
 const NET_PROBE = process.env.AGENT_ORCH_WORKER_NET_PROBE || 'github.com:443';
 const PROBE_EVERY_MS = 60_000;
+// AGENT_ORCH_WORKER_POWER: a fixture file with those readings (power.mjs readPower), re-read every heartbeat; tests use
+// it (with AGENT_ORCH_WORKER_CAFFEINATE, a stub caffeinate) to run the power policy on any OS.
+const POWER_FIXTURE = process.env.AGENT_ORCH_WORKER_POWER || null;
+const POWERED = process.platform === 'darwin' || !!POWER_FIXTURE;
 // The agent-orch checkout this worker runs from, which node.update pulls (tests point it at a scratch repo).
 const SRC_DIR = process.env.AGENT_ORCH_WORKER_SRC || ROOT;
 const EDIT_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
@@ -120,9 +127,22 @@ export function tailLines(file, n, maxBytes = 512 * 1024) {
 
 // ---------------------------------------------------------------- pairing
 
-// Trades a one-time pairing code (from the owner's "Add machine") for a node id + bearer token, stored 0600.
-export async function pair({ controller, code, name = os.hostname(), home = workerHome() }) {
+// The name a machine pairs under unless --name is given: on a Mac its model and local host name ('MacBook Pro
+// (Sanat-MBP-2)'), else its short hostname. The controller makes it unique; the owner can rename it (Machines view).
+export const macName = (hardware, host) => `${/Model Name:\s*(.+)/.exec(hardware || '')?.[1]?.trim() || 'Mac'}${host ? ` (${host})` : ''}`;
+export async function defaultName() {
+  const short = os.hostname().split('.')[0] || 'worker';
+  if (process.platform !== 'darwin') return short;
+  const out = (cmd, args) => helperOut(cmd, args, { timeoutMs: 15_000 }).then((s) => s.trim(), () => '');
+  const [hw, host] = await Promise.all([out('/usr/sbin/system_profiler', ['SPHardwareDataType']), out('/usr/sbin/scutil', ['--get', 'LocalHostName'])]);
+  return macName(hw, host || short);
+}
+
+// Trades a pairing code from the owner's "Add machine" (one-time, or one code for several machines) for this machine's
+// own node id + bearer token, stored 0600.
+export async function pair({ controller, code, name, home = workerHome() }) {
   if (!OS_KINDS.includes(process.platform)) throw new Error(`unsupported OS ${process.platform} (need ${OS_KINDS.join(' or ')})`);
+  name ||= await defaultName();
   const base = new URL(controller);
   const r = await fetch(new URL(CLAIM_PATH, base), {
     method: 'POST', headers: { 'content-type': 'application/json' },
@@ -164,6 +184,9 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   let pendingWake = null;
   let peer = new Set(); // the controller's features (welcome.features): newer frame types go only to one that reads them
   let srcSha = null, lastInv = null, updating = false;
+  // The power policy and task cap the controller set for this node (welcome.policy, node.policy); its OS defaults until then.
+  let policy = effectivePolicy(process.platform), policyText = '';
+  const awake = POWERED ? createKeepAwake({ log }) : null;
 
   // Model lists (once a day per agent, cached) and plan limits (only on limits.refresh): nothing polls (BRIEF goal 7).
   const models = createModelStore({ file: path.join(home, 'models.json'), log, onChange: () => sendInventory() });
@@ -242,7 +265,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     sendEvents(job, evEnd(job));
   }
   const allJobs = () => [...jobs.values(), ...held.values()];
-  const flusher = setInterval(() => { for (const j of allJobs()) { flushJob(j); sendProgress(j); } }, EVENT_FLUSH_MS);
+  const flusher = setInterval(() => { for (const j of allJobs()) { flushJob(j); sendProgress(j); } syncAwake(); }, EVENT_FLUSH_MS);
 
   // ---- phases (job.phase): queued → cloning/fetching → installing → running → checking → committing → pushing → done.
   // Each frame is stamped when its phase starts and says how long the one before took; it rides the job's stream (held
@@ -322,8 +345,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
 
   // ---- health telemetry, sent with every resources frame: CPU % per core, memory, swap, disk free on the volume holding
   // the repos, GitHub's reachability, the agents as last checked (never polled: BRIEF goal 7), uptimes, version and sha,
-  // and on a Mac its battery and thermal state.
-  let prevCpus = null, netState = null, netAt = 0, netBusy = false, power = null, powerAt = 0;
+  // and on a Mac its battery and thermal state, whether its power policy lets it take new jobs, and whether it is held awake.
+  let prevCpus = null, netState = null, netAt = 0, netBusy = false, power = null, powerAt = 0, powerBusy = null;
   function probeNet() {
     if (NET_PROBE === 'off' || netBusy || Date.now() - netAt < PROBE_EVERY_MS) return;
     const [host, port = '443'] = NET_PROBE.split(':'), t0 = Date.now();
@@ -340,10 +363,27 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     sock.once('timeout', () => done(false, 'timed out'));
     sock.once('error', (e) => done(false, e.code || e.message));
   }
-  function probePower() {
-    if (process.platform !== 'darwin' || Date.now() - powerAt < PROBE_EVERY_MS) return;
+  // Resolves once `power` is at most maxAge old (a fixture is read every time).
+  function probePower(maxAge = PROBE_EVERY_MS) {
+    if (!POWERED) return Promise.resolve();
+    if (powerBusy || (!POWER_FIXTURE && Date.now() - powerAt < maxAge)) return powerBusy || Promise.resolve();
     powerAt = Date.now();
-    readPowerDarwin().then((p) => { power = p; }, () => {});
+    return powerBusy = readPower().then((p) => { power = p; syncAwake(); }, () => {}).finally(() => { powerBusy = null; });
+  }
+  // ---- power policy (power.mjs): intake (no new jobs on low battery or when hot) and keep-awake while jobs run
+  const intakeNow = () => (POWERED ? intakeOf(policy, power) : { ok: true });
+  const activeJobs = () => [...jobs.values()].filter((j) => j.state !== 'paused').length;
+  // At most maxTasks jobs (Auto: cores − 1 on a Mac, all cores elsewhere), and never above a config.json maxJobs.
+  const maxJobs = () => Math.min(policy.maxTasks ?? autoTasks(process.platform, os.cpus().length), config.maxJobs || Infinity);
+  function syncAwake() { awake?.set(!stopping && wantsAwake(policy, power, activeJobs())); }
+  function setPolicy(p) {
+    policy = { ...effectivePolicy(process.platform), ...p };
+    const rules = !POWERED ? '' : `new jobs on AC power${policy.minBattery == null ? ' only' : ` or above ${policy.minBattery}% battery`}` +
+      `${policy.thermal === 'off' ? '' : `, none at ${policy.thermal} thermal pressure`}; awake while jobs run: ${{ ac: 'on AC power', always: 'always', never: 'never' }[policy.keepAwake]}; `;
+    const text = `${rules}at most ${maxJobs()} jobs at once, leaving ${+(Math.max(MEM.claimFloor, reserveBytes(policy)) / 1024 ** 3).toFixed(1)} GB free`;
+    if (text !== policyText) log(`policy: ${text}`);
+    policyText = text;
+    syncAwake();
   }
   function telemetry(sys) {
     const cpu = prevCpus && cpuPercent(prevCpus, sys.cpus || []);
@@ -358,6 +398,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       ...(lastInv ? { agents: lastInv.agents.map(({ id, installed, version, signedIn }) => ({ id, installed, version, signedIn })) } : {}),
       uptime: Math.round(sys.uptime || os.uptime()), procUptime: Math.round(process.uptime()), version: VERSION, ...(srcSha ? { sha: srcSha } : {}),
       ...(power?.battery ? { battery: power.battery } : {}), ...(power?.thermal ? { thermal: power.thermal } : {}),
+      ...(POWERED ? { intake: intakeNow(), awake: !!awake?.active() } : {}),
     };
   }
   function sendResources() {
@@ -422,6 +463,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     peer = new Set(Array.isArray(msg.features) ? msg.features : []);
     welcomed = true;
     log(`welcomed as ${msg.node}`);
+    if (msg.policy) setPolicy(msg.policy);
     clearInterval(beat);
     // Resources every heartbeat (any frame counts as one); a controller silent for HEARTBEAT_MISSES beats is gone.
     beat = setInterval(() => {
@@ -463,7 +505,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       case MSG.ERROR: return log(`controller error: ${msg.message}`, 'warn');
       case MSG.BYE: log(`controller said bye (${msg.reason || 'no reason'})`); return ws?.close(1000, 'bye');
       case MSG.JOB_OFFER: {
-        const reason = offerRejection(msg);
+        const reason = await offerRejection(msg);
         return reason ? raw(MSG.JOB_REJECT, { job: msg.job, reason }) : raw(MSG.JOB_ACCEPT, { job: msg.job });
       }
       case MSG.JOB_START: return startJob(msg);
@@ -487,18 +529,24 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       case MSG.LOGIN_START: case MSG.LOGIN_CODE: case MSG.LOGIN_CANCEL: case MSG.LOGIN_LOGOUT: return logins.handle(msg);
       case MSG.LOGS_TAIL: return raw(MSG.LOGS, { req: msg.req, lines: tailLines(logFile(home), Math.max(1, Math.min(2000, msg.lines))) });
       case MSG.NODE_UPDATE: return selfUpdate(msg);
+      case MSG.NODE_POLICY: setPolicy(msg.policy); return sendResources(); // the controller sees the new intake at once
       default: return;
     }
   }
 
-  function offerRejection(msg) {
+  // Declined while stopping or updating, without the agent or its sign-in, at the task cap, when the job would leave less
+  // free memory than the claim floor or the policy's reserve for the owner, or while the power policy pauses intake
+  // (checked on a reading at most 15 s old).
+  async function offerRejection(msg) {
     if (stopping || updating) return 'draining';
     const st = agentStatus(msg.agent);
     if (st === 'not installed' || st === 'unknown agent') return 'agent_missing';
     if (st !== true) return 'not_signed_in';
-    if ([...jobs.values()].filter((j) => j.state !== 'paused').length >= (config.maxJobs || os.cpus().length)) return 'busy';
+    if (activeJobs() >= maxJobs()) return 'busy';
     const avail = readSystem().memAvailable ?? os.freemem();
-    if (avail - (msg.footprint || 0) < MEM.claimFloor) return 'low_memory';
+    if (avail - (msg.footprint || 0) < Math.max(MEM.claimFloor, reserveBytes(policy))) return 'low_memory';
+    await probePower(15_000);
+    if (!intakeNow().ok) return peer.has('policy') ? 'power' : 'busy';
     return null;
   }
 
@@ -542,6 +590,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     jobs.set(job.id, job);
     finished.delete(job.id);
     held.delete(job.id);
+    syncAwake();
     log(`job ${job.id} start: ${spec.title} (${spec.agent}${spec.model ? `/${spec.model}` : ''})`);
     setPhase(job, 'queued');
     if (!(await setup(job))) return;
@@ -849,6 +898,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     srcSha = await git(srcDir, ['rev-parse', 'HEAD']).then((s) => s.trim(), () => null);
     if (srcSha && !/^[0-9a-f]{40}$/.test(srcSha)) srcSha = null;
     await sweepLeftovers().catch((e) => log(`leftover sweep failed: ${e.message}`, 'warn'));
+    await probePower();
+    setPolicy(policy);
     resources?.start();
     models.start().catch((e) => log(`model discovery failed: ${e.message}`, 'warn'));
     connect();
@@ -868,7 +919,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     for (const j of allJobs()) flushJob(j);
     raw(MSG.BYE, { reason });
     clearInterval(flusher); clearInterval(beat); clearInterval(clock);
-    models.stop(); limits.stop(); resources?.stop();
+    models.stop(); limits.stop(); resources?.stop(); awake?.stop();
     // Let the bye and the close frame out before the process exits.
     const sock = ws;
     try { sock?.close(1000, reason); } catch {}
@@ -895,7 +946,7 @@ async function main() {
   if (cmd === 'pair') {
     const controller = a.controller || a._[0], code = a.code || a._[1];
     if (!controller || !code) throw new Error('usage: node worker.mjs pair --controller https://<host> --code <code> [--name <name>]');
-    const r = await pair({ controller, code, name: a.name || os.hostname() });
+    const r = await pair({ controller, code, name: a.name });
     console.log(`paired as ${r.name} (${r.node}); token saved in ${configFile(workerHome())}. Start it with: node worker.mjs run`);
   } else if (cmd === 'run') {
     const w = createWorker();

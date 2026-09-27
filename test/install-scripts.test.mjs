@@ -45,8 +45,8 @@ test('linux --dry-run --uninstall removes the unit and the checkout', () => {
   assert.match(r.stdout, /rm -rf \S+\/agent-orch-worker\n/);
 });
 
-test('macos --dry-run: dedicated agentorch user, sudoers rule for one launcher, a KeepAlive LaunchAgent', () => {
-  const r = dry(MAC, ARGS);
+test('macos --service login --dry-run: dedicated agentorch user, sudoers rule for one launcher, a KeepAlive LaunchAgent', () => {
+  const r = dry(MAC, [...ARGS, '--service', 'login']);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /Why a dedicated user/);
   assert.match(r.stdout, /sysadminctl -addUser agentorch/);

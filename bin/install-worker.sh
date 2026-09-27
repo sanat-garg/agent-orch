@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # agent-orch worker installer for Linux (systemd). Design: .agent-orch/CLUSTER.md; README "Adding machines".
-# One line from the head's "Add machine" (the code is one-time, valid 10 minutes):
+# One line from the head's "Add machine" (a one-time code lasts 10 minutes; a multi-use one pairs several in 1 h):
 #   curl -fsSL https://<head>/install/worker-linux.sh | bash -s -- --controller https://<head> --code ABCD-1234
 # Installs Node 22 if missing (nvm when present, else the official tarball in ~/.local/node), clones or updates
 # github.com/sanat-garg/agent-orch into ~/agent-orch-worker with the gh login, runs npm ci, optionally installs agent

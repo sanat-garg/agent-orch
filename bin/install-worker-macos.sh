@@ -1,23 +1,32 @@
 #!/usr/bin/env bash
 # agent-orch worker installer for macOS (launchd). Design: .agent-orch/CLUSTER.md; README "Adding machines".
-# One line from the head's "Add machine" (the code is one-time, valid 10 minutes):
+# One line from the head's "Add machine" (a one-time code is valid 10 minutes; a multi-use code pairs up to N Macs
+# within an hour, the same line on each, and every Mac names itself, e.g. "MacBook Pro (Sanat-MBP-2)"):
 #   curl -fsSL https://<head>/install/worker-macos.sh | sudo bash -s -- --controller https://<head> --code ABCD-1234
-# Strongly recommended (the default under sudo): the worker runs as a dedicated standard user, 'agentorch', created
-# here with sysadminctl. Agents run autonomously with full permissions; under their own account they can't read your
-# documents, keychain, browser profiles or SSH keys. Your own LaunchAgent starts it (via a sudoers rule that allows
-# exactly that one command), so it runs only while you are logged in, and KeepAlive restarts it.
+# The worker runs as a dedicated standard user, 'agentorch', created here with sysadminctl: agents run autonomously
+# with full permissions, and under their own account they can't read your documents, keychain, browser profiles or
+# SSH keys. How it starts (--service):
+#   daemon (default, recommended): a LaunchDaemon starts it at boot as agentorch, whether or not anyone is logged in.
+#   login: your own LaunchAgent starts it as agentorch when you log in (a sudoers rule allows exactly that one
+#          command), and it stops when you log out.
+# Either way launchd restarts it if it stops. Power policy (the head sends it; change it per Mac in Machines → Power):
+# new tasks on AC power or above 50% battery, none at heavy thermal pressure, at most cores − 1 tasks with 3 GB of RAM
+# left for you, and while tasks run on AC power the worker keeps the Mac awake with `caffeinate -i -w <worker pid>`.
 # Installs Node 22 if missing (nvm when present, else the official tarball in ~/.local/node), clones or updates
 # github.com/sanat-garg/agent-orch into ~/agent-orch-worker with the gh login, runs npm ci, optionally installs agent
 # CLIs and pairs the machine. Idempotent: re-running updates everything; without --code an existing pairing is kept.
-#   --controller URL  --code CODE  --name NAME (default: this Mac's name)  --agents claude,codex
-#   --user NAME (dedicated user, default agentorch)  --no-dedicated-user (run as yourself, without sudo; not advised)
+#   --controller URL  --code CODE  --name NAME (default: "<model> (<host name>)")  --agents claude,codex
+#   --service daemon|login  --user NAME (dedicated user, default agentorch)
+#   --no-dedicated-user (run as yourself from your own LaunchAgent, without sudo; not advised)
 #   --dry-run (print what would run, change nothing)  --uninstall [--purge] (also delete the worker home)
 set -euo pipefail
 
 REPO=sanat-garg/agent-orch
 LABEL=com.agent-orch.worker
 LAUNCHER=/usr/local/bin/agent-orch-worker-run
-CONTROLLER='' CODE='' NAME='' AGENTS='' WUSER=agentorch SELF=0 DRY=0 UNINSTALL=0 PURGE=0
+SUDOERS=/etc/sudoers.d/agent-orch-worker
+DAEMON_PLIST=/Library/LaunchDaemons/$LABEL.plist
+CONTROLLER='' CODE='' NAME='' AGENTS='' WUSER=agentorch SERVICE='' SELF=0 DRY=0 UNINSTALL=0 PURGE=0
 
 say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -34,8 +43,10 @@ write_root() {
   if [[ "${3:-}" == check ]] && ! visudo -cf "$tmp" >/dev/null; then rm -f "$tmp"; die "$1 failed validation"; fi
   mkdir -p "$(dirname "$1")"; install -m "$2" -o root -g wheel "$tmp" "$1"; rm -f "$tmp"
 }
+# ~NAME, or /Users/NAME for an account that doesn't exist (yet).
+home_of() { local h; h="$(eval echo "~$1")"; [[ "$h" == "~"* ]] && h="/Users/$1"; echo "$h"; }
 
-usage() { sed -n '2,16p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,21p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; }
 
 parse() {
   while (($#)); do
@@ -44,6 +55,7 @@ parse() {
       --code) CODE="${2:?--code needs a value}"; shift ;;
       --name) NAME="${2:?--name needs a value}"; shift ;;
       --agents) AGENTS="${2:?--agents needs a list}"; shift ;;
+      --service) SERVICE="${2:?--service needs daemon or login}"; shift ;;
       --user) WUSER="${2:?--user needs a name}"; shift ;;
       --no-dedicated-user) SELF=1 ;;
       --dry-run) DRY=1 ;;
@@ -57,7 +69,9 @@ parse() {
   [[ -z "$CONTROLLER" || "$CONTROLLER" =~ ^https?://[^[:space:]]+$ ]] || die "--controller must be an http(s) URL"
   [[ -z "$AGENTS" || "$AGENTS" =~ ^(claude|codex)(,(claude|codex))*$ ]] || die "--agents takes a comma list of: claude, codex"
   [[ "$WUSER" =~ ^[a-z_][a-z0-9_-]{0,30}$ ]] || die "--user must be a short lowercase account name"
-  [[ -n "$NAME" ]] || NAME="$(scutil --get ComputerName 2>/dev/null || hostname -s)"
+  [[ -z "$SERVICE" || "$SERVICE" =~ ^(daemon|login)$ ]] || die "--service takes daemon (a LaunchDaemon, the default) or login (starts at your login)"
+  ((!SELF)) || [[ "$SERVICE" != daemon ]] || die "--no-dedicated-user runs the worker from your own LaunchAgent; a LaunchDaemon needs the dedicated user"
+  SERVICE="${SERVICE:-daemon}"
 }
 
 why_user() {
@@ -65,7 +79,7 @@ why_user() {
 Why a dedicated user: agent-orch runs coding agents autonomously with full permissions (no approval prompts).
 Under your own account they could read your documents, photos, keychain, browser profiles and SSH keys. Under a
 separate standard (non-admin) account, macOS keeps your files out of reach and the agents can't install system
-software. It costs nothing: the account is hidden from the login window and your own login starts the worker.
+software. It costs nothing: the account is hidden from the login window, and launchd starts the worker for it.
 EOF
 }
 
@@ -126,13 +140,18 @@ install_agents() {
   done
 }
 
+# A one-time or a multi-use code: the same command pairs each Mac as a machine of its own. Without --name the worker
+# names it "<model> (<local host name>)"; the head makes names unique, and the owner can rename machines there.
 pair() {
   local cfg="${AGENT_ORCH_WORKER_HOME:-$HOME/.agent-orch-worker}/config.json"
   if [[ -n "$CODE" ]]; then
-    [[ -n "$CONTROLLER" ]] || die "--code needs --controller"
+    [[ -n "$CONTROLLER" ]] || ((DRY)) || die "--code needs --controller (the head's URL, as in its \"Add machine\" line)"
     [[ -f "$cfg" ]] && say "Already paired; pairing again as a new machine (remove the old one in the head's UI)"
-    say "Pairing as \"$NAME\""
-    run node "$HOME/agent-orch-worker/worker.mjs" pair --controller "$CONTROLLER" --code "$CODE" --name "$NAME"
+    if [[ -n "$NAME" ]]; then say "Pairing as \"$NAME\""
+    else say "Pairing: this Mac names itself \"<model> (<host name>)\" (rename it in the head's Machines view)"; fi
+    local args=(pair --controller "${CONTROLLER:-https://<controller>}" --code "$CODE")
+    [[ -n "$NAME" ]] && args+=(--name "$NAME")
+    run node "$HOME/agent-orch-worker/worker.mjs" "${args[@]}"
   elif [[ -f "$cfg" ]]; then say "Already paired (keeping it)"
   elif ((DRY)); then echo "+ (no --code: pairing skipped)"
   else die "not paired yet: pass --controller <url> --code <code> from the head's \"Add machine\""; fi
@@ -145,15 +164,17 @@ worker_stage() {
   install_agents
   pair
 }
-# The node binary the worker stage settled on, for the LaunchAgent.
+# The node binary the worker stage settled on, for launchd.
 node_path() {
   ensure_node >/dev/null
   if ((DRY)) && (($(node_major) < 22)); then echo "$HOME/.local/node/bin/node"; else command -v node; fi
 }
 
-# ---------------------------------------------------------------- owner stage (the logged-in owner's LaunchAgent)
+# ---------------------------------------------------------------- the service (launchd)
 
-plist() { # plist PROGRAM-ARGS… (as <string> lines) — env: WHOME_DIR, LOG
+# plist PROGRAM-ARGS… (env: LOG, KEYS = extra <key> lines). ProcessType Standard with Nice 5: the worker gets every core
+# (Background would confine it to the efficiency cores) but yields to your apps; its policy caps what it takes.
+plist() {
   cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -164,47 +185,111 @@ plist() { # plist PROGRAM-ARGS… (as <string> lines) — env: WHOME_DIR, LOG
   <array>
 $(for a in "$@"; do printf '    <string>%s</string>\n' "$a"; done)
   </array>
-$([[ -n "${PLIST_PATH:-}" ]] && printf '  <key>EnvironmentVariables</key><dict><key>PATH</key><string>%s</string></dict>\n' "$PLIST_PATH" || true)
-  <key>RunAtLoad</key><true/>
+${KEYS:-}  <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
-  <key>LimitLoadToSessionType</key><string>Aqua</string>
-  <key>ProcessType</key><string>Background</string>
+  <key>ProcessType</key><string>Standard</string>
+  <key>Nice</key><integer>5</integer>
   <key>StandardOutPath</key><string>$LOG</string>
   <key>StandardErrorPath</key><string>$LOG</string>
 </dict>
 </plist>
 EOF
 }
-
-worker_path() { echo "$(dirname "$1"):$2/.local/bin:$2/.local/node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"; }
-launcher() { # launcher NODE WORKER-HOME
-  printf '#!/bin/sh\n# agent-orch worker launcher (install-worker-macos.sh): started by the owner'"'"'s LaunchAgent as %s.\n' "$WUSER"
-  printf 'export PATH="%s"\nexec "%s" "%s/agent-orch-worker/worker.mjs" run\n' "$(worker_path "$1" "$2")" "$1" "$2"
+env_keys() { # env_keys HOME PATH [USER]
+  printf '  <key>EnvironmentVariables</key>\n  <dict>\n    <key>HOME</key><string>%s</string>\n    <key>PATH</key><string>%s</string>\n' "$1" "$2"
+  [[ -n "${3:-}" ]] && printf '    <key>USER</key><string>%s</string>\n' "$3"
+  printf '  </dict>\n'
 }
+worker_path() { echo "$(dirname "$1"):$2/.local/bin:$2/.local/node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"; }
 
-# A LaunchAgent lives in the owner's GUI session, so the worker runs only while the owner is logged in.
-load_agent() { # load_agent OWNER PLIST
+# A LaunchAgent lives in a GUI login session: it runs while that user is logged in.
+load_agent() { # load_agent USER PLIST
   local uid; uid="$(id -u "$1")"
   run launchctl bootout "gui/$uid/$LABEL" 2>/dev/null || true
   run launchctl bootstrap "gui/$uid" "$2"
 }
 
+# --service daemon: launchd starts the worker at boot as $WUSER, whether or not anyone is logged in.
+install_daemon() { # install_daemon OWNER NODE WORKER-HOME
+  remove_login "$1"
+  local LOG="$3/Library/Logs/agent-orch-worker.log"
+  run sudo -u "$WUSER" mkdir -p "$3/Library/Logs"
+  say "Installing the LaunchDaemon $DAEMON_PLIST: it starts the worker at boot as $WUSER, whether or not anyone is logged in"
+  KEYS="$(printf '  <key>UserName</key><string>%s</string>\n  <key>GroupName</key><string>staff</string>\n  <key>InitGroups</key><true/>\n  <key>WorkingDirectory</key><string>%s</string>\n' "$WUSER" "$3/agent-orch-worker")
+$(env_keys "$3" "$(worker_path "$2" "$3")" "$WUSER")
+" plist "$2" "$3/agent-orch-worker/worker.mjs" run | write_root "$DAEMON_PLIST" 0644
+  run launchctl bootout "system/$LABEL" 2>/dev/null || true
+  run launchctl enable "system/$LABEL"
+  run launchctl bootstrap system "$DAEMON_PLIST"
+  FINISH="Done. The worker runs as $WUSER from boot (LaunchDaemon $LABEL), whether or not anyone is logged in; launchd restarts it if it stops. Log: $LOG"
+}
+
+# --service login: a root-owned launcher sets PATH (sudo resets it; agents need node, git, gh, claude and codex), and the
+# owner's LaunchAgent may start exactly that one command as $WUSER, nothing else. It runs while the owner is logged in.
+launcher() { # launcher NODE WORKER-HOME
+  printf '#!/bin/sh\n# agent-orch worker launcher (install-worker-macos.sh): started by the owner'"'"'s LaunchAgent as %s.\n' "$WUSER"
+  printf 'export PATH="%s"\nexec "%s" "%s/agent-orch-worker/worker.mjs" run\n' "$(worker_path "$1" "$2")" "$1" "$2"
+}
+install_login() { # install_login OWNER NODE WORKER-HOME
+  remove_daemon
+  say "Installing $LAUNCHER and allowing $1 to start it as $WUSER ($SUDOERS)"
+  launcher "$2" "$3" | write_root "$LAUNCHER" 0755
+  printf '%s ALL=(%s) NOPASSWD: %s\n' "$1" "$WUSER" "$LAUNCHER" | write_root "$SUDOERS" 0440 check
+  local ohome; ohome="$(home_of "$1")"
+  local LOG="$ohome/Library/Logs/agent-orch-worker.log" plistf="$ohome/Library/LaunchAgents/$LABEL.plist"
+  run sudo -u "$1" mkdir -p "$ohome/Library/LaunchAgents" "$ohome/Library/Logs"
+  KEYS='  <key>LimitLoadToSessionType</key><string>Aqua</string>
+' plist /usr/bin/sudo -n -u "$WUSER" -H "$LAUNCHER" | write "$plistf"
+  run chown "$1" "$plistf"
+  load_agent "$1" "$plistf"
+  FINISH="Done. The worker runs as $WUSER while you're logged in (your LaunchAgent $LABEL) and restarts if it stops. Log: $LOG"
+}
+
+# The other mode's pieces, so one install never leaves two workers running on the same token.
+remove_login() { # remove_login OWNER
+  local plistf; plistf="$(home_of "$1")/Library/LaunchAgents/$LABEL.plist"
+  [[ -f "$plistf" || -f "$LAUNCHER" || -f "$SUDOERS" ]] || return 0
+  say "Removing the login-mode LaunchAgent, launcher and sudoers rule"
+  run launchctl bootout "gui/$(id -u "$1")/$LABEL" 2>/dev/null || true
+  run rm -f "$plistf" "$LAUNCHER" "$SUDOERS"
+}
+remove_daemon() {
+  [[ -f "$DAEMON_PLIST" ]] || return 0
+  say "Removing the LaunchDaemon $DAEMON_PLIST"
+  run launchctl bootout "system/$LABEL" 2>/dev/null || true
+  run rm -f "$DAEMON_PLIST"
+}
+
+# The power policy the worker follows (the head sends it: power.mjs). Nothing to install: caffeinate and pmset ship with
+# macOS, and caffeinate needs no root.
+power_policy() {
+  say "Power policy (the defaults; change them per Mac in the head's Server details → Machines → Power):"
+  cat <<'EOF'
+    - new tasks only on AC power, or on battery above 50%; none while the Mac runs hot (heavy thermal pressure)
+    - at most cores − 1 tasks at once (Max tasks: Auto), leaving 3 GB of RAM free for you
+    - while tasks run on AC power the worker keeps the Mac awake: caffeinate -i -w <worker pid> (idle sleep only; it
+      ends with the last task or the worker)
+    - closing the lid still sleeps the Mac: the head shows it asleep and moves its tasks to another machine after 5 min
+EOF
+  [[ -x /usr/bin/caffeinate ]] || ((DRY)) || say "Warning: /usr/bin/caffeinate is missing, so the Mac may sleep while tasks run"
+}
+
 uninstall() {
-  local owner="${SUDO_USER:-$(id -un)}" ohome; ohome="$(eval echo "~$owner")"
-  local plistf="$ohome/Library/LaunchAgents/$LABEL.plist"
-  say "Removing the LaunchAgent $LABEL"
-  run launchctl bootout "gui/$(id -u "$owner")/$LABEL" || true
-  run rm -f "$plistf"
-  local home="$HOME"
-  if ((EUID == 0)) && ((!SELF)); then
-    run rm -f /etc/sudoers.d/agent-orch-worker "$LAUNCHER"
-    home="$(eval echo "~$WUSER")"
+  local owner="${SUDO_USER:-$(id -un)}"
+  say "Removing the service $LABEL"
+  if ((EUID == 0 || DRY)) && ((!SELF)); then
+    run launchctl bootout "system/$LABEL" 2>/dev/null || true
+    run rm -f "$DAEMON_PLIST" "$SUDOERS" "$LAUNCHER"
   fi
+  run launchctl bootout "gui/$(id -u "$owner")/$LABEL" 2>/dev/null || true
+  run rm -f "$(home_of "$owner")/Library/LaunchAgents/$LABEL.plist"
+  local home="$HOME"
+  if ((EUID == 0 || DRY)) && ((!SELF)); then home="$(home_of "$WUSER")"; fi
   say "Removing $home/agent-orch-worker"
   run rm -rf "$home/agent-orch-worker"
   if ((PURGE)); then say "Removing $home/.agent-orch-worker"; run rm -rf "$home/.agent-orch-worker"; fi
-  if ((EUID == 0)) && ((!SELF)); then say "The '$WUSER' account is kept. Delete it with: sudo sysadminctl -deleteUser $WUSER"; fi
+  if ((EUID == 0 || DRY)) && ((!SELF)); then say "The '$WUSER' account is kept. Delete it with: sudo sysadminctl -deleteUser $WUSER"; fi
   say "Remove the machine in the head's UI too."
 }
 
@@ -224,9 +309,13 @@ main() {
     local node_bin; node_bin="$(node_path)"
     local LOG="$HOME/Library/Logs/agent-orch-worker.log" plistf="$HOME/Library/LaunchAgents/$LABEL.plist"
     run mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
-    PLIST_PATH="$(worker_path "$node_bin" "$HOME")" plist "$node_bin" "$HOME/agent-orch-worker/worker.mjs" run | write "$plistf"
+    KEYS="  <key>LimitLoadToSessionType</key><string>Aqua</string>
+$(env_keys "$HOME" "$(worker_path "$node_bin" "$HOME")")
+" plist "$node_bin" "$HOME/agent-orch-worker/worker.mjs" run | write "$plistf"
     load_agent "$(id -un)" "$plistf"
-    finish "$HOME"
+    power_policy
+    FINISH="Done. The worker runs while you're logged in and restarts if it stops. Log: $LOG"
+    finish "$HOME" ''
     return
   fi
 
@@ -242,7 +331,7 @@ main() {
   local whome="/Users/$WUSER"
   if id "$WUSER" >/dev/null 2>&1; then
     say "Using the existing '$WUSER' account"
-    whome="$(eval echo "~$WUSER")"
+    whome="$(home_of "$WUSER")"
   else
     say "Creating the standard user '$WUSER' (hidden from the login window)"
     local pw; pw="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 || true)"
@@ -265,24 +354,14 @@ main() {
   fi
   [[ "$node_bin" == /* ]] || die "the worker stage didn't report a node binary"
 
-  # A root-owned launcher sets PATH (sudo resets it; agents need node, git, gh, claude and codex), and the owner's
-  # LaunchAgent may start exactly that one command as $WUSER, nothing else.
-  say "Installing $LAUNCHER and allowing $owner to start it as $WUSER (/etc/sudoers.d/agent-orch-worker)"
-  launcher "$node_bin" "$whome" | write_root "$LAUNCHER" 0755
-  printf '%s ALL=(%s) NOPASSWD: %s\n' "$owner" "$WUSER" "$LAUNCHER" | write_root /etc/sudoers.d/agent-orch-worker 0440 check
-
-  local ohome; ohome="$(eval echo "~$owner")"
-  local LOG="$ohome/Library/Logs/agent-orch-worker.log" plistf="$ohome/Library/LaunchAgents/$LABEL.plist"
-  run sudo -u "$owner" mkdir -p "$ohome/Library/LaunchAgents" "$ohome/Library/Logs"
-  plist /usr/bin/sudo -n -u "$WUSER" -H "$LAUNCHER" | write "$plistf"
-  run chown "$owner" "$plistf"
-  load_agent "$owner" "$plistf"
-  finish "$whome"
+  if [[ "$SERVICE" == daemon ]]; then install_daemon "$owner" "$node_bin" "$whome"; else install_login "$owner" "$node_bin" "$whome"; fi
+  power_policy
+  finish "$whome" "sudo -u $WUSER -H "
 }
 
-finish() {
-  say "Done. The worker runs while you're logged in and restarts if it stops. Log: $LOG"
-  say "Status: node $1/agent-orch-worker/worker.mjs status"
+finish() { # finish WORKER-HOME RUN-AS-PREFIX
+  say "$FINISH"
+  say "Status: ${2}node $1/agent-orch-worker/worker.mjs status"
   say "Next: sign the agents in on this machine (the head's Connections window)."
 }
 

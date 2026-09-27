@@ -9,8 +9,8 @@ import crypto from 'node:crypto';
 
 export const PROTOCOL_VERSION = 1;
 export const WS_PATH = '/api/cluster/ws';
-export const PAIR_PATH = '/api/cluster/pair'; // owner (signed in): POST → a one-time pairing code
-export const CLAIM_PATH = '/api/cluster/claim'; // worker: POST {code, name, os, arch} → {node, token} once
+export const PAIR_PATH = '/api/cluster/pair'; // owner (signed in): POST {uses?} → a pairing code; DELETE …/:code revokes it
+export const CLAIM_PATH = '/api/cluster/claim'; // worker: POST {code, name, os, arch} → {node, token} once per machine
 export const HEARTBEAT_MS = 10_000;
 export const HEARTBEAT_MISSES = 3; // no frame for 3 heartbeats = disconnected (the grace period starts then)
 export const GRACE_MS = { mac: 5 * 60_000, vps: 2 * 60_000 };
@@ -18,7 +18,9 @@ export const WIP_PUSH_MS = 10 * 60_000;
 export const SLEEP_JUMP_MS = 30_000; // a timer firing this much later than due means the machine was asleep
 export const MAX_FRAME = 1024 * 1024;
 export const MAX_BATCH = 200; // normalised events per job.event frame
-export const PAIRING_TTL_MS = 10 * 60_000;
+export const PAIRING_TTL_MS = 10 * 60_000; // a one-time code
+export const PAIRING_MULTI_TTL_MS = 60 * 60_000; // a multi-use code (several machines in one go)
+export const MAX_PAIRING_USES = 20;
 export const WORKER_HOME = '~/.agent-orch-worker';
 
 export const MSG = {
@@ -31,6 +33,7 @@ export const MSG = {
   LOGIN_START: 'login.start', LOGIN_STATE: 'login.state', LOGIN_CODE: 'login.code', LOGIN_CANCEL: 'login.cancel', LOGIN_LOGOUT: 'login.logout',
   MODELS_REFRESH: 'models.refresh', MODELS: 'models', LIMITS_REFRESH: 'limits.refresh', LIMITS: 'limits',
   JOB_PHASE: 'job.phase', JOB_ERROR: 'job.error', NODE_ERROR: 'node.error', LOGS_TAIL: 'logs.tail', LOGS: 'logs', NODE_UPDATE: 'node.update',
+  NODE_POLICY: 'node.policy',
 };
 
 // Who may send each type: 'w' worker → controller, 'c' controller → worker, 'both'. Only the controller originates jobs.
@@ -41,12 +44,14 @@ export const DIRECTION = {
   'job.done': W, 'job.cancel': C, 'job.pause': C, 'job.resume': C, 'job.attach': C, wake: W, 'git.credential': C,
   'login.start': C, 'login.state': W, 'login.code': C, 'login.cancel': C, 'login.logout': C,
   'models.refresh': C, models: W, 'limits.refresh': C, limits: W,
-  'job.phase': W, 'job.error': W, 'node.error': W, 'logs.tail': C, logs: W, 'node.update': C,
+  'job.phase': W, 'job.error': W, 'node.error': W, 'logs.tail': C, logs: W, 'node.update': C, 'node.policy': C,
 };
 // Frame types a peer sends only when the other side lists the feature (hello.features: the worker's, welcome.features:
 // the controller's), so a worker updated ahead of the controller's running code (or the reverse) never sends a type the
 // other can't read. Additive fields need no flag: validators ignore unknown fields.
-export const FEATURES = { 'job.phase': 'phases', 'job.error': 'errors', 'node.error': 'errors', 'logs.tail': 'logs', logs: 'logs', 'node.update': 'update' };
+// Feature 'policy' also covers the job.reject reason 'power'.
+export const FEATURES = { 'job.phase': 'phases', 'job.error': 'errors', 'node.error': 'errors', 'logs.tail': 'logs', logs: 'logs', 'node.update': 'update',
+  'node.policy': 'policy' };
 export const FEATURE_LIST = [...new Set(Object.values(FEATURES))];
 
 export const AGENT_IDS = ['claude', 'codex'];
@@ -54,7 +59,8 @@ export const OS_KINDS = ['linux', 'darwin'];
 export const EVENT_KINDS = ['text', 'tool', 'tool_result', 'result', 'limit', 'image', 'windows'];
 // runAgentCli outcomes plus the worker's own: setup_failed (clone/worktree/install), lost (controller gave up on it).
 export const OUTCOMES = ['ok', 'rate_limited', 'auth_error', 'aborted', 'timeout', 'max_turns', 'error', 'empty_response', 'setup_failed', 'lost'];
-export const REJECT_REASONS = ['busy', 'low_memory', 'agent_missing', 'not_signed_in', 'draining', 'version', 'other'];
+// power: its power policy pauses intake (on battery, running hot); sent only to a controller with feature 'policy'.
+export const REJECT_REASONS = ['busy', 'low_memory', 'agent_missing', 'not_signed_in', 'draining', 'version', 'other', 'power'];
 // starting → url (open it; a device code may ride along) or waiting_code (paste the page's code back) → done | failed |
 // cancelled; signed_out answers login.logout.
 export const LOGIN_STATES = ['starting', 'url', 'waiting_code', 'done', 'failed', 'cancelled', 'signed_out'];
@@ -66,15 +72,18 @@ export const PHASES = ['queued', 'cloning', 'fetching', 'installing', 'running',
 const S = {
   // sha: the worker's agent-orch checkout (the controller compares it with its origin/main); features: see FEATURES.
   hello: { node: 'str', protocol: 'int', version: 'str', jobs: 'arr', sha: 'sha?', features: 'arr?' },
-  welcome: { node: 'str', protocol: 'int', heartbeatMs: 'int', wipPushMs: 'int', graceMs: 'int', features: 'arr?' },
+  // policy: the node's power policy and caps (power.mjs: minBattery, keepAwake, thermal, reserveGB, plus maxTasks).
+  welcome: { node: 'str', protocol: 'int', heartbeatMs: 'int', wipPushMs: 'int', graceMs: 'int', features: 'arr?', policy: 'obj?' },
   inventory: { node: 'str', name: 'str', os: 'os', arch: 'str', cores: 'int', mem: 'int', agents: 'arr', limits: 'obj?', versions: 'obj' },
   // Also the worker's health telemetry (every heartbeat, the controller keeps a 24 h series): cpu (% per core), memTotal,
   // swapTotal/swapUsed (bytes), disk {path, free, total} (the volume holding its repos), net {host, ok, ms, at, error}
   // (reachability of GitHub), agents [{id, installed, version, signedIn}] (as last checked, never polled), uptime (s),
-  // procUptime (s), version, sha, and on macOS battery {pct, charging, source} and thermal {pressure, speedLimit}.
+  // procUptime (s), version, sha, and on macOS battery {pct, charging, source} and thermal {pressure, speedLimit, level}.
+  // intake: whether its power policy lets it take new jobs ({ok} or {ok: false, reason, text}); awake: caffeinate holds it awake.
   resources: {
     memAvailable: 'int', load: 'arr', running: 'arr', swapUsedPct: 'num?', cpu: 'arr?', memTotal: 'int?', swapTotal: 'int?', swapUsed: 'int?',
     disk: 'obj?', net: 'obj?', agents: 'arr?', uptime: 'num?', procUptime: 'num?', version: 'str?', sha: 'sha?', battery: 'obj?', thermal: 'obj?',
+    intake: 'obj?', awake: 'bool?',
   },
   heartbeat: {},
   ack: { re: 'int', job: 'int?' }, // job: the controller acks a job.done (the worker then forgets the job)
@@ -128,6 +137,8 @@ const S = {
   // Update agent-orch on the worker (git pull --ff-only, npm ci when the lockfile changed) and restart its service. Sent
   // only while the node is idle; a busy worker refuses (node.error kind update). sha: the controller's origin/main.
   'node.update': { sha: 'sha?' },
+  // The owner changed the node's power policy or max tasks (Machines view): the same shape as welcome.policy.
+  'node.policy': { policy: 'obj' },
 };
 export const SCHEMA = S;
 
@@ -225,8 +236,9 @@ export function backoffMs(attempt, rand = Math.random) {
 // How long the controller waits for a vanished node before reassigning its jobs.
 export const graceMs = (os) => (os === 'darwin' ? GRACE_MS.mac : GRACE_MS.vps);
 
-// Pairing: the owner gets a short one-time code in the UI; the worker trades it (POST CLAIM_PATH) for a node id and a
-// long bearer token. The controller stores only sha256 hashes of both.
+// Pairing: the owner gets a short code in the UI (one-time, or for up to MAX_PAIRING_USES machines in one go); each
+// worker trades it (POST CLAIM_PATH) for its own node id and a long bearer token. The controller stores only sha256
+// hashes of both.
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I
 export function newPairingCode(bytes = crypto.randomBytes(8)) {
   const c = [...bytes].map((b) => CODE_ALPHABET[b % CODE_ALPHABET.length]).join('');

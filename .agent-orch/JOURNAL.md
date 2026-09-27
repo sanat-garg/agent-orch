@@ -691,3 +691,7 @@ Merge resolved, tooltip race fixed, 353/353 tests pass
 ## 2026-09-27 19:32 — #229 Strong worker reporting: phases, health telemetry, crash reports, auto-drain [done (check passed)]
 
 worker phases, telemetry, errors, log tail, auto-drain, updates; tests pass
+
+## 2026-09-27 20:22 — #230 Many-MacBook support: multi-use pairing, battery and sleep policy [done (check passed)]
+
+multi-use pairing, Mac power policy, LaunchDaemon installer; tests pass

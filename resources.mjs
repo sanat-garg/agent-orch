@@ -10,7 +10,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { helperOut, runHelperSync } from './helpers.mjs';
+import { runHelperSync } from './helpers.mjs';
 
 export const OWNER_ENV = 'AGENT_ORCH_OWNER';
 export const ownerTag = (kind, id, server = process.pid) => `${server}:${kind}:${id}`;
@@ -112,8 +112,9 @@ export function parseSwapUsage(text) {
   const v = (k) => { const m = new RegExp(`${k} = ([\\d.]+)([KMG])`).exec(text || ''); return m ? Math.round(Number(m[1]) * unit[m[2]]) : null; };
   return { swapTotal: v('total'), swapFree: v('free') };
 }
-// macOS power for worker telemetry. `pmset -g batt` ("Now drawing from 'AC Power'\n -InternalBattery-0 (id=1)\t64%;
-// charging; 1:10 remaining") → {pct, charging, source: 'ac' | 'battery'}; null without a battery (a Mac mini).
+// macOS power for worker telemetry (power.mjs readPower). `pmset -g batt` ("Now drawing from 'AC Power'\n
+// -InternalBattery-0 (id=1)\t64%; charging; 1:10 remaining") → {pct, charging, source: 'ac' | 'battery'}; null without a
+// battery (a Mac mini).
 export function parseBattery(text) {
   const m = /(\d{1,3})%;\s*([^;\n]+)/.exec(text || '');
   if (!m) return null;
@@ -128,11 +129,6 @@ export function parseThermal(text) {
   const speed = /CPU_Speed_Limit\s*=\s*(\d+)/.exec(text), warn = /thermal warning level\D{0,20}?(\d+)/i.exec(text);
   const speedLimit = speed ? Number(speed[1]) : null, warning = warn ? Number(warn[1]) : null;
   return { pressure: (speedLimit != null && speedLimit < 100) || warning > 0 ? 'throttled' : 'nominal', speedLimit, warning };
-}
-export async function readPowerDarwin() {
-  const out = (args) => helperOut('/usr/bin/pmset', args, { timeoutMs: 3000 }).catch(() => '');
-  const [batt, therm] = await Promise.all([out(['-g', 'batt']), out(['-g', 'therm'])]);
-  return { battery: parseBattery(batt), thermal: parseThermal(therm) };
 }
 function readSystemDarwin() {
   const out = (cmd, args) => { const r = runHelperSync(cmd, args, { timeoutMs: 3000 }); return r.status === 0 ? r.stdout : ''; };

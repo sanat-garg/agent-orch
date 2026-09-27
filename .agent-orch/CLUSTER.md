@@ -13,9 +13,9 @@ supply the CPU/RAM. They do not supply quota (see the caveat at the end).
   the DB, the planner, reflection, routing/delegation, the queue, and every merge into a project's main branch
   (`mergeTask` under `serialGit`). It decides which node runs which task. It is also a node itself: the
   **local node** runs tasks exactly as today (worktree beside the repo, `runAgent` in-process).
-- **Workers**: a Linux VPS (same spec as the controller) and the owner's MacBook whenever it is awake. Each runs a
+- **Workers**: a Linux VPS (same spec as the controller) and the owner's MacBooks whenever they are awake. Each runs a
   small daemon (`worker.mjs` in this repo, started by systemd on Linux or a launchd
-  agent on macOS) that dials the controller, reports what it has, and runs the jobs it is given with the same
+  LaunchDaemon on macOS) that dials the controller, reports what it has, and runs the jobs it is given with the same
   adapters (`agents.mjs` `runAgentCli`, normalised events) and the same done-when check (`runCheck`). A worker has no
   DB, no planner and no UI; it holds nothing the controller can't rebuild except in-flight work, which it pushes.
 - **Node**: any machine that can run tasks (local node + workers). Identified by a stable `node` id (issued at
@@ -26,12 +26,17 @@ supply the CPU/RAM. They do not supply quota (see the caveat at the end).
 - The worker **dials out** over WebSocket to `wss://<controller>/api/cluster/ws` (`WS_PATH`). Caddy already proxies
   everything to :3000 and terminates TLS, so no Caddy change and **no inbound port on any worker**; it works from
   behind NAT/home Wi-Fi. server.mjs handles the upgrade on the existing `ws` server by path.
-- **Pairing** (one time per node): the owner presses "Add machine" in the UI, which shows a one-time code
-  (`newPairingCode`, `XXXX-XXXX`, valid `PAIRING_TTL_MS` = 10 min, single use) and the install command. On the worker,
-  `agent-orch-worker pair https://<controller> XXXX-XXXX` POSTs `{code, name, os, arch}` to `CLAIM_PATH`
-  (`/api/cluster/claim`, rate-limited like login; the owner's UI creates the code with a signed-in POST to `PAIR_PATH`,
-  `/api/cluster/pair`). The controller answers `{node, token}` once; the token
-  (`newNodeToken`, 256-bit, `aon_` prefix) is stored on the worker in `~/.agent-orch-worker/config.json` (mode 0600).
+- **Pairing** (one time per node): the owner presses "Add machine" in the UI, picks how many machines, and gets a code
+  (`newPairingCode`, `XXXX-XXXX`) and the install command. One machine: a one-time code valid `PAIRING_TTL_MS` (10 min).
+  Several (2..`MAX_PAIRING_USES`): one code that pairs that many machines within `PAIRING_MULTI_TTL_MS` (1 h), the same
+  command on each ("Pair 4 Macs in one go"). On the worker, `node worker.mjs pair --controller https://<controller>
+  --code XXXX-XXXX` POSTs `{code, name, os, arch}` to `CLAIM_PATH` (`/api/cluster/claim`, rate-limited like login; the
+  owner's UI creates the code with a signed-in POST `{uses}` to `PAIR_PATH`, `/api/cluster/pair`, follows it with GET
+  `…/pair/:code` and revokes it with DELETE). Each claim makes a node of its own and answers `{node, name, token}`
+  once; the token (`newNodeToken`, 256-bit, `aon_` prefix) is stored on the worker in `~/.agent-orch-worker/config.json`
+  (mode 0600). Without `--name` a Mac names itself `<model> (<LocalHostName>)` (worker.mjs `defaultName`: system_profiler,
+  scutil), a Linux box its short hostname; the controller appends " 2", " 3" to a name already taken. Codes live in
+  the `pairings` table (hashes, uses, the node ids that claimed them, revoked_at), so a controller restart keeps them.
 - **Auth**: every connection sends `Authorization: Bearer <token>` on the upgrade request (`bearerToken`). The
   controller compares its sha256 against the node's stored hash (`secretMatches`, constant time) and refuses the
   upgrade (401) for unknown or revoked nodes before any frame is read. The session cookie is not accepted here, and the
@@ -56,14 +61,14 @@ Direction: C = controller → worker, W = worker → controller (`DIRECTION`; `v
 | type | dir | fields | meaning |
 | --- | --- | --- | --- |
 | `hello` | W | node, protocol, version, jobs[{job, state, sha, next}], sha, features | first frame; `jobs` = work still on this machine, finished ones whose `job.done` wasn't acked included (re-attach); `sha` = its agent-orch checkout; `features` see Health |
-| `welcome` | C | node, protocol, heartbeatMs, wipPushMs, graceMs, features | settings for this node |
+| `welcome` | C | node, protocol, heartbeatMs, wipPushMs, graceMs, features, policy | settings for this node; `policy` see Power policy |
 | `inventory` | W | node, name, os (linux/darwin), arch, cores, mem, agents[{id, installed, version, signedIn, account, models}], limits, versions{agentOrch, node, git} | after `welcome` and whenever it changes |
-| `resources` | W | memAvailable, load[1,5,15], running[job ids], swapUsedPct + health telemetry: cpu[% per core], memTotal, swapTotal, swapUsed, disk{path, free, total}, net{host, ok, ms, at, error}, agents[{id, installed, version, signedIn}], uptime, procUptime, version, sha, battery{pct, charging, source}, thermal{pressure, speedLimit} | every heartbeat (10 s), from /proc or `vm_stat`/`sysctl`/`pmset` on macOS; see Health |
+| `resources` | W | memAvailable, load[1,5,15], running[job ids], swapUsedPct + health telemetry: cpu[% per core], memTotal, swapTotal, swapUsed, disk{path, free, total}, net{host, ok, ms, at, error}, agents[{id, installed, version, signedIn}], uptime, procUptime, version, sha, battery{pct, charging, source}, thermal{pressure, speedLimit, level}, intake{ok, reason, text}, awake | every heartbeat (10 s), from /proc or `vm_stat`/`sysctl`/`pmset`/`notifyutil` on macOS; see Health and Power policy |
 | `heartbeat` | both | — | liveness |
 | `ack` / `error` / `bye` | both | re (+job) / message / reason | replies; the controller acks each `job.done` with its `job` (the worker then forgets the job); `bye` before a clean shutdown |
 | `wake` | W | sleptAt, sleptMs | a time jump on the worker (a laptop's sleep), sent after the next `welcome` |
 | `job.offer` | C | job, agent, model, footprint | "can you take this?" |
-| `job.accept` / `job.reject` | W | job / job, reason (busy, low_memory, agent_missing, not_signed_in, draining, version, other) | answer within 10 s or counts as reject |
+| `job.accept` / `job.reject` | W | job / job, reason (busy, low_memory, agent_missing, not_signed_in, draining, version, other, power) | answer within 10 s or counts as reject; `power` only to a controller with feature `policy` |
 | `job.start` | C | job, title, prompt, systemAppend, agent, model, account, repo, baseSha, branch, doneWhen, resume, timeouts{taskSec, verifySec, installSec}, autonomous, tools, install[argv] | run it |
 | `job.event` | W | job, from, events[≤200 normalised agent events] | batched every ~1 s; `from` = index of the first event so resends dedupe |
 | `job.check` | W | job, command, output, pass, code | result of the done-when check, run on the worker in the task's worktree |
@@ -80,6 +85,7 @@ Direction: C = controller → worker, W = worker → controller (`DIRECTION`; `v
 | `job.error` / `node.error` | W | job, kind, message, stack, stderr, at / kind, message, stack, stderr, re | a structured failure with its stack or stderr tail (feature `errors`) |
 | `logs.tail` / `logs` | C / W | req, lines / req, lines[], error | the owner asked for the worker's log tail (feature `logs`) |
 | `node.update` | C | sha | update agent-orch and restart, sent only while the node is idle (feature `update`) |
+| `node.policy` | C | policy | the owner changed the node's power policy or max tasks (feature `policy`); older workers read it in the next `welcome` |
 
 A task's life on a worker: `job.offer` → `job.accept` → `job.start` → `job.event`* (+ `job.wip`*) → (if ok and the
 task has a done-when) `job.check` → final commit + push (`job.wip`) → `job.done` → controller merges or answers with `job.resume` (continue /
@@ -122,8 +128,11 @@ verify-failed prompt, same as the local flow) or `job.cancel`. The controller ke
   `MEM` thresholds; workers report the same numbers). `footprint(agent)` is the per-agent measured RSS from #209
   (until then a constant per agent, e.g. 1.2 GB for claude, 0.8 GB for codex).
 - Slots per node = `min(cores, floor((memAvailable - floor) / footprint))` when its max tasks is Auto (`max_slots` 0,
-  API `maxSlots: null`), else the owner's number from the Machines view (new nodes start at 1, so a laptop stays
-  usable); headroom is checked per claim either way. The local node keeps its current `taskSlots` rule.
+  API `maxSlots: null`), else the owner's number from the Machines view; headroom is checked per claim either way. A
+  Mac's Auto keeps a core and its policy's RAM reserve for its owner: `min(cores − 1, (memAvailable − max(floor,
+  reserve)) / footprint)` (power.mjs `autoTasks`, orchestrator `nodeCap`/`floorOf`). New Linux nodes start at 1 task,
+  new Macs on Auto. A node whose worker reports no intake (status `paused`, see Power policy) gets nothing new. The
+  local node keeps its current `taskSlots` rule.
 - Placement picks the placeable node with the most headroom, preferring: the node that last ran the task (warm
   worktree and session), then remote nodes over the local one (the controller also serves the UI and merges). Plan and
   reflect tasks always run on the local node: they need the DB and project context.
@@ -214,10 +223,46 @@ Workers report richly; the controller keeps what the owner needs and acts on it.
   systemd (`Restart=always`) or launchd (`KeepAlive`) to start the new code. Its next hello on another sha ends the
   update; a failed one isn't retried on its own for the same target, and one that doesn't come back within 10 min fails.
 
+## Power policy (#230)
+
+A Mac is someone's laptop: it works for the cluster when that suits its owner. Each node has a policy on the
+controller (`nodes.policy`, the owner's settings over the defaults for its OS: power.mjs `policyDefaults` /
+`effectivePolicy`; PATCH /api/cluster/nodes/:id `{policy: {...} | null}`, the Machines view's Power panel). The
+controller sends the effective policy plus `maxTasks` (`max_slots`, null = Auto) in `welcome` and, when the owner
+changes either, `node.policy`; the worker enforces it, and the scheduler keeps to it too.
+
+| setting | default | meaning |
+| --- | --- | --- |
+| `minBattery` | 50 | on battery power, new jobs only above this charge (%); null = only on AC power |
+| `keepAwake` | `ac` | while jobs run, `caffeinate -i -w <worker pid>`: `ac` (only on AC power), `always`, `never` |
+| `thermal` | `heavy` | no new jobs at this thermal pressure or worse: `moderate`, `heavy`, `off` |
+| `reserveGB` | 3 (Mac), 0 (Linux) | RAM a new job must leave free for the owner (never below `MEM.claimFloor`) |
+
+- **Readings** (worker, power.mjs `readPower`, no root, no powermetrics): `pmset -g batt` (charge, AC or battery),
+  `pmset -g therm` (CPU speed limit, thermal warnings) and the thermal pressure level (`notifyutil -g
+  com.apple.system.thermalpressurelevel`: nominal, moderate, heavy, trapping, sleeping; without it pmset alone: a speed
+  limit is moderate, 70% or less heavy). Read once a minute, and again (≤ 15 s old) before an offer is answered.
+- **Intake** (`intake(policy, power)`): on battery at or under `minBattery`, or at the `thermal` level or worse, the
+  worker takes no new jobs. It says so in every `resources` frame (`intake {ok: false, reason, text}`); the controller
+  shows the node as `paused` (view status; only from a reading on the current connection) and places nothing there,
+  and an offer that races it is declined with reason `power`. Running jobs go on. No reading (a VPS, a Mac mini's
+  battery) never blocks.
+- **Caps**: at most `maxTasks` jobs (Auto: cores − 1 on a Mac, all cores elsewhere) and none that would leave less than
+  `max(MEM.claimFloor, reserveGB)` free (`low_memory`). The controller's placement uses the same numbers.
+- **Keep awake** (`createKeepAwake`): `caffeinate -i -w <worker pid>` runs while the worker has a job that isn't paused
+  and `keepAwake` allows it for the power source; it is stopped (process group SIGTERM) when the last job ends, on
+  battery under `ac`, or at shutdown, and exits by itself if the worker dies (`-w`). `-i` only prevents idle sleep: a
+  closed lid still sleeps the Mac, and the failover above (grace, then reassignment from the pushed WIP) applies.
+- **Service** (bin/install-worker-macos.sh): the worker runs as the dedicated `agentorch` user, by default from a
+  LaunchDaemon (`/Library/LaunchDaemons/com.agent-orch.worker.plist`, `UserName agentorch`, from boot, no login
+  needed) or with `--service login` from the owner's LaunchAgent via a sudoers-allowed launcher (while the owner is
+  logged in). Both use `ProcessType Standard` with `Nice 5`.
+
 ## Security
 
-- **Tokens**: the controller stores only `hashSecret(token)` (sha256) and `hashSecret(code)` for pending pairing
-  codes; codes are single-use and expire in 10 min. Tokens are compared in constant time. The worker keeps its token
+- **Tokens**: the controller stores only `hashSecret(token)` (sha256) and `hashSecret(code)` for pairing codes; a
+  one-time code expires in 10 min, a multi-use one pairs at most its `uses` machines within 1 h, and the owner can
+  revoke either. Every machine gets its own token. Tokens are compared in constant time. The worker keeps its token
   in a 0600 file under `~/.agent-orch-worker/`.
 - **Revocation**: removing a node in the UI deletes its row (and token hash), closes its socket (code 4003), and requeues its jobs; a revoked token
   is refused at the upgrade. Re-adding needs a new pairing code.
@@ -226,8 +271,8 @@ Workers report richly; the controller keeps what the owner needs and acts on it.
   controller and controller-only types on the worker. Workers run no listener at all: **no inbound ports**.
 - **Least privilege**: the worker runs as an unprivileged user with no sudo, touching only `~/.agent-orch-worker/`
   and its agent CLIs' own config dirs. On the Mac it runs as a **dedicated macOS user** (e.g. `agentorch`, standard
-  account, FileVault on) so agents can't read the owner's home, keychain or browser profiles; the launchd agent runs
-  in that user's session. Agent env is stripped exactly as on the controller (API_ENV / `envFilter`), so runs stay on
+  account, FileVault on) so agents can't read the owner's home, keychain or browser profiles; launchd runs it as
+  that user (a LaunchDaemon with `UserName`, or the owner's LaunchAgent through a one-command sudoers rule). Agent env is stripped exactly as on the controller (API_ENV / `envFilter`), so runs stay on
   the subscription login.
 - **Secrets never travel over the wire**: the validators refuse any frame whose keys look like secrets
   (`secretKeys`: `*token`, `*secret`, `password`, `api_key`, `cookie`, `credential(s)`, `authorization`), repo URLs

@@ -3276,13 +3276,16 @@ setInterval(() => { if (M.usage) renderUsage(); }, 30e3); // keep the "in 2h 9m"
 // One card per node from GET /api/cluster/nodes (cluster.mjs view + orchestrator `machines`: running tasks, work slots in
 // use and the node's slot count). While Server details is open it re-reads on 'cluster' pushes (node changes, worker
 // CPU/RAM readings), task changes and, for the controller's own numbers, its metric ticks (at most every 10 s).
-// "Add machine": POST /api/cluster/pair → a one-time code, embedded in a one-line install command per OS
-// (bin/install-worker*.sh, served at /install/…). GET /api/cluster/pair/:code then reports waiting → paired (node) → node.connected.
-const AM = { code: null, expiresAt: 0, pairing: null, err: '', timer: null, lastFocus: null };
-const MC = { nodes: [], at: 0, timer: null, loading: false };
+// "Add machine": POST /api/cluster/pair → a one-time code, or {uses: N} → one code for N machines (valid 1 h), embedded in
+// a one-line install command per OS (bin/install-worker*.sh, served at /install/…). GET /api/cluster/pair/:code then
+// reports waiting → paired (node; a multi-use code: nodes, used) → node.connected; DELETE revokes the code.
+const AM = { code: null, expiresAt: 0, uses: 1, pairing: null, err: '', timer: null, lastFocus: null };
+const AM_USES = [1, 2, 3, 4, 5, 6, 8, 10];
+// power: the Macs whose Power settings are open; stale: a render skipped while one of its menus was in use.
+const MC = { nodes: [], at: 0, timer: null, loading: false, power: new Set(), stale: false };
 const fmtGB = (b) => `${((b || 0) / 2 ** 30).toFixed(1)} GB`;
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
-const NODE_ST = { online: 'Online', draining: 'Draining', disabled: 'Disabled', updating: 'Updating' };
+const NODE_ST = { online: 'Online', draining: 'Draining', disabled: 'Disabled', updating: 'Updating', paused: 'Paused' };
 const OS_NAME = { darwin: 'macOS', linux: 'Linux' };
 const OS_ICON = { // SF Symbols style: laptopcomputer (macOS) and server.rack (Linux)
   darwin: '<svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true"><rect x="5" y="5" width="14" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M2.5 18.5h19" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
@@ -3300,22 +3303,27 @@ function scheduleMachines(ms = 600) {
   MC.timer = setTimeout(() => { MC.timer = null; if (!$('serverModal').hidden) loadMachines(); }, ms);
 }
 // Online / Draining / Disabled while connected; away: Asleep (a Mac that went silent), Shut down (bye), else Offline.
-// Updating: waiting to be idle for its self-update, or restarting into it.
+// Updating: waiting to be idle for its self-update, or restarting into it. Paused: its power policy takes no new tasks
+// for now (on battery, running hot).
 function nodeState(n) {
   if (!n.enabled) return { dot: '', label: 'Disabled' };
   if (['pending', 'sent'].includes(n.update?.state) && !n.draining) return { dot: 'warn', label: 'Updating' };
   if (!n.connected) return n.away === 'asleep' ? { dot: '', label: 'Asleep' } : n.away === 'bye' ? { dot: '', label: 'Shut down' } : { dot: 'off', label: 'Offline' };
-  return n.draining ? { dot: 'warn', label: 'Draining' } : { dot: 'on', label: 'Online' };
+  if (n.draining) return { dot: 'warn', label: 'Draining' };
+  return n.status === 'paused' ? { dot: 'warn', label: 'Paused' } : { dot: 'on', label: 'Online' };
 }
 // 'Cluster: 3 machines · 7 cores · 14.2 GB free · 4 of 6 slots running': machines that are connected and enabled.
 function machineSummary(nodes) {
   const up = nodes.filter((n) => n.connected && n.enabled), sum = (f) => up.reduce((a, n) => a + (f(n) || 0), 0);
-  const used = sum((n) => n.used), slots = sum((n) => (n.draining ? n.used : Math.max(n.slots || 0, n.used)));
+  const used = sum((n) => n.used), slots = sum((n) => (n.draining || n.status === 'paused' ? n.used : Math.max(n.slots || 0, n.used)));
   const off = nodes.filter((n) => n.enabled && !n.connected).length, dis = nodes.filter((n) => !n.enabled).length;
   return [`Cluster: ${plural(up.length, 'machine')}`, plural(sum((n) => n.inventory?.cores), 'core'), `${fmtGB(sum((n) => n.resources?.memAvailable))} free`,
     `${used} of ${plural(slots, 'slot')} running`, off && `${off} offline`, dis && `${dis} disabled`].filter(Boolean).join(' · ');
 }
 function renderMachines() {
+  // A power menu in use isn't replaced under the owner's finger: the render waits until it loses focus.
+  if (document.activeElement?.matches?.('#mMachines select')) { MC.stale = true; return; }
+  MC.stale = false;
   const nodes = MC.nodes, sec = $('mcTitle').closest('.mc-sec'), body = sec.parentElement, first = nodes.some((n) => !n.local);
   // With workers the cluster leads Server details (above this server's charts); alone it sits at the bottom.
   if (first !== (body.firstElementChild === sec)) { if (first) body.prepend(sec); else body.append(sec); }
@@ -3401,16 +3409,19 @@ function machineCard(n) {
   if (tasks.length) run.append(list);
   li.append(run);
   li.append(machineControls(n));
+  if (MC.power.has(n.id) && n.policy) li.append(powerPanel(n));
   return li;
 }
 // A running remote task's step on its card ('installing deps'; nothing extra while the agent itself runs).
 const PHASE_DOING = { queued: 'starting', cloning: 'cloning', fetching: 'fetching', installing: 'installing deps', checking: 'checking', committing: 'committing', pushing: 'pushing', done: 'finishing' };
-// What the owner should know about a machine's health, one short line each: why it was drained automatically, an update
-// (waiting, restarting, failed) or how far behind it is, its last error today, a Mac's battery and thermal state, GitHub
-// out of reach.
+// What the owner should know about a machine's health, one short line each: why it was drained automatically, why its
+// power policy pauses it, an update (waiting, restarting, failed) or how far behind it is, its last error today, a Mac's
+// battery and thermal state (and whether it is kept awake for its tasks), GitHub out of reach.
 function machineHealth(n) {
   const out = [], res = n.resources || {}, line = (cls, text, title) => { const p = el('p', `mc-health ${cls}`, text); if (title) p.title = title; out.push(p); };
   if (n.drainReason) line('warn', `Drained automatically${n.drainedAt ? ` ${relTime(n.drainedAt)}` : ''}: ${n.drainReason}. Undrain it when that's fixed.`);
+  const paused = n.status === 'paused' ? res.intake?.reason : null;
+  if (paused) line('warn', `${res.intake.text}. Its running tasks go on.`);
   const u = n.update;
   if (u?.state === 'pending') line('', n.draining ? 'Updates itself once its running tasks finish (it is draining meanwhile).' : 'Updates itself once its running tasks finish; it takes no new ones meanwhile.');
   else if (u?.state === 'sent') line('', 'Updating: pulling the latest agent-orch and restarting…');
@@ -3419,8 +3430,9 @@ function machineHealth(n) {
   const e = n.lastError;
   if (e && Date.now() - e.at < 86400e3 && e.kind !== 'update') line('bad', `Error ${relTime(e.at)}: ${e.message}`, [e.kind, e.stderr || e.stack].filter(Boolean).join('\n\n'));
   const bat = res.battery, th = res.thermal;
-  if (bat) line(bat.pct < 20 && !bat.charging ? 'warn' : '', `Battery ${bat.pct}%${bat.charging ? ' · charging' : bat.source === 'ac' ? ' · on power' : ''}`);
-  if (th?.pressure === 'throttled') line('warn', th.speedLimit != null ? `Running hot: CPU limited to ${th.speedLimit}%` : 'Running hot: the CPU is throttled');
+  if (bat && paused !== 'battery') line(bat.pct < 20 && !bat.charging ? 'warn' : '', `Battery ${bat.pct}%${bat.charging ? ' · charging' : bat.source === 'ac' ? ' · on power' : ''}`);
+  if (th?.pressure === 'throttled' && paused !== 'thermal') line('warn', th.speedLimit != null ? `Running hot: CPU limited to ${th.speedLimit}%` : 'Running hot: the CPU is throttled');
+  if (res.awake && n.connected) line('', 'Kept awake while its tasks run');
   if (res.net && !res.net.ok && n.connected) line('warn', `Can't reach ${res.net.host === 'github.com' ? 'GitHub' : res.net.host}${res.net.error ? ` (${res.net.error})` : ''}: it can't clone or push`);
   return out;
 }
@@ -3440,7 +3452,7 @@ function machineControls(n) {
       const b = el('button', '', v == null ? 'Auto' : String(v));
       b.type = 'button';
       b.setAttribute('aria-pressed', String(v === n.maxSlots));
-      if (v == null) b.title = 'Sized from its cores and free RAM';
+      if (v == null) b.title = n.os === 'darwin' ? `Sized from its cores (one kept for you) and free RAM (${n.policy?.reserveGB ?? 3} GB kept for you)` : 'Sized from its cores and free RAM';
       b.addEventListener('click', () => { if (v !== n.maxSlots) patchNode(n, { maxSlots: v }); });
       seg.append(b);
     }
@@ -3462,6 +3474,13 @@ function machineControls(n) {
   const drain = btn('Drain', 'drain', () => patchNode(n, { draining: !n.draining }));
   drain.setAttribute('aria-pressed', String(n.draining));
   drain.title = n.draining ? 'Draining: it takes no new tasks. Press to take tasks again.' : 'Take no new tasks; running ones finish here';
+  // A Mac's power policy: battery, keep-awake, heat and the RAM kept for its owner (powerPanel).
+  if (!n.local && n.os === 'darwin' && n.policy) {
+    const open = MC.power.has(n.id);
+    const pw = btn('Power', 'power', () => { if (open) MC.power.delete(n.id); else MC.power.add(n.id); renderMachines(); });
+    pw.setAttribute('aria-expanded', String(open));
+    pw.title = 'When this Mac takes tasks on battery or when hot, whether it stays awake for them, and the RAM kept for you';
+  }
   const moving = n.used ? ` Its ${plural(n.used, 'running task')} go${n.used === 1 ? 'es' : ''} back to the queue now.` : '';
   // Update: an outdated worker, or one whose update failed, pulls the latest agent-orch and restarts once idle.
   if (!n.local && n.connected && (n.update?.state === 'failed' || (n.outdated && !n.update))) {
@@ -3488,19 +3507,78 @@ async function patchNode(n, body) {
   try { await api(`/api/cluster/nodes/${encodeURIComponent(n.id)}`, 'PATCH', body); } catch (e) { toast(e.message, { kind: 'error' }); }
   loadMachines();
 }
+// A Mac's power policy (power.mjs; its worker enforces it, and the scheduler keeps to its RAM reserve): a menu per
+// setting, saved as soon as it changes. A value set another way (the API) shows as an extra option.
+const POWER_ROWS = [
+  ['minBattery', 'New tasks on battery', [[null, 'Never: AC power only'], [25, 'Above 25%'], [50, 'Above 50%'], [75, 'Above 75%'], [0, 'At any charge']], (v) => `Above ${v}%`],
+  ['keepAwake', 'Keep awake while tasks run', [['ac', 'On AC power'], ['always', 'Always'], ['never', 'Never']]],
+  ['thermal', 'Pause new tasks when hot', [['heavy', 'At heavy pressure'], ['moderate', 'From moderate pressure'], ['off', 'Never']]],
+  ['reserveGB', 'RAM kept free for you', [1, 2, 3, 4, 6, 8].map((g) => [g, `${g} GB`]), (v) => `${v} GB`],
+];
+function powerPanel(n) {
+  const box = el('div', 'mc-power');
+  box.setAttribute('role', 'group');
+  box.setAttribute('aria-label', `Power settings for ${n.name}`);
+  for (const [key, label, options, other = String] of POWER_ROWS) {
+    const row = el('label', 'mc-prow'), sel = el('select'), cur = n.policy[key];
+    sel.dataset.act = `policy-${key}`;
+    for (const [v, text] of options.some(([v]) => v === cur) ? options : [...options, [cur, other(cur)]]) {
+      const o = el('option', '', text);
+      o.value = JSON.stringify(v);
+      o.selected = v === cur;
+      sel.append(o);
+    }
+    sel.addEventListener('change', () => patchNode(n, { policy: { [key]: JSON.parse(sel.value) } }));
+    sel.addEventListener('blur', () => { if (MC.stale) setTimeout(renderMachines, 0); });
+    row.append(el('span', '', label), sel);
+    box.append(row);
+  }
+  box.append(el('p', 'mc-pnote', 'Running tasks go on either way. A closed lid still sleeps the Mac; its tasks then move to another machine.'));
+  return box;
+}
 const installCmd = (os, code) => {
   const o = location.origin;
   return os === 'mac' ? `curl -fsSL ${o}/install/worker-macos.sh | sudo bash -s -- --controller ${o} --code ${code} --agents claude,codex`
     : `curl -fsSL ${o}/install/worker-linux.sh | bash -s -- --controller ${o} --code ${code} --agents claude,codex`;
 };
+// How many machines the code pairs: one (a one-time code, valid 10 min) or several in one go (one code, valid 1 h).
+function amUsesPicker() {
+  const row = el('label', 'am-uses'), sel = el('select');
+  sel.id = 'amUses';
+  for (const n of AM_USES) {
+    const o = el('option', '', n === 1 ? '1 machine' : `${n} machines`);
+    o.value = String(n);
+    o.selected = n === AM.uses;
+    sel.append(o);
+  }
+  sel.addEventListener('change', () => newPairing(Number(sel.value)));
+  row.append(el('span', '', 'Add'), sel, el('span', 'am-hint', AM.uses > 1 ? 'one code for all of them, valid 1 hour' : 'one-time code, valid 10 minutes'));
+  return row;
+}
+// A multi-use code's machines so far, each with where it is: connected, or waiting for its worker to start.
+function amPairedList(list) {
+  const ul = el('ul', 'am-list');
+  for (const n of list) {
+    const li = el('li');
+    li.append(el('span', `dot ${n.connected ? 'on' : 'wait'}`), el('span', 'am-name', n.name), el('span', 'am-state', n.connected ? 'Connected' : 'Waiting for its worker…'));
+    ul.append(li);
+  }
+  return ul;
+}
 function renderAddMachine() {
-  const body = $('amBody'), p = AM.pairing, node = p?.node;
-  const nodes = [];
+  const body = $('amBody'), p = AM.pairing, multi = AM.uses > 1, node = !multi && p?.node, refocus = document.activeElement?.id === 'amUses';
+  const paired = multi ? p?.nodes || [] : [], open = multi ? (p?.state ?? 'waiting') === 'waiting' && AM.expiresAt > Date.now() : !node;
+  const picker = amUsesPicker(), nodes = [picker];
   if (AM.err) nodes.push(el('p', 'cn-err', AM.err));
-  if (!AM.code) { body.replaceChildren(...nodes, el('p', 'am-note', AM.err ? '' : 'Getting a pairing code…')); return; }
-  if (!node) {
-    nodes.push(el('p', 'am-note', 'Run one line on the new machine. It installs Node 22 and the worker, signs in to GitHub if needed, pairs with this server and starts at boot (Linux) or login (Mac).'));
-    for (const [os, label, note] of [['linux', 'Linux VPS (systemd)', ''], ['mac', 'macOS (launchd)', 'Runs under a separate standard user, agentorch, so agents can’t see your files.']]) {
+  if (!AM.code) {
+    body.replaceChildren(...nodes, el('p', 'am-note', AM.err ? '' : 'Getting a pairing code…'));
+    if (refocus) picker.querySelector('select').focus();
+    return;
+  }
+  if (open) {
+    nodes.push(el('p', 'am-note', multi ? `Run the same line on each machine, up to ${AM.uses}. Each one pairs as a machine of its own and names itself after its model and host name, like “MacBook Pro (Sanat-MBP-2)”; rename any of them later.`
+      : 'Run one line on the new machine. It installs Node 22 and the worker, signs in to GitHub if needed, pairs with this server and starts at boot.'));
+    for (const [os, label, note] of [['linux', 'Linux VPS (systemd)', ''], ['mac', 'macOS (launchd)', 'Runs as a separate standard user, agentorch, so agents can’t see your files. It starts at boot and keeps the Mac awake only while tasks run on power.']]) {
       const cmd = installCmd(os, AM.code), pre = el('pre', 'am-cmd copy-cmd');
       pre.dataset.copy = cmd;
       pre.title = 'Click to copy';
@@ -3513,43 +3591,74 @@ function renderAddMachine() {
   }
   const st = el('div', 'am-status');
   st.setAttribute('role', 'status');
-  const expired = p?.state === 'expired' || (!node && AM.expiresAt && AM.expiresAt < Date.now());
-  const [dot, text] = node?.connected ? ['on', `Connected: ${node.name}`]
-    : node ? ['wait', `Paired: ${node.name}. Waiting for its worker to start…`]
-      : expired ? ['off', 'This code expired.']
-        : ['wait', `Waiting for the machine to connect… (code ${AM.code}, valid ${fmtDur(Math.max(0, Math.round((AM.expiresAt - Date.now()) / 1000)))})`];
+  const expired = p?.state === 'expired' || (!node && AM.expiresAt && AM.expiresAt < Date.now()), valid = fmtDur(Math.max(0, Math.round((AM.expiresAt - Date.now()) / 1000)));
+  const [dot, text] = multi ? (p?.state === 'paired' ? [paired.every((n) => n.connected) ? 'on' : 'wait', `All ${AM.uses} machines paired`]
+    : p?.state === 'revoked' ? ['off', `Code revoked: ${paired.length} of ${AM.uses} paired`]
+      : expired ? ['off', `This code expired: ${paired.length} of ${AM.uses} paired`]
+        : ['wait', `Waiting for machines: ${paired.length} of ${AM.uses} paired (code ${AM.code}, valid ${valid})`])
+    : node?.connected ? ['on', `Connected: ${node.name}`]
+      : node ? ['wait', `Paired: ${node.name}. Waiting for its worker to start…`]
+        : expired ? ['off', 'This code expired.']
+          : p?.state === 'revoked' ? ['off', 'This code was revoked.']
+            : ['wait', `Waiting for the machine to connect… (code ${AM.code}, valid ${valid})`];
   st.append(el('span', `dot ${dot}`), el('span', '', text));
   nodes.push(st);
+  if (paired.length) nodes.push(amPairedList(paired));
   if (node) nodes.push(el('p', 'am-next', `Next: sign the agents in on ${node.name}. Claude Code and Codex use that machine’s own login, so run \`claude\` and \`codex login --device-auth\` there once; signing in from here comes next.`));
+  if (paired.length) nodes.push(el('p', 'am-next', 'Next: sign the agents in on each machine: Connections lists every machine at the top.'));
   const acts = el('div', 'am-acts');
-  if (expired || node) {
+  if (multi && open) {
+    const revoke = el('button', 'btn danger', 'Revoke code');
+    revoke.type = 'button';
+    revoke.title = 'No more machines can pair with this code; the ones that did stay';
+    revoke.addEventListener('click', revokePairing);
+    acts.append(revoke);
+  }
+  if (expired || node || (multi && !open)) {
     const again = el('button', 'btn', node ? 'Add another' : 'New code');
     again.type = 'button';
-    again.addEventListener('click', newPairing);
+    again.addEventListener('click', () => newPairing());
     acts.append(again);
   }
-  const done = el('button', `btn${node?.connected ? ' primary' : ''}`, node ? 'Done' : 'Close');
+  const done = el('button', `btn${node?.connected || paired.some((n) => n.connected) ? ' primary' : ''}`, node || paired.length ? 'Done' : 'Close');
   done.type = 'button';
   done.addEventListener('click', closeAddMachine);
   acts.append(done);
   nodes.push(acts);
   body.replaceChildren(...nodes);
+  if (refocus) picker.querySelector('select').focus();
 }
-async function newPairing() {
-  Object.assign(AM, { code: null, pairing: null, err: '' });
+// A new code for `uses` machines. The code it replaces is revoked when no machine used it.
+async function newPairing(uses = AM.uses) {
+  const old = AM.code, p = AM.pairing;
+  if (old && !p?.node && !p?.used) api(`/api/cluster/pair/${encodeURIComponent(old)}`, 'DELETE').catch(() => {});
+  Object.assign(AM, { code: null, pairing: null, err: '', uses });
   renderAddMachine();
-  try { Object.assign(AM, await api('/api/cluster/pair', 'POST')); } catch (e) { AM.err = e.message; }
+  try {
+    const r = await api('/api/cluster/pair', 'POST', uses > 1 ? { uses } : undefined);
+    Object.assign(AM, { code: r.code, expiresAt: r.expiresAt, pairing: uses > 1 ? { state: 'waiting', uses, used: 0, nodes: [] } : null });
+  } catch (e) { AM.err = e.message; }
   renderAddMachine();
 }
+async function revokePairing() {
+  if (!AM.code) return;
+  try { AM.pairing = await api(`/api/cluster/pair/${encodeURIComponent(AM.code)}`, 'DELETE'); toast('Code revoked: no more machines can pair with it'); } catch (e) { toast(e.message, { kind: 'error' }); }
+  renderAddMachine();
+}
+// Re-reads the code's state (the 'cluster' push usually arrives first; the 4 s timer also ticks the countdown) until it
+// settles: its machine connected, or a multi-use code done pairing with every machine connected.
 async function checkPairing() {
-  if ($('machineModal').hidden || !AM.code || AM.pairing?.node?.connected) return;
+  const p = AM.pairing, settled = AM.uses > 1 ? p && p.state !== 'waiting' && p.nodes?.every((n) => n.connected) : p?.node?.connected;
+  // Not while the machine-count menu is in use: a render would close it.
+  if ($('machineModal').hidden || !AM.code || settled || document.activeElement?.id === 'amUses') return;
   try { AM.pairing = await api(`/api/cluster/pair/${encodeURIComponent(AM.code)}`); } catch { return; }
   renderAddMachine();
 }
 function openAddMachine() {
   AM.lastFocus = document.activeElement;
   $('machineModal').hidden = false;
-  newPairing();
+  // A multi-use code still pairing is shown again (close and reopen between Macs); otherwise a new one-time code.
+  if (AM.code && AM.uses > 1 && AM.pairing?.state === 'waiting' && AM.expiresAt > Date.now()) { renderAddMachine(); checkPairing(); } else newPairing(1);
   clearInterval(AM.timer);
   AM.timer = setInterval(checkPairing, 4000); // the 'cluster' push usually gets here first; this also ticks the countdown
   $('machineModal').querySelector('[data-close].icon-btn').focus();

@@ -252,19 +252,26 @@ removed, so a retry can pick it up.
 
 ## Adding machines
 
-Open **Server details** (the stats card at the bottom of the sidebar) → **Machines** → **Add machine**. It creates a
-one-time pairing code (valid 10 minutes) and shows one line per OS with the code built in; click it to copy, then run
-it on the new machine:
+Open **Server details** (the stats card at the bottom of the sidebar) → **Machines** → **Add machine**. Pick how many
+machines to add. One gets a one-time pairing code, valid 10 minutes. Two to ten get one code for all of them, valid
+1 hour: run the same line on each machine, up to that many. The wizard shows one line per OS with the code built in;
+click it to copy, then run it on the new machine:
 
 ```sh
 # Linux VPS (systemd), as a normal sudo user
 curl -fsSL https://<your-host>/install/worker-linux.sh | bash -s -- --controller https://<your-host> --code ABCD-1234 --agents claude,codex
-# macOS (launchd), from your own logged-in account
+# macOS (launchd), from your own logged-in admin account
 curl -fsSL https://<your-host>/install/worker-macos.sh | sudo bash -s -- --controller https://<your-host> --code ABCD-1234 --agents claude,codex
 ```
 
-The wizard shows "Waiting for the machine to connect…", then the machine's name once it claims the code, then
-"Connected" when its worker dials in. After that, sign the agents in on that machine.
+The wizard shows "Waiting for the machine to connect…", then each machine's name once it claims the code, then
+"Connected" when its worker dials in. A multi-use code lists every machine that paired with it. **Revoke code** stops
+it early; the machines that already paired stay. Codes are stored as hashes, so a server restart doesn't void one.
+After that, sign the agents in on each machine (Connections has a switcher for them).
+
+Each machine pairs as a node of its own, with its own token. It names itself: a Mac after its model and local host
+name, like "MacBook Pro (Sanat-MBP-2)", a Linux box after its hostname. Two machines with the same name get " 2"
+appended. **Rename** changes it on its card; `--name` sets one at install time.
 
 The scripts are `bin/install-worker.sh` and `bin/install-worker-macos.sh` (the server serves them without a login at
 `/install/…`; the pairing code is the only secret). They:
@@ -274,22 +281,79 @@ The scripts are `bin/install-worker.sh` and `bin/install-worker-macos.sh` (the s
 - clone or update github.com/sanat-garg/agent-orch into `~/agent-orch-worker` and run `npm ci`;
 - with `--agents claude,codex`, install missing agent CLIs (`curl -fsSL https://claude.ai/install.sh | bash`,
   `npm i -g @openai/codex`);
-- pair with `node worker.mjs pair --controller … --code … --name …` (`--name` defaults to the hostname);
+- pair with `node worker.mjs pair --controller … --code …` (a one-time or a multi-use code);
 - install the service. Linux: `/etc/systemd/system/agent-orch-worker.service` with `Restart=always` and
-  `MemoryHigh=85%`, which throttles the worker before the machine runs short. macOS: a LaunchAgent,
-  `~/Library/LaunchAgents/com.agent-orch.worker.plist`, with `KeepAlive`. It runs only while you're logged in.
-
-**On a Mac, use a dedicated user (the default under sudo).** Agents run on their own with full permissions. Under
-your account they could read your documents, keychain, browser profiles and SSH keys. So the macOS script creates a
-hidden standard user, `agentorch` (`--user` to rename it), with `sysadminctl`, and installs and pairs everything as
-that user. Your own LaunchAgent starts the worker through a root-owned launcher,
-`/usr/local/bin/agent-orch-worker-run`. A sudoers rule (`/etc/sudoers.d/agent-orch-worker`) lets you run that one
-command as `agentorch` and nothing else. `--no-dedicated-user` installs under your own account (run it without sudo),
-but this isn't advised. Sign the agents in as that user too, for example `sudo -u agentorch -H claude`.
+  `MemoryHigh=85%`, which throttles the worker before the machine runs short. macOS: see below.
 
 Both scripts are idempotent: re-running updates the checkout and the service and keeps the existing pairing unless
-you pass a new `--code`. `--dry-run` prints every step without changing anything. `--uninstall` removes the service
-and the checkout. Add `--purge` to delete `~/.agent-orch-worker` too. Then remove the machine in the UI.
+you pass a new `--code`. Re-running with a code pairs the machine again as a new node, which uses up one more use of a
+multi-use code; remove the old entry in Machines. `--dry-run` prints every step without changing anything.
+`--uninstall` removes the service and the checkout. Add `--purge` to delete `~/.agent-orch-worker` too. Then remove
+the machine in the UI.
+
+### macOS: a dedicated user, a LaunchDaemon, and a power policy
+
+**The worker runs as a dedicated user.** Agents run on their own with full permissions. Under your account they
+could read your documents, keychain, browser profiles and SSH keys. So the macOS script creates a hidden standard user,
+`agentorch` (`--user` to rename it), with `sysadminctl`, and installs and pairs everything as that user. Sign the
+agents in as that user too: from the head's Connections window, or on the Mac with `sudo -u agentorch -H claude`.
+`--no-dedicated-user` installs under your own account (run it without sudo), but this isn't advised.
+
+**How it starts** (`--service`):
+
+- `daemon` (the default, recommended): a LaunchDaemon, `/Library/LaunchDaemons/com.agent-orch.worker.plist`, with
+  `UserName agentorch`. launchd starts the worker at boot, whether or not anyone is logged in, and restarts it if it
+  stops (`KeepAlive`). Its log is `/Users/agentorch/Library/Logs/agent-orch-worker.log`. Check it with
+  `sudo launchctl print system/com.agent-orch.worker`.
+- `login`: it starts when you log in and stops when you log out. Your own LaunchAgent
+  (`~/Library/LaunchAgents/com.agent-orch.worker.plist`) starts it as `agentorch` through a root-owned launcher,
+  `/usr/local/bin/agent-orch-worker-run`. A sudoers rule (`/etc/sudoers.d/agent-orch-worker`) lets you run that one
+  command as `agentorch` and nothing else. (A LaunchAgent inside the hidden `agentorch` account itself would only run
+  while someone is logged in as `agentorch`, which is why this mode hooks into your login instead.)
+
+Either mode removes the other's files, so a Mac never runs two workers. Both run the worker at `Nice 5` as a standard
+process: it can use every core, but your apps win when they compete.
+
+**Power policy.** Each Mac follows a policy set on the head: its card in Machines → **Power**. The worker enforces
+it, and the head places nothing on a Mac that says it takes no work.
+
+| Setting | Default | Choices |
+| --- | --- | --- |
+| New tasks on battery | above 50% (on AC power: always) | never (AC power only), above 25/50/75%, at any charge |
+| Keep awake while tasks run | on AC power | on AC power, always, never |
+| Pause new tasks when hot | at heavy thermal pressure | heavy, from moderate, never |
+| RAM kept free for you | 3 GB | 1–8 GB |
+| Max tasks (on the card) | Auto: cores − 1 | Auto, 1–4 |
+
+- A Mac that takes no new tasks shows **Paused** with the reason, such as "On battery at 42%: takes new tasks above
+  50%". Tasks already running go on either way.
+- While tasks run, the worker holds the Mac awake with `caffeinate -i -w <worker pid>`: only while it has tasks, and by
+  default only on AC power. It stops with the last task, when the Mac goes on battery, or when the worker exits.
+- Heat is read without root or powermetrics: `pmset -g therm` (the CPU speed limit) and the system's thermal pressure
+  level (`notifyutil -g com.apple.system.thermalpressurelevel`). Battery and power source come from `pmset -g batt`.
+- Auto sizing leaves one core and the reserved RAM to you: a task starts only if the Mac keeps its RAM reserve (3 GB)
+  after it, and at most cores − 1 tasks run. A new Mac starts on Auto; a new Linux node starts at 1 task.
+- `caffeinate -i` only stops idle sleep. **Closing the lid or choosing Sleep still sleeps the Mac.** The head then shows
+  it as "Mac asleep", waits its grace period (5 minutes by default), and moves its tasks to another machine from their
+  last pushed work. When the Mac wakes, it reconnects and drops the tasks that moved.
+
+### Pair 4 Macs in one go
+
+1. On the head: Server details → Machines → **Add machine** → **Add: 4 machines**. The wizard shows one code, valid
+   for an hour, and the macOS line. Copy the line.
+2. On each Mac, from an admin account: open Terminal, paste the line and enter your password when sudo asks. The
+   first time, sign in to GitHub when the script asks (it clones and pushes as `agentorch`). The Mac installs
+   everything, pairs, and starts its LaunchDaemon.
+3. Back in the wizard, each Mac appears by name as it pairs, then shows **Connected**. You can close the wizard between
+   Macs; reopening it shows the same code while uses are left.
+4. After the fourth Mac, the code stops working. If you paired fewer, press **Revoke code**; otherwise it expires
+   after the hour.
+5. Sign the agents in on each Mac: Connections → pick the Mac at the top → sign in to Claude Code and Codex. The same
+   subscription on several Macs shares one set of rate limits.
+6. Check each Mac's card: rename it if needed, and set its **Power** policy. For example, choose "Never: AC power only"
+   for a Mac you carry around.
+
+A second VPS works the same way: the Linux line with the same code adds it too, if the code has a use left.
 
 ## Worker machines
 
@@ -298,8 +362,8 @@ runs orchestrator tasks in its own checkouts. Design: `.agent-orch/CLUSTER.md`. 
 repo checked out, `npm ci`):
 
 ```sh
-node worker.mjs pair --controller https://<your-host> --code ABCD-1234 --name mac   # code from "Add machine"
-node worker.mjs run                                                                  # the daemon
+node worker.mjs pair --controller https://<your-host> --code ABCD-1234   # code from "Add machine"; --name to pick its name
+node worker.mjs run                                                      # the daemon
 ```
 
 - Pairing stores the node token in `~/.agent-orch-worker/config.json` (mode 0600). Everything else lives there
@@ -308,9 +372,11 @@ node worker.mjs run                                                             
 - **Credentials come from the machine's own login**: sign Claude Code and Codex in locally, and set up git so it can
   fetch and push the project repos (`gh auth login` then `gh auth setup-git`, or an SSH key). Nothing else is sent to
   the worker, except a GitHub token the owner explicitly authorises per node (`git.credential`, kept in memory only).
-- Run it as a dedicated unprivileged user under systemd (`Restart=always`) or a launchd agent on macOS. On stop it
-  pauses running jobs and pushes their work first. It reconnects with backoff forever and runs its own reaper for
-  leftover agent processes (`AGENT_ORCH_REAPER=off` disables it).
+- Run it as a dedicated unprivileged user under systemd (`Restart=always`) or, on macOS, a LaunchDaemon with
+  `UserName` (see Adding machines). On stop it pauses running jobs and pushes their work first. It reconnects with
+  backoff forever and runs its own reaper for leftover agent processes (`AGENT_ORCH_REAPER=off` disables it).
+- **It follows the power policy and caps the head sets for it** (Machines → Power, Max tasks): on a Mac, no new tasks
+  on low battery or when hot, and `caffeinate` only while tasks run (see Adding machines).
 - **It reports to this server**: each job's steps (shown as a timeline in the task drawer), health telemetry every
   10 s (kept for 24 h in `<DATA>/metrics/nodes/`, `GET /api/cluster/nodes/:id/metrics?range=1h`) and its errors; `GET
   /api/cluster/nodes/:id/logs?tail=200` fetches its log. A worker with under 2 GB of disk free, one that keeps losing

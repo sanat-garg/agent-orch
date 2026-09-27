@@ -1467,9 +1467,11 @@ async function handleRequest(req, res) {
   }
   if (p.startsWith('/api/cluster/') && !cluster) return json(res, 503, { error: 'cluster unavailable' });
   if (p === '/api/cluster/nodes' && req.method === 'GET') return json(res, 200, { nodes: orch.machines(cluster.listNodes()) });
-  if (p === PAIR_PATH && req.method === 'POST') return json(res, 200, cluster.createPairing());
+  // "Add machine": a pairing code, {uses: N} for one code that pairs N machines (valid 1 h); DELETE revokes a code.
+  if (p === PAIR_PATH && req.method === 'POST') { const r = cluster.createPairing(await readBody(req)); return r.error ? json(res, r.status, { error: r.error }) : json(res, 200, r); }
   const pcode = p.match(/^\/api\/cluster\/pair\/([\w-]{1,20})$/);
   if (pcode && req.method === 'GET') return json(res, 200, cluster.pairing(pcode[1]));
+  if (pcode && req.method === 'DELETE') { const r = cluster.revokePairing(pcode[1]); return r.error ? json(res, r.status, { error: r.error }) : json(res, 200, r); }
   const cnode = p.match(/^\/api\/cluster\/nodes\/([\w-]+)$/);
   if (cnode && (req.method === 'PATCH' || req.method === 'DELETE')) {
     const r = req.method === 'PATCH' ? cluster.update(cnode[1], await readBody(req)) : cluster.revoke(cnode[1]);

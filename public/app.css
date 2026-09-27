@@ -549,6 +549,20 @@ code, pre, kbd { font-family: var(--mono); }
 .am-next { margin: 0; padding: 10px 12px; border-radius: 10px; background: var(--accent-soft); color: var(--text); }
 .am-acts { display: flex; gap: 8px; justify-content: flex-end; }
 @media (max-width: 700px) { .am-acts .btn { height: 44px; } #addMachine { height: 44px; } }
+.am-uses { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; color: var(--text); font-weight: 550; font-size: 13.5px; }
+.am-uses select, .mc-prow select { height: 34px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit;
+  font-size: 13.5px; font-weight: 500; padding: 0 6px; }
+.am-hint { color: var(--muted); font-weight: 400; font-size: 12.5px; }
+.am-list { list-style: none; margin: -2px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.am-list li { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; }
+.am-list .am-name { flex: 1; min-width: 0; color: var(--text); font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.am-list .am-state { flex: none; color: var(--muted); font-size: 12.5px; }
+.mc-ctl .btn[aria-expanded="true"] { background: var(--raised); border-color: var(--border-strong); color: var(--text); }
+.mc-power { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 10px; background: var(--raised); }
+.mc-prow { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12.5px; color: var(--text); }
+.mc-prow select { flex: none; max-width: 58%; font-size: 12.5px; height: 30px; }
+.mc-pnote { margin: 0; font-size: 12px; }
+@media (pointer: coarse) { .am-uses select, .mc-prow select { height: 44px; } }
 
 /* sidebar connections (agent CLI + GitHub sign-ins) */
 .modal-panel.conns { width: min(520px, 100%); font-size: 13px; color: var(--muted); }

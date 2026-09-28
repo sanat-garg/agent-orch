@@ -945,7 +945,7 @@ function shotGrid(imgs = []) {
 // Prev/next goes through every image of the chat, or of the whole task in the drawer.
 function openShot(fig) {
   let list;
-  const panel = fig.closest('.rv-panel');
+  const panel = fig.closest('.rv-panel, .act-list');
   if (panel) list = [...panel.querySelectorAll('.shot')].map((f) => ({ id: f.dataset.id, name: f.dataset.name, w: +f.dataset.w || 0, h: +f.dataset.h || 0 }));
   else if (fig.closest('#drBody') && O.detail) list = O.detail.runs.flatMap((r) => r.entries.filter((e) => e.k === 'image'));
   else list = [...$('messages').querySelectorAll('.shot')].map((f) => ({ id: f.dataset.id, name: f.dataset.name, w: +f.dataset.w || 0, h: +f.dataset.h || 0 }));
@@ -1101,6 +1101,15 @@ function renderEvent(ev, replay) {
       endLive();
       const nm = (m) => (AGENT_LIST.some((a) => a.id === m.agent) ? modelName(m.agent, m.model) : m.label || m.model || m.agent);
       const n = el('div', 'notice moved', `#${ev.taskId} moved to ${nm(ev.to)} — ${nm(ev.from)} is limited${ev.until ? ` until ${fmtWhen(ev.until * 1000)}` : ''}`);
+      n.setAttribute('role', 'link');
+      n.addEventListener('click', () => showTask(ev.taskId));
+      add(n);
+      break;
+    }
+    case 'approval': {
+      // '#12 is waiting for your approval: Click "Send" button on mail.google.com · To: bob@…'
+      endLive();
+      const n = el('div', 'notice approval', `#${ev.taskId} is waiting for your approval: ${ev.action}`);
       n.setAttribute('role', 'link');
       n.addEventListener('click', () => showTask(ev.taskId));
       add(n);
@@ -4924,6 +4933,7 @@ function taskState(t) {
   }
   switch (t.status) {
     case 'running':
+      if (t.approvals?.length) return { cls: 'running awaiting', label: `Awaiting your approval${t.approvals.length > 1 ? ` · ${t.approvals.length} actions` : ''}` };
       return { cls: 'running', label: `${t.kind === 'reflect' ? 'Looking through the project' : 'Running'} · ${fmtDur(nowS - (t.started_at || nowS))}` };
     case 'done':
       return { cls: 'done', label: t.summary ? `Done · ${t.summary}` : 'Done' };
@@ -5020,7 +5030,8 @@ function fillCard(b, id) {
   b.classList.toggle('review-card', t.kind === 'review');
   b.classList.toggle('active', O.drawer === id);
   // Waiting checkpoints in the chat and the queue get their review panel right under the card.
-  if (b.isConnected) syncReviewPanel(b, t); else queueMicrotask(() => b.isConnected && syncReviewPanel(b, O.tasks.get(id)));
+  if (b.isConnected) { syncReviewPanel(b, t); syncApprovalPanels(b, t); }
+  else queueMicrotask(() => { if (b.isConnected) { syncReviewPanel(b, O.tasks.get(id)); syncApprovalPanels(b, O.tasks.get(id)); } });
 }
 // A running work task's card pauses it; a paused one's resumes it (the card itself is a button, so this is a role=button span).
 function cardControl(t) {
@@ -5135,6 +5146,108 @@ function reviewPanel(t) {
   p.append(row, form);
   return p;
 }
+// ----- the approval gate (gate.mjs): a browser or connector action held before it ran. The owner sees the exact action
+// and the page, and answers Approve once / Always allow this action for this task / Deny (the reason goes to the agent).
+// Unanswered, it is denied when it expires. Shown under the task's card (chat, Queue) and at the top of its drawer.
+const AP = { busy: new Set(), deny: new Map() }; // deny: approval id -> the reason being typed (survives re-renders)
+async function decideApproval(a, decision, reason) {
+  AP.busy.add(a.id);
+  try {
+    await api(`/api/orch/approvals/${encodeURIComponent(a.id)}`, 'POST', { decision, ...(reason && { reason }) });
+    AP.deny.delete(a.id);
+    const t = O.tasks.get(a.task);
+    if (t) { t.approvals = (t.approvals || []).filter((x) => x.id !== a.id); refreshCards(t.id); }
+    toast(decision === 'deny' ? 'Denied: the agent was told why' : decision === 'always' ? 'Approved, and allowed for the rest of this task' : 'Approved', { kind: 'success' });
+  } catch (e) { toast(e.message, { kind: 'error' }); }
+  finally {
+    AP.busy.delete(a.id);
+    if (O.drawer === a.task) { loadDetail(); loadActions(a.task); }
+  }
+}
+function approvalPanel(a) {
+  const p = el('div', 'rv-panel ap-panel');
+  p.dataset.id = a.id;
+  p.append(el('div', 'rv-head', `#${a.task} is waiting for your approval`), el('div', 'ap-action', a.action || `${a.server}: ${a.tool}`));
+  const meta = [];
+  if (a.url) meta.push(a.url);
+  if (a.expires) meta.push(`denied automatically ${fmtWhen(a.expires)} unless you answer`);
+  if (meta.length) p.append(el('div', 'muted ap-meta', meta.join(' · ')));
+  if (a.screenshot) p.append(shotGrid([{ id: a.screenshot, name: 'The page when it asked' }]));
+  const busy = AP.busy.has(a.id), row = el('div', 'rv-actions');
+  const ok = el('button', 'btn small primary', 'Approve once');
+  const always = el('button', 'btn small', 'Always allow for this task');
+  always.title = 'Approve this, and let the same action through without asking again until this task ends';
+  const no = el('button', 'btn small danger', 'Deny…');
+  const form = el('form', 'rv-change');
+  form.hidden = !AP.deny.has(a.id);
+  const note = el('textarea');
+  note.rows = 2;
+  note.placeholder = 'Why not? The agent is told, and does not do it.';
+  note.setAttribute('aria-label', 'Reason for denying');
+  note.value = AP.deny.get(a.id) || '';
+  note.oninput = () => AP.deny.set(a.id, note.value);
+  const send = el('button', 'btn small danger', 'Deny');
+  form.append(note, send);
+  for (const x of [ok, always, no, send]) { x.type = x === send ? 'submit' : 'button'; x.disabled = busy; }
+  ok.onclick = () => decideApproval(a, 'approve');
+  always.onclick = () => decideApproval(a, 'always');
+  no.onclick = () => { form.hidden = !form.hidden; if (form.hidden) AP.deny.delete(a.id); else { AP.deny.set(a.id, note.value); note.focus(); } };
+  form.onsubmit = (e) => { e.preventDefault(); decideApproval(a, 'deny', note.value.trim()); };
+  row.append(ok, always, no);
+  p.append(row, form);
+  return p;
+}
+// Under a chat card: one panel per held action, rebuilt only when the set changes (a typed reason is kept in AP.deny).
+function syncApprovalPanels(b, t) {
+  const list = b.parentElement?.closest('.task-cards, #qBody') ? t?.approvals || [] : [];
+  const sig = list.map((a) => a.id).join(',') + (list.some((a) => AP.busy.has(a.id)) ? ':busy' : '');
+  const old = [];
+  for (let n = b.nextElementSibling; n?.classList.contains('ap-panel'); n = n.nextElementSibling) old.push(n);
+  if ((b.dataset.ap || '') === sig && old.length === list.length) return;
+  b.dataset.ap = sig;
+  for (const n of old) n.remove();
+  b.after(...list.map(approvalPanel));
+}
+// The drawer's Actions timeline: every browser/connector call of the task (its audit log), newest first.
+const ACT = { task: null, data: null, open: false };
+async function loadActions(id) {
+  try {
+    const d = await api(`/api/orch/tasks/${id}/actions`);
+    if (O.drawer !== id) return;
+    ACT.task = id; ACT.data = d;
+    const sec = $('drBody').querySelector('.dr-actions-log');
+    if (sec) sec.replaceWith(actionsSection(id));
+  } catch {}
+}
+const CLASS_LABEL = { read: 'Read', draft: 'Draft', outbound: 'Outbound' };
+const DECISION_LABEL = { approve: 'approved by you', always: 'approved, always for this task', auto: 'allowed (you said always)', deny: 'denied by you', expired: 'denied: no answer in time' };
+function actionsSection(id) {
+  const d = el('details', 'dr-more dr-actions-log');
+  d.open = ACT.open;
+  const data = ACT.task === id ? ACT.data : null, entries = data?.entries || [];
+  d.append(el('summary', '', `Actions${entries.length ? ` · ${entries.length}` : ''}`));
+  d.addEventListener('toggle', () => { ACT.open = d.open; if (d.open) loadActions(id); });
+  if (!data) { d.append(el('div', 'muted', 'Loading…')); return d; }
+  if (!entries.length) { d.append(el('div', 'muted', 'No browser or connector actions yet. Every one is logged here, and outbound ones wait for your approval.')); return d; }
+  const ul = el('ol', 'act-list');
+  for (const e of entries.slice().reverse()) {
+    const li = el('li', `act act-${e.class}${e.ok === false ? ' act-fail' : ''}`);
+    const head = el('div', 'act-head');
+    head.append(el('span', `act-cls ${e.class}`, CLASS_LABEL[e.class] || e.class), el('span', 'act-what', e.action || `${e.server}: ${e.tool}`));
+    li.append(head);
+    const bits = [fmtWhen(e.ts), e.tool];
+    if (e.decision) bits.push(DECISION_LABEL[e.decision] || e.decision);
+    if (e.note) bits.push(`"${e.note}"`);
+    if (e.ok === false && !e.decision) bits.push('failed');
+    if (e.broken) bits.push('⚠ log chain broken here');
+    li.append(el('div', 'muted act-meta', bits.join(' · ')));
+    if (e.screenshot) li.append(shotGrid([{ id: e.screenshot, name: e.action || e.tool }]));
+    ul.append(li);
+  }
+  d.append(ul);
+  return d;
+}
+
 // The machine a running task is on ('on vps-2', 'waiting for Mac mini (Mac asleep)'), or a queued one is pinned to
 // ('only on MacBook Air'); tasks on the controller say
 // 'on this server' only once the cluster has workers (MC.nodes, read when the Queue or Server details opens).
@@ -5174,6 +5287,19 @@ function onOrch(msg) {
     for (const other of O.tasks.values()) if (taskDeps(other).includes(msg.task.id)) refreshCards(other.id);
     if (O.drawer === msg.task.id) { renderDrawerHead(); scheduleDetail(); }
     if (msg.task.project_id === O.project?.id) scheduleQueue();
+  } else if (msg.t === 'oapproval') {
+    // A held action: a sound (the task-sound switch) and a toast that opens the task, even while this tab has focus.
+    const a = msg.approval, t = O.tasks.get(a.task);
+    if (t) {
+      t.approvals = msg.kind === 'new' ? [...(t.approvals || []).filter((x) => x.id !== a.id), a] : (t.approvals || []).filter((x) => x.id !== a.id);
+      refreshCards(t.id);
+      if (O.drawer === t.id) { renderDrawerHead(); scheduleDetail(); }
+    }
+    if (O.drawer === a.task && ACT.open) loadActions(a.task);
+    if (msg.kind === 'new') {
+      toast(`#${a.task} needs your approval: ${a.action}`, { kind: 'warn', duration: 15000, action: 'Review', run: () => showTask(a.task) });
+      if ($('stSound').checked) void playTaskSound();
+    }
   } else if (msg.t === 'oorder') {
     for (const r of msg.order || []) { const t = O.tasks.get(r.id); if (t) t.position = r.position; }
     if (msg.project_id === O.project?.id) scheduleQueue();
@@ -5257,6 +5383,7 @@ function openSettings() {
   if ($('settingsModal').hidden) ST.lastFocus = document.activeElement;
   $('settingsModal').hidden = false;
   renderSettings();
+  loadGatePatterns();
   $('settingsModal').querySelector('.icon-btn[data-close]').focus();
 }
 function closeSettings() {
@@ -5327,6 +5454,14 @@ function renderParallel(s) {
   sel.replaceChildren(...opts);
   sel.value = c.cap ? String(c.cap) : '';
 }
+// The approval gate's extra outbound names (on top of its defaults), saved on blur.
+async function loadGatePatterns() {
+  try { const g = await api('/api/orch/gate'); if (document.activeElement !== $('stGatePatterns')) $('stGatePatterns').value = (g.patterns || []).join('\n'); } catch {}
+}
+$('stGatePatterns').addEventListener('change', async (e) => {
+  try { const r = await api('/api/orch/gate', 'PUT', { patterns: e.target.value }); e.target.value = r.settings.patterns.join('\n'); toast('Saved: these actions now wait for your approval', { kind: 'success' }); }
+  catch (err) { toast(err.message, { kind: 'error' }); }
+});
 $('stParallel').addEventListener('change', (e) => { saveParallel({ maxTasks: e.target.value ? Number(e.target.value) : null }); e.target.blur(); });
 // Reflection direction (per project, optional): saved as you type (debounced) and on blur; blank = the reflector decides.
 const DIR = { timer: null, saving: false };
@@ -5665,6 +5800,7 @@ function renderDrawer(fromLive = false) {
     row.append(retry);
   }
   if (t.status === 'awaiting_review') top.append(reviewPanel(t));
+  for (const a of t.approvals || []) top.append(approvalPanel(a));
   if (row.children.length) top.append(row);
   if (O.err) top.append(el('div', 'dr-err', O.err));
   body.append(top);
@@ -5722,6 +5858,9 @@ function renderDrawer(fromLive = false) {
     s3.append(live);
   }
   body.append(s3);
+
+  // Every browser/connector call it made (the approval gate's audit log), loaded when opened.
+  if (t.kind === 'work') body.append(actionsSection(t.id));
 
   // 4. What "done" means for it.
   if (t.kind === 'work' && d.task.done_when) {

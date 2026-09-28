@@ -48,7 +48,7 @@ after(() => { if (tmp) fs.rmSync(tmp, { recursive: true, force: true }); });
 
 test('the allow-list: jobs, sign-in, refreshes, logs, updates, policy and the live browser view from the head, nothing chat-, prompt- or settings-like', () => {
   assert.deepEqual([...WORKER_ACCEPTS].sort(), [
-    'ack', 'agent.credential', 'bye', 'error', 'git.credential', 'heartbeat', 'job.attach', 'job.cancel', 'job.offer', 'job.pause', 'job.resume', 'job.start',
+    'ack', 'agent.credential', 'bye', 'error', 'git.credential', 'heartbeat', 'job.approval', 'job.attach', 'job.cancel', 'job.offer', 'job.pause', 'job.resume', 'job.start',
     'limits.refresh', 'login.cancel', 'login.code', 'login.logout', 'login.start', 'logs.tail', 'models.refresh', 'node.policy', 'node.update',
     'screen.input', 'screen.req', 'welcome',
   ]);

@@ -2,7 +2,8 @@
 
 _BRIEF goal 12. Agents that do office work the way an employee (say, an accountant) would: triage email, fill
 spreadsheets, edit Canva designs, process invoices, reconcile bank statements, and use web apps. This is a design
-doc only; nothing here is built yet. Research date: 2026-09-28. Vendor details change often, so check the linked
+doc; built so far: the browser capability (browser.mjs) and the approval gate with its audit log (task #258, see
+"Built: the approval gate" under Safety). Research date: 2026-09-28. Vendor details change often, so check the linked
 docs again before building each connector._
 
 Principles, in priority order:
@@ -406,6 +407,17 @@ Passwords the owner types are plain `text` inside `screen.input` events and exis
 5. The orchestrator resumes the session with a short message: `A-123 approved and executed: <result>` (or `rejected:
    <note>`). Unanswered approvals expire after the grant's `approvalTtl` (default 24 h). The expiry is logged, and
    the task goes back to the owner as blocked.
+
+### Built: the approval gate (task #258)
+
+What runs today differs from the flow below in a few owner-chosen ways: the held call **blocks** (the agent's tool call
+simply waits, the task shows "Awaiting your approval", and its timeout is paused) instead of returning "Held as A-123";
+the answers are **Approve once / Always allow this action for this task / Deny** (the reason goes back to the agent as
+the tool error); unanswered = denied after `gate_settings.ttlHours` (24 h). There is no separate gate process with
+secrets: `gate-proxy.mjs` wraps each gated MCP server of one run (Playwright, and connectors = owner MCP servers with an
+`outbound` tool list), Claude runs on the controller also ask it from the SDK's PreToolUse hook, and the audit log is
+`<DATA>/audit/<task>.jsonl` (one line per call, hash-chained). Grants, the run sandbox, Edit & approve and site rules
+are not built.
 
 ### Audit log
 

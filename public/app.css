@@ -1010,6 +1010,22 @@ label.st-row, label.st-text { cursor: pointer; }
 .rv-change textarea { width: 100%; box-sizing: border-box; font: inherit; font-size: 16px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); color: var(--text); resize: vertical; }
 .rv-change .btn { justify-self: start; }
 .rv-change[hidden] { display: none; }
+/* The approval gate: a held action (the exact action, the page, Approve / Always / Deny) and the drawer's Actions log. */
+.ap-action { font-weight: 550; overflow-wrap: anywhere; }
+.ap-meta { font-size: 12.5px; overflow-wrap: anywhere; }
+.ap-panel .shots { max-width: 320px; }
+.dr-sec .ap-panel { margin-top: 12px; }
+.notice.approval { cursor: pointer; border-color: var(--warn); }
+.act-list { margin: 8px 0 0; padding: 0; list-style: none; display: grid; gap: 10px; }
+.act { display: grid; gap: 3px; min-width: 0; padding-left: 10px; border-left: 3px solid var(--border); }
+.act-outbound { border-left-color: var(--warn); }
+.act-fail .act-what { color: var(--muted); text-decoration: line-through; }
+.act-head { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.act-what { overflow-wrap: anywhere; min-width: 0; }
+.act-cls { flex: none; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; color: var(--faint); }
+.act-cls.outbound { color: var(--warn); }
+.act-meta { font-size: 12px; }
+.act .shots { max-width: 240px; }
 
 /* the task drawer (slides in from the right) */
 .drawer {

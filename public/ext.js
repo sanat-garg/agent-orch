@@ -322,6 +322,9 @@ function exMcpFields(f, s, _mode, form) {
   const cmd = exField('Command', exInput('commandLine', s?.commandLine, { mono: true, placeholder: 'npx -y @playwright/mcp@latest' }), 'Started on this server, as your user, when a chat or task starts.');
   const env = exField('Environment variables', exArea('env', exPairs(s?.env, '='), { rows: 3, mono: true, placeholder: 'API_KEY=…' }),
     'One KEY=value per line. Saved values show as ••••••; leave those as they are to keep them.');
+  // A connector (gate.mjs): the tools named here are held for the owner's approval in task runs, and every call is logged.
+  const outbound = exField('Outbound tools', exInput('outbound', (s?.outbound || []).join(', '), { mono: true, placeholder: 'e.g. send_email, create_payment, delete_*' }),
+    "Optional. Makes it a connector: in task runs these tools wait for your approval (tools named like send, pay, delete, publish or share do too), and every call shows in the task's Actions.");
   const url = exField('URL', exInput('url', s?.url, { mono: true, type: 'url', placeholder: 'https://example.com/mcp' }));
   const headers = exField('Headers', exArea('headers', exPairs(s?.headers, ': '), { rows: 3, mono: true, placeholder: 'Authorization: Bearer …' }),
     'One Name: value per line. Saved values show as ••••••; leave those as they are to keep them.');
@@ -331,10 +334,10 @@ function exMcpFields(f, s, _mode, form) {
   Object.assign(sw, { type: 'checkbox', name: 'enabled', checked: s ? s.enabled !== false : true });
   sw.setAttribute('role', 'switch');
   on.append(el('span', null, 'On'), sw);
-  f.append(cmd, env, url, headers, agents, on);
+  f.append(cmd, env, outbound, url, headers, agents, on);
   const sync = () => {
     const t = form.querySelector('input[name="type"]:checked')?.value || 'stdio';
-    cmd.hidden = env.hidden = t !== 'stdio';
+    cmd.hidden = env.hidden = outbound.hidden = t !== 'stdio';
     url.hidden = headers.hidden = t === 'stdio';
     const codex = agents.querySelector('input[value="codex"]');
     codex.disabled = t === 'sse';

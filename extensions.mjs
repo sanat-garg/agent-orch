@@ -13,7 +13,10 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { runHelper } from './helpers.mjs';
+import { fileURLToPath } from 'node:url';
 import { MCP_SERVER as BROWSER_MCP, browserServer } from './browser.mjs';
+
+const GATE_PROXY = fileURLToPath(new URL('./gate-proxy.mjs', import.meta.url));
 
 export const NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/; // new skills and subagents (Claude's skill-name rule)
 export const MCP_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/; // a bare TOML key for codex, and part of Claude's mcp__<name>__<tool>
@@ -320,6 +323,10 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
       const parts = Array.isArray(b.args) && b.command ? [String(b.command), ...b.args.map(String)] : splitCommand(text(b.commandLine ?? b.command, 4000, 'Command'));
       if (!parts[0]) throw new Error('Add the command that starts the server, e.g. npx -y @playwright/mcp@latest');
       Object.assign(s, { command: parts[0], args: parts.slice(1), env: parsePairs(b.env, '=', old?.env, 'variable') });
+      // A connector: its tools named here (or ending in *) are outbound and held for the owner in task runs (gate.mjs).
+      const outbound = (Array.isArray(b.outbound) ? b.outbound : String(b.outbound ?? (old?.outbound || []).join(', ')).split(/[\s,]+/))
+        .map((x) => String(x).trim()).filter((x) => /^[\w.-]{1,120}\*?$/.test(x)).slice(0, 200);
+      if (outbound.length) s.outbound = outbound;
     } else {
       const url = text(b.url, 2000, 'URL');
       try { if (!/^https?:$/.test(new URL(url).protocol)) throw 0; } catch { throw new Error('Add the server URL (http or https)'); }
@@ -348,14 +355,18 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
   }
   // The servers a run on `agent` gets: Claude → an SDK/--mcp-config mcpServers record, codex → config.toml tables; null for none.
   // run.browser ({identity, outputDir, home?, headed?}, a task with the browser capability) adds the Playwright MCP on
-  // that identity's persistent profile (browser.mjs), replacing an owner server of the same name.
+  // that identity's persistent profile (browser.mjs), replacing an owner server of the same name. run.gate ({dir, task,
+  // patterns, ttlMs, hook}, a task run) puts that server and every connector (stdio servers with `outbound` tools) behind
+  // the approval gate: gate-proxy.mjs runs them, from a 0600 config in the run's gate dir.
   function mcpFor(agent, run = null) {
     let on = readMcp().filter((s) => s.enabled !== false && (s.agents || SKILL_AGENTS).includes(agent) && (agent !== 'codex' || s.type !== 'sse'));
-    if (run?.browser) on = [...on.filter((s) => s.name !== BROWSER_MCP), { name: BROWSER_MCP, env: {}, ...browserServer({ home, ...run.browser }) }];
+    if (run?.browser) on = [...on.filter((s) => s.name !== BROWSER_MCP), { name: BROWSER_MCP, env: {}, browser: true, ...browserServer({ home, ...run.browser }) }];
+    if (run?.gate) on = on.map((s) => (s.type === 'stdio' && (s.browser || s.outbound?.length) ? gated(s, run.gate) : s));
     if (!on.length || !SKILL_AGENTS.includes(agent)) return null;
     if (agent === 'codex') {
       const toml = on.map((s) => [`[mcp_servers.${s.name}]`, ...(s.type === 'stdio'
-        ? [`command = ${tomlVal(s.command)}`, `args = ${tomlVal(s.args || [])}`, ...(Object.keys(s.env || {}).length ? [`env = ${tomlVal(s.env)}`] : [])]
+        ? [`command = ${tomlVal(s.command)}`, `args = ${tomlVal(s.args || [])}`, ...(Object.keys(s.env || {}).length ? [`env = ${tomlVal(s.env)}`] : []),
+          ...(s.holdSec ? [`tool_timeout_sec = ${s.holdSec}`] : [])]
         : [`url = ${tomlVal(s.url)}`, ...(Object.keys(s.headers || {}).length ? [`http_headers = ${tomlVal(s.headers)}`] : [])])].join('\n'));
       return `# Written by agent-orch (Settings → Skills & tools) for its codex runs (codex -p ${CODEX_PROFILE}). Changes here are overwritten.\n\n${toml.join('\n\n')}\n`;
     }
@@ -363,13 +374,20 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
       ? { type: 'stdio', command: s.command, args: s.args || [], ...(Object.keys(s.env || {}).length && { env: s.env }) }
       : { type: s.type, url: s.url, ...(Object.keys(s.headers || {}).length && { headers: s.headers }) }]));
   }
+  function gated(s, g) {
+    const file = path.join(g.dir, `proxy-${s.name}.json`);
+    writeAtomic(file, JSON.stringify({ dir: g.dir, server: s.name, kind: s.browser ? 'browser' : 'connector', task: g.task ?? null, patterns: g.patterns,
+      ttlMs: g.ttlMs, hook: !!g.hook, upstream: { command: s.command, args: s.args || [], env: s.env || {} }, ...(!s.browser && { connector: { outbound: s.outbound } }) }));
+    // codex gives up on a tool call after 60 s by default: a held one waits for the owner (up to the approval TTL).
+    return { name: s.name, type: 'stdio', command: process.execPath, args: [GATE_PROXY, '--config', file], env: {}, holdSec: Math.ceil(((g.ttlMs || 86_400_000) + 900_000) / 1000) };
+  }
   // What a run passes (writing the file first when it changed): Claude → the --mcp-config file, codex → the profile name.
   // A browser run gets its own file / profile (named by a hash of its config), and ones a day old are swept.
   function mcpRun(agent, run = null) {
     if (!SKILL_AGENTS.includes(agent)) return null;
     const cfg = mcpFor(agent, run);
     let file = agent === 'codex' ? codexMcpFile : claudeMcpFile, profile = CODEX_PROFILE;
-    if (run?.browser && cfg) {
+    if ((run?.browser || run?.gate) && cfg) {
       const key = crypto.createHash('sha256').update(JSON.stringify(cfg)).digest('hex').slice(0, 12);
       profile = `${CODEX_PROFILE}-run-${key}`;
       file = agent === 'codex' ? path.join(codexHome, `${profile}.config.toml`) : path.join(extDir, 'runs', `claude-mcp-${key}.json`);
@@ -380,7 +398,7 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
     try { cur = fs.readFileSync(file, 'utf8'); } catch {}
     if (text == null) { if (cur != null) fs.rmSync(file, { force: true }); return null; }
     if (cur !== text) writeAtomic(file, text);
-    else if (run?.browser) fs.utimesSync(file, new Date(), new Date());
+    else if (run?.browser || run?.gate) fs.utimesSync(file, new Date(), new Date());
     return agent === 'codex' ? profile : file;
   }
   function sweepRunFiles(maxAgeMs = 86_400_000) {

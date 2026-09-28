@@ -20,6 +20,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { AGENTS, agentEfforts, agentStatus, clampEffort, codexExhausted, codexLatestSnapshot, isMissingSession, limitScope, limitScopes, modelCatalog, modelNames, runAgentCli, toolInputSummary, windowLabel } from './agents.mjs';
 import { SHOTS_DIR, mediaCollector } from './media.mjs';
 import { BROWSER_SYSTEM, needsBrowser, normIdentity, parseCapabilities } from './browser.mjs';
+import { APPROVAL_TTL_MS, DEFAULT_PATTERNS, patternsWith } from './gate.mjs';
+import { createApprovals } from './approvals.mjs';
 import { createUsageLog } from './usage.mjs';
 import { DELEGATE_CFG, createDelegator, parseFallbacks } from './delegate.mjs';
 import { filesOverlap, parseFiles, spreadAssign, readMemInfo, taskSlots, MEM } from './parallel.mjs';
@@ -1271,6 +1273,51 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       maxTasks: Number.isInteger(s.maxTasks) && s.maxTasks > 0 ? s.maxTasks : null };
   }
   const slotsFor = (a) => typeof CFG.agentSlots === 'number' ? CFG.agentSlots : CFG.agentSlots[a] ?? 1;
+
+  // ---- the approval gate (gate.mjs, approvals.mjs): browser and connector calls of task runs are classified, outbound
+  // ones held for the owner, all audited. kv gate_settings {patterns: the owner's extra outbound names, ttlHours}.
+  function gateSettings() {
+    let s = {};
+    try { s = JSON.parse(kvGet('gate_settings') || '{}') || {}; } catch {}
+    const ttlHours = Number(s.ttlHours) > 0 && Number(s.ttlHours) <= 24 * 14 ? Number(s.ttlHours) : APPROVAL_TTL_MS / 3600_000;
+    return { patterns: Array.isArray(s.patterns) ? s.patterns.map(String) : [], defaults: DEFAULT_PATTERNS, ttlHours, ttlMs: ttlHours * 3600_000 };
+  }
+  function setGateSettings(v = {}) {
+    const next = {};
+    if (v.patterns != null) {
+      const list = (Array.isArray(v.patterns) ? v.patterns : String(v.patterns).split(/\n|,/)).map((x) => String(x).trim()).filter(Boolean);
+      if (list.length > 100 || list.some((x) => x.length > 200)) return { error: 'At most 100 patterns of up to 200 characters' };
+      next.patterns = [...new Set(list)];
+    } else next.patterns = gateSettings().patterns;
+    if (v.ttlHours != null) {
+      const h = Number(v.ttlHours);
+      if (!(h > 0 && h <= 24 * 14)) return { error: 'ttlHours must be between 0 and 336' };
+      next.ttlHours = h;
+    } else next.ttlHours = gateSettings().ttlHours;
+    kvSet('gate_settings', JSON.stringify(next));
+    return { ok: true, settings: gateSettings() };
+  }
+  const approvals = createApprovals({ db, dataDir, boot: !!leader.ok, settings: gateSettings, deliver: deliverApproval, onChange: approvalChanged });
+  // A decision for a held call on a worker goes back as job.approval (the controller's own runs are answered in-process).
+  function deliverApproval(a, ans) {
+    if (!a.node || a.node === LOCAL_NODE || !cluster) return false;
+    return cluster.send(a.node, { t: MSG.JOB_APPROVAL, job: a.task, id: a.id, decision: ans.decision, ...(ans.reason && { reason: String(ans.reason) }), ...(ans.by && { by: String(ans.by) }) });
+  }
+  function approvalChanged(a, kind) {
+    const t = a && getTask(a.task);
+    if (!t) return;
+    broadcast({ t: 'oapproval', approval: a, kind });
+    pushTask(t.id);
+    if (kind !== 'new') return;
+    logEvent(`#${t.id} is waiting for your approval: ${a.action}`, { level: 'warn', projectId: t.project_id, taskId: t.id });
+    const convoId = getProject(t.project_id)?.convo_id;
+    if (convoId && convoExists(convoId)) emitChat(convoId, { t: 'approval', taskId: t.id, id: a.id, action: a.action, screenshot: a.screenshot || null });
+  }
+  function decideApproval(id, body = {}) {
+    try { return { ok: true, approval: approvals.decide(String(id), { decision: String(body.decision || ''), reason: body.reason ? String(body.reason) : null, by: 'owner' }) }; }
+    catch (e) { return { error: e.message, status: /No such/.test(e.message) ? 404 : 409 }; }
+  }
+  const taskActions = (id) => (getTask(id) ? { ...approvals.actions(id), approvals: approvals.forTask(id) } : null);
   // Read fresh before every claim: the second slot and claiming at all depend on the memory available right now.
   function slotCount(d, mem = readMemInfo(CFG.meminfo)) {
     return taskSlots({ setting: parallelSettings().parallelTasks, mem,
@@ -1408,16 +1455,18 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     // Pinned by the owner (run_on): only that machine, waiting for it. A worker pin only binds a task that can run remotely.
     const pin = task.kind === 'work' && task.run_on && (task.run_on === LOCAL_NODE || remote) ? task.run_on : null;
     if (remote && pin !== LOCAL_NODE) {
-      const free = freeWorkers(agent, task.id).filter((n) => (!browser || n.inventory?.browser?.capable === true) && (!pin || n.id === pin))
+      const free = freeWorkers(agent, task.id).filter((n) => (!browser || browserWorker(n)) && (!pin || n.id === pin))
         .sort((a, b) => (b.id === task.node_id) - (a.id === task.node_id) || headroom(b, agent) - headroom(a, agent));
       if (free.length) return free[0].id;
     }
     if (pin && pin !== LOCAL_NODE) return null;
     if (!localOk || !localFree || localDraining() || !localAgentOk(agent) || slotsFor(agent) - runningOn(agent) <= 0) return null;
     if (browser && !parallelSettings().controllerBrowser && pin !== LOCAL_NODE) return null;
-    if (remote && !pin && !parallelSettings().controllerWork && workerNodes(agent).some((n) => !browser || n.inventory?.browser?.capable === true)) return null;
+    if (remote && !pin && !parallelSettings().controllerWork && workerNodes(agent).some((n) => !browser || browserWorker(n))) return null;
     return LOCAL_NODE;
   }
+  // A worker that can run a browser task: it has a browser, and its approval gate can ask the head (feature 'approvals').
+  const browserWorker = (n) => n.inventory?.browser?.capable === true && (n.features || []).includes('approvals');
   const identityOf = (task) => (needsBrowser(task) ? normIdentity(task.browser_identity) : null);
   // The profile lock: a claimed (running) task already uses this identity. Read from the DB, so a claim not yet started counts.
   const profileBusy = (task) => qa("SELECT id, kind, capabilities, browser_identity FROM tasks WHERE status='running' AND capabilities IS NOT NULL AND id!=:id", { id: task.id })
@@ -1701,12 +1750,26 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return writeEntry;
   }
 
-  async function runAgent({ agent = 'claude', prompt, cwd, resume, model, append, tools, autonomous, signal, timeoutSec, taskId, runId, logPath, onMessage, onEvent, partial, effort, browser }) {
+  // gated: a task run whose browser and connector calls go through the approval gate (gate.mjs): its gate dir is hosted
+  // here, and the time it spends held on the owner doesn't count against its timeout.
+  async function runAgent({ agent = 'claude', prompt, cwd, resume, model, append, tools, autonomous, signal, timeoutSec, taskId, runId, logPath, onMessage, onEvent, partial, effort, browser, gated }) {
     const ac = new AbortController();
     let stopped = null;
     const onAbort = () => { stopped = stopped || 'aborted'; ac.abort(); };
     if (signal) { if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true }); }
-    const timer = timeoutSec ? setTimeout(() => { stopped = 'timeout'; ac.abort(); }, timeoutSec * 1000) : null;
+    let gate = null;
+    if (gated && taskId && runId) {
+      const dir = path.join(dataDir, 'gate', `run-${runId}`), gs = gateSettings();
+      gate = { dir, task: taskId, patterns: patternsWith(gs.patterns), ttlMs: gs.ttlMs, hook: agent === 'claude' };
+      gate.stop = approvals.host(dir, { taskId, runId });
+    }
+    const due = Date.now() + (timeoutSec || 0) * 1000;
+    const fire = () => {
+      const left = due + (gate ? approvals.heldMs(runId) : 0) - Date.now();
+      if (gate && (left > 0 || approvals.pending(taskId).length)) { timer = setTimeout(fire, Math.max(60_000, left)); return; }
+      stopped = 'timeout'; ac.abort();
+    };
+    let timer = timeoutSec ? setTimeout(fire, timeoutSec * 1000) : null;
     const writeEntry = runLog(taskId, runId, logPath);
     if (taskId) writeEntry({ k: 'start', at: now(), resumed: !!resume, agent, model: model || null, effort: effort || null });
     // Screenshots: tool-result images, plus new/changed files in .agent-orch/shots/ after each tool result and at the end.
@@ -1716,6 +1779,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     try {
       res = await runAgentCli({
         agent, model, prompt, cwd, resume, systemAppend: append, autonomous, effort, signal: ac.signal, ...(browser && { browser }),
+        ...(gate && { gate: { dir: gate.dir, task: gate.task, patterns: gate.patterns, ttlMs: gate.ttlMs, hook: gate.hook } }),
         onEvent: taskId ? (e) => {
           onEvent?.(e);
           if (e.k === 'image') { const img = media.image(e); if (img) writeEntry({ k: 'image', ...img, tool: e.tool }); return; }
@@ -1731,6 +1795,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
+      if (gate) {
+        gate.stop();
+        approvals.endRun(runId);
+        fs.rm(gate.dir, { recursive: true, force: true }, () => {});
+      }
     }
     if (stopped) res.outcome = stopped;
     usageLog.tokens(agent, res.usage, taskId ? 'task' : 'chat', taskId ?? null);
@@ -2582,7 +2651,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const browser = task.kind === 'work' && needsBrowser(task) ? { identity: identityOf(task), outputDir: path.join(cwd, SHOTS_DIR) } : null;
     const res = await runAgent({
       agent: route.agent, prompt, cwd, resume, model: route.model, append: withBrowser(task, resume ? null : withPersona(system, project)), tools, autonomous, effort,
-      signal, timeoutSec: CFG.taskTimeoutSec, taskId: task.id, runId, logPath, browser,
+      signal, timeoutSec: CFG.taskTimeoutSec, taskId: task.id, runId, logPath, browser, gated: task.kind === 'work',
     });
     finishRun(runId, res);
     if (task.handoff && res.sessionId) updateTask(task.id, { handoff: null }); // the new agent's own session carries on from here
@@ -2636,7 +2705,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     logEvent(`#${task.id} runs on ${name}`, { projectId: project.id, taskId: task.id });
     const res = await remoteJob(task.id, nodeId, name, { runId, logPath }, {
       title: task.title, prompt, systemAppend: withBrowser(task, resume ? null : withPersona(WORKER_SYSTEM, project)) || undefined, agent: route.agent, model: route.model || undefined, effort: effort || undefined,
-      ...(needsBrowser(task) && { capabilities: ['browser'], identity: identityOf(task) }),
+      ...(needsBrowser(task) && { capabilities: ['browser'], identity: identityOf(task), gate: (({ patterns, ttlMs }) => ({ patterns, ttlMs }))(gateSettings()) }),
       repo, baseSha, branch: taskBranch(task.id), doneWhen: task.done_when || undefined, resume: resume || undefined,
       timeouts: { taskSec: CFG.taskTimeoutSec, verifySec: CFG.verifyTimeoutSec, installSec: 900 }, autonomous: !!project.autonomous,
     }, signal);
@@ -2685,6 +2754,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         signal?.removeEventListener('abort', onAbort);
         if (jobs.get(id) === job) jobs.delete(id);
         waiting(null);
+        approvals.endRun(runId);
         // A run that ended mid-phase (lost, stopped): that phase lasted until now.
         const open = job.phases.at(-1);
         if (open && open.phase !== 'done' && open.ms == null) { open.ms = Math.max(0, Date.now() - open.at); open.cut = true; saveRun('phases'); }
@@ -2709,6 +2779,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
           const i = from + n;
           if (i < job.next) return;
           if (e.k === 'image') { const img = e.data && media.image(e); if (img) write({ k: 'image', ...img, tool: e.tool, i }); return; }
+          if (e.k === 'audit') { if (e.entry && typeof e.entry === 'object') approvals.audit(id, e.entry); return; }
+          if (e.k === 'approval') { try { approvals.request({ approval: e.approval, taskId: id, runId, node: nodeId }); } catch (err) { console.error('[orch] approval from', nodeId, err.message); } return; }
           const l = logEntryOf(e);
           if (l) write({ ...l, i });
         });
@@ -2804,6 +2876,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         if (mine?.node === nodeId && mine.started) {
           mine.attached = true;
           cluster.send(nodeId, { t: MSG.JOB_ATTACH, job: j.job, from: mine.next });
+          approvals.resend(j.job, nodeId); // decisions sent while it was away
         } else cluster.send(nodeId, { t: MSG.JOB_CANCEL, job: j.job, reason: 'reassigned' });
       }
       for (const [id, job] of jobs) if (job.node === nodeId && job.started && !listed.has(id)) job.lost(`${nodeName(nodeId)} came back without the job (restarted?)`);
@@ -3468,6 +3541,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       run_on: t.run_on ?? null, run_on_name: t.run_on ? nodeName(t.run_on) : null, // the machine the owner pinned it to
       // A remote run whose node went away (within its grace period): 'Mac mini (Mac asleep)'.
       waiting_for: running.get(t.id)?.waiting || null,
+      // Held browser/connector calls waiting for the owner (the approval gate): the task shows 'Awaiting approval'.
+      approvals: t.status === 'running' ? approvals.pending(t.id).map(({ args, ...a }) => a) : [],
     };
   }
   function projectView(p) {
@@ -3641,6 +3716,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     // A sidebar chat's project rank ({id, position, priority}), or null when its folder has no orchestrator project.
     projectRank: (cwd) => q1('SELECT id, position, priority FROM projects WHERE path=:p', { p: cwd }) ?? null,
     isRunning: (id) => running.has(Number(id)), logEvent, attachCluster,
+    gateSettings, setGateSettings, decideApproval, taskActions, pendingApprovals: () => approvals.pending().map(({ args, ...a }) => a),
     claimNext, // tests: claims the next task and its node, as one tick step would (without starting it)
     unwatch: (ws) => { for (const set of runSubs.values()) set.delete(ws); },
   };

@@ -97,7 +97,7 @@ test('placement: browser tasks go only to browserCapable workers, never the cont
     import path from 'node:path';
     const [dataDir, repos] = process.argv.slice(1), GB = 2 ** 30;
     const worker = (id, browser) => ({ id, name: id, os: 'linux', local: false, status: 'online', connected: true, enabled: true, draining: false, maxSlots: 4,
-      inventory: { cores: 8, agents: [{ id: 'claude', installed: true, signedIn: true }], ...(browser && { browser }) }, resources: { memAvailable: 32 * GB, at: Date.now() } });
+      inventory: { cores: 8, agents: [{ id: 'claude', installed: true, signedIn: true }], ...(browser && { browser }) }, resources: { memAvailable: 32 * GB, at: Date.now() }, features: ['approvals'] });
     const nodes = [{ id: 'controller', local: true, status: 'online', connected: true, enabled: true }, worker('plain', null)];
     const o = createOrchestrator({ query: () => (async function* () {})(), dataDir, disabled: true, claudeEnv: {}, getLimits: () => [],
       onSubscription: () => true, broadcast() {}, emitChat() {}, convoExists: () => false });

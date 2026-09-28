@@ -1628,6 +1628,24 @@ async function handleRequest(req, res) {
     const result = orch.setParallelSettings(await readBody(req));
     return json(res, result.error ? 400 : 200, result);
   }
+  // The approval gate (gate.mjs): held outbound calls, the owner's answer {decision: approve | always | deny, reason?},
+  // a task's Actions timeline (its audit log + approvals), and the settings {patterns, ttlHours}.
+  if (p === '/api/orch/approvals' && req.method === 'GET') return json(res, 200, { approvals: orch.pendingApprovals() });
+  const oap = p.match(/^\/api\/orch\/approvals\/([\w-]{6,64})$/);
+  if (oap && req.method === 'POST') {
+    const r = orch.decideApproval(oap[1], await readBody(req));
+    return json(res, r.error ? r.status || 400 : 200, r);
+  }
+  const oac = p.match(/^\/api\/orch\/tasks\/(\d+)\/actions$/);
+  if (oac && req.method === 'GET') {
+    const r = orch.taskActions(Number(oac[1]));
+    return r ? json(res, 200, r) : json(res, 404, { error: 'No such task' });
+  }
+  if (p === '/api/orch/gate' && req.method === 'GET') return json(res, 200, orch.gateSettings());
+  if (p === '/api/orch/gate' && req.method === 'PUT') {
+    const r = orch.setGateSettings(await readBody(req));
+    return json(res, r.error ? 400 : 200, r);
+  }
   const tf = p.match(/^\/api\/orch\/tasks\/(\d+)\/fallbacks$/);
   if (tf && req.method === 'PATCH') {
     const { list, error } = checkFallbacks((await readBody(req)).fallbacks);

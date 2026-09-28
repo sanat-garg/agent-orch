@@ -728,6 +728,9 @@ AGENTIC.md covers connectors, browser, safety, task shape and rollout
 
 browser tasks get Playwright MCP; persistent-profile cookie test passes
 
+## 2026-09-28 03:40 — #258 Approval gate for outbound actions, with an audit log [done (check passed)]
+
+Outbound browser/connector calls held for approval, audited, tests pass
 ## 2026-09-28 03:11 — #249 UI-REVIEW #1: top bar keeps its 56px content row below the iPhone safe-area inset [done (check passed)]
 
 Top bar height includes safe-area inset; static tests pass
@@ -742,3 +745,6 @@ orchestrator.mjs conflicts resolved; browser-live and run-on tests pass
 ## 2026-09-28 03:43 — #250 UI-REVIEW #2: keyboard-aware composer via visualViewport; hide the orch bar while typing [done (check passed)]
 
 Phone composer now stays above the keyboard; tests pass
+## 2026-09-28 03:44 — #261 Integrate #258: Approval gate for outbound actions, with an audit log [done (check passed)]
+
+Merge conflicts resolved; approval-gate, protocol and browser tests pass

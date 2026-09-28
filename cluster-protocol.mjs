@@ -37,7 +37,7 @@ export const MSG = {
   LOGIN_START: 'login.start', LOGIN_STATE: 'login.state', LOGIN_CODE: 'login.code', LOGIN_CANCEL: 'login.cancel', LOGIN_LOGOUT: 'login.logout',
   MODELS_REFRESH: 'models.refresh', MODELS: 'models', LIMITS_REFRESH: 'limits.refresh', LIMITS: 'limits',
   JOB_PHASE: 'job.phase', JOB_ERROR: 'job.error', NODE_ERROR: 'node.error', LOGS_TAIL: 'logs.tail', LOGS: 'logs', NODE_UPDATE: 'node.update',
-  NODE_POLICY: 'node.policy',
+  NODE_POLICY: 'node.policy', JOB_APPROVAL: 'job.approval',
   SCREEN_REQ: 'screen.req', SCREEN_RES: 'screen.res', SCREEN_INPUT: 'screen.input', SCREEN_FRAME: 'screen.frame', SCREEN_STATE: 'screen.state',
 };
 
@@ -49,7 +49,7 @@ export const DIRECTION = {
   'job.done': W, 'job.cancel': C, 'job.pause': C, 'job.resume': C, 'job.attach': C, wake: W, 'git.credential': C, 'agent.credential': B,
   'login.start': C, 'login.state': W, 'login.code': C, 'login.cancel': C, 'login.logout': C,
   'models.refresh': C, models: W, 'limits.refresh': C, limits: W,
-  'job.phase': W, 'job.error': W, 'node.error': W, 'logs.tail': C, logs: W, 'node.update': C, 'node.policy': C,
+  'job.phase': W, 'job.error': W, 'node.error': W, 'logs.tail': C, logs: W, 'node.update': C, 'node.policy': C, 'job.approval': C,
   'screen.req': C, 'screen.res': W, 'screen.input': C, 'screen.frame': W, 'screen.state': W,
 };
 // Frame types a peer sends only when the other side lists the feature (hello.features: the worker's, welcome.features:
@@ -58,7 +58,7 @@ export const DIRECTION = {
 // Feature 'policy' also covers the job.reject reason 'power'; feature 'cap' (no frame type of its own) is the job.reject
 // reason 'cap': the worker's local cap (cap.mjs) is full.
 export const FEATURES = { 'job.phase': 'phases', 'job.error': 'errors', 'node.error': 'errors', 'logs.tail': 'logs', logs: 'logs', 'node.update': 'update',
-  'node.policy': 'policy', 'agent.credential': 'creds',
+  'node.policy': 'policy', 'agent.credential': 'creds', 'job.approval': 'approvals',
   'screen.req': 'screen', 'screen.res': 'screen', 'screen.input': 'screen', 'screen.frame': 'screen', 'screen.state': 'screen' };
 export const FEATURE_LIST = [...new Set([...Object.values(FEATURES), 'cap'])];
 // Compute-only workers (BRIEF goal 11): the only frames a worker acts on, all from the head it dialled. Connection
@@ -70,12 +70,13 @@ export const WORKER_ACCEPTS = Object.freeze([
   MSG.WELCOME, MSG.HEARTBEAT, MSG.ACK, MSG.ERROR, MSG.BYE,
   MSG.JOB_OFFER, MSG.JOB_START, MSG.JOB_CANCEL, MSG.JOB_PAUSE, MSG.JOB_RESUME, MSG.JOB_ATTACH, MSG.GIT_CREDENTIAL, MSG.AGENT_CREDENTIAL,
   MSG.LOGIN_START, MSG.LOGIN_CODE, MSG.LOGIN_CANCEL, MSG.LOGIN_LOGOUT,
-  MSG.MODELS_REFRESH, MSG.LIMITS_REFRESH, MSG.LOGS_TAIL, MSG.NODE_UPDATE, MSG.NODE_POLICY, MSG.SCREEN_REQ, MSG.SCREEN_INPUT,
+  MSG.MODELS_REFRESH, MSG.LIMITS_REFRESH, MSG.LOGS_TAIL, MSG.NODE_UPDATE, MSG.NODE_POLICY, MSG.JOB_APPROVAL, MSG.SCREEN_REQ, MSG.SCREEN_INPUT,
 ]);
 
 export const AGENT_IDS = ['claude', 'codex'];
 export const OS_KINDS = ['linux', 'darwin'];
-export const EVENT_KINDS = ['text', 'tool', 'tool_result', 'result', 'limit', 'image', 'windows'];
+// audit / approval (feature 'approvals'): the approval gate's log lines and held calls on a browser run (gate.mjs).
+export const EVENT_KINDS = ['text', 'tool', 'tool_result', 'result', 'limit', 'image', 'windows', 'audit', 'approval'];
 // runAgentCli outcomes plus the worker's own: setup_failed (clone/worktree/install), lost (controller gave up on it).
 export const OUTCOMES = ['ok', 'rate_limited', 'auth_error', 'aborted', 'timeout', 'max_turns', 'error', 'empty_response', 'setup_failed', 'lost'];
 // power: its power policy pauses intake (on battery, running hot); sent only to a controller with feature 'policy'.
@@ -169,6 +170,9 @@ const S = {
   'node.update': { sha: 'sha?' },
   // The owner changed the node's power policy or max tasks (Machines view): the same shape as welcome.policy.
   'node.policy': { policy: 'obj' },
+  // The owner's answer to a held call of a job's approval gate (gate.mjs): decision approve | always | auto | deny | expired,
+  // reason (fed back to the agent on a denial). Sent again after the job re-attaches; a worker ignores answered ids.
+  'job.approval': { job: 'int', id: 'str', decision: 'str', reason: 'str?', by: 'str?' },
   // The owner's live view of a browser profile on the node (browser-live.mjs; AGENTIC.md → Browser). screen.req ops:
   // profiles, open (start streaming, url?), stop, nav (action go|back|forward|reload, url?), takeover (on: hold the
   // profile's task actions), sites (cookie domains, never values), clear; answered by screen.res {req, result|error}.

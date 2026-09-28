@@ -13,6 +13,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import { toolResultImages } from './media.mjs';
+import { APPROVAL_TTL_MS, ask, isBrowserRead } from './gate.mjs';
 import { toEpochSec } from './usage.mjs';
 import { runHelper, runHelperSync, helperOut, claudeHelperSpawn, killGroup, singleFlight } from './helpers.mjs';
 
@@ -182,18 +183,38 @@ function* claudeEvents(m) {
 // MCP servers every run gets (extensions.mjs mcpRun, set by the server): Claude → an --mcp-config file, codex → a config
 // profile layered on ~/.codex/config.toml (codex -p <name>); null for none. Files, so no secret is on a command line.
 // A run's own `mcp` option replaces it. A run's `browser` ({identity, outputDir}, browser.mjs) is handed to the source,
-// which adds the Playwright MCP on that identity's profile.
+// which adds the Playwright MCP on that identity's profile; its `gate` ({dir, task, patterns, ttlMs, hook}, gate.mjs) puts
+// that server and the connectors behind the approval gate's proxy.
 let mcpSource = () => null;
 export const setMcpSource = (fn) => { mcpSource = fn || (() => null); };
-const mcpOf = (agent, own, browser) => {
+const mcpOf = (agent, own, browser, gate) => {
   if (own !== undefined) return own;
-  try { return browser ? mcpSource(agent, { browser }) : mcpSource(agent); } catch (e) { console.error('[agents] mcp source failed', e); return null; }
+  try { return browser || gate ? mcpSource(agent, { ...(browser && { browser }), ...(gate && { gate }) }) : mcpSource(agent); } catch (e) { console.error('[agents] mcp source failed', e); return null; }
 };
+const holdMs = (gate) => (gate?.ttlMs || APPROVAL_TTL_MS) + 15 * 60_000;
+// The approval gate's permission hook for Claude runs: before the CLI dispatches a call to a gated MCP server (one that
+// gate-proxy.mjs runs for this run: <dir>/proxy-<server>.json), the proxy checks it through the gate dir, holding an
+// outbound call until the owner answers. A denial reaches the model as the owner's reason; an allowed call then runs
+// without being asked about again. Reads skip the round trip (the proxy still logs them).
+export function gateHooks(gate, signal) {
+  const pre = async (input) => {
+    const m = /^mcp__(.+?)__(.+)$/.exec(input?.tool_name || '');
+    if (!m || !fs.existsSync(path.join(gate.dir, `proxy-${m[1]}.json`)) || isBrowserRead(m[2])) return {};
+    const ans = await ask(gate.dir, 'checks', { tool: m[2], args: input.tool_input || {} }, { timeoutMs: holdMs(gate), signal });
+    if (ans?.allow) return {};
+    return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny',
+      permissionDecisionReason: ans?.reason || 'The approval gate did not answer, so this action was NOT performed.' } };
+  };
+  return { PreToolUse: [{ hooks: [pre], timeout: Math.ceil(holdMs(gate) / 1000) }] };
+}
 
 // Extra options: query (SDK override, for tests), bin, env, partial (stream deltas), onMessage (raw SDK messages).
 // effort: a level from CLAUDE.efforts (the SDK's `effort` option), or null for the model's default.
-async function runClaude({ model, prompt, cwd, resume, systemAppend, signal, onEvent, query = sdkQuery, bin, env = process.env, partial, onMessage, effort, mcp, browser }) {
-  mcp = mcpOf('claude', mcp, browser);
+// gate: the run's approval gate (gate.mjs); with gate.hook the SDK's PreToolUse permission hook asks it first (gateHooks).
+async function runClaude({ model, prompt, cwd, resume, systemAppend, signal, onEvent, query = sdkQuery, bin, env = process.env, partial, onMessage, effort, mcp, browser, gate }) {
+  mcp = mcpOf('claude', mcp, browser, gate);
+  // A held MCP call waits for the owner: the CLI must not time it out first.
+  if (gate) env = { ...env, MCP_TOOL_TIMEOUT: String(holdMs(gate)) };
   const ac = new AbortController();
   let aborted = false;
   const onAbort = () => { aborted = true; ac.abort(); };
@@ -206,6 +227,7 @@ async function runClaude({ model, prompt, cwd, resume, systemAppend, signal, onE
       options: {
         cwd, resume: resume || undefined, model: model || undefined, ...(effort && { effort }),
         ...(mcp && { extraArgs: { 'mcp-config': mcp } }),
+        ...(gate?.hook && { hooks: gateHooks(gate, ac.signal) }),
         pathToClaudeCodeExecutable: bin || CLAUDE.bin, env: stripEnv(env, CLAUDE.envFilter), abortController: ac,
         systemPrompt: systemAppend ? { type: 'preset', preset: 'claude_code', append: systemAppend } : { type: 'preset', preset: 'claude_code' },
         // The owner runs this on a disposable server and gave every agent full access (including
@@ -529,11 +551,11 @@ function* codexEvents(m, started = new Set()) {
 // append flag, so systemAppend is prepended to the prompt. effort: a level from CODEX.efforts, passed as
 // `-c model_reasoning_effort=<level>` (also on `exec resume`); null keeps the model's default.
 // images: local image paths attached to the prompt with -i (a chat's attached pictures; exec and exec resume both take it).
-async function runCodex({ model, prompt, cwd, resume, systemAppend, signal, onEvent, bin, env = process.env, autonomous = true, onMessage, codexHome, effort, mcp, images, browser }) {
+async function runCodex({ model, prompt, cwd, resume, systemAppend, signal, onEvent, bin, env = process.env, autonomous = true, onMessage, codexHome, effort, mcp, images, browser, gate }) {
   const res = { outcome: 'error', text: '', sessionId: resume || null, usage: {}, numTurns: 0, resetsAt: null, limitType: null, stderr: '', errorCode: null, windows: null };
   const startedAt = Date.now();
   // The MCP profile goes before `exec`: `exec resume` has no -p of its own.
-  const profile = mcpOf('codex', mcp, browser);
+  const profile = mcpOf('codex', mcp, browser, gate);
   const args = [...(profile ? ['-p', profile] : []), 'exec', ...(resume ? ['resume'] : []), '--json', '--skip-git-repo-check', '-c', 'forced_login_method="chatgpt"'];
   if (model) args.push('-m', model);
   if (effort) args.push('-c', `model_reasoning_effort=${effort}`);

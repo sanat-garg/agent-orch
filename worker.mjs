@@ -50,6 +50,7 @@ import { FOOTPRINT, applyLimit, capRejection, capTasks, capText, fmtCores, fmtGB
 import { createJobUsage, createWrappers, heldBy, probeLimiter } from './worker-cap.mjs';
 import { request as statusRequest, serveStatus, statusCli } from './worker-status.mjs';
 import { ensureBrowser, needsBrowser, normIdentity } from './browser.mjs';
+import { APPROVAL_TTL_MS, hostGate, patternsWith } from './gate.mjs';
 import { createLiveBrowsers, screenOp } from './browser-live.mjs';
 import { createExtensions } from './extensions.mjs';
 
@@ -757,6 +758,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
         return reason ? raw(MSG.JOB_REJECT, { job: msg.job, reason }) : raw(MSG.JOB_ACCEPT, { job: msg.job });
       }
       case MSG.JOB_START: return startJob(msg);
+      case MSG.JOB_APPROVAL: return jobs.get(msg.job)?.gate?.answer(msg);
       case MSG.JOB_CANCEL: return stopJob(msg.job, 'cancel', msg.reason);
       case MSG.JOB_PAUSE: return stopJob(msg.job, 'pause');
       case MSG.JOB_RESUME: return resumeJob(msg);
@@ -928,23 +930,31 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     job.state = 'running';
     setPhase(job, 'running');
     job.ac = new AbortController();
-    const kill = setTimeout(() => { job.stop = { kind: 'timeout' }; job.ac.abort(); }, (spec.timeouts.taskSec || 3 * 3600) * 1000);
+    // A browser run's calls go through the approval gate (gate.mjs); time held on the owner doesn't count to the timeout.
+    const gate = needsBrowser(spec) ? (job.gate = openGate(job)) : null;
+    const due = Date.now() + (spec.timeouts.taskSec || 3 * 3600) * 1000;
+    const fire = () => {
+      const left = due + (gate?.heldMs() || 0) - Date.now();
+      if (gate && (left > 0 || gate.pending())) { kill = setTimeout(fire, Math.max(60_000, left)); return; }
+      job.stop = { kind: 'timeout' }; job.ac.abort();
+    };
+    let kill = setTimeout(fire, due - Date.now());
     const wip = setInterval(() => pushWip(job).catch(() => {}), wipPushMs);
     let res;
     try {
       // The agent CLI runs through its wrapper: under the local cap, with its pid recorded for the usage sampler.
       const bin = wrappers.wrap(job.id, spec.agent, [AGENTS[spec.agent]?.bin || spec.agent]);
-      const run = needsBrowser(spec) ? { browser: { identity: normIdentity(spec.identity), outputDir: path.join(job.dir, '.agent-orch', 'shots') } } : null;
+      const run = needsBrowser(spec) ? { browser: { identity: normIdentity(spec.identity), outputDir: path.join(job.dir, '.agent-orch', 'shots') }, gate: gate.spec } : null;
       res = await runAgentCli({
         agent: spec.agent, model: spec.model || undefined, effort: spec.effort || undefined, prompt, cwd: job.dir, resume: resume || undefined, systemAppend: spec.systemAppend || undefined,
         autonomous: spec.autonomous ?? true, signal: job.ac.signal, onEvent: (e) => pushEvent(job, e), bin,
         env: jobEnv(job), onSpawn: ({ pid, pgid }) => registerPid({ pid, pgid, kind: 'task', id: job.id }),
-        ...(run && { mcp: ext.mcpRun(spec.agent, run) }),
+        ...(run && { mcp: ext.mcpRun(spec.agent, run), gate: gate.spec }),
       });
     } catch (e) {
       res = { outcome: 'error', text: `agent crashed: ${e?.message || e}` };
       jobError(job, 'agent_crash', res.text, { stack: e?.stack });
-    } finally { clearTimeout(kill); clearInterval(wip); }
+    } finally { clearTimeout(kill); clearInterval(wip); gate?.close(); job.gate = null; }
     if (res.sessionId) job.sessionId = res.sessionId;
     log(`job ${job.id} agent turn ended: ${res.outcome}`);
     if (await stopped(job)) return;
@@ -955,6 +965,43 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     if (job.stop?.kind === 'timeout') res.outcome = 'timeout';
     if (job.stop?.kind === 'cap') res = { ...res, outcome: 'aborted', text: job.stop.text };
     await finish(job, res);
+  }
+
+  // The approval gate of a browser job (gate.mjs): the proxy's held calls go to the head as `approval` events (after the
+  // screenshot as an `image` event, same sha256 id) and its log lines as `audit` events; the head's job.approval answers.
+  // Without a head that reads them (feature 'approvals'), held calls are denied at once.
+  function openGate(job) {
+    const dir = path.join(home, 'gate', `job-${job.id}`), g = job.spec.gate || {};
+    fs.rmSync(dir, { recursive: true, force: true });
+    const waiters = new Map(), sent = new Set();
+    let held = 0;
+    const image = (id) => {
+      if (!id || sent.has(id)) return;
+      sent.add(id);
+      try {
+        const data = fs.readFileSync(path.join(dir, 'shots', id)).toString('base64');
+        pushEvent(job, { k: 'image', tool: 'gate', mediaType: id.endsWith('.png') ? 'image/png' : id.endsWith('.webp') ? 'image/webp' : 'image/jpeg', data });
+      } catch {}
+    };
+    const stop = hostGate(dir, {
+      onRequest: (a) => {
+        if (!peer.has('approvals')) return { decision: 'deny', reason: 'the head runs an agent-orch too old to ask the owner, so outbound actions are refused' };
+        image(a.screenshot);
+        pushEvent(job, { k: 'approval', approval: a });
+        flushJob(job);
+        const at = Date.now();
+        return new Promise((resolve) => waiters.set(String(a.id), (ans) => { held += Date.now() - at; resolve(ans); }));
+      },
+      onAudit: (e) => { image(e.screenshot); pushEvent(job, { k: 'audit', entry: e }); },
+    });
+    const ttlMs = Number(g.ttlMs) > 0 ? Number(g.ttlMs) : APPROVAL_TTL_MS;
+    return {
+      spec: { dir, task: job.id, patterns: patternsWith(g.patterns), ttlMs, hook: false },
+      answer: (msg) => { const w = waiters.get(msg.id); if (!w) return; waiters.delete(msg.id); w({ decision: msg.decision, reason: msg.reason, by: msg.by }); },
+      pending: () => waiters.size,
+      heldMs: () => held,
+      close: () => { stop(); for (const w of waiters.values()) w({ decision: 'deny', reason: 'the run ended' }); waiters.clear(); fs.rm(dir, { recursive: true, force: true }, () => {}); },
+    };
   }
 
   // A pause/cancel that landed while the agent (or the check) ran: pause keeps the worktree, cancel drops it. A timeout or

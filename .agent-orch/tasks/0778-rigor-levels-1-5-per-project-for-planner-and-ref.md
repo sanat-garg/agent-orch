@@ -13,3 +13,7 @@ The owner finds agent-orch's task creation over-engineered ('meant to secure a n
 ## Done when
 
 `node --test test/rigor*.test.mjs` passes (prompts vary by level, no-audit rule at levels 1-2, migration to 3, default 2 for new, 5 levels with same-request examples)
+
+## Result — done (check passed) (2026-09-28 23:24)
+
+AGENT-ORCH-STATUS: done — Per-project rigor 1-5 now shapes planner, reflection and top-up prompts

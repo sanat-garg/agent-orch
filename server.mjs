@@ -9,7 +9,7 @@ import { execFile, spawn } from 'node:child_process';
 import net from 'node:net';
 import { WebSocketServer } from 'ws';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { createOrchestrator, parseJsonl, SHOT_HINT } from './orchestrator.mjs';
+import { createOrchestrator, parseJsonl, SHOT_HINT, rigorLevelsView } from './orchestrator.mjs';
 import { createGitHub } from './github.mjs';
 import { retireRuntime, chatIdle, whenIdle } from './runtimes.mjs';
 import { AGENTS, isAgent, agentEfforts, clampEffort, runAgentCli, clearLoginCache, isMissingSession, modelCatalog, claudeWindows, fetchLimits, agentVersion, readVersion, windowLabel, setMcpSource } from './agents.mjs';
@@ -2157,8 +2157,12 @@ async function handleRequest(req, res) {
     const r = orch.reorderProjects((await readBody(req)).ids);
     return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r);
   }
+  // Rigor levels 1-5 (#778) the owner picks per project ({rigor} in the project fields below), each with an example
+  // task for the same sample request.
+  if (p === '/api/orch/rigor-levels' && req.method === 'GET') return json(res, 200, rigorLevelsView());
+  // The project's fields (perpetual, autonomous, priority, mode, status, rigor, reflectDirection, removeRoute).
   const op = p.match(/^\/api\/orch\/project\/(\d+)$/);
-  if (op && req.method === 'POST') {
+  if (op && (req.method === 'POST' || req.method === 'PATCH')) {
     const r = orch.projectAction(Number(op[1]), await readBody(req));
     return json(res, r.error ? 400 : 200, r);
   }

@@ -185,6 +185,74 @@ While a task's agent is at its usage limit, it moves down the owner's fallback l
 reflection tasks, the project's list); with an empty list it waits for the reset.
 A block may contain only \`routes\` (with \`"tasks": []\`).`;
 
+// Rigor (#778, projects.rigor 1-5): how much process the planner and reflection put into the tasks they create. Each
+// level's `guidance` goes into the planner's turn prompt and the reflection prompt, `reflect` into the reflection's
+// priorities; `steps` sizes a reflection and `rapidCap` caps the Rapid top-up (lower rigor → fewer speculative tasks).
+// The examples (GET /api/orch/rigor-levels) all answer RIGOR_SAMPLE_REQUEST, so the owner sees the difference.
+export const RIGOR_SAMPLE_REQUEST = 'Add a contact form to the website';
+export const RIGOR_DEFAULT = 2;
+const NO_AUDIT = 'Do NOT queue AUDIT, audit, security, hardening or edge-case tasks, and no reviews, unless the owner explicitly asks for them.';
+export const RIGOR_LEVELS = [
+  { level: 1, name: 'Just make it work', summary: '1-2 broad tasks per request, checked by running the feature. No tests unless trivial.',
+    guidance: ['Split each request into 1-2 broad tasks, not many small ones; a task may cover a whole feature.',
+      '`done_when` is that the feature runs: the page loads, the command works, the thing shows up. No tests unless trivial.',
+      'No refactors, error-handling passes, audits or security work. ' + NO_AUDIT],
+    reflect: 'Only fix things that are visibly broken or that the owner asked for; otherwise queue nothing. ' + NO_AUDIT,
+    steps: '0–2', rapidCap: 2,
+    example: { title: 'Add a contact form to the website',
+      prompt: 'Add a Contact page (linked from the nav) with name, email and message fields. On submit, save the message and show "Thanks, we\'ll be in touch." Keep it simple.',
+      done_when: 'The contact page loads with the form, and submitting it shows the thanks message.' } },
+  { level: 2, name: 'Working product', summary: 'Small feature-sized tasks with one simple check each. Reflection polishes features and fixes obvious bugs.',
+    guidance: ['Split requests into small feature-sized tasks, each with ONE simple check: a smoke test or a single command.',
+      'Focus on user-visible features, obvious bugs and UX. Skip exhaustive tests, edge-case hunting and refactors.',
+      NO_AUDIT],
+    reflect: 'Prefer finishing and polishing the features the BRIEF asks for, obvious bugs and UX. ' + NO_AUDIT,
+    steps: '1–3', rapidCap: 4,
+    example: { title: 'Add a contact form page',
+      prompt: 'Add /contact with name, email and message fields and a nav link. POST /api/contact stores the message; the page then shows a thank-you note. Add one smoke test.',
+      done_when: '`node --test test/contact-smoke.test.mjs` passes (the page loads and a submit returns the thank-you note).' } },
+  { level: 3, name: 'Balanced', summary: 'Plus basic automated tests per feature and obvious edge cases. An occasional light review.',
+    guidance: ['Small, separately verifiable tasks. Each feature gets basic automated tests.',
+      'Cover the obvious edge cases: validation of required input, empty states, a clear error message.',
+      'An occasional light review is fine; no audit rounds or security hardening unless the owner asks.'],
+    reflect: 'Balance new features from the BRIEF with fixing bugs and filling obvious test gaps. At most one light review now and then; no audit rounds.',
+    steps: '1–5', rapidCap: 6,
+    example: { title: 'Add a contact form with validation and tests',
+      prompt: 'Add /contact (name, email, message) and POST /api/contact that stores the message. Validate required fields and the email format, showing inline errors; show a thank-you note on success. Add tests for a valid submit and for missing fields.',
+      done_when: '`npm test -- test/contact.test.mjs` passes (a valid submit is stored; a missing email or empty message is rejected with a message).' } },
+  { level: 4, name: 'Thorough', summary: 'Plus error handling, input validation, security basics, broader tests and small refactors.',
+    guidance: ['Small, separately verifiable tasks with broader tests (success, failure and edge cases).',
+      'Include error handling, server-side input validation and security basics (escaping, limits, auth checks) in the work itself.',
+      'Small refactors that keep the code healthy are welcome.'],
+    reflect: 'Besides features and bugs, look at reliability, error handling, security basics and test coverage; you may queue a focused audit of a risky area.',
+    steps: '1–5', rapidCap: Infinity,
+    example: { title: 'Add a validated, safe contact form',
+      prompt: 'Add /contact and POST /api/contact. Validate and length-limit every field on the server, escape output, rate-limit submits per IP, and handle a storage or mail failure with a friendly error. Test valid, invalid, oversized, HTML-injection and storage-failure cases.',
+      done_when: '`npm test -- test/contact.test.mjs` passes (valid, invalid, oversized, injection and failure cases).' } },
+  { level: 5, name: 'Enterprise', summary: 'Audit rounds, security hardening, strict verification, extensive tests and AUDIT ledgers.',
+    guidance: ['Very small, strictly verifiable tasks; every change carries extensive tests.',
+      'Harden security (CSRF, rate limits, abuse, secrets), error handling and observability as part of the work.',
+      'Run audit rounds on risky areas and keep AUDIT.md as the ledger of findings and fixes.'],
+    reflect: 'Include audit rounds, security hardening, reliability and test coverage alongside features; record findings in AUDIT.md.',
+    steps: '1–5', rapidCap: Infinity,
+    example: { title: 'Contact form: threat model, hardened endpoint, full tests',
+      prompt: 'Write the contact form\'s threat model in AUDIT.md, then add /contact and POST /api/contact with CSRF tokens, a spam honeypot, per-IP rate limits, strict validation and sanitisation, structured logs and graceful failures. Add unit, integration and end-to-end tests; a follow-up audit task reviews it.',
+      done_when: '`npm test` passes and `grep -q "Contact form" AUDIT.md` (threat model recorded, no open items).' } },
+];
+export const rigorOf = (project) => { const r = Number(project?.rigor); return Number.isInteger(r) && r >= 1 && r <= 5 ? r : RIGOR_DEFAULT; };
+export const rigorLevel = (project) => RIGOR_LEVELS[rigorOf(project) - 1];
+export const rigorLabel = (project) => { const l = rigorLevel(project); return `Rigor: ${l.level} · ${l.name}`; };
+// The public view (GET /api/orch/rigor-levels): what the owner picks from.
+export const rigorLevelsView = () => RIGOR_LEVELS.map(({ level, name, summary, example }) => ({ level, name, summary, example: { ...example } }));
+// The level's guidance block, shared by the planner turn and the reflection prompt.
+export function rigorGuidance(project) {
+  const l = rigorLevel(project);
+  return `${rigorLabel(project)} (the owner's setting for how much process this project's tasks carry; 1 = just make it work, 5 = enterprise).\n` +
+    l.guidance.map((g) => `- ${g}`).join('\n') + '\n' +
+    'Where this differs from the general task-sizing and checking rules, this rigor level wins. ' +
+    `For example, at this level "${RIGOR_SAMPLE_REQUEST}" becomes:\n  title: ${l.example.title}\n  done_when: ${l.example.done_when}\n`;
+}
+
 const PLANNER_SYSTEM = `You are the planning mind of an agent orchestrator (agent-orch) running on the owner's server.
 You talk with the owner, understand exactly what they want, and turn it into small, well-specified steps
 for autonomous Claude Code agents that run around the clock within the owner's plan usage limits.
@@ -204,6 +272,8 @@ How to behave:
   front, and you can add the next steps after these finish. Reply in one or two lines: why these steps,
   not what's in it — the owner sees the queued tasks as cards under your reply.
 - Tokens are precious: don't queue speculative busywork, and don't re-read things you already know.
+- The context's Rigor line (1-5, the owner's per-project setting) decides how many tasks, how many tests and how
+  much hardening a request gets: follow its guidance over the general sizing rules below.
 
 ${TASKS_FORMAT}`;
 
@@ -314,6 +384,7 @@ const hotFilesText = (rapid) => (rapid?.hotFiles?.length
 export function plannerTurnPrompt(project, rows, text, environment, rapid = null) {
   return `[agent-orch context] Project: ${project.name} at ${project.path}\n` +
     `Project priority: ${project.priority}/100 · mode: ${project.mode}\n` +
+    rigorGuidance(project) +
     `Now: ${nowText()} (use this to turn 'tomorrow', 'by Friday' into real deadlines)\n` +
     `${environment}\n` +
     (rapid && (rapid.workers?.free ?? rapid.free) > 0 ? `Rapid development mode: ${rapid.slots} slots, ${rapid.running} running, ${rapid.free} free.\n` +
@@ -408,6 +479,9 @@ export function pickReflectModel(pool, { usable = () => true, tried = [], random
 
 export function reflectPrompt(project, rows, journalTail, overage, limits, reason, failures, outcomes, environment, rapid = null) {
   const direction = String(project.reflect_direction || '').trim();
+  const level = rigorLevel(project), low = level.level <= 2;
+  // Rapid top-up respects the rigor: lower levels queue fewer speculative tasks than the free slots would take.
+  if (rapid) rapid = { ...rapid, requested: Math.min(rapid.requested, level.rapidCap) };
   const sections = [];
   const lines = [];
   for (const [type, label] of [['five_hour', '5h window'], ['seven_day', 'Weekly']]) {
@@ -424,12 +498,13 @@ export function reflectPrompt(project, rows, journalTail, overage, limits, reaso
     sections.push(`Rapid development mode: workers have ${w.slots} slots, ${w.running} running, ${rapid.ready} ready: queue about ${rapid.requested} more worker-runnable tasks.\n` + head +
       'The target is free worker slots plus a two-task buffer. Return this many independent tasks with declared `files`, split into small file-disjoint pieces (including their tests). ' +
       'No chains: a task with `after` waits for its prerequisites, so it does not count as ready and leaves a slot empty. ' +
-      'Spread them across bugs from AUDIT.md, UI-REVIEW.md items, tests for untested modules, ROADMAP.md next items, and BRIEF.md goals still open. ' +
+      (low ? 'Draw them from BRIEF.md features still open, visibly broken things and UX polish; queue fewer rather than speculative work. '
+        : 'Spread them across bugs from AUDIT.md, UI-REVIEW.md items, tests for untested modules, ROADMAP.md next items, and BRIEF.md goals still open. ') +
       'Avoid files already assigned to queued or running work. Add integrator tasks only where parts must combine, with `after` for those true prerequisites.\n' + hotFilesText(rapid));
   }
   if (lines.length && !rapid) {
     sections.push(`Capacity right now:\n${lines.join('\n')}\nSize your queue to this: if much of the 5h window will expire ` +
-      'unused, queue enough valuable work (up to 5 steps) to use it; if weekly capacity is tight, queue only the ' +
+      `unused, queue enough valuable work (up to ${level.steps.split('–')[1]} steps) to use it; ` + 'if weekly capacity is tight, queue only the ' +
       'highest-value steps, or none.\n');
   }
   if (failures.length) {
@@ -467,14 +542,16 @@ general order below (new features or scope included, if that's what it asks for)
 broken (failing build/tests, bugs that block the owner) first, and if nothing valuable remains in this direction,
 say so and queue fewer steps rather than stretching it.
 
-` : ''}Ask yourself: what else should be done? Consider, in rough order of value: broken things (failing
-build/tests, bugs), gaps versus the brief's goals and definition of done, user-facing quality and UX,
-reliability and error handling, security, performance, test coverage, documentation, and code health.
+` : ''}${rigorGuidance(project)}
+Ask yourself: what else should be done? Consider, in rough order of value: ${low
+    ? "broken things (visible bugs, a failing build), gaps versus the brief's goals and definition of done, and user-facing\nfeatures, quality and UX."
+    : "broken things (failing\nbuild/tests, bugs), gaps versus the brief's goals and definition of done, user-facing quality and UX,\nreliability and error handling, security, performance, test coverage, documentation, and code health."}
+Rigor note: ${level.reflect}
 
 Then:
 1. Rewrite .agent-orch/ROADMAP.md: a brief honest assessment, the prioritized next steps, and later ideas.
-2. Queue ${rapid ? `the requested ${rapid.requested} tasks` : 'the next 1–5 steps'} as small, separately verifiable tasks (\`after\` only for true prerequisites; \`files\` for each). Prefer
-   finishing and hardening what exists over new scope unless the brief${direction ? ' or the direction above' : ''} asks for it. If the project truly
+2. Queue ${rapid ? `the requested ${rapid.requested} tasks` : `the next ${level.steps} steps`} as ${level.level === 1 ? 'broad' : 'small'}, separately verifiable tasks (\`after\` only for true prerequisites; \`files\` for each). Prefer
+   finishing and ${low ? 'polishing' : 'hardening'} what exists over new scope unless the brief${direction ? ' or the direction above' : ''} asks for it. If the project truly
    meets its brief and nothing valuable remains, return an empty task list rather than inventing busywork.
    Unless something is genuinely broken or time-bound, this upkeep work is \`background\` urgency.
 
@@ -1109,6 +1186,12 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const del = db.prepare("DELETE FROM kv WHERE key LIKE '%:' || ? OR key LIKE '%:' || ? || ':%'");
     for (const a of ['antigravity', 'opencode', 'kiro', 'copilot']) del.run(a, a);
     db.exec("INSERT INTO kv(key,value) VALUES('removed_agents_kv_migrated','1')");
+  }
+  // projects.rigor (#778): 1-5, how much process the planner and reflection put into tasks (RIGOR_LEVELS). Projects that
+  // predate it keep today's balance (3); new ones start at 2 (Working product) from the column default.
+  if (!db.prepare('PRAGMA table_info(projects)').all().some((c) => c.name === 'rigor')) {
+    db.exec('ALTER TABLE projects ADD COLUMN rigor INTEGER NOT NULL DEFAULT 2');
+    db.exec('UPDATE projects SET rigor=3');
   }
   // projects.position: the owner's sidebar order (1 = top = highest priority; see reorderProjects). Existing rows
   // start in the order the scheduler already ranked them: priority, then age.
@@ -4181,6 +4264,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if ('priority' in fields) allowed.priority = clamp(fields.priority, 0, 100, p.priority);
     if ('mode' in fields && ['build', 'maintain'].includes(fields.mode)) allowed.mode = fields.mode;
     if ('status' in fields && ['active', 'paused'].includes(fields.status)) allowed.status = fields.status;
+    if ('rigor' in fields) {
+      const r = Number(fields.rigor);
+      if (!Number.isInteger(r) || r < 1 || r > 5) return { error: 'rigor must be an integer from 1 to 5' };
+      allowed.rigor = r;
+    }
     if (allowed.perpetual === 1 && !p.perpetual) allowed.next_reflect_at = 0;
     if ('reflectDirection' in fields) {
       const d = String(fields.reflectDirection ?? '').trim().slice(0, REFLECT_DIRECTION_MAX) || null;
@@ -4399,7 +4487,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       SUM(status='failed') AS failed FROM tasks WHERE project_id=:p AND kind!='plan'`, { p: p.id }) || {};
     return {
       id: p.id, name: p.name, path: p.path, convo_id: p.convo_id, status: p.status, priority: p.priority, position: p.position ?? null, mode: p.mode,
-      perpetual: !!p.perpetual, autonomous: !!p.autonomous, next_reflect_at: p.next_reflect_at, ready: !!projectReady(p.path),
+      perpetual: !!p.perpetual, autonomous: !!p.autonomous, rigor: rigorOf(p), next_reflect_at: p.next_reflect_at, ready: !!projectReady(p.path),
       counts: { queued: c.queued || 0, running: c.running || 0, done: c.done || 0, failed: c.failed || 0 },
       reflect_fallbacks: parseFallbacks(p.reflect_fallbacks), reflect_direction: p.reflect_direction || null, reflect: reflectFor(p),
       // What a reflect task starts on when Settings names no reflection model (a 'reflect' route, else the chat's model).

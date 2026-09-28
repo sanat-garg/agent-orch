@@ -9,7 +9,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { reflectPrompt } from '../orchestrator.mjs';
 
-const project = { name: 'Example', path: '/example', priority: 50, mode: 'build' };
+const project = { name: 'Example', path: '/example', priority: 50, mode: 'build', rigor: 5 }; // rigor 5: the top-up is uncapped
 const prompt = (rapid) => reflectPrompt(project, [], '', false, [], '', [], { done: 0, failed: 0 }, '', rapid);
 
 async function scenario(body) {
@@ -29,7 +29,7 @@ async function scenario(body) {
         maxSlots: 11, inventory: { cores: 14, agents: [] }, resources: { memAvailable: 40 * 2 ** 30, at: Date.now() } }], onMessage() {}, version: () => 1 });
       const db = new DatabaseSync(dataDir + '/orchestrator/agent-orch.db');
       const t = Date.now()/1000;
-      const pid = Number(db.prepare("INSERT INTO projects(path,name,status,perpetual,next_reflect_at,created_at) VALUES(?,'Example','active',1,?,0)").run(root,t+3600).lastInsertRowid);
+      const pid = Number(db.prepare("INSERT INTO projects(path,name,status,perpetual,next_reflect_at,rigor,created_at) VALUES(?,'Example','active',1,?,5,0)").run(root,t+3600).lastInsertRowid);
       function task(title, status='queued', { integrates=null, after=null, node=null } = {}) {
         return Number(db.prepare('INSERT INTO tasks(project_id,title,prompt,status,kind,depends_on,integrates,node_id,created_at) VALUES(?,?,?,?,?,?,?,?,?)')
           .run(pid,title,title,status,'work',after,integrates,node,t-1000).lastInsertRowid);

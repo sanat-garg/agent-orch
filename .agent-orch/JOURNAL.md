@@ -1647,3 +1647,6 @@ downloads preflight via check=1, failures toast instead of saving
 ## 2026-09-28 23:24 — #779 Settings: Rigor slider (5 levels) with an example prompt for each [done (check passed)]
 
 Rigor slider with example card saves per project
+## 2026-09-28 23:24 — #778 Rigor levels 1-5 per project for planner and reflection prompts [done (check passed)]
+
+Per-project rigor 1-5 now shapes planner, reflection and top-up prompts

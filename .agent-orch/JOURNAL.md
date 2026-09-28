@@ -727,3 +727,7 @@ AGENTIC.md covers connectors, browser, safety, task shape and rollout
 ## 2026-09-28 02:35 — #256 Browser capability: Playwright MCP with persistent profiles for agent runs [done (check passed)]
 
 browser tasks get Playwright MCP; persistent-profile cookie test passes
+
+## 2026-09-28 03:11 — #249 UI-REVIEW #1: top bar keeps its 56px content row below the iPhone safe-area inset [done (check passed)]
+
+Top bar height includes safe-area inset; static tests pass

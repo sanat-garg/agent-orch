@@ -13,3 +13,7 @@ Apply the finding UI-REVIEW #1 from .agent-orch/UI-REVIEW.md. The finished chang
 ## Done when
 
 `grep -c 'calc(56px + env(safe-area-inset-top' public/app.css` prints 2 and `node --test test/ui-static.test.mjs` passes
+
+## Result — done (check passed) (2026-09-28 03:11)
+
+AGENT-ORCH-STATUS: done — Top bar height includes safe-area inset; static tests pass

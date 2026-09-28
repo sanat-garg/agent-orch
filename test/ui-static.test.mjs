@@ -175,3 +175,12 @@ test('server details: Top processes sits in the metric grid right after the six 
   assert.match(appCss, /@media \(min-width: 801px\) \{\n\s*\.m-grid > \.m-top \{ grid-column: span 2; \}/);
   assert.match(appCss, /\.m-top-scroll \{[^}]*contain: size;/, 'the list scrolls inside the row instead of stretching it');
 });
+
+test('top bar keeps its 56px content row below the iPhone safe-area inset (UI-REVIEW #1)', () => {
+  const topbars = appCss.match(/\.topbar \{[^}]*\}/g);
+  assert.equal(topbars.length, 2, 'base rule and the max-width: 800px rule');
+  for (const r of topbars) {
+    assert.match(r, /height: calc\(56px \+ env\(safe-area-inset-top, 0px\)\)/);
+    assert.match(r, /padding-top: env\(safe-area-inset-top\)/);
+  }
+});

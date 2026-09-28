@@ -179,7 +179,7 @@ code, pre, kbd { font-family: var(--mono); }
 .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .topbar {
   display: flex; align-items: center; gap: 12px;
-  height: 56px; padding: 0 16px; padding-top: env(safe-area-inset-top);
+  height: calc(56px + env(safe-area-inset-top, 0px)); padding: 0 16px; padding-top: env(safe-area-inset-top);
   border-bottom: 1px solid var(--border);
   flex: none;
 }
@@ -1303,7 +1303,7 @@ details.dr-more[open] > summary { margin-bottom: 12px; }
   }
   .app.side-open .sidebar { transform: none; }
   .app.side-open .scrim { display: block; position: fixed; inset: 0; z-index: 35; background: rgba(0,0,0,.4); }
-  .topbar { padding: 0 8px; gap: 6px; padding-top: env(safe-area-inset-top); }
+  .topbar { height: calc(56px + env(safe-area-inset-top, 0px)); padding: 0 8px; gap: 6px; padding-top: env(safe-area-inset-top); }
   .cwd { display: none; }
   .seg button { padding: 0 10px; }
   .messages, .working { padding: 0 14px; }

@@ -1016,3 +1016,7 @@ Screen prompt outcome now comes from last-line status marker
 ## 2026-09-28 12:40 — #358 Files tab ui: search inside files with GET /api/files/grep and a Names | Contents switch [done (check passed)]
 
 Files tab can now search inside files in Contents mode
+
+## 2026-09-28 12:40 — #355 AUDIT ledger: mark round 7 #53, #58, #62, #64, #65 and #66 with what landed and what still waits [done (check passed)]
+
+AUDIT round 7 #53/#58/#62/#64/#65/#66 marked, verified against code

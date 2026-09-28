@@ -715,6 +715,7 @@ matches them (verified). The sweep deletes nothing when git can't list the main 
 kills the check's process group and keeps only the output's tail.
 
 ### 53. [low] A VAPID key file that fails to load is replaced silently; a bad one stops the server from booting; failing devices never surface (push.mjs:59-68, :120-123; server.mjs:729)
+- **Fixed** (task #351, 32b8849): `loadVapid` makes a key pair only on ENOENT; any other read error, bad JSON or a bad PEM leaves the file alone and returns a push that is off (`disabled` holds the reason) instead of throwing; `checkSub` trial-runs `computeSecret` on p256dh, and the JWT `sub` is an https URL (default `https://agent-orch.local`); test/push.test.mjs. Still open: server.mjs doesn't surface `push.disabled` or a device's last error in Settings.
 - **What:** `readJson` returns null for any error, so an unreadable `push-vapid.json` (EACCES after a restore or a
   copy made as root, or EMFILE) counts as missing. A new key pair is then written over the old one, and every existing
   subscription was made for the old `applicationServerKey`. Push services refuse those sends with 403 (VAPID key
@@ -775,6 +776,7 @@ kills the check's process group and keeps only the output's tail.
   owner re-send.
 
 ### 58. [low] `browserTaskStatus` calls successes failed and failures done (browser-task.mjs:9-14; orchestrator.mjs:3202-3206)
+- **Fixed (module half)** (task #353, 2e647c1): `browserTaskStatus` trusts the `AGENT-ORCH-STATUS: done|failed` marker (last line first) that `BROWSER_TASK_SYSTEM` now asks for, and without one judges only the final paragraph with quoted page text ignored; test/browser-task.test.mjs. Still waits for orchestrator.mjs: `finishWork` sets the status directly instead of routing `failed` through `fail()` (no push), and there is no Unclear state for a reply without a marker.
 - **What:** Any "I couldn't / can't / was unable to" anywhere in the reply means `failed`. Any reply without one means
   `done`.
 - **Repro (verified):** "I couldn't find a cheaper fare, so I booked the 9:40 flight as you asked." → failed. "Posted the
@@ -830,6 +832,7 @@ kills the check's process group and keeps only the output's tail.
   have approvals keep a reference list the GC reads.
 
 ### 62. [low] A symlinked worktrees root makes a reused worktree get deleted with its uncommitted work, and the task can never start again (worktrees.mjs:47-60, :86-90, :168-183)
+- **Fixed** (task #352, 0b747a6): worktrees.mjs `real()` realpaths `worktreesRoot` and every path from `git worktree list`, so a symlinked root still matches git's list and a reused worktree is never deleted; test/worktree.test.mjs.
 - **What:** `git worktree add` records the real path. `worktreePath` joins `dirname(realpath(top))` with
   `.agent-orch-worktrees` without resolving that last part, so if the directory is a symlink (the owner moved it to a
   bigger disk) no listed worktree ever matches. `ensureWorktree` then sees "not listed", `registered()` doesn't
@@ -850,6 +853,7 @@ kills the check's process group and keeps only the output's tail.
   the `job.cache` check), and sweep `browser-tasks/` at boot for tasks that aren't live.
 
 ### 64. [med] Only the last command of a multi-line check block, or of a `;` snippet, decides pass or fail (taskrun.mjs:23-24, :31, :44)
+- **Fixed** (task #349, fddef42): `extractCommand` checks each line of a fenced block and joins them with ` && ` (`joinAll`); `checkCommand` splits a snippet on its one bare `;` and joins the parts with `&&`, so every part must pass; test/verify.test.mjs.
 - **What:** A fenced block is passed to `bash -c` whole. Newlines aren't counted as separators (only `;` and `&&` are),
   and bash returns the last command's status. A single snippet may hold one `;`, so the multi-snippet join wraps it as
   `{ a; b; }`, whose status is `b`'s alone.
@@ -862,6 +866,7 @@ kills the check's process group and keeps only the output's tail.
   and join a `;` snippet's parts with `&&` too (a grep "prints nothing" suffix is the one intended `;`).
 
 ### 65. [med] A check that exits 127 with "command not found" counts as passing, and file names in backticks become commands (orchestrator.mjs:3237-3243; taskrun.mjs:15, :18)
+- **Fixed (extractor half)** (task #350, 04979e4): `RUNNER` needs a word boundary (`node_modules`, `nodes.json`, `go.mod`, `yarn.lock` aren't commands) and `PATH_LIKE` skips file-name snippets such as `./README.md`; test/verify.test.mjs. Still waits for orchestrator.mjs: `finishWork` still accepts any 127 "command not found" as "check unavailable" (the first-word-absent-from-PATH rule isn't there).
 - **What:** 127 with "command not found" means "program missing on this machine", and the task is accepted unverified.
   But the program is often the project's own. An npm script that calls a missing local binary exits 127 (`sh: jest:
   command not found`). And `looksLikeCommand` treats any snippet that starts with a runner name as a command, word
@@ -876,6 +881,7 @@ kills the check's process group and keeps only the output's tail.
   absent from PATH (`command -v`) before the check runs, never when a script inside it is missing.
 
 ### 66. [med] The Done-when filter drops real checks silently and still lets dangerous ones through (taskrun.mjs:17-18, :33, :43-45)
+- **Fixed (extractor half)** (task #350, 04979e4): quoted `>` no longer refuses a check, `2>&1`/`2>/dev/null`, up to three `&&`, env prefixes and a leading `cd <dir> &&` are accepted; #335 (3901b06) refuses `$(…)` even inside double quotes; test/verify.test.mjs. Still waits for orchestrator.mjs: a refused snippet still leaves `extractCommand` null and the task is merged as a plain "done" instead of failing with "Done-when check was refused".
 - **What:** A refused snippet throws away the whole check. The task then runs no check at all and is merged with a
   plain "done". Things that are refused: `>` anywhere, including `=>` inside a quoted grep pattern and `2>&1`; a third
   `&&`; env prefixes (`CI=1 npm test`) and `cd web && …` (not command-like, so a lone snippet leaves no check). The

@@ -1002,6 +1002,12 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     db.prepare("INSERT OR REPLACE INTO kv(key,value) VALUES('parallel_settings', ?)").run(JSON.stringify(s));
     db.exec("INSERT INTO kv(key,value) VALUES('parallel_cap_migrated','1')");
   }
+  // Once: drop kv rows (planner sessions, limit streaks) left by the agents removed in goal 10.
+  if (!db.prepare("SELECT 1 FROM kv WHERE key='removed_agents_kv_migrated'").get()) {
+    const del = db.prepare("DELETE FROM kv WHERE key LIKE '%:' || ? OR key LIKE '%:' || ? || ':%'");
+    for (const a of ['antigravity', 'opencode', 'kiro', 'copilot']) del.run(a, a);
+    db.exec("INSERT INTO kv(key,value) VALUES('removed_agents_kv_migrated','1')");
+  }
   // projects.position: the owner's sidebar order (1 = top = highest priority; see reorderProjects). Existing rows
   // start in the order the scheduler already ranked them: priority, then age.
   if (!db.prepare('PRAGMA table_info(projects)').all().some((c) => c.name === 'position')) {

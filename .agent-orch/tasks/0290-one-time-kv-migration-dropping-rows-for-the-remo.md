@@ -13,3 +13,7 @@ The orchestrator kv table still holds rows for agents removed in goal 10 of BRIE
 ## Done when
 
 `grep -q 'removed_agents_kv_migrated' orchestrator.mjs` and `npm test -- test/kv-migrate.test.mjs`
+
+## Result — done (check passed) (2026-09-28 08:41)
+
+AGENT-ORCH-STATUS: done — boot migration drops removed-agent kv rows; test passes

@@ -865,3 +865,7 @@ Round 2 HIG review added: rows 18–35, 30 screenshots
 ## 2026-09-28 08:40 — #289 Retention GC: prune old run logs and unreferenced media at boot and daily [done (check passed)]
 
 retention GC prunes old run logs and unreferenced media
+
+## 2026-09-28 08:41 — #290 One-time kv migration dropping rows for the removed agents antigravity, opencode, kiro and copilot [done (check passed)]
+
+boot migration drops removed-agent kv rows; test passes

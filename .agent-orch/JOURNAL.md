@@ -1514,6 +1514,13 @@ Usage bars show pace markers; usage charts show dashed pace diagonals
 ## 2026-09-28 18:15 — #480 Machines window: a wide modal titled 'Machines', head KPIs only on click [done (check passed)]
 
 Machines is a wide modal with four cards in one row
+## 2026-09-28 18:15 — #484 Files tab: one Back/Parent button, drag-and-drop upload and an Upload button [done (check passed)]
+
+Files has one ‹ parent button, plus upload by menu and drag-and-drop
+
+## 2026-09-28 18:16 — #489 Integrate #484: Files tab: one Back/Parent button, drag-and-drop upload and an Upload button [done (check passed)]
+
+CONTEXT.md conflict merged; upload and nav tests pass
 
 ## 2026-09-28 18:15 — #488 Integrate #481: Simpler Settings: one sound switch, no About section [done (check passed)]
 
@@ -1525,3 +1532,7 @@ app.css conflict resolved, keeping phase and pace colours; tests pass
 ## 2026-09-28 18:16 — #486 Skills: show the synced skills and make importing new ones simple [done (check passed)]
 
 synced skills shown read-only; one-step Add skill from GitHub/zip
+
+## 2026-09-28 18:17 — #490 Integrate #484: Files tab: one Back/Parent button, drag-and-drop upload and an Upload button [done (check passed)]
+
+CONTEXT.md conflict resolved; upload tests pass

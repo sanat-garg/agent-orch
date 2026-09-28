@@ -125,14 +125,14 @@ test('opens at the project root, folders first; the path bar, Enter, Backspace, 
   await page.click('#fxPath .fx-crumb:has-text("proj")');
   await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 3);
   assert.deepEqual(await names(page), ['docs', 'src', 'a.zip', 'README.md']);
-  await page.click('#fxBack');
+  await page.keyboard.press('Alt+ArrowLeft');
   await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 5);
   await page.keyboard.press('Backspace');
   await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 4);
   assert.equal(await page.getAttribute(rowSel('lib'), 'aria-selected'), 'true', 'the folder backed out of stays selected');
-  await page.click('#fxBack');
+  await page.keyboard.press('Alt+ArrowLeft');
   await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 5);
-  await page.click('#fxFwd');
+  await page.keyboard.press('Alt+ArrowRight');
   await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 4);
   assert.deepEqual(await crumbs(page), ['/', 'w', 'proj', 'src']);
   await page.keyboard.press('Alt+ArrowUp');

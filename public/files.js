@@ -1,10 +1,10 @@
 'use strict';
 // ---------- Files: a Finder-style browser of the whole disk, opening on the open chat's project (server: files.mjs) ----------
 // Opens at the project's root (or the last folder, remembered per project for this page load only). Paths are absolute: the
-// path bar runs from '/', ↑ Parent (⌥↑, Backspace) climbs to '/', Places jumps to Project, Home, / and /tmp, and Go to folder
+// path bar runs from '/', ‹ Parent (⌥↑, Backspace) climbs to '/', Places jumps to Project, Home, / and /tmp, and Go to folder
 // (⌘L) takes a typed absolute, ~ or relative path with completion from the listings. Protected entries (secrets) show a lock
 // and never open; a read-only location shows a tag and disables the menu's write actions. Icon and list views (list folders
-// open in place with disclosure triangles), back/forward, a name filter,
+// open in place with disclosure triangles), back/forward (⌥← ⌥→, ⌘[ ⌘]; no buttons), a name filter,
 // hidden files on request (⌘⇧.), project-wide search by name or inside files (Enter in the search field; Names | Contents), and Quick Look (Space or double-click) for text, Markdown and images.
 // The Changed view lists the files that differ from git HEAD with +/− counts; Quick Look shows their diff.
 // Ask in chat (Quick Look's header, a Contents hit's trailing button, Shift+Enter on a row) puts `path[:line]` into the composer. Loaded after
@@ -27,7 +27,8 @@ const FX = {
   root: null, clip: null, menu: null, press: 0, // root: the project key; clip: {mode: 'copy'|'cut', paths, root}
   proj: null, places: null, last: new Map(), restored: false, // proj: the project's real path; last: root → folder (this page load)
   goto: { cache: new Map(), opts: [], i: -1, seq: 0 }, // Go to folder's suggestions
-  climbed: false, // the selection is only the folder ↑ Parent came out of: Backspace climbs on instead of deleting it
+  climbed: false, // the selection is only the folder ‹ Parent came out of: Backspace climbs on instead of deleting it
+  upl: null, uplFrame: 0, conflict: null, // the running upload batch (fxUpload) and its Replace / Keep both / Skip question
   edit: null, // a name being typed: {kind: 'rename', rel, value} | {kind: 'new', type: 'file'|'dir', dir, value}
 };
 const FX_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
@@ -112,14 +113,14 @@ function fxBuild() {
   const v = $('filesView');
   v.innerHTML = `
     <div class="fx-bar">
-      <div class="fx-nav" role="group" aria-label="History">
-        <button type="button" class="icon-btn" id="fxBack" aria-label="Back" title="Back (⌘[)"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-        <button type="button" class="icon-btn" id="fxFwd" aria-label="Forward" title="Forward (⌘])"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-        <button type="button" class="icon-btn fx-up" id="fxUp" aria-label="Parent folder" title="Parent folder (⌥↑)"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path d="M12 19V6M6 11.5l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="fx-up-l">Parent</span></button>
+      <div class="fx-nav">
+        <button type="button" class="icon-btn fx-up" id="fxUp" aria-label="Parent folder" title="Parent folder (⌥↑)"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
       </div>
       <h2 class="fx-title" id="fxTitle">Files</h2>
       <span class="fx-ro" id="fxRO" title="${FX_RO}" hidden>Read-only</span>
       <div class="fx-tools">
+        <button type="button" class="btn small fx-places" id="fxUpload" aria-haspopup="menu" title="Upload files or a folder here">Upload<svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><path d="M2.5 4.5l3.5 3.5 3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <input type="file" id="fxUpFiles" multiple hidden><input type="file" id="fxUpDir" webkitdirectory multiple hidden>
         <button type="button" class="btn small fx-places" id="fxPlaces" aria-haspopup="menu" title="Places and Go to folder (${fxKeys('L')})">Places<svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><path d="M2.5 4.5l3.5 3.5 3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         <div class="fx-views seg-sm" role="radiogroup" aria-label="View as">
           <button type="button" role="radio" data-fxview="icons" aria-label="Icons" title="as Icons">${ICON_GRID}</button>
@@ -149,10 +150,20 @@ function fxBuild() {
     </form>
     <div class="fx-main" id="fxMain"></div>
     <div class="fx-busy" id="fxBusy" role="status" hidden><span class="fx-prog" aria-hidden="true"></span><span id="fxBusyText"></span></div>
+    <div class="fx-upl" id="fxUpl" role="region" aria-label="Uploads" hidden>
+      <div class="fx-upl-head"><span id="fxUplText" role="status"></span><span class="fx-upl-bar" aria-hidden="true"><i id="fxUplBar"></i></span><button type="button" class="btn small" id="fxUplX">Cancel</button></div>
+      <div class="fx-upl-list" id="fxUplList"></div>
+    </div>
+    <div class="fx-drop" id="fxDrop" aria-hidden="true" hidden><span id="fxDropText"></span></div>
     <div class="fx-path" id="fxPath"></div>`;
-  $('fxBack').onclick = () => fxHistory(-1);
-  $('fxFwd').onclick = () => fxHistory(1);
   $('fxUp').onclick = () => fxUp();
+  $('fxUpload').onclick = () => { const k = $('fxUpload').getBoundingClientRect(); fxUploadMenu(k.left, k.bottom + 4); };
+  for (const id of ['fxUpFiles', 'fxUpDir']) $(id).addEventListener('change', (e) => {
+    fxUpload([...e.target.files].map((file) => ({ file, path: file.webkitRelativePath || file.name })), FX.path);
+    e.target.value = '';
+  });
+  $('fxUplX').onclick = () => fxUploadCancel();
+  fxDropWire($('fxMain'));
   $('fxPlaces').onclick = () => { const k = $('fxPlaces').getBoundingClientRect(); fxPlacesOpen(k.left, k.bottom + 4); };
   $('fxGotoBar').onsubmit = (e) => { e.preventDefault(); fxGotoGo(); };
   $('fxGotoX').onclick = () => fxGotoClose(true);
@@ -191,7 +202,9 @@ function fxBuild() {
   });
   v.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === '.') { e.preventDefault(); fxToggleHidden(); }
-    else if ((e.metaKey || e.ctrlKey) && (e.key === '[' || e.key === ']')) { e.preventDefault(); fxHistory(e.key === '[' ? -1 : 1); }
+    else if (((e.metaKey || e.ctrlKey) && (e.key === '[' || e.key === ']')) || (e.altKey && !e.target.closest('input') && (e.key === 'ArrowLeft' || e.key === 'ArrowRight'))) {
+      e.preventDefault(); fxHistory(e.key === '[' || e.key === 'ArrowLeft' ? -1 : 1);
+    }
   });
   // ⌘L / Ctrl+L: Go to folder, wherever the focus is while Files is showing.
   document.addEventListener('keydown', (e) => {
@@ -342,10 +355,10 @@ function fxSorted(entries) {
 function fxRender() {
   if (!FX.built) return;
   const main = $('fxMain'), d = FX.data;
-  $('fxBack').disabled = !FX.back.length;
-  $('fxFwd').disabled = !FX.fwd.length;
   $('fxUp').disabled = !fxUpPath() || FX.view === 'changed';
   $('fxRO').hidden = !fxReadOnly();
+  $('fxUpload').disabled = !FX.data || fxFlat() || fxReadOnly();
+  $('fxUpload').title = fxReadOnly() ? FX_RO : 'Upload files or a folder here';
   $('fxHidden').setAttribute('aria-pressed', String(FX.hidden));
   $('filesView').querySelectorAll('[data-fxview]').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.fxview === FX.view)));
   $('filesView').querySelectorAll('[data-fxmode]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.fxmode === FX.mode)));
@@ -362,7 +375,7 @@ function fxRender() {
   if (!d) {
     FX.rows = [];
     if (!FX.err) main.append(el('div', 'fx-loading', 'Loading…'));
-    else if (/Permission denied/i.test(FX.err)) main.append(fxEmpty('Permission denied', "agent-orch's user isn't allowed to open this folder. ↑ Parent or Places take you elsewhere.", 'fx-denied'));
+    else if (/Permission denied/i.test(FX.err)) main.append(fxEmpty('Permission denied', "agent-orch's user isn't allowed to open this folder. ‹ Parent or Places take you elsewhere.", 'fx-denied'));
     else main.append(fxEmpty("Couldn't open this folder", FX.err));
     if (FX.path.startsWith('/')) fxPathBar(); else $('fxPath').textContent = ''; // the path bar still climbs out
     return;
@@ -720,7 +733,7 @@ function fxOpen(r) {
   else fxPreview(r);
 }
 function fxKey(e) {
-  if (e.target.closest('input')) return;
+  if (e.target.closest('input') || (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight'))) return; // ⌥←/⌥→: history (fxBuild)
   const i = FX.rows.findIndex((r) => r.rel === FX.sel), cur = FX.rows[i];
   const cols = () => {
     if (FX.view !== 'icons') return 1;
@@ -1031,7 +1044,7 @@ function fxMenuShow(items, label, x, y, note = '') {
   m.style.left = `${Math.max(8, Math.min(x, innerWidth - w - 8))}px`;
   m.style.top = `${Math.max(8, y + h > innerHeight - 8 ? Math.min(y - h, innerHeight - h - 8) : y)}px`;
   const close = () => fxMenuClose();
-  const outside = (e) => { if (!m.contains(e.target) && !e.target.closest?.('#fxPlaces')) fxMenuClose(); }; // Places toggles its own
+  const outside = (e) => { if (!m.contains(e.target) && !e.target.closest?.('#fxPlaces, #fxUpload')) fxMenuClose(); }; // they toggle their own
   FX.menu = { el: m, close, outside };
   document.addEventListener('pointerdown', outside, true);
   window.addEventListener('resize', close);
@@ -1050,6 +1063,223 @@ function fxPlacesOpen(x, y) {
   ], 'Places', x, y);
   m.dataset.places = '1';
   m.querySelectorAll('[data-act="place"]').forEach((b, i) => { if (places[i].path === FX.path) b.setAttribute('aria-current', 'location'); });
+}
+
+// ----- upload: the toolbar's Upload menu (Files… / Folder…) or files and folders dropped from the desktop onto the list (a
+// folder row takes them, else the current folder). Each file is POSTed raw to /api/files/upload?dir=<abs folder>&path=<its
+// path under it>&overwrite=0|1 → {saved} | 409 {error: 'exists'}, 3 at a time over XHR for progress (#fxUpl, with Cancel).
+// The first 409 of a batch asks Replace / Keep both / Skip once for all of them; Keep both retries as 'name 2.ext', 'name 3.ext'…
+function fxUploadMenu(x, y) {
+  if (FX.menu?.el.dataset.upload) return fxMenuClose(true);
+  const m = fxMenuShow([
+    ['upfiles', 'Files…', '', true, () => $('fxUpFiles').click()],
+    ['updir', 'Folder…', '', true, () => $('fxUpDir').click()],
+  ], 'Upload', x, y);
+  m.dataset.upload = '1';
+}
+function fxUpload(list, dest) {
+  list = list.filter((x) => x.file);
+  if (!list.length || !FX.cid) return;
+  if (!fxWritableDir(dest)) return toast(`${FX_RO}.`, { kind: 'error' });
+  const items = list.map(({ file, path }) => ({ file, path: path.replace(/^\/+/, ''), dest, loaded: 0, state: 'wait', xhr: null, row: null }));
+  if (FX.upl) { FX.upl.items.push(...items); fxUplPaint(); return fxUplPump(); } // one batch while any upload runs
+  FX.upl = { cid: FX.cid, items, choice: null, ask: null, cancelled: false, running: 0 };
+  $('fxUplList').textContent = '';
+  $('fxUpl').hidden = false;
+  fxUplPaint();
+  fxUplPump();
+}
+function fxUplPump() {
+  const b = FX.upl;
+  while (b && !b.cancelled && b.running < 3) {
+    const it = b.items.find((x) => x.state === 'wait');
+    if (!it) break;
+    it.state = 'up'; b.running++;
+    fxUplOne(b, it).finally(() => { b.running--; fxUplPaint(); if (b.running || b.items.some((x) => x.state === 'wait') && !b.cancelled) fxUplPump(); else fxUplDone(b); });
+  }
+}
+async function fxUplOne(b, it) {
+  let overwrite = false, n = 1;
+  const orig = it.path;
+  for (;;) {
+    const res = await fxUplXhr(b, it, overwrite);
+    if (b.cancelled || res.status === -1) { it.state = 'cancel'; return; }
+    if (res.status >= 200 && res.status < 300) { it.state = 'done'; it.loaded = it.file.size; return; }
+    if (res.status === 409) {
+      const pick = await fxUplChoice(b, it);
+      if (pick === 'replace' && !overwrite) { overwrite = true; continue; }
+      if (pick === 'rename' && n < 1000) { it.path = fxKeepBoth(orig, ++n); it.loaded = 0; continue; }
+      it.state = 'skip'; return;
+    }
+    if (res.status === 401) location.href = '/login';
+    it.state = 'fail'; it.error = res.data.error || `Upload failed (${res.status || 'network error'})`;
+    return;
+  }
+}
+// 'a/b/name.ext' → 'a/b/name 2.ext' (a dotfile or no extension: 'name 2').
+function fxKeepBoth(p, n) {
+  const i = p.lastIndexOf('/'), dir = p.slice(0, i + 1), name = p.slice(i + 1), dot = name.lastIndexOf('.');
+  return dot > 0 ? `${dir}${name.slice(0, dot)} ${n}${name.slice(dot)}` : `${dir}${name} ${n}`;
+}
+function fxUplXhr(b, it, overwrite) {
+  return new Promise((resolve) => {
+    const x = new XMLHttpRequest(), q = new URLSearchParams({ cid: b.cid, dir: it.dest, path: it.path, overwrite: overwrite ? '1' : '0' });
+    it.xhr = x;
+    x.open('POST', `/api/files/upload?${q}`);
+    x.setRequestHeader('Content-Type', 'application/octet-stream');
+    x.upload.onprogress = (e) => { it.loaded = e.loaded; fxUplPaint(); };
+    x.onload = () => { let data = {}; try { data = JSON.parse(x.responseText); } catch {} resolve({ status: x.status, data }); };
+    x.onerror = () => resolve({ status: 0, data: {} });
+    x.onabort = () => resolve({ status: -1, data: {} });
+    x.send(it.file);
+  }).finally(() => { it.xhr = null; });
+}
+// The batch's answer to 'already exists': asked once, shared by every conflict in it.
+function fxUplChoice(b, it) {
+  if (!b.choice) b.choice = new Promise((resolve) => { b.ask = resolve; fxConflictAsk(it, resolve); });
+  return b.choice;
+}
+function fxConflictAsk(it, done) {
+  const back = document.activeElement, name = it.path.split('/').pop();
+  const m = el('div', 'modal sheet fx-confirm');
+  m.id = 'fxConflict';
+  m.innerHTML = `
+    <div class="modal-backdrop"></div>
+    <div class="modal-panel fx-cf-panel" role="alertdialog" aria-modal="true" aria-labelledby="fxCfTitle" aria-describedby="fxCfText">
+      <span class="sheet-grip" aria-hidden="true"></span>
+      <h2 id="fxCfTitle"></h2>
+      <p class="m-sub" id="fxCfText">Your choice applies to every file in this upload that already exists.</p>
+      <div class="fx-cf-acts"><button type="button" class="btn" data-pick="skip">Skip</button><button type="button" class="btn" data-pick="rename">Keep both</button><button type="button" class="btn fx-cf-del" data-pick="replace">Replace</button></div>
+    </div>`;
+  const sub = it.path.split('/').slice(0, -1).join('/');
+  m.querySelector('h2').textContent = `“${name}” already exists in “${fxFolderName(sub ? fxJoin(it.dest, sub) : it.dest)}”`;
+  const close = (pick) => {
+    m.remove();
+    if (back?.isConnected) back.focus({ preventScroll: true });
+    done(pick);
+  };
+  m.addEventListener('click', (e) => { const b = e.target.closest('[data-pick]'); if (b) close(b.dataset.pick); });
+  m.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Escape') { e.preventDefault(); close('skip'); }
+    else if (e.key === 'Tab') {
+      e.preventDefault();
+      const bs = [...m.querySelectorAll('[data-pick]')];
+      bs[(bs.indexOf(document.activeElement) + (e.shiftKey ? bs.length - 1 : 1)) % bs.length].focus();
+    }
+  });
+  FX.conflict = { el: m, close };
+  document.body.append(m);
+  m.querySelector('[data-pick="rename"]').focus(); // not the destructive one (HIG)
+}
+function fxUploadCancel() {
+  const b = FX.upl;
+  if (!b) return;
+  b.cancelled = true;
+  for (const it of b.items) { if (it.state === 'wait') it.state = 'cancel'; it.xhr?.abort(); }
+  if (FX.conflict?.el.isConnected) FX.conflict.close('skip');
+  if (!b.running) fxUplDone(b);
+}
+function fxUplDone(b) {
+  if (FX.upl !== b) return;
+  FX.upl = null;
+  $('fxUpl').hidden = true;
+  const count = (s) => b.items.filter((x) => x.state === s).length, done = count('done'), failed = b.items.filter((x) => x.state === 'fail');
+  const dests = [...new Set(b.items.map((x) => x.dest))], where = dests.length === 1 ? ` to ${fxFolderName(dests[0])}` : '';
+  if (failed.length) toast(`Couldn't upload ${failed.map((x) => `“${x.path.split('/').pop()}” (${x.error})`).join(', ')}`, { kind: 'error' });
+  if (done) toast(`Uploaded ${done === 1 ? `“${b.items.find((x) => x.state === 'done').path.split('/').pop()}”` : `${done} files`}${where}${count('skip') ? ` · ${count('skip')} skipped` : ''}`, { kind: 'success', duration: 2500 });
+  else if (b.cancelled) toast('Upload cancelled', { duration: 2000 });
+  if (b.cid === FX.cid) fxLoad();
+}
+// Overall and per-file progress, repainted once a frame.
+function fxUplPaint() {
+  if (FX.uplFrame) return;
+  FX.uplFrame = requestAnimationFrame(() => {
+    FX.uplFrame = 0;
+    const b = FX.upl;
+    if (!b) return;
+    const live = b.items.filter((x) => !['skip', 'cancel'].includes(x.state));
+    const total = live.reduce((a, x) => a + x.file.size, 0), sent = live.reduce((a, x) => a + Math.min(x.loaded, x.file.size), 0);
+    const pct = total ? Math.round((sent / total) * 100) : live.every((x) => x.state === 'done') ? 100 : 0, fin = b.items.filter((x) => !['wait', 'up'].includes(x.state)).length;
+    $('fxUplText').textContent = `${b.cancelled ? 'Cancelling' : 'Uploading'} ${fin} of ${b.items.length} · ${pct}%`;
+    $('fxUplBar').style.width = `${pct}%`;
+    const list = $('fxUplList');
+    for (const it of b.items) {
+      if (!it.row) {
+        it.row = el('div', 'fx-upl-row');
+        it.row.append(el('span', 'fx-upl-n', it.path), el('span', 'fx-upl-bar'), el('span', 'fx-upl-s'));
+        it.row.children[1].append(el('i'));
+        list.append(it.row);
+      }
+      it.row.children[0].textContent = it.path;
+      it.row.children[1].firstChild.style.width = `${it.file.size ? Math.round((Math.min(it.loaded, it.file.size) / it.file.size) * 100) : it.state === 'done' ? 100 : 0}%`;
+      it.row.children[2].textContent = { wait: 'Waiting', up: fxSize(it.file.size), done: 'Done', skip: 'Skipped', cancel: 'Cancelled', fail: 'Failed' }[it.state];
+      it.row.dataset.state = it.state;
+    }
+  });
+}
+// Dragging files from the desktop over the list: an overlay names where they'll land (a folder row, else this folder).
+function fxDropWire(main) {
+  const files = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+  const can = () => !!FX.cid && !!FX.data && !fxFlat();
+  const destOf = (e) => {
+    const o = e.target.closest?.('[data-i]'), r = o && FX.rows[+o.dataset.i];
+    return r?.e.dir && !r.e.protected && r.e.readable !== false ? { rel: r.rel, o } : { rel: FX.path, o: null };
+  };
+  const over = (e) => {
+    if (!files(e) || !can()) return;
+    e.preventDefault();
+    const d = destOf(e), ok = fxWritableDir(d.rel);
+    e.dataTransfer.dropEffect = ok ? 'copy' : 'none';
+    fxDropShow(d, ok);
+  };
+  main.addEventListener('dragenter', over);
+  main.addEventListener('dragover', over);
+  main.addEventListener('dragleave', (e) => { if (!main.contains(e.relatedTarget)) fxDropShow(null); });
+  main.addEventListener('drop', (e) => {
+    if (!files(e)) return;
+    e.preventDefault();
+    fxDropShow(null);
+    if (!can()) return;
+    const d = destOf(e);
+    if (!fxWritableDir(d.rel)) return toast(`${FX_RO}.`, { kind: 'error' });
+    // Entries must be taken during the event; reading them can wait.
+    const dt = e.dataTransfer, items = [...(dt.items || [])].filter((i) => i.kind === 'file');
+    const roots = items.length ? items.map((i) => i.webkitGetAsEntry?.() || i.getAsFile()) : [...(dt.files || [])];
+    fxDropRead(roots).then((list) => fxUpload(list, d.rel));
+  });
+}
+function fxDropShow(d, ok = true) {
+  const o = $('fxDrop'), main = $('fxMain');
+  main.querySelectorAll('.fx-drop-on').forEach((x) => { if (x !== d?.o) x.classList.remove('fx-drop-on'); });
+  if (!d) { o.hidden = true; main.classList.remove('fx-dropping'); return; }
+  d.o?.classList.add('fx-drop-on');
+  main.classList.toggle('fx-dropping', !d.o);
+  $('fxDropText').textContent = ok ? `Drop to upload to ${fxFolderName(d.rel)}` : `${FX_RO}`;
+  o.classList.toggle('no', !ok);
+  Object.assign(o.style, { top: `${main.offsetTop}px`, left: `${main.offsetLeft}px`, width: `${main.offsetWidth}px`, height: `${main.offsetHeight}px` });
+  o.hidden = false;
+}
+// Dropped files and folders (FileSystemEntry, or plain Files) → [{file, path}], folders walked with their paths kept.
+async function fxDropRead(roots) {
+  const out = [];
+  const walk = async (en) => {
+    if (!en) return;
+    if (en instanceof File) return void out.push({ file: en, path: en.name });
+    if (en.isFile) {
+      const file = await new Promise((res, rej) => en.file(res, rej)).catch(() => null);
+      if (file) out.push({ file, path: (en.fullPath || en.name).replace(/^\/+/, '') });
+    } else if (en.isDirectory) {
+      const rd = en.createReader();
+      for (;;) { // readEntries hands them out in chunks until an empty one
+        const got = await new Promise((res, rej) => rd.readEntries(res, rej)).catch(() => []);
+        if (!got.length) break;
+        for (const c of got) await walk(c);
+      }
+    }
+  };
+  for (const r of roots) await walk(r);
+  return out;
 }
 
 // ----- Go to folder (⌘L): an absolute, ~ or relative path; folder names complete from the listings (Tab, ↓↑, a click)

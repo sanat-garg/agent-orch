@@ -13,7 +13,7 @@
   }
 }
 
-.files { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--bg); }
+.files { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--bg); }
 .files.loading .fx-main { opacity: .6; transition: opacity .2s .15s; }
 
 /* toolbar: history, the folder's name, view switch, hidden files, refresh, search */
@@ -21,7 +21,6 @@
 .fx-nav { display: flex; gap: 2px; flex: none; }
 .fx-nav .icon-btn:disabled { opacity: .35; cursor: default; }
 .fx-title { flex: 1; min-width: 0; margin: 0; font-size: 15px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.icon-btn.fx-up { width: auto; gap: 4px; padding: 0 9px 0 7px; display: flex; align-items: center; font: inherit; font-size: 13px; }
 .fx-ro { flex: none; margin-left: -2px; padding: 2px 7px; border: 1px solid var(--border); border-radius: 6px; font-size: 11.5px; font-weight: 550;
   color: var(--muted); cursor: help; }
 .fx-ro[hidden] { display: none; }
@@ -202,6 +201,28 @@ a.fx-ql-file { color: var(--text); text-decoration: none; }
 .fx-prog::after { content: ''; position: absolute; inset: 0 auto 0 0; width: 40%; border-radius: 2px; background: var(--accent); animation: fx-prog 1.1s ease-in-out infinite; }
 @keyframes fx-prog { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
 @media (prefers-reduced-motion: reduce) { .fx-prog::after { animation: none; width: 100%; opacity: .5; } }
+/* uploads: the overall bar and Cancel, then one row per file with its own bar */
+.btn.small.fx-places:disabled { opacity: .45; cursor: default; }
+.fx-upl { flex: none; border-top: 1px solid var(--border); padding: 6px 12px; font-size: 12.5px; }
+.fx-upl[hidden] { display: none; }
+.fx-upl-head { display: flex; align-items: center; gap: 10px; }
+.fx-upl-head #fxUplText { flex: none; font-variant-numeric: tabular-nums; }
+.fx-upl-head .btn.small { margin-left: auto; height: 26px; }
+.fx-upl-bar { position: relative; flex: 1; min-width: 60px; height: 4px; border-radius: 2px; overflow: hidden; background: var(--border); }
+.fx-upl-bar i { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--accent); transition: width .15s; }
+.fx-upl-list { max-height: 120px; overflow-y: auto; margin-top: 4px; }
+.fx-upl-row { display: grid; grid-template-columns: minmax(0, 1fr) 80px 72px; align-items: center; gap: 10px; min-height: 22px; color: var(--muted); }
+.fx-upl-n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.fx-upl-s { text-align: right; font-variant-numeric: tabular-nums; }
+.fx-upl-row[data-state="fail"] .fx-upl-s { color: var(--danger); }
+/* drop from the desktop: the list is outlined and names where the files go; a folder row under the pointer takes them */
+.fx-drop { position: absolute; z-index: 5; display: grid; place-items: end center; padding-bottom: 18px; pointer-events: none; box-sizing: border-box;
+  border: 2px dashed var(--accent); border-radius: 10px; background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.fx-drop[hidden] { display: none; }
+.fx-drop span { padding: 6px 14px; border-radius: 999px; background: var(--accent-strong, var(--accent)); color: #fff; font-size: 13px; font-weight: 600; box-shadow: 0 4px 14px rgba(0, 0, 0, .2); }
+.fx-drop.no { border-color: var(--border-strong); }
+.fx-drop.no span { background: var(--raised); color: var(--muted); }
+.fx-main .fx-drop-on { outline: 2px solid var(--accent); outline-offset: -2px; background: var(--accent-soft); }
 
 /* path bar */
 .fx-path { display: flex; align-items: center; gap: 12px; min-height: 30px; padding: 0 12px; border-top: 1px solid var(--border); flex: none;
@@ -253,6 +274,7 @@ a.fx-ql-file { color: var(--text); text-decoration: none; }
   .fx-disc { width: 28px; height: 36px; }
   .fx-crumb, .fx-ell { height: 36px; }
   .icon-btn.fx-up, .btn.small.fx-places { min-height: 44px; min-width: 44px; }
+  .fx-upl-head .btn.small { height: 44px; }
   .fx-goto input { height: 44px; font-size: 16px; }
   .fx-goto .btn.small { height: 44px; }
   .fx-goto .icon-btn { width: 44px; height: 44px; }
@@ -276,7 +298,7 @@ a.fx-ql-file { color: var(--text); text-decoration: none; }
 @media (max-width: 640px) {
   .fx-bar { flex-wrap: wrap; row-gap: 8px; padding: 8px 10px; }
   .fx-title { order: 0; }
-  .fx-up-l, .fx-goto label { display: none; }
+  .fx-goto label { display: none; }
   /* the path folds its middle folders into … (a tap unfolds them) */
   .fx-crumbs:not(.open) .mid { display: none; }
   .fx-crumbs:not(.open) .fx-ell { display: inline-flex; }

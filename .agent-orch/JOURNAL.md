@@ -893,3 +893,6 @@ Touch devices get 16px fields and 44pt targets, tests pass
 ## 2026-09-28 10:58 — #304 Web Push backend without a new dependency: push.mjs with VAPID keys, subscriptions, aes128gcm and send; /api/push routes [done (check passed)]
 
 Web Push backend and /api/push routes built; both test files pass
+## 2026-09-28 11:06 — #300 Rapid mode: keep every free slot fed with parallel, file-disjoint work [done (check passed)]
+
+Rapid mode tops up parallel work with verified quota guards.

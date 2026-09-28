@@ -4,7 +4,7 @@
 //              current, and turns what you want into small, chained, verifiable tasks.
 //   workers    one fresh Claude Code session per task, several at once. Each does exactly one task,
 //              is checked against its "Done when" command, and is committed to git.
-//   reflector  when a project's queue is empty and "Keep improving" is on, it inspects the code,
+//   reflector  tops up ready work in Rapid mode (otherwise waits for an empty queue), inspects the code,
 //              rewrites ROADMAP.md and queues the next most valuable steps.
 //
 // Everything runs on the Claude subscription through the Claude Code SDK. A governor sleeps until
@@ -139,7 +139,7 @@ export const TASKS_FORMAT = `Emit work as a fenced block exactly like this (stri
   of them: the 0-based index of an earlier task in THIS block, or "#12" for an existing task id. The task starts
   only once ALL of them have finished, and cancelling or failing one cancels everything after it. Never chain
   tasks just to keep them in order: tasks already run in queue order. Omit \`after\` when nothing is needed first.
-- Plan sequential chains; use \`after\` only for true prerequisites; the machine runs one task at a time.
+- Independent tasks can run in parallel across the cluster; use \`after\` only for true prerequisites.
 - \`files\` (optional metadata) lists the paths or globs (\`src/**/*.css\`, \`test/\`) the task will create or modify.
 - \`capabilities\` (optional): \`["browser"]\` only for tasks that must use a real web browser (a web app with no API);
   omit it otherwise. Such a task runs on a machine with Chromium, on a persistent browser profile the owner signs in to:
@@ -191,7 +191,7 @@ How to behave:
 - Keep the project memory current: write/refresh .agent-orch/BRIEF.md (vision, goals, constraints, definition
   of done) and .agent-orch/CONTEXT.md (architecture, conventions, decisions). Only write inside .agent-orch/; code changes
   are the workers' job, so queue them as tasks rather than making them yourself.
-- Queue a short first chain of steps as soon as the intent is clear — you don't need the whole plan up
+- Queue a first set of steps as soon as the intent is clear — you don't need the whole plan up
   front, and you can add the next steps after these finish. Reply in one or two lines: why these steps,
   not what's in it — the owner sees the queued tasks as cards under your reply.
 - Tokens are precious: don't queue speculative busywork, and don't re-read things you already know.
@@ -233,7 +233,7 @@ orchestrator will give the rest back to you in a new session. Never write \`done
 const REFLECT_ASK = 'Look at this project and improve it — find the most valuable next steps and queue them.';
 const REFLECT_DIRECTION_MAX = 1000; // characters of the owner's reflection direction kept
 
-const REFLECT_SYSTEM = `You are the reflective mind of an agent orchestrator (agent-orch). The work queue for this project is empty, and
+const REFLECT_SYSTEM = `You are the reflective mind of an agent orchestrator (agent-orch). The work queue for this project needs attention, and
 your job is to decide what would most improve the project next — thinking like its owner, a demanding
 product lead, and a senior engineer at once. Do NOT modify source code in this session; you may only
 update files in .agent-orch/.`;
@@ -295,11 +295,14 @@ function formatQueue(rows) {
   }).join('\n');
 }
 
-function plannerTurnPrompt(project, rows, text, environment) {
+export function plannerTurnPrompt(project, rows, text, environment, rapid = null) {
   return `[agent-orch context] Project: ${project.name} at ${project.path}\n` +
     `Project priority: ${project.priority}/100 · mode: ${project.mode}\n` +
     `Now: ${nowText()} (use this to turn 'tomorrow', 'by Friday' into real deadlines)\n` +
     `${environment}\n` +
+    (rapid && rapid.free > 0 ? `Rapid development mode: ${rapid.slots} slots, ${rapid.running} running, ${rapid.free} free.\n` +
+      'When the owner asks for a feature, decompose it into small parallel parts by default. Declare disjoint `files` for each part, including tests. ' +
+      'Use one deliverable and one check per task; add an integrator with true prerequisites only where the parts must combine. Stay within the requested feature.\n' : '') +
     `Current queue:\n${formatQueue(rows)}\n\n[Owner says]\n${text}`;
 }
 
@@ -351,7 +354,18 @@ const until = (sec) => {
   return d ? `${d}d ${h}h` : `${h}h ${m}m`;
 };
 
-function reflectPrompt(project, rows, journalTail, overage, limits, reason, failures, outcomes, environment) {
+// Two queued tasks buffer the next completion; unknown/expired usage never proves an account is near its limit.
+export function rapidQueueTarget(slots, running, ready) {
+  const free = Math.max(0, slots - running);
+  return { slots, running, ready, free, requested: Math.max(0, free + 2 - ready) };
+}
+export function rapidAgentsLimited(agents, windowsFor, at = now()) {
+  return agents.length > 0 && agents.every((agent) => windowsFor(agent).some((w) =>
+    ['five_hour', '5h'].includes(w.window) && w.pct != null && Number(w.pct) >= 90 &&
+    (w.resetsAt == null || w.resetsAt > at)));
+}
+
+export function reflectPrompt(project, rows, journalTail, overage, limits, reason, failures, outcomes, environment, rapid = null) {
   const direction = String(project.reflect_direction || '').trim();
   const sections = [];
   const lines = [];
@@ -362,7 +376,13 @@ function reflectPrompt(project, rows, journalTail, overage, limits, reason, fail
     lines.push(`- ${label}: ${used}${r.resets_at ? `, resets in ${until(r.resets_at - now())}` : ''}`);
   }
   if (reason) lines.push(`- Pacing: ${reason}`);
-  if (lines.length) {
+  if (rapid) {
+    sections.push(`Rapid development mode: ${rapid.slots} slots, ${rapid.running} running, ${rapid.ready} ready: queue about ${rapid.requested} more.\n` +
+      'The target is free cluster slots plus a two-task buffer. Return this many independent tasks with declared `files`, split into small file-disjoint pieces (including their tests). ' +
+      'Spread them across bugs from AUDIT.md, UI-REVIEW.md items, tests for untested modules, ROADMAP.md next items, and BRIEF.md goals still open. ' +
+      'Avoid files already assigned to queued or running work. Add integrator tasks only where parts must combine, with `after` for those true prerequisites.\n');
+  }
+  if (lines.length && !rapid) {
     sections.push(`Capacity right now:\n${lines.join('\n')}\nSize your queue to this: if much of the 5h window will expire ` +
       'unused, queue enough valuable work (up to 5 steps) to use it; if weekly capacity is tight, queue only the ' +
       'highest-value steps, or none.\n');
@@ -392,7 +412,7 @@ build/tests/linters to find real problems rather than guessing.
 Recently completed work (tail of .agent-orch/JOURNAL.md):
 ${journalTail || '(nothing yet)'}
 
-Recent task history:
+Recent task history (last 50 tasks; never repeat queued, running or done work):
 ${formatQueue(rows)}
 ${sections.map((s) => `\n${s}`).join('')}
 ${direction ? `The owner's direction for this reflection:
@@ -408,7 +428,7 @@ reliability and error handling, security, performance, test coverage, documentat
 
 Then:
 1. Rewrite .agent-orch/ROADMAP.md: a brief honest assessment, the prioritized next steps, and later ideas.
-2. Queue the next 1–5 steps as small, separately verifiable tasks (\`after\` only for true prerequisites; \`files\` for each). Prefer
+2. Queue ${rapid ? `the requested ${rapid.requested} tasks` : 'the next 1–5 steps'} as small, separately verifiable tasks (\`after\` only for true prerequisites; \`files\` for each). Prefer
    finishing and hardening what exists over new scope unless the brief${direction ? ' or the direction above' : ''} asks for it. If the project truly
    meets its brief and nothing valuable remains, return an empty task list rather than inventing busywork.
    Unless something is genuinely broken or time-bound, this upkeep work is \`background\` urgency.
@@ -1106,17 +1126,25 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     }
     let rows = queueOrder(qa(sql, p));
     // Two tasks share a project only if both are work tasks in their own worktrees; anything else would race on the same
-    // checkout or its commits. A waiting plan/reflect task also stops more work from starting in its project. Work whose
+    // checkout or its commits (Rapid reflection can share isolated work). A waiting plan/reflect task otherwise stops
+    // more work from starting in its project. Work whose
     // declared files overlap a running task's (parallel.mjs; undeclared = everything) goes after the rest, so free slots
     // fill with disjoint work first; with CFG.overlapWaits it waits instead. Overlapping edits meet at merge time
     // (mergeBack; a conflict queues an integrator).
     if (exclusive) {
-      const busy = qa("SELECT id, project_id, files FROM tasks WHERE status='running'");
+      const busy = qa("SELECT id, project_id, kind, integrates, files FROM tasks WHERE status='running'");
+      const rapid = parallelSettings().rapidDevelopment;
       const blocked = new Set(), later = [];
       rows = rows.filter((r) => {
         if (blocked.has(r.project_id)) return false;
-        const others = busy.filter((b) => b.project_id === r.project_id);
+        let others = busy.filter((b) => b.project_id === r.project_id);
         if (!others.length) return true;
+        // Rapid reflection only edits project memory; workers edit separate checkouts and merges are serialized.
+        if (rapid && worktreeCapable(getProject(r.project_id))) {
+          if (r.kind === 'reflect' && others.every((b) => b.kind === 'work' && !b.integrates && running.get(b.id)?.wt)) return true;
+          if (r.kind === 'work' && !r.integrates) others = others.filter((b) => b.kind !== 'reflect');
+          if (!others.length) return true;
+        }
         if (!(r.kind === 'work' && worktreeCapable(getProject(r.project_id)) && others.every((b) => running.get(b.id)?.wt))) {
           if (r.kind !== 'work') blocked.add(r.project_id);
           return false;
@@ -1271,6 +1299,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
   // kv parallel_settings { parallelTasks: 1 | 2 (the controller's own work slots), controllerWork: bool (see
   // CFG.controllerWork), controllerBrowser: bool (see CFG.controllerBrowser), maxTasks: null | n (owner cap on work tasks across every node),
+  // rapidDevelopment: bool (default on: fill free cluster slots plus two ready tasks),
   // autoRestart: bool (server.mjs restarts itself once idle after merged commits touched server code; default off) }. Older shapes read as defaults.
   function parallelSettings() {
     let s = {};
@@ -1279,7 +1308,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       controllerWork: typeof s.controllerWork === 'boolean' ? s.controllerWork : CFG.controllerWork,
       controllerBrowser: typeof s.controllerBrowser === 'boolean' ? s.controllerBrowser : CFG.controllerBrowser,
       maxTasks: Number.isInteger(s.maxTasks) && s.maxTasks > 0 ? s.maxTasks : null,
-      autoRestart: s.autoRestart === true };
+      rapidDevelopment: s.rapidDevelopment !== false, autoRestart: s.autoRestart === true };
   }
   const slotsFor = (a) => typeof CFG.agentSlots === 'number' ? CFG.agentSlots : CFG.agentSlots[a] ?? 1;
 
@@ -1336,10 +1365,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const v = value && typeof value === 'object' ? value : {};
     let next = {};
     try { next = JSON.parse(kvGet('parallel_settings') || '{}') || {}; } catch {} // only what the owner set is stored
-    if (!['parallelTasks', 'controllerWork', 'controllerBrowser', 'maxTasks', 'autoRestart'].some((k) => k in v)) return { error: 'Expected parallelTasks 1 or 2' };
+    if (!['parallelTasks', 'controllerWork', 'controllerBrowser', 'maxTasks', 'autoRestart', 'rapidDevelopment'].some((k) => k in v)) return { error: 'Expected parallelTasks 1 or 2' };
     if ('parallelTasks' in v) { if (![1, 2].includes(v.parallelTasks)) return { error: 'Expected parallelTasks 1 or 2' }; next.parallelTasks = v.parallelTasks; }
     if ('controllerWork' in v) { if (typeof v.controllerWork !== 'boolean') return { error: 'controllerWork must be true or false' }; next.controllerWork = v.controllerWork; }
     if ('controllerBrowser' in v) { if (typeof v.controllerBrowser !== 'boolean') return { error: 'controllerBrowser must be true or false' }; next.controllerBrowser = v.controllerBrowser; }
+    if ('rapidDevelopment' in v) { if (typeof v.rapidDevelopment !== 'boolean') return { error: 'rapidDevelopment must be true or false' }; next.rapidDevelopment = v.rapidDevelopment; }
     if ('autoRestart' in v) { if (typeof v.autoRestart !== 'boolean') return { error: 'autoRestart must be true or false' }; next.autoRestart = v.autoRestart; }
     if ('maxTasks' in v) { if (v.maxTasks !== null && !(Number.isInteger(v.maxTasks) && v.maxTasks >= 1 && v.maxTasks <= 64)) return { error: 'maxTasks must be null or 1-64' }; next.maxTasks = v.maxTasks; }
     kvSet('parallel_settings', JSON.stringify(next));
@@ -2383,7 +2413,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   const setPlannerSession = (project, agent, id) => (agent === 'claude' ? updateProject(project.id, { chat_session_id: id }) : kvSet(`planner_session:${project.id}:${agent}`, id || ''));
 
   async function plannerRun(project, text, convoId, signal, fromChat = false, { agent = 'claude', model = null, origin = { origin: 'chat' } } = {}) {
-    const prompt = plannerTurnPrompt(project, listTasks(project.id, 25), text, `${ENVIRONMENT}\n${routesText(project.id)}\nOwner fallback list (used when a model hits its limit): ${JSON.stringify(origin.fallbacks || [])}`);
+    const prompt = plannerTurnPrompt(project, listTasks(project.id, 25), text, `${ENVIRONMENT}\n${routesText(project.id)}\nOwner fallback list (used when a model hits its limit): ${JSON.stringify(origin.fallbacks || [])}`, parallelSettings().rapidDevelopment ? rapidQueue() : null);
     // Claude streams SDK messages into the chat, so a 'plan' route can only change the Claude planner's model.
     // Other agents show their tool calls as they happen and the reply at the end.
     const route = resolveRoute({ kind: 'plan', title: '' }, project, listRoutes(project.id), () => true);
@@ -2442,6 +2472,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       }
       kvSet('announced_auth', 0);
       const d = decision();
+      if (parallelSettings().rapidDevelopment) scheduleReflections();
       considerPreemption(d);
       reapIfLow();
       // Pacing and the owner's cap limit work across every node (all nodes share the same accounts' limits).
@@ -2502,23 +2533,54 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
   const chatPlanning = () => [...planningProjects.values()].includes('chat');
 
+  // Ready means prerequisites met and no review hold; count across projects, just like cluster capacity.
+  function rapidQueue() {
+    const c = capacityView();
+    const ready = qa(RUNNABLE + " AND t.kind='work'", { now: now() }).filter((r) => projectReady(getProject(r.project_id).path)).length;
+    const running = q1("SELECT COUNT(*) AS n FROM tasks WHERE status='running' AND kind='work'").n;
+    return rapidQueueTarget(Math.min(c.max, c.cap ?? Infinity), running, ready);
+  }
+  function rapidLimitReason(p) {
+    const primary = intendedRoute({ kind: 'reflect', title: 'Reflect: what else should be done?', prompt: '', ...reflectFor(p) }, p);
+    const fallbacks = reflectFallbacksFor(p);
+    const agents = [...new Set(fallbacks?.length ? fallbacks.map((f) => f.agent) : [primary.agent])];
+    const limited = rapidAgentsLimited(agents, (agent) => {
+      const reported = agent === 'claude' ? (getLimits() || []).filter((w) => w.limit_type === 'five_hour') : [];
+      return reported.length ? reported.map((w) => ({ window: w.limit_type, pct: w.utilization == null ? null : w.utilization * 100, resetsAt: w.resets_at }))
+        : usageLog.current?.(agent) || [];
+    });
+    return limited ? `Rapid top-up paused for ${p.name}: ${fallbacks?.length ? 'all fallback agents are' : 'the reflection agent is'} at or above 90% of the 5 h window.` : null;
+  }
+  function rapidStatus() {
+    if (!parallelSettings().rapidDevelopment) return null;
+    const blockedProjects = qa("SELECT * FROM projects WHERE status='active' AND perpetual=1")
+      .map((p) => ({ id: p.id, reason: rapidLimitReason(p) })).filter((p) => p.reason);
+    return { ...rapidQueue(), blockedProjects, reason: blockedProjects.length ? blockedProjects[0].reason : null };
+  }
   function scheduleReflections() {
     let added = false;
-    const t = now();
+    const t = now(), rapid = parallelSettings().rapidDevelopment ? rapidQueue() : null;
     for (const p of qa("SELECT * FROM projects WHERE status='active' AND perpetual=1")) {
-      if (p.next_reflect_at > t) continue;
       if (planningProjects.has(p.id)) continue; // the owner is mid-conversation with the planner
       if (!projectReady(p.path)) continue;
-      if (q1("SELECT 1 AS x FROM tasks WHERE project_id=:p AND status IN ('queued','running','paused','awaiting_review')", { p: p.id })) continue;
+      if (rapid) {
+        if (!rapid.requested || rapidLimitReason(p)) continue;
+        // Persist the spacing across restarts, including empty/failed reflections and manual direction edits.
+        const last = q1("SELECT MAX(created_at) AS at FROM tasks WHERE project_id=:p AND kind='reflect'", { p: p.id });
+        if (last?.at != null && t - last.at < 180) continue;
+        if (q1("SELECT 1 FROM tasks WHERE project_id=:p AND kind IN ('reflect','plan') AND status IN ('queued','running','paused','awaiting_review')", { p: p.id })) continue;
+      } else {
+        if (p.next_reflect_at > t) continue;
+        if (q1("SELECT 1 FROM tasks WHERE project_id=:p AND status IN ('queued','running','paused','awaiting_review')", { p: p.id })) continue;
+      }
       // Nothing to improve until the owner has said what the project is and some work has landed.
       if (!q1("SELECT 1 AS x FROM tasks WHERE project_id=:p AND kind='work' AND status='done' LIMIT 1", { p: p.id })) continue;
-      run('UPDATE projects SET next_reflect_at=:u WHERE id=:id', { u: t + 120, id: p.id });
+      run('UPDATE projects SET next_reflect_at=:u WHERE id=:id', { u: t + (rapid ? 180 : 120), id: p.id });
       const rs = reflectFor(p);
-      // The reflection fallbacks move the reflect task itself too when its model is at its limit (delegate).
       const id = addTask(p.id, { title: 'Reflect: what else should be done?', prompt: '(reflection)', kind: 'reflect', source: 'reflection', agent: rs.agent, model: rs.model,
         fallbacks: reflectFallbacksFor(p) });
       if (p.convo_id) emitChat(p.convo_id, { t: 'reflect', taskId: id, text: p.reflect_direction ? `${REFLECT_ASK} Direction: ${p.reflect_direction}` : REFLECT_ASK });
-      logEvent(`queue empty → reflecting (task #${id})`, { projectId: p.id, taskId: id });
+      logEvent(`${rapid ? `${rapid.ready} ready < ${rapid.free + 2} target → topping up` : 'queue empty → reflecting'} (task #${id})`, { projectId: p.id, taskId: id });
       added = true;
     }
     return added;
@@ -2637,8 +2699,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         { p: project.id, s: now() - 7 * 86400 });
       const oc = q1(`SELECT SUM(status='done') AS done, SUM(status='failed') AS failed FROM tasks WHERE project_id=:p AND source='reflection' AND kind='work' AND finished_at>=:s`,
         { p: project.id, s: now() - 7 * 86400 }) || {};
-      body = reflectPrompt(project, listTasks(project.id, 20), recentJournal(project.path), contextOverage(project.path),
-        limitsRows(), decision().reason, failures, { done: oc.done || 0, failed: oc.failed || 0 }, `${ENVIRONMENT}\nOwner fallback list (used when a model hits its limit): ${JSON.stringify(reflectFallbacksFor(project) || [])}`);
+      body = reflectPrompt(project, qa('SELECT * FROM tasks WHERE project_id=:p ORDER BY id DESC LIMIT 50', { p: project.id }).map((r) => ({ ...r, deps: depsOf(r.id) })), recentJournal(project.path), contextOverage(project.path),
+        limitsRows(), decision().reason, failures, { done: oc.done || 0, failed: oc.failed || 0 }, `${ENVIRONMENT}\nOwner fallback list (used when a model hits its limit): ${JSON.stringify(reflectFallbacksFor(project) || [])}`, parallelSettings().rapidDevelopment ? rapidQueue() : null);
       system = REFLECT_SYSTEM;
       tools = [...PLANNER_TOOLS, ...CFG.safeTools.filter((t) => t.startsWith('Bash('))];
       autonomous = false;
@@ -3601,7 +3663,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         activity: r.activity || null, started_at: r.startedAt, elapsed: Math.max(0, now() - r.startedAt), node: r.node, node_name: r.node === LOCAL_NODE ? null : nodeName(r.node), waiting_for: r.waiting || null };
     });
     return { activeUsage, blocks, blockedUntil: blockedUntil(), blockedReason: kvGet('blocked_reason'),
-      pacing: d?.reason || kvGet('budget_reason'), slots: slotCount(d, mem), parallel, lanes, capacity: capacityView(d, mem),
+      pacing: d?.reason || kvGet('budget_reason'), slots: slotCount(d, mem), parallel, lanes, capacity: capacityView(d, mem), rapid: rapidStatus(),
       running: running.size, workRunning: workRunning(), remoteRunning: workEverywhere() - workRunning(), draining, subscription: onSubscription() };
   }
   // The Machines view (GET /api/cluster/nodes): each node's running tasks (read from the DB, so adopted remote work
@@ -3750,6 +3812,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     projectRank: (cwd) => q1('SELECT id, position, priority FROM projects WHERE path=:p', { p: cwd }) ?? null,
     isRunning: (id) => running.has(Number(id)), logEvent, attachCluster,
     gateSettings, setGateSettings, decideApproval, taskActions, pendingApprovals: () => approvals.pending().map(({ args, ...a }) => a),
+    scheduleReflections, // tests: run a reflection scheduling step without starting agents
     claimNext, // tests: claims the next task and its node, as one tick step would (without starting it)
     unwatch: (ws) => { for (const set of runSubs.values()) set.delete(ws); },
   };

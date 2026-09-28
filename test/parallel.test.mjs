@@ -319,8 +319,9 @@ test('taskSlots: one by default, two only with the setting, >2.5 GB available an
   assert.ok(readMemInfo(f).avail > 0, 'unreadable → os.freemem()');
 });
 
-test('planner prompt asks for sequential chains, not parallel groups', () => {
-  assert.match(TASKS_FORMAT, /Plan sequential chains; use `after` only for true prerequisites; the machine runs one task at a time\./);
+test('shared task format permits independent parallel work with true prerequisites', () => {
+  assert.match(TASKS_FORMAT, /Independent tasks can run in parallel across the cluster; use `after` only for true prerequisites\./);
+  assert.doesNotMatch(TASKS_FORMAT, /machine runs one task at a time/);
   assert.doesNotMatch(TASKS_FORMAT, /parallel-group|decompose EVERY|Spread parts/);
   assert.match(TASKS_FORMAT, /`files` \(optional metadata\)/);
 });

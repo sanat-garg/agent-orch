@@ -19,3 +19,7 @@ Add assertions to test/ui-static.test.mjs (see how earlier rows were guarded the
 ## Done when
 
 `npm test -- test/ui-static.test.mjs test/ui-contrast.test.mjs test/ui-away.test.mjs` passes and `grep -q 'UI-REVIEW #22' public/app.css`
+
+## Result — done (check passed) (2026-09-28 09:01)
+
+AGENT-ORCH-STATUS: done — Touch devices get 16px fields and 44pt targets, tests pass

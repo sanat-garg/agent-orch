@@ -885,3 +885,7 @@ Browser gate now holds Enter, submit, Post-style and nameless buttons
 ## 2026-09-28 08:56 — #295 AUDIT #45 and #51: the hub refuses disabled nodes and shares nothing with them; the worker gate reads only MEDIA_ID_RE screenshot ids [done (check passed)]
 
 disabled nodes refused, sign-ins withheld; worker screenshot ids now validated
+
+## 2026-09-28 09:01 — #296 UI-REVIEW #20 and #22: phone fields at 16px and 44pt touch targets on Stats, Skills, Files, Machines, Browser, drawer and queue cards [done (check passed)]
+
+Touch devices get 16px fields and 44pt targets, tests pass

@@ -95,7 +95,8 @@
   .ext-body { --px: 12px; --pb: max(16px, env(safe-area-inset-bottom)); }
 }
 @media (pointer: coarse) {
-  .ext-tabs button { height: 36px; }
+  .ext-tabs button { min-height: 44px; min-width: 44px; } /* UI-REVIEW #22 */
+  #extBody input, #extBody textarea, #extBody select { font-size: 16px; } /* UI-REVIEW #20: beats .ext-field .mono's 13px */
   .ext-field input, .ext-field select { height: 44px; }
   .ext-field input, .ext-field textarea, .ext-field select { font-size: 16px; } /* iOS zooms into smaller inputs */
   .ext-check { min-height: 44px; }

@@ -127,6 +127,9 @@
   .fx-row { height: 44px; }
   .fx-disc { width: 28px; height: 36px; }
   .fx-crumb { height: 36px; }
+  .fx-views button { min-height: 44px; min-width: 44px; } /* UI-REVIEW #22 */
+  .fx-bar .fx-search { height: 44px; } /* UI-REVIEW #22: .fx-bar beats the phone block's 36px below */
+  .fx-search input { font-size: 16px; } /* UI-REVIEW #20 */
 }
 /* phones: the search takes its own row; the list is one column with size and date under the name (like Files on iOS) */
 @media (max-width: 640px) {

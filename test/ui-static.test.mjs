@@ -255,3 +255,33 @@ test('sidebar footer in the body font at 44pt on touch; .btn.small centres its l
   assert.match(appCss, /\.btn\.small \{[^}]*display: inline-flex; align-items: center; justify-content: center/);
   assert.match(appCss, /@media \(pointer: coarse\) \{ \.side-foot, #logout \{ min-height: 44px; \} \}/);
 });
+
+test('touch screens get 16px fields and 44pt targets in Settings, Skills, Files, Browser, Stats, Machines, drawer, queue (UI-REVIEW #20, #22)', () => {
+  // Every top-level `@media (pointer: coarse) { ... }` body across the sheets, brace-matched, as selector → declarations.
+  const coarse = new Map();
+  for (const f of ['app', 'files', 'stats', 'ext', 'browser']) {
+    const css = read(`public/${f}.css`);
+    for (const m of css.matchAll(/@media \(pointer: coarse\) \{/g)) {
+      let i = m.index + m[0].length, depth = 1;
+      const start = i;
+      for (; depth; i++) depth += css[i] === '{' ? 1 : css[i] === '}' ? -1 : 0;
+      for (const r of css.slice(start, i - 1).replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+        for (const sel of r[1].split(',')) coarse.set(sel.trim(), `${coarse.get(sel.trim()) || ''}${r[2]};`);
+      }
+    }
+  }
+  const has = (sel, decl) => assert.ok((coarse.get(sel) || '').includes(decl), `${sel} sets ${decl} on touch (got ${coarse.get(sel)})`);
+  for (const sel of ['.st-row select', '.st-dir textarea', '#stGatePatterns', '#extBody input', '#extBody textarea', '#extBody select', '.fx-search input', '.bv-bar input', '.dr-due input']) has(sel, 'font-size: 16px');
+  for (const sel of ['.sx-tabs button', '.range-picker button', '.ext-tabs button', '.fx-views button']) { has(sel, 'min-height: 44px'); has(sel, 'min-width: 44px'); }
+  has('.mc-ctl .seg-sm button', 'height: 44px'); has('.mc-ctl .seg-sm button', 'min-width: 44px');
+  for (const sel of ['.fx-bar .fx-search', '.bv-bar input', '.bw-add input']) has(sel, 'height: 44px');
+  has('.dr-body details.dr-more > summary', 'min-height: 44px'); has('.dr-body details.dr-more > summary', 'display: flex');
+  for (const sel of ['.tc-tag.tc-ctl', '.tc-tag.tc-rb']) { has(sel, 'position: relative'); has(`${sel}::after`, "content: ''"); has(`${sel}::after`, 'position: absolute'); }
+  // same-specificity overrides must come after their base rule (the later rule wins)
+  for (const [base, touch] of [['.st-row select { height: 34px', '.st-row select, .st-dir textarea, #stGatePatterns { font-size: 16px'],
+    ['.dr-due input { flex: 1', '.dr-due input { font-size: 16px'], ['.mc-ctl .seg-sm button { height: 38px', '.mc-ctl .seg-sm button { height: 44px']]) {
+    assert.ok(appCss.indexOf(base) >= 0 && appCss.indexOf(base) < appCss.indexOf(touch), `${touch} comes after ${base}`);
+  }
+  const filesCss = read('public/files.css');
+  assert.ok(filesCss.indexOf('.fx-search input { flex: 1') < filesCss.indexOf('.fx-search input { font-size: 16px'));
+});

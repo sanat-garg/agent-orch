@@ -228,3 +228,63 @@ test('cancel with no login returns login: null so a stale panel clears (AUDIT #2
   await conn.start('x');
   assert.equal((await conn.cancel('x')).login.state, 'cancelled');
 });
+
+// "Invalid OAuth Request: Missing state parameter" (a real sign-in): `claude setup-token`'s Ink screen hard-wraps its
+// long OAuth URL at the pane width, so the captured line lacked `&state=…`. The rest of the URL is on the next line(s).
+test('a hard-wrapped Claude OAuth URL is joined back whole; one still missing its state is not shown yet', () => {
+  const head = 'https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&code_challenge=j2MmaCS9Wr5PTOY4YbRZMdnJ';
+  const tail = 'jm5pTG8Q-_DJXCeaiMU&code_challenge_method=S256&state=myv1DK5P8J9yRC_fBPCfnX5YzeX_qwbBLGT54WkJraE';
+  const wrapped = `Browser didn't open? Use the url below to sign in (c to copy)\n\n${head}\n${tail}\n\n Hold Shift while selecting to copy\n\nPaste code here if prompted >`;
+  assert.equal(parsePane(SPECS.claudeShare, wrapped).url, head + tail);
+  assert.equal(new URL(parsePane(SPECS.claudeShare, wrapped).url).searchParams.get('state'), 'myv1DK5P8J9yRC_fBPCfnX5YzeX_qwbBLGT54WkJraE');
+  // Output still arriving (the rest not printed yet): no URL, rather than a broken one.
+  assert.equal(parsePane(SPECS.claudeShare, `${head}\n`).url, null);
+  assert.equal(parsePane(SPECS.claude, `If the browser didn't open, visit: ${head}\n`).url, null);
+  // A whole URL on one line is left as is, and the prompt after it is not glued on.
+  const one = `If the browser didn't open, visit: ${head}${tail}\nPaste code here if prompted >`;
+  assert.equal(parsePane(SPECS.claude, one).url, head + tail);
+  // A short URL is never extended by the line after it (codex prints its one-time code right below the link).
+  assert.equal(parsePane(SPECS.codex, 'Follow these steps:\n   https://auth.openai.com/codex/device\nABCD-12345\n').url, 'https://auth.openai.com/codex/device');
+});
+
+test('sign-in sessions run 1000 columns wide, so a long OAuth URL fits on one line', async () => {
+  const calls = [];
+  const tmux = async (args) => { calls.push(args); return { ok: true, out: '' }; };
+  const c = createConnections({ tmux, pollMs: 60_000, entries: [{ id: 'claude', label: 'Claude Code', installed: () => true, signedIn: () => false, spec: SPECS.claude }] });
+  await c.start('claude');
+  const ns = calls.find((a) => a[0] === 'new-session');
+  assert.equal(ns[ns.indexOf('-x') + 1], '1000');
+  await c.cancel('claude');
+});
+
+// "Sign-in failed: the sign-in session ended unexpectedly" (a real sign-in on the live server): every instance clears
+// its tmux socket at boot, and test servers booting on the same machine used the live server's socket.
+test('each server instance signs in on its own tmux socket; one booting never ends another\'s sign-in', async () => {
+  const { loginSocketFor, tmuxRunnerFor, SOCKET } = await import('../connections.mjs');
+  assert.equal(loginSocketFor('/srv/agent-orch/data', '/srv/agent-orch/data/'), SOCKET, 'the live server keeps its socket');
+  const a = loginSocketFor('/tmp/cw-test-a', '/srv/agent-orch/data'), b = loginSocketFor('/tmp/cw-test-b', '/srv/agent-orch/data');
+  assert.notEqual(a, SOCKET);
+  assert.notEqual(a, b);
+  assert.equal(loginSocketFor('/tmp/cw-test-a', '/srv/agent-orch/data'), a, 'stable across restarts');
+  assert.ok(a.startsWith('agent-orch-login'), 'the reaper still knows it for a login session');
+
+  const { spawnSync } = await import('node:child_process');
+  if (spawnSync('tmux', ['-V']).status !== 0) return; // no tmux here: the naming above is what matters
+  const tag = `cwtest-${process.pid}-${Date.now()}`, live = `${tag}-live`, other = `${tag}-other`;
+  const entry = { id: 'x', label: 'X', installed: () => true, signedIn: () => false, spec: { start: ['sleep', '30'], url: /(https:\/\/\S+)/ } };
+  const alive = () => spawnSync('tmux', ['-L', live, 'has-session', '-t', '=login-x']).status === 0;
+  try {
+    const liveConns = createConnections({ tmux: tmuxRunnerFor(live), pollMs: 60_000, entries: [entry] });
+    await liveConns.start('x');
+    assert.ok(alive(), 'the sign-in session runs');
+    createConnections({ tmux: tmuxRunnerFor(other), entries: [entry] }); // a test server boots: clears only its own socket
+    await new Promise((r) => setTimeout(r, 300));
+    assert.ok(alive(), 'still running after another instance booted');
+    createConnections({ tmux: tmuxRunnerFor(live), entries: [entry] }); // what used to happen: the same socket
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(alive(), false, 'booting on the same socket ends it (why each instance has its own)');
+    await liveConns.cancel('x');
+  } finally {
+    for (const s of [live, other]) spawnSync('tmux', ['-L', s, 'kill-server']);
+  }
+});

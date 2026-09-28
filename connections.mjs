@@ -2,6 +2,7 @@
 // socket (never the owner's terminals), scrapes the pane for the sign-in URL and one-time code, types back a code the
 // owner pastes, and cleans up when the CLI exits, is cancelled, or LOGIN_TIMEOUT passes.
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -25,6 +26,7 @@ export const SPECS = {
   claude: {
     start: [path.join(BIN, 'claude'), 'auth', 'login', '--claudeai'],
     url: /(https:\/\/claude\.(?:com|ai)\/\S*oauth\/authorize\S+)/,
+    complete: /[?&]state=[^&\s]+/,
     needsPastedCode: true,
     successRe: /Login successful/i,
     logout: [path.join(BIN, 'claude'), 'auth', 'logout'],
@@ -36,6 +38,7 @@ export const SPECS = {
   claudeShare: {
     start: [path.join(BIN, 'claude'), 'setup-token'],
     url: /(https:\/\/claude\.(?:com|ai)\/\S*oauth\/authorize\S+)/,
+    complete: /[?&]state=[^&\s]+/,
     needsPastedCode: true,
     successRe: /sk-ant-oat01-/,
     capture: /(sk-ant-oat01-[A-Za-z0-9_-]{20,})/,
@@ -61,6 +64,21 @@ export const SPECS = {
   },
 };
 const grab = (re, text) => text.match(re)?.[1] || null;
+// A sign-in URL. Claude's setup-token screen (Ink) hard-wraps a long line at the pane width with real newlines, which
+// capture-pane -J can't join, so a long URL line continues on the lines after it while they are URL characters only
+// (a blank line, or text with spaces, ends it); a short line never wrapped. The pane is 1000 wide so this is rare.
+function grabUrl(re, text) {
+  const m = text.match(re);
+  if (!m) return null;
+  let url = m[1];
+  const start = text.lastIndexOf('\n', m.index) + 1, end = m.index + m[0].length;
+  if (end - start < 200 || text[end] !== '\n') return url;
+  for (const line of text.slice(end + 1).split('\n')) {
+    if (!/^[A-Za-z0-9%&=_.~:/?#+-]+$/.test(line)) break;
+    url += line;
+  }
+  return url;
+}
 function genericPrompt(text) {
   const lines = String(text || '').split('\n').map((l) => l.trimEnd()).filter(Boolean);
   const prompt = lines.findIndex((l) => /^\s*\?/.test(l) || /^\s*[❯›>]\s*\S/.test(l) || /\(y\/N\)\s*$/.test(l));
@@ -70,7 +88,10 @@ function genericPrompt(text) {
 // What the pane shows so far: {url, code, prompts (indices of `answers` visible), exited, exitCode, ok, error}.
 export function parsePane(spec, text) {
   text = String(text || '').replace(/\r/g, '');
-  const url = grab(spec.url, text) || spec.defaultUrl || null;
+  // spec.complete: what a whole URL has (Claude's `state`); a URL still missing it isn't shown yet (the next poll has it).
+  let url = grabUrl(spec.url, text);
+  if (url && spec.complete && !spec.complete.test(url)) url = null;
+  url ||= spec.defaultUrl || null;
   const code = spec.code ? grab(spec.code, text) : null;
   const prompts = (spec.answers || []).flatMap(([re], i) => (re.test(text) ? [i] : []));
   const promptText = genericPrompt(text);
@@ -93,6 +114,14 @@ export const tmuxRunnerFor = (socket) => (args) => new Promise((resolve) => {
   execFile('tmux', ['-L', socket, ...args], { timeout: 5000 }, (err, out) => resolve({ ok: !err, out: String(out || '') }));
 });
 export const tmuxRunner = tmuxRunnerFor(SOCKET);
+// The sign-in socket for a server instance. Each instance clears its own socket at boot (orphans of a previous run:
+// createConnections), and the socket is per user, not per instance: a test server (its own data dir) booting on the
+// live server's socket ended the owner's sign-in in progress ("the sign-in session ended unexpectedly"). So the live
+// server (the default data dir) keeps SOCKET and any other data dir gets its own, stable across its restarts.
+export function loginSocketFor(dataDir, liveDataDir) {
+  if (path.resolve(dataDir) === path.resolve(liveDataDir)) return SOCKET;
+  return `${SOCKET}-${crypto.createHash('sha256').update(path.resolve(dataDir)).digest('hex').slice(0, 10)}`;
+}
 
 // The tmux subset createConnections uses (new-session, capture-pane, send-keys, kill-session, kill-server), backed by
 // `script` (a pty from util-linux or BSD) for machines without tmux (a Mac without Homebrew's tmux). Each session is
@@ -226,7 +255,8 @@ export function createConnections({ entries, env = process.env, onChange = () =>
     logins.set(id, l);
     await booted;
     await tmux(['kill-session', '-t', `=${session(id)}`]);
-    const r = await tmux(['new-session', '-d', '-s', session(id), '-x', '250', '-y', '50', '-c', os.homedir(), cmd]);
+    // 1000 columns: a sign-in URL (Claude's run to ~470 characters) fits on one line, even in a UI that hard-wraps.
+    const r = await tmux(['new-session', '-d', '-s', session(id), '-x', '1000', '-y', '50', '-c', os.homedir(), cmd]);
     if (l.state !== 'waiting') { // cancelled while starting: don't leave the new session behind
       if (r.ok) await tmux(['kill-session', '-t', `=${session(id)}`]);
       return { status: 200, login: view(l) };

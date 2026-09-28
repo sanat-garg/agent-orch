@@ -38,7 +38,7 @@ test('macOS: the worker stage handed over as `declare -f` text re-parses and run
     // Load the functions without main (AGENT_ORCH_INSTALLER_NO_MAIN), then build the command main hands the worker
     // account: with every function (declare -f) and with just WORKER_FUNCS, as main does.
     const cmd = (fns, fn) => {
-      const r = b32(['-c', `. "$0"; parse "$@"; vars="$(declare -p REPO LABEL CONTROLLER CODE NAME AGENTS DRY)"
+      const r = b32(['-c', `. "$0"; parse "$@"; vars="$(declare -p "\${WORKER_VARS[@]}")"
         printf '%s' "set -euo pipefail; $vars; $(declare -f ${fns}); cd; ${fn}"`, MAC, ...ARGS], { env: { AGENT_ORCH_INSTALLER_NO_MAIN: '1' } });
       assert.equal(r.status, 0, r.stderr);
       assert.match(r.stdout, /^set -euo pipefail; declare -- REPO="sanat-garg\/agent-orch"/);

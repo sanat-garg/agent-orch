@@ -14,7 +14,7 @@ import { retireRuntime, chatIdle, whenIdle } from './runtimes.mjs';
 import { AGENTS, agentEfforts, clampEffort, runAgentCli, clearLoginCache, isMissingSession, modelCatalog, claudeWindows, fetchLimits, agentVersion, readVersion, windowLabel, setMcpSource } from './agents.mjs';
 import { createModelStore } from './models.mjs';
 import { runHelper, claudeHelperSpawn } from './helpers.mjs';
-import { createConnections, SPECS, codexAccount, onPath } from './connections.mjs';
+import { createConnections, SPECS, codexAccount, onPath, tmuxRunnerFor, loginSocketFor } from './connections.mjs';
 import { mediaCollector, MEDIA_ID_RE, MEDIA_TYPES, toolResultImages } from './media.mjs';
 import { createUsageLog, createLimitStore, RANGES as USAGE_RANGES } from './usage.mjs';
 import { handleFiles } from './files.mjs';
@@ -715,6 +715,8 @@ const agentEntry = (a, extra = {}) => ({ id: a.id, label: a.label, installed: ()
 // once the cluster hub exists. Codex needs nothing extra; Claude needs one long-lived token, made here once.
 let agentShare = null;
 const connections = createConnections({
+  // Its own tmux socket: a test server on this machine must never clear the live server's sign-in in progress.
+  tmux: tmuxRunnerFor(loginSocketFor(DATA, path.join(ROOT, 'data'))),
   entries: [
     agentEntry(AGENTS.claude, { spec: SPECS.claude, account: () => AGENTS.claude.account() }),
     { id: 'claude-machines', label: 'Claude for your machines', installed: () => !!agentShare && AGENTS.claude.available(),

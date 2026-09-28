@@ -14,7 +14,8 @@ import { createAgentShare, wireAgentShare, shareTargets, parseCodexAuth, CLAUDE_
 import { createConnections, SPECS, parsePane } from '../connections.mjs';
 import { parseClaudeAuth } from '../agents.mjs';
 import { createCluster } from '../cluster.mjs';
-import { validate, WORKER_ACCEPTS, FEATURES, FEATURE_LIST, CLAIM_PATH } from '../cluster-protocol.mjs';
+import { validate, WORKER_ACCEPTS, FEATURES, FEATURE_LIST, CLAIM_PATH, WHOAMI_PATH } from '../cluster-protocol.mjs';
+import { checkPairing } from '../worker.mjs';
 import { isolatedPath } from './helpers/isolated-path.mjs';
 import { waitFor } from './helpers/wait.mjs';
 
@@ -153,6 +154,11 @@ esac
   share = createAgentShare({ dataDir: path.join(tmp, 'head-data'), home: headHome(), send: (id, f) => cluster.send(id, f), targets: shareTargets(cluster), watchMs: 200 });
   wireAgentShare(cluster, share);
   server = http.createServer(async (req, res) => {
+    if (req.url === WHOAMI_PATH && req.method === 'GET') {
+      const r = cluster.whoami(req.headers);
+      res.writeHead(r.status || 200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify(r.status ? { error: r.error } : r));
+    }
     if (req.url !== CLAIM_PATH || req.method !== 'POST') { res.writeHead(404); return res.end(); }
     let body = '';
     for await (const c of req) body += c;
@@ -208,4 +214,28 @@ test('a worker with nothing signed in runs Claude and Codex on the head\'s sign-
   fs.rmSync(path.join(headHome(), '.codex', 'auth.json'));
   await waitFor(() => agent('claude')?.signedIn === false && !fs.existsSync(wauth), { timeout: 10000, message: `worker dropped both\n${out}` });
   assert.equal(agent('codex').shared, false);
+});
+
+// The installer's re-run check (worker.mjs check → WHOAMI_PATH): keep a pairing the head still knows, never add the
+// machine twice; pair again once the head removed it or for another head; keep it when the head can't be asked.
+test('worker.mjs check: known to the head, paired with another head, removed there, or the head unreachable', { timeout: 60000 }, async () => {
+  const home = path.join(whome, '.agent-orch-worker');
+  const { node, name } = JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8'));
+  assert.deepEqual(await checkPairing({ home, controller: base }), { state: 'ok', name });
+  assert.equal((await checkPairing({ home, controller: 'https://another-head.example' })).state, 'unpaired');
+  const cli = async (...args) => promisify(execFile)(process.execPath, ['worker.mjs', 'check', ...args], { cwd: ROOT, env: env() })
+    .then((r) => ({ code: 0, out: r.stdout }), (e) => ({ code: e.code, out: e.stdout }));
+  assert.deepEqual(await cli('--controller', base), { code: 0, out: `paired as ${name}\n` });
+  // A bad token asking is refused without revealing anything; the machine is removed on the head: pair again.
+  const r = await fetch(new URL(WHOAMI_PATH, base), { headers: { authorization: 'Bearer aon_nope' } });
+  assert.equal(r.status, 401);
+  assert.equal((await r.json()).node, undefined);
+  cluster.revoke(node);
+  assert.deepEqual(await checkPairing({ home, controller: base }), { state: 'unpaired', why: 'the head removed this machine' });
+  assert.equal((await cli('--controller', base)).code, 3);
+  // The head can't be asked (down, or a head too old to answer): keep the pairing (exit 2).
+  const cfg = JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8'));
+  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ ...cfg, controller: 'http://127.0.0.1:9' }), { mode: 0o600 });
+  assert.equal((await checkPairing({ home })).state, 'unknown');
+  assert.equal((await cli()).code, 2);
 });

@@ -12,6 +12,9 @@ const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin')
 const LINUX = path.join(BIN, 'install-worker.sh'), MAC = path.join(BIN, 'install-worker-macos.sh');
 const ARGS = ['--dry-run', '--controller', 'https://head.example', '--code', 'ABCD-2345', '--name', 'box', '--agents', 'claude,codex'];
 
+// The macOS installer's functions and settings without running it (its last line runs main unless told not to).
+const macFunctions = () => fs.readFileSync(MAC, 'utf8').replace(/\n(?:\[\[[^\n]*\]\] \|\| )?main "\$@"\s*$/, '\n');
+
 function dry(script, args) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-install-'));
   try {
@@ -32,7 +35,7 @@ test('both scripts pass bash -n', () => {
 test('macos: the worker stage survives the declare -f hand-over (bash 3.2 on macOS)', () => {
   const code = (s) => fs.readFileSync(s, 'utf8').split('\n').filter((l) => !l.trim().startsWith('#')).join('\n'); // comments may quote the pattern
   for (const s of [LINUX, MAC]) assert.doesNotMatch(code(s), /<<-?\s*['"]?\w+['"]?[^\n]*\|/, `${path.basename(s)}: a here-document feeds a pipe`);
-  const body = fs.readFileSync(MAC, 'utf8').replace(/\n(?:\[\[[^\n]*\]\] \|\| )?main "\$@"\s*$/, '\n');
+  const body = macFunctions();
   const shells = ['bash', process.env.CW_BASH32, process.platform === 'darwin' ? '/bin/bash' : null].filter(Boolean);
   for (const sh of shells) {
     const dumps = execFileSync(sh, ['-c', `${body}\ndeclare -f; echo '#---'; declare -f "\${WORKER_FUNCS[@]}"`], { encoding: 'utf8' });
@@ -41,7 +44,9 @@ test('macos: the worker stage survives the declare -f hand-over (bash 3.2 on mac
     const [defined, listed] = execFileSync(sh, ['-c', `${body}\ndeclare -F | awk '{print $3}' | tr '\\n' ' '; echo; echo "\${WORKER_FUNCS[*]}"`], { encoding: 'utf8' })
       .trim().split('\n').map((l) => l.trim().split(/\s+/));
     const handed = dumps.split('#---')[1];
-    const missing = defined.filter((f) => !listed.includes(f) && new RegExp(`(^|[\\s;(&|])${f}([\\s;)]|$)`, 'm').test(handed));
+    // A call: the name where a command starts (line start, after ; & | $( or then/do/else/if/!), not a word in a message.
+    const missing = defined.filter((f) => !listed.includes(f)
+      && new RegExp(`(^\\s*|[;&|]\\s*|\\$\\(\\s*|\\b(?:then|do|else|if|!)\\s+)${f}(\\s|;|\\)|$)`, 'm').test(handed));
     assert.deepEqual(missing, [], `${sh}: WORKER_FUNCS lacks functions the worker stage calls`);
     // Exactly what main runs as the worker account (here in dry-run, as this user, in a temp HOME).
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-install-'));
@@ -114,7 +119,7 @@ exit 0
 `, { mode: 0o755 });
     fs.writeFileSync(path.join(bin, 'plutil'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     fs.writeFileSync(path.join(bin, 'sleep'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-    const body = fs.readFileSync(MAC, 'utf8').replace(/\nmain "\$@"\s*$/, '\n');
+    const body = macFunctions();
     const r = spawnSync('bash', ['-c', `${body}\nDRY=0; relaunch system com.agent-orch.worker /Library/LaunchDaemons/w.plist; echo loaded`],
       { encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
     assert.equal(r.status, 0, r.stderr);

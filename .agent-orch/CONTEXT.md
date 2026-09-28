@@ -26,7 +26,7 @@ _What the code doesn't say. History: JOURNAL.md. Bugs: AUDIT.md. Mobile HIG rows
 ## Decisions (beyond BRIEF.md)
 - Subscriptions only: API_ENV stripping in server.mjs is what enforces it. Never weaken that.
 - Local branch `backup/pre-agent-orch` must never be pushed. Local `claude/*` branches and `agent-orch/task-197/-199/-209` are the owner's unlanded work: never land or delete them unasked.
-- `after` is for TRUE prerequisites only (cancelling cascades). Use `files` to keep parallel work apart. Rapid reflections target free cluster slots + two buffered tasks.
+- `after` is for TRUE prerequisites only (cancelling cascades). Use `files` to keep parallel work apart. Rapid top-up (`rapidQueue`) targets free worker slots + 2 minus worker-ready work; head-only work (integrators, tasks kept on the head) and chained tasks never count.
 - System font stack only. No benchmark ranking of models, ever.
 - Computer work follows AGENTIC.md's rollout (files-only workspace first). Connectors (Gmail etc.) only when the owner asks.
 

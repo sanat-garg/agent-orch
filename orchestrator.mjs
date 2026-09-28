@@ -392,8 +392,11 @@ export function reflectPrompt(project, rows, journalTail, overage, limits, reaso
   }
   if (reason) lines.push(`- Pacing: ${reason}`);
   if (rapid) {
-    sections.push(`Rapid development mode: ${rapid.slots} slots, ${rapid.running} running, ${rapid.ready} ready: queue about ${rapid.requested} more.\n` +
-      'The target is free cluster slots plus a two-task buffer. Return this many independent tasks with declared `files`, split into small file-disjoint pieces (including their tests). ' +
+    const head = rapid.head?.ready ? `Head-only backlog: ${rapid.head.ready} ready (integrators and work kept on the head) for ${rapid.head.free} free head slot${rapid.head.free === 1 ? '' : 's'}; ` +
+      'it never runs on workers, so it does not fill worker slots and you need not add to it.\n' : '';
+    sections.push(`Rapid development mode: workers have ${rapid.slots} slots, ${rapid.running} running, ${rapid.ready} ready: queue about ${rapid.requested} more worker-runnable tasks.\n` + head +
+      'The target is free worker slots plus a two-task buffer. Return this many independent tasks with declared `files`, split into small file-disjoint pieces (including their tests). ' +
+      'No chains: a task with `after` waits for its prerequisites, so it does not count as ready and leaves a slot empty. ' +
       'Spread them across bugs from AUDIT.md, UI-REVIEW.md items, tests for untested modules, ROADMAP.md next items, and BRIEF.md goals still open. ' +
       'Avoid files already assigned to queued or running work. Add integrator tasks only where parts must combine, with `after` for those true prerequisites.\n');
   }
@@ -2622,12 +2625,18 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
   const chatPlanning = () => [...planningProjects.values()].includes('chat');
 
-  // Ready means prerequisites met and no review hold; count across projects, just like cluster capacity.
+  // Rapid top-up demand per node class (#436). Worker slots: every node taking ordinary work (online workers at their
+  // target, the controller's work slots when it takes work) less the ordinary work running. Worker-ready: queued work
+  // that can go there (prerequisites met, no review hold, not an integrator or a task kept on the controller). Head: its
+  // reserved slots vs ready integrators, reported only: reflection never tops up head-only work.
   function rapidQueue() {
     const c = capacityView();
-    const ready = qa(RUNNABLE + " AND t.kind='work'", { now: now() }).filter((r) => projectReady(getProject(r.project_id).path)).length;
-    const running = q1("SELECT COUNT(*) AS n FROM tasks WHERE status='running' AND kind='work'").n;
-    return rapidQueueTarget(Math.min(c.max, c.cap ?? Infinity), running, ready);
+    const rows = qa(RUNNABLE + " AND t.kind='work'", { now: now() }).filter((r) => projectReady(getProject(r.project_id).path));
+    const headOnly = (r) => controllerOnly(r) || (!c.controller && (!!r.worktree || r.run_on === LOCAL_NODE));
+    const running = q1("SELECT COUNT(*) AS n FROM tasks WHERE status='running' AND kind='work' AND integrates IS NULL").n;
+    const ready = rows.filter((r) => !headOnly(r)).length, hs = headSlots(), only = headLoad().only;
+    return { ...rapidQueueTarget(Math.min(c.max, c.cap ?? Infinity), running, ready),
+      head: { slots: hs.reserved, running: only, free: Math.max(0, hs.reserved - only), ready: rows.length - ready } };
   }
   function rapidLimitReason(p) {
     const primary = intendedRoute({ kind: 'reflect', title: 'Reflect: what else should be done?', prompt: '', ...reflectFor(p) }, p);
@@ -2644,7 +2653,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (!parallelSettings().rapidDevelopment) return null;
     const blockedProjects = qa("SELECT * FROM projects WHERE status='active' AND perpetual=1")
       .map((p) => ({ id: p.id, reason: rapidLimitReason(p) })).filter((p) => p.reason);
-    return { ...rapidQueue(), blockedProjects, reason: blockedProjects.length ? blockedProjects[0].reason : null };
+    const q = rapidQueue(), open = qa("SELECT id FROM projects WHERE status='active' AND perpetual=1").length > blockedProjects.length;
+    return { ...q, toppingUp: q.requested > 0 && open, blockedProjects, reason: blockedProjects.length ? blockedProjects[0].reason : null };
   }
   // Keep improving off (projects.perpetual=0) means no reflection at all: scheduleReflections is the only path that
   // creates reflect tasks, RUNNABLE never claims one, and this cancels any left waiting (one project, or every project
@@ -2681,7 +2691,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       const id = addTask(p.id, { title: 'Reflect: what else should be done?', prompt: '(reflection)', kind: 'reflect', source: 'reflection', agent: rs.agent, model: rs.model,
         fallbacks: reflectFallbacksFor(p) });
       if (p.convo_id) emitChat(p.convo_id, { t: 'reflect', taskId: id, text: p.reflect_direction ? `${REFLECT_ASK} Direction: ${p.reflect_direction}` : REFLECT_ASK });
-      logEvent(`${rapid ? `${rapid.ready} ready < ${rapid.free + 2} target → topping up` : 'queue empty → reflecting'} (task #${id})`, { projectId: p.id, taskId: id });
+      logEvent(`${rapid ? `workers: ${rapid.free} free · ${rapid.ready} ready → topping up with ${rapid.requested}` : 'queue empty → reflecting'} (task #${id})`, { projectId: p.id, taskId: id });
       added = true;
     }
     return added;

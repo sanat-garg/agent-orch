@@ -13,3 +13,7 @@ The owner sees the MacBook Pro with a parallel limit of 11 get only 2 tasks. The
 ## Done when
 
 `node --test test/rapid-topup-capacity*.test.mjs` passes (worker-slot-based demand, integrators excluded, no top-up when enough worker-ready work)
+
+## Result — done (check passed) (2026-09-28 14:27)
+
+AGENT-ORCH-STATUS: done — Rapid top-up now counts worker slots, excluding head-only integrators

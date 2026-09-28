@@ -6649,6 +6649,12 @@ document.addEventListener('keydown', (e) => {
   else closeQueue();
 }, true);
 function scheduleQueue() { clearTimeout(Q.timer); Q.timer = setTimeout(renderQueue, 120); }
+// Rapid top-up at a glance (#436): worker demand, then head-only backlog, e.g. 'Workers: 9 free · 3 ready → topping up'.
+function rapidSummary(r) {
+  if (!r) return '';
+  const head = r.head?.ready ? ` · Head: ${r.head.free} free · ${r.head.ready} ready` : '';
+  return `Workers: ${r.free} free · ${r.ready} ready${r.toppingUp ? ' → topping up' : ''}${head}`;
+}
 function renderQueue() {
   if ($('queueModal').hidden || Q.drag || Q.busy) return;
   const body = $('qBody');
@@ -6676,6 +6682,8 @@ function renderQueue() {
     for (const t of paused) box.append(queueCard(t.id, false));
     body.append(box);
   }
+  const rapid = rapidSummary(O.state?.rapid);
+  if (rapid) body.append(el('p', 'muted q-rapid', rapid));
   body.append(el('h3', 'dg-group', `Up next · ${queued.length}`));
   if (!queued.length) body.append(el('p', 'muted', 'Nothing queued.'));
   const list = el('div', 'q-list');

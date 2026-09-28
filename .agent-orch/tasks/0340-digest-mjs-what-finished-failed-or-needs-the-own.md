@@ -13,3 +13,7 @@ New feature backend (BRIEF goal 3 and 6: the phone app opened after hours away s
 ## Done when
 
 `node --test test/digest.test.mjs` and `grep -q 'export function digest\|export async function digest' digest.mjs`
+
+## Result — done (check passed) (2026-09-28 12:29)
+
+AGENT-ORCH-STATUS: done — digest.mjs reports per-project done/failed/needs-you, tests pass

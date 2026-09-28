@@ -964,3 +964,7 @@ existing origins push without gh; repoOf handles all URL forms
 ## 2026-09-28 12:29 — #341 Wire chat search: GET /api/convos?q= via search.mjs and a search field above the chat list [done (check passed)]
 
 Sidebar chat search now calls GET /api/convos?q=; tests pass
+
+## 2026-09-28 12:29 — #340 digest.mjs: what finished, failed or needs the owner since they last looked, per project, with tests [done (check passed)]
+
+digest.mjs reports per-project done/failed/needs-you, tests pass

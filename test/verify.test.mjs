@@ -2,7 +2,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { extractCommand } from '../orchestrator.mjs';
-import { extractCheck } from '../taskrun.mjs';
+import { extractCheck, checkUnavailable } from '../taskrun.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 test('extractCommand joins every command snippet with &&', () => {
   assert.equal(extractCommand('`! grep -q foo x.mjs` and `npm test` passes'), '! grep -q foo x.mjs && npm test');
@@ -142,4 +145,22 @@ test('extractCheck lists refused snippets, so a refused check is not mistaken fo
   assert.deepEqual(extractCheck('```\nnpm test\nrm -rf dist\n```'), { command: null, refused: ['rm -rf dist'] });
   assert.deepEqual(extractCheck('`grep -q x f` and `curl -s http://x`'), { command: null, refused: ['curl -s http://x'] });
   assert.deepEqual(extractCheck('`npm test` passes'), { command: 'npm test', refused: [] });
+});
+
+test('checkUnavailable: only a missing first program not on PATH makes a 127 "unavailable" (AUDIT #65)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ao-path-'));
+  const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'ao-path-'));
+  try {
+    const env = { PATH: empty };
+    assert.equal(checkUnavailable('node_modules && npm test', 'bash: node_modules: command not found', 127, env), true);
+    assert.equal(checkUnavailable('npm test', '> jest\nsh: jestx: command not found', 127, env), false);
+    assert.equal(checkUnavailable('CI=1 pytest', 'bash: pytest: command not found', 127, env), true);
+    assert.equal(checkUnavailable('cd app && ! pytest -q', 'sh: 1: pytest: not found', 127, env), true);
+    assert.equal(checkUnavailable('CI=1 pytest', 'bash: pytest: command not found', 1, env), false);
+    fs.writeFileSync(path.join(dir, 'pytest'), '#!/bin/sh\n', { mode: 0o755 });
+    assert.equal(checkUnavailable('CI=1 pytest', 'bash: pytest: command not found', 127, { PATH: `${empty}${path.delimiter}${dir}` }), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(empty, { recursive: true, force: true });
+  }
 });

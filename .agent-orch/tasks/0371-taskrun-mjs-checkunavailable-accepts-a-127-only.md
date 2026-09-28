@@ -13,3 +13,7 @@ Reliability in taskrun.mjs (AUDIT #65 in .agent-orch/AUDIT.md; do not edit AUDIT
 ## Done when
 
 `npm test -- test/verify.test.mjs` passes and `grep -q 'export function checkUnavailable' taskrun.mjs`
+
+## Result — done (check passed) (2026-09-28 13:52)
+
+AGENT-ORCH-STATUS: done — checkUnavailable exported and tested; orchestrator.mjs wiring still pending

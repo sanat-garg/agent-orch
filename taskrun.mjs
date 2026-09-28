@@ -1,7 +1,9 @@
 // What running one task needs on any node, shared by the controller's orchestrator (orchestrator.mjs) and a worker
 // (worker.mjs), so a worker never loads the orchestrator (planner, reflection, scheduler): the done-when check
-// (extractCheck / extractCommand → runCheck) and a tool call in one line (toolLine). No deps beyond node built-ins.
+// (extractCheck / extractCommand → runCheck → checkUnavailable) and a tool call in one line (toolLine). No deps beyond node built-ins.
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 
 // "Edit · src/app.js": a tool call in one line (lane activity, handoff prompts, a worker's progress hints).
 export const toolLine = (e) => {
@@ -90,6 +92,25 @@ function checkCommand(cand, doneWhen) {
     }
   }
   return cand;
+}
+
+// True only when a check's exit 127 means its own first program is missing from this node (so "check unavailable",
+// not "failed"): the `<name>: command not found` (bash) / `<name>: not found` (sh) line must name the first word of
+// the command or of one of its && parts (after cd/env prefixes and a `!`), and that word must not be on env.PATH.
+// A runner missing inside an npm script (`sh: jestx: command not found`) means the tests never ran: false (AUDIT #65).
+export function checkUnavailable(command, output, code, env = process.env) {
+  if (code !== 127 || !command) return false;
+  const missing = new Set([...String(output || '').matchAll(/([^\s:]+): (?:command )?not found\s*$/gm)].map((m) => m[1]));
+  if (!missing.size) return false;
+  const bare = unquoted(command);
+  const parts = [];
+  for (let i = 0, from = 0; i <= bare.length; i++) {
+    if (i === bare.length || bare.startsWith('&&', i)) { parts.push(command.slice(from, i)); from = i + 2; i++; }
+  }
+  const words = parts.map((p) => stripPrefix(p.trim().replace(/^\{\s+/, '').replace(/^!\s+/, '')).split(/\s+/)[0]).filter(Boolean);
+  const runnable = (f) => { try { fs.accessSync(f, fs.constants.X_OK); return fs.statSync(f).isFile(); } catch { return false; } };
+  const onPath = (w) => (w.includes('/') ? runnable(w) : String(env?.PATH || '').split(path.delimiter).some((d) => d && runnable(path.join(d, w))));
+  return words.some((w) => missing.has(w) && !onPath(w));
 }
 
 // Resolves [ok, output, exitCode]. Runs without a login shell so the caller's PATH (the orchestrator's has its

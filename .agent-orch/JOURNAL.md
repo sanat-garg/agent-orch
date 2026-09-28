@@ -1070,3 +1070,6 @@ Ping per worker card and Ping all work; ping tests pass
 ## 2026-09-28 13:52 — #396 uploads.mjs: placeUploads sweeps project-side attachment copies older than 30 days [done (check passed)]
 
 placeUploads now removes project attachment copies over 30 days old; tests pass
+## 2026-09-28 13:52 — #371 taskrun.mjs: checkUnavailable accepts a 127 only for a missing first program (AUDIT #65 half two) [done (check passed)]
+
+checkUnavailable exported and tested; orchestrator.mjs wiring still pending

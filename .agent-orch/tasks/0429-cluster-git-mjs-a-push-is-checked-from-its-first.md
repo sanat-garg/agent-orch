@@ -13,3 +13,7 @@ Harden the head's git endpoint for paired workers, cluster-git.mjs (read its hea
 ## Done when
 
 `node --test test/cluster-git-stream.test.mjs test/cluster-git.test.mjs`
+
+## Result — done (check passed) (2026-09-28 14:25)
+
+AGENT-ORCH-STATUS: done — Pushes now stream into git after the ref check; dropped clients kill git

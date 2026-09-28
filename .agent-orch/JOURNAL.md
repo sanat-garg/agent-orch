@@ -1168,3 +1168,6 @@ http gate proxy re-initializes after a stale-session 404 and retries
 ## 2026-09-28 14:24 — #385 Integrate #374: Files tab ui: a Changed view with +/− counts and a coloured diff in Quick Look [done (check passed)]
 
 merge resolved; Changed view, context menu and Ask in chat all pass
+## 2026-09-28 14:25 — #429 cluster-git.mjs: a push is checked from its first pkt-lines and streamed into git, never buffered whole; git is killed when the client goes away [done (check passed)]
+
+Pushes now stream into git after the ref check; dropped clients kill git

@@ -41,13 +41,13 @@ test('gcRetention prunes old finished run logs and old unreferenced media only',
   assert.equal(r.media, 2); // the unreferenced one and the one only the deleted run log referenced
   assert.ok(r.bytes > 0);
 
-  assert.deepEqual(gcRetention({ dataDir, runsDir, db, now }), { runs: 0, media: 0, uploads: 0, bytes: 0 });
+  assert.deepEqual(gcRetention({ dataDir, runsDir, db, now }), { runs: 0, media: 0, uploads: 0, browserTasks: 0, bytes: 0 });
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
 test('gcRetention falls back to mtimes without a DB and tolerates missing dirs', () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'retention-test-'));
-  assert.deepEqual(gcRetention({ dataDir }), { runs: 0, media: 0, uploads: 0, bytes: 0 });
+  assert.deepEqual(gcRetention({ dataDir }), { runs: 0, media: 0, uploads: 0, browserTasks: 0, bytes: 0 });
   const runsDir = path.join(dataDir, 'orchestrator', 'runs');
   fs.mkdirSync(runsDir, { recursive: true });
   const old = new Date(Date.now() - 40 * DAY);
@@ -95,5 +95,48 @@ test('gcRetention keeps media referenced by audit logs, approvals and task resul
   oldDb.exec('CREATE TABLE tasks(id INTEGER PRIMARY KEY, status TEXT, finished_at REAL); CREATE TABLE runs(id INTEGER PRIMARY KEY, task_id INTEGER, finished_at REAL);');
   assert.equal(gcRetention({ dataDir, db: oldDb, now }).media, 2);
   assert.deepEqual(fs.readdirSync(mediaDir), [byAudit]);
+  fs.rmSync(dataDir, { recursive: true, force: true });
+});
+
+test('gcRetention sweeps finished and orphaned screen-prompt workspaces under browser-tasks/', () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'retention-test-'));
+  const browserDir = path.join(dataDir, 'orchestrator', 'browser-tasks');
+  const now = Date.now(), ago = (days) => new Date(now - days * DAY);
+  const workspace = (name, days = 0) => {
+    const shots = path.join(browserDir, name, '.agent-orch', 'shots');
+    fs.mkdirSync(shots, { recursive: true });
+    fs.writeFileSync(path.join(shots, 'a.png'), 'png-bytes'); // 9 bytes
+    for (const d of [shots, path.join(browserDir, name)]) fs.utimesSync(d, ago(days), ago(days));
+  };
+
+  const db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE tasks(id INTEGER PRIMARY KEY, status TEXT, finished_at REAL);
+    CREATE TABLE runs(id INTEGER PRIMARY KEY, task_id INTEGER, finished_at REAL);`);
+  const statuses = { 21: 'done', 22: 'failed', 23: 'cancelled', 24: 'running', 25: 'queued', 26: 'awaiting_review', 27: 'needs_integration', 28: 'paused' };
+  for (const [id, status] of Object.entries(statuses)) db.prepare('INSERT INTO tasks VALUES(?,?,?)').run(Number(id), status, now / 1000);
+  for (const id of [...Object.keys(statuses), '99']) workspace(id); // 99 has no row
+  workspace('scratch');
+  workspace('12a');
+
+  const r = gcRetention({ dataDir, db, now });
+  assert.deepEqual(fs.readdirSync(browserDir).sort(), ['12a', '24', '25', '26', '27', '28', 'scratch']);
+  assert.deepEqual(r, { runs: 0, media: 0, uploads: 0, browserTasks: 4, bytes: 4 * 9 });
+  assert.equal(gcRetention({ dataDir, db, now }).browserTasks, 0);
+
+  // Without a DB only workspaces older than runDays go, whatever their task's state.
+  fs.rmSync(browserDir, { recursive: true });
+  workspace('31', 40);
+  workspace('32', 2);
+  workspace('old', 40);
+  const r2 = gcRetention({ dataDir, now });
+  assert.equal(r2.browserTasks, 1);
+  assert.equal(r2.bytes, 9);
+  assert.deepEqual(fs.readdirSync(browserDir).sort(), ['32', 'old']);
+
+  // An explicit browserDir is honoured.
+  const other = path.join(dataDir, 'elsewhere');
+  fs.mkdirSync(path.join(other, '21'), { recursive: true });
+  assert.equal(gcRetention({ dataDir, db, now, browserDir: other }).browserTasks, 1);
+  assert.deepEqual(fs.readdirSync(other), []);
   fs.rmSync(dataDir, { recursive: true, force: true });
 });

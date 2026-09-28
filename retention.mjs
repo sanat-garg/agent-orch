@@ -4,8 +4,11 @@
 // then <DATA>/media/<sha256>.<ext> files older than mediaDays whose id appears nowhere it is still referenced: no chat log
 // (<DATA>/logs), surviving run log, approval audit log (<DATA>/audit/<task>.jsonl), approvals.screenshot or tasks.result
 // (review/checkpoint shots), then <DATA>/uploads/<id>/ dirs (uploads.mjs) whose meta.json `at` (else the dir mtime) is
-// older than mediaDays and whose 24-hex id appears in no chat log. Synchronous, never throws per file; returns
-// {runs, media, uploads, bytes}. Callers catch: see orchestrator.mjs retentionGc.
+// older than mediaDays and whose 24-hex id appears in no chat log, then <browserDir>/<task id> screen-prompt workspaces
+// (browserDir defaults to <DATA>/orchestrator/browser-tasks; their .agent-orch/shots are duplicates of the media store)
+// whose task is done/failed/cancelled (any age) or has no row; any other status keeps it, and without a DB only those
+// whose mtime is older than runDays go. Non-integer names are left alone. Synchronous, never throws per file; returns
+// {runs, media, uploads, browserTasks, bytes}. Callers catch: see orchestrator.mjs retentionGc.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -14,6 +17,7 @@ import { UPLOAD_ID_RE } from './uploads.mjs';
 
 const DAY = 86400e3;
 const RUN_RE = /^run-(\d+)\.jsonl$/;
+const TASK_ID_RE = /^\d+$/;
 const FINISHED = new Set(['done', 'failed', 'cancelled']);
 
 const list = (dir) => { try { return fs.readdirSync(dir, { withFileTypes: true }); } catch { return []; } };
@@ -44,9 +48,19 @@ function dirBytes(dir) {
   for (const e of list(dir)) if (e.isFile()) n += stat(path.join(dir, e.name))?.size || 0;
   return n;
 }
+// Total bytes of everything under a path (a browser workspace nests its shots); symlinks count as themselves.
+function treeBytes(f, depth = 0) {
+  let st;
+  try { st = fs.lstatSync(f); } catch { return 0; }
+  if (!st.isDirectory()) return st.size;
+  let n = 0;
+  if (depth < 20) for (const e of list(f)) n += treeBytes(path.join(f, e.name), depth + 1);
+  return n;
+}
 
-export function gcRetention({ dataDir, runsDir = path.join(dataDir, 'orchestrator', 'runs'), db = null, now = Date.now(), runDays = 30, mediaDays = 7 }) {
-  const out = { runs: 0, media: 0, uploads: 0, bytes: 0 };
+export function gcRetention({ dataDir, runsDir = path.join(dataDir, 'orchestrator', 'runs'),
+  browserDir = path.join(dataDir, 'orchestrator', 'browser-tasks'), db = null, now = Date.now(), runDays = 30, mediaDays = 7 }) {
+  const out = { runs: 0, media: 0, uploads: 0, browserTasks: 0, bytes: 0 };
   const lookup = db?.prepare(`SELECT r.finished_at AS rf, t.id AS tid, t.status, t.finished_at AS tf
     FROM runs r LEFT JOIN tasks t ON t.id=r.task_id WHERE r.id=?`);
   const surviving = [];
@@ -62,6 +76,24 @@ export function gcRetention({ dataDir, runsDir = path.join(dataDir, 'orchestrato
       try { fs.rmSync(f); out.runs++; out.bytes += st.size; continue; } catch {}
     }
     surviving.push(f);
+  }
+
+  let taskStatus = null;
+  try { taskStatus = db?.prepare('SELECT status FROM tasks WHERE id=?'); } catch {}
+  for (const e of list(browserDir)) {
+    if (!TASK_ID_RE.test(e.name)) continue;
+    const f = path.join(browserDir, e.name);
+    let gone;
+    if (db) {
+      if (!taskStatus) continue; // a DB we cannot read: never guess a task is finished
+      try { const row = taskStatus.get(Number(e.name)); gone = !row || FINISHED.has(row.status); } catch { continue; }
+    } else {
+      const st = stat(f);
+      gone = !!st && now - st.mtimeMs > runDays * DAY;
+    }
+    if (!gone) continue;
+    const size = treeBytes(f);
+    try { fs.rmSync(f, { recursive: true, force: true }); out.browserTasks++; out.bytes += size; } catch {}
   }
 
   const maxAge = mediaDays * DAY;

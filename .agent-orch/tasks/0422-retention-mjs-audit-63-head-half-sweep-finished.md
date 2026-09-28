@@ -13,3 +13,7 @@ Goal: AUDIT #63 says screen-prompt workspaces are never deleted. On the head eac
 ## Done when
 
 `npm test -- test/retention.test.mjs` passes and `grep -c "browserTasks" retention.mjs` prints at least 1
+
+## Result — done (check passed) (2026-09-28 14:16)
+
+AGENT-ORCH-STATUS: done — gcRetention now sweeps finished and orphaned browser-task workspaces, tests pass

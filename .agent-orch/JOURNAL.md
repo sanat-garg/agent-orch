@@ -1140,3 +1140,7 @@ http connectors now run through the gate proxy; sse still withheld
 ## 2026-09-28 14:16 — #424 login page: the product is agent-orch, not Claude Code (goal 4) [done (check passed)]
 
 Login subtitle now says "Sign in to agent-orch"; tests pass
+
+## 2026-09-28 14:16 — #422 retention.mjs AUDIT #63 (head half): sweep finished screen-prompt workspaces under browser-tasks/ [done (check passed)]
+
+gcRetention now sweeps finished and orphaned browser-task workspaces, tests pass

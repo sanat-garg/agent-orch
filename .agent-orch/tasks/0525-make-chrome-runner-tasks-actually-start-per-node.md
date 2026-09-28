@@ -13,3 +13,7 @@ URGENT. The owner's Chrome runner node is online and capable ('Chrome on Sanat's
 ## Done when
 
 `node --test test/chrome-runner-start*.test.mjs` passes (per-node lock, chrome tasks never profile-gated, stale lock ignored, owner sign-in detection), and .agent-orch/CHROME.md's 'First real run' records a browser task that started on the runner and finished
+
+## Result — done (check passed) (2026-09-28 19:52)
+
+AGENT-ORCH-STATUS: done — lock, slots, sign-in fixed+tested; live proof needs deploy

@@ -4281,6 +4281,13 @@ function phoneSummary(nodes) {
   return `${up.length} of ${plural(nodes.length, 'machine')} online · ${running} running · ${plural(free, 'free slot')}`;
 }
 // From 768px it shows only in the machine's side panel, whose charts and Running here stand in for its meters and tasks.
+// A Chrome runner whose Claude is signed out (its inventory reported, no signed-in Claude): what the owner must do, else
+// null. chrome.mjs runnerSignIn says the same on the server (the Browser tab's setup card); a runner queues nothing until then.
+function runnerSignIn(n) {
+  const inv = n?.inventory || {};
+  if (!inv.chromeRunner || !inv.agents || inv.agents.some((a) => a.id === 'claude' && a.installed && a.signedIn)) return null;
+  return `Sign in to Claude on ${String(n.name || n.id || 'the Mac').replace(/^chrome on /i, '')} as yourself: run \`claude\` in Terminal`;
+}
 function machineCard(n) {
   const li = el('li', 'm-card mc-node'), st = nodeState(n), inv = n.inventory || {}, res = n.resources || {}, brief = CA_WIDE.matches;
   li.dataset.node = n.id;
@@ -4325,7 +4332,7 @@ function machineCard(n) {
     if (a.account) t.title = `Signed in as ${a.account}`;
     ag.append(t);
   }
-  if (!signed.length) ag.append(el('span', 'mc-idle', inv.agents ? 'No agents signed in' : 'Agents not reported yet'));
+  if (!signed.length) ag.append(el('span', 'mc-idle', runnerSignIn(n) || (inv.agents ? 'No agents signed in' : 'Agents not reported yet')));
   li.append(ag);
   if (brief) {
     if (canUpdate(n)) li.append(updateButton(n));
@@ -5942,7 +5949,7 @@ function ndPhoneRender(n) {
     gauges.append(ringGauge('CPU', u.cpu, inv.cores && plural(inv.cores, 'core')), ringGauge('Memory', u.mem, inv.mem && `${fmtGB(n.resources?.memAvailable)} free`));
     const ag = el('div', 'mc-agents'), signed = (inv.agents || []).filter((a) => a.signedIn);
     for (const a of signed) ag.append(el('span', 'tc-tag on', a.account ? `${agentLabel(a.id)} · ${a.account}` : agentLabel(a.id)));
-    if (!signed.length) ag.append(el('span', 'mc-idle', inv.agents ? 'No agents signed in' : 'Agents not reported yet'));
+    if (!signed.length) ag.append(el('span', 'mc-idle', runnerSignIn(n) || (inv.agents ? 'No agents signed in' : 'Agents not reported yet')));
     const pool = !n.local && poolLine(n), ping = !n.local && pingBox(n);
     info.replaceChildren(gauges, ...machineHealth(n), ...(pool ? [pool] : []), ...(ping ? [ping] : []), ag, ...(canUpdate(n) ? [updateButton(n)] : []));
   }

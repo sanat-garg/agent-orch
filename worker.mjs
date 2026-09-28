@@ -59,7 +59,7 @@ import { applyLimit, capRejection, capTasks, capText, fmtCores, fmtGB, resolveCa
 import { createJobUsage, createWrappers, heldBy, probeLimiter } from './worker-cap.mjs';
 import { request as statusRequest, serveStatus, statusCli } from './worker-status.mjs';
 import { ensureBrowser, needsBrowser, normIdentity } from './browser.mjs';
-import { detectChrome } from './chrome.mjs';
+import { CHROME_RUNNER_SLOTS, OWNER_ENV_STRIP, detectChrome, ownerClaudeLogin } from './chrome.mjs';
 import { APPROVAL_TTL_MS, hostGate } from './gate.mjs';
 import { MEDIA_ID_RE } from './media.mjs';
 import { createLiveBrowsers, screenOp } from './browser-live.mjs';
@@ -104,6 +104,9 @@ const BROWSER_MODE = process.env.AGENT_ORCH_WORKER_BROWSER || (process.env.NODE_
 // desktop session and takes only browser tasks, driving their Chrome through Claude in Chrome (chrome.mjs). It keeps the
 // owner's own Claude sign-in: the head's shared setup token can't drive Chrome.
 const CHROME_RUNNER = process.env.AGENT_ORCH_CHROME_RUNNER === '1';
+// A runner's Claude (the sign-in check, model reads and every run) uses the owner's own config: ~/.claude, never a
+// CLAUDE_CONFIG_DIR or the head's token that reached its environment (chrome.mjs OWNER_ENV_STRIP, #525).
+if (CHROME_RUNNER) for (const k of Object.keys(process.env)) if (OWNER_ENV_STRIP.test(k)) delete process.env[k];
 const EDIT_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
 // The files an edit tool call touched: Claude's file_path, or codex's file_change lines ("add hello.txt").
 const editedFiles = (e) => (EDIT_TOOLS.has(e.name) ? String(e.input?.file_path || e.input?.path || '').split('\n')
@@ -514,15 +517,20 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   const credWatch = setInterval(checkCodexRefresh, Number(process.env.AGENT_ORCH_CRED_WATCH_MS) || 10_000);
   credWatch.unref?.();
 
+  // A Chrome runner's Claude is the owner's own sign-in (chrome.mjs ownerClaudeLogin: the CLI's answer on the owner's
+  // config, else their ~/.claude.json). The inventory and the offer gate both read it, so the head sees what a job gets.
+  const runnerLogin = () => (CHROME_RUNNER && AGENTS.claude.available() ? ownerClaudeLogin({ cli: AGENTS.claude.loggedIn() ? AGENTS.claude.email || true : false }) : null);
   // ---- inventory and resources
   async function inventory() {
     const agents = await Promise.all(Object.values(AGENTS).map(async (a) => {
-      const installed = !!a.available(), signedIn = installed && !!a.loggedIn();
+      const owner = a.id === 'claude' ? runnerLogin() : null;
+      const installed = !!a.available(), signedIn = owner ? owner.ok : installed && !!a.loggedIn();
       const version = installed ? await readVersion(a.id).catch(() => null) : null;
       const cat = modelCatalog(a.id);
-      // shared: signed in with the head's sign-in (agent.credential), not one made on this machine.
-      const shared = a.id === 'claude' ? !!process.env.CLAUDE_CODE_OAUTH_TOKEN : !!codexShared && readCodexAuth() === codexShared;
-      return { id: a.id, installed, version, signedIn, shared, account: signedIn ? agentAccount(a.id) : null, models: cat.models, modelsError: cat.error };
+      // shared: signed in with the head's sign-in (agent.credential), not one made on this machine (a runner never is).
+      const shared = owner ? false : a.id === 'claude' ? !!process.env.CLAUDE_CODE_OAUTH_TOKEN : !!codexShared && readCodexAuth() === codexShared;
+      return { id: a.id, installed, version, signedIn, shared, account: owner ? owner.email : signedIn ? agentAccount(a.id) : null,
+        ...(owner && { owner: owner.via }), models: cat.models, modelsError: cat.error }; // owner: how a runner found the owner's sign-in ('cli' | 'config' | 'none')
     }));
     let gitVersion = null;
     try { gitVersion = /\d+\.\d+[\w.]*/.exec(await git(home, ['--version']))?.[0] || null; } catch {}
@@ -625,8 +633,9 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     return cpu?.saturated ? { ok: false, reason: 'cpu', text: `CPU saturated (${cpu.text})` } : { ok: true };
   }
   const activeJobs = () => [...jobs.values()].filter((j) => j.state !== 'paused').length;
-  // At most the head's max tasks (Auto: its cores, at least 4: placement.mjs slotTarget): slots are set on the head only.
-  const maxJobs = () => policy.maxTasks ?? slotTarget(os.cpus().length);
+  // At most the head's max tasks (Auto: its cores, at least 4: placement.mjs slotTarget; a Chrome runner: CHROME_RUNNER_SLOTS
+  // browser tasks, Chrome tabs are cheap): slots are set on the head only.
+  const maxJobs = () => policy.maxTasks ?? (CHROME_RUNNER ? CHROME_RUNNER_SLOTS : slotTarget(os.cpus().length));
   function syncAwake() { awake?.set(!stopping && wantsAwake(policy, power, activeJobs())); }
   function setPolicy(p) {
     policy = { ...effectivePolicy(process.platform, p), maxTasks: p?.maxTasks ?? null };
@@ -900,7 +909,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   // Auth, owner CPU/task ceilings and sustained CPU saturation are the offer gates.
   async function offerRejection(msg) {
     if (stopping || updating) return 'draining';
-    const st = agentStatus(msg.agent);
+    const owner = msg.agent === 'claude' ? runnerLogin() : null;
+    const st = owner ? (owner.ok ? true : 'not logged in') : agentStatus(msg.agent);
     if (st === 'not installed' || st === 'unknown agent') return 'agent_missing';
     if (st !== true) return 'not_signed_in';
     if (activeJobs() >= maxJobs() && !msg.assigned) return 'busy'; // the owner's assignment overrides the head's cap, never the local one

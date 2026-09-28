@@ -1621,3 +1621,7 @@ Browser prompts go straight to Chrome; setup card shows without runner
 ## 2026-09-28 19:25 — #521 No progress bar on waiting tasks [done (check passed)]
 
 Timeline bars now hidden on waiting tasks, shown once a run starts
+
+## 2026-09-28 19:52 — #525 Make Chrome-runner tasks actually start: per-node profile lock, runner sign-in, live proof [done (check passed)]
+
+lock, slots, sign-in fixed+tested; live proof needs deploy

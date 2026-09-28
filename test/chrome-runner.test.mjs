@@ -39,7 +39,7 @@ test('detection: Chrome, the extension in a profile, the native host and a deskt
 });
 
 const chromeNode = (id, extra = {}) => ({ id, name: `Chrome on ${id}`, os: 'darwin', local: false, status: 'online', connected: true, enabled: true,
-  features: ['approvals', 'browser-task', 'chrome'], inventory: { chrome: { capable: true }, chromeRunner: true }, ...extra });
+  features: ['approvals', 'browser-task', 'chrome'], inventory: { chrome: { capable: true }, chromeRunner: true, agents: [{ id: 'claude', installed: true, signedIn: true }] }, ...extra });
 
 test('browserRoute: a chrome node online wins for Claude; otherwise the built-in browser, with a note', () => {
   const pw = { id: 'pw', name: 'VPS2', local: false, status: 'online', connected: true, enabled: true, features: ['approvals', 'browser-task'], inventory: { browser: { capable: true } } };
@@ -53,6 +53,7 @@ test('browserRoute: a chrome node online wins for Claude; otherwise the built-in
   assert.equal(runnerLabel(off), 'Built-in browser');
   assert.equal(browserRoute([chromeNode('mac', { features: ['approvals'] })]).mode, 'builtin', 'a worker without the chrome feature');
   assert.equal(browserRoute([chromeNode('mac')], { agent: 'codex' }).mode, 'builtin', 'Claude in Chrome is Claude only');
+  assert.equal(browserRoute([chromeNode('mac', { inventory: { chrome: { capable: true }, chromeRunner: true, agents: [{ id: 'claude', installed: true, signedIn: false }] } })]).mode, 'builtin', 'a runner whose Claude is signed out (#525)');
 });
 
 test('a Claude run with chrome gets extraArgs {chrome: null}, no Playwright MCP, and the gate hook', async () => {

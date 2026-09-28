@@ -21,7 +21,7 @@ import { AGENTS, isAgent, agentEfforts, agentStatus, clampEffort, codexExhausted
 import { SHOTS_DIR, mediaCollector } from './media.mjs';
 import { BROWSER_SYSTEM, MCP_START_FAILED, needsBrowser, normIdentity, parseCapabilities, browserUnavailable, failedNodes, nextBrowserNode, chromeNode, findBrowser, FAILED_MS } from './browser.mjs';
 import { BROWSER_TASK_SYSTEM, browserTaskStatus, browserSteps, isBrowserTask } from './browser-task.mjs';
-import { browserRoute, chromeCapable, chromePrompt, chromeSetup, runnerLabel } from './chrome.mjs';
+import { CHROME_RUNNER_SLOTS, browserRoute, chromeCapable, chromePrompt, chromeSetup, runnerLabel } from './chrome.mjs';
 import { APPROVAL_TTL_MS, DEFAULT_PATTERNS } from './gate.mjs';
 import { createApprovals } from './approvals.mjs';
 import { createUsageLog } from './usage.mjs';
@@ -49,6 +49,7 @@ const CFG = {
   agentSlots: 'auto',                // concurrent tasks per connected account (or map by agent)
   browserSwitches: 2,           // a browser task whose browser couldn't start moves to another machine at most this often (#500)
   browserFailedMs: FAILED_MS,   // and the machine it failed on is skipped by unpinned browser tasks this long
+  staleLockMs: 600_000,         // a browser profile's holder that wrote nothing to its run this long is dead: its lock is ignored (#525)
   meminfo: process.env.AGENT_ORCH_MEMINFO || '/proc/meminfo', // the memory guard's source (tests point it at a fixture)
   memCheckMs: 5000,             // memory guard interval while tasks run
   memLowPauseSec: 30,           // MemAvailable under MEM.pauseBelow this long → pause the newest running task
@@ -1608,9 +1609,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // Work tasks on a node (plan tasks aside), from the DB, so a claim that hasn't started yet counts: the spread's "running".
   const nodeLoad = (id) => Math.max(q1("SELECT COUNT(*) AS n FROM tasks WHERE status='running' AND kind!='plan' AND COALESCE(node_id, :l)=:id", { l: LOCAL_NODE, id }).n,
     nodeRuns(id).filter((r) => r.kind !== 'plan').length);
-  // A worker's slots: the owner's max tasks (nodes.max_slots) or Auto = its cores, at least 4 (placement.mjs slotTarget),
-  // never more than its local cap allows (`node worker.mjs limit`: --max-tasks, --cpu). RAM never changes the slot count.
-  const nodeCap = (n, agent = 'claude') => Math.min(n.maxSlots ?? slotTarget(n.inventory?.cores),
+  // A worker's slots: the owner's max tasks (nodes.max_slots) or Auto = its cores, at least 4 (placement.mjs slotTarget);
+  // a Chrome runner's Auto is CHROME_RUNNER_SLOTS (Chrome tabs are cheap, #525). Never more than its local cap allows
+  // (`node worker.mjs limit`: --max-tasks, --cpu). RAM never changes the slot count.
+  const nodeCap = (n, agent = 'claude') => Math.min(n.maxSlots ?? (n.inventory?.chromeRunner ? CHROME_RUNNER_SLOTS : slotTarget(n.inventory?.cores)),
     capSlots(localCap(n), { cpuPerTask: CFG.cpuPerTask?.[agent] ?? CPU_PER_TASK }));
   const cpuOf = (n) => cpuState(n?.resources, n?.inventory?.cores ?? (n?.local ? os.cpus().length : null));
   // Why worker n can't take a task of `agent`'s now (the text after 'skipped: '), or null. Only a genuinely saturated CPU
@@ -1701,7 +1703,6 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if ((localFree !== 'reserved' || task.integrates) && ordinaryEverywhere() >= cap) return no(`at the ${parallelSettings().maxTasks === cap ? "owner's" : 'pacing'} cap of ${cap} running task${cap === 1 ? '' : 's'}`);
     const browser = needsBrowser(task);
     if (isBrowserTask(task) && browserHeld(task.run_on, identityOf(task))) return no('its browser identity is busy');
-    if (browser && profileBusy(task)) return no('its browser profile is in use');
     const project = getProject(task.project_id), remote = remoteCapable(task, project);
     // Pinned by the owner (run_on): only that machine, waiting for it. A worker pin only binds a task that can run remotely.
     // A machine whose browser failed lately (#500) is left out of the Chrome route, so a failover pin isn't undone.
@@ -1722,6 +1723,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         weigh(n.id, workerSkip(n, agent, task.id) || (!browser && n.inventory?.chromeRunner ? 'a Chrome runner: browser tasks only'
           : browser && !pin && browserFailed.has(n.id) ? `its browser failed lately (${browserFailed.why(n.id)})`
           : browser && !browserOk(n) ? (chromeIds ? `browser tasks use Chrome on ${route.name}` : 'no browser for browser tasks')
+          : browser && !chromeIds?.has(n.id) && profileBusyOn(n.id, task) ? 'its browser profile is in use there'
           : macOnly && n.os !== 'darwin' ? 'browser tasks run on a Mac while one is online'
           : !canClone(n, task, project) ? 'cannot clone this project'
             : task.integrates && !integrateWorker(n) ? 'its worker is too old for integration'
@@ -1735,6 +1737,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         : browser && !settings.controllerBrowser && pin !== LOCAL_NODE ? 'browser tasks run on workers (Settings)'
           : browser && macOnly ? 'browser tasks run on a Mac while one is online'
           : browser && !pin && browserFailed.has(LOCAL_NODE) ? `its browser failed lately (${browserFailed.why(LOCAL_NODE)})`
+          : browser && profileBusyOn(LOCAL_NODE, task) ? 'its browser profile is in use here'
           : remote && !pin && !settings.controllerWork && workerNodes(agent).some(fits) ? 'leaves work tasks to the workers (Settings)'
             : cpu?.saturated ? `CPU saturated (${cpu.text})`
               : !localFree ? `full (${nodeLoad(LOCAL_NODE)}/${slots} running)`
@@ -1777,9 +1780,27 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     logEvent(`#${task.id} moved to ${to}: browser unavailable on ${was}. Signed-in sites may differ on ${to}`, { level: 'warn', projectId: project.id, taskId: task.id });
     return true;
   }
-  // The profile lock: a claimed (running) task already uses this identity. Read from the DB, so a claim not yet started counts.
-  const profileBusy = (task) => qa("SELECT id, kind, capabilities, browser_identity FROM tasks WHERE status='running' AND capabilities IS NOT NULL AND id!=:id", { id: task.id })
-    .some((r) => r.kind === 'work' && identityOf(r) === identityOf(task));
+  // The profile lock, per machine and identity (#525): a running work task drives that machine's browser profile for its
+  // identity (Playwright, browser.mjs), so another task for the same profile there waits; the same identity on another
+  // machine is another profile. A run on a Chrome runner drives the owner's Chrome through the extension, no profile: it
+  // never holds the lock and is never gated by it (place: a chrome candidate skips the check). A holder whose run is
+  // dead — its node offline, or nothing written to its run for CFG.staleLockMs — doesn't count. Read from the DB, so a
+  // claim not yet started counts (its tasks.started_at is its first sign of life).
+  const profileHolders = (task) => qa("SELECT id, kind, capabilities, browser_identity, node_id, browser_runner, started_at FROM tasks WHERE status='running' AND capabilities IS NOT NULL AND id!=:id", { id: task.id })
+    .filter((r) => r.kind === 'work' && r.browser_runner !== 'chrome' && identityOf(r) === identityOf(task))
+    .map((r) => ({ ...r, node: running.get(r.id)?.node || r.node_id || LOCAL_NODE }))
+    .filter((r) => !chromeCapable(nodesNow().find((n) => n.id === r.node)) && lockLive(r));
+  const profileBusyOn = (nodeId, task) => profileHolders(task).some((r) => r.node === nodeId);
+  // A holder's run is alive: its node is up and its run showed life (the claim, the run's start, a phase, an entry in its
+  // log: every event lands there) within staleLockMs.
+  function lockLive(r) {
+    const n = r.node === LOCAL_NODE ? null : nodesNow().find((x) => x.id === r.node);
+    if (r.node !== LOCAL_NODE && !(n?.status === 'online' && n.connected)) return false;
+    const last = q1('SELECT started_at, log_path FROM runs WHERE task_id=:t ORDER BY id DESC LIMIT 1', { t: r.id }), live = running.get(r.id);
+    let at = Math.max(r.started_at || 0, last?.started_at || 0, live?.startedAt || 0, (live?.phaseAt || 0) / 1000);
+    try { at = Math.max(at, fs.statSync(last.log_path).mtimeMs / 1000); } catch {}
+    return now() - at < CFG.staleLockMs / 1000;
+  }
 
   // Claims the next task and its node: { task, node, prevNode }. slots: the controller's work slots now (slotCount);
   // localOk: it may claim on this server at all (no pending restart: `hold` says why not); cap: ordinary work
@@ -4225,7 +4246,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const agent = routeNow(task, project).agent;
     const signed = n.local ? localAgentOk(agent) : (n.inventory?.agents || []).some((a) => a.id === agent && a.installed && a.signedIn);
     if (!signed) return `${agentName(agent).replace(/ CLI$/, '')} isn't signed in on ${nodeWhere(n)}`;
-    if (needsBrowser(task) && profileBusy(task)) return `#${task.id}'s browser profile is in use by another task`;
+    if (needsBrowser(task) && !chromeCapable(n) && profileBusyOn(n.id, task)) return `#${task.id}'s browser profile on ${nodeWhere(n)} is in use by another task`;
     // Only work in its own checkout (a worktree here, or any worker) shares a project with running tasks.
     if (!isBrowserTask(task) && !(task.kind === 'work' && (!n.local || worktreeCapable(project)))) {
       const rapid = parallelSettings().rapidDevelopment;

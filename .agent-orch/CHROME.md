@@ -113,6 +113,41 @@ takes only browser tasks:
 - **Screenshots**: `computer` screenshots come back as tool-result images; agents.mjs `claudeEvents` turns them into
   `image` events, which the worker streams and the head stores as the task's media, like any tool-result image.
 
+## Starting on the runner (#525)
+
+- **The profile lock is per (machine, identity)**, never global (orchestrator.mjs `profileHolders` / `profileBusyOn`): a
+  Playwright audit holding `default` on one Mac never blocks a browser task on another. A task bound for a Chrome runner
+  (the route's chrome node, or the direct mode) drives the owner's Chrome through the extension and uses no profile: it is
+  never gated by the lock and never holds it. A holder whose run is dead (its node offline, or nothing written to its run
+  for `CFG.staleLockMs`, 10 min) is ignored. The Machines view words a skip as 'its browser profile is in use there/here'.
+- **Slots**: a runner's Auto is `CHROME_RUNNER_SLOTS` (2) browser tasks at once, on the head (`nodeCap`) and in the
+  worker (`maxJobs`), not its cores.
+- **Sign-in**: in runner mode the worker strips `CLAUDE_CODE_OAUTH_TOKEN` and `CLAUDE_CONFIG_DIR` from its environment at
+  start (`OWNER_ENV_STRIP`), so the sign-in probe, model reads and every run use the owner's own `~/.claude`. The inventory's
+  Claude entry is `ownerClaudeLogin`: the CLI's `auth status` on that config, else `~/.claude.json`'s `oauthAccount` (an
+  interactive login writes it, a setup token never does; `owner: 'cli' | 'config' | 'none'` says which), with the account's
+  email; the offer gate reads the same. `browserRoute` takes a chrome node only while its Claude is signed in
+  (`chromeReady`); a signed-out runner shows **"Sign in to Claude on <Mac> as yourself: run `claude` in Terminal"** on its
+  Machines card and as its line on the Browser tab's setup card (the tab then offers the built-in browser), and
+  placement lists it as 'agent claude signed out' instead of queueing silently.
+
+## First real run
+
+_Not yet run: blocked until this build is deployed._ The fixes above were written and tested on the MacBook Pro worker
+(task #525, 2026-09-29, branch agent-orch/task-525; test/chrome-runner-start.test.mjs covers the per-node lock, the chrome
+exemption, the stale lock, the runner's slots and the owner sign-in detection). A live run through the owner's runner
+needs the head AND the runner on Sanat's MacBook Air to run this code, which only happens after the branch merges (the
+head restarts itself on merged server code; Machines → Update all rolls the runner), and a worker session has no owner
+login for the head's API (session cookie only, no token), so no session of this task could do it before the merge.
+
+**To do right after deploy (a follow-up task on the head, or the owner):** with the runner online and its Machines card
+showing Claude signed in as the owner (not "Sign in to Claude on … as yourself"), retry #523 ('search nykaa for glow led
+masks') or send that prompt from the Browser tab, then watch the head's log for `#N runs on Chrome on …` within 30 s and
+the tab's steps from the extension's tool calls, and record here: run id, node, start delay, steps seen, outcome. If the
+runner's card still says to sign in, run `claude` in Terminal on the Air as the owner; the inventory's `owner` field says
+whether the CLI probe or `~/.claude.json` answered. If the task still doesn't start, the head's log line 'claim decision:
+#N not started: …' names the gate (it can no longer be 'its browser profile is in use' for a chrome task).
+
 ## Not verified here
 
 The MacBook's agentorch account has no GUI session and no extension, so no real end-to-end `--chrome` run was made

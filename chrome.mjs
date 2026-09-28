@@ -47,14 +47,41 @@ export function guiSession() {
   return who && who === os.userInfo().username;
 }
 
+// ---- the runner's Claude sign-in (#525)
+// Browser tasks at once on a Chrome runner when its slots are Auto: Chrome tabs are cheap, so its cores don't matter.
+export const CHROME_RUNNER_SLOTS = 2;
+// A runner runs Claude as the owner, on the owner's own config: never the head's shared setup token (it can't drive
+// Chrome, see above) nor a CLAUDE_CONFIG_DIR pointing elsewhere. worker.mjs strips these from its environment at start.
+export const OWNER_ENV_STRIP = /^(CLAUDE_CODE_OAUTH_TOKEN|CLAUDE_CONFIG_DIR)$/;
+// The owner's own Claude sign-in as the runner sees it: `cli` is what `claude auth status --json` said on the owner's
+// config (the email, true, or false when it said no, hung on a keychain prompt or failed). When the CLI says no, the
+// owner's ~/.claude.json still tells: an interactive `claude login` writes `oauthAccount` there (a setup token never
+// does), so a slow or prompt-blocked probe can't hide a real sign-in. {ok, email, via: 'cli' | 'config' | 'none'}.
+export function ownerClaudeLogin({ home = os.homedir(), cli = false, read = (f) => fs.readFileSync(f, 'utf8') } = {}) {
+  let acct = null;
+  try { acct = JSON.parse(read(path.join(home, '.claude.json')))?.oauthAccount || null; } catch {}
+  if (cli) return { ok: true, email: typeof cli === 'string' ? cli : acct?.emailAddress || null, via: 'cli' };
+  if (acct?.emailAddress) return { ok: true, email: acct.emailAddress, via: 'config' };
+  return { ok: false, email: null, via: 'none' };
+}
+// A node's Claude is installed and signed in (its inventory, as the worker reported it).
+export const claudeSignedIn = (n) => (n?.inventory?.agents || []).some((a) => a.id === 'claude' && a.installed && a.signedIn);
+// The Mac a runner runs on: its name without the "Chrome on " prefix the installer gives runners.
+export const runnerMac = (n) => String(n?.name || n?.id || 'the Mac').replace(/^chrome on /i, '');
+export const ownerSignInHint = (mac) => `Sign in to Claude on ${mac} as yourself: run \`claude\` in Terminal`;
+// What a Chrome runner whose Claude is signed out needs (the Machines view and the Browser tab say it), else null.
+export const runnerSignIn = (n) => (n?.inventory?.chromeRunner && !claudeSignedIn(n) ? ownerSignInHint(runnerMac(n)) : null);
+
 // ---- routing
 // A worker that can run a browser task through Claude in Chrome (and ask the head for approvals).
 export const chromeCapable = (n) => n?.inventory?.chrome?.capable === true && (n.features || []).includes('chrome') && (n.features || []).includes('approvals');
+// …and whose Claude is signed in, so a task sent there starts (a signed-out runner would queue it forever, #525).
+export const chromeReady = (n) => chromeCapable(n) && claudeSignedIn(n);
 const online = (n) => !n.local && n.enabled !== false && n.connected && (n.status || 'online') === 'online';
-// How a browser task runs now: {mode: 'chrome', nodes: [ids], name} when a chrome node is online (Claude only: the
-// integration is Claude Code's), else {mode: 'builtin', note} (the Playwright browser, browser.mjs).
+// How a browser task runs now: {mode: 'chrome', nodes: [ids], name} when a chrome node is online with Claude signed in
+// (Claude only: the integration is Claude Code's), else {mode: 'builtin', note} (the Playwright browser, browser.mjs).
 export function browserRoute(nodes, { agent = 'claude' } = {}) {
-  const chrome = (nodes || []).filter((n) => online(n) && chromeCapable(n));
+  const chrome = (nodes || []).filter((n) => online(n) && chromeReady(n));
   if (chrome.length && agent === 'claude') return { mode: 'chrome', nodes: chrome.map((n) => n.id), name: chrome[0].name || chrome[0].id };
   return { mode: 'builtin', note: chrome.length ? 'Codex runs use the built-in browser (Claude in Chrome is Claude only)' : 'No Chrome runner is online, so the built-in browser is used' };
 }
@@ -126,7 +153,7 @@ export function chromePrompt(prompt, rules = []) {
 export function chromeSetupStatus(n) {
   const c = n?.inventory?.chrome;
   if (!c) return n?.inventory?.chromeRunner ? 'checking Chrome' : 'no Chrome runner';
-  if (c.capable) return chromeCapable(n) ? 'ready' : 'worker needs an update';
+  if (c.capable) return !chromeCapable(n) ? 'worker needs an update' : runnerSignIn(n) || 'ready';
   if (!c.chrome) return 'Chrome not installed';
   if (!c.extension) return 'extension missing';
   if (!c.nativeHost) return 'run `claude --chrome` once';

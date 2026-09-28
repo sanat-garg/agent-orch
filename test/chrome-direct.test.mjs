@@ -38,10 +38,11 @@ test('chromeSetup: a status line per Mac', () => {
     mac('air', { capable: false, chrome: false, reason: 'Google Chrome is not installed' }),
     mac('mini', { capable: false, chrome: true, extension: false }),
     mac('pro', { capable: false, chrome: true, extension: true, nativeHost: true, gui: false }),
-    mac('runner', { capable: true }, { inventory: { chrome: { capable: true }, chromeRunner: true } }),
+    mac('runner', { capable: true }, { inventory: { chrome: { capable: true }, chromeRunner: true, agents: [{ id: 'claude', installed: true, signedIn: true }] } }),
+    mac('out', { capable: true }, { name: "Chrome on Sanat's MacBook Air", inventory: { chrome: { capable: true }, chromeRunner: true, agents: [{ id: 'claude', installed: true, signedIn: false }] } }),
     mac('old', null), mac('away', { capable: true }, { connected: false })]);
-  assert.deepEqual(Object.fromEntries(rows.map((r) => [r.id, r.status])), { runner: 'ready', air: 'Chrome not installed', mini: 'extension missing',
-    pro: 'no desktop session', old: 'no Chrome runner', away: 'offline' });
+  assert.deepEqual(Object.fromEntries(rows.map((r) => [r.id, r.status])), { runner: 'ready', out: "Sign in to Claude on Sanat's MacBook Air as yourself: run `claude` in Terminal",
+    air: 'Chrome not installed', mini: 'extension missing', pro: 'no desktop session', old: 'no Chrome runner', away: 'offline' });
   assert.equal(rows[0].id, 'runner', 'runners first');
 });
 

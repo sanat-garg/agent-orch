@@ -44,6 +44,9 @@ was retired when benchmark ranking was removed in #152/#153. Current work harden
    growing while healthy and backing off under saturation. Owner caps are optional ceilings. Memory is only an emergency guard (pause the newest task near OOM), never a pre-emptive throttle. Keep
    the queue full: the planner and reflection split work into many file-disjoint parallel tasks (with integrators)
    so every slot has work. Rate limits per account are the real ceiling, so use the fallback list to spread load.
+   PLACEMENT RULE (owner, 2026-09-28 12:25): use EVERY online machine. Never consider RAM, battery, AC power or
+   thermal state when delegating; only skip a machine whose CPU is genuinely struggling (sustained saturation),
+   and don't be conservative about it. Spread work across all machines instead of piling onto one.
 10. Removed agent CLIs (owner, 2026-09-27): Antigravity, OpenCode, Kiro and GitHub Copilot were uninstalled and all
    their code deleted. Claude Code and Codex are the only agents; never re-add the others.
 

@@ -1735,7 +1735,8 @@ async function handleRequest(req, res) {
     const r = orch.stopBrowserTask(Number(browserStop[1]));
     return json(res, r.error ? r.status || 400 : 200, r);
   }
-  if (p === '/api/browser' && req.method === 'GET') return json(res, 200, { nodes: await browserViews.list() });
+  // runner: how the next prompt runs, Claude in Chrome on a Mac or the built-in browser (orchestrator browserRunner).
+  if (p === '/api/browser' && req.method === 'GET') return json(res, 200, { nodes: await browserViews.list(), runner: orch.browserRunner?.() || null });
   if ((p === '/api/browser/sites' && req.method === 'GET') || (p === '/api/browser/clear' && req.method === 'POST')) {
     const q = req.method === 'GET' ? Object.fromEntries(new URL(req.url, 'http://x').searchParams) : await readBody(req);
     try {

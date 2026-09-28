@@ -21,6 +21,7 @@ import { AGENTS, isAgent, agentEfforts, agentStatus, clampEffort, codexExhausted
 import { SHOTS_DIR, mediaCollector } from './media.mjs';
 import { BROWSER_SYSTEM, MCP_START_FAILED, needsBrowser, normIdentity, parseCapabilities } from './browser.mjs';
 import { BROWSER_TASK_SYSTEM, browserTaskStatus, browserSteps, isBrowserTask } from './browser-task.mjs';
+import { browserRoute, chromeCapable, runnerLabel } from './chrome.mjs';
 import { APPROVAL_TTL_MS, DEFAULT_PATTERNS } from './gate.mjs';
 import { createApprovals } from './approvals.mjs';
 import { createUsageLog } from './usage.mjs';
@@ -1010,7 +1011,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // tasks.capabilities: JSON ["browser"] (browser.mjs; NULL = none); tasks.browser_identity: the browser profile a browser
   // task uses (NULL = 'default'). Browser tasks run on browserCapable nodes, one per profile at a time (`place`).
   // tasks.run_on: the machine the owner pinned a work task to (a node id; NULL = any machine), `place` honours it.
-  for (const col of ['capabilities', 'browser_identity', 'run_on']) {
+  // tasks.browser_runner: how a browser task's latest run drove its browser: 'chrome' (Claude in Chrome, chrome.mjs) or 'builtin'.
+  for (const col of ['capabilities', 'browser_identity', 'run_on', 'browser_runner']) {
     if (!db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === col)) db.exec(`ALTER TABLE tasks ADD COLUMN ${col} TEXT`);
   }
   // messages.task_id: the plan task that took a saved message (status 'taken'); it is 'done' once answered.
@@ -1598,7 +1600,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return used >= slots ? `full (${used}/${slots} running)` : null;
   }
   const freeWorkers = (agent, taskId) => workerNodes(agent).filter((n) => !workerSkip(n, agent, taskId));
-  const workerSlots = (agent) => freeWorkers(agent).reduce((sum, n) => sum + nodeCap(n, agent) - nodeLoad(n.id), 0);
+  // A Chrome runner (chrome.mjs; its inventory says chromeRunner) takes browser tasks only, so its slots don't count here.
+  const workerSlots = (agent) => freeWorkers(agent).filter((n) => !n.inventory?.chromeRunner).reduce((sum, n) => sum + nodeCap(n, agent) - nodeLoad(n.id), 0);
   // The Machines view's "last placement decision" per node: {at, ok, text, task}. picks: node id → the sequence number of
   // the placement that last chose it (pickNode's round-robin among ties).
   const decisions = new Map(), picks = new Map();
@@ -1652,6 +1655,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // allows it (controllerBrowser), and never while another task uses the same profile (Chromium locks it). Profiles live
   // on a Mac by default: while a Mac that can run it is online, an unpinned browser task waits for a Mac (the controller's
   // 1 core can't drive a browser well).
+  // Claude in Chrome (chrome.mjs, .agent-orch/CHROME.md): while a chrome-capable node is online, a Claude browser task goes
+  // only to one (a Browser-tab prompt drops its profile's machine for it), waiting for it when it is busy; the Playwright
+  // browser is the fallback only while none is online. A Chrome runner node takes nothing but browser tasks.
   // why (optional): why it wasn't placed, for the stall diagnostics (claimNext's `why`); `hold`: a pending restart's reason.
   function place(task, agent, { localFree, localOk, cap, hold = null }, why = {}) {
     const no = (reason) => { why.reason = reason; return null; };
@@ -1667,16 +1673,22 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (browser && profileBusy(task)) return no('its browser profile is in use');
     const project = getProject(task.project_id), remote = remoteCapable(task, project);
     // Pinned by the owner (run_on): only that machine, waiting for it. A worker pin only binds a task that can run remotely.
-    const pin = task.kind === 'work' && task.run_on && (task.run_on === LOCAL_NODE || remote || isBrowserTask(task)) ? task.run_on : null;
-    const macOnly = browser && !pin && remote && workerNodes(agent).some((n) => n.os === 'darwin' && browserWorker(n) && canClone(n, task, project));
-    const fits = (n) => (!browser || browserWorker(n)) && (!macOnly || n.os === 'darwin') && canClone(n, task, project) && (!task.integrates || integrateWorker(n));
+    const route = browser ? browserRoute(nodesNow(), { agent }) : null;
+    let pin = task.kind === 'work' && task.run_on && (task.run_on === LOCAL_NODE || remote || isBrowserTask(task)) ? task.run_on : null;
+    if (route?.mode === 'chrome' && isBrowserTask(task) && !route.nodes.includes(pin)) pin = null;
+    const chromeIds = route?.mode === 'chrome' && (!pin || route.nodes.includes(pin)) ? new Set(route.nodes) : null;
+    const browserOk = (n) => (chromeIds ? chromeIds.has(n.id) : browserWorker(n));
+    const macOnly = browser && !chromeIds && !pin && remote && workerNodes(agent).some((n) => n.os === 'darwin' && browserWorker(n) && canClone(n, task, project));
+    const fits = (n) => (!browser || browserOk(n)) && (!macOnly || n.os === 'darwin') && canClone(n, task, project) && (!task.integrates || integrateWorker(n))
+      && (browser || !n.inventory?.chromeRunner);
     const cands = [], skips = [];
     const weigh = (id, skip, slots, cores) => (skip ? (noteDecision(id, false, skip, task.id), skips.push(`${id === LOCAL_NODE ? 'this server' : nodeName(id)}: ${skip}`))
       : cands.push({ id, running: nodeLoad(id), slots, cores: slotTarget(cores) }));
     if (remote && pin !== LOCAL_NODE) {
       for (const n of nodesNow()) {
         if (n.local || (pin && n.id !== pin)) continue;
-        weigh(n.id, workerSkip(n, agent, task.id) || (browser && !browserWorker(n) ? 'no browser for browser tasks'
+        weigh(n.id, workerSkip(n, agent, task.id) || (!browser && n.inventory?.chromeRunner ? 'a Chrome runner: browser tasks only'
+          : browser && !browserOk(n) ? (chromeIds ? `browser tasks use Chrome on ${route.name}` : 'no browser for browser tasks')
           : macOnly && n.os !== 'darwin' ? 'browser tasks run on a Mac while one is online'
           : !canClone(n, task, project) ? 'cannot clone this project'
             : task.integrates && !integrateWorker(n) ? 'its worker is too old for integration'
@@ -1686,6 +1698,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (!pin || pin === LOCAL_NODE) {
       const settings = parallelSettings(), cpu = cpuOf(nodesNow().find((n) => n.local)), slots = slotCount(decisionCache?.d);
       weigh(LOCAL_NODE, !localOk ? hold || 'not claiming now' : localDraining() ? 'draining' : !localAgentOk(agent) ? `agent ${agent} signed out`
+        : browser && chromeIds ? `browser tasks use Chrome on ${route.name}`
         : browser && !settings.controllerBrowser && pin !== LOCAL_NODE ? 'browser tasks run on workers (Settings)'
           : browser && macOnly ? 'browser tasks run on a Mac while one is online'
           : remote && !pin && !settings.controllerWork && workerNodes(agent).some(fits) ? 'leaves work tasks to the workers (Settings)'
@@ -3168,7 +3181,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       : workerTaskPrompt({ ...project, path: where }, task, env);
     const effort = taskEffort(task, project, route);
     const { runId, logPath } = startRun(task.id, task.kind, route.agent, nodeId, effort);
-    updateTask(task.id, { ran_agent: route.agent, ran_model: route.model || null, route_note: routeNote(route), node_id: nodeId });
+    // Claude in Chrome: place() only sends a Claude browser task to a chrome node while one is online.
+    const chrome = needsBrowser(task) && route.agent === 'claude' && chromeCapable(n);
+    updateTask(task.id, { ran_agent: route.agent, ran_model: route.model || null, route_note: routeNote(route), node_id: nodeId,
+      ...(needsBrowser(task) && { browser_runner: chrome ? 'chrome' : 'builtin' }) });
     const r = running.get(task.id);
     if (r) { r.agent = route.agent; r.runId = runId; }
     pushState();
@@ -3176,6 +3192,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const res = await remoteJob(task.id, nodeId, name, { runId, logPath }, {
       title: task.title, prompt, systemAppend: withBrowser(task, isBrowserTask(task) ? BROWSER_TASK_SYSTEM : resume ? null : withPersona(WORKER_SYSTEM, project)) || undefined, agent: route.agent, model: route.model || undefined, effort: effort || undefined,
       ...(needsBrowser(task) && { capabilities: ['browser'], identity: identityOf(task), gate: (({ rules, ttlMs }) => ({ rules, ttlMs }))(gateSettings()) }),
+      ...(chrome && { chrome: true }),
       ...(isBrowserTask(task) ? { execution: 'browser' } : { repo: repo || undefined, gitUrl: viaHead ? gitPath(project.id) : undefined, baseSha, branch, doneWhen: task.done_when || undefined }), resume: resume || undefined,
       ...(task.integrates && { integrate: { branch: taskBranch(task.integrates), files: parseJsonList(task.conflicts) } }),
       timeouts: { taskSec: CFG.taskTimeoutSec, verifySec: CFG.verifyTimeoutSec, installSec: 900 }, autonomous: isBrowserTask(task) || !!project.autonomous,
@@ -4339,10 +4356,16 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       entries.sort((a, b) => a.at - b.at);
       const mcp = entries.filter((e) => e.k === 'mcp');
       return { id: t.id, title: t.title, status: t.status, startedAt: t.started_at, finishedAt: t.finished_at,
-        resultText: t.result, steps: browserSteps(entries),
+        resultText: t.result, steps: browserSteps(entries), runner: t.browser_runner || null,
         // The browser tool's startup on the latest run: {ok, ms, warmMs, attempt} (the activity panel's details).
         mcp: mcp.length ? (({ ok, ms, warmMs, attempt }) => ({ ok, ms: ms ?? null, warmMs: warmMs ?? null, attempt: attempt ?? 1 }))(mcp.at(-1)) : null };
     });
+  }
+  // How the Browser tab's next prompt runs (chrome.mjs browserRoute; its tasks run on Claude unless routed elsewhere):
+  // {mode, label, node?, name?, note?}.
+  function browserRunner() {
+    const r = browserRoute(nodesNow(), { agent: 'claude' });
+    return { mode: r.mode, label: runnerLabel(r), ...(r.mode === 'chrome' ? { node: r.nodes[0], name: r.name } : { note: r.note }) };
   }
   function stopBrowserTask(id) {
     if (!isBrowserTask(getTask(id))) return { error: 'No such browser task', status: 404 };
@@ -4489,7 +4512,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
 
   return {
-    createBrowserTask, listBrowserTasks, stopBrowserTask, attachBrowserViews,
+    createBrowserTask, listBrowserTasks, stopBrowserTask, attachBrowserViews, browserRunner,
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
     planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, insertCheckpoint, approveCheckpoint, requestChanges, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setTaskRunOn, assignable, assignTask, setReflectFallbacks, setReflectSettings, syncConvoModel, pauseTask, resumeTask, handoffTask, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
     drain, undrain, chatPlanning, applyUpdates: () => parallelSettings().applyUpdates,

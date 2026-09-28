@@ -13,3 +13,7 @@ The owner wants browser tasks to use the Claude in Chrome extension instead of o
 ## Done when
 
 `node --test test/chrome-runner*.test.mjs` passes (detection, routing with the chrome option, deny rule holds extension tool, fallback), and .agent-orch/CHROME.md documents the setup
+
+## Result — done (check passed) (2026-09-28 18:52)
+
+AGENT-ORCH-STATUS: done — browser tasks prefer a Claude in Chrome runner; tests pass, documented

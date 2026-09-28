@@ -20,6 +20,9 @@
 #   --service daemon|login  --user NAME (dedicated user, default agentorch)
 #   --no-dedicated-user (run as yourself from your own LaunchAgent, without sudo; not advised)
 #   --status-window (also open the live status view, worker.mjs status, in a Terminal window at every login)
+#   --chrome-runner (also a Chrome runner: a second worker, paired as its own machine "Chrome on <this Mac>", that runs as
+#          YOU from your LaunchAgent while you're logged in and takes only browser tasks, driving your Google Chrome through
+#          the Claude in Chrome extension with your own `claude login`. See .agent-orch/CHROME.md)
 #   --repair (pair again as a new machine even though the head still knows this one; re-runs keep the pairing)
 #   --dry-run (print what would run, change nothing)  --uninstall [--purge] (also delete the worker home)
 set -euo pipefail
@@ -34,7 +37,9 @@ DAEMON_PLIST=/Library/LaunchDaemons/$LABEL.plist
 STATUS_LABEL=$LABEL.status
 STATUS_BIN=/usr/local/bin/agent-orch-worker-status
 STATUS_SUDOERS=/etc/sudoers.d/agent-orch-worker-status
-CONTROLLER='' CODE='' NAME='' AGENTS='' WUSER=agentorch SERVICE='' SELF=0 DRY=0 UNINSTALL=0 PURGE=0 STATUS_WINDOW=0 STATUS_NOTE='' REPAIR=0
+# --chrome-runner: the owner's LaunchAgent for the Chrome runner worker, with its own pairing in ~/.agent-orch-chrome-runner.
+RUNNER_LABEL=$LABEL.chrome-runner
+CONTROLLER='' CODE='' NAME='' AGENTS='' WUSER=agentorch SERVICE='' SELF=0 DRY=0 UNINSTALL=0 PURGE=0 STATUS_WINDOW=0 STATUS_NOTE='' REPAIR=0 CHROME_RUNNER=0 RUNNER_NOTE=''
 
 say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1mwarning:\033[0m %s\n' "$*" >&2; }
@@ -76,6 +81,7 @@ parse() {
       --user) WUSER="${2:?--user needs a name}"; shift ;;
       --no-dedicated-user) SELF=1 ;;
       --status-window) STATUS_WINDOW=1 ;;
+      --chrome-runner) CHROME_RUNNER=1 ;;
       --dry-run) DRY=1 ;;
       --repair) REPAIR=1 ;;
       --uninstall) UNINSTALL=1 ;;
@@ -380,6 +386,59 @@ EOF
   STATUS_NOTE="The status view also opens in Terminal each time $1 logs in ($STATUS_LABEL)."
 }
 
+# --chrome-runner: Claude in Chrome needs Chrome, the Claude extension and `claude` to run as one logged-in macOS user
+# (they meet over a socket in /tmp/claude-mcp-browser-bridge-<user>), so this worker runs as the owner, not agentorch:
+# a LaunchAgent in their GUI session (Aqua only) with its own checkout of the worker in their home and its own pairing
+# (AGENT_ORCH_WORKER_HOME=~/.agent-orch-chrome-runner). AGENT_ORCH_CHROME_RUNNER=1 makes it take browser tasks only and
+# keep the owner's own Claude sign-in; AGENT_ORCH_WORKER_BROWSER=off skips the Playwright browser.
+runner_keys() { # runner_keys HOME PATH
+  printf '  <key>LimitLoadToSessionType</key><string>Aqua</string>\n  <key>EnvironmentVariables</key>\n  <dict>\n'
+  printf '    <key>%s</key><string>%s</string>\n' HOME "$1" PATH "$2" AGENT_ORCH_WORKER_HOME "$1/.agent-orch-chrome-runner" \
+    AGENT_ORCH_CHROME_RUNNER 1 AGENT_ORCH_WORKER_BROWSER off
+  printf '  </dict>\n'
+}
+runner_vars() { local NAME="$1" AGENTS=''; declare -p "${WORKER_VARS[@]}"; }
+install_chrome_runner() { # install_chrome_runner OWNER
+  local ohome rname vars node_bin cmd me
+  ohome="$(home_of "$1")"; me="$(id -un)"
+  rname="$NAME"
+  [[ -n "$rname" ]] || rname="$(scutil --get ComputerName 2>/dev/null || hostname -s)"
+  say "Setting up the Chrome runner as $1: browser tasks only, in your desktop session, with your Chrome and your own Claude sign-in"
+  # The runner's stage: its own name and pairing; the agents are yours (claude must be signed in as you: claude login).
+  vars="$(runner_vars "Chrome on $rname")"
+  cmd="set -euo pipefail; export AGENT_ORCH_WORKER_HOME=\"\$HOME/.agent-orch-chrome-runner\"; $vars; $(declare -f "${WORKER_FUNCS[@]}"); cd;"
+  if ((DRY)); then
+    echo "+ (as $1, HOME=$ohome, AGENT_ORCH_WORKER_HOME=$ohome/.agent-orch-chrome-runner) the worker stage as \"Chrome on $rname\":"
+    HOME="$ohome" AGENT_ORCH_WORKER_HOME="$ohome/.agent-orch-chrome-runner" NAME="Chrome on $rname" AGENTS='' worker_stage
+    node_bin="$(HOME="$ohome" node_path)"
+  elif [[ "$me" == "$1" ]]; then
+    bash -c "$cmd worker_stage"
+    node_bin="$(bash -c "$cmd node_path" </dev/null)"
+  else
+    sudo -u "$1" -H bash -c "$cmd worker_stage"
+    node_bin="$(sudo -u "$1" -H bash -c "$cmd node_path" </dev/null)"
+  fi
+  [[ "$node_bin" == /* ]] || die "the Chrome runner's stage didn't report a node binary"
+  local LOG="$ohome/Library/Logs/agent-orch-chrome-runner.log" plistf="$ohome/Library/LaunchAgents/$RUNNER_LABEL.plist"
+  if [[ "$me" == "$1" ]]; then run mkdir -p "$ohome/Library/LaunchAgents" "$ohome/Library/Logs"
+  else run sudo -u "$1" mkdir -p "$ohome/Library/LaunchAgents" "$ohome/Library/Logs"; fi
+  LABEL="$RUNNER_LABEL" KEYS="$(runner_keys "$ohome" "$(worker_path "$node_bin" "$ohome")")
+" plist "$node_bin" "$ohome/agent-orch-worker/worker.mjs" run | write "$plistf"
+  [[ "$me" == "$1" ]] || run chown "$1" "$plistf"
+  load_agent "$1" "$plistf" "$RUNNER_LABEL"
+  RUNNER_NOTE="The Chrome runner \"Chrome on $rname\" runs as $1 while you're logged in ($RUNNER_LABEL). Log: $LOG"
+  chrome_check "$1" "$node_bin" "$ohome"
+}
+# What the Chrome runner still lacks (chrome.mjs detectChrome), said once at the end of the install.
+chrome_check() { # chrome_check OWNER NODE-BIN OWNER-HOME
+  if ((DRY)); then echo "+ (checks Google Chrome, the Claude extension, its native host and your desktop session)"; return; fi
+  local js='const m = await import(process.argv[1]); const r = m.detectChrome(); console.log(r.capable ? "ready" : r.reason);' st
+  if [[ "$(id -un)" == "$1" ]]; then st="$("$2" --input-type=module -e "$js" "$3/agent-orch-worker/chrome.mjs" 2>&1 </dev/null || true)"
+  else st="$(sudo -u "$1" -H "$2" --input-type=module -e "$js" "$3/agent-orch-worker/chrome.mjs" 2>&1 </dev/null || true)"; fi
+  if [[ "$st" == ready ]]; then RUNNER_NOTE="$RUNNER_NOTE. Chrome is ready: browser tasks now drive your Chrome."
+  else RUNNER_NOTE="$RUNNER_NOTE. Not ready yet: $st. Until it is, browser tasks use the built-in browser (see .agent-orch/CHROME.md)."; fi
+}
+
 # The power policy the worker follows (the head sends it: power.mjs). Nothing to install: caffeinate and pmset ship with
 # macOS, and caffeinate needs no root.
 power_policy() {
@@ -403,7 +462,10 @@ uninstall() {
   fi
   run launchctl bootout "gui/$(id -u "$owner")/$LABEL" 2>/dev/null || true
   run launchctl bootout "gui/$(id -u "$owner")/$STATUS_LABEL" 2>/dev/null || true
-  run rm -f "$(home_of "$owner")/Library/LaunchAgents/$LABEL.plist" "$(home_of "$owner")/Library/LaunchAgents/$STATUS_LABEL.plist"
+  run launchctl bootout "gui/$(id -u "$owner")/$RUNNER_LABEL" 2>/dev/null || true
+  run rm -f "$(home_of "$owner")/Library/LaunchAgents/$LABEL.plist" "$(home_of "$owner")/Library/LaunchAgents/$STATUS_LABEL.plist" \
+    "$(home_of "$owner")/Library/LaunchAgents/$RUNNER_LABEL.plist"
+  if ((PURGE)); then run rm -rf "$(home_of "$owner")/.agent-orch-chrome-runner"; fi
   local home="$HOME"
   if ((EUID == 0 || DRY)) && ((!SELF)); then home="$(home_of "$WUSER")"; fi
   say "Removing $home/agent-orch-worker"
@@ -434,6 +496,7 @@ $(env_keys "$HOME" "$(worker_path "$node_bin" "$HOME")")
 " plist "$node_bin" "$HOME/agent-orch-worker/worker.mjs" run | write "$plistf"
     load_agent "$(id -un)" "$plistf"
     ((STATUS_WINDOW)) && install_status_window "$(id -un)" "$node_bin" "$HOME"
+    ((CHROME_RUNNER)) && install_chrome_runner "$(id -un)"
     power_policy
     FINISH="Done. The worker runs while you're logged in and restarts if it stops. Log: $LOG"
     finish "$HOME" ''
@@ -477,6 +540,7 @@ $(env_keys "$HOME" "$(worker_path "$node_bin" "$HOME")")
 
   if [[ "$SERVICE" == daemon ]]; then install_daemon "$owner" "$node_bin" "$whome"; else install_login "$owner" "$node_bin" "$whome"; fi
   ((STATUS_WINDOW)) && install_status_window "$owner" "$node_bin" "$whome"
+  ((CHROME_RUNNER)) && install_chrome_runner "$owner"
   power_policy
   finish "$whome" "sudo -u $WUSER -H "
 }
@@ -485,6 +549,7 @@ $(env_keys "$HOME" "$(worker_path "$node_bin" "$HOME")")
 finish() { # finish WORKER-HOME RUN-AS-PREFIX
   say "$FINISH"
   say "Live status (connection, cap, running tasks; q quits): ${2}node $1/agent-orch-worker/worker.mjs status"
+  [[ -z "$RUNNER_NOTE" ]] || say "$RUNNER_NOTE"
   if [[ -n "$STATUS_NOTE" ]]; then say "$STATUS_NOTE"; else say "To open it in Terminal at every login, run this installer again with --status-window."; fi
   say "Cap what this Mac lends the cluster: ${2}node $1/agent-orch-worker/worker.mjs limit --cpu 4 --mem 8   (cores or %, GB or %; --show, --reset)"
   say "Claude and Codex run on the head's accounts: nothing to sign in here. If Claude isn't shared yet, on the head open Connections → Claude for your machines → Share with machines."

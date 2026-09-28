@@ -72,7 +72,8 @@ export const FEATURES = { 'job.phase': 'phases', 'job.error': 'errors', 'node.er
 // Feature 'update-now' also means the worker honours node.update.mode 'now' (Update all, #458).
 // Feature 'git' (no frame type): the worker fetches and pushes through job.start.gitUrl, so it needs no GitHub access.
 // Feature 'integrate' (no frame type): the worker runs integrator jobs (job.start.integrate).
-export const FEATURE_LIST = [...new Set([...Object.values(FEATURES), 'cap', 'browser-task', 'mcp-start', 'git', 'integrate'])];
+// Feature 'chrome' (no frame type): the worker runs a browser job with Claude in Chrome when job.start.chrome says so (chrome.mjs).
+export const FEATURE_LIST = [...new Set([...Object.values(FEATURES), 'cap', 'browser-task', 'mcp-start', 'git', 'integrate', 'chrome'])];
 // Compute-only workers (BRIEF goal 11): the only frames a worker acts on, all from the head it dialled. Connection
 // upkeep; jobs (job.*, plus git.credential for their pushes); remote sign-in driven from the head's Connections (login.*);
 // model and limit refreshes; its log tail; self-update; the node's policy (max tasks, power), which like draining is
@@ -153,6 +154,8 @@ const S = {
     // uncommitted, conflicts left for the agent; the head lands it.
     execution: 'str?', repo: 'repo?', gitUrl: 'str?', baseSha: 'sha?', branch: 'branch?', doneWhen: 'str?', resume: 'str?',
     timeouts: 'obj', autonomous: 'bool?', tools: 'arr?', install: 'arr?', capabilities: 'arr?', identity: 'str?', ext: 'hash?', integrate: 'obj?',
+    // chrome (feature 'chrome'): a browser job runs Claude with Claude in Chrome (chrome.mjs) instead of the Playwright MCP.
+    chrome: 'bool?',
   },
   'job.event': { job: 'int', from: 'int', events: 'events' },
   'job.check': { job: 'int', command: 'str', output: 'str', pass: 'bool', code: 'int?' },

@@ -721,9 +721,17 @@ function bxRenderEarlier(box, shown) {
 
 // The prompt box: Enter sends on a desktop (Shift+Enter is a new line); a phone's return key is a new line.
 const bxIn = $('bxInput');
+// Which browser the next prompt drives (/api/browser runner, chrome.mjs): the owner's Chrome on a Mac, or the built-in one.
+function bxRunnerText(runner, sel, many, slow) {
+  if (runner?.mode === 'chrome') return runner.label;
+  const where = sel ? ` · ${sel.identity}${many ? ` on ${sel.name}` : ''}${slow ? ' · Running on the VPS (slow)' : ''}` : '';
+  return `Built-in browser${/^No Chrome/.test(runner?.note || '') ? ' (no Chrome runner online)' : ''}${where}`;
+}
 function bxSyncSend() {
   $('bxSend').disabled = BX.sending || !BX.sel || !bxIn.value.trim();
-  $('bxHint').textContent = BX.sel ? `On ${BX.sel.identity}${(BV.data?.nodes || []).length > 1 ? ` · ${BX.sel.name}` : ''}${bvSlow(BX.sel.node) ? ' · Running on the VPS (slow)' : ''}` : '';
+  const r = BV.data?.runner, hint = $('bxHint');
+  hint.textContent = BX.sel ? bxRunnerText(r, BX.sel, (BV.data?.nodes || []).length > 1, bvSlow(BX.sel.node)) : '';
+  hint.title = r?.mode === 'builtin' && r.note ? r.note : '';
 }
 bxIn.addEventListener('input', () => {
   bxIn.style.height = 'auto';

@@ -13,7 +13,8 @@ import { execFileSync, spawn } from 'node:child_process';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import { toolResultImages } from './media.mjs';
-import { APPROVAL_TTL_MS, ask, isBrowserRead } from './gate.mjs';
+import { APPROVAL_TTL_MS, appendAudit, ask, denialText, isBrowserRead, newId, redact, verdict } from './gate.mjs';
+import { CHROME_OPTIONS, CHROME_SERVER, chromeTool, judgeChrome } from './chrome.mjs';
 import { toEpochSec } from './usage.mjs';
 import { runHelper, runHelperSync, helperOut, claudeHelperSpawn, killGroup, singleFlight } from './helpers.mjs';
 import { MCP_SERVER, MCP_START_MS, MCP_START_FAILED, normIdentity } from './browser.mjs';
@@ -201,8 +202,30 @@ export const MCP_START_ENV = { MCP_TIMEOUT: String(MCP_START_MS), MCP_CONNECT_TI
 // gate-proxy.mjs runs for this run: <dir>/proxy-<server>.json), the proxy checks it through the gate dir, holding an
 // outbound call until the owner answers. A denial reaches the model as the owner's reason; an allowed call then runs
 // without being asked about again. Reads skip the round trip (the proxy still logs them).
+// A Claude in Chrome run (gate.chrome, chrome.mjs): the extension's calls never pass a proxy, so the hook itself judges
+// each one against the owner's rules, holds a match in the gate dir's approvals/ (the host asks the owner, as for the
+// proxy's) and appends every call to audit.jsonl. Not canUseTool: runs use bypassPermissions, which never calls it.
 export function gateHooks(gate, signal) {
+  let page = null; // the URL the run last opened (url rules match it)
+  const chrome = async (tool, args) => {
+    const j = judgeChrome(tool, args, { rules: gate.rules || [], page }), red = redact(args || {});
+    const audit = (extra) => { try { appendAudit(path.join(gate.dir, 'audit.jsonl'), { ts: Date.now(), task: gate.task ?? null, server: CHROME_SERVER, tool, class: j.cls, reason: j.reason, action: j.action, args: red, ...(j.rule && { rule: j.rule }), ...extra }); } catch {} };
+    if (!j.hold) {
+      if (j.url) page = j.url;
+      audit({ ok: true, via: 'hook' });
+      return {};
+    }
+    const approval = { id: newId(), task: gate.task ?? null, server: CHROME_SERVER, tool, cls: j.cls, reason: j.reason, action: j.action, key: null,
+      url: j.url || page, ...(j.rule && { rule: j.rule }), args: red, screenshot: null, at: Date.now(), ttlMs: gate.ttlMs || APPROVAL_TTL_MS };
+    const v = verdict(await ask(gate.dir, 'approvals', approval, { id: approval.id, timeoutMs: holdMs(gate), signal }));
+    audit({ approval: approval.id, decision: v.decision, ...(v.by && { by: v.by }), ...(v.reason && { note: v.reason }), ...(!v.allow && { ok: false, result: 'not performed' }), via: 'hook' });
+    if (v.allow) { if (j.url) page = j.url; return {}; }
+    return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: denialText(v, j.action) } };
+  };
   const pre = async (input) => {
+    const ct = gate.chrome && chromeTool(input?.tool_name);
+    if (ct) return chrome(ct, input.tool_input || {});
+    if (!gate.hook) return {};
     const m = /^mcp__(.+?)__(.+)$/.exec(input?.tool_name || '');
     if (!m || !fs.existsSync(path.join(gate.dir, `proxy-${m[1]}.json`)) || isBrowserRead(m[2])) return {};
     const ans = await ask(gate.dir, 'checks', { tool: m[2], args: input.tool_input || {} }, { timeoutMs: holdMs(gate), signal });
@@ -216,8 +239,12 @@ export function gateHooks(gate, signal) {
 // Extra options: query (SDK override, for tests), bin, env, partial (stream deltas), onMessage (raw SDK messages).
 // effort: a level from CLAUDE.efforts (the SDK's `effort` option), or null for the model's default.
 // gate: the run's approval gate (gate.mjs); with gate.hook the SDK's PreToolUse permission hook asks it first (gateHooks).
-async function runClaude({ model, prompt, cwd, resume, systemAppend, signal, onEvent, query = sdkQuery, bin, env = process.env, partial, onMessage, effort, mcp, browser, gate }) {
+// chrome: run with Claude in Chrome (chrome.mjs CHROME_OPTIONS) instead of a Playwright browser; its calls go through
+// gate's rules (gateHooks). Its screenshots come back as tool-result images, so they land in the task's media.
+async function runClaude({ model, prompt, cwd, resume, systemAppend, signal, onEvent, query = sdkQuery, bin, env = process.env, partial, onMessage, effort, mcp, browser, gate, chrome }) {
+  if (chrome) { browser = null; gate = gate && { ...gate, chrome: true }; }
   mcp = mcpOf('claude', mcp, browser, gate);
+  const extraArgs = { ...(mcp && { 'mcp-config': mcp }), ...(chrome && CHROME_OPTIONS.extraArgs) };
   // A held MCP call waits for the owner: the CLI must not time it out first.
   if (gate) env = { ...env, MCP_TOOL_TIMEOUT: String(holdMs(gate)) };
   if (browser) env = { ...env, ...MCP_START_ENV };
@@ -233,8 +260,8 @@ async function runClaude({ model, prompt, cwd, resume, systemAppend, signal, onE
       prompt,
       options: {
         cwd, resume: resume || undefined, model: model || undefined, ...(effort && { effort }),
-        ...(mcp && { extraArgs: { 'mcp-config': mcp } }),
-        ...(gate?.hook && { hooks: gateHooks(gate, ac.signal) }),
+        ...(Object.keys(extraArgs).length && { extraArgs }),
+        ...((gate?.hook || gate?.chrome) && { hooks: gateHooks(gate, ac.signal) }),
         pathToClaudeCodeExecutable: bin || CLAUDE.bin, env: stripEnv(env, CLAUDE.envFilter), abortController: ac,
         systemPrompt: systemAppend ? { type: 'preset', preset: 'claude_code', append: systemAppend } : { type: 'preset', preset: 'claude_code' },
         // The owner runs this on a disposable server and gave every agent full access (including
@@ -249,7 +276,7 @@ async function runClaude({ model, prompt, cwd, resume, systemAppend, signal, onE
     for await (const m of it) {
       if (m.session_id) res.sessionId = m.session_id;
       // The browser run's MCP didn't connect: stop before the agent spends a turn without its browser (browserRun retries).
-      if (browser && m.type === 'system' && m.subtype === 'init' && (m.mcp_servers || []).some((x) => x.name === MCP_SERVER && x.status === 'failed')) { mcpDown = true; break; }
+      if ((browser || chrome) && m.type === 'system' && m.subtype === 'init' && (m.mcp_servers || []).some((x) => x.name === (chrome ? CHROME_SERVER : MCP_SERVER) && x.status === 'failed')) { mcpDown = true; break; }
       if (m.type === 'rate_limit_event' && m.rate_limit_info) res.limits.push(m.rate_limit_info);
       if (m.type === 'assistant' && m.error) res.errorCode = m.error;
       if (m.type === 'result') result = m;
@@ -267,7 +294,7 @@ async function runClaude({ model, prompt, cwd, resume, systemAppend, signal, onE
     if (mcpDown) ac.abort();
   }
   if (aborted) res.outcome = 'aborted';
-  else if (mcpDown) Object.assign(res, { outcome: 'error', errorCode: 'mcp_connect_failed', text: `The ${MCP_SERVER} MCP server failed to connect` });
+  else if (mcpDown) Object.assign(res, { outcome: 'error', errorCode: 'mcp_connect_failed', text: `The ${chrome ? CHROME_SERVER : MCP_SERVER} MCP server failed to connect` });
   else classifyClaude(res, result);
   return res;
 }
@@ -799,7 +826,9 @@ export function runAgentCli(opts) {
     if (e.k === 'tool') tools.push(e.name || 'tool');
     opts.onEvent?.(e);
   };
-  const run = () => (opts.browser ? browserRun(a, opts, onEvent) : a.run({ ...opts, onEvent }));
+  // Claude in Chrome is Claude Code's: another agent keeps its Playwright browser.
+  if (opts.chrome && a.id !== 'claude') delete opts.chrome;
+  const run = () => (opts.browser && !opts.chrome ? browserRun(a, opts, onEvent) : a.run({ ...opts, onEvent }));
   return (opts.onSpawn ? spawnHook.run(opts.onSpawn, run) : run()).then((res) => finishEmpty(res, { agent: a, lastText, tools, onEvent }));
 }
 

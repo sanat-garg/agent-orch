@@ -59,6 +59,7 @@ import { applyLimit, capRejection, capTasks, capText, fmtCores, fmtGB, resolveCa
 import { createJobUsage, createWrappers, heldBy, probeLimiter } from './worker-cap.mjs';
 import { request as statusRequest, serveStatus, statusCli } from './worker-status.mjs';
 import { ensureBrowser, needsBrowser, normIdentity } from './browser.mjs';
+import { detectChrome } from './chrome.mjs';
 import { APPROVAL_TTL_MS, hostGate } from './gate.mjs';
 import { MEDIA_ID_RE } from './media.mjs';
 import { createLiveBrowsers, screenOp } from './browser-live.mjs';
@@ -99,6 +100,10 @@ const RECENT = 5; // finished jobs the status view lists
 // Browser tasks (browser.mjs): at start the worker checks for a Chromium/Chrome and, without one, installs Playwright's.
 // AGENT_ORCH_WORKER_BROWSER=off|check|install; under node:test it only checks unless told to install.
 const BROWSER_MODE = process.env.AGENT_ORCH_WORKER_BROWSER || (process.env.NODE_TEST_CONTEXT ? 'check' : 'install');
+// A Chrome runner (install-worker-macos.sh --chrome-runner, .agent-orch/CHROME.md): this worker runs as the owner in their
+// desktop session and takes only browser tasks, driving their Chrome through Claude in Chrome (chrome.mjs). It keeps the
+// owner's own Claude sign-in: the head's shared setup token can't drive Chrome.
+const CHROME_RUNNER = process.env.AGENT_ORCH_CHROME_RUNNER === '1';
 const EDIT_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
 // The files an edit tool call touched: Claude's file_path, or codex's file_change lines ("add hello.txt").
 const editedFiles = (e) => (EDIT_TOOLS.has(e.name) ? String(e.input?.file_path || e.input?.path || '').split('\n')
@@ -470,7 +475,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   let codexShared = null; // the text last taken from, or sent back to, the head
   const readCodexAuth = () => { try { return fs.readFileSync(codexAuthFile, 'utf8'); } catch { return null; } };
   function applyCredential(msg) {
-    if (msg.agent === 'claude') {
+    if (msg.agent === 'claude' && CHROME_RUNNER) log("Claude: a Chrome runner keeps this user's own sign-in (the head's shared one can't drive Chrome)");
+    else if (msg.agent === 'claude') {
       if (msg.value) process.env.CLAUDE_CODE_OAUTH_TOKEN = msg.value;
       else delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
       log(msg.value ? "Claude: using the head's shared account" : 'Claude: the head stopped sharing its account');
@@ -525,6 +531,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       node: config.node, name: config.name || os.hostname(), os: process.platform, arch: process.arch, cores: os.cpus().length, mem: os.totalmem(),
       agents, limits: Object.fromEntries(ids.map((id) => [id, limits.get(id)]).filter(([, v]) => v)),
       versions: { agentOrch: VERSION, node: process.version, git: gitVersion, ...(srcSha ? { sha: srcSha, build: srcBuild } : {}) }, cap, ...(browser && { browser }),
+      // Claude in Chrome (chrome.mjs): {capable, chrome, extension, nativeHost, gui, reason?} on a Mac.
+      ...(process.platform === 'darwin' && { chrome: detectChrome() }), ...(CHROME_RUNNER && { chromeRunner: true }),
       ext: { hash: synced.hash, ...(extError ? { error: extError } : {}), ...(synced.kept.length ? { kept: synced.kept } : {}) },
     };
   }
@@ -1105,14 +1113,17 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     try {
       // The agent CLI runs through its wrapper: under the local cap, with its pid recorded for the usage sampler.
       const bin = wrappers.wrap(job.id, spec.agent, [AGENTS[spec.agent]?.bin || spec.agent]);
-      const run = needsBrowser(spec) ? { browser: { identity: normIdentity(spec.identity), outputDir: path.join(job.dir, '.agent-orch', 'shots') }, gate: gate.spec } : null;
+      // spec.chrome: Claude in Chrome drives this user's Chrome instead of the Playwright browser (its calls judged by the gate hook).
+      const run = spec.chrome && needsBrowser(spec) ? { chrome: true, gate: gate.spec }
+        : needsBrowser(spec) ? { browser: { identity: normIdentity(spec.identity), outputDir: path.join(job.dir, '.agent-orch', 'shots') }, gate: gate.spec } : null;
       res = await runAgentCli({
         agent: spec.agent, model: spec.model || undefined, effort: spec.effort || undefined, prompt, cwd: job.dir, resume: resume || undefined, systemAppend: spec.systemAppend || undefined,
         // The synced MCP servers as 0600 files (Claude's --mcp-config, codex -p): never on the command line.
         mcp: ext.mcpRun(spec.agent),
         autonomous: spec.autonomous ?? true, signal: job.ac.signal, onEvent: (e) => pushEvent(job, e), bin,
         env: jobEnv(job), onSpawn: ({ pid, pgid }) => registerPid({ pid, pgid, kind: 'task', id: job.id }),
-        ...(run && { mcp: ext.mcpRun(spec.agent, run), gate: gate.spec, browser: run.browser }), // browser: pre-warm and MCP retries
+        ...(run?.chrome && { gate: gate.spec, chrome: true }),
+        ...(run?.browser && { mcp: ext.mcpRun(spec.agent, run), gate: gate.spec, browser: run.browser }), // browser: pre-warm and MCP retries
       });
     } catch (e) {
       res = { outcome: 'error', text: `agent crashed: ${e?.message || e}` };

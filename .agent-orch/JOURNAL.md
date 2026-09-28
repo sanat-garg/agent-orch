@@ -1393,3 +1393,7 @@ Restarts wait only for merges; integrators pause; friendly 404 retry
 ## 2026-09-28 16:59 — #466 Integrate #458: Machines: 'Update all' brings every machine to the latest version [done (check passed)]
 
 Waiting for the test run to finish.
+
+## 2026-09-28 17:02 — #451 Simpler phone prompt window [done (check passed)]
+
+phone composer shows only field, send, model pill and '+'

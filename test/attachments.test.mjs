@@ -308,13 +308,13 @@ test('composer: the paperclip, paste and drop add several attachments; each uplo
   }
 });
 
-test('390px: the tray and the paperclip fit; no sideways scroll', { skip: noBrowser, timeout: 60000 }, async () => {
+test('390px: the tray and the + (the phone\'s attach button) fit; no sideways scroll', { skip: noBrowser, timeout: 60000 }, async () => {
   const p = await page({ width: 390, height: 844 }, { isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
   try {
     await p.evaluate(() => addAttachments([1, 2, 3].map((i) => new File([new Uint8Array(2048)], `long-file-name-number-${i}-for-the-tray.pdf`, { type: 'application/pdf' }))));
     await p.waitForFunction(() => document.querySelectorAll('#attTray .att-item.ready').length === 3);
     assert.equal(await p.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-    for (const sel of ['#attBtn', '#attTray']) {
+    for (const sel of ['#plusBtn', '#attTray']) {
       const b = await p.locator(sel).boundingBox();
       assert.ok(b.x >= 0 && b.x + b.width <= 390, `${sel}: ${JSON.stringify(b)}`);
     }

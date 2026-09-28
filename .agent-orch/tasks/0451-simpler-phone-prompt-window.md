@@ -14,3 +14,7 @@ Redesign the chat composer on phones (<768px) to be simpler, building on #449's 
 ## Done when
 
 `node --test test/ui-mobile-composer*.test.mjs` passes (only field, send, model pill and + visible at 390px; the + sheet holds the moved options; send works)
+
+## Result — done (check passed) (2026-09-28 17:02)
+
+AGENT-ORCH-STATUS: done — phone composer shows only field, send, model pill and '+'

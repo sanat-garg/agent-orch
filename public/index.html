@@ -188,10 +188,15 @@
           <textarea id="input" rows="1" placeholder="Ask Claude to build something…" autocomplete="off" spellcheck="true"></textarea>
           <div class="controls">
             <div class="left">
+              <!-- Phones only (#451): '+' opens #plusSheet with what the phone composer hides (attach, mode, effort, persona). -->
+              <button type="button" class="chip plus-btn" id="plusBtn" aria-label="Attach and options" aria-haspopup="dialog" aria-controls="plusSheet" aria-expanded="false">
+                <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+              </button>
               <button type="button" class="chip att-btn" id="attBtn" aria-label="Attach images or files" title="Attach images or files (you can also paste or drop them)">
                 <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M20.5 11.5 12 20a5.5 5.5 0 0 1-7.8-7.8l8.9-8.9a3.7 3.7 0 0 1 5.2 5.2l-8.9 8.9a1.8 1.8 0 0 1-2.6-2.6l8.2-8.2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
               </button>
               <input type="file" id="attInput" multiple hidden tabindex="-1">
+              <input type="file" id="attImgInput" accept="image/*" multiple hidden tabindex="-1">
               <!-- Reserved for a future per-chat directory selector.
               <button type="button" class="chip project-chip" id="folderBtn" aria-haspopup="dialog">
                 <svg viewBox="0 0 24 24" width="15" height="15"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
@@ -574,6 +579,27 @@
 <div class="cmenu" id="modePop" role="listbox" aria-label="Permission mode" hidden></div>
 <div class="cmenu" id="effPop" role="listbox" aria-label="Effort" hidden></div>
 <div class="cmenu" id="personaPop" role="listbox" aria-label="Persona" hidden></div>
+<!-- The phone composer's '+' sheet (app.js openPlusSheet): attach, then the composer options its chips hold on desktop. -->
+<div class="modal sheet" id="plusSheet" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-panel ps" role="dialog" aria-modal="true" aria-labelledby="plusTitle">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <div class="m-head">
+      <div><h2 id="plusTitle">Attach and options</h2></div>
+      <button class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="ps-list">
+      <button type="button" class="ps-row" data-plus="photo"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="9" cy="10" r="1.8" fill="currentColor"/><path d="M21 16l-5-5-8 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg><span class="ps-l">Photo</span></button>
+      <button type="button" class="ps-row" data-plus="file"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M20.5 11.5 12 20a5.5 5.5 0 0 1-7.8-7.8l8.9-8.9a3.7 3.7 0 0 1 5.2 5.2l-8.9 8.9a1.8 1.8 0 0 1-2.6-2.6l8.2-8.2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ps-l">File</span></button>
+      <div class="ps-sep" role="separator"></div>
+      <button type="button" class="ps-row" data-plus="modeChip"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg><span class="ps-l">Permission mode</span><span class="ps-val" id="psMode"></span></button>
+      <button type="button" class="ps-row" data-plus="effChip"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M4 18a8 8 0 1 1 16 0M12 18l4-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span class="ps-l">Effort</span><span class="ps-val" id="psEff"></span></button>
+      <button type="button" class="ps-row" data-plus="personaChip"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="12" cy="8" r="3.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span class="ps-l">Persona</span><span class="ps-val" id="psPersona"></span></button>
+    </div>
+  </div>
+</div>
 <div class="modal fb-pop" id="fbModal" hidden>
   <div class="modal-backdrop" data-close></div>
   <div class="modal-panel fb" role="dialog" aria-modal="true" aria-labelledby="fbTitle">

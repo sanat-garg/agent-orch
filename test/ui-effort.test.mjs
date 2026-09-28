@@ -141,21 +141,22 @@ test('switching Codex → Claude clamps ultra to max; the pill hides for an agen
   await p.context().close();
 });
 
-test('390px: the pill collapses to the level word and its menu opens above it, on screen', { skip, timeout: 60000 }, async () => {
+test('390px: effort lives in the + sheet and its menu opens above +, on screen', { skip, timeout: 60000 }, async () => {
   const p = await page({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
   await p.goto(`${base}/#${CLAUDE_CHAT}`);
-  const chip = p.locator('#effChip');
-  await chip.waitFor();
-  assert.equal((await chip.innerText()).trim(), 'Medium');
+  await p.waitForFunction(() => !document.getElementById('effChip').hidden);
+  assert.equal(await p.locator('#effChip').isVisible(), false, 'the phone composer hides the pill (#451)');
   assert.equal(await p.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'no horizontal scroll');
-  const box = await chip.boundingBox();
-  assert.ok(box.x >= 0 && box.x + box.width <= 390, JSON.stringify(box));
-  await chip.tap();
+  const plus = p.locator('#plusBtn');
+  const box = await plus.boundingBox();
+  await plus.tap();
+  assert.equal(await p.locator('#psEff').textContent(), 'Medium');
+  await p.locator('#plusSheet [data-plus="effChip"]').tap();
   const menu = p.locator('#effPop');
   await menu.waitFor();
   const mb = await menu.boundingBox();
   assert.ok(mb.x >= 8 && mb.x + mb.width <= 382 && mb.y >= 0, `on screen: ${JSON.stringify(mb)}`);
-  assert.ok(mb.y + mb.height <= box.y, `above the pill: ${JSON.stringify({ mb, box })}`);
+  assert.ok(mb.y + mb.height <= box.y, `above +: ${JSON.stringify({ mb, box })}`);
   assert.equal(await p.evaluate(() => document.activeElement.id), 'effRange');
   assert.deepEqual(p.errors, []);
   await p.context().close();

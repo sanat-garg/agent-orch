@@ -1563,6 +1563,44 @@ details.dr-more[open] > summary { margin-bottom: 12px; }
   .title-btn .chev { display: block; flex: none; color: var(--muted); transition: transform .15s ease; }
   .title-btn[aria-expanded="true"] .chev { transform: rotate(180deg); }
 }
+/* Phone composer (#451, HIG text fields and keyboards): one small row with '+' (#plusBtn: #plusSheet holds attach, mode,
+   effort and persona) and the model pill, over one rounded field: the auto-growing #input with a round #send inside its
+   right edge. The other chips are hidden here; desktop keeps .box's chip row. */
+#plusBtn { display: none; }
+@media (max-width: 767px) {
+  #composer .box { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "tray tray" "plus model" "field field";
+    align-items: center; column-gap: 2px; row-gap: 4px; border: 0; border-radius: 0; background: none; box-shadow: none; }
+  #composer .box:focus-within { box-shadow: none; }
+  #composer .controls, #composer .controls .left { display: contents; }
+  #composer .att-tray { grid-area: tray; padding: 0 2px 4px; }
+  #attBtn, #modeChip, #effChip, #personaChip { display: none; }
+  #plusBtn { grid-area: plus; display: grid; place-items: center; width: 30px; padding: 0; border-radius: 50%; }
+  #plusBtn, #modelChip { border-color: transparent; background: none; color: var(--muted); }
+  #plusBtn:active, #modelChip:active, #plusBtn[aria-expanded="true"] { background: var(--raised); color: var(--text); }
+  #modelChip { grid-area: model; justify-self: start; max-width: 100%; padding-left: 6px; }
+  /* A box-shadow outline, not a border: autosize() sets the height to scrollHeight, which leaves out borders. */
+  #composer textarea { grid-area: field; max-height: 40dvh; padding: 10px 48px 10px 16px; border-radius: 22px; background: var(--panel);
+    box-shadow: inset 0 0 0 1px var(--border-strong); transition: box-shadow .15s; }
+  #composer textarea:focus { box-shadow: inset 0 0 0 1px var(--accent), 0 0 0 3px var(--focus); }
+  #composer .send { grid-area: field; justify-self: end; align-self: end; margin: 4px; border-radius: 50%; }
+  .modal-panel.ps { width: 100%; }
+}
+@media (max-width: 767px) and (pointer: coarse) {
+  #plusBtn { width: 44px; }
+  #composer textarea { padding: 14px 56px 14px 18px; border-radius: 26px; }
+}
+/* The '+' sheet's rows: an icon, the label and, for a composer option, its current value. */
+.modal-panel.ps { width: min(420px, 100%); }
+.ps-list { display: flex; flex-direction: column; padding: 0 10px calc(16px + env(safe-area-inset-bottom)); }
+.ps-row { display: flex; align-items: center; gap: 14px; min-height: 48px; padding: 0 12px; border: 0; border-radius: 12px; background: none;
+  color: var(--text); font: inherit; font-size: 16px; text-align: left; cursor: pointer; }
+.ps-row:active { background: var(--raised); }
+@media (hover: hover) { .ps-row:hover { background: var(--raised); } }
+.ps-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ps-row svg { flex: none; color: var(--accent); }
+.ps-l { flex: 1; min-width: 0; }
+.ps-val { flex: 0 1 auto; min-width: 0; max-width: 50%; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ps-sep { height: 1px; margin: 6px 12px; background: var(--border); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0s !important; transition: none !important; }
 }

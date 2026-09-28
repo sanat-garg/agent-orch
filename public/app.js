@@ -1705,7 +1705,7 @@ function renderAttTray() {
   }));
 }
 $('attBtn').addEventListener('click', () => $('attInput').click());
-$('attInput').addEventListener('change', (e) => { addAttachments([...e.target.files]); e.target.value = ''; input.focus(); });
+for (const f of [$('attInput'), $('attImgInput')]) f.addEventListener('change', (e) => { addAttachments([...e.target.files]); e.target.value = ''; input.focus(); });
 // Pasting a copied image or file attaches it; pasting text (even with a picture of it alongside) stays text.
 input.addEventListener('paste', (e) => {
   const files = [...(e.clipboardData?.files || [])];
@@ -1828,8 +1828,9 @@ $('messages').addEventListener('click', (e) => {
 // ---------- composer menus (mode, effort; the model pill opens the fallback sheet) ----------
 // One compact listbox popover (.cmenu) in the app's menu style: it opens above its chip (the composer sits at the bottom;
 // below when there is more room there), options are .cm-opt buttons (role=option; aria-selected marks the current one),
-// arrows/Home/End move, Enter or a click picks, Esc, Tab or a click outside closes. Phones get the same menu.
-const CM = { open: null }; // { chip, menu, pick }
+// arrows/Home/End move, Enter or a click picks, Esc, Tab or a click outside closes. Phones get the same menu; the phone
+// composer hides the chips, so its '+' sheet opens them above #plusBtn (openMenuFrom).
+const CM = { open: null, binds: new Map() }; // open: { chip, menu, pick, anchor }; binds: chip → { menu, build, pick }
 function menuOpt(label, { value, selected = false, hint = '', title = '', disabled = false } = {}) {
   const b = el('button', 'cm-opt');
   b.type = 'button';
@@ -1850,14 +1851,14 @@ function placeMenu(menu, anchor) {
   else { menu.style.top = `${r.bottom + gap}px`; menu.style.maxHeight = `${Math.min(440, below)}px`; }
   menu.style.left = `${Math.max(edge, Math.min(r.left, innerWidth - menu.offsetWidth - edge))}px`;
 }
-function openMenu(chip, menu, build, pick) {
+function openMenu(chip, menu, build, pick, anchor = chip) {
   closeMenu(false);
   menu.replaceChildren();
   build(menu);
   menu.hidden = false;
   chip.setAttribute('aria-expanded', 'true');
-  CM.open = { chip, menu, pick };
-  placeMenu(menu, chip);
+  CM.open = { chip, menu, pick, anchor };
+  placeMenu(menu, anchor);
   const cur = menu.querySelector('.cm-opt[aria-selected="true"]:not(:disabled)') || menu.querySelector('.cm-opt:not(:disabled)')
     || menu.querySelector('input') || menu.querySelector('button'); // a menu without options: Effort's slider
   cur?.scrollIntoView({ block: 'nearest' });
@@ -1869,9 +1870,14 @@ function closeMenu(refocus = true) {
   CM.open = null;
   o.menu.hidden = true;
   o.chip.setAttribute('aria-expanded', 'false');
-  if (refocus) o.chip.focus();
+  if (refocus) (o.chip.offsetParent ? o.chip : o.anchor).focus();
+}
+function openMenuFrom(chip, anchor) {
+  const b = CM.binds.get(chip);
+  openMenu(chip, b.menu, b.build, b.pick, anchor);
 }
 function bindMenu(chip, menu, build, pick) {
+  CM.binds.set(chip, { menu, build, pick });
   chip.addEventListener('click', () => (CM.open?.menu === menu ? closeMenu() : openMenu(chip, menu, build, pick)));
   chip.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); openMenu(chip, menu, build, pick); }
@@ -1897,7 +1903,39 @@ function bindMenu(chip, menu, build, pick) {
 document.addEventListener('pointerdown', (e) => {
   if (CM.open && !e.target.closest('.cmenu') && !CM.open.chip.contains(e.target)) closeMenu(false);
 }, true);
-addEventListener('resize', () => { if (CM.open) placeMenu(CM.open.menu, CM.open.chip); });
+addEventListener('resize', () => { if (CM.open) placeMenu(CM.open.menu, CM.open.anchor); });
+// The phone composer's '+' (#451): a sheet with Photo, File and a row per composer chip (mode, and effort / persona when
+// their chips show) carrying the chip's value; a row opens that chip's menu above '+'.
+const PLUS = { lastFocus: null };
+function openPlusSheet() {
+  closeMenu(false);
+  PLUS.lastFocus = document.activeElement;
+  $('psMode').textContent = $('modeLabel').textContent;
+  $('psEff').textContent = $('effVal').textContent;
+  $('psPersona').textContent = $('personaLabel').textContent;
+  for (const r of $('plusSheet').querySelectorAll('[data-plus$="Chip"]')) r.hidden = $(r.dataset.plus).hidden;
+  $('plusSheet').hidden = false;
+  $('plusBtn').setAttribute('aria-expanded', 'true');
+  if (!coarse) $('plusSheet').querySelector('.ps-row').focus();
+}
+function closePlusSheet(refocus = true) {
+  $('plusSheet').hidden = true;
+  $('plusBtn').setAttribute('aria-expanded', 'false');
+  if (refocus) PLUS.lastFocus?.focus?.();
+}
+$('plusBtn').addEventListener('click', openPlusSheet);
+$('plusSheet').addEventListener('click', (e) => {
+  if (e.target.closest('[data-close]')) return closePlusSheet();
+  const what = e.target.closest('[data-plus]')?.dataset.plus;
+  if (!what) return;
+  closePlusSheet(false);
+  if (what === 'photo') $('attImgInput').click();
+  else if (what === 'file') $('attInput').click();
+  else openMenuFrom($(what), $('plusBtn'));
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('plusSheet').hidden) { e.stopImmediatePropagation(); closePlusSheet(); }
+}, true);
 // Mode: its four permission levels, then Orchestrator Mode.
 bindMenu($('modeChip'), $('modePop'), (menu) => {
   for (const o of $('mode').options) {

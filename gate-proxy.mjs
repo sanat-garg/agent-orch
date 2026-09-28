@@ -5,7 +5,8 @@
 // with a screenshot) until the host answers, and a denial goes back to the agent as a tool error, the call never made.
 // Calls run one at a time, in order, so nothing slips past a held one. Every call is appended to <dir>/audit.jsonl.
 // Config (JSON, 0600, written by extensions.mjs mcpFor): {dir, server, kind: 'browser'|'connector', upstream: {command,
-// args, env}, patterns, connector: {outbound, read, draft}, ttlMs, task, hook (serve the Claude hook's checks/)}.
+// args, env}, patterns, connector: {outbound, read, draft}, ttlMs, task, hook (serve the Claude hook's checks/), snapshotMs}.
+// A page that can't be read (the snapshot errors or times out) makes element tools, key presses and dialogs outbound.
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -15,7 +16,7 @@ import { APPROVAL_TTL_MS, DEFAULT_PATTERNS, appendAudit, ask, callKey, classify,
 
 const cfg = JSON.parse(fs.readFileSync(process.argv[process.argv.indexOf('--config') + 1], 'utf8'));
 const { dir, server = 'mcp', kind = 'browser', task = null } = cfg;
-const patterns = cfg.patterns?.length ? cfg.patterns : DEFAULT_PATTERNS, ttlMs = cfg.ttlMs || APPROVAL_TTL_MS;
+const patterns = cfg.patterns?.length ? cfg.patterns : DEFAULT_PATTERNS, ttlMs = cfg.ttlMs || APPROVAL_TTL_MS, snapshotMs = cfg.snapshotMs || 60_000;
 const auditFile = path.join(dir, 'audit.jsonl');
 
 const up = spawn(cfg.upstream.command, cfg.upstream.args || [], { env: { ...process.env, ...(cfg.upstream.env || {}) }, stdio: ['pipe', 'pipe', 'inherit'] });
@@ -81,14 +82,21 @@ async function screenshot() {
   return saveImage(imageOf(r?.result));
 }
 
+// Tools whose class depends on what is on the page: without a readable snapshot they can't be told apart from a Send.
+const PAGE_TOOLS = new Set(['browser_click', 'browser_type', 'browser_select_option', 'browser_drag', 'browser_handle_dialog',
+  'browser_press_key', 'browser_fill_form']);
+const needsPage = (tool) => PAGE_TOOLS.has(tool) || /^browser_mouse_\w+_xy$/.test(tool);
+
 // Classifies a call and, when outbound, holds it for the owner. → {allow, c (classify), args (redacted), approval?, v?, shot?}
 async function check(tool, args) {
-  let snap = null;
+  let snap = null, readable = true;
   if (kind === 'browser' && !isBrowserRead(tool)) {
-    const r = await callUp('browser_snapshot', {});
+    const r = await callUp('browser_snapshot', {}, snapshotMs);
     snap = parseSnapshot(r ? resultText(r.result) || r.error?.message || '' : '');
+    readable = !!r && !r.error && !r.result?.isError && (!!snap.url || snap.refs.size > 0);
   }
-  const c = classify(tool, args, { server, kind, snapshot: snap, patterns, connector: cfg.connector });
+  let c = classify(tool, args, { server, kind, snapshot: snap, patterns, connector: cfg.connector });
+  if (!readable && needsPage(tool)) c = { ...c, cls: 'outbound', reason: 'the page could not be read before this action' };
   const red = redactCall(tool, args, snap);
   if (c.cls !== 'outbound') return { allow: true, c, args: red };
   const shot = kind === 'browser' ? await screenshot() : null;

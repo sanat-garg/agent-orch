@@ -19,3 +19,7 @@ Tests (test/gate-proxy.test.mjs, copy the MCP client helper and layout from test
 ## Done when
 
 `node --test test/gate-proxy.test.mjs test/approval-gate-run.test.mjs` and `grep -q 'could not be read' gate-proxy.mjs`
+
+## Result — done (check passed) (2026-09-28 12:30)
+
+AGENT-ORCH-STATUS: done — Proxy holds page actions when the snapshot errors or hangs; tests pass

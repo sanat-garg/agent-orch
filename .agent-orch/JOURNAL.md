@@ -968,3 +968,7 @@ Sidebar chat search now calls GET /api/convos?q=; tests pass
 ## 2026-09-28 12:29 — #340 digest.mjs: what finished, failed or needs the owner since they last looked, per project, with tests [done (check passed)]
 
 digest.mjs reports per-project done/failed/needs-you, tests pass
+
+## 2026-09-28 12:30 — #338 Gate proxy: a page that can't be read makes element tools, key presses and dialogs outbound, with tests [done (check passed)]
+
+Proxy holds page actions when the snapshot errors or hangs; tests pass

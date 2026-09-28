@@ -153,7 +153,8 @@ const DROP_REASONS = { sleep: 'asleep', dns: 'dns', network: 'network' };
 // Added later: grace_ms (the owner's per-node grace before its jobs are reassigned; NULL = graceMs(os)); away (why a
 // node is offline: 'bye' after a clean shutdown, else 'lost', whatever its OS: a silent Mac may be asleep or off the
 // network, and only its worker can tell, on reconnect (node_drops); 'asleep' is a legacy value); slept_at/slept_ms
-// (the last sleep a worker reported on wake). max_slots 0 = Auto (the scheduler sizes it from cores and free RAM).
+// (the last sleep a worker reported on wake). max_slots 0 = Auto (the scheduler sizes it from cores and free RAM); the
+// controller's is what the scheduler sized from its hardware (setLocalCapacity).
 // drain_reason/drained_at: why and when auto-health drained it (NULL when the owner did); drain_kind: which rule did
 // ('disk' | 'drops'; NULL for the owner and for task failures), so only a disk drain lifts itself; health_ack: when the owner last
 // undrained it (older evidence no longer counts); last_error: JSON of its last node.error {at, kind, message, stack, stderr}.
@@ -237,6 +238,15 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
       .run(Date.now(), info.inventory ? JSON.stringify(info.inventory) : null, info.resources ? JSON.stringify(info.resources) : null, LOCAL_NODE);
     // The controller's own series, at the workers' pace.
     if (metrics && info.resources && Date.now() - localAt >= heartbeatMs) { localAt = Date.now(); metrics.record(LOCAL_NODE, info.resources); }
+  }
+
+  // The controller's size as the scheduler detected it (orchestrator.mjs detectHardware, #384): its cores and memory into
+  // its inventory, and max_slots = its slots in all, so the Machines view shows the truth after a resize.
+  function setLocalCapacity({ cores, mem, maxSlots }) {
+    const row = get(LOCAL_NODE), inv = { ...parse(row?.inventory), cores, mem };
+    if (row && row.inventory === JSON.stringify(inv) && row.max_slots === maxSlots) return;
+    db.prepare('UPDATE nodes SET inventory=?, max_slots=? WHERE id=?').run(JSON.stringify(inv), maxSlots, LOCAL_NODE);
+    changed();
   }
 
   // A node that went away: why (row.away), and the owner-facing words for it ('connection lost').
@@ -801,5 +811,5 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
 
   return { listNodes, node, createPairing, pairing, revokePairing, claim, whoami, update, revoke, handleUpgrade, send, onMessage, isConnected: (id) => conns.has(id), version: () => version, close,
     autoDrain, requestUpdate, logsTail, request, ping, nodeEvents, metrics: metricsOf, setBusy: (fn) => { busy = fn; }, setUpNext: (fn) => { upNext = fn; }, health,
-    handleExt, syncExt, extHash: () => extInfo()?.hash || null };
+    handleExt, syncExt, extHash: () => extInfo()?.hash || null, setLocalCapacity };
 }

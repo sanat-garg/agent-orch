@@ -1,6 +1,6 @@
 // Parallel planning (#156): glob-aware file-overlap gating, multi-dependencies ("after": [...]), agent spreading across
 // the fallback list, and an integrator task that starts only after all its parts. #302: the controller's own slots are the
-// owner's setting (1-16, default 4), memory only an emergency floor (/proc/meminfo fixture), and the low-memory pause.
+// owner's setting (1-16, default from the head's cores: 4 on 2), memory only an emergency floor (/proc/meminfo fixture), and the low-memory pause.
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -250,7 +250,7 @@ describe('parallel scheduling', { concurrency: true, timeout: 120000 }, () => {
     assert.ok(overlaps(r.spans.S1, r.spans.S2), 'both ran at once, on two agents');
   });
 
-  test('four work tasks by default; the owner sets 1-16 and memory above the floor never lowers it, re-checked per claim', async () => {
+  test('four work tasks by default on a 2-core head; the owner sets 1-16 and memory above the floor never lowers it, re-checked per claim', async () => {
     const r = await scenario(`
       const two = (a, b) => [{ title: a, prompt: 'WAIT ' + a + '\\nWRITE ' + a + '.txt x', files: [a + '.txt'] }, { title: b, prompt: 'WRITE ' + b + '.txt y', files: [b + '.txt'] }];
       const phase = async (a, b) => {
@@ -269,7 +269,8 @@ describe('parallel scheduling', { concurrency: true, timeout: 120000 }, () => {
       o.setParallelSettings({ parallelTasks: 2 });
       setMem(1000, 2048); // 1 GB available, half the swap in use: above the emergency floor
       const lowMem = await phase('l1', 'l2');
-      return { byDefault, bad, one, lowMem, setting: o.stateView().parallel.parallelTasks, spans: spans() };`);
+      return { byDefault, bad, one, lowMem, setting: o.stateView().parallel.parallelTasks, spans: spans() };`,
+    { config: { hardware: { cores: 2 } } });
     assert.equal(r.byDefault.slots, 4, 'default: four slots');
     assert.notEqual(r.byDefault.second, 'queued', 'default: the second task runs too');
     assert.ok(overlaps(r.spans.d1, r.spans.d2));

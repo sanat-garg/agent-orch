@@ -13,3 +13,7 @@ The owner upgraded the head VPS (oracle-vm) to 2 cores and 11 GB RAM (it was 1 c
 ## Done when
 
 `node --test test/head-capacity*.test.mjs` passes (cores-derived target, reserved integrator slots, workers-first delegation, head fallback, resize re-detect)
+
+## Result — done (check passed) (2026-09-28 14:05)
+
+AGENT-ORCH-STATUS: done — head slots from hardware, integrators reserved, workers-first delegation tested

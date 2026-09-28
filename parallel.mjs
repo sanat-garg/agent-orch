@@ -104,3 +104,11 @@ export function taskSlots({ setting = 1, mem, pacingLimit = Infinity }) {
   if (mem.avail < MEM.claimFloor) return 0;
   return Math.max(1, Math.min(setting, pacingLimit));
 }
+
+// The head's slots from its real hardware (BRIEF goal 9, #384): agents mostly wait on the LLM, so three a core and at
+// least 4 in all. Of them, up to `reserve` are kept for controller-only work (integrators, reflection) so it never waits
+// behind ordinary work; the rest (at most 16, like the owner's setting) take work. 2 cores → {target 6, reserved 2, work 4}.
+export function headTarget(cores, reserve = 2) {
+  const target = Math.max(4, Math.max(1, Math.floor(Number(cores)) || 1) * 3), reserved = Math.max(0, Math.min(reserve, target - 1));
+  return { target, reserved, work: Math.min(16, target - reserved) };
+}

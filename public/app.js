@@ -3724,9 +3724,14 @@ function machineCard(n) {
   if (!signed.length) ag.append(el('span', 'mc-idle', inv.agents ? 'No agents signed in' : 'Agents not reported yet'));
   li.append(ag);
 
-  // Running tasks (plan tasks too, though they hold no work slot); tap one for its drawer.
-  const run = el('div', 'mc-run'), h = el('h4');
-  h.append(document.createTextNode('Running · '), el('b', '', `${n.used} of ${n.slots ?? 0}`), document.createTextNode(` ${n.slots === 1 ? 'slot' : 'slots'}`));
+  // Running tasks (plan tasks too, though they hold no work slot); tap one for its drawer. This server splits its slots:
+  // 'Integrating 2 · Work 1/4' (the reserved ones for integrators and reflection, then its work slots in use).
+  const run = el('div', 'mc-run'), h = el('h4'), hd = n.head;
+  if (hd) {
+    h.append(document.createTextNode('Integrating '), el('b', '', String(hd.reserved)), document.createTextNode(' · Work '), el('b', '', `${hd.workUsed}/${hd.work}`));
+    h.title = `${plural(hd.reserved, 'slot')} kept for integrators and reflection (${hd.integrating} running), ${hd.workUsed} of ${plural(hd.work, 'work slot')} in use. ` +
+      `Sized from its ${plural(hd.cores, 'core')}: three a core, at least 4 in all. Work goes to the other machines first.`;
+  } else h.append(document.createTextNode('Running · '), el('b', '', `${n.used} of ${n.slots ?? 0}`), document.createTextNode(` ${n.slots === 1 ? 'slot' : 'slots'}`));
   run.append(h);
   const tasks = n.tasks || [];
   if (!tasks.length) run.append(el('p', 'mc-idle', n.connected && n.enabled && !n.draining ? 'Idle' : 'Nothing running'));
@@ -3848,7 +3853,7 @@ function machineControls(n) {
   const ctl = el('div', 'mc-ctl'), slots = el('span', 'mc-slots', 'Max tasks');
   if (n.local) {
     const auto = el('span', 'mc-auto', 'Auto');
-    auto.title = "Follows this server's free memory. Settings → Parallel tasks caps tasks across all machines.";
+    auto.title = `Sized from this server's ${n.head ? plural(n.head.cores, 'core') : 'cores'} (three tasks a core, at least 4), re-checked every 10 minutes. Settings → Parallel tasks caps tasks across all machines.`;
     slots.append(auto);
   } else {
     const seg = el('span', 'seg-sm');

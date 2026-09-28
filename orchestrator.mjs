@@ -25,7 +25,7 @@ import { APPROVAL_TTL_MS, DEFAULT_PATTERNS, patternsWith } from './gate.mjs';
 import { createApprovals } from './approvals.mjs';
 import { createUsageLog } from './usage.mjs';
 import { DELEGATE_CFG, createDelegator, parseFallbacks } from './delegate.mjs';
-import { filesOverlap, parseFiles, spreadAssign, readMemInfo, taskSlots, MEM } from './parallel.mjs';
+import { filesOverlap, headTarget, parseFiles, spreadAssign, readMemInfo, taskSlots, MEM } from './parallel.mjs';
 import { registerPid, withOwner } from './resources.mjs';
 import { LOCAL_NODE, HEALTH, awayNote } from './cluster.mjs';
 import { MSG, graceMs, isRepoUrl } from './cluster-protocol.mjs';
@@ -39,7 +39,10 @@ import { commitAll, ensureWorktree, isMerged, listWorktrees, mergeBack, parkWork
 
 const CFG = {
   concurrency: 2,               // pacing reference (pacing may drop work to one slot)
-  parallelTasks: 4,             // the controller's own work tasks at once unless the owner sets 1-16 (parallel.mjs taskSlots)
+  parallelTasks: null,          // the controller's own work tasks at once unless the owner sets 1-16; null = from its hardware (headTarget)
+  reservedSlots: 2,             // head slots kept on top of those for controller-only work (integrators, reflection)
+  hardware: null,               // {cores, mem} or a function returning it: the controller's hardware (tests); null = os.cpus() and MemTotal
+  hardwareMs: 600_000,          // re-detected this often, so a resized VPS applies without a restart
   agentSlots: 1,                // concurrent tasks per connected account (or map by agent)
   meminfo: process.env.AGENT_ORCH_MEMINFO || '/proc/meminfo', // the memory guard's source (tests point it at a fixture)
   memCheckMs: 5000,             // memory guard interval while tasks run
@@ -343,6 +346,15 @@ const lostHandoff = (task) => task.kind === 'work' && !task.session_id && /^\[lo
 // with the planner), reflection, review checkpoints and integrators (they need the controller's conflicted worktree)
 // stay on the controller.
 export const remoteWork = (task) => task?.kind === 'work' && !task.integrates;
+// Controller-only work that holds a head slot (plan tasks hold none): integrators and reflection. It takes the head's
+// reserved slots first, so it never waits behind ordinary work (#384).
+export const controllerOnly = (task) => !!task && task.kind !== 'plan' && !remoteWork(task);
+// The controller's hardware, read live: CFG.hardware (tests) or its cores and MemTotal.
+function readHardware() {
+  let h = null;
+  try { h = typeof CFG.hardware === 'function' ? CFG.hardware() : CFG.hardware || { cores: os.cpus().length, mem: os.totalmem() }; } catch (e) { console.error('[orchestrator] hardware detection failed', e); }
+  return { cores: Math.max(1, Math.floor(Number(h?.cores)) || os.cpus().length || 1), mem: Number(h?.mem) || os.totalmem() };
+}
 const worktreeNote = (wt, project) => `You are in an isolated git worktree of ${project.path} (branch ${wt.branch}), so tasks running at ` +
   `the same time can't clobber your edits. Work only in ${wt.cwd}, never in ${project.path}: the orchestrator merges this branch back when you finish.`;
 const nextTaskPrompt = (task) => taskBody(task, [
@@ -887,7 +899,8 @@ function takeLock(file) {
 export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLimits, onSubscription, emitChat, broadcast, convoExists, refreshUsage,
   convoFallbacks = () => null, convoEffort = () => null, convoPersona = () => null, onCommit = () => {}, projectReady = () => true, disabled = false, usageLog = createUsageLog(dataDir),
   notify = () => {}, codexSnapshot = () => codexLatestSnapshot(), reap = null, config = {} }) {
-  Object.assign(CFG, config); // tests tune slots (concurrency, parallelTasks, agentSlots, meminfo)
+  Object.assign(CFG, config); // tests tune slots (concurrency, parallelTasks, agentSlots, meminfo, hardware)
+  let hw = readHardware(); // the controller's hardware as last detected (detectHardware)
   const dir = path.join(dataDir, 'orchestrator');
   const runsDir = path.join(dir, 'runs');
   fs.mkdirSync(runsDir, { recursive: true });
@@ -1180,8 +1193,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // plan/reflect tasks and anything the owner queued directly (source 'user'), and tasks a deadline under 24 h away
   // promotes to urgent. Across projects the scheduler takes each project's head in effective-priority order
   // (only one task per project runs at a time anyway), the owner's sidebar order breaking ties. Rows need `eff`
-  // (EFFECTIVE_SQL) and `project_position`.
-  const goesFirst = (r) => r.kind !== 'work' || r.source === 'user' || (r.deadline != null && r.deadline - now() < 86400);
+  // (EFFECTIVE_SQL) and `project_position`. Integrators go before all of them (#384): they unblock merged work.
+  const goesFirst = (r) => (r.integrates ? 2 : r.kind !== 'work' || r.source === 'user' || (r.deadline != null && r.deadline - now() < 86400) ? 1 : 0);
   const byPosition = (a, b) => (a.position ?? Infinity) - (b.position ?? Infinity) || 0;
   const withinProject = (a, b) => goesFirst(b) - goesFirst(a) || byPosition(a, b) || b.eff - a.eff
     || (b.session_id != null) - (a.session_id != null) || a.created_at - b.created_at || a.id - b.id;
@@ -1314,7 +1327,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     setTimeout(tick, 100);
     return { ok: true, order };
   }
-  // kv parallel_settings { parallelTasks: 1-16 (the controller's own work slots; memory only an emergency floor), controllerWork: bool (see
+  // kv parallel_settings { parallelTasks: 1-16 (the controller's own work slots, default headTarget's; memory only an emergency floor), controllerWork: bool (see
   // CFG.controllerWork), controllerBrowser: bool (see CFG.controllerBrowser), maxTasks: null | n (owner cap on work tasks across every node),
   // rapidDevelopment: bool (default on: fill free cluster slots plus two ready tasks),
   // autoRestart: bool (server.mjs restarts itself once idle after merged commits touched server code; default off) }. Older shapes read as defaults.
@@ -1322,13 +1335,50 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   function parallelSettings() {
     let s = {};
     try { s = JSON.parse(kvGet('parallel_settings') || '{}') || {}; } catch {}
-    return { parallelTasks: validParallel(s.parallelTasks) ? s.parallelTasks : CFG.parallelTasks,
+    return { parallelTasks: validParallel(s.parallelTasks) ? s.parallelTasks : CFG.parallelTasks ?? headTarget(hw.cores, CFG.reservedSlots).work,
       controllerWork: typeof s.controllerWork === 'boolean' ? s.controllerWork : CFG.controllerWork,
       controllerBrowser: typeof s.controllerBrowser === 'boolean' ? s.controllerBrowser : CFG.controllerBrowser,
       maxTasks: Number.isInteger(s.maxTasks) && s.maxTasks > 0 ? s.maxTasks : null,
       rapidDevelopment: s.rapidDevelopment !== false, autoRestart: s.autoRestart === true };
   }
   const slotsFor = (a) => typeof CFG.agentSlots === 'number' ? CFG.agentSlots : CFG.agentSlots[a] ?? 1;
+
+  // ---- the head's own slots (#384): its work slots (parallelSettings().parallelTasks: the owner's, else its hardware's)
+  // plus `reserved` kept for controller-only work (integrators, reflection). Hardware is re-detected at boot and every
+  // CFG.hardwareMs, and the controller's nodes row follows (cores, mem, max_slots = its slots in all) for the Machines view.
+  function headSlots() {
+    const { target, reserved } = headTarget(hw.cores, CFG.reservedSlots), work = parallelSettings().parallelTasks;
+    return { cores: hw.cores, mem: hw.mem, target, reserved, work, total: work + reserved };
+  }
+  function detectHardware() {
+    const prev = hw;
+    hw = readHardware();
+    if (prev.cores !== hw.cores || prev.mem !== hw.mem) {
+      const h = headSlots();
+      logEvent(`this server now has ${hw.cores} ${hw.cores === 1 ? 'core' : 'cores'} and ${(hw.mem / GB).toFixed(1)} GB (was ${prev.cores}, ${(prev.mem / GB).toFixed(1)} GB): ${h.work} work slots plus ${h.reserved} for integration`);
+      pushState(); setTimeout(tick, 0);
+    }
+    syncHeadNode();
+    return headSlots();
+  }
+  function syncHeadNode() {
+    const h = headSlots();
+    try { cluster?.setLocalCapacity?.({ cores: h.cores, mem: h.mem, maxSlots: h.total }); } catch (e) { console.error('[orchestrator] controller node update failed', e); }
+  }
+  // The head's own runs, read from the DB so a claim not yet started counts: controller-only ones and ordinary work.
+  function headLoad() {
+    const rows = qa("SELECT kind, integrates FROM tasks WHERE status='running' AND kind!='plan' AND COALESCE(node_id, :l)=:l", { l: LOCAL_NODE });
+    const only = rows.filter(controllerOnly).length;
+    return { only, work: rows.length - only };
+  }
+  // Work slots in use: ordinary work plus controller-only runs beyond the reserved slots.
+  const headWorkUsed = (load = headLoad()) => load.work + Math.max(0, load.only - headSlots().reserved);
+  // May the head start `task` now? 'reserved': a controller-only task takes a reserved slot (no pacing, owner cap or
+  // per-agent limit holds it back); 'work': a work slot is free (`slots`: slotCount, after pacing and the memory floor); null.
+  function headFree(task, slots, load = headLoad()) {
+    if (controllerOnly(task) && load.only < headSlots().reserved) return 'reserved';
+    return headWorkUsed(load) < slots ? 'work' : null;
+  }
 
   // ---- the approval gate (gate.mjs, approvals.mjs): browser and connector calls of task runs are classified, outbound
   // ones held for the owner, all audited. kv gate_settings {patterns: the owner's extra outbound names, ttlHours}.
@@ -1504,13 +1554,15 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
   const localAgentOk = (agent) => (agent === 'claude' ? onSubscription() : agentStatus(agent) === true && !(kvTime(`agent_auth_failed:${agent}`) > now()));
   // Where a claimed task runs: the free worker with the most headroom (the node that last ran it first), else the
-  // controller when it has a free slot. While some worker could run a work task, the controller leaves it to the
-  // workers (it waits for one to free up) unless the owner's controllerWork setting says otherwise. null = not now.
+  // controller when it has a free slot (localFree: headFree's answer for this task). Ordinary work goes to the workers
+  // first: the controller takes it only once every worker is at its target or none is online, and with the owner's
+  // controllerWork off it leaves it to the workers while one could run it (it waits for one to free up). A controller-only
+  // task in a reserved slot ignores the owner's cap and pacing (cap), so integration never waits behind work. null = not now.
   // A browser task (browser.mjs) goes only to a worker that reports browserCapable, or to the controller when the owner
   // allows it (controllerBrowser), and never while another task uses the same profile (Chromium locks it).
   function place(task, agent, { localFree, localOk, cap }) {
     if (task.kind === 'plan') return localOk ? LOCAL_NODE : null;
-    if (workEverywhere() >= cap) return null;
+    if (localFree !== 'reserved' && workEverywhere() >= cap) return null;
     const browser = needsBrowser(task);
     if (isBrowserTask(task) && browserHeld(task.run_on, identityOf(task))) return null;
     if (browser && profileBusy(task)) return null;
@@ -1523,7 +1575,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       if (free.length) return free[0].id;
     }
     if (pin && pin !== LOCAL_NODE) return null;
-    if (!localOk || !localFree || localDraining() || !localAgentOk(agent) || slotsFor(agent) - runningOn(agent) <= 0) return null;
+    if (!localOk || !localFree || localDraining() || !localAgentOk(agent) || (localFree !== 'reserved' && slotsFor(agent) - runningOn(agent) <= 0)) return null;
     if (browser && !parallelSettings().controllerBrowser && pin !== LOCAL_NODE) return null;
     if (remote && !pin && !parallelSettings().controllerWork && workerNodes(agent).some((n) => !browser || browserWorker(n))) return null;
     return LOCAL_NODE;
@@ -1535,9 +1587,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   const profileBusy = (task) => qa("SELECT id, kind, capabilities, browser_identity FROM tasks WHERE status='running' AND capabilities IS NOT NULL AND id!=:id", { id: task.id })
     .some((r) => r.kind === 'work' && identityOf(r) === identityOf(task));
 
-  // Claims the next task and its node: { task, node, prevNode }. localFree: the controller has a free work slot;
+  // Claims the next task and its node: { task, node, prevNode }. slots: the controller's work slots now (slotCount);
   // localOk: it may claim at all (memory); cap: work tasks allowed across all nodes (owner cap, pacing).
-  function claimNext(allowed, localFree = true, localOk = true, cap = Infinity) {
+  function claimNext(allowed, { slots = slotCount(decisionCache?.d), localOk = slots > 0, cap = Infinity } = {}) {
     // Mandatory GitHub protocol: a project's work only starts once its repo exists.
     // A plan task waits while the owner's chat turn holds the planner session (AUDIT #5).
     // A task whose agent is at its usage limit waits; others (e.g. codex-routed while Claude is limited) still run.
@@ -1552,12 +1604,16 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       const fallbacks = r.kind === 'work' ? (parseFallbacks(r.fallbacks) || []).filter((f) => listedModel(f.agent, f.model) && `${f.agent}/${f.model}` !== `${primary.agent}/${primary.model}`) : [];
       return { task: r, options: [primary, ...fallbacks] };
     });
-    const picks = spreadAssign(ready, {
-      slotsFree: (a) => Math.max(0, slotsFor(a) - runningOn(a)) + workerSlots(a),
-      hasUsage: (a, m) => delegator.hasUsage(a, m),
-    });
+    // Controller-only work (integrators first) goes ahead of the rest on its own route: it has its reserved head slots.
+    const only = ready.filter((r) => controllerOnly(r.task)).sort((a, b) => !!b.task.integrates - !!a.task.integrates);
+    const picks = [...only.filter((r) => delegator.hasUsage(r.options[0].agent, r.options[0].model)).map((r) => ({ task: r.task, ...r.options[0], spilled: false })),
+      ...spreadAssign(ready.filter((r) => !controllerOnly(r.task)), {
+        slotsFree: (a) => Math.max(0, slotsFor(a) - runningOn(a)) + workerSlots(a),
+        hasUsage: (a, m) => delegator.hasUsage(a, m),
+      })];
+    const load = headLoad();
     for (const pick of picks) {
-      const node = place(pick.task, pick.agent, { localFree, localOk, cap });
+      const node = place(pick.task, pick.agent, { localFree: headFree(pick.task, slots, load), localOk, cap });
       if (!node) continue;
       assertPlacement(pick.task, node);
       if (pick.spilled) spread(pick.task, pick);
@@ -2509,7 +2565,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
           if (kvGet('announced_mem') !== '1') { kvSet('announced_mem', 1); logEvent(`waiting: server memory low (${Math.round(mem.avail / 1024 ** 2)} MB available)`, { level: 'warn' }); }
           if (!workerNodes('claude').length && !workerNodes('codex').length) break; // workers can still take work
         } else kvSet('announced_mem', 0);
-        const free = slots > 0 && workRunning() < slots, claim = claimNext(d.allowed, free, slots > 0, cap);
+        const free = slots > 0 && headWorkUsed() < slots, claim = claimNext(d.allowed, { slots, localOk: slots > 0, cap });
         if (!claim) { if (free && scheduleReflections()) continue; break; }
         startTask(claim.task, claim.node, claim.prevNode);
       }
@@ -2641,7 +2697,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
 
   function considerPreemption(d) {
-    if (workRunning() < Math.max(1, slotCount(d))) return;
+    if (headWorkUsed() < Math.max(1, slotCount(d))) return;
     const best = runnable(d.allowed, false, 1)[0];
     if (!best) return;
     const runningRows = qa(`SELECT t.*, ${EFFECTIVE_SQL} AS eff FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.status='running' ORDER BY eff ASC`, { now: now() });
@@ -3027,6 +3083,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     // A worker counts as busy while we have a job placed or offered there: it is sent node.update only once idle.
     c.setBusy?.((nodeId) => nodeRuns(nodeId).length > 0 || [...jobs.values()].some((j) => j.node === nodeId));
     c.setUpNext?.(upNext);
+    syncHeadNode();
     for (const id of adoptable.splice(0)) adopt(id);
   }
   // "Up next" on a worker's status view (sent with every heartbeat): the queued work tasks ready to start now that could
@@ -3724,10 +3781,17 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     });
     return { activeUsage, blocks, blockedUntil: blockedUntil(), blockedReason: kvGet('blocked_reason'),
       pacing: d?.reason || kvGet('budget_reason'), slots: slotCount(d, mem), parallel, lanes, capacity: capacityView(d, mem), rapid: rapidStatus(),
-      running: running.size, workRunning: workRunning(), remoteRunning: workEverywhere() - workRunning(), draining, subscription: onSubscription() };
+      running: running.size, workRunning: workRunning(), remoteRunning: workEverywhere() - workRunning(), draining, subscription: onSubscription(), head: headView(d) };
+  }
+  // The head's slots as the Machines view splits them ('Integrating 2 · Work 1/4'): its hardware and target, the reserved
+  // slots and the controller-only runs in them, the work slots it may use now (slotCount) and those in use.
+  function headView(d = decisionCache?.d, load = headLoad()) {
+    const h = headSlots();
+    return { cores: h.cores, mem: h.mem, target: h.target, reserved: h.reserved, integrating: load.only, work: slotCount(d), workMax: h.work, workUsed: headWorkUsed(load) };
   }
   // The Machines view (GET /api/cluster/nodes): each node's running tasks (read from the DB, so adopted remote work
-  // shows too), the work slots they hold and its slot count (the controller: slotCount; a worker: nodeCap).
+  // shows too), the work slots they hold and its slot count (the controller: slotCount plus its reserved slots, split in
+  // `head`; a worker: nodeCap).
   function machines(nodes) {
     const rows = qa(`SELECT t.id, t.project_id, p.name AS project, t.kind, t.title, t.agent, t.model, t.ran_agent, t.ran_model, t.started_at, t.node_id
       FROM tasks t LEFT JOIN projects p ON p.id=t.project_id WHERE t.status='running' ORDER BY t.started_at, t.id`);
@@ -3738,7 +3802,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
           model: t.ran_model || t.model || delegator.defaultModel(agent) || null, started_at: t.started_at, waiting_for: running.get(t.id)?.waiting || null,
           phase: running.get(t.id)?.phase || null }; // a remote job's current phase (job.phase)
       });
-      return { ...n, tasks, used: tasks.filter((t) => t.kind !== 'plan').length, slots: n.local ? slotCount(decisionCache?.d) : nodeCap(n), slotsWhy: slotsWhy(n) };
+      const head = n.local ? headView() : null;
+      return { ...n, tasks, used: tasks.filter((t) => t.kind !== 'plan').length, slots: head ? head.work + head.reserved : nodeCap(n), slotsWhy: slotsWhy(n), ...(head && { head }) };
     });
   }
   // Why a connected worker on Auto gets no slot at all (its Machines card says so): its free memory, or its local cap.
@@ -3869,6 +3934,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     cleanupWorktrees(); // per-project merge lock: a claim in the same project waits for it
     retentionGc();
     reconcileCodexLimit();
+    detectHardware();
+    setInterval(detectHardware, CFG.hardwareMs);
     setInterval(tick, CFG.pollMs);
     setInterval(memGuard, CFG.memCheckMs);
     setInterval(retentionGc, 86400e3);
@@ -3909,7 +3976,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     drain, undrain, chatPlanning, autoRestart: () => parallelSettings().autoRestart, stateView, machines, browserTasks, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, reconcileClaudeLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     // A sidebar chat's project rank ({id, position, priority}), or null when its folder has no orchestrator project.
     projectRank: (cwd) => q1('SELECT id, position, priority FROM projects WHERE path=:p', { p: cwd }) ?? null,
-    isRunning: (id) => running.has(Number(id)), logEvent, attachCluster,
+    isRunning: (id) => running.has(Number(id)), logEvent, attachCluster, detectHardware,
     gateSettings, setGateSettings, decideApproval, taskActions, pendingApprovals: () => approvals.pending().map(({ args, ...a }) => a),
     scheduleReflections, // tests: run a reflection scheduling step without starting agents
     claimNext, // tests: claims the next task and its node, as one tick step would (without starting it)

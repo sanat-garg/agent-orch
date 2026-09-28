@@ -1115,3 +1115,6 @@ push.mjs createNotifier holds messages per tag, caps bursts; tests pass
 ## 2026-09-28 14:04 — #412 gate-proxy.mjs: a streamable-http upstream, so http connectors can be gated instead of withheld (AUDIT #69's lasting fix) [done (check passed)]
 
 gate-proxy gates streamable-http upstreams; both test files pass
+## 2026-09-28 14:05 — #384 Head capacity from its real hardware; integration first on the head, work delegated to Macs [done (check passed)]
+
+head slots from hardware, integrators reserved, workers-first delegation tested

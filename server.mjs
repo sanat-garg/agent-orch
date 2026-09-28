@@ -757,9 +757,9 @@ function emit(cid, ev) {
 // CW_NO_ORCHESTRATOR=1 (preflight against a copy of real data): the DB is opened and migrated, but nothing runs or pushes.
 const NO_ORCH = process.env.CW_NO_ORCHESTRATOR === '1';
 const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
-  // The controller runs up to 4 work tasks by default (BRIEF goal 9; memory is only an emergency floor, parallel.mjs
-  // taskSlots); the owner sets 1-16 in Settings.
-  config: { parallelTasks: 4 },
+  // The controller's work slots come from its hardware (parallel.mjs headTarget; memory is only an emergency floor) unless
+  // the owner sets 1-16 in Settings, and any agent may fill them all (rate limits are the fallback list's job).
+  config: { agentSlots: Infinity },
   query,
   claudeBin: CLAUDE_BIN,
   claudeEnv: CLAUDE_ENV,

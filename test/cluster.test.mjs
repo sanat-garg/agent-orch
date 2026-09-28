@@ -190,7 +190,10 @@ test('PATCH edits name, draining and max slots', async () => {
   await waitFor(async () => (await nodeOf(w.node)).resources?.memAvailable === 4 * 1024 ** 3, { timeout: 5000 });
   const m = await nodeOf(w.node);
   assert.deepEqual([m.maxSlots, m.slots, m.used, m.tasks], [null, 2, 0, []]);
-  assert.equal((await nodeOf('controller')).slots, 2, "the controller's slots are its own (up to 2 with memory to spare), not its nodes row's 1");
+  // The controller's slots come from its hardware (#384): its work slots plus the reserved ones, not its nodes row's 1.
+  const head = await nodeOf('controller');
+  assert.equal(head.slots, head.head.work + head.head.reserved);
+  assert.equal(head.head.cores, os.cpus().length);
   assert.equal((await (await api(`/api/cluster/nodes/${w.node}`, { method: 'PATCH', body: { enabled: false } })).json()).node.status, 'disabled');
   c.ws.close();
 });

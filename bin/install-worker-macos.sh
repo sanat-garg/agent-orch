@@ -104,9 +104,9 @@ EOF
 
 # ---------------------------------------------------------------- worker stage (runs AS the worker account)
 # These functions go to the worker account's own bash as text (declare -f, see main). macOS's /bin/bash is 3.2, and its
-# declare -f reprints a here-document piped into a command (`cat <<EOF | cmd`) with the pipe after EOF, which no bash
-# can parse back ("syntax error near unexpected token `|'"): so nothing in this file pipes a here-document; feed it
-# straight in (`cmd <<EOF`). test/install-scripts.test.mjs checks both.
+# declare -f reprints a here-document piped into a command with the pipe after the EOF line, which no bash can parse
+# back ("syntax error near unexpected token `|'"): so nothing in this file pipes a here-document; feed it straight in
+# (`cmd <<EOF`). test/install-scripts.test.mjs and test/install-macos-bash32.test.mjs (the real bash 3.2) check it.
 WORKER_FUNCS=(say warn die run tty_run node_major ensure_node ensure_gh ensure_checkout install_agents pair worker_stage node_path)
 # …and the settings they read (declare -p; under set -u a missing one stops the stage).
 WORKER_VARS=(REPO LABEL CONTROLLER CODE NAME AGENTS DRY REPAIR)
@@ -490,4 +490,6 @@ finish() { # finish WORKER-HOME RUN-AS-PREFIX
   say "Claude and Codex run on the head's accounts: nothing to sign in here. If Claude isn't shared yet, on the head open Connections → Claude for your machines → Share with machines."
 }
 
-main "$@"
+# AGENT_ORCH_INSTALLER_NO_MAIN=1 only defines the functions (test/install-macos-bash32.test.mjs). Not "${BASH_SOURCE[0]}":
+# with `curl … | bash` it is empty, which bash 3.2 calls unbound under set -u.
+[[ -n "${AGENT_ORCH_INSTALLER_NO_MAIN:-}" ]] || main "$@"

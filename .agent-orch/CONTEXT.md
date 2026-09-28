@@ -36,7 +36,7 @@ _Durable knowledge for every session. History: JOURNAL.md. Bug backlog: AUDIT.md
 - Times: events carry `until` (epoch s); app.js `withUntil` formats in the browser. Never format times on the server except in logs.
 - AUDIT.md items get `**Fixed**` + a one-line note; UI-REVIEW.md rows are marked fixed in place.
 - Mobile: follow Apple HIG (apple-design skill). Modals need `grid-template-columns: minmax(0, 100%)`; test/ui-away.test.mjs checks every modal fits 375×667 and 390×844.
-- Shell scripts for macOS must parse under bash 3.2 and be tested with `~/.local/opt/bash-3.2.57/bin/bash` (built by bin/dev/build-bash32.sh).
+- Shell scripts for macOS must parse under bash 3.2 and be tested with `~/.local/opt/bash-3.2.57/bin/bash` (built by bin/dev/build-bash32.sh; test/install-macos-bash32.test.mjs). Tests load installer functions with `AGENT_ORCH_INSTALLER_NO_MAIN=1` (never `${BASH_SOURCE[0]}`).
 
 ## Decisions
 - Chat and agents run on subscriptions, never API credits (API_ENV stripping in server.mjs). Never weaken that.

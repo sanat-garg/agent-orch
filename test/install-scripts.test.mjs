@@ -32,7 +32,7 @@ test('both scripts pass bash -n', () => {
 test('macos: the worker stage survives the declare -f hand-over (bash 3.2 on macOS)', () => {
   const code = (s) => fs.readFileSync(s, 'utf8').split('\n').filter((l) => !l.trim().startsWith('#')).join('\n'); // comments may quote the pattern
   for (const s of [LINUX, MAC]) assert.doesNotMatch(code(s), /<<-?\s*['"]?\w+['"]?[^\n]*\|/, `${path.basename(s)}: a here-document feeds a pipe`);
-  const body = fs.readFileSync(MAC, 'utf8').replace(/\nmain "\$@"\s*$/, '\n');
+  const body = fs.readFileSync(MAC, 'utf8').replace(/\n(?:\[\[[^\n]*\]\] \|\| )?main "\$@"\s*$/, '\n');
   const shells = ['bash', process.env.CW_BASH32, process.platform === 'darwin' ? '/bin/bash' : null].filter(Boolean);
   for (const sh of shells) {
     const dumps = execFileSync(sh, ['-c', `${body}\ndeclare -f; echo '#---'; declare -f "\${WORKER_FUNCS[@]}"`], { encoding: 'utf8' });

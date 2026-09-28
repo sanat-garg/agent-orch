@@ -13,3 +13,7 @@ The Mac worker install still fails on macOS's /bin/bash 3.2.57 with `syntax erro
 ## Done when
 
 `! grep -n 'cat <<' bin/install-worker-macos.sh | grep -q '|'` passes and `node --test test/install-macos-bash32.test.mjs` passes without skipping
+
+## Result — done (check passed) (2026-09-28 02:00)
+
+AGENT-ORCH-STATUS: done — macOS installer, bash 3.2 build script and non-skipping test pass

@@ -802,3 +802,7 @@ README documents browser tasks, approval gate, audit, live view, sync
 ## 2026-09-28 05:20 — #270 AUDIT #35: reject prototype agent names and validate chat modes [done (check passed)]
 
 isAgent guards all agent names; chat modes validated against MODES
+
+## 2026-09-28 05:22 — #271 UI-REVIEW #6: light-theme contrast to 4.5:1 for faint text and filled buttons, with a static contrast test [done (check passed)]
+
+faint text and filled buttons now clear 4.5:1, with a contrast test

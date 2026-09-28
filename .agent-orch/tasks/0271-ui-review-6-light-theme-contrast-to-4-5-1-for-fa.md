@@ -13,3 +13,7 @@ Fix row 6 of .agent-orch/UI-REVIEW.md. In public/app.css the light theme's `--fa
 ## Done when
 
 `node --test test/ui-contrast.test.mjs` and `grep -q 'accent-strong' public/app.css` and `grep -q 'prefers-color-scheme: light' public/login.html` and `grep -E '^\| 6 \|' .agent-orch/UI-REVIEW.md | grep -q fixed`
+
+## Result — done (check passed) (2026-09-28 05:22)
+
+AGENT-ORCH-STATUS: done — faint text and filled buttons now clear 4.5:1, with a contrast test

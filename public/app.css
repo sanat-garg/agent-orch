@@ -7,10 +7,13 @@
   --border-strong: #cfcbbf;
   --text: #1f1e1c;
   --muted: #6b675e;
-  --faint: #9a968c;
+  --faint: #767268;
   --accent: #c96442;
   --accent-hover: #b4553a;
   --accent-text: #ffffff;
+  /* Background of filled buttons (.btn.primary, .send): --accent-text on it clears 4.5:1. */
+  --accent-strong: #b3532f;
+  --accent-strong-hover: #9e4829;
   --accent-soft: #f6e4dc;
   /* Accent as text or as a fill under --accent-text, darkened until it clears 4.5:1 (#c96442 on white is 3.9:1). */
   --accent-ink: #b4553a;
@@ -47,10 +50,12 @@
     --border-strong: #4d4a44;
     --text: #ecebe6;
     --muted: #a8a49a;
-    --faint: #7c786f;
+    --faint: #969289;
     --accent: #d97757;
     --accent-hover: #e38a6c;
     --accent-text: #1f1e1c;
+    --accent-strong: #d97757;
+    --accent-strong-hover: #e38a6c;
     --accent-soft: #3a2a22;
     --accent-ink: #d97757;
     --accent-ink-hover: #e38a6c;
@@ -212,8 +217,8 @@ code, pre, kbd { font-family: var(--mono); }
 .btn { border: 1px solid var(--border-strong); background: var(--panel); border-radius: 9px; padding: 0 14px; height: 36px; cursor: pointer; font-weight: 550; }
 .btn:hover { border-color: var(--accent); }
 .btn.small { height: 32px; font-size: 13.5px; }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
-.btn.primary:hover { background: var(--accent-hover); }
+.btn.primary { background: var(--accent-strong); border-color: var(--accent-strong); color: var(--accent-text); }
+.btn.primary:hover { background: var(--accent-strong-hover); border-color: var(--accent-strong-hover); }
 .btn.danger { color: var(--danger); }
 
 /* ---------- chat ---------- */
@@ -398,7 +403,7 @@ code, pre, kbd { font-family: var(--mono); }
 #modeChip[data-mode="bypassPermissions"] { color: var(--text); }
 .send {
   width: 36px; height: 36px; flex: none; border: 0; border-radius: 10px;
-  background: var(--accent); color: var(--accent-text); display: grid; place-items: center; cursor: pointer;
+  background: var(--accent-strong); color: var(--accent-text); display: grid; place-items: center; cursor: pointer;
 }
 .send:disabled { opacity: .4; cursor: default; }
 .send .i-stop { display: none; }

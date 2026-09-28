@@ -1107,3 +1107,7 @@ transientGit and retryGit exported from taskrun.mjs, tests pass
 ## 2026-09-28 14:03 — #401 A different completion sound per machine (the VPS and each worker) [done (check passed)]
 
 per-machine finish sounds work and tests pass; no screenshots (Chromium won't launch)
+
+## 2026-09-28 14:03 — #411 push.mjs AUDIT #54: createNotifier coalesces pushes per tag, keeps the newest dropped one, and caps bursts with one summary [done (check passed)]
+
+push.mjs createNotifier holds messages per tag, caps bursts; tests pass

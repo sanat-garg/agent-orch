@@ -747,6 +747,7 @@ kills the check's process group and keeps only the output's tail.
   queued tasks in a row, and the phone buzzes 15 times.
 - **Fix:** Keep the newest dropped message per tag and send it when the minute is up. Add a global budget (e.g. 5 per
   10 min, then one "N more need you" summary).
+- **Partly fixed** (task #411): push.mjs `createNotifier(send, opts)` does this (test/push.test.mjs); server.mjs `notify` still has to use it.
 
 ### 55. [low] Pushes show approval targets and check output on the lock screen, and the badge counts reviews nobody can see (orchestrator.mjs:1060, :1367, :3307, :3392-3401)
 - **What:** Push bodies are shown by iOS on the lock screen (and on a watch). They carry `#id title: <action>` for

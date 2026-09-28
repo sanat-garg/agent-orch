@@ -192,3 +192,89 @@ export function createPush({ dataDir, subject = DEFAULT_SUBJECT, log = () => {} 
     },
   };
 }
+
+// Pacing for pushes, so the phone buzzes rarely but nothing that needs the owner is lost:
+//   createNotifier(send, {tagMs, budget, budgetMs, now, setTimer, clearTimer, log}) → { notify(n), pending(), close() }
+// notify(n) sends at once when its tag (n.tag || '') has not gone out within tagMs and fewer than `budget` pushes went
+// out in the last budgetMs; it returns that send's promise (a throw resolves {sent:0, failed:1}), else undefined.
+// A message on a tag still inside its minute is kept (the newest replaces an older kept one) and sent when the minute
+// ends. Past the budget, a new message is only counted, and one summary push "<N> more need you" goes out when the
+// window frees, before the kept messages flush in the order they were first kept. A send that throws or reaches no
+// device ({sent: 0, failed > 0}) neither uses up its tag's minute nor the budget.
+export function createNotifier(send, { tagMs = 60_000, budget = 5, budgetMs = 600_000, now = Date.now,
+  setTimer = setTimeout, clearTimer = clearTimeout, log = () => {} } = {}) {
+  const sentAt = new Map(); // tag → {at} of its last push that did not fail
+  const kept = new Map(); // tag → newest held-back message, in first-kept order
+  const tagTimers = new Map(); // tag → timer for the end of its minute
+  let stamps = []; // {at} of each push inside the budget window, oldest first
+  let over = 0, budgetTimer = null;
+
+  const tagWait = (key, t) => (sentAt.has(key) ? Math.max(0, sentAt.get(key).at + tagMs - t) : 0);
+  function budgetWait(t) {
+    stamps = stamps.filter((s) => t - s.at < budgetMs);
+    return stamps.length < budget ? 0 : Math.max(0, stamps[stamps.length - budget].at + budgetMs - t);
+  }
+  const timer = (fn, ms) => { const h = setTimer(fn, ms); h?.unref?.(); return h; };
+
+  function fire(key, n, t, onFail) {
+    const stamp = { at: t };
+    sentAt.set(key, stamp); stamps.push(stamp);
+    for (const [k, s] of sentAt) if (t - s.at >= tagMs) sentAt.delete(k);
+    const fail = (why) => {
+      if (sentAt.get(key) === stamp) sentAt.delete(key);
+      stamps = stamps.filter((s) => s !== stamp);
+      log(`push "${String(n.title || '').slice(0, 60)}" failed (${why}); its tag stays free`);
+      onFail?.();
+      pump();
+    };
+    let p;
+    try { p = Promise.resolve(send(n)); } catch (e) { p = Promise.reject(e); }
+    return p.then((r) => {
+      if (r && r.sent === 0 && r.failed > 0) fail(`${r.failed} device${r.failed === 1 ? '' : 's'} failed`);
+      return r;
+    }, (e) => { fail(e?.message || String(e)); return { sent: 0, failed: 1 }; });
+  }
+
+  // Send what is due now (the summary first, then kept messages in order) and arm timers for the rest.
+  function pump() {
+    const t = now();
+    if (over && !budgetWait(t)) {
+      const count = over;
+      over = 0;
+      log(`${count} push${count === 1 ? '' : 'es'} over the budget → one summary`);
+      fire('summary', { title: 'agent-orch', body: `${count} more need you`, tag: 'summary', url: '/' }, t, () => { over += count; });
+    }
+    for (const [key, n] of kept) {
+      if (budgetWait(t)) break;
+      if (tagWait(key, t)) continue;
+      kept.delete(key);
+      if (tagTimers.has(key)) { clearTimer(tagTimers.get(key)); tagTimers.delete(key); }
+      fire(key, n, t);
+    }
+    let needBudget = over > 0;
+    for (const key of kept.keys()) {
+      const wait = tagWait(key, t);
+      if (!wait) needBudget = true;
+      else if (!tagTimers.has(key)) tagTimers.set(key, timer(() => { tagTimers.delete(key); pump(); }, wait));
+    }
+    if (budgetTimer) { clearTimer(budgetTimer); budgetTimer = null; }
+    if (needBudget) budgetTimer = timer(() => { budgetTimer = null; pump(); }, budgetWait(t));
+  }
+
+  return {
+    notify(n) {
+      if (over || kept.size) pump();
+      const key = n?.tag || '', t = now();
+      if (kept.has(key) || tagWait(key, t)) { kept.set(key, n); pump(); return undefined; }
+      if (budgetWait(t)) { over++; pump(); return undefined; }
+      return fire(key, n, t);
+    },
+    pending: () => [...kept.values()],
+    close() {
+      for (const h of tagTimers.values()) clearTimer(h);
+      tagTimers.clear();
+      if (budgetTimer) clearTimer(budgetTimer);
+      budgetTimer = null;
+    },
+  };
+}

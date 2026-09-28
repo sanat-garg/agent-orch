@@ -13,3 +13,7 @@ AUDIT #54 (.agent-orch/AUDIT.md, read it): server.mjs `notify` (lines ~731-740, 
 ## Done when
 
 `npm test -- test/push.test.mjs` passes and `grep -c 'export function createNotifier' push.mjs` prints 1
+
+## Result — done (check passed) (2026-09-28 14:03)
+
+AGENT-ORCH-STATUS: done — push.mjs createNotifier holds messages per tag, caps bursts; tests pass

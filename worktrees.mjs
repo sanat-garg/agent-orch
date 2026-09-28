@@ -31,7 +31,10 @@ export async function repoInfo(projectPath) {
   } catch { return null; }
 }
 
-export const worktreesRoot = (top) => path.join(path.dirname(top), '.agent-orch-worktrees');
+// `git worktree add` records a worktree's real path, so every path compared with git's list is realpath'd: the root may
+// be a symlink (moved to a bigger disk), and a mismatch would make a live worktree look unlisted and get deleted.
+const real = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
+export const worktreesRoot = (top) => real(path.join(path.dirname(top), '.agent-orch-worktrees'));
 export const worktreePath = (top, id) => path.join(worktreesRoot(top), `${path.basename(top)}-task-${id}`);
 
 // Commit everything in `dir` (a worktree or the main tree). Returns the short sha, or '' if there was nothing.
@@ -87,7 +90,7 @@ async function reattach(dir, branch) {
 // Worktree directories git has registered in this repo (whatever they have checked out).
 async function registered(top) {
   const out = await git(top, ['worktree', 'list', '--porcelain']).catch(() => '');
-  return out.split('\n\n').map((b) => /^worktree (.+)$/m.exec(b)?.[1]).filter(Boolean);
+  return out.split('\n\n').map((b) => /^worktree (.+)$/m.exec(b)?.[1]).filter(Boolean).map(real);
 }
 
 // Repo-local (untracked) settings shared by every worktree: the union merge for JOURNAL.md, and an exclude for the
@@ -202,8 +205,9 @@ export async function listWorktrees(top) {
   const out = await git(top, ['worktree', 'list', '--porcelain']).catch(() => '');
   const list = [], prefix = `${path.basename(top)}-task-`;
   for (const block of out.split('\n\n')) {
-    const dir = /^worktree (.+)$/m.exec(block)?.[1];
-    if (!dir) continue;
+    const listed = /^worktree (.+)$/m.exec(block)?.[1];
+    if (!listed) continue;
+    const dir = real(listed);
     const m = BRANCH_RE.exec(/^branch refs\/heads\/(.+)$/m.exec(block)?.[1] || '');
     const name = path.basename(dir), byDir = path.dirname(dir) === worktreesRoot(top) && name.startsWith(prefix);
     const id = m ? m[1] : byDir && /^\d+$/.test(name.slice(prefix.length)) ? name.slice(prefix.length) : null;

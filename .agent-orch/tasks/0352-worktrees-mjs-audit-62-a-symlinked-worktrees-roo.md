@@ -13,3 +13,7 @@ Reliability fix in worktrees.mjs (read its header and .agent-orch/AUDIT.md Round
 ## Done when
 
 `npm test -- test/worktree.test.mjs` passes and `grep -q 'realpath' worktrees.mjs`
+
+## Result — done (check passed) (2026-09-28 12:32)
+
+AGENT-ORCH-STATUS: done — Worktrees under a symlinked root are reused and kept, tested

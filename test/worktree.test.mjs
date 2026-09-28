@@ -240,6 +240,23 @@ describe('worktrees', { concurrency: true, timeout: 120000 }, () => {
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 
+  test('a symlinked worktrees root: a worktree is reused with its work, and the sweep keeps it', async () => {
+    const { root, repo } = makeRepo();
+    try {
+      fs.mkdirSync(path.join(root, 'other'));
+      fs.symlinkSync(path.join(root, 'other'), path.join(root, '.agent-orch-worktrees'), 'dir');
+      const info = await repoInfo(repo);
+      const wt = await ensureWorktree(info, 7);
+      fs.writeFileSync(path.join(wt.cwd, 'work.txt'), 'uncommitted\n');
+      const again = await ensureWorktree(info, 7);
+      assert.equal(again.reused, true);
+      assert.equal(fs.readFileSync(path.join(again.cwd, 'work.txt'), 'utf8'), 'uncommitted\n');
+      assert.deepEqual((await listWorktrees(repo)).map((w) => w.id), [7]);
+      assert.deepEqual(await pruneOrphanWorktrees(info, []), []);
+      assert.equal(fs.readFileSync(path.join(root, 'other', 'proj-task-7', 'work.txt'), 'utf8'), 'uncommitted\n');
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   test('a setext ======= heading merged in from main is not an unresolved conflict', async () => {
     const { root, repo } = makeRepo();
     try {

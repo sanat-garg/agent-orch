@@ -975,3 +975,7 @@ Proxy holds page actions when the snapshot errors or hangs; tests pass
 ## 2026-09-28 12:31 — #335 Verifier loophole: extractCommand refuses command and process substitution even inside double quotes [done (check passed)]
 
 extractCommand now refuses substitution, including inside double quotes
+
+## 2026-09-28 12:32 — #352 worktrees.mjs AUDIT #62: a symlinked worktrees root still matches git's list, so a reused worktree is never deleted [done (check passed)]
+
+Worktrees under a symlinked root are reused and kept, tested

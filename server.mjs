@@ -291,14 +291,43 @@ setInterval(() => refreshClaudeAuth().catch((e) => console.error('[auth] refresh
 // ---------- self-restart ----------
 // The boot commit tells the UI how far HEAD has moved since this process started (a restart is due).
 const git = (args) => new Promise((resolve) => execFile('git', args, { cwd: ROOT, timeout: 5000 }, (err, out) => resolve(err ? '' : out.trim())));
+// AGENT_ORCH_BOOT_COMMIT overrides it (tests only).
 let bootCommit = '', restartPending = false, restartGen = 0, sinceBoot = { at: 0, count: 0, busy: false };
-git(['rev-parse', 'HEAD']).then((c) => { bootCommit = c; });
+if (process.env.AGENT_ORCH_BOOT_COMMIT) bootCommit = process.env.AGENT_ORCH_BOOT_COMMIT;
+else git(['rev-parse', 'HEAD']).then((c) => { bootCommit = c; });
 function commitsSinceBoot() {
   if (bootCommit && !sinceBoot.busy && Date.now() - sinceBoot.at > 30e3) {
     sinceBoot.busy = true;
     git(['rev-list', '--count', `${bootCommit}..HEAD`]).then((n) => { sinceBoot = { at: Date.now(), count: Number(n) || 0, busy: false }; });
   }
   return sinceBoot.count;
+}
+// Stop claiming tasks, then exit 0 once the running ones and every chat reply/planner turn finish; systemd
+// (Restart=always) brings the app back. Cancelled by POST /api/restart-when-idle {cancel:true}.
+function startRestartDrain(reason) {
+  if (restartPending) return;
+  restartPending = true;
+  const gen = ++restartGen;
+  console.log(`[restart] ${reason}: waiting for running tasks and chat turns to finish`);
+  whenIdle({
+    drained: orch.drain(), cancelled: () => gen !== restartGen,
+    idle: () => chatIdle({ runtimes, agentTurns, planning, chatPlanning: orch.chatPlanning }),
+  }).then((ok) => { if (ok) { console.log('[restart] idle; exiting for restart'); process.exit(0); } });
+  for (const ws of allClients) send(ws, { t: 'status', restartPending });
+}
+// The owner's autoRestart setting: once merged commits since boot touch server-side code (root *.mjs, bin/,
+// package.json, package-lock.json), drain and restart by itself. A cancelled auto restart waits for a newer HEAD.
+const SERVER_FILE = (f) => /^[^/]+\.mjs$/.test(f) || f.startsWith('bin/') || f === 'package.json' || f === 'package-lock.json';
+let autoRestartSkipHead = '', autoRestartBusy = false;
+async function autoRestartCheck() {
+  if (restartPending || autoRestartBusy || !bootCommit || !orch?.autoRestart()) return;
+  autoRestartBusy = true;
+  try {
+    const head = await git(['rev-parse', 'HEAD']);
+    if (!head || head === bootCommit || head === autoRestartSkipHead) return;
+    const files = (await git(['diff', '--name-only', `${bootCommit}..${head}`])).split('\n').filter(SERVER_FILE);
+    if (files.length && !restartPending && orch.autoRestart()) startRestartDrain(`auto: ${files.length} server file(s) changed since boot (${files.slice(0, 3).join(', ')})`);
+  } finally { autoRestartBusy = false; }
 }
 
 // ---------- server metrics ----------
@@ -697,6 +726,7 @@ const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
   disabled: NO_ORCH,
   reap: () => resources.reap({ reason: 'low memory' }),
 });
+if (orch && !NO_ORCH) setInterval(() => autoRestartCheck().catch((e) => console.error('[restart] auto check failed', e)), Number(process.env.AGENT_ORCH_RESTART_POLL_MS) || 60e3);
 
 // ---------- GitHub protocol ----------
 // Every project is a private GitHub repo; every finished task and chat reply is pushed.
@@ -1441,22 +1471,14 @@ async function handleRequest(req, res) {
     if ((await readBody(req)).cancel) {
       if (restartPending) {
         restartPending = false; restartGen++;
+        autoRestartSkipHead = await git(['rev-parse', 'HEAD']);
         orch.undrain();
         console.log('[restart] cancelled');
       }
       for (const ws of allClients) send(ws, { t: 'status', restartPending });
       return json(res, 200, { draining: false });
     }
-    if (!restartPending) {
-      restartPending = true;
-      const gen = ++restartGen;
-      console.log('[restart] draining: waiting for running tasks and chat turns to finish');
-      whenIdle({
-        drained: orch.drain(), cancelled: () => gen !== restartGen,
-        idle: () => chatIdle({ runtimes, agentTurns, planning, chatPlanning: orch.chatPlanning }),
-      }).then((ok) => { if (ok) { console.log('[restart] idle; exiting for restart'); process.exit(0); } });
-      for (const ws of allClients) send(ws, { t: 'status', restartPending });
-    }
+    startRestartDrain('draining');
     return json(res, 202, { draining: true });
   }
   if (p === '/api/metrics/history') {

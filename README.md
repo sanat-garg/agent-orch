@@ -125,6 +125,9 @@ For terminals to survive restarts of the web app, also run a `tmux -D` server as
 `sudo systemctl daemon-reload && sudo systemctl enable --now agent-orch agent-orch-shell agent-orch-tmux caddy`. The metrics
 panel checks service status with `systemctl is-active agent-orch agent-orch-shell caddy`.
 
+The app restarts itself through `Restart=always`: "Restart when idle" (`POST /api/restart-when-idle`) drains tasks and chat turns, then exits 0.
+With the `autoRestart` setting on (off by default; `PUT /api/orch/parallel {autoRestart: true}`), it does the same by itself once merged commits since boot touch server code (root `*.mjs`, `bin/`, `package*.json`).
+
 ### Moving an old `claude-web` install
 
 Installs that predate the rename live in `/home/ubuntu/claude-web` and run the units `claude-web`, `claude-shell` and

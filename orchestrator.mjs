@@ -1263,14 +1263,16 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return { ok: true, order };
   }
   // kv parallel_settings { parallelTasks: 1 | 2 (the controller's own work slots), controllerWork: bool (see
-  // CFG.controllerWork), controllerBrowser: bool (see CFG.controllerBrowser), maxTasks: null | n (owner cap on work tasks across every node) }. Older shapes read as defaults.
+  // CFG.controllerWork), controllerBrowser: bool (see CFG.controllerBrowser), maxTasks: null | n (owner cap on work tasks across every node),
+  // autoRestart: bool (server.mjs restarts itself once idle after merged commits touched server code; default off) }. Older shapes read as defaults.
   function parallelSettings() {
     let s = {};
     try { s = JSON.parse(kvGet('parallel_settings') || '{}') || {}; } catch {}
     return { parallelTasks: [1, 2].includes(s.parallelTasks) ? s.parallelTasks : CFG.parallelTasks,
       controllerWork: typeof s.controllerWork === 'boolean' ? s.controllerWork : CFG.controllerWork,
       controllerBrowser: typeof s.controllerBrowser === 'boolean' ? s.controllerBrowser : CFG.controllerBrowser,
-      maxTasks: Number.isInteger(s.maxTasks) && s.maxTasks > 0 ? s.maxTasks : null };
+      maxTasks: Number.isInteger(s.maxTasks) && s.maxTasks > 0 ? s.maxTasks : null,
+      autoRestart: s.autoRestart === true };
   }
   const slotsFor = (a) => typeof CFG.agentSlots === 'number' ? CFG.agentSlots : CFG.agentSlots[a] ?? 1;
 
@@ -1327,10 +1329,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const v = value && typeof value === 'object' ? value : {};
     let next = {};
     try { next = JSON.parse(kvGet('parallel_settings') || '{}') || {}; } catch {} // only what the owner set is stored
-    if (!['parallelTasks', 'controllerWork', 'controllerBrowser', 'maxTasks'].some((k) => k in v)) return { error: 'Expected parallelTasks 1 or 2' };
+    if (!['parallelTasks', 'controllerWork', 'controllerBrowser', 'maxTasks', 'autoRestart'].some((k) => k in v)) return { error: 'Expected parallelTasks 1 or 2' };
     if ('parallelTasks' in v) { if (![1, 2].includes(v.parallelTasks)) return { error: 'Expected parallelTasks 1 or 2' }; next.parallelTasks = v.parallelTasks; }
     if ('controllerWork' in v) { if (typeof v.controllerWork !== 'boolean') return { error: 'controllerWork must be true or false' }; next.controllerWork = v.controllerWork; }
     if ('controllerBrowser' in v) { if (typeof v.controllerBrowser !== 'boolean') return { error: 'controllerBrowser must be true or false' }; next.controllerBrowser = v.controllerBrowser; }
+    if ('autoRestart' in v) { if (typeof v.autoRestart !== 'boolean') return { error: 'autoRestart must be true or false' }; next.autoRestart = v.autoRestart; }
     if ('maxTasks' in v) { if (v.maxTasks !== null && !(Number.isInteger(v.maxTasks) && v.maxTasks >= 1 && v.maxTasks <= 64)) return { error: 'maxTasks must be null or 1-64' }; next.maxTasks = v.maxTasks; }
     kvSet('parallel_settings', JSON.stringify(next));
     pushState(); setTimeout(tick, 0);
@@ -3718,7 +3721,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   return {
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
     planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, insertCheckpoint, approveCheckpoint, requestChanges, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setTaskRunOn, setReflectFallbacks, setReflectSettings, syncConvoModel, pauseTask, resumeTask, handoffTask, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
-    drain, undrain, chatPlanning, stateView, machines, browserTasks, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, reconcileClaudeLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
+    drain, undrain, chatPlanning, autoRestart: () => parallelSettings().autoRestart, stateView, machines, browserTasks, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, reconcileClaudeLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     // A sidebar chat's project rank ({id, position, priority}), or null when its folder has no orchestrator project.
     projectRank: (cwd) => q1('SELECT id, position, priority FROM projects WHERE path=:p', { p: cwd }) ?? null,
     isRunning: (id) => running.has(Number(id)), logEvent, attachCluster,

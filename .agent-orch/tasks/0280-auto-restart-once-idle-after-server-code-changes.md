@@ -20,3 +20,7 @@ Constraints: never touch port 3000 or the live data dir. Default off: nothing ch
 ## Done when
 
 `npm test -- test/restart.test.mjs test/parallel.test.mjs` && `grep -q autoRestart server.mjs` && `grep -q autoRestart orchestrator.mjs`
+
+## Result — done (check passed) (2026-09-28 05:59)
+
+AGENT-ORCH-STATUS: done — Opt-in autoRestart setting drains and restarts after server-code merges; tests pass

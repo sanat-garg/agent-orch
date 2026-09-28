@@ -830,3 +830,7 @@ Phones now get 16px body text and 12px-minimum metadata
 ## 2026-09-28 05:49 — #278 UI-REVIEW #13 and #14: sidebar footer in the body font at 44pt, centred small buttons; record rows 4, 8, 13 status [done (check passed)]
 
 Sidebar footer uses body font, 44pt on touch; rows marked fixed
+
+## 2026-09-28 05:59 — #280 Auto-restart once idle after server code changes: backend setting and drain trigger [done (check passed)]
+
+Opt-in autoRestart setting drains and restarts after server-code merges; tests pass

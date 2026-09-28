@@ -8,12 +8,14 @@
 // `--mcp-config <DATA>/extensions/claude-mcp.json`, codex `-p agent-orch` (~/.codex/agent-orch.config.toml, a profile
 // layered on the owner's config.toml). The terminal's own CLI sessions don't load them. A persona is a named set of instructions a chat picks, appended to its system prompt and to the
 // system prompt of its project's planner and task runs.
+// Cluster workers get the same skills, subagents and enabled MCP servers: syncBundle() here, applyBundle() on the worker.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { runHelper } from './helpers.mjs';
 import { fileURLToPath } from 'node:url';
+import { EXT_ENTRY_RE, EXT_MAX_BYTES, extBundleError, extHash } from './cluster-protocol.mjs';
 import { MCP_SERVER as BROWSER_MCP, browserServer } from './browser.mjs';
 
 const GATE_PROXY = fileURLToPath(new URL('./gate-proxy.mjs', import.meta.url));
@@ -439,6 +441,140 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
     return p ? `## Persona: ${p.name}\nThe owner chose this persona for this project. Work and reply as it describes, within the rules above:\n${p.prompt}` : null;
   }
 
+  // ---------- cluster workers (the extension bundle, cluster-protocol.mjs extBundleError). The controller's syncBundle()
+  // holds its skills, subagents and enabled MCP servers (rebuilt only when a file's size/mtime or the MCP list changes).
+  // A worker's applyBundle() writes it into that machine's ~/.claude and ~/.codex and its own mcp.json, touching only
+  // entries an earlier sync wrote (synced.json): skills and subagents installed there by hand stay as they are.
+  const syncedFile = path.join(extDir, 'synced.json');
+  const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
+  // A skill folder's files, as copySkill copies them (no .git, no symlinks).
+  function skillFiles(dir) {
+    const out = [];
+    const walk = (d, rel) => {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        const p = path.join(d, e.name), r = rel ? `${rel}/${e.name}` : e.name;
+        if (e.name === '.git' || e.isSymbolicLink()) continue;
+        if (e.isDirectory()) walk(p, r);
+        else if (e.isFile()) { const st = fs.statSync(p); out.push({ path: r, abs: p, size: st.size, mtime: st.mtimeMs, x: !!(st.mode & 0o100) }); }
+      }
+    };
+    walk(dir, '');
+    return out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  }
+  let built = null; // { key, info, where: sha -> a file with that content }
+  function syncInfo() {
+    const skills = listSkills().filter((s) => EXT_ENTRY_RE.test(s.folder)).flatMap((s) => s.agents.map((agent) => ({ agent, name: s.folder, files: skillFiles(skillDir(agent, s.folder)) })));
+    const agents = listAgents().filter((a) => EXT_ENTRY_RE.test(a.file)).map((a) => {
+      const abs = path.join(agentsDir, `${a.file}.md`), st = fs.statSync(abs);
+      return { name: a.file, abs, size: st.size, mtime: st.mtimeMs };
+    });
+    const mcp = readMcp().filter((s) => s.enabled !== false);
+    const key = JSON.stringify([skills.map((s) => [s.agent, s.name, s.files.map((f) => [f.path, f.size, f.mtime, f.x])]), agents.map((a) => [a.name, a.size, a.mtime]), mcp]);
+    if (built?.key === key) return built.info;
+    const where = new Map(), skipped = [];
+    let bytes = 0;
+    // Subagents first (small), then skills in name order until EXT_MAX_BYTES (a file shared by entries counts once).
+    const fits = (kind, name, files) => {
+      const fresh = new Map(files.filter((f) => !where.has(f.sha)).map((f) => [f.sha, f]));
+      const add = [...fresh.values()].reduce((n, f) => n + f.size, 0);
+      if (bytes + add > EXT_MAX_BYTES) { skipped.push({ kind, name, reason: `the bundle is full (${EXT_MAX_BYTES >> 20} MB)` }); return false; }
+      for (const [sha, f] of fresh) where.set(sha, f.abs);
+      bytes += add;
+      return true;
+    };
+    const withSha = (f) => { const buf = fs.readFileSync(f.abs); return { ...f, sha: sha256(buf), size: buf.length }; };
+    const info = { v: 1, hash: null, bytes: 0, skills: [], agents: [], mcp, skipped };
+    for (const a of agents) {
+      const f = withSha(a);
+      if (fits('agent', a.name, [f])) info.agents.push({ name: a.name, sha: f.sha });
+    }
+    for (const s of skills) {
+      const total = s.files.reduce((n, f) => n + f.size, 0);
+      // Past the import limits (a skill copied in by hand can be anything), or only symlinks: it stays on the controller.
+      const why = s.files.length > MAX_SKILL_FILES || total > MAX_SKILL_BYTES ? `too big (${s.files.length} files, ${Math.ceil(total / 1048576)} MB)` : !s.files.length ? 'only symlinks' : null;
+      if (why) { skipped.push({ kind: 'skill', name: `${s.agent}/${s.name}`, reason: why }); continue; }
+      const files = s.files.map(withSha);
+      if (fits('skill', `${s.agent}/${s.name}`, files)) info.skills.push({ agent: s.agent, name: s.name, files: files.map((f) => ({ path: f.path, sha: f.sha, ...(f.x && { x: true }) })) });
+    }
+    Object.assign(info, { hash: extHash(info), bytes });
+    built = { key, info, where };
+    return info;
+  }
+  // The whole bundle, with each file's content (base64). A file that changed since syncInfo read it rebuilds it once.
+  function syncBundle(retry = true) {
+    const info = syncInfo(), blobs = {};
+    for (const [sha, file] of built.where) {
+      let buf = null;
+      try { buf = fs.readFileSync(file); } catch {}
+      if (!buf || sha256(buf) !== sha) {
+        if (!retry) throw new Error(`${file} keeps changing`);
+        built = null;
+        return syncBundle(false);
+      }
+      blobs[sha] = buf.toString('base64');
+    }
+    return { ...info, blobs };
+  }
+
+  const lexists = (p) => { try { fs.lstatSync(p); return true; } catch { return false; } };
+  const synced = () => {
+    const j = readJson(syncedFile, null);
+    return { hash: j?.hash || null, skills: { claude: { ...j?.skills?.claude }, codex: { ...j?.skills?.codex } }, agents: { ...j?.agents }, kept: j?.kept || [] };
+  };
+  // Worker side: writes a bundle (checked first) here. Returns what it did; `kept` = entries installed here by hand
+  // under a name the controller also uses (left alone). A failure part-way still records what was written.
+  function applyBundle(b) {
+    const err = extBundleError(b);
+    if (err) throw new Error(err);
+    const next = { ...synced(), hash: null, kept: [] };
+    const blob = (sha) => Buffer.from(b.blobs[sha], 'base64');
+    try {
+      for (const agent of SKILL_AGENTS) {
+        const root = roots[agent], mine = next.skills[agent], want = new Map(b.skills.filter((s) => s.agent === agent).map((s) => [s.name, s]));
+        fs.mkdirSync(root, { recursive: true });
+        for (const e of fs.readdirSync(root)) if (e.startsWith('.agent-orch-sync-')) fs.rmSync(path.join(root, e), { recursive: true, force: true });
+        for (const name of Object.keys(mine)) {
+          if (want.has(name)) continue;
+          if (EXT_ENTRY_RE.test(name)) fs.rmSync(path.join(root, name), { recursive: true, force: true });
+          delete mine[name];
+        }
+        for (const s of want.values()) {
+          const dest = path.join(root, s.name), digest = sha256(JSON.stringify(s.files));
+          if (!(s.name in mine) && lexists(dest)) { next.kept.push(`${agent} skill ${s.name}`); continue; }
+          if (mine[s.name] === digest && isDir(dest)) continue;
+          // Written beside it, then swapped in: a run starting meanwhile sees the old or the new skill, never half of one.
+          const tmp = path.join(root, `.agent-orch-sync-${s.name}-${crypto.randomBytes(4).toString('hex')}`);
+          for (const f of s.files) {
+            const p = path.join(tmp, ...f.path.split('/'));
+            fs.mkdirSync(path.dirname(p), { recursive: true });
+            fs.writeFileSync(p, blob(f.sha), { mode: f.x ? 0o755 : 0o644 });
+          }
+          fs.rmSync(dest, { recursive: true, force: true });
+          fs.renameSync(tmp, dest);
+          mine[s.name] = digest;
+        }
+      }
+      const want = new Map(b.agents.map((a) => [a.name, a]));
+      for (const name of Object.keys(next.agents)) {
+        if (want.has(name)) continue;
+        if (EXT_ENTRY_RE.test(name)) fs.rmSync(path.join(agentsDir, `${name}.md`), { force: true });
+        delete next.agents[name];
+      }
+      for (const a of want.values()) {
+        const dest = path.join(agentsDir, `${a.name}.md`);
+        if (!(a.name in next.agents) && lexists(dest)) { next.kept.push(`subagent ${a.name}`); continue; }
+        if (next.agents[a.name] !== a.sha || !isFile(dest)) writeAtomic(dest, blob(a.sha), 0o644);
+        next.agents[a.name] = a.sha;
+      }
+      writeMcp(b.mcp);
+      for (const agent of SKILL_AGENTS) mcpRun(agent); // the run files, now rather than at the next run
+      next.hash = b.hash;
+    } finally {
+      writeAtomic(syncedFile, JSON.stringify(next, null, 1));
+    }
+    return { hash: b.hash, skills: b.skills.length, agents: b.agents.length, mcp: b.mcp.length, kept: next.kept };
+  }
+
   // Every kind (and where skills and subagents are saved), or just {[kind]: [...]}.
   function list(kind) {
     const all = { skills: listSkills, agents: listAgents, mcp: () => readMcp().map(publicMcp), personas: readPersonas };
@@ -449,6 +585,7 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
   return {
     list, listSkills, saveSkill, removeSkill, importSkill, listAgents, saveAgent, removeAgent,
     saveMcp, removeMcp, setMcpEnabled, mcpFor, mcpRun, savePersona, removePersona, persona, personaPrompt,
+    syncInfo, syncBundle, applyBundle, synced,
     onChange: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
   };
 }

@@ -1,5 +1,5 @@
-// Controller cluster hub (cluster.mjs): pairing + claim, bearer-token auth on the worker socket, heartbeat timeout,
-// revocation, and the local 'controller' node in GET /api/cluster/nodes.
+// Controller cluster hub (cluster.mjs): pairing + claim, bearer-token auth on the worker socket and the extension
+// bundle, heartbeat timeout, revocation, and the local 'controller' node in GET /api/cluster/nodes.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
-import { PROTOCOL_VERSION, WS_PATH, PAIR_PATH, CLAIM_PATH, createSender } from '../cluster-protocol.mjs';
+import { PROTOCOL_VERSION, WS_PATH, PAIR_PATH, CLAIM_PATH, EXT_PATH, createSender, extBundleError } from '../cluster-protocol.mjs';
 import { waitFor } from './helpers/wait.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -45,11 +45,11 @@ function connect(headers) {
     ws.on('error', reject);
   });
 }
-async function helloed({ node, token }) {
+async function helloed({ node, token }, features) {
   const c = await connect({ authorization: `Bearer ${token}` });
   const send = createSender('w');
   c.send = (t, f) => c.ws.send(send(t, f));
-  c.send('hello', { node, protocol: PROTOCOL_VERSION, version: 'test', jobs: [] });
+  c.send('hello', { node, protocol: PROTOCOL_VERSION, version: 'test', jobs: [], ...(features ? { features } : {}) });
   await waitFor(() => c.frames.find((f) => f.t === 'welcome'), { timeout: 5000 });
   return c;
 }
@@ -120,6 +120,31 @@ test('the worker socket refuses missing, unknown and cookie credentials', async 
   await assert.rejects(connect({}), { status: 401 });
   await assert.rejects(connect({ authorization: 'Bearer aon_nope' }), { status: 401 });
   await assert.rejects(connect({ cookie }), { status: 401 });
+});
+
+test('the extension bundle: its hash follows welcome; GET EXT_PATH needs an enabled node token, never the cookie', async () => {
+  const w = await pair('ext-worker');
+  // A worker without feature 'ext' (older code) hears nothing about it.
+  const old = await helloed(await pair('old-worker'));
+  const c = await helloed(w, ['ext']);
+  const sync = await waitFor(() => c.frames.find((f) => f.t === 'ext.sync'), { timeout: 5000 });
+  assert.ok(c.frames.indexOf(sync) > c.frames.findIndex((f) => f.t === 'welcome'));
+  const get = (headers) => fetch(base + EXT_PATH, { headers });
+  assert.equal((await get({})).status, 401);
+  assert.equal((await get({ cookie })).status, 401);
+  assert.equal((await get({ authorization: 'Bearer aon_nope' })).status, 401);
+  const r = await get({ authorization: `Bearer ${w.token}` });
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('content-encoding'), 'gzip');
+  const b = await r.json();
+  assert.equal(extBundleError(b), null);
+  assert.equal(b.hash, sync.hash);
+  assert.deepEqual(b.mcp, []);
+  assert.equal((await api(`/api/cluster/nodes/${w.node}`, { method: 'PATCH', body: { enabled: false } })).status, 200);
+  assert.equal((await get({ authorization: `Bearer ${w.token}` })).status, 403, 'a disabled node gets no bundle');
+  assert.ok(!old.frames.some((f) => f.t === 'ext.sync'));
+  c.ws.close();
+  old.ws.close();
 });
 
 test('hello/inventory mark a node online; invalid frames get errors; silence marks it offline', async () => {

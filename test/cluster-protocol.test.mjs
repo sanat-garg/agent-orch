@@ -1,10 +1,11 @@
 // Cluster wire protocol (cluster-protocol.mjs, design in .agent-orch/CLUSTER.md): frame validation, direction, the
-// no-secrets rule, batching, backoff and pairing/token helpers.
+// no-secrets rule, the extension bundle check, batching, backoff and pairing/token helpers.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import {
   MSG, DIRECTION, SCHEMA, MAX_BATCH, MAX_FRAME, GRACE_MS, validate, decode, createSender, batchEvents, backoffMs, graceMs,
-  secretKeys, newPairingCode, newNodeToken, hashSecret, secretMatches, bearerToken,
+  secretKeys, newPairingCode, newNodeToken, hashSecret, secretMatches, bearerToken, extHash, extBundleError,
 } from '../cluster-protocol.mjs';
 import { FEATURES, FEATURE_LIST, PHASES } from '../cluster-protocol.mjs';
 
@@ -66,6 +67,40 @@ test('secrets never travel over the wire except git.credential', () => {
   assert.deepEqual(secretKeys({ usage: { input_tokens: 1, cache_read_input_tokens: 2 }, password: 'p', a: [{ api_key: 1 }] }), ['password', 'a.0.api_key']);
   // Agent events are the agent's own data and aren't key-scanned.
   assert.equal(validate(frame(MSG.JOB_EVENT, { job: 1, from: 0, events: [{ k: 'tool', name: 'x', input: { token: 't' } }] })), null);
+});
+
+test('extensions: frames carry only the bundle hash; a worker checks a bundle before writing it', () => {
+  const H = 'b'.repeat(64);
+  assert.equal(validate(frame(MSG.EXT_SYNC, { hash: H, bytes: 1234 }), { from: 'c' }), null);
+  assert.match(validate(frame(MSG.EXT_SYNC, { hash: H, bytes: 1 }), { from: 'w' }), /may not be sent by the worker/);
+  assert.match(validate(frame(MSG.EXT_SYNC, { hash: 'abc', bytes: 1 })), /bad hash/);
+  assert.equal(validate(start({ ext: H }), { from: 'c' }), null);
+  assert.match(validate(start({ ext: SHA })), /bad ext/);
+
+  const text = Buffer.from('---\nname: notes\n---\nhi\n'), sha = crypto.createHash('sha256').update(text).digest('hex');
+  const ok = {
+    v: 1, bytes: text.length, skipped: [],
+    skills: [{ agent: 'claude', name: 'notes', files: [{ path: 'SKILL.md', sha }, { path: 'scripts/run.sh', sha, x: true }] }, { agent: 'codex', name: 'notes', files: [{ path: 'SKILL.md', sha }] }],
+    agents: [{ name: 'reviewer', sha }],
+    // MCP secrets travel in the bundle (over TLS, to paired nodes), never in a frame.
+    mcp: [{ name: 'gh', type: 'stdio', enabled: true, command: 'npx', args: ['-y', 'gh-mcp'], env: { GITHUB_TOKEN: 'ghp_x' } }],
+    blobs: { [sha]: text.toString('base64') },
+  };
+  ok.hash = extHash(ok);
+  assert.equal(extBundleError(ok), null);
+  const bad = (change) => { const b = structuredClone(ok); change(b); b.hash = extHash(b); return extBundleError(b); };
+  for (const p of ['../x', 'a/../../x', '/etc/passwd', 'a//b', 'a\\b', '.', 'a/\u0000']) assert.match(bad((b) => { b.skills[0].files[1].path = p; }), /bad file/, p);
+  assert.match(bad((b) => { b.skills[0].files[1].path = 'SKILL.md'; }), /bad file/, 'a path twice');
+  for (const n of ['..', '.hidden', 'a/b', '']) assert.match(bad((b) => { b.skills[0].name = n; }), /bad skill/, n);
+  assert.match(bad((b) => { b.skills[1].agent = 'claude'; }), /bad skill/, 'the same skill twice');
+  assert.match(bad((b) => { b.skills[0].agent = 'copilot'; }), /bad skill/);
+  assert.match(bad((b) => { b.agents[0].name = '../../.bashrc'; }), /bad subagent/);
+  assert.match(bad((b) => { b.mcp[0].name = 'a b'; }), /bad MCP server/);
+  assert.match(bad((b) => { b.blobs[sha] = Buffer.from('tampered').toString('base64'); }), /corrupt/);
+  assert.match(bad((b) => { delete b.blobs[sha]; }), /missing/);
+  assert.match(extBundleError({ ...ok, hash: H }), /hash mismatch/);
+  assert.match(extBundleError({ ...ok, mcp: [...ok.mcp, { name: 'x', type: 'http', url: 'https://x' }] }), /hash mismatch/, 'the hash covers the MCP servers');
+  assert.match(extBundleError({ ...ok, v: 2 }), /v1/);
 });
 
 test('job.event batches are bounded and carry known kinds', () => {
@@ -154,6 +189,6 @@ test('worker reports: job.phase, job.error, node.error, logs, node.update, and t
   // hello and welcome name their features; each newer type is sent only to a peer that lists its feature.
   assert.equal(validate(frame(MSG.HELLO, { node: 'n', protocol: 1, version: '1', jobs: [], sha: SHA, features: FEATURE_LIST }), { from: 'w' }), null);
   assert.equal(validate(frame(MSG.WELCOME, { node: 'n', protocol: 1, heartbeatMs: 1, wipPushMs: 1, graceMs: 1, features: FEATURE_LIST }), { from: 'c' }), null);
-  assert.deepEqual(FEATURE_LIST, ['phases', 'errors', 'logs', 'update', 'policy', 'creds', 'approvals', 'screen', 'cap']);
+  assert.deepEqual(FEATURE_LIST, ['phases', 'errors', 'logs', 'update', 'policy', 'creds', 'approvals', 'screen', 'ext', 'cap']);
   for (const [t, f] of Object.entries(FEATURES)) assert.ok(SCHEMA[t] && FEATURE_LIST.includes(f), t);
 });

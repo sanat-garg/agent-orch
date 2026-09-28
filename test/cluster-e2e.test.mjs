@@ -2,7 +2,8 @@
 // CW_DATA_DIR) and a paired worker.mjs process on this machine with separate homes. A temp bare repo is the project's
 // GitHub `origin` (url.insteadOf maps the GitHub URL onto it on both sides). Two tasks: the codex one is placed on the
 // worker (only it has codex), runs there, pushes its branch, and the controller fetches and merges it; the Claude one
-// runs on the controller. Both land on main in origin.
+// runs on the controller. Both land on main in origin. The controller's skill, subagent and MCP server reach the
+// worker's home, and its codex run gets the MCP servers as a profile file.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFile, execFileSync } from 'node:child_process';
@@ -13,6 +14,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { parseJsonl } from '../orchestrator.mjs';
+import { createExtensions } from '../extensions.mjs';
 import { isolatedPath } from './helpers/isolated-path.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -62,6 +64,13 @@ test('a task placed on a paired worker is merged into main by the controller; an
   fs.mkdirSync(dataDir);
   execFileSync('git', ['clone', '-q', REPO, project], { env: cenv, stdio: 'ignore' });
   assert.equal(git(project, 'config', '--get', 'remote.origin.url'), REPO);
+  // The owner's extensions on the controller: a skill with a script, a subagent, an MCP server with a secret.
+  const cext = createExtensions({ dataDir, home: cenv.HOME }), secret = 'e2e-mcp-secret-9051';
+  cext.saveSkill({ name: 'release-notes', description: 'Use when: writing release notes', body: '# Release notes', agents: ['claude', 'codex'] });
+  fs.mkdirSync(path.join(cenv.HOME, '.codex/skills/release-notes/scripts'));
+  fs.writeFileSync(path.join(cenv.HOME, '.codex/skills/release-notes/scripts/changelog.sh'), '#!/bin/sh\ngit log --oneline\n', { mode: 0o755 });
+  cext.saveAgent({ name: 'reviewer', description: 'Reviews diffs', prompt: 'Review the diff.' });
+  cext.saveMcp({ name: 'e2e', commandLine: 'npx -y e2e-mcp', env: `E2E_TOKEN=${secret}`, agents: ['claude', 'codex'] });
 
   controller = start(['test/fixtures/cluster-controller.mjs', dataDir, project], { ...cenv, CW_DATA_DIR: dataDir });
   const lines = readline.createInterface({ input: controller.stdout })[Symbol.asyncIterator]();
@@ -104,4 +113,19 @@ test('a task placed on a paired worker is merged into main by the controller; an
   // The controller's usage log counts the remote run's tokens under codex.
   const usage = parseJsonl(fs.readFileSync(path.join(dataDir, 'metrics', 'usage.jsonl'), 'utf8'));
   assert.ok(usage.some((u) => u.agent === 'codex' && u.ref === r.remote.id), 'remote usage in usage.jsonl');
+
+  // The controller's skill, subagent and MCP server were on the worker before its codex run started.
+  const wh = wenv.HOME, rec = JSON.parse(git(origin, 'show', 'main:args.json'));
+  assert.deepEqual(rec.skills, ['release-notes']);
+  assert.deepEqual(rec.argv.slice(0, 3), ['-p', 'agent-orch', 'exec']);
+  assert.match(rec.profile, /\[mcp_servers\.e2e\]/);
+  assert.ok(rec.profile.includes(secret) && !rec.argv.join(' ').includes(secret));
+  for (const agent of ['.claude', '.codex']) {
+    assert.equal(fs.readFileSync(path.join(wh, agent, 'skills/release-notes/SKILL.md'), 'utf8'), fs.readFileSync(path.join(cenv.HOME, agent, 'skills/release-notes/SKILL.md'), 'utf8'));
+  }
+  assert.equal(fs.statSync(path.join(wh, '.codex/skills/release-notes/scripts/changelog.sh')).mode & 0o777, 0o755);
+  assert.ok(fs.existsSync(path.join(wh, '.claude/agents/reviewer.md')));
+  assert.equal(fs.statSync(path.join(wh, '.codex/agent-orch.config.toml')).mode & 0o777, 0o600);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(wh, '.agent-orch-worker/extensions/synced.json'), 'utf8')).hash, cext.syncInfo().hash);
+  assert.ok(!logs.includes(secret), 'no MCP secret in the controller or worker logs');
 });

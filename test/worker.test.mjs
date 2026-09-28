@@ -1,6 +1,7 @@
 // Worker daemon e2e (worker.mjs): a fake hub (cluster.mjs on an in-test HTTP/WS server), a temp bare repo as the
 // project's `origin` (git's url.insteadOf maps the GitHub URL onto it) and a stub `codex` CLI. Covers pairing,
-// inventory, resources, and a job that edits a file, passes its check and pushes the branch with the change.
+// inventory, resources, a job that edits a file, passes its check and pushes the branch with the change, and the
+// controller's skills, subagents and MCP servers (the hub's extension bundle) reaching the worker's home and its runs.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFile, execFileSync } from 'node:child_process';
@@ -11,7 +12,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createCluster } from '../cluster.mjs';
-import { CLAIM_PATH } from '../cluster-protocol.mjs';
+import { CLAIM_PATH, EXT_PATH } from '../cluster-protocol.mjs';
+import { createExtensions } from '../extensions.mjs';
 import { parseVmStat, parseSwapUsage, parseMemLevel } from '../resources.mjs';
 import { cacheName, sleptFor } from '../worker.mjs';
 import { isolatedPath } from './helpers/isolated-path.mjs';
@@ -19,7 +21,7 @@ import { waitFor } from './helpers/wait.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const REPO = 'https://github.com/test-owner/demo.git';
-let tmp, home, bin, origin, baseSha, server, cluster, base, worker, workerOut = '';
+let tmp, home, bin, origin, baseSha, server, cluster, cext, base, worker, workerOut = '';
 const frames = [];
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 const env = () => ({ HOME: home, PATH: bin, TMPDIR: tmp, AGENT_ORCH_REAPER: 'off' });
@@ -47,9 +49,12 @@ before(async () => {
   baseSha = git(seed, 'rev-parse', 'HEAD');
   fs.writeFileSync(path.join(home, '.gitconfig'), `[url "file://${origin}"]\n\tinsteadOf = ${REPO}\n[user]\n\tname = worker\n\temail = w@w\n`);
 
-  cluster = createCluster({ dbFile: path.join(tmp, 'hub.db'), heartbeatMs: 300 });
+  // The controller's extensions live in their own home (skills, subagents) and data dir (MCP servers).
+  cext = createExtensions({ dataDir: path.join(tmp, 'controller-data'), home: path.join(tmp, 'controller-home') });
+  cluster = createCluster({ dbFile: path.join(tmp, 'hub.db'), heartbeatMs: 300, ext: cext });
   cluster.onMessage((node, msg) => frames.push({ node, ...msg }));
   server = http.createServer(async (req, res) => {
+    if (req.url === EXT_PATH && req.method === 'GET') return cluster.handleExt(req, res);
     if (req.url !== CLAIM_PATH || req.method !== 'POST') { res.writeHead(404); return res.end(); }
     let body = '';
     for await (const c of req) body += c;
@@ -186,4 +191,57 @@ test('pause pushes WIP and keeps the worktree, resume finishes the job, cancel d
   await waitFor(() => !fs.existsSync(wt(10)), { timeout: 20000, message: `cancel 10\n${workerOut}` });
   assert.equal(got('job.done', 10).length, 0);
   assert.equal(got('job.wip', 10).length, 0, 'a reassigned job is not pushed');
+});
+
+test("the controller's skills, subagents and MCP servers reach the worker's home, and a job's run gets the MCP profile", async () => {
+  const { node } = JSON.parse(fs.readFileSync(path.join(home, '.agent-orch-worker', 'config.json'), 'utf8'));
+  const secret = 'mcp-secret-value-4417';
+  // Only a paired node's token opens the bundle (it holds MCP secrets).
+  assert.equal((await fetch(new URL(EXT_PATH, base))).status, 401);
+  assert.equal((await fetch(new URL(EXT_PATH, base), { headers: { authorization: 'Bearer aon_not-a-node' } })).status, 401);
+
+  cext.saveSkill({ name: 'notes', description: 'Use when: taking notes', body: '# Notes', agents: ['claude', 'codex'] });
+  cext.saveAgent({ name: 'reviewer', description: 'Reviews diffs', prompt: 'Review it.' });
+  cext.saveMcp({ name: 'demo', commandLine: 'npx -y demo-mcp', env: `DEMO_TOKEN=${secret}` });
+  cluster.syncExt();
+  const skill = path.join(home, '.claude/skills/notes/SKILL.md');
+  await waitFor(() => fs.existsSync(skill) && fs.existsSync(path.join(home, '.codex/skills/notes/SKILL.md')), { timeout: 10000, message: `skill synced\n${workerOut}` });
+  assert.equal(fs.readFileSync(skill, 'utf8'), fs.readFileSync(path.join(tmp, 'controller-home/.claude/skills/notes/SKILL.md'), 'utf8'));
+  assert.equal(fs.readFileSync(path.join(home, '.claude/agents/reviewer.md'), 'utf8'), fs.readFileSync(path.join(tmp, 'controller-home/.claude/agents/reviewer.md'), 'utf8'));
+  await waitFor(() => cluster.node(node).inventory?.ext?.hash === cluster.extHash(), { timeout: 5000, message: 'the inventory reports the applied bundle' });
+
+  // A skill copied into the controller's home by hand announces nothing; the next job names the new bundle, so the
+  // worker fetches it before the agent starts. The codex run is handed the MCP servers as a profile file (-p).
+  const handMade = path.join(tmp, 'controller-home/.codex/skills/hand-made');
+  fs.mkdirSync(handMade, { recursive: true });
+  fs.writeFileSync(path.join(handMade, 'SKILL.md'), '---\nname: hand-made\ndescription: copied in by hand\n---\n');
+  assert.ok(cluster.send(node, {
+    t: 'job.start', job: 11, title: 'Record args', prompt: 'ARGS', agent: 'codex', repo: REPO, baseSha,
+    branch: 'agent-orch/task-11', ext: cluster.extHash(), timeouts: { taskSec: 60 },
+  }));
+  const [done] = await waitFor(() => got('job.done', 11).length && got('job.done', 11), { timeout: 30000, message: `job.done 11\n${workerOut}` });
+  assert.equal(done.outcome, 'ok', done.text);
+  const rec = JSON.parse(git(origin, 'show', `${done.sha}:args.json`));
+  assert.deepEqual(rec.skills, ['hand-made', 'notes'], 'the run saw the bundle the job named');
+  assert.deepEqual(rec.argv.slice(0, 3), ['-p', 'agent-orch', 'exec']);
+  assert.match(rec.profile, /\[mcp_servers\.demo\]\ncommand = "npx"/);
+  assert.ok(rec.profile.includes(secret));
+  assert.ok(!rec.argv.join(' ').includes(secret), 'no secret on the command line');
+  assert.equal(fs.statSync(path.join(home, '.codex/agent-orch.config.toml')).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.join(home, '.agent-orch-worker/extensions/mcp.json')).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.join(home, '.agent-orch-worker/extensions/claude-mcp.json')).mode & 0o777, 0o600);
+  const log = fs.readFileSync(path.join(home, '.agent-orch-worker', 'logs', 'worker.log'), 'utf8');
+  assert.match(log, /extensions [0-9a-f]{12} applied: 2 skills, 1 subagents, 1 MCP servers/);
+  assert.match(log, /extensions [0-9a-f]{12} applied: 3 skills, 1 subagents, 1 MCP servers/);
+  assert.ok(!log.includes(secret) && !workerOut.includes(secret), 'no secret in the logs');
+  assert.ok(!frames.some((f) => JSON.stringify(f).includes(secret)), 'no secret in a frame');
+
+  // A skill removed on the controller leaves the worker; one its owner installed by hand stays.
+  const own = path.join(home, '.claude/skills/by-hand');
+  fs.mkdirSync(own, { recursive: true });
+  fs.writeFileSync(path.join(own, 'SKILL.md'), '---\nname: by-hand\ndescription: mine\n---\n');
+  cext.removeSkill('notes');
+  cluster.syncExt();
+  await waitFor(() => !fs.existsSync(path.join(home, '.claude/skills/notes')) && !fs.existsSync(path.join(home, '.codex/skills/notes')), { timeout: 10000, message: `skill removed\n${workerOut}` });
+  assert.ok(fs.existsSync(path.join(own, 'SKILL.md')));
 });

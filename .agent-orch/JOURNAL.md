@@ -716,6 +716,24 @@ Command: node --check public/app.js && npm test
 
 Branch on main; check passes 427/427 in worktree
 
+## 2026-09-28 — #248 Land worker skills/subagents/MCP sync from claude/heuristic-visvesvaraya-d78c0d
+
+Merged aae07b1 with conflicts resolved keeping both sides (feature 'ext' + ext.sync beside main's 'cap', queued, status view; inventory has cap and ext). npm test 435/435.
+
+## 2026-09-28 01:44 — #248 Land worker skills/subagents/MCP sync from branch claude/heuristic-visvesvaraya-d78c0d [done (check passed)]
+
+workers now get the head's skills, subagents and MCP servers; npm test passes
+
+## 2026-09-28 — #252 Integrate #248 with main
+Merged main (agent.credential / feature 'creds') into #248: FEATURES keeps both ('creds' then 'ext'), WORKER_ACCEPTS and worker.mjs handle both agent.credential and ext.sync; tests updated for both; server.test.mjs takes main's claude-machines expectation (half-snapshotted from main). npm test: 440/441, the one failure fixed and re-run.
+
+## 2026-09-28 03:28 — #252 Integrate #248: Land worker skills/subagents/MCP sync from branch claude/heuristic-visvesvaraya-d78c0d [done (check passed)]
+
+merge conflicts resolved; worker handles both agent.credential and ext.sync
+
+## 2026-09-28 03:28 — #252 Integrate #248: Land worker skills/subagents/MCP sync from branch claude/heuristic-visvesvaraya-d78c0d [verify failed (1)]
+
+Command: merge main again
 ## 2026-09-28 02:00 — #254 Land the bash 3.2 fix for the macOS worker installer [done (check passed)]
 
 macOS installer, bash 3.2 build script and non-skipping test pass
@@ -748,3 +766,11 @@ Phone composer now stays above the keyboard; tests pass
 ## 2026-09-28 03:44 — #261 Integrate #258: Approval gate for outbound actions, with an audit log [done (check passed)]
 
 Merge conflicts resolved; approval-gate, protocol and browser tests pass
+
+## 2026-09-28 — #252 Integrate #248 (second merge of main)
+Main gained whoami, browser capability, approval gate and live browser view meanwhile. Kept both: FEATURES ends 'approvals', 'screen', 'ext', 'cap'; WORKER_ACCEPTS has job.approval, screen.req/input and ext.sync; inventory carries browser and ext; job.start has capabilities/identity and ext; cluster.mjs whoami reuses tokenNode; worker.mjs has one `ext` (synced bundle + browser run MCP).
+Full suite then failed 5 real-browser tests, on main too: Chromium aborts "Socket path too long" (its SingletonSocket sits in TMPDIR, Unix socket paths ≤107 bytes). bin/test.mjs now realpaths node_modules/.cache and puts the temp dir under ~/.cache when that path would be too long. `npm test`: 478/478.
+
+## 2026-09-28 04:44 — #252 Integrate #248: Land worker skills/subagents/MCP sync from branch claude/heuristic-visvesvaraya-d78c0d [done (check passed)]
+
+main re-merged with ext sync kept; npm test passes 478/478

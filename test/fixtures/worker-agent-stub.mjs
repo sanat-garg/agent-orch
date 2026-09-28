@@ -2,11 +2,16 @@
 // Stand-in `codex` for the worker e2e test: signed in, lists the recorded model catalog, and `exec` edits a file in its
 // cwd (hello.txt) while printing `codex exec --json` events. A prompt containing SLOW takes 60 s to finish (pause/cancel tests);
 // WRITE:<file> writes that file instead of hello.txt; TICKS:<n> streams n messages "tick <i>" 250 ms apart first (failover tests). With STUB_RECORD=1 it only records its
-// checkout's HEAD and the prompt it got in handoff.json (the run that takes over a lost task).
+// checkout's HEAD and the prompt it got in handoff.json (the run that takes over a lost task). ARGS also writes args.json:
+// its arguments (all but the prompt), the text of the `-p <profile>` config file it was given (the MCP servers) and the
+// skills in ~/.codex/skills.
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
-const [cmd, sub] = process.argv.slice(2);
+const all = process.argv.slice(2), profile = all[0] === '-p' ? all[1] : null;
+const [cmd, sub] = profile ? all.slice(2) : all;
 if (cmd === '--version') { process.stdout.write('codex-cli 0.157.0\n'); process.exit(0); }
 if (cmd === 'login' && sub === 'status') { process.stderr.write('Logged in using ChatGPT\n'); process.exit(0); }
 if (cmd === 'debug' && sub === 'models') { process.stdout.write(fs.readFileSync(new URL('./codex-models.json', import.meta.url))); process.exit(0); }
@@ -26,6 +31,12 @@ if (process.env.STUB_RECORD) {
 }
 const file = /WRITE:(\S+)/.exec(prompt)?.[1] || 'hello.txt';
 fs.writeFileSync(file, 'hello from the stub agent\n');
+if (prompt.includes('ARGS')) {
+  let text = null, skills = [];
+  try { text = fs.readFileSync(path.join(os.homedir(), '.codex', `${profile}.config.toml`), 'utf8'); } catch {}
+  try { skills = fs.readdirSync(path.join(os.homedir(), '.codex', 'skills')).sort(); } catch {}
+  fs.writeFileSync('args.json', JSON.stringify({ argv: all.slice(0, -1), profile: text, skills }));
+}
 out({ type: 'item.completed', item: { id: 'item_1', type: 'file_change', changes: [{ path: file, kind: 'add' }], status: 'completed' } });
 const ticks = Number(/TICKS:(\d+)/.exec(prompt)?.[1] || 0);
 for (let i = 0; i < ticks; i++) {

@@ -1,12 +1,14 @@
 // Controller side of the cluster (BRIEF goal 11, design: .agent-orch/CLUSTER.md, wire format: cluster-protocol.mjs).
 // Node registry in the orchestrator DB, pairing codes (one-time or multi-use), each node's power policy (power.mjs), and
-// the worker WebSocket hub at WS_PATH. The scheduler uses listNodes() / send(nodeId, msg) / onMessage(handler) /
-// version(), and feeds setBusy() (the update's idle check) and setUpNext() (each worker's "up next" count, sent with
-// welcome and every heartbeat); the UI reads listNodes() via GET /api/cluster/nodes.
+// the worker WebSocket hub at WS_PATH, and the extension bundle at EXT_PATH. The scheduler uses listNodes() /
+// send(nodeId, msg) / onMessage(handler) / version() / extHash(), and feeds setBusy() (the update's idle check) and
+// setUpNext() (each worker's "up next" count, sent with welcome and every heartbeat); the UI reads listNodes() via
+// GET /api/cluster/nodes.
 // Health (CLUSTER.md, Health): each worker's telemetry as a 24 h series (node-metrics.mjs), its log tail on demand,
 // its last error, auto-drain, and the version check that updates an outdated worker once it is idle.
 import os from 'node:os';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
@@ -97,9 +99,10 @@ const cleanName = (s) => (typeof s === 'string' ? s.replace(/[\u0000-\u001f]/g, 
 // metricsDir: where the per-node telemetry series live (<DATA>/metrics/nodes; null = not kept). repoDir: the controller's
 // agent-orch checkout for the version check (null = off); outdatedAfter: see OUTDATED_AFTER; autoUpdate: update outdated
 // workers on its own. onNotice({node, level, text}): something the owner should hear about (an auto-drain, an update).
-// health: HEALTH overrides (tests); logsTimeoutMs: how long a log tail may take.
+// health: HEALTH overrides (tests); logsTimeoutMs: how long a log tail may take. ext: extensions.mjs (syncInfo/syncBundle):
+// workers get its bundle (ext.sync, EXT_PATH); null = none is offered.
 export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTBEAT_MS, wipPushMs = WIP_PUSH_MS, graceMs: graceAll = null, log = () => {}, onChange = () => {},
-  metricsDir = null, repoDir = null, outdatedAfter = OUTDATED_AFTER, autoUpdate = true, mainTtlMs, onNotice = () => {}, health: healthOpts = {}, logsTimeoutMs = 15_000 }) {
+  metricsDir = null, repoDir = null, outdatedAfter = OUTDATED_AFTER, autoUpdate = true, mainTtlMs, onNotice = () => {}, health: healthOpts = {}, logsTimeoutMs = 15_000, ext = null }) {
   const health = { ...HEALTH, ...healthOpts };
   const db = new DatabaseSync(dbFile);
   db.exec('PRAGMA busy_timeout=5000');
@@ -307,19 +310,48 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
   // ---- WebSocket hub
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME });
   const deny = (socket, code, text) => { socket.write(`HTTP/1.1 ${code} ${text}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`); socket.destroy(); };
-  // Bearer token only (no session cookie): unknown or revoked tokens are refused before any frame is read.
-  // WHOAMI_PATH: which machine a bearer token belongs to, without connecting (a check must not bump the live worker).
-  function whoami(headers) {
+  // The node row a request's bearer token belongs to (never the session cookie), or null.
+  function tokenNode(headers) {
     const token = bearerToken(headers);
     const row = token && db.prepare('SELECT * FROM nodes WHERE token_hash=?').get(hashSecret(token));
-    if (!row || !secretMatches(token, row.token_hash)) return { status: 401, error: 'this machine is not paired with this head' };
+    return row && secretMatches(token, row.token_hash) ? row : null;
+  }
+  // WHOAMI_PATH: which machine a bearer token belongs to, without connecting (a check must not bump the live worker).
+  function whoami(headers) {
+    const row = tokenNode(headers);
+    if (!row) return { status: 401, error: 'this machine is not paired with this head' };
     return { node: row.id, name: row.name };
   }
+  // Unknown or revoked tokens are refused before any frame is read.
   function handleUpgrade(req, socket, head) {
-    const token = bearerToken(req.headers);
-    const row = token && db.prepare('SELECT * FROM nodes WHERE token_hash=?').get(hashSecret(token));
-    if (!row || !secretMatches(token, row.token_hash)) return deny(socket, 401, 'Unauthorized');
+    const row = tokenNode(req.headers);
+    if (!row) return deny(socket, 401, 'Unauthorized');
     wss.handleUpgrade(req, socket, head, (ws) => attach(ws, row.id));
+  }
+
+  // ---- extension bundle: skills, subagents and MCP servers (with their secrets) for paired, enabled nodes only.
+  // Workers hear the hash (ext.sync after welcome and on every change, job.start.ext) and GET EXT_PATH when theirs differs.
+  // An older worker (no feature 'ext') gets no ext.sync and ignores job.start.ext.
+  const extInfo = () => { try { return ext?.syncInfo() || null; } catch (e) { log(`extension bundle failed: ${e.message}`); return null; } };
+  function sendExt(c) {
+    if (!c.hello?.features?.includes('ext')) return;
+    const i = extInfo();
+    try { if (i) c.send(MSG.EXT_SYNC, { hash: i.hash, bytes: i.bytes }); } catch (e) { log(`ext.sync failed: ${e.message}`); }
+  }
+  function syncExt() { for (const c of conns.values()) if (c.hello) sendExt(c); }
+  const gzip = promisify(zlib.gzip);
+  async function handleExt(req, res) {
+    const reply = (status, body = '', headers = {}) => { res.writeHead(status, { 'Cache-Control': 'no-store', ...headers }); res.end(body); };
+    const row = tokenNode(req.headers);
+    if (!row) return reply(401);
+    if (!row.enabled) return reply(403);
+    if (!ext) return reply(404);
+    let b;
+    try { b = ext.syncBundle(); } catch (e) { log(`extension bundle failed: ${e.message}`); return reply(500); }
+    const body = await gzip(JSON.stringify(b));
+    // Names and counts only: the bundle holds MCP secrets.
+    log(`node ${row.id} fetched extensions ${b.hash.slice(0, 12)}: ${b.skills.length} skills, ${b.agents.length} subagents, ${b.mcp.length} MCP servers (${Math.ceil(body.length / 1024)} KB)`);
+    reply(200, body, { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' });
   }
 
   function attach(ws, id) {
@@ -364,6 +396,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
           touch({ away: null });
           c.send(MSG.WELCOME, { node: id, protocol: PROTOCOL_VERSION, heartbeatMs, wipPushMs, graceMs: nodeGrace(row), features: FEATURE_LIST, policy: wirePolicy(row), ...queuedFor(id) });
           helloUpdate(id, row, c.hello.sha);
+          sendExt(c);
           changed();
           break;
         }
@@ -588,5 +621,6 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
   }
 
   return { listNodes, node, createPairing, pairing, revokePairing, claim, whoami, update, revoke, handleUpgrade, send, onMessage, isConnected: (id) => conns.has(id), version: () => version, close,
-    autoDrain, requestUpdate, logsTail, request, metrics: metricsOf, setBusy: (fn) => { busy = fn; }, setUpNext: (fn) => { upNext = fn; }, health };
+    autoDrain, requestUpdate, logsTail, request, metrics: metricsOf, setBusy: (fn) => { busy = fn; }, setUpNext: (fn) => { upNext = fn; }, health,
+    handleExt, syncExt, extHash: () => extInfo()?.hash || null };
 }

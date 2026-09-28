@@ -2708,6 +2708,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       ...(needsBrowser(task) && { capabilities: ['browser'], identity: identityOf(task), gate: (({ patterns, ttlMs }) => ({ patterns, ttlMs }))(gateSettings()) }),
       repo, baseSha, branch: taskBranch(task.id), doneWhen: task.done_when || undefined, resume: resume || undefined,
       timeouts: { taskSec: CFG.taskTimeoutSec, verifySec: CFG.verifyTimeoutSec, installSec: 900 }, autonomous: !!project.autonomous,
+      ext: cluster.extHash?.() || undefined, // the worker fetches this extension bundle first unless it has it
     }, signal);
     finishRun(runId, res);
     checkNodeFailures(nodeId, res);

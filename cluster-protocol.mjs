@@ -4,7 +4,8 @@
 // Replies and acks name the frame they answer with `re` (its seq). Job frames carry `job` = the controller's task id.
 // Secrets never travel over the wire (the node token rides in the upgrade's Authorization header); the exceptions are
 // `git.credential`, sent only to nodes the owner explicitly authorised to push with their GitHub token, and
-// `agent.credential`: the head's Claude worker token and Codex sign-in, so no worker needs a sign-in of its own.
+// `agent.credential`: the head's Claude worker token and Codex sign-in, so no worker needs a sign-in of its own. MCP
+// servers' env values and headers reach workers outside the frames, in the extension bundle (EXT_PATH, below).
 
 import crypto from 'node:crypto';
 
@@ -15,6 +16,8 @@ export const CLAIM_PATH = '/api/cluster/claim'; // worker: POST {code, name, os,
 // worker: GET with its bearer token → {node, name} while the head still knows this machine, 401 once it was removed.
 // The installer asks before pairing again, so re-running it never adds the same machine twice.
 export const WHOAMI_PATH = '/api/cluster/me';
+export const EXT_PATH = '/api/cluster/ext'; // worker: GET with its bearer token → the extension bundle (gzip JSON)
+export const EXT_MAX_BYTES = 32 << 20; // file bytes (skills + subagents) per bundle; the controller leaves out the rest
 export const HEARTBEAT_MS = 10_000;
 export const HEARTBEAT_MISSES = 3; // no frame for 3 heartbeats = disconnected (the grace period starts then)
 export const GRACE_MS = { mac: 5 * 60_000, vps: 2 * 60_000 };
@@ -39,6 +42,7 @@ export const MSG = {
   JOB_PHASE: 'job.phase', JOB_ERROR: 'job.error', NODE_ERROR: 'node.error', LOGS_TAIL: 'logs.tail', LOGS: 'logs', NODE_UPDATE: 'node.update',
   NODE_POLICY: 'node.policy', JOB_APPROVAL: 'job.approval',
   SCREEN_REQ: 'screen.req', SCREEN_RES: 'screen.res', SCREEN_INPUT: 'screen.input', SCREEN_FRAME: 'screen.frame', SCREEN_STATE: 'screen.state',
+  EXT_SYNC: 'ext.sync',
 };
 
 // Who may send each type: 'w' worker → controller, 'c' controller → worker, 'both'. Only the controller originates jobs.
@@ -50,7 +54,7 @@ export const DIRECTION = {
   'login.start': C, 'login.state': W, 'login.code': C, 'login.cancel': C, 'login.logout': C,
   'models.refresh': C, models: W, 'limits.refresh': C, limits: W,
   'job.phase': W, 'job.error': W, 'node.error': W, 'logs.tail': C, logs: W, 'node.update': C, 'node.policy': C, 'job.approval': C,
-  'screen.req': C, 'screen.res': W, 'screen.input': C, 'screen.frame': W, 'screen.state': W,
+  'screen.req': C, 'screen.res': W, 'screen.input': C, 'screen.frame': W, 'screen.state': W, 'ext.sync': C,
 };
 // Frame types a peer sends only when the other side lists the feature (hello.features: the worker's, welcome.features:
 // the controller's), so a worker updated ahead of the controller's running code (or the reverse) never sends a type the
@@ -59,18 +63,20 @@ export const DIRECTION = {
 // reason 'cap': the worker's local cap (cap.mjs) is full.
 export const FEATURES = { 'job.phase': 'phases', 'job.error': 'errors', 'node.error': 'errors', 'logs.tail': 'logs', logs: 'logs', 'node.update': 'update',
   'node.policy': 'policy', 'agent.credential': 'creds', 'job.approval': 'approvals',
-  'screen.req': 'screen', 'screen.res': 'screen', 'screen.input': 'screen', 'screen.frame': 'screen', 'screen.state': 'screen' };
+  'screen.req': 'screen', 'screen.res': 'screen', 'screen.input': 'screen', 'screen.frame': 'screen', 'screen.state': 'screen', 'ext.sync': 'ext' };
 export const FEATURE_LIST = [...new Set([...Object.values(FEATURES), 'cap'])];
 // Compute-only workers (BRIEF goal 11): the only frames a worker acts on, all from the head it dialled. Connection
 // upkeep; jobs (job.*, plus git.credential for their pushes); remote sign-in driven from the head's Connections (login.*);
-// model and limit refreshes; its log tail; self-update; and the node's policy (max tasks, power), which like draining is
-// set on the head only; and the owner's live view of a browser profile on it (screen.*). A worker rejects and logs any other type, even one added here later, and the head's hub never
-// sends one: there is no chat, prompt, planner, reflection or settings frame for a worker.
+// model and limit refreshes; its log tail; self-update; the node's policy (max tasks, power), which like draining is
+// set on the head only; the owner's live view of a browser profile on it (screen.*); and the head's skills, subagents
+// and MCP servers for its jobs (ext.sync: only a hash, the bundle comes from EXT_PATH). A worker rejects and logs any
+// other type, even one added here later, and the head's hub never sends one: there is no chat, prompt, planner,
+// reflection or settings frame for a worker.
 export const WORKER_ACCEPTS = Object.freeze([
   MSG.WELCOME, MSG.HEARTBEAT, MSG.ACK, MSG.ERROR, MSG.BYE,
   MSG.JOB_OFFER, MSG.JOB_START, MSG.JOB_CANCEL, MSG.JOB_PAUSE, MSG.JOB_RESUME, MSG.JOB_ATTACH, MSG.GIT_CREDENTIAL, MSG.AGENT_CREDENTIAL,
   MSG.LOGIN_START, MSG.LOGIN_CODE, MSG.LOGIN_CANCEL, MSG.LOGIN_LOGOUT,
-  MSG.MODELS_REFRESH, MSG.LIMITS_REFRESH, MSG.LOGS_TAIL, MSG.NODE_UPDATE, MSG.NODE_POLICY, MSG.JOB_APPROVAL, MSG.SCREEN_REQ, MSG.SCREEN_INPUT,
+  MSG.MODELS_REFRESH, MSG.LIMITS_REFRESH, MSG.LOGS_TAIL, MSG.NODE_UPDATE, MSG.NODE_POLICY, MSG.JOB_APPROVAL, MSG.SCREEN_REQ, MSG.SCREEN_INPUT, MSG.EXT_SYNC,
 ]);
 
 export const AGENT_IDS = ['claude', 'codex'];
@@ -98,7 +104,8 @@ const S = {
   welcome: { node: 'str', protocol: 'int', heartbeatMs: 'int', wipPushMs: 'int', graceMs: 'int', features: 'arr?', policy: 'obj?', queued: 'int?' },
   // cap: the machine's local cap in effect (cap.mjs resolveCap: {cpu: cores, mem: bytes, maxTasks, onlyOnAc}; null = none).
   // browser: {capable, headed, error?}: whether it has a Chromium/Chrome for browser tasks (browser.mjs ensureBrowser).
-  inventory: { node: 'str', name: 'str', os: 'os', arch: 'str', cores: 'int', mem: 'int', agents: 'arr', limits: 'obj?', versions: 'obj', cap: 'obj?', browser: 'obj?' },
+  // ext: the extension bundle applied here {hash, error?, kept?[hand-installed entries left in place of the controller's]}.
+  inventory: { node: 'str', name: 'str', os: 'os', arch: 'str', cores: 'int', mem: 'int', agents: 'arr', limits: 'obj?', versions: 'obj', cap: 'obj?', browser: 'obj?', ext: 'obj?' },
   // Also the worker's health telemetry (every heartbeat, the controller keeps a 24 h series): cpu (% per core), memTotal,
   // swapTotal/swapUsed (bytes), disk {path, free, total} (the volume holding its repos), net {host, ok, ms, at, error}
   // (reachability of GitHub), agents [{id, installed, version, signedIn}] (as last checked, never polled), uptime (s),
@@ -120,9 +127,10 @@ const S = {
   'job.start': {
     // effort: the reasoning-effort level the controller read at this session boundary (the worker clamps it to the agent).
     // capabilities ["browser"] + identity: the run gets the Playwright MCP on that browser profile (browser.mjs).
+    // ext: the controller's extension bundle hash; the worker fetches the bundle first unless it already has that one.
     job: 'int', title: 'str', prompt: 'str', systemAppend: 'str?', agent: 'agent', model: 'str?', effort: 'str?', account: 'str?',
     repo: 'repo', baseSha: 'sha', branch: 'branch', doneWhen: 'str?', resume: 'str?',
-    timeouts: 'obj', autonomous: 'bool?', tools: 'arr?', install: 'arr?', capabilities: 'arr?', identity: 'str?',
+    timeouts: 'obj', autonomous: 'bool?', tools: 'arr?', install: 'arr?', capabilities: 'arr?', identity: 'str?', ext: 'hash?',
   },
   'job.event': { job: 'int', from: 'int', events: 'events' },
   'job.check': { job: 'int', command: 'str', output: 'str', pass: 'bool', code: 'int?' },
@@ -182,10 +190,13 @@ const S = {
   'screen.input': { identity: 'str', events: 'arr' },
   'screen.frame': { identity: 'str', n: 'int', data: 'str', w: 'int', h: 'int' },
   'screen.state': { identity: 'str', url: 'str?', title: 'str?', active: 'bool?', takeover: 'bool?', closed: 'bool?', error: 'str?', note: 'str?' },
+  // The controller's skills, subagents or MCP servers are now `hash` (after welcome and on every change); a worker
+  // holding another bundle GETs EXT_PATH. bytes = the bundle's file bytes.
+  'ext.sync': { hash: 'hash', bytes: 'int' },
 };
 export const SCHEMA = S;
 
-const SHA_RE = /^[0-9a-f]{40}$/;
+const SHA_RE = /^[0-9a-f]{40}$/, HASH_RE = /^[0-9a-f]{64}$/;
 const BRANCH_RE = /^agent-orch\/task-\d+$/;
 // Plain https or ssh GitHub-style URLs; never credentials embedded in the URL.
 const REPO_RE = /^(https:\/\/[^\s/@:]+(?::\d+)?\/[\w.\-/]+|git@[\w.-]+:[\w.\-/]+)$/;
@@ -196,7 +207,7 @@ const SECRET_KEY_RE = /(token|secret|password|passwd|api_?key|apikey|cookie|cred
 const TYPES = {
   str: (v) => typeof v === 'string', int: Number.isSafeInteger, num: (v) => typeof v === 'number' && Number.isFinite(v),
   bool: (v) => typeof v === 'boolean', obj: (v) => !!v && typeof v === 'object' && !Array.isArray(v), arr: Array.isArray,
-  sha: (v) => typeof v === 'string' && SHA_RE.test(v), branch: (v) => typeof v === 'string' && BRANCH_RE.test(v),
+  sha: (v) => typeof v === 'string' && SHA_RE.test(v), hash: (v) => typeof v === 'string' && HASH_RE.test(v), branch: (v) => typeof v === 'string' && BRANCH_RE.test(v),
   repo: (v) => typeof v === 'string' && REPO_RE.test(v), agent: (v) => AGENT_IDS.includes(v), os: (v) => OS_KINDS.includes(v),
   outcome: (v) => OUTCOMES.includes(v), reject: (v) => REJECT_REASONS.includes(v), login: (v) => LOGIN_STATES.includes(v),
   phase: (v) => PHASES.includes(v),
@@ -274,6 +285,50 @@ export function batchEvents(events, start = 0) {
   const out = [];
   for (let i = 0; i < events.length; i += MAX_BATCH) out.push({ from: start + i, events: events.slice(i, i + MAX_BATCH) });
   return out;
+}
+
+// The extension bundle (GET EXT_PATH): the controller's skills, Claude subagents and enabled MCP servers, so a worker's
+// runs get the same ones. Each file travels once, content-addressed (a skill copied for Claude and Codex costs nothing
+// twice):
+//   { v: 1, hash, bytes, skills: [{agent, name, files: [{path, sha, x?}]}], agents: [{name, sha}], mcp: [server],
+//     blobs: {sha256: base64}, skipped: [{kind, name, reason}] }
+// skills = ~/.claude|.codex/skills/<name>/<path> (x: executable), agents = ~/.claude/agents/<name>.md, mcp = the enabled
+// entries of <DATA>/extensions/mcp.json with their env/headers (served only to paired, enabled nodes, over TLS),
+// skipped = what the controller left out (too big). extHash covers skills, agents and mcp (the entries name their blobs).
+export const extHash = (b) => crypto.createHash('sha256').update(JSON.stringify([b.skills, b.agents, b.mcp])).digest('hex');
+export const EXT_ENTRY_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,99}$/; // a skill folder or subagent name: no dot files, no ..
+export const EXT_MAX_BODY = Math.ceil(EXT_MAX_BYTES * 4 / 3) + (8 << 20); // the decompressed JSON a worker accepts
+const MCP_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+// A file path inside a skill: relative, '/'-separated, no empty, '.' or '..' segments, no backslashes or control characters.
+const relPath = (p) => typeof p === 'string' && p.length <= 1000 && p.split('/').every((s) => s && s !== '.' && s !== '..' && s.length <= 255 && !/[\u0000-\u001f\\]/.test(s));
+const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
+// What a worker checks before writing a bundle: its shape, names that stay inside their folders, each blob's sha and
+// the hash. Returns an error string, or null.
+export function extBundleError(b) {
+  if (!TYPES.obj(b) || b.v !== 1) return 'not a v1 extension bundle';
+  if (![b.skills, b.agents, b.mcp].every(Array.isArray) || !TYPES.obj(b.blobs)) return 'bundle: skills, agents, mcp and blobs required';
+  const need = new Set(), seen = new Set();
+  const once = (key) => !seen.has(key) && seen.add(key);
+  for (const s of b.skills) {
+    if (!TYPES.obj(s) || !AGENT_IDS.includes(s.agent) || !EXT_ENTRY_RE.test(s.name) || !once(`skill:${s.agent}/${s.name}`)
+      || !Array.isArray(s.files) || !s.files.length) return `bundle: bad skill ${JSON.stringify(s?.name)}`;
+    for (const f of s.files) {
+      if (!TYPES.obj(f) || !relPath(f.path) || !once(`file:${s.agent}/${s.name}/${f.path}`) || !HASH_RE.test(f.sha)) return `bundle: bad file in skill ${s.name}`;
+      need.add(f.sha);
+    }
+  }
+  for (const a of b.agents) {
+    if (!TYPES.obj(a) || !EXT_ENTRY_RE.test(a.name) || !once(`agent:${a.name}`) || !HASH_RE.test(a.sha)) return `bundle: bad subagent ${JSON.stringify(a?.name)}`;
+    need.add(a.sha);
+  }
+  for (const m of b.mcp) {
+    if (!TYPES.obj(m) || !MCP_NAME_RE.test(m.name) || !once(`mcp:${m.name}`) || !['stdio', 'http', 'sse'].includes(m.type)) return `bundle: bad MCP server ${JSON.stringify(m?.name)}`;
+  }
+  for (const sha of need) {
+    const data = b.blobs[sha];
+    if (typeof data !== 'string' || sha256(Buffer.from(data, 'base64')) !== sha) return `bundle: blob ${sha.slice(0, 12)} is missing or corrupt`;
+  }
+  return extHash(b) === b.hash ? null : 'bundle: hash mismatch';
 }
 
 // Reconnect delay: 1 s doubling to 60 s, with ±20% jitter so a fleet doesn't reconnect in lockstep.

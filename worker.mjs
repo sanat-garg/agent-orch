@@ -19,7 +19,8 @@
 //   node worker.mjs limit --cpu <cores|N%> --mem <GB|N%> [--max-tasks N] [--only-on-ac] | --show | --reset
 // Everything lives in ~/.agent-orch-worker (AGENT_ORCH_WORKER_HOME overrides): config.json (0600: the pairing and the
 // cap), worker.sock (the status socket, 0600), repos/ (bare cache clones), worktrees/, deps/ (node_modules by lockfile
-// hash), run/ (each job's wrapper scripts and pids), logs/. git and gh use the machine's own login.
+// hash), run/ (each job's wrapper scripts and pids), logs/, extensions/ (the head's MCP servers, 0600, and synced.json:
+// the skills and subagents it wrote into ~/.claude and ~/.codex). git and gh use the machine's own login.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -30,10 +31,11 @@ import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import WebSocket from 'ws';
 import {
-  PROTOCOL_VERSION, WS_PATH, CLAIM_PATH, WHOAMI_PATH, HEARTBEAT_MS, HEARTBEAT_MISSES, WIP_PUSH_MS, SLEEP_JUMP_MS, MAX_FRAME, MAX_BATCH, MSG, OUTCOMES,
+  PROTOCOL_VERSION, WS_PATH, CLAIM_PATH, WHOAMI_PATH, EXT_PATH, EXT_MAX_BODY, HEARTBEAT_MS, HEARTBEAT_MISSES, WIP_PUSH_MS, SLEEP_JUMP_MS, MAX_FRAME, MAX_BATCH, MSG, OUTCOMES,
   EVENT_KINDS, OS_KINDS, GRACE_MS, FEATURES, FEATURE_LIST, WORKER_ACCEPTS, backoffMs, createSender, decode,
 } from './cluster-protocol.mjs';
 import { AGENTS, agentStatus, clearLoginCache, fetchLimits, modelCatalog, readVersion, runAgentCli } from './agents.mjs';
+import { createExtensions } from './extensions.mjs';
 import { agentAccount } from './health.mjs';
 import { createNodeLogins } from './remote-login.mjs';
 import { parseCodexAuth } from './agent-share.mjs';
@@ -52,7 +54,6 @@ import { request as statusRequest, serveStatus, statusCli } from './worker-statu
 import { ensureBrowser, needsBrowser, normIdentity } from './browser.mjs';
 import { APPROVAL_TTL_MS, hostGate, patternsWith } from './gate.mjs';
 import { createLiveBrowsers, screenOp } from './browser-live.mjs';
-import { createExtensions } from './extensions.mjs';
 
 const execFileP = promisify(execFile);
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -240,10 +241,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   // For the status view: the last finished jobs, the head's count of tasks up next for this machine, the connection.
   const recent = [];
   let queued = null, downSince = Date.now(), retryAt = 0, connError = null, status = null;
-  // browser: {capable, headed, error?} once checked (inventory.browser); ext writes a browser run's MCP config (only the
-  // Playwright server: a worker has no MCP list of its own).
+  // browser: {capable, headed, error?} once checked (inventory.browser).
   let browser = null, browserAbort = null;
-  const ext = createExtensions({ dataDir: home });
   // The owner's live view of a browser profile here (browser-live.mjs), driven by the head's screen.* frames; frames are
   // dropped while the socket is backed up. Created on first use.
   let screens = null;
@@ -267,6 +266,9 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     sendInventory();
     models.refresh([id]).catch(() => {});
   } });
+  // The controller's skills, subagents and MCP servers (extensions.mjs bundle), written into this machine's homes.
+  const ext = createExtensions({ dataDir: home });
+  let extRun = null, extError = null;
   const reaperMode = process.env.AGENT_ORCH_REAPER || 'on';
   const resources = fs.existsSync('/proc/self/stat') && reaperMode !== 'off' ? createResources({
     mode: reaperMode, isActive: (o) => o.kind === 'task' && jobs.get(Number(o.id))?.state === 'running', loginActive: () => logins.active(), log,
@@ -458,11 +460,47 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     }));
     let gitVersion = null;
     try { gitVersion = /\d+\.\d+[\w.]*/.exec(await git(home, ['--version']))?.[0] || null; } catch {}
+    const synced = ext.synced();
     return {
       node: config.node, name: config.name || os.hostname(), os: process.platform, arch: process.arch, cores: os.cpus().length, mem: os.totalmem(),
       agents, limits: Object.fromEntries(ids.map((id) => [id, limits.get(id)]).filter(([, v]) => v)),
       versions: { agentOrch: VERSION, node: process.version, git: gitVersion }, cap, ...(browser && { browser }),
+      ext: { hash: synced.hash, ...(extError ? { error: extError } : {}), ...(synced.kept.length ? { kept: synced.kept } : {}) },
     };
+  }
+
+  // ---- extensions: fetched from the controller (GET EXT_PATH, its bearer token) when its hash (ext.sync,
+  // job.start.ext) isn't the one applied here. A caller waits for a fetch in flight and does at most one of its own, so
+  // a bundle that changes again meanwhile can't keep it looping; the newest one wins either way. Logs carry names and
+  // counts only: the bundle holds the MCP servers' secrets.
+  async function fetchExt() {
+    const r = await fetch(new URL(EXT_PATH, config.controller), { headers: { authorization: `Bearer ${config.token}` }, signal: AbortSignal.timeout(120_000) });
+    if (!r.ok) throw new Error(`the controller answered HTTP ${r.status}`);
+    const chunks = [];
+    let n = 0;
+    for await (const c of r.body) {
+      if ((n += c.length) > EXT_MAX_BODY) throw new Error(`the bundle is over ${EXT_MAX_BODY >> 20} MB`);
+      chunks.push(c);
+    }
+    try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new Error('the bundle is not JSON'); } // (the parse error quotes the text)
+  }
+  async function applyExt() {
+    try {
+      const b = await fetchExt(), r = ext.applyBundle(b);
+      extError = null;
+      log(`extensions ${r.hash.slice(0, 12)} applied: ${r.skills} skills, ${r.agents} subagents, ${r.mcp} MCP servers`
+        + `${r.kept.length ? `; kept this machine's own ${r.kept.join(', ')}` : ''}${b.skipped?.length ? `; left out by the controller: ${b.skipped.map((s) => `${s.name} (${s.reason})`).join(', ')}` : ''}`);
+    } catch (e) {
+      extError = String(e.message || e).slice(0, 300);
+      log(`extension sync failed: ${extError}`, 'warn');
+      throw e;
+    } finally { sendInventory(); }
+  }
+  async function syncExt(want) {
+    if (!want || want === ext.synced().hash) return;
+    if (extRun) { await extRun.catch(() => {}); if (want === ext.synced().hash) return; }
+    extRun ||= applyExt().finally(() => { extRun = null; });
+    return extRun;
   }
   async function probeBrowser() {
     if (BROWSER_MODE === 'off') return;
@@ -764,6 +802,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       case MSG.JOB_RESUME: return resumeJob(msg);
       case MSG.GIT_CREDENTIAL: gitCreds.set(msg.host, msg.token); return log(`received a git credential for ${msg.host}`);
       case MSG.AGENT_CREDENTIAL: return applyCredential(msg);
+      case MSG.EXT_SYNC: return syncExt(msg.hash).catch(() => {}); // logged and reported in the inventory; a job retries it
       case MSG.MODELS_REFRESH: {
         clearLoginCache();
         await models.refresh([msg.agent]);
@@ -858,11 +897,13 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     await runTurn(job, spec.prompt, spec.resume || null);
   }
 
-  // Cache fetch → worktree on agent-orch/task-<id> (from the pushed branch when it exists, else baseSha) → install.
+  // The controller's extensions (job.start.ext) → cache fetch → worktree on agent-orch/task-<id> (from the pushed branch
+  // when it exists, else baseSha) → install.
   async function setup(job) {
     const { spec } = job, branch = taskBranch(job.id);
     job.state = 'setup';
     try {
+      await syncExt(spec.ext).catch((e) => { throw new Error(`could not get the controller's skills and MCP servers: ${e.message}`); });
       setPhase(job, fs.existsSync(path.join(cacheDir(spec.repo), 'HEAD')) ? 'fetching' : 'cloning');
       job.cache = await ensureCache(spec.repo);
       const remote = `refs/remotes/origin/${branch}`;
@@ -947,6 +988,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       const run = needsBrowser(spec) ? { browser: { identity: normIdentity(spec.identity), outputDir: path.join(job.dir, '.agent-orch', 'shots') }, gate: gate.spec } : null;
       res = await runAgentCli({
         agent: spec.agent, model: spec.model || undefined, effort: spec.effort || undefined, prompt, cwd: job.dir, resume: resume || undefined, systemAppend: spec.systemAppend || undefined,
+        // The synced MCP servers as 0600 files (Claude's --mcp-config, codex -p): never on the command line.
+        mcp: ext.mcpRun(spec.agent),
         autonomous: spec.autonomous ?? true, signal: job.ac.signal, onEvent: (e) => pushEvent(job, e), bin,
         env: jobEnv(job), onSpawn: ({ pid, pgid }) => registerPid({ pid, pgid, kind: 'task', id: job.id }),
         ...(run && { mcp: ext.mcpRun(spec.agent, run), gate: gate.spec }),
@@ -1059,7 +1102,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     });
     log(`job ${job.id} done: ${outcome}${sha ? ` at ${sha.slice(0, 8)}` : ''}`);
     await dropWorktree(job);
-    finished.set(job.id, { ...spec, resume: job.sessionId || undefined });
+    finished.set(job.id, { ...spec, ext: undefined, resume: job.sessionId || undefined }); // ext.sync keeps extensions current by then
     if (finished.size > 20) finished.delete(finished.keys().next().value);
   }
 

@@ -63,14 +63,14 @@ Direction: C = controller → worker, W = worker → controller (`DIRECTION`; `v
 | --- | --- | --- | --- |
 | `hello` | W | node, protocol, version, jobs[{job, state, sha, next}], sha, features | first frame; `jobs` = work still on this machine, finished ones whose `job.done` wasn't acked included (re-attach); `sha` = its agent-orch checkout; `features` see Health |
 | `welcome` | C | node, protocol, heartbeatMs, wipPushMs, graceMs, features, policy, queued | settings for this node; `policy` see Power policy; `queued` see Local cap and status view |
-| `inventory` | W | node, name, os (linux/darwin), arch, cores, mem, agents[{id, installed, version, signedIn, account, models}], limits, versions{agentOrch, node, git}, cap, browser{capable, headed, error} | after `welcome` and whenever it changes; `cap` see Local cap and status view |
+| `inventory` | W | node, name, os (linux/darwin), arch, cores, mem, agents[{id, installed, version, signedIn, account, models}], limits, versions{agentOrch, node, git}, cap, browser{capable, headed, error}, ext{hash, error, kept} | after `welcome` and whenever it changes; `cap` see Local cap and status view; `ext` = the extension bundle applied there (see Extensions) |
 | `resources` | W | memAvailable, load[1,5,15], running[job ids], swapUsedPct + health telemetry: cpu[% per core], memTotal, swapTotal, swapUsed, disk{path, free, total}, net{host, ok, ms, at, error}, agents[{id, installed, version, signedIn}], uptime, procUptime, version, sha, battery{pct, charging, source}, thermal{pressure, speedLimit, level}, intake{ok, reason, text}, awake, cap, jobsMem, jobsCpu | every heartbeat (10 s), from /proc or `vm_stat`/`sysctl`/`pmset`/`notifyutil` on macOS; see Health, Power policy and Local cap |
 | `heartbeat` | both | queued (C) | liveness; the controller's carries `queued` |
 | `ack` / `error` / `bye` | both | re (+job) / message / reason | replies; the controller acks each `job.done` with its `job` (the worker then forgets the job); `bye` before a clean shutdown |
 | `wake` | W | sleptAt, sleptMs | a time jump on the worker (a laptop's sleep), sent after the next `welcome` |
 | `job.offer` | C | job, agent, model, footprint | "can you take this?" |
 | `job.accept` / `job.reject` | W | job / job, reason (busy, low_memory, agent_missing, not_signed_in, draining, version, other, power, cap) | answer within 10 s or counts as reject; `power` only to a controller with feature `policy`, `cap` only with feature `cap` |
-| `job.start` | C | job, title, prompt, systemAppend, agent, model, account, repo, baseSha, branch, doneWhen, resume, timeouts{taskSec, verifySec, installSec}, autonomous, tools, install[argv], capabilities["browser"], identity | run it (a browser task gets the Playwright MCP on that profile, browser.mjs) |
+| `job.start` | C | job, title, prompt, systemAppend, agent, model, effort, account, repo, baseSha, branch, doneWhen, resume, timeouts{taskSec, verifySec, installSec}, autonomous, tools, install[argv], capabilities["browser"], identity, ext | run it (a browser task gets the Playwright MCP on that profile, browser.mjs); `ext` = the controller's extension bundle hash, fetched first unless the worker has it |
 | `job.event` | W | job, from, events[≤200 normalised agent events] | batched every ~1 s; `from` = index of the first event so resends dedupe |
 | `job.check` | W | job, command, output, pass, code | result of the done-when check, run on the worker in the task's worktree |
 | `job.wip` | W | job, sha, branch | a WIP commit was pushed to `agent-orch/task-<id>` |
@@ -88,6 +88,7 @@ Direction: C = controller → worker, W = worker → controller (`DIRECTION`; `v
 | `logs.tail` / `logs` | C / W | req, lines / req, lines[], error | the owner asked for the worker's log tail (feature `logs`) |
 | `node.update` | C | sha | update agent-orch and restart, sent only while the node is idle (feature `update`) |
 | `node.policy` | C | policy | the owner changed the node's power policy or max tasks (feature `policy`); older workers read it in the next `welcome` |
+| `ext.sync` | C | hash, bytes | the controller's skills, subagents or MCP servers are now bundle `hash` (sent after `welcome` and on every change); a worker holding another one GETs `EXT_PATH` (feature `ext`) |
 | `screen.req` / `screen.res` / `screen.input` / `screen.frame` / `screen.state` | C / W / C / W / W | req, op, identity… / req, result, error / identity, events / identity, n, data, w, h / identity, url, title, active, takeover | the owner's live view of a browser profile on the worker (browser-live.mjs; feature `screen`); input is never logged |
 
 A task's life on a worker: `job.offer` → `job.accept` → `job.start` → `job.event`* (+ `job.wip`*) → (if ok and the
@@ -119,6 +120,36 @@ verify-failed prompt, same as the local flow) or `job.cancel`. The controller ke
   merge, the controller deletes the remote branch and sends nothing further; the worker removes its worktree when it
   gets the `ack` for its final `job.done`, and prunes cached repos unused for 14 days.
 - Controller-side worktrees are unchanged for local-node tasks.
+
+## Extensions (skills, subagents, MCP servers)
+
+A task on a worker runs with the controller's skills, Claude subagents and enabled MCP servers, and the owner manages
+them only on the controller (Settings → Skills & tools); workers stay compute-only. Personas need nothing extra: the
+controller appends a project's persona to `job.start.systemAppend`.
+
+- **The bundle** (extensions.mjs `syncInfo`/`syncBundle`, format and checks in cluster-protocol.mjs `extBundleError`):
+  every skill folder with a SKILL.md in `~/.claude/skills` and `~/.codex/skills` (hand-installed ones included; `.git`
+  and symlinks left behind, like the UI's copies), every `~/.claude/agents/<name>.md`, and the enabled servers of
+  `<DATA>/extensions/mcp.json`. Files are content-addressed (`blobs`, sha256 → base64), so a skill copied for both
+  agents travels once. `extHash` covers the entries and the MCP servers. Bounded: `EXT_MAX_BYTES` (32 MB) of file bytes;
+  a skill past the import limits (1000 files, 20 MB) or past the cap stays on the controller and is listed in
+  `skipped`. The controller rebuilds it only when a file's size/mtime or the MCP list changes.
+- **Transport**: not frames (they are capped at `MAX_FRAME` and carry no file contents or secrets). Frames carry only
+  the hash: `ext.sync {hash, bytes}` (feature `ext`; an older worker gets none and ignores `job.start.ext`) after `welcome` and whenever the owner changes a skill, subagent or MCP server
+  (server.mjs `ext.onChange` → `cluster.syncExt`), and `job.start.ext`, read when the job starts, so something copied
+  into the controller's home by hand reaches the next job. A worker whose applied hash differs GETs `EXT_PATH`
+  (`/api/cluster/ext`) with its bearer token (cluster.mjs `handleExt`: unknown tokens 401, disabled nodes 403, no
+  cookie) and gets gzip JSON, refused past `EXT_MAX_BODY`. A fetch in flight is shared. A job that can't get its
+  bundle ends `setup_failed`; a failed `ext.sync` fetch is only logged and shown in `inventory.ext.error`.
+- **On the worker** (extensions.mjs `applyBundle`, after `extBundleError`: paths stay inside their folder, every blob
+  matches its sha, the hash matches): skills are written beside their folder and swapped in, subagents written
+  atomically. `~/.agent-orch-worker/extensions/synced.json` records what syncs wrote; only those entries are replaced
+  or removed later. A skill or subagent installed on the worker by hand under a name the controller also uses is left
+  alone and reported in `inventory.ext.kept`. MCP servers go to `~/.agent-orch-worker/extensions/mcp.json` (0600) and
+  each run gets them the controller's way, as 0600 files passed through `runAgentCli`'s `mcp` option: Claude
+  `--mcp-config ~/.agent-orch-worker/extensions/claude-mcp.json`, codex `-p agent-orch`
+  (`~/.codex/agent-orch.config.toml`). They never go on a command line or in a log; the worker logs names and counts.
+- A stdio MCP server's command must exist on the worker too (`npx -y …` servers fetch themselves).
 
 ## Scheduling
 
@@ -270,8 +301,8 @@ UI runs on it, and it takes work only from the head.
 
 - **Allow-list** (cluster-protocol.mjs `WORKER_ACCEPTS`): connection upkeep (`welcome`, `heartbeat`, `ack`, `error`,
   `bye`), jobs (`job.offer/start/cancel/pause/resume/attach`, plus `git.credential` for their pushes), remote sign-in
-  driven from the head's Connections (`login.*`), `models.refresh`, `limits.refresh`, `logs.tail`, `node.update` and
-  `node.policy`. The worker decodes with `decode(raw, {from: 'c', accept: WORKER_ACCEPTS})`, which refuses any other
+  driven from the head's Connections (`login.*`), `models.refresh`, `limits.refresh`, `logs.tail`, `node.update`,
+  `node.policy` and `ext.sync` (a hash; see Extensions). The worker decodes with `decode(raw, {from: 'c', accept: WORKER_ACCEPTS})`, which refuses any other
   type before validating it: the worker logs `rejected "<type>" from the controller` and answers `error`. A type added to
   the protocol later is refused until it is put on the list, and the list may never hold a chat-, prompt-, planner- or
   settings-like type (test/compute-only.test.mjs).
@@ -363,6 +394,10 @@ A worker's owner decides how much of the machine the cluster may use; everything
   owner explicitly authorises per node in the UI (a fine-grained token limited to the project repos with
   contents:write is recommended); the worker keeps it in memory or a 0600 git credential store, never in a repo URL
   or a log. Without it the worker uses its own `gh auth`/ssh key.
+- **MCP secrets go to every paired worker**: the extension bundle (see Extensions) carries the enabled MCP servers'
+  env values and headers, since a worker's runs need them. It is not a frame: a worker GETs it over TLS with its node
+  token, only while the node is enabled, keeps it in 0600 files and never logs it. Disabling or revoking a node stops
+  further fetches but doesn't delete what it already has; rotate a server's secret if a worker is lost.
 - Frames are size-capped (`MAX_FRAME`) and schema-checked; job fields such as `branch` must match
   `agent-orch/task-<id>` and `baseSha` a full sha, so a controller bug can't point a worker at arbitrary refs.
 

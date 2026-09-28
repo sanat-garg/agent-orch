@@ -5,6 +5,7 @@
 //   npm test -- --list           print the selection without running it
 // Owns every temporary fixture for the run, including leftovers from failed setup hooks.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -41,9 +42,15 @@ if (!count) process.exit(0);
 
 // One file at a time by default: on 1 core the suite is mostly CPU-bound, and parallel files flaked timing-sensitive tests.
 const concurrency = Number(process.env.AGENT_ORCH_TEST_CONCURRENCY) || 1;
-const cache = path.join(root, 'node_modules', '.cache');
+let cache = path.join(root, 'node_modules', '.cache');
 fs.mkdirSync(cache, { recursive: true });
-const temp = fs.mkdtempSync(path.join(cache, 'agent-orch-test-'));
+cache = fs.realpathSync(cache); // a worktree's node_modules is often a symlink to the main checkout's
+// Chromium's <TMPDIR>/org.chromium.Chromium.XXXXXX/SingletonSocket is a Unix socket, at most 107 bytes: a deep checkout
+// (a worktree) gets its temp dir under ~/.cache instead, or browser tests abort with "Socket path too long".
+const socketPath = (base) => path.join(base, 'agent-orch-test-XXXXXX', 'org.chromium.Chromium.XXXXXX', 'SingletonSocket');
+const tempBase = Buffer.byteLength(socketPath(cache)) <= 107 ? cache : path.join(os.homedir(), '.cache');
+fs.mkdirSync(tempBase, { recursive: true });
+const temp = fs.mkdtempSync(path.join(tempBase, 'agent-orch-test-'));
 // One suite at a time per machine (several sessions share this 1-core box), at low CPU priority so the live server and
 // chats stay responsive. flock waits for the lock; AGENT_ORCH_TEST_NOLOCK=1 skips it.
 const lock = path.join(cache, 'agent-orch-test.lock');

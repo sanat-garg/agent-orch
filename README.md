@@ -221,7 +221,16 @@ limit never blocks another's.
 - **Personas** set how a chat's agents work and talk. Pick one per chat with the persona button in the composer.
   It is added to that chat's system prompt and to its project's planner and task runs, and applies from the next message.
 
-Worker machines get a task's persona, but not yet the skills, subagents or MCP servers.
+**Worker machines** run tasks with the same skills, subagents and enabled MCP servers as this server, plus the
+task's persona. You manage them only here. When you change one, every connected worker is told. Each task also names
+the set it needs, so a skill you copied into `~/.claude/skills` by hand reaches the next task. A worker downloads the
+set only when it has changed, over HTTPS with its own machine token (`GET /api/cluster/ext`). It writes skills and
+subagents into its own `~/.claude` and `~/.codex`, and it only replaces or removes the ones it put there itself.
+Anything installed on the worker by hand is left alone; if it has the same name as one of yours, the worker keeps its
+own and says so in its log. MCP servers, secrets included, are stored in `0600` files under
+`~/.agent-orch-worker/extensions/` and reach the worker's CLIs the same way as here. Every paired machine gets your MCP
+secrets, so rotate them after removing a machine you no longer trust. A server started by a command (`npx …`) needs
+that command on the worker too. The set is capped at 32 MB; skills that don't fit stay on this server.
 
 ## Parallel tasks and git worktrees
 
@@ -370,16 +379,18 @@ node worker.mjs limit --cpu 4 --mem 8 [--max-tasks 2] [--only-on-ac]     # cap w
 
 - Pairing stores the node token in `~/.agent-orch-worker/config.json` (mode 0600). Everything else lives there
   too: `repos/` (bare cache clones), `worktrees/` (one per job, removed when it finishes), `deps/` (`node_modules`
-  cached by lockfile hash), `logs/worker.log` and `logs/jobs/<id>.jsonl`. `AGENT_ORCH_WORKER_HOME` moves it.
+  cached by lockfile hash), `logs/worker.log` and `logs/jobs/<id>.jsonl`, `extensions/` (this server's MCP servers and
+  a list of the skills and subagents it synced, see above). `AGENT_ORCH_WORKER_HOME` moves it.
 - **Credentials come from the machine's own login**: sign Claude Code and Codex in locally, and set up git so it can
-  fetch and push the project repos (`gh auth login` then `gh auth setup-git`, or an SSH key). Nothing else is sent to
-  the worker, except a GitHub token the owner explicitly authorises per node (`git.credential`, kept in memory only).
+  fetch and push the project repos (`gh auth login` then `gh auth setup-git`, or an SSH key). The only secrets sent
+  to the worker are your MCP servers' env values and headers (with the skills, see Skills, MCP servers, subagents and
+  personas) and a GitHub token you explicitly authorise per node (`git.credential`, kept in memory only).
 - Run it as a dedicated unprivileged user under systemd (`Restart=always`) or, on macOS, a LaunchDaemon with
   `UserName` (see Adding machines). On stop it pauses running jobs and pushes their work first. It reconnects with
   backoff forever and runs its own reaper for leftover agent processes (`AGENT_ORCH_REAPER=off` disables it).
 - **It is compute-only**: no chat, planner, reflection or web UI, and no TCP port. It acts only on the head's job,
-  sign-in, refresh, log, update and policy messages, and rejects (and logs) anything else. Its only commands are
-  `pair`, `run`, `status` and `limit`. `node server.mjs` refuses to start on a paired worker; to make the machine a
+  sign-in, refresh, log, update, policy and extension-sync messages, and rejects (and logs) anything else. Its only
+  commands are `pair`, `run`, `status` and `limit`. `node server.mjs` refuses to start on a paired worker; to make the machine a
   head instead, unpair it first (the installer's `--uninstall --purge`).
 - **Status view**: `node worker.mjs status` is a live terminal view (refreshed every second, q or Ctrl-C quits;
   `--once` prints one snapshot): the connection to the head (Connected, Reconnecting, Offline), the cap in effect, the

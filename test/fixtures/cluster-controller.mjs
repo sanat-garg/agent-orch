@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Controller for the cluster e2e test (test/cluster-e2e.test.mjs): the orchestrator plus the cluster hub on a local HTTP
-// server, like server.mjs wires them. Prints {base, code} (a pairing code), waits for a worker with codex to come online,
+// server, like server.mjs wires them (with this $HOME's skills and subagents and <dataDir>'s MCP servers as the
+// extension bundle). Prints {base, code} (a pairing code), waits for a worker with codex to come online,
 // queues two tasks in the project at argv[3] (one for codex, which only the worker has, and one for Claude, run here by
 // a fake SDK query), waits for both to finish and prints the resulting rows as JSON.
 //   node cluster-controller.mjs <dataDir> <project>
@@ -12,7 +13,8 @@ import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { createOrchestrator } from '../../orchestrator.mjs';
 import { createCluster } from '../../cluster.mjs';
-import { CLAIM_PATH } from '../../cluster-protocol.mjs';
+import { createExtensions } from '../../extensions.mjs';
+import { CLAIM_PATH, EXT_PATH } from '../../cluster-protocol.mjs';
 
 const [dataDir, repo] = process.argv.slice(2);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -33,9 +35,10 @@ const o = createOrchestrator({
   onCommit: (dir) => { promisify(execFile)('git', ['push', '-q', 'origin', 'HEAD:main'], { cwd: dir }).catch((e) => console.error('push failed', e.message)); },
 });
 // Test homes may sit on a small /tmp: no low-disk auto-drain here.
-const cluster = createCluster({ dbFile: path.join(dataDir, 'orchestrator', 'agent-orch.db'), heartbeatMs: 500, health: { diskMinBytes: 0 } });
+const cluster = createCluster({ dbFile: path.join(dataDir, 'orchestrator', 'agent-orch.db'), heartbeatMs: 500, health: { diskMinBytes: 0 }, ext: createExtensions({ dataDir }) });
 o.attachCluster(cluster);
 const server = http.createServer(async (req, res) => {
+  if (req.url === EXT_PATH && req.method === 'GET') return cluster.handleExt(req, res);
   if (req.url !== CLAIM_PATH || req.method !== 'POST') { res.writeHead(404); return res.end(); }
   let body = '';
   for await (const c of req) body += c;
@@ -55,7 +58,8 @@ const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'))
 const pid = Number(db.prepare("INSERT INTO projects(path,name,priority,status,perpetual,created_at) VALUES(?,?,50,'active',0,0)").run(repo, 'demo').lastInsertRowid);
 const task = (title, prompt, agent, files, doneWhen) => Number(db.prepare('INSERT INTO tasks(project_id,title,prompt,priority,urgency,agent,files,done_when,created_at) VALUES(?,?,?,50,?,?,?,?,?)')
   .run(pid, title, prompt, 'normal', agent, JSON.stringify(files), doneWhen, Date.now() / 1000).lastInsertRowid);
-const remote = task('Add hello.txt', 'Create hello.txt', 'codex', ['hello.txt'], '`test -s hello.txt` passes');
+// ARGS: the worker's stub agent also commits args.json (its arguments, MCP profile and skills).
+const remote = task('Add hello.txt', 'Create hello.txt ARGS', 'codex', ['hello.txt'], '`test -s hello.txt` passes');
 const local = task('Add local.txt', 'Create local.txt', null, ['local.txt'], null);
 const get = (id) => db.prepare('SELECT * FROM tasks WHERE id=?').get(id);
 await until(() => [remote, local].every((id) => ['done', 'failed', 'cancelled', 'needs_integration'].includes(get(id).status)), 90_000);

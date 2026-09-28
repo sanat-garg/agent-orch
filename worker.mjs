@@ -931,6 +931,16 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
 
   // Bare cache clone (blob-less), fetched before each job; remote branches land in refs/remotes/origin/*.
   const cacheDir = (repo) => path.join(dirs.repos, `${cacheName(repo)}.git`);
+  // One git operation on a cache (and the worktrees made from it) at a time: jobs set up or pushing in parallel would
+  // otherwise race on its refs and config ("cannot lock ref 'refs/remotes/origin/main'", "could not set remote.origin.url").
+  const cacheLocks = new Map();
+  function withCache(repo, fn) {
+    const key = cacheDir(repo), run = (cacheLocks.get(key) || Promise.resolve()).then(fn);
+    const tail = run.catch(() => {});
+    cacheLocks.set(key, tail);
+    tail.then(() => { if (cacheLocks.get(key) === tail) cacheLocks.delete(key); });
+    return run;
+  }
   async function ensureCache(repo) {
     const dir = cacheDir(repo), env = gitAuthEnv(repo);
     if (!fs.existsSync(path.join(dir, 'HEAD'))) {
@@ -978,20 +988,22 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       await syncExt(spec.ext).catch((e) => { throw new Error(`could not get the controller's skills and MCP servers: ${e.message}`); });
       if (isBrowserTask(spec)) { fs.mkdirSync(job.dir, { recursive: true }); return true; }
       setPhase(job, fs.existsSync(path.join(cacheDir(spec.repo), 'HEAD')) ? 'fetching' : 'cloning');
-      job.cache = await ensureCache(spec.repo);
-      const remote = `refs/remotes/origin/${branch}`;
-      job.remoteStart = (await gitOk(job.cache, ['rev-parse', '--verify', '-q', remote])) ? (await git(job.cache, ['rev-parse', remote])).trim() : '';
-      if (fs.existsSync(path.join(job.dir, '.git'))) {
-        await git(job.dir, ['checkout', '-q', branch]);
-      } else {
-        await git(job.cache, ['worktree', 'prune']);
-        fs.rmSync(job.dir, { recursive: true, force: true });
-        const start = job.remoteStart || spec.baseSha;
-        if (!job.remoteStart && !(await gitOk(job.cache, ['cat-file', '-e', `${spec.baseSha}^{commit}`]))) {
-          await git(job.cache, ['fetch', '-q', 'origin', spec.baseSha], { env: job.env });
+      await withCache(spec.repo, async () => {
+        job.cache = await ensureCache(spec.repo);
+        const remote = `refs/remotes/origin/${branch}`;
+        job.remoteStart = (await gitOk(job.cache, ['rev-parse', '--verify', '-q', remote])) ? (await git(job.cache, ['rev-parse', remote])).trim() : '';
+        if (fs.existsSync(path.join(job.dir, '.git'))) {
+          await git(job.dir, ['checkout', '-q', branch]);
+        } else {
+          await git(job.cache, ['worktree', 'prune']);
+          fs.rmSync(job.dir, { recursive: true, force: true });
+          const start = job.remoteStart || spec.baseSha;
+          if (!job.remoteStart && !(await gitOk(job.cache, ['cat-file', '-e', `${spec.baseSha}^{commit}`]))) {
+            await git(job.cache, ['fetch', '-q', 'origin', spec.baseSha], { env: job.env });
+          }
+          await git(job.cache, ['worktree', 'add', '-q', '-f', '-B', branch, job.dir, start]);
         }
-        await git(job.cache, ['worktree', 'add', '-q', '-f', '-B', branch, job.dir, start]);
-      }
+      });
       job.pushed ??= job.remoteStart || null;
       await install(job);
       return true;
@@ -1205,12 +1217,24 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       if (final) setPhase(job, 'pushing');
       for (let i = 0; ; i++) {
         try {
-          await git(job.dir, [...GIT_ID, 'push', '-q', `--force-with-lease=refs/heads/${branch}:${job.pushed || ''}`, 'origin', `HEAD:refs/heads/${branch}`], { env: job.env });
+          await withCache(job.spec.repo, () => git(job.dir, [...GIT_ID, 'push', '-q', `--force-with-lease=refs/heads/${branch}:${job.pushed || ''}`, 'origin', `HEAD:refs/heads/${branch}`], { env: job.env }));
           break;
         } catch (e) {
           const why = String(e.stderr || e.message).trim().split('\n').pop();
           jobError(job, 'push_failed', `push of ${branch} failed: ${why}`, { stderr: e.stderr });
-          if ((!final && i >= 2) || job.stop?.kind === 'cancel') throw new Error(why);
+          if (job.stop?.kind === 'cancel') throw new Error(why);
+          // Refused by the lease: the branch on origin isn't where this job last saw it (another run's push landed after
+          // this job fetched). Already part of this work → lease on it and push again; other work there → stop, never clobber it.
+          const tip = await branchTip(job, branch).catch(() => undefined);
+          if (tip !== undefined && tip !== (job.pushed || '')) {
+            if (tip && !(await gitOk(job.dir, ['merge-base', '--is-ancestor', tip, 'HEAD']))) {
+              throw new Error(`${branch} on origin has commits this run doesn't (${tip.slice(0, 8)}): another machine pushed work to it`);
+            }
+            log(`job ${job.id}: ${branch} on origin moved to ${tip ? tip.slice(0, 8) : 'nothing'}, which this run already has; pushing again`);
+            job.pushed = tip || null;
+            continue;
+          }
+          if (!final && i >= 2) throw new Error(why);
           await new Promise((r) => setTimeout(r, backoffMs(i)));
         }
       }
@@ -1222,12 +1246,25 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     return run;
   }
 
+  // The task branch's tip on origin ('' when it has none), fetched into the cache.
+  function branchTip(job, branch) {
+    return withCache(job.spec.repo, async () => {
+      const remote = `refs/remotes/origin/${branch}`;
+      await git(job.cache, ['fetch', '-q', '--prune', 'origin', `+refs/heads/${branch}:${remote}`], { env: job.env }).catch(async (e) => {
+        if (!/couldn't find remote ref/i.test(String(e.stderr || e.message))) throw e;
+        await gitOk(job.cache, ['update-ref', '-d', remote]);
+      });
+      return (await gitOk(job.cache, ['rev-parse', '--verify', '-q', remote])) ? (await git(job.cache, ['rev-parse', remote])).trim() : '';
+    });
+  }
   async function dropWorktree(job) {
     if (!job.cache) return;
-    await gitOk(job.cache, ['worktree', 'remove', '--force', job.dir]);
-    fs.rmSync(job.dir, { recursive: true, force: true });
-    await gitOk(job.cache, ['worktree', 'prune']);
-    await gitOk(job.cache, ['branch', '-D', taskBranch(job.id)]);
+    await withCache(job.spec.repo, async () => {
+      await gitOk(job.cache, ['worktree', 'remove', '--force', job.dir]);
+      fs.rmSync(job.dir, { recursive: true, force: true });
+      await gitOk(job.cache, ['worktree', 'prune']);
+      await gitOk(job.cache, ['branch', '-D', taskBranch(job.id)]);
+    });
     await pruneCaches().catch((e) => log(`cache prune failed: ${e.message}`, 'warn'));
   }
 

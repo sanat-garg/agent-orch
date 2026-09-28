@@ -176,6 +176,25 @@ test('a job edits a file, passes its check and pushes its branch to origin', asy
   assert.ok(fs.readFileSync(path.join(home, '.agent-orch-worker', 'logs', 'worker.log'), 'utf8').includes('job 7 done: ok'));
 });
 
+test('two jobs set up from one cache at once; a push refused because the base landed on its branch meanwhile goes through', async () => {
+  const { node } = JSON.parse(fs.readFileSync(path.join(home, '.agent-orch-worker', 'config.json'), 'utf8'));
+  const start = (job, prompt) => cluster.send(node, {
+    t: 'job.start', job, title: `Parallel ${job}`, prompt, agent: 'codex', repo: REPO, baseSha,
+    branch: `agent-orch/task-${job}`, timeouts: { taskSec: 60, verifySec: 30, installSec: 60 },
+  });
+  assert.ok(start(21, 'TICKS:12 WRITE:t21.txt'));
+  assert.ok(start(22, 'WRITE:t22.txt'));
+  // While job 21's agent runs, another run's push of the unchanged base lands on its branch (after job 21 fetched).
+  await waitFor(() => got('job.event', 21).length, { timeout: 20000, message: `job.event 21\n${workerOut}` });
+  git(origin, 'update-ref', 'refs/heads/agent-orch/task-21', baseSha);
+  const done = await waitFor(() => got('job.done', 21).length && got('job.done', 22).length && [got('job.done', 21)[0], got('job.done', 22)[0]],
+    { timeout: 30000, message: `job.done 21/22\n${workerOut}` });
+  for (const d of done) assert.equal(d.outcome, 'ok', d.text);
+  assert.equal(git(origin, 'rev-parse', 'refs/heads/agent-orch/task-21'), done[0].sha);
+  assert.equal(git(origin, 'rev-parse', 'refs/heads/agent-orch/task-22'), done[1].sha);
+  assert.ok(!got('job.error', 22).length, 'the parallel setup raced on nothing');
+});
+
 test('a job whose base commit does not exist ends as setup_failed', async () => {
   const { node } = JSON.parse(fs.readFileSync(path.join(home, '.agent-orch-worker', 'config.json'), 'utf8'));
   cluster.send(node, {

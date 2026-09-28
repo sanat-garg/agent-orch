@@ -14,3 +14,9 @@ Update README.md for what has landed on main (read the code as of now; do not de
 ## Done when
 
 `grep -n 'push-vapid.json' README.md` prints a line, `grep -n '/api/browser/task' README.md` prints a line, and `! grep -n 'over 2.5 GB' README.md` prints nothing
+
+## Result — done (check passed) (2026-09-28 14:53)
+
+I've rewritten the three README sections and added the two push files to the `data/` table; all three "Done when" greps pass.
+
+AGENT-ORCH-STATUS: done — README covers parallel slots, push notifications, Browser tab tasks

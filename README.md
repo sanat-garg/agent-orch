@@ -293,15 +293,21 @@ your own names, one per line, to the default list (a plain phrase matches whole 
 `GET`/`PUT /api/orch/gate` reads and sets `{patterns, ttlHours}`, where `ttlHours` (up to 336) replaces the 24-hour
 expiry.
 
-**Live browser view** (`browser-live.mjs`, `browser-view.mjs`, `public/browser.js`). The globe in the sidebar opens
-the **Browser** sheet: every machine that can run a browser, its profiles, the sites each is signed in to (cookie
-domains only) and **Clear**. **Open** streams the profile's Chromium into the page, and your mouse, touch, keys and
-paste go back to it, with a URL bar, Back and Reload. Use it to:
+**The Browser tab** (`browser-live.mjs`, `browser-view.mjs`, `public/browser.js`). The header's **Browser** tab shows
+a profile's Chromium live in place, with a profile picker, a URL bar, Back, Reload, Paste and Keyboard; your mouse,
+touch, keys and paste go back to it, and on a phone the page is laid out for the phone's screen. **Profiles** opens the
+Browser sheet: every machine that can run a browser, its profiles, the sites each is signed in to (cookie domains only)
+and **Clear**. Use it to:
 
 - **Sign in once** on a profile (2FA and CAPTCHAs included) before any task needs it. Tasks on that identity reuse the
   cookies.
+- **Tell an agent what to do on this screen**: the prompt box under the page runs a screen task on that profile and
+  machine (`POST /api/browser/task` `{prompt, identity, node}`). The panel below follows its running or last task
+  (`GET /api/browser/tasks?identity=&node=`): status, steps, screenshots, approvals, the result and **Stop** (`POST
+  /api/browser/task/<id>/stop`). Screen tasks go to a non-reflecting **Browser** project and have no git lifecycle:
+  no repository, worktree, "Done when" check or merge. The agent's final message is the result.
 - **Watch a run**: the viewer and the task's MCP share one Chromium per profile, and a running browser task's drawer
-  shows a small live thumbnail.
+  shows a small live thumbnail that opens the same view.
 - **Take over**: while you control it, the task's browser actions wait; **Hand back** (or closing the view) lets
   them continue.
 
@@ -319,14 +325,25 @@ In a project that is a git repository, each work task runs in its own git worktr
 `<repo>/../.agent-orch-worktrees/<repo>-task-<id>` on branch `agent-orch/task-<id>`, so several tasks can edit
 at once without seeing each other's changes. Projects outside git (or on a detached HEAD) run in the main tree.
 
-- **One task at a time**: by default exactly one work task runs across all projects (plan tasks and chat turns
-  run beside it). Orchestrator settings → **Parallel tasks: 2** allows a second one only while `/proc/meminfo`
-  shows over 2.5 GB `MemAvailable` and under 25% swap in use, re-checked before every claim; the second task
-  runs on another agent from the fallback list. The planner plans sequential chains.
-- **Memory guard**: nothing is claimed while `MemAvailable` is under 800 MB. If it stays under 300 MB for 30 s,
-  the newest running task is paused (`Paused #N: server memory low`) and resumes its session later.
-- **`files`** (optional): paths or globs the task will change. When two tasks may run, overlapping lists
-  (or a task without `files`) keep them apart.
+- **Slots on this server** (`parallel.mjs` `taskSlots`): Settings → **This server runs up to N** (1-16, `PUT
+  /api/orch/parallel` `{"parallelTasks": n}`) is the limit. Unset, it comes from the hardware (`headTarget`: three
+  a core, at least 4 slots, 2 of them kept for integrators and reflection), so a 2-core VPS runs 4 work tasks. Plan
+  tasks and chat turns run beside them. While a worker is online the controller runs no work tasks unless
+  `controllerWork` is on.
+- **Memory is only an emergency guard**, never a throttle: nothing is claimed while `MemAvailable` is under 800 MB
+  (`MEM.claimFloor`), and if it stays under 300 MB (`MEM.pauseBelow`) for 30 s the newest running task is paused
+  (`Paused #N: server memory low`) and resumes its session later.
+- **Each machine's cap**: Machines → a machine → **Parallel tasks** (`nodes.max_slots`); Auto sizes it from the
+  machine's cores and free memory, and a worker's own `node worker.mjs limit` is a hard ceiling. Settings →
+  **Parallel tasks** (`maxTasks`) optionally caps work tasks across all machines.
+- **Rapid development mode** (Settings, on by default): reflection keeps every free slot fed, queuing small
+  file-disjoint tasks (with integrators where parts must combine) until the ready ones cover every free slot plus two. File overlap is then only a preference: a free slot takes an overlapping task when nothing else is ready,
+  up to a per-file cap (3, tuned between 1 and 6 from the last day's merge conflicts). Off, overlapping tasks wait
+  for each other and reflection waits for an empty queue.
+- **Run on** (task drawer): pins a queued work task to one machine; it then waits for that machine even while
+  others are free. **Any machine** undoes it.
+- **`files`** (optional): paths or globs the task will change. Overlapping lists (or a task without `files`) keep
+  tasks apart, as above.
 - **`after`**: true prerequisites only. A task starts once all of them are done, and cancelling or failing one
   cancels everything after it.
 - **Cheap worktrees**: `node_modules` is a symlink to the main checkout's, and a worktree is removed right after
@@ -497,6 +514,20 @@ node worker.mjs limit --cpu 4 --mem 8 [--max-tasks 2] [--only-on-ac]     # cap w
   changed) and restarts through its service. Keep that checkout free of local changes. Server details → Machines also
   has an Update button.
 
+## Notifications
+
+agent-orch sends Web Push with no dependency (`push.mjs`: VAPID JWTs and aes128gcm payloads on node:crypto), so your
+phone hears about work that needs you while the app is closed. The key pair is made on first start in
+`data/push-vapid.json` and subscribed devices are kept in `data/push-subscriptions.json`; both live under `data/` and
+are never committed.
+
+- **Turn it on per device**: Settings → **Notify this device**. On an iPhone it works only in agent-orch added to the
+  Home Screen (Share → Add to Home Screen); in Safari the switch stays off. Push needs HTTPS, which Caddy provides.
+- **What sends one** (server.mjs `notify`): an approval waiting on the gate, a chat permission prompt nobody answered
+  within 15 s, a failed task, a task that needs integration, a review checkpoint, an orchestrator waiting event, an
+  update that wasn't applied and a stopped GitHub push. At most one push per tag per minute. Tapping one opens the
+  task or chat.
+
 ## Screenshots
 
 `bin/shot.mjs` screenshots a page with Playwright's Chromium (`playwright-core` is pinned to the version
@@ -539,6 +570,8 @@ All runtime state lives in `data/` (or `CW_DATA_DIR`). The JSON state files (`au
 | `orchestrator/runs/` | per-run agent logs |
 | `orchestrator/lock` | PID of the process that runs the orchestrator; a second instance on the same dir won't schedule tasks |
 | `orchestrator/bin/` | `python`/`pip` shims |
+| `push-vapid.json` | the Web Push VAPID key pair (made on first start) |
+| `push-subscriptions.json` | the devices that turned on Notify this device |
 | `extensions/` | MCP servers (`mcp.json`, with their secrets), the `--mcp-config` file Claude runs read, and personas (`personas.json`) |
 
 `data/` is in `.gitignore` and must never be committed. It contains the password hash, live session

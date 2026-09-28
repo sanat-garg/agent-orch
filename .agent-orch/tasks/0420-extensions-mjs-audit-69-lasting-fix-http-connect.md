@@ -13,3 +13,7 @@ Goal: close AUDIT #69 properly. gate-proxy.mjs now speaks MCP streamable http up
 ## Done when
 
 `npm test -- test/extensions.test.mjs test/ext-gate-http.test.mjs` passes and `! grep -q "over http cannot be gated" extensions.mjs`
+
+## Result — done (check passed) (2026-09-28 14:16)
+
+AGENT-ORCH-STATUS: done — http connectors now run through the gate proxy; sse still withheld

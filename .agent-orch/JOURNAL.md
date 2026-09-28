@@ -1133,3 +1133,6 @@ compute-only tests pass; Linux-only /proc/systemd checks now skipped on macOS
 ## 2026-09-28 14:15 — #421 worktrees.mjs: git operations retry lock races and network blips through retryGit [done (check passed)]
 
 worktrees.mjs git calls retry lock races; conflicts never retried
+## 2026-09-28 14:16 — #420 extensions.mjs AUDIT #69 lasting fix: http connectors with outbound tools run through the gate proxy instead of being withheld [done (check passed)]
+
+http connectors now run through the gate proxy; sse still withheld

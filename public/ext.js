@@ -174,7 +174,7 @@ function exRow(it) {
   for (const t of exTags(it)) tags.append(el('span', 'ext-tag', t));
   if (EX.tab === 'mcp' && it.ungatedOutbound) {
     const warn = el('span', 'ext-tag ext-tag-warn', 'not gated');
-    warn.title = 'Outbound tools are held for your approval only on stdio servers; over http this server stays out of task runs until then';
+    warn.title = "Outbound tools can't be held for your approval over SSE; this server stays out of task runs until you add it as http or a stdio command";
     tags.append(warn);
   }
   open.append(main, tags);
@@ -342,8 +342,8 @@ function exMcpFields(f, s, _mode, form) {
   // A connector (gate.mjs): the tools named here are held for the owner's approval in task runs, and every call is logged.
   const outbound = exField('Outbound tools', exInput('outbound', (s?.outbound || []).join(', '), { mono: true, placeholder: 'e.g. send_email, create_payment, delete_*' }),
     "Optional. Makes it a connector: in task runs these tools wait for your approval (tools named like send, pay, delete, publish or share do too), and every call shows in the task's Actions.");
-  const httpNote = el('p', 'ext-note', 'Outbound tools are held for your approval only on stdio servers; over http this server stays out of task runs until then');
-  outbound.append(httpNote);
+  const sseNote = el('p', 'ext-note', "Outbound tools can't be held for your approval over SSE; this server stays out of task runs until you add it as http or a stdio command");
+  outbound.append(sseNote);
   const url = exField('URL', exInput('url', s?.url, { mono: true, type: 'url', placeholder: 'https://example.com/mcp' }));
   const headers = exField('Headers', exArea('headers', exPairs(s?.headers, ': '), { rows: 3, mono: true, placeholder: 'Authorization: Bearer …' }),
     'One Name: value per line. Saved values show as ••••••; leave those as they are to keep them.');
@@ -357,7 +357,8 @@ function exMcpFields(f, s, _mode, form) {
   const sync = () => {
     const t = form.querySelector('input[name="type"]:checked')?.value || 'stdio';
     cmd.hidden = env.hidden = t !== 'stdio';
-    url.hidden = headers.hidden = httpNote.hidden = t === 'stdio';
+    url.hidden = headers.hidden = t === 'stdio';
+    sseNote.hidden = t !== 'sse';
     const codex = agents.querySelector('input[value="codex"]');
     codex.disabled = t === 'sse';
     if (t === 'sse') codex.checked = false;

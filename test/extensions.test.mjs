@@ -167,35 +167,49 @@ test('MCP servers: secrets masked and kept; handed to runs through 0600 files, S
   assert.ok(!fs.existsSync(file));
 });
 
-test('MCP connectors: an http server keeps its outbound list and a gated run withholds it; a stdio one is gated', () => {
+test('MCP connectors: stdio and http ones with outbound tools run behind the gate proxy; an sse one is withheld', () => {
   const { home, x } = setup();
-  const mail = x.saveMcp({ name: 'mail', type: 'http', url: 'https://example.com/mcp', outbound: 'send_mail' });
+  const mail = x.saveMcp({ name: 'mail', type: 'http', url: 'https://example.com/mcp', headers: 'Authorization: Bearer t0k', outbound: 'send_mail' });
   assert.deepEqual(mail.outbound, ['send_mail']);
-  assert.equal(mail.ungatedOutbound, true);
-  assert.equal(mail.gated, false);
+  assert.equal(mail.gated, true);
+  assert.equal(mail.ungatedOutbound, false);
   assert.deepEqual(x.list().mcp.find((m) => m.name === 'mail').outbound, ['send_mail']);
   const pay = x.saveMcp({ name: 'pay', type: 'stdio', commandLine: 'node pay.js', outbound: 'charge, refund_*' });
   assert.equal(pay.gated, true);
   assert.equal(pay.ungatedOutbound, false);
-  x.saveMcp({ name: 'docs', type: 'http', url: 'https://example.com/docs' });
+  x.saveMcp({ name: 'docs', type: 'http', url: 'https://example.com/docs', headers: 'X-Key: k' });
+  const feed = x.saveMcp({ name: 'feed', type: 'sse', url: 'https://example.com/sse', outbound: 'post' });
+  assert.equal(feed.gated, false);
+  assert.equal(feed.ungatedOutbound, true);
 
   const dir = path.join(home, 'gate'), withheld = [];
   fs.mkdirSync(dir);
   const onWithheld = (name, reason) => withheld.push([name, reason]);
   const gatedRun = x.mcpFor('claude', { gate: { dir, onWithheld } });
-  assert.deepEqual(Object.keys(gatedRun), ['pay', 'docs'], 'the http connector is left out; a plain http server stays');
-  assert.deepEqual(withheld, [['mail', 'connector with outbound tools over http cannot be gated yet; add it as a stdio command']]);
+  assert.deepEqual(Object.keys(gatedRun), ['mail', 'pay', 'docs'], 'the sse connector is left out; a plain http server stays');
+  assert.deepEqual(withheld, [['feed', 'connector with outbound tools over sse cannot be gated; add it as http or a stdio command']]);
   assert.equal(gatedRun.pay.command, process.execPath, 'the stdio connector runs behind the gate proxy');
   assert.match(gatedRun.pay.args.at(-1), /proxy-pay\.json$/);
-  assert.deepEqual(JSON.parse(read(dir, 'proxy-pay.json')).connector, { outbound: ['charge', 'refund_*'] });
+  const payCfg = JSON.parse(read(dir, 'proxy-pay.json'));
+  assert.deepEqual(payCfg.connector, { outbound: ['charge', 'refund_*'] });
+  assert.deepEqual(payCfg.upstream, { command: 'node', args: ['pay.js'], env: {} });
+  assert.deepEqual(gatedRun.mail, { type: 'stdio', command: process.execPath, args: [fileURLToPath(new URL('../gate-proxy.mjs', import.meta.url)), '--config', path.join(dir, 'proxy-mail.json')] },
+    'the http connector becomes a stdio entry for the gate proxy');
+  const mailCfg = JSON.parse(read(dir, 'proxy-mail.json'));
+  assert.deepEqual(mailCfg.upstream, { url: 'https://example.com/mcp', headers: { Authorization: 'Bearer t0k' } });
+  assert.deepEqual(mailCfg.connector, { outbound: ['send_mail'] });
+  assert.equal(mailCfg.kind, 'connector');
+  assert.equal(fs.statSync(path.join(dir, 'proxy-mail.json')).mode & 0o777, 0o600);
+  assert.deepEqual(gatedRun.docs, { type: 'http', url: 'https://example.com/docs', headers: { 'X-Key': 'k' } }, 'an http server without outbound tools is untouched');
+  assert.match(x.mcpFor('codex', { gate: { dir } }), /\[mcp_servers\.mail\]\ncommand = .*\nargs = .*proxy-mail\.json.*\ntool_timeout_sec = \d+/);
 
   withheld.length = 0;
   x.mcpRun('claude', { gate: { dir }, onWithheld });
-  assert.deepEqual(withheld.map(([n]) => n), ['mail'], 'mcpRun passes run.onWithheld through');
+  assert.deepEqual(withheld.map(([n]) => n), ['feed'], 'mcpRun passes run.onWithheld through');
 
   const plain = x.mcpFor('claude');
-  assert.deepEqual(Object.keys(plain), ['mail', 'pay', 'docs'], 'a run without a gate is unchanged');
-  assert.deepEqual(plain.mail, { type: 'http', url: 'https://example.com/mcp' });
+  assert.deepEqual(Object.keys(plain), ['mail', 'pay', 'docs', 'feed'], 'a run without a gate is unchanged');
+  assert.deepEqual(plain.mail, { type: 'http', url: 'https://example.com/mcp', headers: { Authorization: 'Bearer t0k' } });
 });
 
 test('personas: saved, prompt block for a run, unique names, removed', () => {

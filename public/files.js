@@ -3,6 +3,7 @@
 // Opens at the project's root (or the last folder, remembered per project). Icon and list views (list folders open in place
 // with disclosure triangles), back/forward, a path bar, a name filter,
 // hidden files on request (⌘⇧.), project-wide search by name or inside files (Enter in the search field; Names | Contents), and Quick Look (Space or double-click) for text, Markdown and images.
+// The Changed view lists the files that differ from git HEAD with +/− counts; Quick Look shows their diff.
 // Ask in chat (Quick Look's header, a Contents hit's trailing button, Shift+Enter on a row) puts `path[:line]` into the composer. Loaded after
 // app.js and uses its helpers ($, el, api, store, md, currentConvo, toast, copyToClipboard).
 // Selection: click, ⌘/Ctrl-click, Shift-click ranges, ⌘A. A context menu (right-click, long-press, a row's ⋯, Shift+F10) offers
@@ -10,8 +11,8 @@
 // (project-relative paths plus copy|cut) and outlives folder changes; pasting POSTs /api/files/copy or /move {paths, dest},
 // and /zip {paths, dest} and /unzip {path, dest} make and extract archives (cid rides in the query like every files route).
 const FX = {
-  cid: null, path: '', data: null, err: '', seq: 0, qseq: 0, fseq: 0, find: null, back: [], fwd: [], sel: null, filter: '', rows: [],
-  view: store.get('cw.files.view') === 'list' ? 'list' : 'icons',
+  cid: null, path: '', data: null, err: '', seq: 0, qseq: 0, fseq: 0, cseq: 0, find: null, changed: null, back: [], fwd: [], sel: null, filter: '', rows: [],
+  view: ['list', 'changed'].includes(store.get('cw.files.view')) ? store.get('cw.files.view') : 'icons',
   sort: (() => { try { const s = JSON.parse(store.get('cw.files.sort')); if (s?.key) return s; } catch {} return { key: 'name', dir: 1 }; })(),
   hidden: store.get('cw.files.hidden') === '1',
   mode: store.get('cw.files.mode') === 'contents' ? 'contents' : 'names', // what Search project looks at
@@ -95,6 +96,7 @@ function fxBuild() {
         <div class="fx-views seg-sm" role="radiogroup" aria-label="View as">
           <button type="button" role="radio" data-fxview="icons" aria-label="Icons" title="as Icons">${ICON_GRID}</button>
           <button type="button" role="radio" data-fxview="list" aria-label="List" title="as List">${ICON_LIST}</button>
+          <button type="button" role="radio" data-fxview="changed" class="fx-ch-btn" title="Files changed since the last commit">Changed</button>
         </div>
         <button type="button" class="icon-btn" id="fxHidden" aria-pressed="false" title="Show hidden files (⌘⇧.)" aria-label="Show hidden files"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/></svg></button>
         <button type="button" class="icon-btn" id="fxRefresh" aria-label="Refresh" title="Refresh"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
@@ -112,7 +114,7 @@ function fxBuild() {
     <div class="fx-path" id="fxPath"></div>`;
   $('fxBack').onclick = () => fxHistory(-1);
   $('fxFwd').onclick = () => fxHistory(1);
-  $('fxRefresh').onclick = () => (FX.find ? fxFind(FX.find.q) : fxLoad());
+  $('fxRefresh').onclick = () => (FX.find ? fxFind(FX.find.q) : FX.view === 'changed' ? fxChanged() : fxLoad());
   v.querySelectorAll('[data-fxmode]').forEach((b) => b.addEventListener('click', () => {
     FX.mode = b.dataset.fxmode; store.set('cw.files.mode', FX.mode);
     if (FX.find) fxFind(FX.find.q); else fxRender();
@@ -120,7 +122,9 @@ function fxBuild() {
   $('fxFindBtn').onclick = () => fxFind($('fxFilter').value.trim());
   $('fxHidden').onclick = () => fxToggleHidden();
   v.querySelectorAll('[data-fxview]').forEach((b) => b.addEventListener('click', () => {
-    FX.view = b.dataset.fxview; store.set('cw.files.view', FX.view); fxRender(); fxFocus();
+    FX.view = b.dataset.fxview; store.set('cw.files.view', FX.view);
+    if (FX.view === 'changed') fxChanged(); else fxRender();
+    fxFocus();
   }));
   $('fxFilter').addEventListener('input', (e) => {
     FX.filter = e.target.value.trim().toLowerCase();
@@ -134,7 +138,7 @@ function fxBuild() {
   });
   $('fxMain').addEventListener('keydown', fxKey);
   $('fxMain').addEventListener('contextmenu', (e) => {
-    if (FX.find || !FX.data || e.target.closest('.fx-head')) return;
+    if (fxFlat() || !FX.data || e.target.closest('.fx-head')) return;
     e.preventDefault();
     if (Date.now() - FX.press < 1000) return; // a long-press already opened it
     const o = e.target.closest('[data-i]');
@@ -153,12 +157,13 @@ function filesShow() {
   const cid = currentConvo()?.id || null;
   if (cid !== FX.cid) {
     const root = currentConvo()?.cwd || cid;
-    Object.assign(FX, { cid, root, path: (root && store.get('cw.files.path.' + root)) || '', back: [], fwd: [], sel: null, picked: new Set(), anchor: null, filter: '', data: null, err: '', find: null });
+    Object.assign(FX, { cid, root, path: (root && store.get('cw.files.path.' + root)) || '', back: [], fwd: [], sel: null, picked: new Set(), anchor: null, filter: '', data: null, err: '', find: null, changed: null });
     FX.expanded.clear(); FX.kids.clear();
     $('fxFilter').value = ''; $('fxFindBar').hidden = true;
   }
   if (!cid) { fxRender(); return; }
   fxLoad();
+  if (FX.view === 'changed') fxChanged();
 }
 async function fxLoad(focus = false) {
   if (!FX.cid) return fxRender();
@@ -222,6 +227,23 @@ async function fxFind(q) {
   }
   fxRender();
 }
+// The Changed view's data: {data, err}; data is /api/files/changed's answer.
+async function fxChanged() {
+  if (!FX.cid) return fxRender();
+  const seq = ++FX.cseq, cid = FX.cid;
+  FX.changed = { data: FX.changed?.data || null, err: '' };
+  fxRender();
+  try {
+    const d = await api(`/api/files/changed?cid=${encodeURIComponent(cid)}`);
+    if (seq !== FX.cseq || cid !== FX.cid) return;
+    FX.changed = { data: d, err: '' };
+  } catch (e) {
+    if (seq !== FX.cseq || cid !== FX.cid) return;
+    FX.changed = { data: null, err: e.message };
+  }
+  fxRender();
+  if (FX.view === 'changed' && !FX.find && $('fxMain').contains(document.activeElement)) fxFocus();
+}
 function fxFindExit(clear) {
   FX.fseq++; FX.find = null; FX.sel = null; FX.picked.clear();
   if (clear) { FX.filter = ''; $('fxFilter').value = ''; $('fxFindBar').hidden = true; }
@@ -265,7 +287,7 @@ function fxRender() {
   $('fxHidden').setAttribute('aria-pressed', String(FX.hidden));
   $('filesView').querySelectorAll('[data-fxview]').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.fxview === FX.view)));
   $('filesView').querySelectorAll('[data-fxmode]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.fxmode === FX.mode)));
-  $('fxTitle').textContent = d?.name || currentConvo()?.title || 'Files';
+  $('fxTitle').textContent = (FX.view === 'changed' ? d?.crumbs[0].name : d?.name) || currentConvo()?.title || 'Files';
   main.textContent = '';
   main.className = `fx-main ${FX.view}`;
   if (!FX.cid) {
@@ -274,6 +296,7 @@ function fxRender() {
     return;
   }
   if (FX.find) return fxFound(main);
+  if (FX.view === 'changed') return fxChangedList(main);
   if (!d) {
     main.append(FX.err ? fxEmpty("Couldn't open this folder", FX.err) : el('div', 'fx-loading', 'Loading…'));
     $('fxPath').textContent = '';
@@ -301,6 +324,8 @@ function fxPrune() {
   for (const rel of FX.picked) if (!have.has(rel)) FX.picked.delete(rel);
   if (FX.sel && !FX.picked.size) FX.picked.add(FX.sel);
 }
+// Search results and the Changed view are flat lists: one row at a time, no clipboard or context menu.
+const fxFlat = () => !!FX.find || FX.view === 'changed';
 const fxRootName = () => FX.data?.crumbs?.[0]?.name || String(currentConvo()?.cwd || '').split('/').filter(Boolean).pop() || 'Project';
 function fxCrumbs() {
   const parts = FX.path ? FX.path.split('/') : [];
@@ -334,6 +359,50 @@ function fxFound(main) {
   const n = FX.rows.length;
   $('fxPath').append(el('span', 'fx-crumbs', `Searching the whole project for “${q}”`),
     el('span', 'fx-count', `${n} found${data.truncated ? ' · stopped early' : ''}`));
+}
+// The Changed view: a status badge, the path (its folder dimmed) and +add −del per changed file; the filter matches paths.
+const FX_STATUS = { M: 'Modified', A: 'Added', D: 'Deleted', R: 'Renamed', '?': 'Untracked' };
+function fxChangedList(main) {
+  const { data, err } = FX.changed || {}, bar = $('fxPath');
+  bar.textContent = '';
+  const refresh = el('button', 'fx-crumb fx-ch-refresh', 'Refresh');
+  refresh.type = 'button';
+  refresh.onclick = () => fxChanged();
+  if (!data) {
+    FX.rows = [];
+    main.append(err ? fxEmpty("Couldn't list the changes", err) : el('div', 'fx-loading', 'Loading…'));
+    return bar.append(el('span', 'fx-crumbs', 'Changes'), refresh);
+  }
+  const entries = data.entries.filter((c) => !FX.filter || c.path.toLowerCase().includes(FX.filter));
+  FX.rows = entries.map((c) => ({ e: { name: c.path.split('/').pop(), dir: false, size: null, mtime: null }, rel: c.path, ch: c, depth: 0 }));
+  fxPrune();
+  if (data.notGit) main.append(fxEmpty('Not a git repository', "This project isn't tracked by git, so there are no changes to show."));
+  else if (!FX.rows.length) main.append(fxEmpty(FX.filter ? 'No matches' : 'No uncommitted changes', FX.filter ? `No changed file is named like “${FX.filter}”.` : `Everything matches the last commit${data.branch ? ` on ${data.branch}` : ''}.`));
+  else {
+    if (data.truncated) main.append(el('div', 'fx-trunc', `Showing the first ${data.entries.length.toLocaleString()} changed files.`));
+    const t = el('div', 'fx-rows fx-changed');
+    t.setAttribute('role', 'listbox');
+    t.setAttribute('aria-label', `${FX.rows.length} changed file${FX.rows.length === 1 ? '' : 's'}`);
+    t.tabIndex = 0;
+    FX.rows.forEach((r, i) => {
+      const c = r.ch, o = optionFor(r, i, `fx-row${c.status === 'D' ? ' deleted' : ''}`), folder = c.path.slice(0, -r.e.name.length);
+      const badge = el('span', `fx-st st-${c.status === '?' ? 'U' : c.status}`, c.status);
+      badge.title = FX_STATUS[c.status] || c.status;
+      const name = el('span', 'fx-c name fx-cp');
+      name.append(el('span', 'fx-dir', folder), el('span', 'fx-base', r.e.name));
+      const cnt = el('span', 'fx-cnt');
+      if (c.binary) cnt.append(el('span', 'fx-bin', 'binary'));
+      else cnt.append(el('span', 'fx-add', `+${c.add}`), el('span', 'fx-del', `−${c.del}`));
+      o.title = `${FX_STATUS[c.status] || c.status}: ${c.from ? `${c.from} → ` : ''}${c.path}`;
+      o.append(badge, name, cnt);
+      t.append(o);
+    });
+    fxActive(t);
+    main.append(t);
+  }
+  const add = entries.reduce((n, c) => n + c.add, 0), del = entries.reduce((n, c) => n + c.del, 0), n = FX.rows.length;
+  bar.append(el('span', 'fx-crumbs', data.notGit ? 'Changes' : `Changes${data.branch ? ` on ${data.branch}` : ''}`),
+    el('span', 'fx-count', data.notGit ? '' : `${n} file${n === 1 ? '' : 's'} · +${add} −${del}${data.truncated ? ' · list cut short' : ''}`), refresh);
 }
 // Contents results: a heading per file, then one row per matching line (`line · text`, the match in <mark>). A row's
 // rel is unique per line; `file` is what Quick Look opens.
@@ -407,11 +476,11 @@ function optionFor(r, i, cls) {
     if (ev.target.closest('.fx-disc, .fx-ask, .fx-more')) return;
     if (Date.now() - FX.press < 1000) return; // the click that ends a long-press
     const mod = ev.metaKey || ev.ctrlKey;
-    fxSelect(r.rel, ev.shiftKey && !FX.find ? 'range' : mod && !FX.find ? 'toggle' : null);
+    fxSelect(r.rel, ev.shiftKey && !fxFlat() ? 'range' : mod && !fxFlat() ? 'toggle' : null);
     if (touch() && !mod && !ev.shiftKey) fxOpen(r);
   });
   o.addEventListener('dblclick', (ev) => { if (!touch() && !ev.target.closest('.fx-more')) fxOpen(r); });
-  if (FX.find) return o;
+  if (fxFlat()) return o;
   // Long-press (touch) opens the context menu where the finger is.
   let t = 0, at = null;
   const stop = () => { clearTimeout(t); t = 0; };
@@ -550,7 +619,7 @@ function fxFocus(selectFirst) {
   c.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' }); // e.g. a revealed find result
 }
 function fxOpen(r) {
-  if (r.hit) fxPreview(r);
+  if (r.hit || r.ch) fxPreview(r);
   else if (FX.find) fxReveal(r);
   else if (r.e.dir) fxGo(r.rel);
   else fxPreview(r);
@@ -565,19 +634,20 @@ function fxKey(e) {
     for (const it of items) { if (it.offsetTop !== items[0].offsetTop) break; n++; }
     return Math.max(1, n);
   };
-  const move = (d) => { const n = Math.min(FX.rows.length - 1, Math.max(0, (i < 0 ? (d > 0 ? -1 : FX.rows.length) : i) + d)); if (FX.rows[n]) fxSelect(FX.rows[n].rel, e.shiftKey && !FX.find ? 'range' : null); };
-  const mod = e.metaKey || e.ctrlKey, k = e.key.toLowerCase();
-  if (mod && !e.shiftKey && !e.altKey && !FX.find && ['a', 'c', 'x', 'v'].includes(k)) {
+  const move = (d) => { const n = Math.min(FX.rows.length - 1, Math.max(0, (i < 0 ? (d > 0 ? -1 : FX.rows.length) : i) + d)); if (FX.rows[n]) fxSelect(FX.rows[n].rel, e.shiftKey && !fxFlat() ? 'range' : null); };
+  const mod = e.metaKey || e.ctrlKey, k = e.key.toLowerCase(), changed = !FX.find && FX.view === 'changed';
+  if (mod && !e.shiftKey && !e.altKey && !fxFlat() && ['a', 'c', 'x', 'v'].includes(k)) {
     e.preventDefault();
     if (k === 'a') fxSelect(null, 'all');
     else if (k === 'v') fxPaste(FX.path);
     else fxClipSet(k === 'x' ? 'cut' : 'copy');
-  } else if (!FX.find && (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10'))) {
+  } else if (!fxFlat() && (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10'))) {
     e.preventDefault();
     const o = $('fxMain').querySelector(`#fx-o-${i}`), k2 = (o || e.currentTarget).getBoundingClientRect();
     fxMenuOpen(cur || null, k2.left + 24, o ? k2.bottom : k2.top + 24);
   } else if (FX.find && (e.key === 'Escape' || e.key === 'Backspace' || (mod && e.key === 'ArrowUp'))) { e.preventDefault(); fxFindExit(true); $('fxFilter').focus(); }
-  else if (FX.find && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) e.preventDefault();
+  else if ((FX.find || changed) && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) e.preventDefault();
+  else if (changed && (e.key === 'Backspace' || ((mod || e.altKey) && e.key === 'ArrowUp'))) e.preventDefault(); // no folder to go up from
   else if ((mod || e.altKey) && e.key === 'ArrowUp') { e.preventDefault(); fxUp(); }
   else if (e.shiftKey && e.key === 'Enter') { if (cur) { e.preventDefault(); fxAskAbout(cur.file || cur.rel, cur.hit?.line); } }
   else if ((mod && e.key === 'ArrowDown') || e.key === 'Enter') { if (cur) { e.preventDefault(); fxOpen(cur); } }
@@ -719,7 +789,8 @@ function fxMenuOpen(r, x, y) {
   m.querySelector('.cm-opt:not(:disabled)')?.focus({ preventScroll: true });
 }
 
-// ----- Quick Look: text (line numbers), Markdown (rendered or source) and images; ←/→ step through the folder's files
+// ----- Quick Look: text (line numbers), Markdown (rendered or source), images and diffs (Changed view: coloured or
+// source; File opens the file itself); ←/→ step through the folder's files
 function fxQuickLook() {
   if ($('fxQL')) return $('fxQL');
   const m = el('div', 'modal fx-ql');
@@ -734,6 +805,7 @@ function fxQuickLook() {
           <button type="button" role="radio" data-mode="preview">Preview</button><button type="button" role="radio" data-mode="source">Source</button>
         </div>
         <button type="button" class="icon-btn" id="fxQLAsk" aria-label="Ask in chat" title="Ask in chat">${ICON_ASK}</button>
+        <a class="btn small fx-ql-file" id="fxQLFile" target="_blank" rel="noopener" title="Open the file itself in a new tab" hidden>File</a>
         <a class="icon-btn" id="fxQLOpen" target="_blank" rel="noopener" aria-label="Open in a new tab" title="Open in a new tab"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
         <button type="button" class="icon-btn" data-close aria-label="Close"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
       </div>
@@ -742,7 +814,7 @@ function fxQuickLook() {
   document.body.append(m);
   m.addEventListener('click', (e) => { if (e.target.closest('[data-close]')) fxClosePreview(); });
   $('fxQLAsk').onclick = () => { const r = FX.ql?.r; if (r) fxAskAbout(r.file || r.rel, r.hit?.line); };
-  m.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', () => { store.set('cw.files.md', b.dataset.mode); if (FX.ql) fxPreview(FX.ql.r); }));
+  m.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', () => { store.set(FX.ql?.r.ch ? 'cw.files.diff' : 'cw.files.md', b.dataset.mode); if (FX.ql) fxPreview(FX.ql.r); }));
   m.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' || (e.key === ' ' && !e.target.closest('button, a'))) { e.preventDefault(); e.stopPropagation(); fxClosePreview(); }
     else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
@@ -762,10 +834,13 @@ async function fxPreview(r) {
   $('fxQLTitle').textContent = r.e.name;
   $('fxQLSub').textContent = r.hit ? `${r.file} · line ${r.hit.line}` : `${kindOf(r.e)} · ${fxSize(r.e.size)} · ${fxDate(r.e.mtime)}`;
   $('fxQLOpen').href = url;
-  $('fxQLMode').hidden = true;
+  $('fxQLOpen').title = 'Open in a new tab';
+  $('fxQLFile').hidden = true;
+  $('fxQLMode').hidden = !r.ch; // a diff always has Preview | Source: hiding it would drop the focus of the one just clicked
   body.className = 'fx-ql-body';
   body.textContent = '';
   if (!wasOpen) m.querySelector('[data-close].icon-btn').focus();
+  if (r.ch) return fxDiff(r, seq);
   if (isImage(r.e.name)) {
     body.classList.add('img');
     const img = el('img');
@@ -810,6 +885,51 @@ async function fxPreview(r) {
   body.append(code);
   if (r.hit) body.scrollTop = Math.max(0, code.offsetTop + 12 + (r.hit.line - 1) * (parseFloat(getComputedStyle(code).lineHeight) || 19) - body.clientHeight / 3);
 }
+// A changed file's diff in Quick Look: Preview colours it line by line (added, removed, hunk headers), Source is the text.
+async function fxDiff(r, seq) {
+  const c = r.ch, body = $('fxQLBody'), url = fxUrl('diff', r.rel);
+  $('fxQLSub').textContent = `${FX_STATUS[c.status] || c.status}${c.from ? ` from ${c.from}` : ''} · ${c.binary ? 'binary' : `+${c.add} −${c.del}`}`;
+  $('fxQLOpen').href = url;
+  $('fxQLOpen').title = 'Open the diff in a new tab';
+  $('fxQLFile').href = fxUrl('raw', r.rel);
+  $('fxQLFile').hidden = c.status === 'D';
+  body.append(el('div', 'fx-loading', 'Loading…'));
+  let text, truncated = false;
+  try {
+    const res = await fetch(url);
+    if (res.status === 401) { location.href = '/login'; return; }
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Request failed (${res.status})`);
+    text = await res.text();
+    truncated = res.headers.get('X-Truncated') === '1';
+  } catch (e) {
+    if (seq !== FX.qseq || FX.ql?.r !== r) return;
+    body.textContent = '';
+    $('fxQLMode').hidden = true;
+    body.append(fxEmpty("Couldn't show the diff", e.message));
+    return;
+  }
+  if (seq !== FX.qseq || FX.ql?.r !== r) return;
+  body.textContent = '';
+  if (truncated) body.append(el('div', 'fx-trunc', 'Showing the first 200 KB of the diff.'));
+  const mode = store.get('cw.files.diff') === 'source' ? 'source' : 'preview';
+  $('fxQLMode').hidden = false;
+  $('fxQLMode').querySelectorAll('[data-mode]').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.mode === mode)));
+  const code = el('div', 'fx-code');
+  if (mode === 'source') code.append(el('pre', 'fx-text', text));
+  else {
+    // One span per line (textContent, so nothing in the diff is markup); lines before the first @@ of a file are headers.
+    const pre = el('pre', 'fx-diff');
+    let head = true;
+    for (const line of text.replace(/\n$/, '').split('\n')) {
+      if (line.startsWith('diff --git')) head = true; // a rename can show as two files
+      else if (line.startsWith('@@')) head = false;
+      const cls = line.startsWith('@@') ? 'hunk' : head || line[0] === '\\' ? 'meta' : line[0] === '+' ? 'add' : line[0] === '-' ? 'del' : 'ctx';
+      pre.append(el('span', `fx-dl ${cls}`, `${line}\n`));
+    }
+    code.append(pre);
+  }
+  body.append(code);
+}
 function fxClosePreview() {
   const m = $('fxQL');
   if (!m || m.hidden) return;
@@ -821,5 +941,9 @@ function fxClosePreview() {
 
 // Hooks for app.js: setView('files') shows it; a chat switch while it's open reloads it; returning to the tab refreshes.
 window.FilesView = { show: filesShow };
-document.addEventListener('visibilitychange', () => { if (!document.hidden && $('app').dataset.view === 'files' && FX.cid) fxLoad(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden || $('app').dataset.view !== 'files' || !FX.cid) return;
+  fxLoad();
+  if (FX.view === 'changed') fxChanged();
+});
 if ($('app').dataset.view === 'files') filesShow();

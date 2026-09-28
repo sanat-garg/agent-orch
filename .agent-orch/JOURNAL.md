@@ -1060,6 +1060,9 @@ retention keeps referenced approval and review shots, prunes stale uploads
 
 Changed-files and per-file diff routes added and tested
 
+## 2026-09-28 13:07 — #374 Files tab ui: a Changed view with +/− counts and a coloured diff in Quick Look [done (check passed)]
+
+Changed view and diff work (jsdom-checked); browser tests skip here
 ## 2026-09-28 13:03 — #375 Files tab ui: Ask in chat puts path:line into the composer from Quick Look and a Contents hit [done (check passed)]
 
 Ask in chat inserts path[:line] from Files, tested
@@ -1162,3 +1165,6 @@ CONTEXT.md conflict resolved; cluster-git tests pass
 ## 2026-09-28 14:23 — #430 gate-proxy.mjs http upstream: on a 404 for a stale session, initialize again once and retry the call [done (check passed)]
 
 http gate proxy re-initializes after a stale-session 404 and retries
+## 2026-09-28 14:24 — #385 Integrate #374: Files tab ui: a Changed view with +/− counts and a coloured diff in Quick Look [done (check passed)]
+
+merge resolved; Changed view, context menu and Ask in chat all pass

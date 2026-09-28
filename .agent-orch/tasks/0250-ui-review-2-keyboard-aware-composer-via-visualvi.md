@@ -13,3 +13,7 @@ Apply finding #2 in .agent-orch/UI-REVIEW.md (mobile, Apple HIG: keep content vi
 ## Done when
 
 `grep -q "visualViewport" public/app.js` and `grep -q -- '--kb' public/app.css` and `node --test test/ui-mobile-keyboard.test.mjs test/ui-static.test.mjs test/ui-away.test.mjs` passes
+
+## Result — done (check passed) (2026-09-28 03:43)
+
+AGENT-ORCH-STATUS: done — Phone composer now stays above the keyboard; tests pass

@@ -184,3 +184,11 @@ test('top bar keeps its 56px content row below the iPhone safe-area inset (UI-RE
     assert.match(r, /padding-top: env\(safe-area-inset-top\)/);
   }
 });
+
+test('composer follows the on-screen keyboard via visualViewport and --kb (UI-REVIEW #2)', () => {
+  assert.match(appJs, /visualViewport\.addEventListener\(ev/);
+  assert.match(appJs, /setProperty\('--kb'/);
+  assert.match(appJs, /classList\.toggle\('kb-open'/);
+  assert.match(appCss, /\.app \{ height: calc\(100dvh - var\(--kb, 0px\)\); \}/);
+  assert.match(appCss, /html\.kb-open \.orch-bar \{ display: none; \}/);
+});

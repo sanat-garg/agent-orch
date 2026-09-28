@@ -1447,6 +1447,19 @@ function autosize() {
   input.style.height = 'auto';
   input.style.height = Math.min(input.scrollHeight, innerHeight * 0.4) + 'px';
 }
+// Keyboard-aware layout (UI-REVIEW #2): iOS Safari ignores interactive-widget=resizes-content, so the keyboard height
+// comes from visualViewport. app.css shrinks .app by --kb and, on phones, hides the orch bar while html.kb-open.
+// A focus counts only inside a user gesture: iOS opens no keyboard for the load-time input.focus().
+let kbFocus = false;
+function syncKeyboard() {
+  const vv = window.visualViewport, root = document.documentElement;
+  const kb = vv ? Math.max(0, Math.round(innerHeight - vv.height - vv.offsetTop)) : 0;
+  root.style.setProperty('--kb', kb + 'px');
+  root.classList.toggle('kb-open', kb > 0 || kbFocus);
+}
+if (window.visualViewport) for (const ev of ['resize', 'scroll']) visualViewport.addEventListener(ev, syncKeyboard);
+input.addEventListener('focus', () => { kbFocus = navigator.userActivation?.isActive ?? true; syncKeyboard(); });
+input.addEventListener('blur', () => { kbFocus = false; syncKeyboard(); });
 function updateSendButton() {
   const has = !!input.value.trim() || ATT.list.length > 0;
   const stop = state.busy && !has;

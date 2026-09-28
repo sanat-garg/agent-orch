@@ -738,3 +738,7 @@ live browser view, take-over and sidebar Browser sheet pass tests
 ## 2026-09-28 03:12 — #260 Integrate #257: Live browser view: sign in once, watch and take over from the app [done (check passed)]
 
 orchestrator.mjs conflicts resolved; browser-live and run-on tests pass
+
+## 2026-09-28 03:43 — #250 UI-REVIEW #2: keyboard-aware composer via visualViewport; hide the orch bar while typing [done (check passed)]
+
+Phone composer now stays above the keyboard; tests pass

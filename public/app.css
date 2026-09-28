@@ -1308,6 +1308,14 @@ details.dr-more[open] > summary { margin-bottom: 12px; }
   .seg button { padding: 0 10px; }
   .messages, .working { padding: 0 14px; }
   .composer { padding: 6px 10px max(10px, env(safe-area-inset-bottom)); }
+  /* Keyboard up (app.js syncKeyboard, UI-REVIEW #2): the app ends at the keyboard's top edge, the orch bar steps
+     aside and the composer chips fold into one scrolling row. */
+  .app { height: calc(100dvh - var(--kb, 0px)); }
+  html.kb-open .orch-bar { display: none; }
+  html.kb-open .composer { padding-bottom: 6px; }
+  html.kb-open .controls .left { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  html.kb-open .controls .left::-webkit-scrollbar { display: none; }
+  html.kb-open .controls .left > * { flex: none; }
   .msg.user { max-width: 94%; }
   .working .esc-hint { display: none; }
   .convo .more { opacity: 1; }

@@ -24,3 +24,7 @@ Tests in test/files.test.mjs: `grepFiles` finds a line in a nested file with the
 ## Done when
 
 `node --test test/files.test.mjs test/ui-static.test.mjs` passes and `grep -n "grepFiles" files.mjs` prints at least one line and `grep -n "api/files/grep" public/files.js` prints at least one line
+
+## Result — done (check passed) (2026-09-28 12:40)
+
+AGENT-ORCH-STATUS: done — Files tab can now search inside files in Contents mode

@@ -272,7 +272,7 @@ test('touch screens get 16px fields and 44pt targets in Settings, Skills, Files,
   }
   const has = (sel, decl) => assert.ok((coarse.get(sel) || '').includes(decl), `${sel} sets ${decl} on touch (got ${coarse.get(sel)})`);
   for (const sel of ['.st-row select', '.st-dir textarea', '#stGatePatterns', '#extBody input', '#extBody textarea', '#extBody select', '.fx-search input', '.bv-bar input', '.dr-due input']) has(sel, 'font-size: 16px');
-  for (const sel of ['.sx-tabs button', '.range-picker button', '.ext-tabs button', '.fx-views button']) { has(sel, 'min-height: 44px'); has(sel, 'min-width: 44px'); }
+  for (const sel of ['.sx-tabs button', '.range-picker button', '.ext-tabs button', '.fx-views button', '.fx-mode button']) { has(sel, 'min-height: 44px'); has(sel, 'min-width: 44px'); }
   has('.mc-ctl .seg-sm button', 'height: 44px'); has('.mc-ctl .seg-sm button', 'min-width: 44px');
   for (const sel of ['.fx-bar .fx-search', '.bv-bar input', '.bw-add input']) has(sel, 'height: 44px');
   has('.dr-body details.dr-more > summary', 'min-height: 44px'); has('.dr-body details.dr-more > summary', 'display: flex');

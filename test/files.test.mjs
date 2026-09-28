@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { findFiles, FIND_VISIT_MAX, handleFiles, listDir, resolveInside, TEXT_MAX } from '../files.mjs';
+import { findFiles, FIND_VISIT_MAX, grepFiles, handleFiles, listDir, resolveInside, TEXT_MAX } from '../files.mjs';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-files-'));
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -140,6 +140,57 @@ test('GET /api/files/find: 2+ characters, only for a known chat', async (t) => {
   assert.deepEqual((await key.json()).entries, [], 'links out of the project are never listed or walked');
   for (const [q, cid, status] of [['a', 'c1', 400], [' a ', 'c1', 400], ['app', 'other', 404]]) {
     const r = await find(q, cid);
+    assert.equal(r.status, status, q);
+    await r.arrayBuffer();
+  }
+});
+
+test('grepFiles: finds lines at any depth, case-insensitive, skips binary and big files, stops at max', async () => {
+  const groot = path.join(tmp, 'grepproj');
+  fs.mkdirSync(path.join(groot, 'a/b'), { recursive: true });
+  fs.mkdirSync(path.join(groot, 'node_modules/pkg'), { recursive: true });
+  fs.writeFileSync(path.join(groot, 'a/b/deep.js'), 'const x = 1;\n  // TODO: Needle in a haystack  \r\nlast\n');
+  fs.writeFileSync(path.join(groot, 'bin.dat'), Buffer.concat([Buffer.from('needle'), Buffer.from([0, 1, 2])]));
+  fs.writeFileSync(path.join(groot, 'big.txt'), 'needle\n' + 'x'.repeat(2000));
+  fs.writeFileSync(path.join(groot, 'node_modules/pkg/i.js'), 'needle');
+  fs.writeFileSync(path.join(groot, 'long.txt'), 'y'.repeat(500) + 'NEEDLE' + 'z'.repeat(500));
+  fs.symlinkSync(path.join(outside, 'key.txt'), path.join(groot, 'key-out.txt'));
+
+  const r = await grepFiles(groot, 'nEEdle', { fileMax: 1500 });
+  assert.equal(r.q, 'nEEdle');
+  assert.equal(r.truncated, false);
+  assert.deepEqual(r.hits.map((h) => [h.path, h.line]), [['long.txt', 1], ['a/b/deep.js', 2]]);
+  assert.equal(r.hits[1].text, '// TODO: Needle in a haystack');
+  const long = r.hits[0].text;
+  assert.equal(long.length, 200);
+  assert.ok(long.includes('NEEDLE') && long.startsWith('y') && long.endsWith('z'), 'the snippet is centred on the match');
+  assert.equal(r.files, 2, 'big.txt (over fileMax) and bin.dat (binary) are not searched');
+  assert.deepEqual((await grepFiles(groot, 'top secret')).hits, [], 'links out of the project are never read');
+
+  for (let i = 0; i < 5; i++) fs.writeFileSync(path.join(groot, `m${i}.txt`), 'needle\nneedle\n');
+  const capped = await grepFiles(groot, 'needle', { max: 3, fileMax: 1500 });
+  assert.deepEqual([capped.hits.length, capped.truncated], [3, true]);
+  await assert.rejects(grepFiles(path.join(tmp, 'gone'), 'xx'), (e) => e.status === 404);
+});
+
+test('GET /api/files/grep: 2+ characters, only for a known chat', async (t) => {
+  const json = (res, status, body) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
+  const server = http.createServer((req, res) => {
+    if (!handleFiles(req, res, new URL(req.url, 'http://x'), { rootFor: (cid) => (cid === 'c1' ? root : null), json })) { res.writeHead(404); res.end(); }
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => server.close());
+  const grep = (q, cid = 'c1') => fetch(`http://127.0.0.1:${server.address().port}/api/files/grep?cid=${cid}&q=${encodeURIComponent(q)}`);
+  const ok = await grep('CONSOLE.log');
+  assert.equal(ok.status, 200);
+  const body = await ok.json();
+  assert.deepEqual(body.hits, [{ path: 'src/app.js', line: 1, text: 'console.log(1)' }]);
+  assert.equal(typeof body.files, 'number');
+  assert.equal(body.truncated, false);
+  const key = await grep('top secret');
+  assert.deepEqual((await key.json()).hits, [], 'links out of the project are never read');
+  for (const [q, cid, status] of [['a', 'c1', 400], [' a ', 'c1', 400], ['x'.repeat(201), 'c1', 400], ['console', 'other', 404]]) {
+    const r = await grep(q, cid);
     assert.equal(r.status, status, q);
     await r.arrayBuffer();
   }

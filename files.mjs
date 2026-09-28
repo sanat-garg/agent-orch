@@ -5,6 +5,7 @@
 //   GET /api/files/list?cid=<chat>&path=<rel>  → {name, path, crumbs, entries: [{name, dir, size, mtime, hidden}], truncated}
 //   GET /api/files/raw?cid=<chat>&path=<rel>   → the file (images), or text/plain (first TEXT_MAX bytes; 415 for binary)
 //   GET /api/files/find?cid=<chat>&q=<text>    → {q, entries: [{name, path, dir, size, mtime}], truncated} (q: 2+ chars)
+//   GET /api/files/grep?cid=<chat>&q=<text>    → {q, hits: [{path, line, text}], files, truncated} (q: 2–200 chars; text files ≤ 1 MB)
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -12,6 +13,7 @@ export const TEXT_MAX = 1024 * 1024;
 export const IMAGE_MAX = 25 * 1024 * 1024;
 export const LIST_MAX = 5000;
 export const FIND_VISIT_MAX = 20000;
+export const GREP_TEXT = 200;
 const FIND_SKIP = new Set(['.git', 'node_modules', '.agent-orch-worktrees']);
 export const IMAGE_TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp',
   '.avif': 'image/avif', '.bmp': 'image/bmp', '.ico': 'image/x-icon', '.svg': 'image/svg+xml' };
@@ -48,20 +50,18 @@ export function listDir(rootDir, rel) {
   return { name: crumbs.at(-1).name, path: clean, crumbs, entries, truncated: names.length > LIST_MAX };
 }
 
-// Project-wide find by name (case-insensitive substring), breadth first so shallow hits come first. Skips FIND_SKIP and
-// hidden folders (unless q itself starts with '.'), never descends a symlink (no loops or duplicates) and leaves out links
-// that point outside the project. Stops after `max` hits or FIND_VISIT_MAX entries looked at (truncated: true).
-export function findFiles(rootDir, q, { max = 200 } = {}) {
-  const { root } = resolveInside(rootDir, '');
-  const needle = String(q || '').toLowerCase(), dotted = needle.startsWith('.');
-  const entries = [], queue = [''];
-  let visited = 0, truncated = false;
-  walk: while (queue.length) {
+// Breadth-first walk of the project, shared by find and grep, so shallow entries come first. Skips FIND_SKIP and hidden
+// folders (unless `dotted`), never descends a symlink (no loops or duplicates) and leaves out links that point outside
+// the project. Yields {name, path, abs, st} for files and folders; after FIND_VISIT_MAX entries it sets state.truncated.
+function* walkProject(root, dotted, state) {
+  const queue = [''];
+  let visited = 0;
+  while (queue.length) {
     const rel = queue.shift();
     let names;
     try { names = fs.readdirSync(path.join(root, rel)).sort(); } catch { continue; }
     for (const name of names) {
-      if (++visited > FIND_VISIT_MAX) { truncated = true; break walk; }
+      if (++visited > FIND_VISIT_MAX) { state.truncated = true; return; }
       const abs = path.join(root, rel, name), relPath = rel ? `${rel}/${name}` : name;
       let st, link = false;
       try {
@@ -75,14 +75,57 @@ export function findFiles(rootDir, q, { max = 200 } = {}) {
       } catch { continue; } // broken link, or gone mid-walk
       if (!st.isDirectory() && !st.isFile()) continue;
       if (st.isDirectory() && (FIND_SKIP.has(name) || (name.startsWith('.') && !dotted))) continue;
-      if (name.toLowerCase().includes(needle)) {
-        if (entries.length >= max) { truncated = true; break walk; }
-        entries.push({ name, path: relPath, dir: st.isDirectory(), size: st.isFile() ? st.size : null, mtime: Math.round(st.mtimeMs) });
-      }
+      yield { name, path: relPath, abs, st };
       if (st.isDirectory() && !link) queue.push(relPath);
     }
   }
-  return { q: String(q || ''), entries, truncated };
+}
+
+// Project-wide find by name (case-insensitive substring) over walkProject. Stops after `max` hits or FIND_VISIT_MAX
+// entries looked at (truncated: true).
+export function findFiles(rootDir, q, { max = 200 } = {}) {
+  const { root } = resolveInside(rootDir, '');
+  const needle = String(q || '').toLowerCase(), state = { truncated: false }, entries = [];
+  for (const { name, path: relPath, st } of walkProject(root, needle.startsWith('.'), state)) {
+    if (!name.toLowerCase().includes(needle)) continue;
+    if (entries.length >= max) { state.truncated = true; break; }
+    entries.push({ name, path: relPath, dir: st.isDirectory(), size: st.isFile() ? st.size : null, mtime: Math.round(st.mtimeMs) });
+  }
+  return { q: String(q || ''), entries, truncated: state.truncated };
+}
+
+// Project-wide search inside files (case-insensitive substring) over walkProject: one hit per matching line, `line`
+// 1-based, `text` the line trimmed to GREP_TEXT characters around the match. Reads only regular files up to `fileMax`
+// bytes and skips binary ones (a NUL in the first 8 KB). `files` counts the files searched. Stops after `max` hits or
+// FIND_VISIT_MAX entries (truncated: true); yields to the event loop every 50 files so a big project can't stall the server.
+export async function grepFiles(rootDir, q, { max = 200, fileMax = 1024 * 1024 } = {}) {
+  const { root } = resolveInside(rootDir, '');
+  const needle = String(q || '').toLowerCase(), state = { truncated: false }, hits = [];
+  let files = 0, seen = 0;
+  walk: for (const { path: relPath, abs, st } of walkProject(root, needle.startsWith('.'), state)) {
+    if (!st.isFile()) continue;
+    if (++seen % 50 === 0) await new Promise((r) => setImmediate(r));
+    if (st.size > fileMax) continue;
+    let buf;
+    try { buf = await fs.promises.readFile(abs); } catch { continue; }
+    if (buf.subarray(0, 8192).includes(0)) continue; // binary
+    files++;
+    const text = buf.toString('utf8'), lower = text.toLowerCase();
+    if (!lower.includes(needle)) continue;
+    const lines = text.split('\n'), lowers = lower.split('\n');
+    for (let i = 0; i < lowers.length; i++) {
+      const at = lowers[i].indexOf(needle);
+      if (at < 0) continue;
+      if (hits.length >= max) { state.truncated = true; break walk; }
+      hits.push({ path: relPath, line: i + 1, text: grepSnippet(lines[i].replace(/\r$/, ''), at, needle.length) });
+    }
+  }
+  return { q: String(q || ''), hits, files, truncated: state.truncated };
+}
+function grepSnippet(line, at, len) {
+  if (line.length <= GREP_TEXT) return line.trim();
+  const start = Math.max(0, Math.min(at - Math.floor((GREP_TEXT - len) / 2), line.length - GREP_TEXT));
+  return line.slice(start, start + GREP_TEXT).trim();
 }
 
 // Serves one file. Images (by extension) as their type; anything else as UTF-8 text, first TEXT_MAX bytes, or 415 when
@@ -111,23 +154,27 @@ export function sendFile(req, res, rootDir, rel) {
   } finally { fs.closeSync(fd); }
 }
 
-// The route handler: rootFor(cid) → the chat's project folder, or null. Returns true when it answered.
+// The route handler: rootFor(cid) → the chat's project folder, or null. Returns true (synchronously) when it answers;
+// grep answers later, from its own promise.
 export function handleFiles(req, res, url, { rootFor, json }) {
-  const m = url.pathname.match(/^\/api\/files\/(list|raw|find)$/);
+  const m = url.pathname.match(/^\/api\/files\/(list|raw|find|grep)$/);
   if (!m || req.method !== 'GET') return false;
   const root = rootFor(url.searchParams.get('cid'));
+  const fail = (e) => {
+    if (res.headersSent) return res.destroy();
+    json(res, e.status || (e.code === 'EACCES' ? 403 : 500), { error: e.status ? e.message : e.code === 'EACCES' ? 'Permission denied' : 'Could not read it' });
+  };
   try {
     if (!root) throw new FileError(404, 'No project for this chat');
     if (m[1] === 'list') json(res, 200, listDir(root, url.searchParams.get('path')));
-    else if (m[1] === 'find') {
+    else if (m[1] === 'find' || m[1] === 'grep') {
       const q = (url.searchParams.get('q') || '').trim();
       if (q.length < 2) throw new FileError(400, 'Type at least 2 characters');
-      json(res, 200, findFiles(root, q));
+      if (m[1] === 'find') json(res, 200, findFiles(root, q));
+      else if (q.length > 200) throw new FileError(400, 'Search for 200 characters at most');
+      else grepFiles(root, q).then((r) => json(res, 200, r), fail);
     }
     else sendFile(req, res, root, url.searchParams.get('path'));
-  } catch (e) {
-    if (res.headersSent) { res.destroy(); return true; }
-    json(res, e.status || (e.code === 'EACCES' ? 403 : 500), { error: e.status ? e.message : e.code === 'EACCES' ? 'Permission denied' : 'Could not read it' });
-  }
+  } catch (e) { fail(e); }
   return true;
 }

@@ -30,6 +30,9 @@
 .fx-search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus); }
 .fx-search input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; color: var(--text); font: inherit; font-size: 13px; }
 .btn.small.fx-find-btn { height: 30px; padding: 0 10px; font-size: 13px; white-space: nowrap; flex: none; }
+.fx-find { display: flex; align-items: center; gap: 6px; flex: none; }
+.fx-find[hidden] { display: none; }
+.fx-mode button { height: 24px; padding: 0 9px; font-size: 12.5px; }
 
 /* the folder */
 .fx-main { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
@@ -85,6 +88,18 @@
 /* project-wide find results: Name, the folder it is in, Size */
 .fx-rows.fx-found { padding-top: 6px; }
 .fx-found .fx-row { grid-template-columns: minmax(0, 1fr) minmax(0, 38%) 90px; }
+/* contents results: a file heading, then `line · text` rows */
+.fx-lfile { display: flex; align-items: center; gap: 6px; height: 28px; padding: 6px 8px 0; font-size: 12.5px; font-weight: 600; color: var(--text); }
+.fx-lfile .fx-ico { width: 18px; height: 16px; }
+.fx-lgroup + .fx-lgroup { margin-top: 6px; }
+.fx-found .fx-row.fx-hit { grid-template-columns: 56px minmax(0, 1fr); background: none; }
+.fx-hl { padding: 0 8px; text-align: right; color: var(--faint); font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+.fx-ht { min-width: 0; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: pre; font-family: var(--mono); font-size: 12.5px; }
+.fx-row.fx-hit[aria-selected="true"] { background: var(--fx-sel-idle); }
+.fx-rows:focus .fx-row.fx-hit[aria-selected="true"] { background: var(--fx-sel); }
+.fx-rows:focus .fx-row[aria-selected="true"] .fx-hl { color: inherit; }
+.fx-ht mark { background: color-mix(in srgb, var(--accent) 28%, transparent); color: inherit; border-radius: 2px; }
+.fx-rows:focus .fx-row[aria-selected="true"] .fx-ht mark { background: rgba(255, 255, 255, .3); }
 
 /* path bar */
 .fx-path { display: flex; align-items: center; gap: 12px; min-height: 30px; padding: 0 12px; border-top: 1px solid var(--border); flex: none;
@@ -134,6 +149,7 @@
   .fx-views button { min-height: 44px; min-width: 44px; } /* UI-REVIEW #22 */
   .fx-bar .fx-search { height: 44px; } /* UI-REVIEW #22: .fx-bar beats the phone block's 36px below */
   .btn.small.fx-find-btn { height: 44px; }
+  .fx-mode button { min-height: 44px; min-width: 44px; }
   .fx-search input { font-size: 16px; } /* UI-REVIEW #20 */
 }
 /* phones: the search takes its own row; the list is one column with size and date under the name (like Files on iOS) */
@@ -142,13 +158,15 @@
   .fx-title { order: 0; }
   .fx-tools { flex: 1 1 100%; flex-wrap: wrap; row-gap: 8px; }
   .fx-search { order: 3; flex: 1 1 60%; width: auto; height: 36px; } /* its own row, shared with Search project */
-  .fx-find-btn { order: 4; }
+  .fx-find { order: 4; flex: 1 1 100%; }
+  .fx-find .fx-find-btn { margin-left: auto; }
   .fx-grid { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); padding: 14px 8px; }
   .fx-head, .fx-row, .fx-found .fx-row { grid-template-columns: minmax(0, 1fr); }
   .fx-head .fx-col:not(.name), .fx-row .fx-c:not(.name) { display: none; }
   .fx-row { height: 56px; border-radius: 10px; }
   .fx-row:nth-child(even) { background: none; }
   .fx-row .fx-ico { width: 30px; height: 28px; }
+  .fx-found .fx-row.fx-hit { grid-template-columns: 44px minmax(0, 1fr); height: 44px; }
   .fx-sub { display: block; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .fx-rows:focus .fx-row[aria-selected="true"] .fx-sub { color: inherit; opacity: .85; }
   .fx-path { padding-bottom: env(safe-area-inset-bottom); }

@@ -1,13 +1,14 @@
 'use strict';
 // ---------- Files: a Finder-style, read-only browser of the open chat's project (server: files.mjs) ----------
 // Icon and list views (list folders open in place with disclosure triangles), back/forward, a path bar, a name filter,
-// hidden files on request (⌘⇧.), project-wide find by name (Enter in the search field), and Quick Look (Space or double-click) for text, Markdown and images. Loaded after
+// hidden files on request (⌘⇧.), project-wide search by name or inside files (Enter in the search field; Names | Contents), and Quick Look (Space or double-click) for text, Markdown and images. Loaded after
 // app.js and uses its helpers ($, el, api, store, md, currentConvo).
 const FX = {
   cid: null, path: '', data: null, err: '', seq: 0, qseq: 0, fseq: 0, find: null, back: [], fwd: [], sel: null, filter: '', rows: [],
   view: store.get('cw.files.view') === 'list' ? 'list' : 'icons',
   sort: (() => { try { const s = JSON.parse(store.get('cw.files.sort')); if (s?.key) return s; } catch {} return { key: 'name', dir: 1 }; })(),
   hidden: store.get('cw.files.hidden') === '1',
+  mode: store.get('cw.files.mode') === 'contents' ? 'contents' : 'names', // what Search project looks at
   expanded: new Set(), kids: new Map(), built: false, ql: null,
 };
 const FX_THUMB_MAX = 3e6; // images up to this size show as their own thumbnail in the icon view
@@ -86,7 +87,12 @@ function fxBuild() {
         <button type="button" class="icon-btn" id="fxHidden" aria-pressed="false" title="Show hidden files (⌘⇧.)" aria-label="Show hidden files"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/></svg></button>
         <button type="button" class="icon-btn" id="fxRefresh" aria-label="Refresh" title="Refresh"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         <label class="fx-search"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M16 16l4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><input id="fxFilter" type="search" placeholder="Search this folder" aria-label="Search this folder" autocomplete="off" spellcheck="false" enterkeyhint="search"></label>
-        <button type="button" class="btn small fx-find-btn" id="fxFindBtn" hidden>Search project</button>
+        <div class="fx-find" id="fxFindBar" hidden>
+          <div class="fx-mode seg-sm" role="group" aria-label="Search project by">
+            <button type="button" data-fxmode="names" title="Find files by name">Names</button><button type="button" data-fxmode="contents" title="Find text inside files">Contents</button>
+          </div>
+          <button type="button" class="btn small fx-find-btn" id="fxFindBtn">Search project</button>
+        </div>
       </div>
     </div>
     <div class="fx-main" id="fxMain"></div>
@@ -94,6 +100,10 @@ function fxBuild() {
   $('fxBack').onclick = () => fxHistory(-1);
   $('fxFwd').onclick = () => fxHistory(1);
   $('fxRefresh').onclick = () => (FX.find ? fxFind(FX.find.q) : fxLoad());
+  v.querySelectorAll('[data-fxmode]').forEach((b) => b.addEventListener('click', () => {
+    FX.mode = b.dataset.fxmode; store.set('cw.files.mode', FX.mode);
+    if (FX.find) fxFind(FX.find.q); else fxRender();
+  }));
   $('fxFindBtn').onclick = () => fxFind($('fxFilter').value.trim());
   $('fxHidden').onclick = () => fxToggleHidden();
   v.querySelectorAll('[data-fxview]').forEach((b) => b.addEventListener('click', () => {
@@ -101,7 +111,7 @@ function fxBuild() {
   }));
   $('fxFilter').addEventListener('input', (e) => {
     FX.filter = e.target.value.trim().toLowerCase();
-    $('fxFindBtn').hidden = FX.filter.length < 2;
+    $('fxFindBar').hidden = FX.filter.length < 2;
     if (!FX.filter && FX.find) fxFindExit(); else fxRender();
   });
   $('fxFilter').addEventListener('keydown', (e) => {
@@ -124,7 +134,7 @@ function filesShow() {
   if (cid !== FX.cid) {
     Object.assign(FX, { cid, path: (cid && store.get('cw.files.path.' + cid)) || '', back: [], fwd: [], sel: null, filter: '', data: null, err: '', find: null });
     FX.expanded.clear(); FX.kids.clear();
-    $('fxFilter').value = ''; $('fxFindBtn').hidden = true;
+    $('fxFilter').value = ''; $('fxFindBar').hidden = true;
   }
   if (!cid) { fxRender(); return; }
   fxLoad();
@@ -152,7 +162,7 @@ async function fxLoad(focus = false) {
 }
 function fxGo(rel, { push = true } = {}) {
   if (push && rel !== FX.path) { FX.back.push(FX.path); FX.fwd = []; }
-  FX.path = rel; FX.sel = null; FX.filter = ''; FX.find = null; $('fxFilter').value = ''; $('fxFindBtn').hidden = true;
+  FX.path = rel; FX.sel = null; FX.filter = ''; FX.find = null; $('fxFilter').value = ''; $('fxFindBar').hidden = true;
   FX.expanded.clear(); FX.kids.clear();
   store.set('cw.files.path.' + FX.cid, rel);
   fxLoad(true);
@@ -174,14 +184,15 @@ function fxUp() {
 function fxToggleHidden() {
   FX.hidden = !FX.hidden; store.set('cw.files.hidden', FX.hidden ? '1' : '0'); fxRender();
 }
-// Project-wide find: results replace the folder until a result is opened, Escape, or the field is cleared.
+// Project-wide search, by name (find) or inside files (grep) as FX.mode says: results replace the folder until a name
+// result is opened, Escape, or the field is cleared.
 async function fxFind(q) {
   if (!FX.cid || q.length < 2) return;
-  const seq = ++FX.fseq, cid = FX.cid;
-  FX.find = { q, data: null, err: '' }; FX.sel = null;
+  const seq = ++FX.fseq, cid = FX.cid, mode = FX.mode;
+  FX.find = { q, mode, data: null, err: '' }; FX.sel = null;
   fxRender();
   try {
-    const d = await api(`/api/files/find?cid=${encodeURIComponent(cid)}&q=${encodeURIComponent(q)}`);
+    const d = await api(`${mode === 'contents' ? '/api/files/grep' : '/api/files/find'}?cid=${encodeURIComponent(cid)}&q=${encodeURIComponent(q)}`);
     if (seq !== FX.fseq || cid !== FX.cid || !FX.find) return;
     FX.find.data = d;
   } catch (e) {
@@ -192,7 +203,7 @@ async function fxFind(q) {
 }
 function fxFindExit(clear) {
   FX.fseq++; FX.find = null; FX.sel = null;
-  if (clear) { FX.filter = ''; $('fxFilter').value = ''; $('fxFindBtn').hidden = true; }
+  if (clear) { FX.filter = ''; $('fxFilter').value = ''; $('fxFindBar').hidden = true; }
   fxRender();
 }
 // Opening a result shows its folder with it selected (hidden files turn on when it is one).
@@ -218,6 +229,7 @@ function fxRender() {
   $('fxFwd').disabled = !FX.fwd.length;
   $('fxHidden').setAttribute('aria-pressed', String(FX.hidden));
   $('filesView').querySelectorAll('[data-fxview]').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.fxview === FX.view)));
+  $('filesView').querySelectorAll('[data-fxmode]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.fxmode === FX.mode)));
   $('fxTitle').textContent = d?.name || currentConvo()?.title || 'Files';
   main.textContent = '';
   main.className = `fx-main ${FX.view}`;
@@ -248,10 +260,11 @@ function fxRender() {
   fxPathBar();
 }
 function fxFound(main) {
-  const { q, data, err } = FX.find;
-  FX.rows = (data?.entries || []).map((e) => ({ e, rel: e.path, depth: 0 }));
+  const { q, mode, data, err } = FX.find;
   $('fxPath').textContent = '';
-  if (!data) return main.append(err ? fxEmpty("Couldn't search this project", err) : el('div', 'fx-loading', 'Searching…'));
+  if (!data) { FX.rows = []; return main.append(err ? fxEmpty("Couldn't search this project", err) : el('div', 'fx-loading', 'Searching…')); }
+  if (mode === 'contents') return fxFoundLines(main);
+  FX.rows = data.entries.map((e) => ({ e, rel: e.path, depth: 0 }));
   if (FX.sel && !FX.rows.some((r) => r.rel === FX.sel)) FX.sel = null;
   if (!FX.rows.length) main.append(fxEmpty(`No files named like “${q}”`, data.truncated ? 'The project is too big to search all of it.' : 'Hidden folders, .git and node_modules are skipped.'));
   else {
@@ -274,6 +287,55 @@ function fxFound(main) {
   const n = FX.rows.length;
   $('fxPath').append(el('span', 'fx-crumbs', `Searching the whole project for “${q}”`),
     el('span', 'fx-count', `${n} found${data.truncated ? ' · stopped early' : ''}`));
+}
+// Contents results: a heading per file, then one row per matching line (`line · text`, the match in <mark>). A row's
+// rel is unique per line; `file` is what Quick Look opens.
+function fxFoundLines(main) {
+  const { q, data } = FX.find;
+  FX.rows = data.hits.map((h) => ({ e: { name: h.path.split('/').pop(), dir: false, size: null, mtime: null }, rel: `${h.path}#L${h.line}`, file: h.path, hit: h, depth: 0 }));
+  if (FX.sel && !FX.rows.some((r) => r.rel === FX.sel)) FX.sel = null;
+  const nFiles = new Set(data.hits.map((h) => h.path)).size;
+  if (!FX.rows.length) main.append(fxEmpty(`No text like “${q}” in this project`, data.truncated ? 'The project is too big to search all of it.' : 'Hidden folders, .git, node_modules, binary files and files over 1 MB are skipped.'));
+  else {
+    const t = el('div', 'fx-rows fx-found fx-lines');
+    t.setAttribute('role', 'listbox');
+    t.setAttribute('aria-label', `Lines with “${q}”, ${FX.rows.length} found in ${nFiles} file${nFiles === 1 ? '' : 's'}`);
+    t.tabIndex = 0;
+    let group;
+    FX.rows.forEach((r, i) => {
+      if (!group || group.dataset.file !== r.file) {
+        group = el('div', 'fx-lgroup');
+        group.dataset.file = r.file;
+        group.setAttribute('role', 'group');
+        group.setAttribute('aria-label', r.file);
+        const head = el('div', 'fx-lfile');
+        head.setAttribute('aria-hidden', 'true');
+        head.title = r.file;
+        head.append(iconFor(r.e, r.file, false), el('span', 'fx-nt', r.file));
+        group.append(head);
+        t.append(group);
+      }
+      const o = optionFor(r, i, 'fx-row fx-hit');
+      o.title = `${r.file}:${r.hit.line}`;
+      o.append(el('span', 'fx-hl', String(r.hit.line)), fxMarked(el('span', 'fx-ht'), r.hit.text, q));
+      group.append(o);
+    });
+    fxActive(t);
+    main.append(t);
+  }
+  $('fxPath').append(el('span', 'fx-crumbs', `Searching inside the project's files for “${q}”`),
+    el('span', 'fx-count', `${FX.rows.length} line${FX.rows.length === 1 ? '' : 's'} in ${nFiles} file${nFiles === 1 ? '' : 's'} · ${data.files} searched${data.truncated ? ' · stopped early' : ''}`));
+}
+// `text` into `node` with each case-insensitive occurrence of q in <mark> (text nodes only).
+function fxMarked(node, text, q) {
+  const low = text.toLowerCase(), needle = q.toLowerCase();
+  let i = 0;
+  for (let at; needle && (at = low.indexOf(needle, i)) >= 0; i = at + needle.length) {
+    if (at > i) node.append(text.slice(i, at));
+    node.append(el('mark', null, text.slice(at, at + needle.length)));
+  }
+  if (i < text.length) node.append(text.slice(i));
+  return node;
 }
 function fxEmpty(title, text) {
   const box = el('div', 'fx-empty');
@@ -398,7 +460,8 @@ function fxFocus(selectFirst) {
   c.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' }); // e.g. a revealed find result
 }
 function fxOpen(r) {
-  if (FX.find) fxReveal(r);
+  if (r.hit) fxPreview(r);
+  else if (FX.find) fxReveal(r);
   else if (r.e.dir) fxGo(r.rel);
   else fxPreview(r);
 }
@@ -471,9 +534,9 @@ async function fxPreview(r) {
   const wasOpen = !m.hidden;
   FX.ql = { r, back: wasOpen ? FX.ql?.back : document.activeElement };
   m.hidden = false;
-  const url = fxUrl('raw', r.rel), body = $('fxQLBody');
+  const url = fxUrl('raw', r.file || r.rel), body = $('fxQLBody');
   $('fxQLTitle').textContent = r.e.name;
-  $('fxQLSub').textContent = `${kindOf(r.e)} · ${fxSize(r.e.size)} · ${fxDate(r.e.mtime)}`;
+  $('fxQLSub').textContent = r.hit ? `${r.file} · line ${r.hit.line}` : `${kindOf(r.e)} · ${fxSize(r.e.size)} · ${fxDate(r.e.mtime)}`;
   $('fxQLOpen').href = url;
   $('fxQLMode').hidden = true;
   body.className = 'fx-ql-body';
@@ -521,6 +584,7 @@ async function fxPreview(r) {
   const code = el('div', 'fx-code');
   code.append(el('pre', 'fx-gutter', Array.from({ length: Math.max(1, lines) }, (_, k) => k + 1).join('\n')), el('pre', 'fx-text', text));
   body.append(code);
+  if (r.hit) body.scrollTop = Math.max(0, code.offsetTop + 12 + (r.hit.line - 1) * (parseFloat(getComputedStyle(code).lineHeight) || 19) - body.clientHeight / 3);
 }
 function fxClosePreview() {
   const m = $('fxQL');

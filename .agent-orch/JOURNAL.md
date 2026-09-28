@@ -1013,3 +1013,6 @@ Each fenced-block line and each `;` part must now pass
 ## 2026-09-28 12:39 — #353 browser-task.mjs AUDIT #58: the last-line status marker decides a screen prompt's outcome; phrase matching only as a last resort on the final paragraph [done (check passed)]
 
 Screen prompt outcome now comes from last-line status marker
+## 2026-09-28 12:40 — #358 Files tab ui: search inside files with GET /api/files/grep and a Names | Contents switch [done (check passed)]
+
+Files tab can now search inside files in Contents mode

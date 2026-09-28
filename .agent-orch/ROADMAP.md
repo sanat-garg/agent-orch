@@ -3,39 +3,38 @@
 _Maintained by the orchestrator's reflection loop._
 
 ## Assessment
-_2026-09-28 12:40 (reflect #361, a rapid top-up after #356)._ Main is clean at e949809. Since #356 landed #349's neighbours
-(#350–#352, #354), #316, #321, #334 and #311. Six tasks are running (#344, #345, #347, #358, #360 and this one) and nine are
-queued. For this reflection the tests of the unheld modules ran to a log (stats, search, digest, changes, attachments,
-retention, usage, media, the Stats UI): 42 of 42 pass, none skipped. No full-suite run (owner: keep suite runs minimal).
-Nothing is known broken on main. CONTEXT.md was trimmed to what a fresh session needs.
+_2026-09-28 12:52 (reflect #367, a rapid top-up after #361)._ Main is clean at 6497a12 (#366 landed: models.mjs keeps the
+last good list). Since #361, #362, #360, #357, #358, #354, #353, #349, #350–#352, #316, #317, #334, #311 and #355 landed.
+Running: #344; queued: #301, #312, #314, #323, #347, #348, #359, #363, #364, #365; needs integration: #299, #305, #315,
+#345. For this reflection the tests of the unheld modules ran to a log (retention, attachments, digest, changes, search,
+github, worktrees, verifier, push, approvals, agent-share, usage, media, files, delegate, health, helpers, extensions,
+remote-login, connections, worker-cap, worker-status, gate-proxy, browser-task, runtimes, node-metrics): 151 passed, 0
+failed before the run was cut short by a session restart. No full-suite run (owner: keep suite runs minimal). Nothing is
+known broken on main.
 
-**What is held.** Queued and running work holds orchestrator.mjs, server.mjs, cluster.mjs, cluster-git.mjs, net-resolve.mjs,
-worker.mjs, parallel.mjs, taskrun.mjs, files.mjs, gate-proxy.mjs, gate.mjs, browser-task.mjs, browser-live.mjs,
-browser-view.mjs, browser.mjs, public/app.js|app.css|index.html|sw.js|files.*|browser.*, README.md and AUDIT.md. So this
-top-up takes the owner's direction (a feature on what exists, a reliability fix with tests) in files nobody holds:
-- **Stats: a Machines tab.** The cluster is goal 11 and the owner just asked for placement across every machine (#344),
-  but nothing shows what each machine actually did. `GET /api/stats` already carries `node` on every task and run;
-  stats.mjs adds the `nodes` table (names) and stats.js a tab with one row per machine: tasks done/failed, check pass
-  rate, busy time, tokens, last active, within the range picker.
-- **models.mjs keeps the last good list when a rediscovery fails.** Verified in the code: `refresh` stores whatever
-  `discover` returns, so a transient failure at the daily refresh (the CLI busy on a loaded VPS, a timeout, a network
-  blip) replaces a good cached list with an empty one and `save()` persists it. The model selector for that agent is
-  then empty until the next day, health reports "0 models", and delegation's `listed()` check treats the agent as
-  having no models. Goal 7 (honest data) and goal 8 (foolproof fallbacks) both break. The fix keeps the old list with
-  the error and retries at the next hourly tick.
-
-Not re-queued: #328 (AUDIT #61, retention keeps pending approval screenshots and prunes stale uploads) failed in setup
-(`cannot lock ref refs/remotes/origin/main`: two fetches on one checkout at once), not in its own work. #345 (git through
-the head) removes the racing fetch on workers; re-queue #61 unchanged once it lands. AUDIT #67's Codex half needs
-worker.mjs `applyCredential` (held by #344/#345/#359).
+**What is held.** Queued and running work holds orchestrator.mjs, server.mjs, cluster.mjs, cluster-git.mjs, capacity.mjs,
+resources.mjs, parallel.mjs, net-resolve.mjs, worker.mjs, browser-live.mjs, browser-view.mjs, browser.mjs, bin/browser-mcp.mjs,
+bin/install-worker-macos.sh, stats.mjs, public/app.js|app.css|index.html|sw.js|browser.*|stats.*, README.md and AUDIT.md.
+Every open UI-REVIEW row and most open AUDIT items (#39, #42, #44, #47, #48, #52, #54–#57, #59, #60, #63, #67) live in
+those files, so this top-up takes the owner's direction in files nobody holds:
+- **Files tab features on what #331/#358 built** (files.mjs, public/files.js are free): search options for Contents mode
+  (match case, whole word, regular expression); a "Changed" view listing what the agents changed in the project (git
+  status with +/− counts) with a per-file diff in Quick Look; and "Ask in chat", which drops `path:line` into the composer
+  from Quick Look or a Contents hit, so the owner can go from finding a line to asking about it without typing paths.
+- **Reliability, verified in the code:** retention.mjs still deletes approval screenshots after 7 days while the approval
+  is pending and never prunes `<DATA>/uploads` (AUDIT #61; #328 failed only in setup, a fetch race on one checkout).
+  taskrun.mjs `extractCommand` returns null both for "no command" and "refused", so the orchestrator can't fail a refused
+  Done-when (AUDIT #66's second half) and `runCheck` can't tell a missing program from a missing script inside an npm
+  script (AUDIT #65's second half); both halves are queued in taskrun.mjs so the orchestrator wiring becomes a two-line
+  change once it is free. health.mjs still reports an agent whose daily rediscovery failed as if nothing were wrong now
+  that #366 keeps the old list. approvals.mjs writes "No answer within 24 h" on rows that expired after a shorter TTL.
 
 Goals 1–8, 10 and 11 of the brief are met. Goal 9 lands with #314, #301 and the owner's #344/#345. Goal 12 has its
 foundations and waits for the owner. Goal 6's push notifications are backend-complete; the phone side is #312.
 
-Open ledgers: AUDIT round 6 has 11 open findings (#38, #39, #41, #42, #44, #46–#50, #52), of which #41/#49/#50 are queued
-(#315, #317). Round 7 (#53–#67): #53/#62/#65/#66 landed (ledger #355 waits), #58/#64 are #353/#349, #61 waits (above);
-#54–#57, #59, #60, #63 and #67 need orchestrator.mjs/server.mjs/worker.mjs. UI-REVIEW round 2 has 11 open rows, all in
-app.js/app.css.
+Open ledgers: AUDIT round 6 has 10 open findings (#38, #39, #42, #44, #47, #48, #49 wait for the ledger, #50 is #315/#363,
+#52). Round 7 (#53–#67): #53/#58/#62/#64/#65/#66 marked (#355), #61 queued below, #54–#57, #59, #60, #63 and #67 need
+orchestrator.mjs/server.mjs/worker.mjs. UI-REVIEW round 2 has 11 open rows, all in app.js/app.css.
 
 Things the owner should know:
 - **`autoRestart` is still off** (kv `parallel_settings` = `{"controllerWork":true}`). AUDIT #43's preflight is live, so it
@@ -45,21 +44,26 @@ Things the owner should know:
   connectors with outbound tools out of the MCP list until then.
 - Task #96 ("Answer owner's message", project soham) waits because that project is paused. By design.
 
-## Next (queued by #361)
-1. Stats Machines tab: `nodes` in `GET /api/stats` (stats.mjs) and a fifth tab in public/stats.js with one row per machine
-   (This server + each node): done/failed, check pass rate, busy time, tokens, last active; a busy-time share bar; range-aware;
-   fits 375px. Tests in test/stats.test.mjs and test/ui-stats.test.mjs.
-2. models.mjs: a failed rediscovery keeps the previous non-empty list (with `error` and `failedAt`), never saves an empty
-   list over a good one, and `refreshStale` retries an errored entry after `retryMs` (default 1 h) instead of a day. Tests
-   in test/models.test.mjs.
-Queued by earlier reflections: #349, #353, #355, #357 (gate-proxy callMs), #359 (owner), #315, #317, #323; integrators
-#312, #314; the owner's #348.
+## Next (queued by #367)
+1. retention.mjs AUDIT #61: media referenced by `approvals.screenshot`, `<DATA>/audit/*.jsonl` or a review task's result
+   survives; `<DATA>/uploads/<id>` older than mediaDays and referenced by no chat log is pruned. test/retention.test.mjs.
+2. taskrun.mjs: `extractCheck(doneWhen)` → `{command, refused}` so a refused snippet can fail the task (AUDIT #66 half two);
+   `extractCommand` unchanged. test/verify.test.mjs.
+3. taskrun.mjs: `checkUnavailable(command, output, code, env)` is true only for a 127 whose missing program is the
+   command's own first word and absent from PATH (AUDIT #65 half two). test/verify.test.mjs.
+4. Files tab: Contents search options (match case, whole word, regex) in files.mjs `grepFiles` and three chips in files.js.
+5. files.mjs: `GET /api/files/changed` (git status + numstat) and `GET /api/files/diff?path=` (one file's unified diff, capped).
+6. Files tab ui: a "Changed" view over 5 with +/− counts and a coloured diff in Quick Look (after 5).
+7. Files tab ui: "Ask in chat" from Quick Look and a Contents hit puts `path:line` into the composer.
+8. health.mjs: a kept-but-stale model list (`error` with models) is an error, not a problem, and says when the list is from.
+9. approvals.mjs: the expiry note states the row's real TTL; a pending row past its `expires_at` at boot expires at once.
+Queued by earlier reflections: #365 (Stats Machines tab), #363/#364 integrators, #323, #312, #314; the owner's #301, #347,
+#348, #359.
 
 ## Later
-Once the integrators (#312, #314), #301 and #344/#345/#347/#348/#360 free orchestrator.mjs, server.mjs, worker.mjs and app.js:
-- AUDIT #61 (#328's content): retention keeps screenshots of pending approvals (scan `<DATA>/audit/` and `approvals.screenshot`)
-  and prunes `<DATA>/uploads/<id>` older than the media age. Queue after #345 lands.
-- AUDIT #66's other half: a refused Done-when snippet fails the task instead of merging unchecked; #65's 127 rule.
+Once the integrators (#312, #314, #363, #364), #301 and #344/#347/#348/#359 free orchestrator.mjs, server.mjs, worker.mjs and app.js:
+- Wire tasks 2 and 3: `finishWork` fails a task with "Done-when check was refused: …" and accepts a 127 only when
+  `checkUnavailable` says so (AUDIT #65/#66 closed); then the AUDIT ledger for #61, #65, #66.
 - AUDIT #58's other half: screen-prompt failures go through `fail()`; a reply without a marker shows as "Unclear".
 - AUDIT #57: a resumed screen prompt gets "Continue; check the page for what is already done"; a lost one fails with its
   steps so far. AUDIT #56: refuse a screen prompt for a node `place` could never pick (409).
@@ -71,7 +75,7 @@ Once the integrators (#312, #314), #301 and #344/#345/#347/#348/#360 free orches
   shared Claude token only in Claude runs' env; back up a worker's own Codex auth.json.
 - Wire the digest (#340): `GET /api/orch/digest?since=`; a "Since you were away" group at the top of the Queue.
 - Wire task changes (#330): `GET /api/orch/task/:id/changes`; a "Changes" section in the task drawer.
-- Files tab follow-ups once #358 lands: a regex toggle and a glob filter, and "Open in chat" pasting `path:line`.
+- Skills & tools: "Check" an MCP server (start it, `tools/list`, show its tools or the error) before a task depends on it.
 - Settings "Send a test notification" (`POST /api/push/test`).
 - UI-REVIEW #25 "Needs you" group at the top of the Queue; #24 machine names instead of node ids in cards and approvals.
 - Retry a failed task from the drawer with an optional note.

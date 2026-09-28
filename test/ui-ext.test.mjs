@@ -100,7 +100,7 @@ test('add a skill, an MCP server and a persona, then pick the persona for the ch
   await page.click('#extBody .ext-acts .btn.primary');
   await page.fill('input[name="name"]', 'Draft');
   await page.keyboard.press('Escape');
-  await saved(page).catch(() => page.locator('#extBody .ext-empty').waitFor());
+  await page.locator('#extBody .ext-list, #extBody .ext-empty').first().waitFor(); // back on the (still empty) list
   assert.deepEqual(dialogs, ['Discard your changes?']);
   await page.click('#extBody .ext-acts .btn.primary');
   await page.click('.ext-starters .chip >> nth=0'); // Staff engineer

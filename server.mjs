@@ -1528,8 +1528,8 @@ async function handleRequest(req, res) {
   if (VENDOR[p]) return serveFile(res, path.join(ROOT, VENDOR[p]));
   if (p === '/' || p === '/index.html') return serveFile(res, path.join(PUBLIC, 'index.html'));
   if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css' || p === '/browser.js' || p === '/browser.css') return serveFile(res, path.join(PUBLIC, p));
-  // The Files view: read-only listing and preview of one chat's project folder (files.mjs).
-  if (handleFiles(req, res, url, { rootFor: (cid) => findConvo(cid)?.cwd || null, json })) return;
+  // The Files view: listing, preview, and copy/move/zip/unzip inside one chat's project folder (files.mjs).
+  if (handleFiles(req, res, url, { rootFor: (cid) => findConvo(cid)?.cwd || null, json, readBody })) return;
 
   if (p === '/api/status') {
     if (!onSubscription() && Date.now() - claudeAuth.checkedAt > 5000) await refreshClaudeAuth();

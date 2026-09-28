@@ -13,3 +13,7 @@ Backend for the Files tab's context menu (files.mjs + server.mjs routes, login-p
 ## Done when
 
 `node --test test/files-ops*.test.mjs` passes (copy/move collisions, zip/unzip round-trip, zip-slip and path-escape rejection, data/ protected)
+
+## Result — done (check passed) (2026-09-28 13:57)
+
+AGENT-ORCH-STATUS: done — Files copy/move/zip/unzip endpoints are live, safe and tested

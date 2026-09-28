@@ -1089,3 +1089,6 @@ mcp-probe.mjs probes stdio/http MCP servers; 7 tests pass
 ## 2026-09-28 13:55 — #393 extensions.mjs AUDIT #69: http and sse servers keep their outbound list, and a gated run withholds a connector the proxy cannot gate [done (check passed)]
 
 gated runs withhold http outbound connectors; UI tests skipped, no Chromium
+## 2026-09-28 13:57 — #403 Files backend: copy, move, zip and unzip endpoints with safe paths [done (check passed)]
+
+Files copy/move/zip/unzip endpoints are live, safe and tested

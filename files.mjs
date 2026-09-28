@@ -1,18 +1,27 @@
-// Read-only file browsing for the Files view: one chat's project folder, never anything outside it. Paths from the
+// File browsing (and the context menu's copy/move/zip/unzip) for the Files view: one chat's project folder, never anything outside it. Paths from the
 // client are relative to the project; each is resolved through realpath (so symlinks count by where they point) and
 // must stay inside the project's own real path. Listing gives names, sizes and dates; `raw` serves one file: images
 // as themselves, everything else as plain text (capped), under a sandbox CSP so nothing served can run as a page.
-//   GET /api/files/list?cid=<chat>&path=<rel>  → {name, path, crumbs, entries: [{name, dir, size, mtime, hidden}], truncated}
+//   GET /api/files/list?cid=<chat>&path=<rel>  → {name, path, crumbs, entries: [{name, dir, type, size, mtime, hidden, isSymlink}], truncated}
+//       (`dir=` works as well as `path=`; type is 'dir' or 'file', of what a link points to)
 //   GET /api/files/raw?cid=<chat>&path=<rel>   → the file (images), or text/plain (first TEXT_MAX bytes; 415 for binary)
 //   GET /api/files/find?cid=<chat>&q=<text>    → {q, entries: [{name, path, dir, size, mtime}], truncated} (q: 2+ chars)
 //   GET /api/files/grep?cid=<chat>&q=<text>    → {q, hits: [{path, line, text}], files, truncated} (q: 2–200 chars; text files ≤ 1 MB)
 //   GET /api/files/changed?cid=<chat>          → {branch, entries: [{path, status, add, del, binary, from?}], truncated}, status
 //       M/A/D/R/? against HEAD (R: path is the new name, from the old); {branch: null, entries: [], notGit: true} outside git
 //   GET /api/files/diff?cid=<chat>&path=<rel>  → text/plain unified diff of one changed file against HEAD (first DIFF_MAX bytes)
+//   POST /api/files/copy  {cid, paths, dest}        → {created: [rel]}
+//   POST /api/files/move  {cid, paths, dest}        → {moved: [{from, to}]}
+//   POST /api/files/zip   {cid, paths, dest?, name?} → {zip: rel}
+//   POST /api/files/unzip {cid, path, dest?}        → {extracted: rel, skipped}
+//   (the rules for these four are above copyPaths; errors are {error} with 400/403/404/409/413)
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { Readable, Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
+import zlib from 'node:zlib';
 
 export const TEXT_MAX = 1024 * 1024;
 export const IMAGE_MAX = 25 * 1024 * 1024;
@@ -46,11 +55,12 @@ export function listDir(rootDir, rel) {
   const names = fs.readdirSync(real);
   const entries = [];
   for (const name of names.slice(0, LIST_MAX)) {
-    let st, target;
-    try { target = fs.realpathSync(path.join(real, name)); st = fs.statSync(target); } catch { continue; } // broken link
+    let st, target, link;
+    try { link = fs.lstatSync(path.join(real, name)).isSymbolicLink(); target = fs.realpathSync(path.join(real, name)); st = fs.statSync(target); } catch { continue; } // broken link
     if (target !== root && !target.startsWith(root + path.sep)) continue; // a link out of the project
     if (!st.isDirectory() && !st.isFile()) continue; // sockets, fifos, devices
-    entries.push({ name, dir: st.isDirectory(), size: st.isFile() ? st.size : null, mtime: Math.round(st.mtimeMs), hidden: name.startsWith('.') });
+    entries.push({ name, dir: st.isDirectory(), type: st.isDirectory() ? 'dir' : 'file', size: st.isFile() ? st.size : null, mtime: Math.round(st.mtimeMs),
+      hidden: name.startsWith('.'), isSymlink: link });
   }
   const crumbs = [{ name: path.basename(root), path: '' }];
   clean.split('/').filter(Boolean).forEach((s, i, a) => crumbs.push({ name: s, path: a.slice(0, i + 1).join('/') }));
@@ -245,19 +255,308 @@ export async function sendDiff(req, res, rootDir, rel) {
   res.end(out.subarray(0, DIFF_MAX));
 }
 
-// The route handler: rootFor(cid) → the chat's project folder, or null. Returns true (synchronously) when it answers;
-// grep, changed and diff answer later, from their own promises.
-export function handleFiles(req, res, url, { rootFor, json }) {
-  const m = url.pathname.match(/^\/api\/files\/(list|raw|find|grep|changed|diff)$/);
-  if (!m || req.method !== 'GET') return false;
-  const root = rootFor(url.searchParams.get('cid'));
+// ── Changing files: copy, move, zip, unzip ──────────────────────────────────────────────────────────────────────────
+// Every path is resolved like resolveInside (realpath, inside the project). A source is the entry itself, not what a
+// link points to: moving or copying a link moves or copies the link (it must still point inside the project), and a
+// folder's contents are copied with their links as they are. The project root is never a source. data/ (at the top)
+// and anything under a .git/ are read-only: never a destination, never moved, and no new item may land there; reading
+// them (copy out, zip) is fine. A clash with an existing name gets 'name copy', 'name copy 2'… (copy, move) or
+// 'name 2', 'name 3'… (zip, unzip). Zips are written and read in plain node (zlib, no zip/unzip binaries, no zip64):
+// the same code on the head and on macOS workers, and every archive entry is checked before anything is written.
+export const OPS_ENTRY_MAX = 20000;
+export const ZIP_INPUT_MAX = 2 * 1024 ** 3;
+export const UNZIP_MAX = 500 * 1024 ** 2;
+
+const relOf = (root, abs) => path.relative(root, abs).split(path.sep).join('/');
+const isProtected = (rel) => { const s = rel.split('/'); return s[0] === 'data' || s.includes('.git'); };
+const within = (p, dir) => p === dir || p.startsWith(dir + path.sep);
+const lexists = (p) => { try { fs.lstatSync(p); return true; } catch { return false; } };
+
+// One source the client named: {root, abs (the entry, in its real parent folder), real, rel, name, dir, link}.
+function sourceOf(rootDir, rel) {
+  const parts = String(rel ?? '').split('/').filter((s) => s && s !== '.');
+  if (parts.some((s) => s === '..' || s.includes('\0'))) throw new FileError(400, 'Invalid path');
+  if (!parts.length) throw new FileError(400, 'Pick a file or folder, not the project itself');
+  const { root, real: parent } = resolveInside(rootDir, parts.slice(0, -1).join('/'));
+  const abs = path.join(parent, parts.at(-1));
+  let lst;
+  try { lst = fs.lstatSync(abs); } catch { throw new FileError(404, `Not found: ${parts.join('/')}`); }
+  const { real } = resolveInside(root, relOf(root, abs));
+  return { root, abs, real, rel: relOf(root, abs), name: parts.at(-1), dir: fs.statSync(real).isDirectory(), link: lst.isSymbolicLink() };
+}
+// The selection: distinct sources, leaving out any inside another selected folder (it comes along with it).
+function sourcesOf(rootDir, paths) {
+  if (!Array.isArray(paths) || !paths.length) throw new FileError(400, 'Pick at least one file or folder');
+  if (paths.length > OPS_ENTRY_MAX) throw new FileError(413, 'Too many items');
+  const all = [...new Map(paths.map((p) => sourceOf(rootDir, p)).map((s) => [s.abs, s])).values()];
+  return all.filter((s) => !all.some((o) => o !== s && o.dir && !o.link && s.abs.startsWith(o.abs + path.sep)));
+}
+function destOf(rootDir, rel) {
+  if (typeof rel !== 'string') throw new FileError(400, 'Pick a destination folder');
+  const d = resolveInside(rootDir, rel);
+  if (!fs.statSync(d.real).isDirectory()) throw new FileError(400, 'The destination is not a folder');
+  if (isProtected(d.rel)) throw new FileError(403, `${d.rel} is read-only`);
+  return d;
+}
+// A free name in `dir` for `name`; style 'copy' → 'a copy.txt', 'a copy 2.txt'; 'number' → 'a 2.zip', 'a 3.zip'.
+function freeName(root, dir, name, { isDir = false, style = 'copy' } = {}) {
+  const ext = isDir ? '' : path.extname(name), stem = name.slice(0, name.length - ext.length);
+  for (let n = 1; n <= 1000; n++) {
+    const cand = n === 1 ? name : style === 'copy' ? `${stem} copy${n === 2 ? '' : ` ${n - 1}`}${ext}` : `${stem} ${n}${ext}`;
+    if (lexists(path.join(dir, cand))) continue;
+    if (isProtected(relOf(root, path.join(dir, cand)))) throw new FileError(403, `${relOf(root, path.join(dir, cand))} is read-only`);
+    return path.join(dir, cand);
+  }
+  throw new FileError(409, `Too many items named like ${name}`);
+}
+function intoItself(s, dest, verb) {
+  if (s.dir && !s.link && within(dest.real, s.real)) throw new FileError(400, `Can't ${verb} ${s.rel} into itself`);
+}
+
+// POST /api/files/copy {paths, dest} → {created: [rel]}
+export async function copyPaths(rootDir, paths, destRel) {
+  const dest = destOf(rootDir, destRel), srcs = sourcesOf(rootDir, paths);
+  for (const s of srcs) intoItself(s, dest, 'copy');
+  const created = [];
+  for (const s of srcs) {
+    const to = freeName(dest.root, dest.real, s.name, { isDir: s.dir && !s.link });
+    await fs.promises.cp(s.abs, to, { recursive: true, force: false, errorOnExist: true, verbatimSymlinks: true, preserveTimestamps: true });
+    created.push(relOf(dest.root, to));
+  }
+  return { created };
+}
+
+// POST /api/files/move {paths, dest} → {moved: [{from, to}]}; an item already in dest stays put (from === to).
+export async function movePaths(rootDir, paths, destRel) {
+  const dest = destOf(rootDir, destRel), srcs = sourcesOf(rootDir, paths);
+  for (const s of srcs) {
+    if (isProtected(s.rel)) throw new FileError(403, `${s.rel} is read-only`);
+    intoItself(s, dest, 'move');
+  }
+  const moved = [];
+  for (const s of srcs) {
+    if (path.dirname(s.abs) === dest.real) { moved.push({ from: s.rel, to: s.rel }); continue; }
+    const to = freeName(dest.root, dest.real, s.name, { isDir: s.dir && !s.link });
+    try { await fs.promises.rename(s.abs, to); }
+    catch (e) {
+      if (e.code !== 'EXDEV') throw e;
+      await fs.promises.cp(s.abs, to, { recursive: true, force: false, errorOnExist: true, verbatimSymlinks: true, preserveTimestamps: true });
+      await fs.promises.rm(s.abs, { recursive: true });
+    }
+    moved.push({ from: s.rel, to: relOf(dest.root, to) });
+  }
+  return { moved };
+}
+
+// A name the client typed for a new item: one plain path component.
+function plainName(name) {
+  const n = String(name).trim();
+  if (!n || n === '.' || n === '..' || /[/\\\0]/.test(n)) throw new FileError(400, 'Invalid name');
+  return n;
+}
+
+// POST /api/files/zip {paths, dest?, name?} → {zip: rel}. Each selected item sits at the top of the archive under its
+// own name; folders go in whole (their links are left out: a zip never follows one). dest defaults to the selection's
+// common parent folder, the name to '<item>.zip' for one item or 'Archive.zip' for several.
+export async function zipPaths(rootDir, paths, { dest: destRel, name } = {}) {
+  const srcs = sourcesOf(rootDir, paths);
+  const { root } = srcs[0];
+  let common = path.dirname(srcs[0].abs);
+  for (const s of srcs) while (!within(path.dirname(s.abs), common)) common = path.dirname(common);
+  const dest = destOf(root, destRel ?? relOf(root, common));
+  const seen = new Set();
+  for (const s of srcs) {
+    if (seen.has(s.name)) throw new FileError(409, `Two selected items are both named ${s.name}`);
+    seen.add(s.name);
+  }
+  let file = name == null || name === '' ? (srcs.length === 1 ? `${srcs[0].name}.zip` : 'Archive.zip') : plainName(name);
+  if (!/\.zip$/i.test(file)) file += '.zip';
+  const entries = [];
+  let bytes = 0;
+  const add = (e) => {
+    if (entries.push(e) > OPS_ENTRY_MAX) throw new FileError(413, `More than ${OPS_ENTRY_MAX} items to zip`);
+    if ((bytes += e.size || 0) > ZIP_INPUT_MAX) throw new FileError(413, 'Too much to zip (2 GB at most)');
+  };
+  for (const s of srcs) {
+    const st = fs.statSync(s.real);
+    if (!st.isDirectory()) { add({ name: s.name, abs: s.real, size: st.size, st }); continue; }
+    add({ name: `${s.name}/`, dir: true, st });
+    const walk = (abs, prefix) => {
+      for (const n of fs.readdirSync(abs).sort()) {
+        const p = path.join(abs, n), l = fs.lstatSync(p);
+        if (l.isDirectory()) { add({ name: `${prefix}${n}/`, dir: true, st: l }); walk(p, `${prefix}${n}/`); }
+        else if (l.isFile()) add({ name: `${prefix}${n}`, abs: p, size: l.size, st: l });
+      }
+    };
+    walk(s.real, `${s.name}/`);
+  }
+  const partial = path.join(dest.real, `.${file}.${process.pid}-${Date.now()}.partial`);
+  try {
+    await writeZip(partial, entries);
+    const to = freeName(root, dest.real, file, { style: 'number' });
+    await fs.promises.rename(partial, to);
+    return { zip: relOf(root, to) };
+  } catch (e) { await fs.promises.rm(partial, { force: true }); throw e; }
+}
+
+function dosTime(ms) {
+  const d = new Date(ms), y = Math.max(1980, d.getFullYear());
+  return { time: (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1), date: ((y - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate() };
+}
+async function writeZip(file, entries) {
+  const fh = await fs.promises.open(file, 'wx');
+  let pos = 0;
+  const central = [];
+  try {
+    for (const e of entries) {
+      const name = Buffer.from(e.name, 'utf8'), offset = pos, method = e.dir ? 0 : 8;
+      let crc = 0, size = 0, csize = 0;
+      pos += 30 + name.length;
+      if (!e.dir) {
+        await pipeline(fs.createReadStream(e.abs), new Transform({ transform(c, _, cb) { crc = zlib.crc32(c, crc); size += c.length; cb(null, c); } }),
+          zlib.createDeflateRaw(), async (chunks) => {
+            for await (const c of chunks) { await fh.write(c, 0, c.length, pos); pos += c.length; csize += c.length; }
+          });
+      }
+      if (pos > 0xfffffff0) throw new FileError(413, 'The zip would be too large (4 GB at most)');
+      const { time, date } = dosTime(e.st.mtimeMs);
+      const mode = e.dir ? 0o40755 : 0o100000 | (e.st.mode & 0o111 ? 0o755 : 0o644);
+      const h = Buffer.alloc(30);
+      h.writeUInt32LE(0x04034b50, 0); h.writeUInt16LE(20, 4); h.writeUInt16LE(0x0800, 6); h.writeUInt16LE(method, 8);
+      h.writeUInt16LE(time, 10); h.writeUInt16LE(date, 12); h.writeUInt32LE(crc, 14); h.writeUInt32LE(csize, 18);
+      h.writeUInt32LE(size, 22); h.writeUInt16LE(name.length, 26);
+      await fh.write(Buffer.concat([h, name]), 0, 30 + name.length, offset);
+      const c = Buffer.alloc(46);
+      c.writeUInt32LE(0x02014b50, 0); c.writeUInt16LE((3 << 8) | 20, 4); h.copy(c, 6, 4, 30); // version needed … name length
+      c.writeUInt32LE(((mode << 16) | (e.dir ? 0x10 : 0)) >>> 0, 38); c.writeUInt32LE(offset, 42);
+      central.push(c, name);
+    }
+    const cd = Buffer.concat(central), end = Buffer.alloc(22);
+    end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10);
+    end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(pos, 16);
+    const all = Buffer.concat([cd, end]);
+    await fh.write(all, 0, all.length, pos);
+  } finally { await fh.close(); }
+}
+
+// The archive's entries from its central directory, all checked before anything is written: no absolute, drive or '..'
+// paths (zip-slip), no encryption or zip64, only stored/deflated data, at most OPS_ENTRY_MAX entries and UNZIP_MAX bytes
+// uncompressed. Symlink entries and anything under a .git/ are skipped (counted in `skipped`).
+async function readZip(fh, fileSize) {
+  const bad = (m) => new FileError(400, m);
+  const tailLen = Math.min(fileSize, 22 + 0xffff), tail = Buffer.alloc(tailLen);
+  await fh.read(tail, 0, tailLen, fileSize - tailLen);
+  let at = -1;
+  for (let i = tailLen - 22; i >= 0; i--) if (tail.readUInt32LE(i) === 0x06054b50) { at = i; break; }
+  if (at < 0) throw bad('Not a zip file');
+  const count = tail.readUInt16LE(at + 10), cdSize = tail.readUInt32LE(at + 12), cdOff = tail.readUInt32LE(at + 16);
+  if (count === 0xffff || cdOff === 0xffffffff || cdSize === 0xffffffff) throw bad('Zip64 archives are not supported');
+  if (count > OPS_ENTRY_MAX) throw new FileError(413, `The zip has more than ${OPS_ENTRY_MAX} entries`);
+  if (cdOff + cdSize > fileSize) throw bad('The zip is damaged');
+  if (cdSize > 64 * 1024 ** 2) throw new FileError(413, 'The zip\'s file list is too large');
+  const cd = Buffer.alloc(cdSize);
+  await fh.read(cd, 0, cdSize, cdOff);
+  const entries = [];
+  let p = 0, total = 0, skipped = 0;
+  for (let i = 0; i < count; i++) {
+    if (p + 46 > cdSize || cd.readUInt32LE(p) !== 0x02014b50) throw bad('The zip is damaged');
+    const host = cd.readUInt16LE(p + 4) >> 8, flags = cd.readUInt16LE(p + 8), method = cd.readUInt16LE(p + 10);
+    const time = cd.readUInt16LE(p + 12), date = cd.readUInt16LE(p + 14), crc = cd.readUInt32LE(p + 16);
+    const csize = cd.readUInt32LE(p + 20), size = cd.readUInt32LE(p + 24), nlen = cd.readUInt16LE(p + 28);
+    const xlen = cd.readUInt16LE(p + 30), clen = cd.readUInt16LE(p + 32), attr = cd.readUInt32LE(p + 38), offset = cd.readUInt32LE(p + 42);
+    const raw = cd.subarray(p + 46, p + 46 + nlen).toString(flags & 0x800 ? 'utf8' : 'latin1');
+    p += 46 + nlen + xlen + clen;
+    const name = raw.replace(/\\/g, '/'), mode = host === 3 ? attr >>> 16 : 0;
+    if (!name || name.startsWith('/') || /^[a-z]:/i.test(name) || name.includes('\0')) throw bad(`Unsafe path in the zip: ${raw}`);
+    const parts = name.split('/').filter((s) => s && s !== '.');
+    if (parts.includes('..')) throw bad(`Unsafe path in the zip: ${raw}`);
+    if ((mode & 0o170000) === 0o120000 || parts.includes('.git')) { skipped++; continue; }
+    if (!parts.length) continue;
+    const dir = name.endsWith('/') || (mode & 0o170000) === 0o040000 || (!mode && attr & 0x10);
+    if (flags & 1) throw bad('Encrypted zips are not supported');
+    if (csize === 0xffffffff || size === 0xffffffff || offset === 0xffffffff) throw bad('Zip64 archives are not supported');
+    if (!dir && method !== 0 && method !== 8) throw bad(`Unsupported compression in ${raw}`);
+    if (!dir && (total += size) > UNZIP_MAX) throw new FileError(413, 'The zip unpacks to more than 500 MB');
+    entries.push({ rel: parts.join('/'), dir, method, crc, csize, size, offset, exec: !!(mode & 0o111),
+      mtime: new Date(1980 + (date >> 9), ((date >> 5) & 15) - 1, date & 31, time >> 11, (time >> 5) & 63, (time & 31) * 2) });
+  }
+  return { entries, skipped };
+}
+
+// POST /api/files/unzip {path, dest?} → {extracted: rel, skipped}: into a new folder named after the zip in dest
+// (default: the zip's own folder). It unpacks into a hidden staging folder first, renamed into place only when every
+// entry came out whole (size and CRC match), so a bad archive leaves nothing behind.
+export async function unzipPath(rootDir, rel, { dest: destRel } = {}) {
+  const src = sourceOf(rootDir, rel);
+  if (src.dir) throw new FileError(400, 'Not a zip file');
+  const dest = destOf(src.root, destRel ?? relOf(src.root, path.dirname(src.abs)));
+  const folder = src.name.replace(/\.zip$/i, '') || 'Archive';
+  const fh = await fs.promises.open(src.real, 'r');
+  const staging = path.join(dest.real, `.${folder}.${process.pid}-${Date.now()}.unzip`);
+  try {
+    const { size: fileSize } = await fh.stat();
+    const { entries, skipped } = await readZip(fh, fileSize);
+    await fs.promises.mkdir(staging);
+    let total = 0;
+    for (const e of entries) {
+      const to = path.join(staging, ...e.rel.split('/'));
+      try {
+        if (e.dir) { await fs.promises.mkdir(to, { recursive: true }); continue; }
+        await fs.promises.mkdir(path.dirname(to), { recursive: true });
+        const lh = Buffer.alloc(30);
+        await fh.read(lh, 0, 30, e.offset);
+        if (lh.readUInt32LE(0) !== 0x04034b50) throw new FileError(400, 'The zip is damaged');
+        const start = e.offset + 30 + lh.readUInt16LE(26) + lh.readUInt16LE(28);
+        if (start + e.csize > fileSize) throw new FileError(400, 'The zip is damaged');
+        let crc = 0, n = 0;
+        const count = new Transform({ transform(c, _, cb) {
+          n += c.length; total += c.length; crc = zlib.crc32(c, crc);
+          if (n > e.size || total > UNZIP_MAX) return cb(new FileError(400, `${e.rel} is larger than the zip says`));
+          cb(null, c);
+        } });
+        const data = e.csize ? fh.createReadStream({ start, end: start + e.csize - 1, autoClose: false }) : Readable.from([]);
+        await pipeline(data, ...(e.method === 8 ? [zlib.createInflateRaw()] : []), count, fs.createWriteStream(to, { flags: 'wx', mode: e.exec ? 0o755 : 0o644 }));
+        if (n !== e.size || crc !== e.crc) throw new FileError(400, `${e.rel} is damaged in the zip`);
+        await fs.promises.utimes(to, e.mtime, e.mtime).catch(() => {});
+      } catch (err) {
+        if (['EEXIST', 'ENOTDIR', 'EISDIR'].includes(err.code)) throw new FileError(400, `The zip's entries clash at ${e.rel}`);
+        if (err.code?.startsWith?.('Z_')) throw new FileError(400, `${e.rel} is damaged in the zip`);
+        throw err;
+      }
+    }
+    const to = freeName(src.root, dest.real, folder, { isDir: true, style: 'number' });
+    await fs.promises.rename(staging, to);
+    return { extracted: relOf(src.root, to), skipped };
+  } catch (e) { await fs.promises.rm(staging, { recursive: true, force: true }); throw e; }
+  finally { await fh.close(); }
+}
+
+// The route handler: rootFor(cid) → the chat's project folder, or null; readBody(req) → the parsed JSON body (POSTs).
+// Returns true (synchronously) when it answers; grep, changed, diff and the POSTs answer later, from their own promises.
+const OPS = { copy: (root, b) => copyPaths(root, b.paths, b.dest), move: (root, b) => movePaths(root, b.paths, b.dest),
+  zip: (root, b) => zipPaths(root, b.paths, b), unzip: (root, b) => unzipPath(root, b.path, b) };
+const FS_ERRORS = { EACCES: [403, 'Permission denied'], EPERM: [403, 'Permission denied'], EROFS: [403, 'The disk is read-only'],
+  EEXIST: [409, 'Something with that name is already there'], ENOSPC: [507, 'The disk is full'], ENOENT: [404, 'Not found'] };
+export function handleFiles(req, res, url, { rootFor, json, readBody }) {
+  const m = url.pathname.match(/^\/api\/files\/(list|raw|find|grep|changed|diff|copy|move|zip|unzip)$/);
+  if (!m || req.method !== (OPS[m[1]] ? 'POST' : 'GET')) return false;
   const fail = (e) => {
     if (res.headersSent) return res.destroy();
-    json(res, e.status || (e.code === 'EACCES' ? 403 : 500), { error: e.status ? e.message : e.code === 'EACCES' ? 'Permission denied' : 'Could not read it' });
+    const [status, error] = e.status ? [e.status, e.message] : FS_ERRORS[e.code] || [500, OPS[m[1]] ? `Could not ${m[1]} it` : 'Could not read it'];
+    json(res, status, { error });
   };
+  if (OPS[m[1]]) {
+    readBody(req).then((b) => {
+      const root = rootFor(b.cid ?? url.searchParams.get('cid'));
+      if (!root) throw new FileError(404, 'No project for this chat');
+      return OPS[m[1]](root, b);
+    }).then((r) => json(res, 200, r), fail);
+    return true;
+  }
+  const root = rootFor(url.searchParams.get('cid'));
   try {
     if (!root) throw new FileError(404, 'No project for this chat');
-    if (m[1] === 'list') json(res, 200, listDir(root, url.searchParams.get('path')));
+    if (m[1] === 'list') json(res, 200, listDir(root, url.searchParams.get('path') ?? url.searchParams.get('dir')));
     else if (m[1] === 'find' || m[1] === 'grep') {
       const q = (url.searchParams.get('q') || '').trim();
       if (q.length < 2) throw new FileError(400, 'Type at least 2 characters');

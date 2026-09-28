@@ -13,3 +13,7 @@ Frontend (public/files.js, files.css). Add 'Download' to the Files tab toolbar (
 ## Done when
 
 `node --test test/ui-files-download*.test.mjs` passes (single-file URL, multi-path zip URL, folder zip, protected excluded, disabled without selection)
+
+## Result — done (check passed) (2026-09-28 23:15)
+
+AGENT-ORCH-STATUS: done — Files Download button, menu item, ⌘⇧D shortcut and tests added

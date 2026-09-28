@@ -14,6 +14,8 @@
 // Backspace, after an in-page confirm), Copy path and Ask in chat. The clipboard is app-internal
 // (absolute paths plus copy|cut) and outlives folder changes; pasting POSTs /api/files/copy or /move {paths, dest},
 // and /zip {paths, dest} and /unzip {path, dest} make and extract archives (cid rides in the query like every files route).
+// Download (toolbar, menu, ⌘⇧D) saves the selection natively via GET /api/files/download?path=… (one file as itself; several
+// paths or a folder as one streamed zip); protected files are never downloaded.
 // Rename and New edit a name in place (FX.edit, redrawn by every render): POST /api/files/rename {path, name},
 // /api/files/new {dir, name, type}; Delete POSTs /api/files/delete {paths}.
 const FX = {
@@ -44,6 +46,7 @@ const fxRel = (p) => (FX.proj && p.startsWith(FX.proj + '/') ? p.slice(FX.proj.l
 const fxBase = (p) => (p === '/' ? '/' : p.split('/').pop());
 const FX_RO = "Read-only location: agent-orch can't change files here";
 const FX_PROT = 'Protected file: contents hidden';
+const FX_DL_KEYS = FX_MAC ? '⌘⇧D' : 'Ctrl+Shift+D';
 const fxUrl = (kind, rel) => `/api/files/${kind}?cid=${encodeURIComponent(FX.cid)}&path=${encodeURIComponent(rel)}`;
 // A folder's listing: `dir` is the contract; `path` keeps servers from before it working.
 const fxListUrl = (rel) => `/api/files/list?cid=${encodeURIComponent(FX.cid)}&dir=${encodeURIComponent(rel)}&path=${encodeURIComponent(rel)}`;
@@ -107,6 +110,7 @@ function iconFor(e, rel, big) {
 
 // ----- shell (built once)
 const ICON_GRID = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect x="4" y="4" width="6.5" height="6.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>';
+const ICON_DL = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M12 4v11m-4.5-4.5L12 15l4.5-4.5M5 19.5h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const ICON_LIST = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="5" cy="6" r="1.2" fill="currentColor"/><circle cx="5" cy="12" r="1.2" fill="currentColor"/><circle cx="5" cy="18" r="1.2" fill="currentColor"/></svg>';
 function fxBuild() {
   if (FX.built) return;
@@ -120,6 +124,7 @@ function fxBuild() {
       <h2 class="fx-title" id="fxTitle">Files</h2>
       <span class="fx-ro" id="fxRO" title="${FX_RO}" hidden>Read-only</span>
       <div class="fx-tools">
+        <button type="button" class="btn small fx-places fx-download" id="fxDownload" disabled>${ICON_DL}<span>Download</span></button>
         <button type="button" class="btn small fx-places" id="fxUpload" aria-haspopup="menu" title="Upload files or a folder here">Upload<svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><path d="M2.5 4.5l3.5 3.5 3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         <input type="file" id="fxUpFiles" multiple hidden><input type="file" id="fxUpDir" webkitdirectory multiple hidden>
         <button type="button" class="btn small fx-places" id="fxPlaces" aria-haspopup="menu" title="Places and Go to folder (${fxKeys('L')})">Places<svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><path d="M2.5 4.5l3.5 3.5 3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
@@ -164,6 +169,7 @@ function fxBuild() {
     e.target.value = '';
   });
   $('fxUplX').onclick = () => fxUploadCancel();
+  $('fxDownload').onclick = () => fxDownload(fxPickedRows());
   fxDropWire($('fxMain'));
   $('fxPlaces').onclick = () => { const k = $('fxPlaces').getBoundingClientRect(); fxPlacesOpen(k.left, k.bottom + 4); };
   $('fxGotoBar').onsubmit = (e) => { e.preventDefault(); fxGotoGo(); };
@@ -205,6 +211,7 @@ function fxBuild() {
   });
   v.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === '.') { e.preventDefault(); fxToggleHidden(); }
+    else if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'd' && !e.target.closest('input')) { e.preventDefault(); fxDownload(fxPickedRows()); }
     else if (((e.metaKey || e.ctrlKey) && (e.key === '[' || e.key === ']')) || (e.altKey && !e.target.closest('input') && (e.key === 'ArrowLeft' || e.key === 'ArrowRight'))) {
       e.preventDefault(); fxHistory(e.key === '[' || e.key === 'ArrowLeft' ? -1 : 1);
     }
@@ -358,6 +365,7 @@ function fxSorted(entries) {
 function fxRender() {
   if (!FX.built) return;
   const main = $('fxMain'), d = FX.data;
+  fxDlPaint();
   $('fxUp').disabled = !fxUpPath() || FX.view === 'changed';
   $('fxRO').hidden = !fxReadOnly();
   $('fxUpload').disabled = !FX.data || fxFlat() || fxReadOnly();
@@ -405,6 +413,7 @@ function fxPrune() {
   if (FX.sel && !have.has(FX.sel)) FX.sel = null;
   for (const rel of FX.picked) if (!have.has(rel)) FX.picked.delete(rel);
   if (FX.sel && !FX.picked.size) FX.picked.add(FX.sel);
+  fxDlPaint();
 }
 // Search results and the Changed view are flat lists: one row at a time, no clipboard or context menu.
 const fxFlat = () => !!FX.find || FX.view === 'changed';
@@ -723,6 +732,7 @@ const fxPickedRows = () => FX.rows.filter((r) => FX.picked.has(r.rel));
 function fxPaintPicked() {
   const c = $('fxMain').querySelector('[role="listbox"], [role="tree"]');
   c?.querySelectorAll('[data-i]').forEach((o) => o.setAttribute('aria-selected', String(FX.picked.has(FX.rows[+o.dataset.i]?.rel))));
+  fxDlPaint();
   return c;
 }
 // Marquee (mouse and pen; touch keeps long-press): pressing on empty space (not a row's name or icon, not a selected row) and
@@ -1117,12 +1127,37 @@ function fxMenuOpen(r, x, y) {
     '-',
     ['delete', 'Delete', FX_MAC ? '⌫' : 'Del', !!rows.length && !ro && !prot, () => fxConfirmDelete(rows), why(ro || prot)],
     '-',
+    ['download', 'Download', FX_DL_KEYS, rows.some((x) => !x.e.protected), () => fxDownload(rows), rows.length && rows.every((x) => x.e.protected) ? `🔒 ${FX_PROT}` : ''],
     ['path', paths.length > 1 ? 'Copy paths' : 'Copy path', '', !!rows.length, async () => {
       toast((await copyToClipboard(paths.join('\n'))) ? `${paths.length > 1 ? 'Paths' : 'Path'} copied` : "Couldn't copy", { duration: 2000 });
     }],
     ['ask', 'Ask in chat', '⇧Enter', !!rows.length, () => fxAskAbout(paths.map(fxRel).join(' '))],
   ];
   fxMenuShow(items, r ? r.e.name : fxFolderName(FX.path), x, y, ro ? `${FX_RO}.` : '');
+}
+// ----- download: the browser saves GET /api/files/download itself (a hidden <a download>, nothing is fetched into the page):
+// one file as itself; several paths (repeated path=) or a folder as one streamed zip. Protected files are left out with a toast.
+const fxDlPath = (r) => fxAbs(r.file || r.rel); // a Contents hit's rel carries #L<line>
+const fxDownloadUrl = (paths) => `/api/files/download?cid=${encodeURIComponent(FX.cid)}${paths.map((p) => `&path=${encodeURIComponent(p)}`).join('')}`;
+function fxDlPaint() {
+  const b = FX.built && $('fxDownload');
+  if (!b) return;
+  const rows = fxPickedRows(), ok = rows.filter((r) => !r.e.protected);
+  b.disabled = !FX.cid || !ok.length;
+  b.title = !rows.length ? 'Select files or folders to download' : !ok.length ? `🔒 ${FX_PROT}: it can't be downloaded` : `Download ${ok.length > 1 || ok[0].e.dir ? 'as a zip ' : ''}(${FX_DL_KEYS})`;
+}
+function fxDownload(rows) {
+  if (!FX.cid || !rows.length) return;
+  const ok = rows.filter((r) => !r.e.protected), skipped = rows.length - ok.length;
+  if (!ok.length) return toast(`${FX_PROT}: it can't be downloaded.`, { kind: 'error' });
+  const paths = [...new Set(ok.map(fxDlPath))];
+  if (skipped) toast(`Skipped ${skipped} protected file${skipped === 1 ? '' : 's'}`, { duration: 3000 });
+  if (paths.length > 1 || ok[0].e.dir) toast(`Downloading ${paths.length > 1 ? `${paths.length} items` : `“${ok[0].e.name}”`} as a zip`, { duration: 2500 });
+  const a = document.createElement('a');
+  a.href = fxDownloadUrl(paths); a.download = ''; a.hidden = true;
+  document.body.append(a);
+  a.click();
+  a.remove();
 }
 // Builds and shows a menu: items are '-' or [act, label, keys, enabled, run, tooltip]; note: a line of text at the end.
 function fxMenuShow(items, label, x, y, note = '') {

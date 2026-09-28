@@ -1629,3 +1629,7 @@ lock, slots, sign-in fixed+tested; live proof needs deploy
 ## 2026-09-28 19:56 — #539 Review checkpoints only from the owner: planner and reflection never add them [done (check passed)]
 
 review checkpoints owner-only; planner/reflection entries dropped, tests pass
+
+## 2026-09-28 23:15 — #762 Files tab: Download button; several selected download as one zip [done (check passed)]
+
+Files Download button, menu item, ⌘⇧D shortcut and tests added

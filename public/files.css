@@ -26,6 +26,7 @@
 .fx-ro[hidden] { display: none; }
 .btn.small.fx-places { display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 10px; font-size: 13px; flex: none; }
 .fx-places svg { opacity: .7; }
+.fx-download svg { opacity: 1; } /* Download: the icon is its label, not a menu chevron */
 /* Go to folder (⌘L): a field under the toolbar with folder suggestions below it */
 .fx-goto { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--border); flex: none; font-size: 13px; }
 .fx-goto[hidden] { display: none; }

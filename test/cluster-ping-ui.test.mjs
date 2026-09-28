@@ -112,11 +112,13 @@ test('a Ping button per worker card and Ping all: results inline, failures in re
   await page.locator('#miniStats').dispatchEvent('click');
   const upCard = page.locator('.mc-node', { hasText: 'MacBook Air (Desk)' }), awayCard = page.locator('.mc-node', { hasText: 'MacBook Pro (Bag)' });
   await awayCard.waitFor();
-  // One per worker card (the controller is this server: nothing to ping), and Ping all in the header.
+  // One per worker card, under Machine settings → Manage → Check connection (the controller is this server: nothing to
+  // ping), and Ping all in the header.
+  for (const c of [upCard, awayCard]) await c.locator('summary[data-act="settings"]').click();
   assert.equal(await page.locator('.mc-node button[data-act="ping"]').count(), 2);
-  assert.equal(await page.locator('.mc-node', { hasText: 'this server' }).locator('button[data-act="ping"]').count(), 0);
-  assert.equal(await upCard.locator('button[data-act="ping"]').textContent(), 'Ping');
-  assert.equal(await awayCard.locator('button[data-act="ping"]').textContent(), 'Not connected');
+  assert.equal(await page.locator('.mc-node', { hasText: '(this server)' }).locator('button[data-act="ping"]').count(), 0);
+  assert.equal(await upCard.locator('button[data-act="ping"]').textContent(), 'Check');
+  assert.match(await awayCard.locator('.mc-row', { has: page.locator('button[data-act="ping"]') }).textContent(), /^Check connectionWhy it dropped, and a command to test from itCheck$/);
   assert.equal(await page.locator('#pingAll').isVisible(), true);
 
   await upCard.locator('button[data-act="ping"]').click();

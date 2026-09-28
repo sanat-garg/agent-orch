@@ -1106,6 +1106,9 @@ Stats and Skills & tools selected tabs: --seg-on, weight 600
 
 stats tasks carry classified `why`; snapshot has `failures` summary
 
+## 2026-09-28 14:01 — #402 Machines: organise each machine's options with plain words [done (check passed)]
+
+Machine settings disclosure ships and tests pass; no screenshots (browsers crash here)
 ## 2026-09-28 14:01 — #406 Show the running build number, restart time and pending build [done (check passed)]
 
 About section, /api/version, build label, worker builds, update toast added
@@ -1199,6 +1202,13 @@ Pushes now stream into git after the ref check; dropped clients kill git
 
 CONTEXT.md conflict resolved; ui-stats tests pass
 
+## 2026-09-28 14:32 — #414 Integrate #402: Machines: organise each machine's options with plain words [done (check passed)]
+
+Merge resolved; settings disclosure now includes main's finish sound
+
+## 2026-09-28 14:32 — #414 Integrate #402: Machines: organise each machine's options with plain words [verify failed (1)]
+
+Command: merge main again
 ## 2026-09-28 14:32 — #437 Files backend: browse the whole VPS, with guardrails for secrets and system folders [done (check passed)]
 
 Files API browses whole disk with secret and write guardrails
@@ -1262,3 +1272,7 @@ merge conflicts resolved again, rapid-overlap tests pass
 ## 2026-09-28 14:33 — #386 Integrate #380: Sidebar usage card cycles through the VPS and every worker [done (check passed)]
 
 Conflicts resolved and staged; mini-rotate tests pass (7/7)
+
+## 2026-09-28 14:34 — #414 Integrate #402: Machines: organise each machine's options with plain words [done (check passed)]
+
+Merged main again; Done-when and Machines browser tests pass

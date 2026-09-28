@@ -9,7 +9,7 @@
 #   daemon (default, recommended): a LaunchDaemon starts it at boot as agentorch, whether or not anyone is logged in.
 #   login: your own LaunchAgent starts it as agentorch when you log in (a sudoers rule allows exactly that one
 #          command), and it stops when you log out.
-# Either way launchd restarts it if it stops. Power policy (the head sends it; change it per Mac in Machines → Power):
+# Either way launchd restarts it if it stops. Power policy (the head sends it; whether it stays awake is set per Mac in Machines → Machine settings):
 # new tasks on AC power or above 50% battery, none at heavy thermal pressure, at most cores − 1 tasks with 3 GB of RAM
 # left for you, and while tasks run on AC power the worker keeps the Mac awake with `caffeinate -i -w <worker pid>`.
 # Installs Node 22 if missing (nvm when present, else the official tarball in ~/.local/node), clones or updates
@@ -383,10 +383,10 @@ EOF
 # The power policy the worker follows (the head sends it: power.mjs). Nothing to install: caffeinate and pmset ship with
 # macOS, and caffeinate needs no root.
 power_policy() {
-  say "Power policy (the defaults; change them per Mac in the head's Server details → Machines → Power):"
+  say "Power policy (the defaults; set whether each Mac stays awake in the head's Server details → Machines → Machine settings):"
   cat <<'EOF'
     - new tasks only on AC power, or on battery above 50%; none while the Mac runs hot (heavy thermal pressure)
-    - at most cores − 1 tasks at once (Max tasks: Auto), leaving 3 GB of RAM free for you
+    - at most cores − 1 tasks at once (Parallel tasks: Auto), leaving 3 GB of RAM free for you
     - while tasks run on AC power the worker keeps the Mac awake: caffeinate -i -w <worker pid> (idle sleep only; it
       ends with the last task or the worker)
     - closing the lid still sleeps the Mac: the head shows it asleep and moves its tasks to another machine after 5 min

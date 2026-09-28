@@ -283,13 +283,14 @@ test('touch screens get 16px fields and 44pt targets in Settings, Skills, Files,
   const has = (sel, decl) => assert.ok((coarse.get(sel) || '').includes(decl), `${sel} sets ${decl} on touch (got ${coarse.get(sel)})`);
   for (const sel of ['.st-row select', '.st-dir textarea', '#stGatePatterns', '#extBody input', '#extBody textarea', '#extBody select', '.fx-search input', '.bv-bar input', '.dr-due input']) has(sel, 'font-size: 16px');
   for (const sel of ['.sx-tabs button', '.range-picker button', '.ext-tabs button', '.fx-views button', '.fx-mode button']) { has(sel, 'min-height: 44px'); has(sel, 'min-width: 44px'); }
-  has('.mc-ctl .seg-sm button', 'height: 44px'); has('.mc-ctl .seg-sm button', 'min-width: 44px');
+  for (const sel of ['.mc-row .seg-sm button', '.mc-row .btn.small']) { has(sel, 'height: 44px'); has(sel, 'min-width: 44px'); }
+  has('.mc-set > summary', 'min-height: 44px');
   for (const sel of ['.fx-bar .fx-search', '.bv-bar input', '.bw-add input']) has(sel, 'height: 44px');
   has('.dr-body details.dr-more > summary', 'min-height: 44px'); has('.dr-body details.dr-more > summary', 'display: flex');
   for (const sel of ['.tc-tag.tc-ctl', '.tc-tag.tc-rb']) { has(sel, 'position: relative'); has(`${sel}::after`, "content: ''"); has(`${sel}::after`, 'position: absolute'); }
   // same-specificity overrides must come after their base rule (the later rule wins)
   for (const [base, touch] of [['.st-row select { height: 34px', '.st-row select, .st-dir textarea, #stGatePatterns { font-size: 16px'],
-    ['.dr-due input { flex: 1', '.dr-due input { font-size: 16px'], ['.mc-ctl .seg-sm button { height: 38px', '.mc-ctl .seg-sm button { height: 44px']]) {
+    ['.dr-due input { flex: 1', '.dr-due input { font-size: 16px'], ['.mc-row .seg-sm button { height: 28px', '.mc-row .seg-sm button, .mc-row .btn.small { height: 44px']]) {
     assert.ok(appCss.indexOf(base) >= 0 && appCss.indexOf(base) < appCss.indexOf(touch), `${touch} comes after ${base}`);
   }
   const filesCss = read('public/files.css');

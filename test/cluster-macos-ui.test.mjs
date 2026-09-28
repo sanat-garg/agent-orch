@@ -1,6 +1,6 @@
 // The many-Macs UI (public/app.js): "Add machine" for 3 machines shows one code with the install lines, lists each Mac as
-// it pairs and can revoke the code; a Mac card shows why its power policy pauses it and a Power panel whose menus save
-// the policy, which reaches the worker as node.policy. Boots server.mjs (CW_NO_ORCHESTRATOR=1, temp data dir); skips
+// it pairs and can revoke the code; a Mac card shows why its power policy pauses it and a Staying awake switch in its Machine
+// settings, which reaches the worker as node.policy. Boots server.mjs (CW_NO_ORCHESTRATOR=1, temp data dir); skips
 // when Playwright's Chromium can't launch.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -107,7 +107,7 @@ test('Add machine for 3 Macs: one code, each Mac listed as it pairs, then revoke
   assert.deepEqual(errors, []);
 });
 
-test('a Mac card: Paused with its reason, and a Power panel that saves the policy to the worker', { skip: noBrowser, timeout: 60000 }, async () => {
+test('a Mac card: Paused with its reason, and Machine settings whose Staying awake switch saves to the worker', { skip: noBrowser, timeout: 60000 }, async () => {
   const GB = 2 ** 30;
   const { body: { code } } = await call('/api/cluster/pair', 'POST');
   const { body: { node, token } } = await claim(code, 'MacBook Air (Kitchen)');
@@ -128,26 +128,30 @@ test('a Mac card: Paused with its reason, and a Power panel that saves the polic
   assert.match(await card.textContent(), /On battery at 42%: takes new tasks above 50%\. Its running tasks go on\./);
   // Auto on a Mac: min(cores − 1, (9 GB free − 3 GB kept for its owner) / 1.2 GB per run) = 5.
   assert.match(await card.textContent(), /Running · 0 of 5 slots/);
-  await card.locator('button[data-act="power"]').click();
-  const panel = card.locator('.mc-power');
-  await panel.waitFor();
-  assert.equal(await card.locator('button[data-act="power"]').getAttribute('aria-expanded'), 'true');
-  assert.equal(await panel.locator('select[data-act="policy-minBattery"]').inputValue(), '50');
-  assert.equal(await panel.locator('select[data-act="policy-reserveGB"]').inputValue(), '3');
-  await panel.locator('select[data-act="policy-minBattery"]').selectOption({ label: 'Above 25%' });
+  // Machine settings → Staying awake: one switch (keepAwake 'ac', the default, shows as on); no battery, heat or RAM menus.
+  await card.locator('summary[data-act="settings"]').click();
+  const panel = card.locator('.mc-set[open]');
+  assert.deepEqual(await panel.locator('h5').allTextContents(), ['Work', 'Staying awake', 'Manage']);
+  assert.match(await panel.textContent(), /Keep this Mac awake while it's connected[\s\S]*Closing the lid still puts it to sleep/);
+  assert.equal(await panel.locator('select:not([data-act="sound"])').count(), 0, 'only the finish sound is a menu');
+  assert.doesNotMatch(await card.locator('.mc-set').textContent(), /Power|battery|thermal|policy/i);
+  const awake = panel.locator('input[data-act="awake"]');
+  assert.equal(await awake.isChecked(), true);
+  await awake.click();
   const sent = await waitFor(() => frames.find((f) => f.t === 'node.policy'), { timeout: 10000, message: 'node.policy frame' });
-  assert.deepEqual(sent.policy, { minBattery: 25, keepAwake: 'ac', thermal: 'heavy', reserveGB: 3, maxTasks: null });
-  assert.equal((await call('/api/cluster/nodes')).body.nodes.find((n) => n.id === node).policy.minBattery, 25);
-  await panel.locator('select[data-act="policy-keepAwake"]').selectOption('"always"');
+  assert.deepEqual(sent.policy, { minBattery: 50, keepAwake: 'never', thermal: 'heavy', reserveGB: 3, maxTasks: null });
+  assert.equal((await call('/api/cluster/nodes')).body.nodes.find((n) => n.id === node).policy.keepAwake, 'never');
+  await card.locator('input[data-act="awake"]:not(:checked)').waitFor({ timeout: 10000 });
+  await card.locator('input[data-act="awake"]').click();
   await waitFor(() => frames.filter((f) => f.t === 'node.policy').at(-1).policy.keepAwake === 'always', { timeout: 10000, message: 'keepAwake' });
-  // The worker, now within its policy, reports intake again: the card is Online, the panel still open.
+  // The worker, now within its policy, reports intake again: the card is Online, its settings still open.
   tx('resources', { memAvailable: 9 * GB, load: [1, 1, 1], running: [], battery: { pct: 42, charging: false, source: 'battery' }, intake: { ok: true }, awake: false });
   await page.locator('#ndTitle').click(); // leave the menu: a render waits while it has focus
   await card.locator('.mc-st', { hasText: 'Online' }).waitFor({ timeout: 15000 });
-  assert.equal(await card.locator('.mc-power').count(), 1);
+  assert.equal(await card.locator('.mc-set[open]').count(), 1);
   const fits = await page.evaluate(() => [...document.querySelectorAll('.mc-node')].every((c) => c.scrollWidth <= c.clientWidth + 1)
     && document.documentElement.scrollWidth <= innerWidth);
-  assert.ok(fits, 'the cards and their Power panel fit 390px');
+  assert.ok(fits, 'the cards and their Machine settings fit 390px');
   await ctx.close();
   assert.deepEqual(errors, []);
 });

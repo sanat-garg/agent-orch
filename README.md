@@ -486,7 +486,7 @@ node worker.mjs limit --cpu 4 --mem 8 [--max-tasks 2] [--only-on-ac]     # cap w
   cap. The worker also declines offers over it, runs each job in a systemd scope with `CPUQuota`/`MemoryMax` on Linux
   (the installer enables lingering for that) or at a low priority, and pauses its newest job when its jobs stay over
   the RAM cap for 30 s (the task resumes later). Machines shows it as "Pooled: 4 cores · 8 GB (set on this Mac)".
-- **It follows the power policy and caps the head sets for it** (Machines → Power, Max tasks): on a Mac, no new tasks
+- **It follows the power policy and caps the head sets for it** (Machines → Machine settings: Parallel tasks, Staying awake): on a Mac, no new tasks
   on low battery or when hot, and `caffeinate` only while tasks run (see Adding machines).
 - **It reports to this server**: each job's steps (shown as a timeline in the task drawer), health telemetry every
   10 s (kept for 24 h in `<DATA>/metrics/nodes/`, `GET /api/cluster/nodes/:id/metrics?range=1h`) and its errors; `GET

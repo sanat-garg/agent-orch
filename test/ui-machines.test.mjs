@@ -2,7 +2,7 @@
 // /api/cluster/pair/:code waiting → a worker claims it → paired), the install scripts served at /install/…, and the UI
 // showing a one-line command per OS with the fresh code that flips to "Paired: <name>" once the code is claimed.
 // Then the Machines view with seeded fake nodes (a worker socket sending inventory/resources, running tasks in the DB):
-// one card per node with its controls, the cluster summary, live updates, and a 390px fit.
+// one card per node with its Machine settings, the cluster summary, live updates, and a 390px fit.
 // Boots server.mjs (CW_NO_ORCHESTRATOR=1, temp data dir). The browser part skips when Playwright's Chromium can't launch.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -169,7 +169,7 @@ async function fakeWorker(name, kind, { cores, mem, avail, load, agents }) {
   return { node, ws, tx };
 }
 
-test('Machines view: one card per node with its state, capacity, running tasks and a Drain control', { skip: noBrowser, timeout: 60000 }, async () => {
+test('Machines view: one card per node with its state, capacity, running tasks and its Machine settings', { skip: noBrowser, timeout: 60000 }, async () => {
   const GB = 2 ** 30;
   const vps = await fakeWorker('build-vps', 'linux', { cores: 4, mem: 24 * GB, avail: 16 * GB, load: [1.5, 1, 1], agents: ['claude', 'codex'] });
   const mac = await fakeWorker('studio-mac', 'darwin', { cores: 10, mem: 16 * GB, avail: 8 * GB, load: [2, 2, 2], agents: ['claude'] });
@@ -196,7 +196,7 @@ test('Machines view: one card per node with its state, capacity, running tasks a
   await page.locator('#mMachines .mc-node[data-node]', { hasText: 'studio-mac' }).waitFor();
   assert.equal(await cards.count(), nodes.length, 'one card per node');
   assert.deepEqual(await cards.evaluateAll((els) => els.map((e) => e.dataset.node)), nodes.map((n) => n.id));
-  for (let i = 0; i < nodes.length; i++) assert.equal(await cards.nth(i).locator('button[data-act="drain"]').count(), 1, `${nodes[i].name} has a Drain control`);
+  for (let i = 0; i < nodes.length; i++) assert.equal(await cards.nth(i).locator('details.mc-set:not([open]) input[data-act="accept"]').count(), 1, `${nodes[i].name} has a closed Machine settings with Run tasks on this machine`);
   // With workers the section leads this server's details (under the device line), and the summary counts the connected machines.
   assert.equal(await page.evaluate(() => document.querySelector('#ndBody #serverDetails .sd-head').nextElementSibling.className), 'mc-sec first');
   assert.match(await page.locator('#mcSum').textContent(), /^Cluster: 3 machines · \d+ cores · [\d.]+ GB free · 2 of \d+ slots running · 2 offline$/);
@@ -210,12 +210,16 @@ test('Machines view: one card per node with its state, capacity, running tasks a
   assert.match(await page.locator('.mc-node', { hasText: 'vps-2' }).first().textContent(), /Offline/);
   const local = page.locator('.mc-node[data-node="controller"]');
   assert.match(await local.textContent(), /this server[\s\S]*Tidy the settings sheet/);
-  assert.equal(await local.locator('[data-act="remove"], [data-act="disable"]').count(), 0, 'the controller cannot be disabled or removed');
+  assert.equal(await local.locator('[data-act="remove"]').count(), 0, 'the controller cannot be disabled or removed');
 
-  // Controls: Drain (live through the 'cluster' push), Auto slots, Rename.
-  await card.locator('[data-act="drain"]').click();
+  // Machine settings (open across the live re-renders): Run tasks on this machine off (live through the 'cluster'
+  // push), Auto slots, Rename.
+  await card.locator('summary[data-act="settings"]').click();
+  assert.deepEqual(await card.locator('.mc-set[open] h5').allTextContents(), ['Work', 'Manage']);
+  await card.locator('input[data-act="accept"]').click();
   await page.locator('.mc-node', { hasText: 'build-vps' }).locator('.mc-st', { hasText: 'Draining' }).waitFor({ timeout: 10000 });
-  assert.equal(await page.locator('.mc-node', { hasText: 'build-vps' }).locator('[data-act="drain"]').getAttribute('aria-pressed'), 'true');
+  assert.equal(await page.locator('.mc-node', { hasText: 'build-vps' }).locator('input[data-act="accept"]').isChecked(), false);
+  assert.match(await page.locator('.mc-node', { hasText: 'build-vps' }).locator('.mc-set[open]').textContent(), /Finish current tasks, then stop/);
   assert.equal((await call('/api/cluster/nodes')).body.nodes.find((n) => n.id === vps.node).draining, true);
   await page.locator('.mc-node', { hasText: 'build-vps' }).locator('.seg-sm button', { hasText: 'Auto' }).click();
   await page.locator('.mc-node', { hasText: 'build-vps' }).locator('.seg-sm button[aria-pressed="true"]', { hasText: 'Auto' }).waitFor();
@@ -232,6 +236,8 @@ test('Machines view: one card per node with its state, capacity, running tasks a
       && [...document.querySelectorAll('.mc-node')].every((c) => c.scrollWidth <= c.clientWidth + 1);
   });
   assert.ok(fits, 'the Machines view fits 390px');
+  const small = await page.evaluate(() => [...document.querySelectorAll('.mc-set[open] :is(summary, button)')].filter((b) => b.getBoundingClientRect().height < 44).length);
+  assert.equal(small, 0, 'every settings control is a 44pt target on a phone');
   // Tapping a running task opens its drawer.
   await page.locator('.mc-task', { hasText: 'Build the machines view' }).click();
   await page.locator('#taskDrawer:not([hidden])').waitFor();

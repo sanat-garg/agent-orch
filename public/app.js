@@ -3757,9 +3757,9 @@ setInterval(() => { if (M.usage) renderUsage(); }, 30e3); // keep the "in 2h 9m"
 // reports waiting → paired (node; a multi-use code: nodes, used) → node.connected; DELETE revokes the code.
 const AM = { code: null, expiresAt: 0, uses: 1, pairing: null, err: '', timer: null, lastFocus: null };
 const AM_USES = [1, 2, 3, 4, 5, 6, 8, 10];
-// power: the Macs whose Power settings are open; stale: a render skipped while one of its menus was in use.
+// open: the cards whose Machine settings are open; stale: a render skipped while a finish sound menu was in use.
 // pings: node id → the owner's last Ping ({busy} | {r: the answer} | {error}), shown under the node (pingBox).
-const MC = { nodes: [], at: 0, timer: null, loading: false, power: new Set(), stale: false, pings: new Map() };
+const MC = { nodes: [], at: 0, timer: null, loading: false, open: new Set(), stale: false, pings: new Map() };
 const fmtGB = (b) => `${((b || 0) / 2 ** 30).toFixed(1)} GB`;
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const NODE_ST = { online: 'Online', draining: 'Draining', disabled: 'Disabled', updating: 'Updating', paused: 'Paused' };
@@ -3804,7 +3804,7 @@ function machineSummary(nodes) {
 function renderMachines() {
   caSync(MC.nodes);
   if (ND.id) ndRender();
-  // A power menu in use isn't replaced under the owner's finger: the render waits until it loses focus.
+  // A menu in use (a finish sound) isn't replaced under the owner's finger: the render waits until it loses focus.
   if (document.activeElement?.matches?.('#mMachines select')) { MC.stale = true; return; }
   MC.stale = false;
   const nodes = MC.nodes, sec = $('mcTitle').closest('.mc-sec'), head = sec.parentElement.firstElementChild, first = nodes.some((n) => !n.local);
@@ -3815,9 +3815,9 @@ function renderMachines() {
   $('pingAll').hidden = !first;
   // Live re-renders keep keyboard focus on the same control of the same card.
   const f = document.activeElement, card = f?.closest?.('#mMachines .mc-node'), key = (b) => b.dataset.act || b.dataset.task || b.textContent;
-  const was = card && f.tagName === 'BUTTON' && [card.dataset.node, key(f)];
+  const was = card && f.matches('button, summary, input') && [card.dataset.node, key(f)];
   $('mMachines').replaceChildren(...nodes.map(machineCard));
-  if (was) [...$('mMachines').querySelectorAll(`.mc-node[data-node="${CSS.escape(was[0])}"] button`)].find((b) => key(b) === was[1])?.focus({ preventScroll: true });
+  if (was) [...$('mMachines').querySelectorAll(`.mc-node[data-node="${CSS.escape(was[0])}"] :is(button, summary, input)`)].find((b) => key(b) === was[1])?.focus({ preventScroll: true });
 }
 // A labelled meter: 'CPU  4 cores · load 1.20' over a bar (warn ≥ 75%, crit ≥ 90%).
 function mcMeter(label, parts, pct) {
@@ -3904,8 +3904,7 @@ function machineCard(n) {
   }
   if (tasks.length) run.append(list);
   li.append(run);
-  li.append(machineControls(n));
-  if (MC.power.has(n.id) && n.policy) li.append(powerPanel(n));
+  li.append(machineSettings(n));
   return li;
 }
 // A worker's local cap (`node worker.mjs limit` on that machine, cap.mjs; the scheduler never gives it more), from its
@@ -3927,12 +3926,12 @@ const PHASE_DOING = { queued: 'starting', cloning: 'cloning', fetching: 'fetchin
 // battery and thermal state (and whether it is kept awake for its tasks), GitHub out of reach.
 function machineHealth(n) {
   const out = [], res = n.resources || {}, line = (cls, text, title) => { const p = el('p', `mc-health ${cls}`, text); if (title) p.title = title; out.push(p); };
-  if (n.drainReason) line('warn', `Drained automatically${n.drainedAt ? ` ${relTime(n.drainedAt)}` : ''}: ${n.drainReason}. Undrain it when that's fixed.`);
+  if (n.drainReason) line('warn', `Drained automatically${n.drainedAt ? ` ${relTime(n.drainedAt)}` : ''}: ${n.drainReason}. Turn on Machine settings → Run tasks on this machine when that's fixed.`);
   if (n.slotsWhy) line('warn', `${n.slotsWhy}. It takes tasks once more memory is free.`);
   const paused = n.status === 'paused' ? res.intake?.reason : null;
   if (paused) line('warn', `${res.intake.text}. Its running tasks go on.`);
   const u = n.update;
-  if (u?.state === 'pending') line('', n.draining ? 'Updates itself once its running tasks finish (it is draining meanwhile).' : 'Updates itself once its running tasks finish; it takes no new ones meanwhile.');
+  if (u?.state === 'pending') line('', 'Updates itself once its running tasks finish; it takes no new ones meanwhile.');
   else if (u?.state === 'sent') line('', 'Updating: pulling the latest agent-orch and restarting…');
   else if (u?.state === 'failed') line('bad', `Update failed: ${u.error}`);
   else if (n.outdated) line('warn', `${plural(n.behind, 'commit')} behind this server's agent-orch`);
@@ -4001,86 +4000,120 @@ function pingBox(n) {
   }
   return box;
 }
-// Rename, max parallel tasks, Drain, Disable and Remove. The controller's own slots follow its free memory (the owner
-// only caps tasks across all machines, in Settings), so its card names no choice; it can't be disabled or removed.
-function machineControls(n) {
-  const ctl = el('div', 'mc-ctl'), slots = el('span', 'mc-slots', 'Max tasks');
-  if (n.local) {
-    const auto = el('span', 'mc-auto', 'Auto');
-    auto.title = `Sized from this server's ${n.head ? plural(n.head.cores, 'core') : 'cores'} (three tasks a core, at least 4), re-checked every 10 minutes. Settings → Parallel tasks caps tasks across all machines.`;
-    slots.append(auto);
-  } else {
-    const seg = el('span', 'seg-sm');
-    seg.setAttribute('role', 'group');
-    seg.setAttribute('aria-label', `Max parallel tasks on ${n.name}`);
-    for (const v of [null, 1, 2, 3, 4, ...(n.maxSlots > 4 ? [n.maxSlots] : [])]) {
-      const b = el('button', '', v == null ? 'Auto' : String(v));
-      b.type = 'button';
-      b.setAttribute('aria-pressed', String(v === n.maxSlots));
-      if (v == null) b.title = n.os === 'darwin' ? `Sized from its cores (one kept for you) and free RAM (${n.policy?.reserveGB ?? 3} GB kept for you)` : 'Sized from its cores and free RAM';
-      b.addEventListener('click', () => { if (v !== n.maxSlots) patchNode(n, { maxSlots: v }); });
-      seg.append(b);
-    }
-    slots.append(seg);
-  }
-  const btn = (text, act, run, cls = '') => {
+// ----- machine settings (the 'Machine settings' disclosure at the foot of each card) -----
+// Plain words in at most three sections, a row each (label, one-line hint, one control; a switch's row is its label):
+//   Work: parallel tasks (Auto or a cap; the controller's own follow its free memory, capped in Settings) and Run tasks
+//     on this machine (off = draining: it finishes its running tasks, then takes no more; on also re-enables it).
+//   Staying awake (a Mac worker): its policy's keepAwake (power.mjs; on = 'always', off = 'never').
+//   Manage: rename, finish sound, check the connection (Ping), update and, set apart in red, remove from the cluster.
+// MC.open: the cards whose disclosure is open, kept across live re-renders.
+const GEAR_ICON = '<svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>'; // a gear (Feather's settings icon)
+function machineSettings(n) {
+  const box = el('details', 'mc-set'), sum = el('summary');
+  box.open = MC.open.has(n.id);
+  box.addEventListener('toggle', () => { if (box.open) MC.open.add(n.id); else MC.open.delete(n.id); });
+  sum.dataset.act = 'settings';
+  sum.innerHTML = GEAR_ICON;
+  sum.append(el('span', '', 'Machine settings'));
+  box.append(sum);
+  const section = (title) => {
+    const s = el('section', 'mc-group');
+    s.append(el('h5', '', title));
+    box.append(s);
+    return s;
+  };
+  const row = (sec, label, hint, control) => {
+    const r = el(control.type === 'checkbox' ? 'label' : 'div', 'mc-row'), t = el('span', 'mc-rt'); // a switch's whole row toggles it
+    t.append(el('span', 'mc-rl', label), el('span', 'mc-rh', hint));
+    r.append(t, control);
+    sec.append(r);
+  };
+  const button = (text, act, run, cls = '') => {
     const b = el('button', `btn small${cls}`, text);
     b.type = 'button';
     b.dataset.act = act;
     b.addEventListener('click', run);
-    ctl.append(b);
     return b;
   };
-  ctl.append(slots, machineSoundPicker(n));
-  btn('Rename', 'rename', () => {
+  const toggle = (act, on, label, run) => {
+    const s = el('input', 'st-switch');
+    s.type = 'checkbox';
+    s.checked = on;
+    s.dataset.act = act;
+    s.setAttribute('role', 'switch');
+    s.setAttribute('aria-label', label);
+    s.addEventListener('change', run);
+    return s;
+  };
+  const mac = n.os === 'darwin', where = mac ? 'this Mac' : 'this machine';
+
+  const work = section('Work');
+  if (n.local) {
+    const auto = el('span', 'mc-auto', 'Auto');
+    auto.title = `Sized from this server's ${n.head ? plural(n.head.cores, 'core') : 'cores'} (three tasks a core, at least 4), re-checked every 10 minutes. Settings → Parallel tasks caps tasks across all machines.`;
+    row(work, 'Parallel tasks', "Three a core on this server. Settings → Parallel tasks caps all machines.", auto);
+  } else {
+    const seg = el('span', 'seg-sm');
+    seg.setAttribute('role', 'group');
+    seg.setAttribute('aria-label', `Parallel tasks on ${n.name}`);
+    for (const v of [null, 1, 2, 3, 4, ...(n.maxSlots > 4 ? [n.maxSlots] : [])]) {
+      const b = el('button', '', v == null ? 'Auto' : String(v));
+      b.type = 'button';
+      b.dataset.act = `slots-${v ?? 'auto'}`;
+      b.setAttribute('aria-pressed', String(v === n.maxSlots));
+      b.addEventListener('click', () => { if (v !== n.maxSlots) patchNode(n, { maxSlots: v }); });
+      seg.append(b);
+    }
+    row(work, 'Parallel tasks', n.maxSlots == null ? `Auto: as many as ${where}'s cores and free memory allow` : `At most ${plural(n.maxSlots, 'task')} at once`, seg);
+  }
+  const taking = n.enabled && !n.draining;
+  row(work, 'Run tasks on this machine', taking ? 'Accept new tasks' : n.enabled ? 'Finish current tasks, then stop' : 'Off: it takes no tasks',
+    toggle('accept', taking, `Run tasks on ${n.name}`, () => patchNode(n, taking ? { draining: true } : { draining: false, ...(n.enabled ? {} : { enabled: true }) })));
+
+  if (!n.local && mac && n.policy) {
+    const on = n.policy.keepAwake !== 'never';
+    row(section('Staying awake'), "Keep this Mac awake while it's connected", 'Closing the lid still puts it to sleep.',
+      toggle('awake', on, `Keep ${n.name} awake`, () => patchNode(n, { policy: { keepAwake: on ? 'never' : 'always' } })));
+  }
+
+  const manage = section('Manage');
+  row(manage, 'Name', n.name, button('Rename', 'rename', () => {
     const name = prompt(`Rename ${n.name}`, n.name)?.trim();
     if (name && name !== n.name) patchNode(n, { name });
-  });
-  const drain = btn('Drain', 'drain', () => patchNode(n, { draining: !n.draining }));
-  drain.setAttribute('aria-pressed', String(n.draining));
-  drain.title = n.draining ? 'Draining: it takes no new tasks. Press to take tasks again.' : 'Take no new tasks; running ones finish here';
-  // A Mac's power policy: battery, keep-awake, heat and the RAM kept for its owner (powerPanel).
-  if (!n.local && n.os === 'darwin' && n.policy) {
-    const open = MC.power.has(n.id);
-    const pw = btn('Power', 'power', () => { if (open) MC.power.delete(n.id); else MC.power.add(n.id); renderMachines(); });
-    pw.setAttribute('aria-expanded', String(open));
-    pw.title = 'When this Mac takes tasks on battery or when hot, whether it stays awake for them, and the RAM kept for you';
-  }
+  }));
+  row(manage, 'Finish sound', 'Plays when a task finishes here', machineSoundPicker(n));
   if (!n.local) {
-    const busy = !!MC.pings.get(n.id)?.busy, pb = btn(busy ? 'Pinging…' : n.connected ? 'Ping' : 'Not connected', 'ping', () => pingNode(n));
+    const busy = !!MC.pings.get(n.id)?.busy, pb = button(busy ? 'Checking…' : 'Check', 'ping', () => pingNode(n));
     pb.disabled = busy;
-    pb.title = n.connected ? 'Round trip to its worker, plus its own check of DNS, the head, and GitHub' : 'Not connected: when it was last seen, why it dropped, and a command to test the head from it';
+    row(manage, 'Check connection', n.connected ? 'Tests its link to this server, DNS and GitHub' : 'Why it dropped, and a command to test from it', pb);
   }
-  const moving = n.used ? ` Its ${plural(n.used, 'running task')} go${n.used === 1 ? 'es' : ''} back to the queue now.` : '';
-  // Update: a worker behind this server's agent-orch (outdated ones update on their own), or one whose update failed,
-  // pulls the latest agent-orch and restarts once idle.
+  // Update: a worker behind this server's agent-orch (outdated ones update on their own), or one whose update failed.
   if (!n.local && n.connected && (n.update?.state === 'failed' || ((n.outdated || n.behind > 0) && !n.update))) {
-    const up = btn('Update', 'update', async () => {
-      try { await api(`/api/cluster/nodes/${encodeURIComponent(n.id)}/update`, 'POST'); toast(`${n.name} updates itself once its running tasks finish`); } catch (e) { toast(e.message, { kind: 'error' }); }
-      loadMachines();
-    });
-    up.title = 'Pull the latest agent-orch on it and restart its worker, once its running tasks finish';
+    row(manage, 'Update agent-orch', n.update?.state === 'failed' ? 'The last update failed: try again' : 'Gets the latest version once its running tasks finish',
+      button('Update', 'update', async () => {
+        try { await api(`/api/cluster/nodes/${encodeURIComponent(n.id)}/update`, 'POST'); toast(`${n.name} updates itself once its running tasks finish`); } catch (e) { toast(e.message, { kind: 'error' }); }
+        loadMachines();
+      }));
   }
   if (!n.local) {
-    btn(n.enabled ? 'Disable' : 'Enable', 'disable', () => {
-      if (n.enabled && moving && !confirm(`Disable ${n.name}?${moving}`)) return;
-      patchNode(n, { enabled: !n.enabled });
-    });
-    btn('Remove', 'remove', async () => {
-      if (!confirm(`Remove ${n.name}? Its token is revoked and it disconnects.${moving} Adding it back needs a new pairing code.`)) return;
+    const moving = n.used ? ` Its ${plural(n.used, 'running task')} go${n.used === 1 ? 'es' : ''} back to the queue now.` : '';
+    const danger = el('div', 'mc-danger');
+    manage.append(danger);
+    row(danger, 'Remove from cluster', 'It disconnects; adding it back needs a new pairing code.', button('Remove…', 'remove', async () => {
+      if (!confirm(`Remove ${n.name} from the cluster? It disconnects for good.${moving} Adding it back needs a new pairing code.`)) return;
       try { await api(`/api/cluster/nodes/${encodeURIComponent(n.id)}`, 'DELETE'); toast(`Removed ${n.name}`); } catch (e) { toast(e.message, { kind: 'error' }); }
       loadMachines();
-    }, ' danger');
+    }, ' danger'));
   }
-  return ctl;
+  return box;
 }
-// 'Finish sound: [Bell ▾] ▶ Test': the sound its finished tasks play, saved on the head (node.sound) for every device.
-// Choosing its default again stores null, so it keeps following the default.
+// The Finish sound row's control, '[Bell ▾] ▶ Test': the sound its finished tasks play, saved on the head (node.sound)
+// for every device. Choosing its default again stores null, so it keeps following the default.
 function machineSoundPicker(n) {
-  const row = el('span', 'mc-slots mc-sound'), lab = el('label', '', 'Finish sound'), pick = el('span', 'mc-sound-pick'), sel = el('select');
-  const def = machineDefaultSound(n.id), id = `mcSound-${n.id}`;
-  lab.htmlFor = sel.id = id;
+  const pick = el('span', 'mc-sound-pick'), sel = el('select');
+  const def = machineDefaultSound(n.id);
   sel.dataset.act = 'sound';
+  sel.setAttribute('aria-label', `Finish sound for ${n.name}`);
   for (const [k, s] of Object.entries(MACHINE_SOUNDS)) {
     const o = el('option', '', `${k === 'chime' && $('stSoundName').textContent === 'Your MP3' ? 'Your MP3' : s.label}${k === def ? ' (default)' : ''}`);
     o.value = k;
@@ -4088,47 +4121,18 @@ function machineSoundPicker(n) {
   }
   sel.value = machineSound(n.id);
   sel.addEventListener('change', () => patchNode(n, { sound: sel.value === def ? null : sel.value }));
+  sel.addEventListener('blur', () => { if (MC.stale) setTimeout(renderMachines, 0); });
   const test = el('button', 'btn small', '▶ Test');
   test.type = 'button';
   test.dataset.act = 'sound-test';
   test.setAttribute('aria-label', `Test ${n.name}'s finish sound`);
   test.addEventListener('click', () => playSound(sel.value));
   pick.append(sel, test);
-  row.append(lab, pick);
-  return row;
+  return pick;
 }
 async function patchNode(n, body) {
   try { await api(`/api/cluster/nodes/${encodeURIComponent(n.id)}`, 'PATCH', body); } catch (e) { toast(e.message, { kind: 'error' }); }
   loadMachines();
-}
-// A Mac's power policy (power.mjs; its worker enforces it, and the scheduler keeps to its RAM reserve): a menu per
-// setting, saved as soon as it changes. A value set another way (the API) shows as an extra option.
-const POWER_ROWS = [
-  ['minBattery', 'New tasks on battery', [[null, 'Never: AC power only'], [25, 'Above 25%'], [50, 'Above 50%'], [75, 'Above 75%'], [0, 'At any charge']], (v) => `Above ${v}%`],
-  ['keepAwake', 'Keep awake while tasks run', [['ac', 'On AC power'], ['always', 'Always'], ['never', 'Never']]],
-  ['thermal', 'Pause new tasks when hot', [['heavy', 'At heavy pressure'], ['moderate', 'From moderate pressure'], ['off', 'Never']]],
-  ['reserveGB', 'RAM kept free for you', [1, 2, 3, 4, 6, 8].map((g) => [g, `${g} GB`]), (v) => `${v} GB`],
-];
-function powerPanel(n) {
-  const box = el('div', 'mc-power');
-  box.setAttribute('role', 'group');
-  box.setAttribute('aria-label', `Power settings for ${n.name}`);
-  for (const [key, label, options, other = String] of POWER_ROWS) {
-    const row = el('label', 'mc-prow'), sel = el('select'), cur = n.policy[key];
-    sel.dataset.act = `policy-${key}`;
-    for (const [v, text] of options.some(([v]) => v === cur) ? options : [...options, [cur, other(cur)]]) {
-      const o = el('option', '', text);
-      o.value = JSON.stringify(v);
-      o.selected = v === cur;
-      sel.append(o);
-    }
-    sel.addEventListener('change', () => patchNode(n, { policy: { [key]: JSON.parse(sel.value) } }));
-    sel.addEventListener('blur', () => { if (MC.stale) setTimeout(renderMachines, 0); });
-    row.append(el('span', '', label), sel);
-    box.append(row);
-  }
-  box.append(el('p', 'mc-pnote', 'Running tasks go on either way. A closed lid still sleeps the Mac; its tasks then move to another machine.'));
-  return box;
 }
 
 // ----- cluster diagram (this server's details → Machines, above the cards) -----

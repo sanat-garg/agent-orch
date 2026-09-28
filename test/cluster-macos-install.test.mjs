@@ -36,7 +36,7 @@ test('`bash bin/install-worker-macos.sh --dry-run --code TEST` exits 0 and shows
   // The power policy, with caffeinate holding the Mac awake only while tasks run.
   assert.match(out, /caffeinate -i -w <worker pid>/);
   assert.match(out, /on battery above 50%/);
-  assert.match(out, /cores − 1 tasks at once \(Max tasks: Auto\), leaving 3 GB of RAM free for you/);
+  assert.match(out, /cores − 1 tasks at once \(Parallel tasks: Auto\), leaving 3 GB of RAM free for you/);
   assert.match(out, /whether or not anyone is logged in/);
 });
 

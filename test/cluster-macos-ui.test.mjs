@@ -1,5 +1,5 @@
 // The many-Macs UI (public/app.js): "Add machine" for 3 machines shows one code with the install lines, lists each Mac as
-// it pairs and can revoke the code; a Mac card shows why its power policy pauses it and a Staying awake switch in its Machine
+// it pairs and can revoke the code; a Mac card stays Online with its placement decision and a Staying awake switch in its Machine
 // settings, which reaches the worker as node.policy. Boots server.mjs (CW_NO_ORCHESTRATOR=1, temp data dir); skips
 // when Playwright's Chromium can't launch.
 import { test, before, after } from 'node:test';
@@ -107,7 +107,7 @@ test('Add machine for 3 Macs: one code, each Mac listed as it pairs, then revoke
   assert.deepEqual(errors, []);
 });
 
-test('a Mac card: Paused with its reason, and Machine settings whose Staying awake switch saves to the worker', { skip: noBrowser, timeout: 60000 }, async () => {
+test('a Mac card: Online with its placement decision, and Machine settings whose Staying awake switch saves to the worker', { skip: noBrowser, timeout: 60000 }, async () => {
   const GB = 2 ** 30;
   const { body: { code } } = await call('/api/cluster/pair', 'POST');
   const { body: { node, token } } = await claim(code, 'MacBook Air (Kitchen)');
@@ -119,15 +119,18 @@ test('a Mac card: Paused with its reason, and Machine settings whose Staying awa
   tx('hello', { node, protocol: PROTOCOL_VERSION, version: 'test', jobs: [], features: FEATURE_LIST });
   await waitFor(() => frames.find((f) => f.t === 'welcome'), { timeout: 5000 });
   tx('inventory', { node, name: 'MacBook Air (Kitchen)', os: 'darwin', arch: 'arm64', cores: 8, mem: 16 * GB, versions: {}, agents: [{ id: 'claude', installed: true, signedIn: true }] });
-  tx('resources', { memAvailable: 9 * GB, load: [1, 1, 1], running: [], battery: { pct: 42, charging: false, source: 'battery' },
-    intake: { ok: false, reason: 'battery', text: 'On battery at 42%: takes new tasks above 50%' }, awake: false });
+  // A worker from before #344 on battery still says it takes nothing: the head doesn't care.
+  tx('resources', { memAvailable: 1 * GB, load: [1, 1, 1], running: [], battery: { pct: 12, charging: false, source: 'battery' },
+    intake: { ok: false, reason: 'battery', text: 'On battery at 12%: takes new tasks above 50%' }, awake: false });
 
   const { ctx, page, errors } = await open({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
   const card = page.locator('.mc-node', { hasText: 'MacBook Air (Kitchen)' });
-  await card.locator('.mc-st', { hasText: 'Paused' }).waitFor({ timeout: 10000 });
-  assert.match(await card.textContent(), /On battery at 42%: takes new tasks above 50%\. Its running tasks go on\./);
-  // Auto on a Mac: min(cores − 1, (9 GB free − 3 GB kept for its owner) / 1.2 GB per run) = 5.
-  assert.match(await card.textContent(), /Running · 0 of 5 slots/);
+  await card.locator('.mc-st', { hasText: 'Online' }).waitFor({ timeout: 10000 });
+  await card.locator('.mc-decision').waitFor({ timeout: 10000 });
+  assert.equal(await card.locator('.mc-decision').textContent(), 'Placement: eligible: 0/8 running');
+  assert.doesNotMatch(await card.textContent(), /takes new tasks above/);
+  // Auto: its 8 cores, whatever its battery or the 1 GB free.
+  assert.match(await card.textContent(), /Running · 0 of 8 slots/);
   // Machine settings → Staying awake: one switch (keepAwake 'ac', the default, shows as on); no battery, heat or RAM menus.
   await card.locator('summary[data-act="settings"]').click();
   const panel = card.locator('.mc-set[open]');
@@ -139,7 +142,7 @@ test('a Mac card: Paused with its reason, and Machine settings whose Staying awa
   assert.equal(await awake.isChecked(), true);
   await awake.click();
   const sent = await waitFor(() => frames.find((f) => f.t === 'node.policy'), { timeout: 10000, message: 'node.policy frame' });
-  assert.deepEqual(sent.policy, { minBattery: 50, keepAwake: 'never', thermal: 'heavy', reserveGB: 3, maxTasks: null });
+  assert.deepEqual(sent.policy, { keepAwake: 'never', minBattery: 0, thermal: 'off', reserveGB: 0, maxTasks: null });
   assert.equal((await call('/api/cluster/nodes')).body.nodes.find((n) => n.id === node).policy.keepAwake, 'never');
   await card.locator('input[data-act="awake"]:not(:checked)').waitFor({ timeout: 10000 });
   await card.locator('input[data-act="awake"]').click();

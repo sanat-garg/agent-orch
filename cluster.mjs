@@ -154,7 +154,7 @@ const DROP_REASONS = { sleep: 'asleep', dns: 'dns', network: 'network' };
 // Added later: grace_ms (the owner's per-node grace before its jobs are reassigned; NULL = graceMs(os)); away (why a
 // node is offline: 'bye' after a clean shutdown, else 'lost', whatever its OS: a silent Mac may be asleep or off the
 // network, and only its worker can tell, on reconnect (node_drops); 'asleep' is a legacy value); slept_at/slept_ms
-// (the last sleep a worker reported on wake). max_slots 0 = Auto (the scheduler sizes it from cores and free RAM); the
+// (the last sleep a worker reported on wake). max_slots 0 = Auto (the scheduler sizes it from cores); the
 // controller's is what the scheduler sized from its hardware (setLocalCapacity).
 // drain_reason/drained_at: why and when auto-health drained it (NULL when the owner did); drain_kind: which rule did
 // ('disk' | 'drops'; NULL for the owner and for task failures), so only a disk drain lifts itself; health_ack: when the owner last
@@ -268,20 +268,19 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
   }
   const nodeGrace = (row) => graceAll ?? row.grace_ms ?? graceMs(row.os);
 
-  // The node's power policy and task cap as its worker enforces them (welcome.policy, node.policy; power.mjs).
-  const wirePolicy = (row) => ({ ...effectivePolicy(row.os, parse(row.policy)), maxTasks: row.max_slots || null });
+  // The node's power policy and task cap as its worker applies them (welcome.policy, node.policy; power.mjs). The neutral
+  // minBattery/thermal/reserveGB keep a worker from before #344 from gating on battery, heat or RAM (BRIEF goal 9).
+  const wirePolicy = (row) => ({ ...effectivePolicy(row.os, parse(row.policy)), minBattery: 0, thermal: 'off', reserveGB: 0, maxTasks: row.max_slots || null });
 
-  // Public view: never the token hash. status 'updating': an update is pending (waiting for it to be idle) or sent;
-  // 'paused': online, but its power policy holds new jobs back for now (on battery, running hot: the intake its worker
-  // reported on this connection), so the scheduler places nothing there meanwhile.
+  // Public view: never the token hash. status 'updating': an update is pending (waiting for it to be idle) or sent.
+  // Battery, heat and RAM never pause a node (BRIEF goal 9); the scheduler adds each node's lastDecision (orchestrator machines).
   function view(row) {
     const c = conns.get(row.id), isLocal = row.id === LOCAL_NODE, connected = isLocal || !!c, resources = parse(row.resources);
     const sha = c?.hello?.sha ?? resources?.sha ?? null, behind = !isLocal && versions ? versions.behind(sha) : null, u = updates.get(row.id);
     const updating = connected && row.enabled && !row.draining && (u?.state === 'pending' || u?.state === 'sent');
-    const paused = !!c && row.enabled && !row.draining && resources?.intake?.ok === false && resources.at >= c.connectedAt;
     return {
       id: row.id, name: row.name, os: row.os, arch: row.arch, local: isLocal, connected,
-      status: updating ? 'updating' : paused ? 'paused' : row.status, createdAt: row.created_at, lastSeen: row.last_seen,
+      status: updating ? 'updating' : row.status, createdAt: row.created_at, lastSeen: row.last_seen,
       away: connected ? null : row.away || 'lost', awayLabel: connected ? null : awayLabel(row),
       graceMs: nodeGrace(row), sleptAt: row.slept_at ?? null, sleptMs: row.slept_ms ?? null, drops: isLocal ? null : dropsOf(row.id),
       enabled: !!row.enabled, draining: !!row.draining, maxSlots: row.max_slots || null, // null = Auto
@@ -352,9 +351,9 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     if (!label) return { status: 400, error: 'name required' };
     const id = `n_${crypto.randomBytes(6).toString('hex')}`, token = newNodeToken(), unique = uniqueName(label);
     db.prepare('UPDATE pairings SET nodes=? WHERE code_hash=?').run(JSON.stringify([...ids, id]), e.code_hash);
-    // A new Linux node starts at 1 task; a Mac on Auto, which its policy keeps to cores − 1 and 3 GB free for its owner.
+    // A new node starts on Auto: its cores, at least 4 (placement.mjs slotTarget).
     db.prepare('INSERT INTO nodes (id, name, os, arch, token_hash, created_at, status, max_slots) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(id, unique, kind, arch, hashSecret(token), Date.now(), 'offline', kind === 'darwin' ? 0 : 1);
+      .run(id, unique, kind, arch, hashSecret(token), Date.now(), 'offline', 0);
     log(`paired node ${id} (${unique}, ${kind}/${arch})${e.uses > 1 ? `: use ${ids.length + 1} of ${e.uses}` : ''}`);
     changed();
     return { node: id, name: unique, token };
@@ -390,7 +389,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     }
     // Power policy (power.mjs): the keys given replace those settings; null goes back to the defaults for its OS.
     if (body.policy !== undefined) {
-      if (id === LOCAL_NODE) return { status: 400, error: 'the controller keeps to its own memory guard; it has no power policy' };
+      if (id === LOCAL_NODE) return { status: 400, error: 'the controller has no power policy' };
       const r = body.policy === null ? { value: null } : checkPolicy(body.policy);
       if (r.error) return { status: 400, error: r.error };
       set.policy = r.value ? JSON.stringify({ ...parse(row.policy), ...r.value }) : null;

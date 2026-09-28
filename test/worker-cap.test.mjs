@@ -1,8 +1,8 @@
 // A worker's local cap (cap.mjs, `node worker.mjs limit`) and its terminal status view (`node worker.mjs status`,
 // worker-status.mjs): the cap's parsing and wording; the head's slots for a worker under its cap (orchestrator nodeCap,
 // in a child process with a stub hub) and its "up next" count; the wrapper a job's commands run through (pid recorded,
-// nice level); and a real worker.mjs against an in-process hub: the cap reported and reloaded live, offers over it
-// declined with reason 'cap', the memory watch pausing the newest job, the status socket's snapshot (0600) and
+// nice level); and a real worker.mjs against an in-process hub: the cap reported and reloaded live, offers over its task
+// count declined with reason 'cap' (never for RAM), the memory watch pausing the newest job, the status socket's snapshot (0600) and
 // `node worker.mjs status --once` printing the connection, the cap and the running job's line.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -59,28 +59,27 @@ test('cap parsing: cores or a share of them, GB or a share of RAM, max tasks, AC
   assert.equal(resolveCap({ cpu: 'lots', maxTasks: 0 }, m), null);
   assert.equal(resolveCap(null, m), null);
   assert.equal(capText(resolveCap({ cpu: 4, mem: 8 }, m), m), '4 cores · 8 GB');
-  assert.equal(capText(resolveCap({ maxTasks: 1, onlyOnAc: true }, m), m), '8 cores · 16 GB · at most 1 task · on AC power only');
+  assert.equal(capText(resolveCap({ maxTasks: 1, onlyOnAc: true }, m), m), '8 cores · 16 GB · at most 1 task', 'a saved --only-on-ac never gates (#344)');
 
-  // The head's ceiling: max tasks, 1 core a task, and the running jobs + what fits in the rest of the RAM cap.
-  assert.equal(capSlots(null, { runs: 3 }), Infinity);
-  assert.equal(capSlots({ cpu: 4, mem: 8 * GB }, { runs: 0, jobsMem: 0, footprint: 1.2 * GB }), 4);
-  assert.equal(capSlots({ cpu: 8, mem: 8 * GB }, { runs: 0, jobsMem: 0, footprint: 1.2 * GB }), 6);
-  assert.equal(capSlots({ mem: 8 * GB }, { runs: 2, jobsMem: 5 * GB, footprint: 1.2 * GB }), 4);
-  assert.equal(capSlots({ mem: 8 * GB }, { runs: 2, jobsMem: 9 * GB, footprint: 1.2 * GB }), 2, 'over its RAM cap: nothing new');
-  assert.equal(capSlots({ cpu: 2.5, maxTasks: 5 }, { footprint: GB }), 2);
-  assert.equal(capSlots({ cpu: 2.5 }, { footprint: GB, cpuPerTask: 0.5 }), 5);
-  // The worker's own check before it accepts one more.
+  // The head's ceiling: max tasks and 1 core a task; a RAM cap never limits placement (only the memory watch's pause).
+  assert.equal(capSlots(null), Infinity);
+  assert.equal(capSlots({ cpu: 4, mem: 8 * GB }), 4);
+  assert.equal(capSlots({ cpu: 8, mem: 1 * GB }), 8);
+  assert.equal(capSlots({ mem: 8 * GB }), Infinity);
+  assert.equal(capSlots({ cpu: 2.5, maxTasks: 5 }), 2);
+  assert.equal(capSlots({ cpu: 2.5 }, { cpuPerTask: 0.5 }), 5);
+  // The worker's own check before it accepts one more: its task and CPU ceilings only.
   assert.equal(capRejection({ maxTasks: 1 }, { jobs: 1 }).kind, 'tasks');
   assert.match(capRejection({ maxTasks: 1 }, { jobs: 1 }).text, /allows 1 task \(max tasks\)/);
-  assert.equal(capRejection({ mem: 2 * GB }, { jobs: 0, jobsMem: GB, footprint: 1.2 * GB }).kind, 'memory');
-  assert.equal(capRejection({ mem: 2 * GB, cpu: 2 }, { jobs: 1, jobsMem: 0.5 * GB, footprint: 1.2 * GB }), null);
+  assert.equal(capRejection({ mem: 2 * GB }, { jobs: 3 }), null);
+  assert.equal(capRejection({ mem: 2 * GB, cpu: 2 }, { jobs: 1 }), null);
   // A node's reported cap: its latest resources frame (null = none) over its inventory.
   assert.equal(localCap({ resources: { cap: null }, inventory: { cap: { maxTasks: 2 } } }), null);
   assert.equal(localCap({ resources: {}, inventory: { cap: { maxTasks: 2 } } }).maxTasks, 2);
   assert.equal(localCap({ resources: { cap: { cpu: 'x', mem: -1 } } }), null);
 });
 
-test('the head keeps to a worker\'s local cap: slots = min(its own setting, max tasks, CPU, RAM left); up next counts what it could take', { timeout: 60000 }, async () => {
+test('the head keeps to a worker\'s local cap: slots = min(its own setting, max tasks, CPU), never RAM; up next counts what it could take', { timeout: 60000 }, async () => {
   const dataDir = fs.mkdtempSync(path.join(tmp, 'orch-')), repo = fs.mkdtempSync(path.join(tmp, 'demo-'));
   execFileSync('git', ['init', '-q', '-b', 'main', repo]);
   execFileSync('git', ['remote', 'add', 'origin', REPO], { cwd: repo });
@@ -117,10 +116,9 @@ test('the head keeps to a worker\'s local cap: slots = min(its own setting, max 
     process.exit(0);`;
   const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script, dataDir, repo], { cwd: ROOT, encoding: 'utf8', timeout: 45000 });
   const r = JSON.parse(stdout.trim().split('\n').pop());
-  // capped: the head says 6, its cap 4 cores (1 a task) → 4. mac-tasks: Auto would be 9 (cores − 1), its cap says 2.
-  // ram-used: the head says 8; RAM is never a pre-emptive throttle, so its 4 GB cap doesn't limit the head (the worker
-  // still enforces it when a job arrives) → 8. no-cap: resources say none (the inventory's older cap no longer counts)
-  // → the head's 3. old-worker: no cap in resources → its inventory's max 1.
+  // capped: the head says 6, its cap 4 cores (1 a task) → 4. mac-tasks: Auto would be 10 (its cores), its cap says 2.
+  // ram-used: its jobs use 3.5 of its 4 GB RAM cap, which never limits placement → the head's 8. no-cap: resources say none (the
+  // inventory's older cap no longer counts) → the head's 3. old-worker: no cap in resources → its inventory's max 1.
   assert.deepEqual(r.slots, { controller: r.slots.controller, capped: 4, 'mac-tasks': 2, 'ram-used': 8, 'no-cap': 3, 'old-worker': 1, 'both-agents': 3 });
   assert.equal(r.workers, 4 + 2 + 8 + 3 + 1 + 3);
   // Up next: the ready work tasks whose agent is signed in there (not the blocked one, not the plan task).
@@ -267,7 +265,7 @@ test('worker e2e setup: a paired machine with a cap saved before its worker star
   cluster.update(nodeId(), { maxSlots: 4 }); // the head allows 4: the local cap is what holds it back
   const saved = await cli('limit', '--max-tasks', '1', '--only-on-ac');
   assert.equal(saved.code, 0, saved.stderr);
-  assert.match(saved.stdout, /Local cap saved: .*at most 1 task · on AC power only\./);
+  assert.match(saved.stdout, /Local cap saved: .*at most 1 task\./);
   assert.match(saved.stdout, /The worker isn't running here; it applies the cap when it starts\./);
   const cfg = JSON.parse(fs.readFileSync(path.join(whome, 'config.json'), 'utf8'));
   assert.match(cfg.token, /^aon_/, 'the pairing is kept');
@@ -312,7 +310,7 @@ test('the worker reports its cap, declines offers over it, reloads it live and p
   assert.equal((await request(whome, { op: 'nope' })).ok, false);
   const once = await cli('status', '--once');
   assert.equal(once.code, 0, once.stderr);
-  for (const want of [/agent-orch worker · capped-box/, /Head +● Connected/, /Cap +\d+ cores? · [\d.]+ GB · at most 1 task · on AC power only \(set on this machine\)/,
+  for (const want of [/agent-orch worker · capped-box/, /Head +● Connected/, /Cap +\d+ cores? · [\d.]+ GB · at most 1 task \(set on this machine\)/,
     /Running +1 of 1 slot/, /#31 +Cap job 31 +codex·default +running +(\d+m )?\d+s/, /Up next +3 tasks ready on the head for this machine/]) {
     assert.match(once.stdout, want);
   }
@@ -322,17 +320,17 @@ test('the worker reports its cap, declines offers over it, reloads it live and p
   assert.match(two.stdout, /Applied now: the worker reloaded it and told the head\./);
   await waitFor(() => cluster.node(node).resources?.cap?.maxTasks === 2 && cluster.node(node).inventory?.cap?.maxTasks === 2, { timeout: 10000, message: 'the new cap reaches the head' });
   assert.equal(await offer(33), 'accept');
-  // A RAM cap the running job already exceeds: offers are declined, and after CAP_PAUSE_MS over it the newest job is
-  // paused: its WIP pushed and job.done aborted, so the head requeues it to resume later.
+  // A RAM cap the running job already exceeds never declines an offer (#344: RAM never gates), but after CAP_PAUSE_MS
+  // over it the newest job is paused: its WIP pushed and job.done aborted, so the head requeues it to resume later.
   await cli('limit', '--mem', '0.01');
   await waitFor(() => cluster.node(node).resources?.cap?.mem > 0, { timeout: 10000 });
-  assert.equal(await offer(34), 'cap');
+  assert.equal(await offer(34), 'accept');
   const [done] = await waitFor(() => got('job.done', 31).length && got('job.done', 31), { timeout: 30000, message: `the memory watch pauses job 31\n${workerOut}` });
   assert.equal(done.outcome, 'aborted');
   assert.match(done.text, /paused by capped-box's local cap: its jobs used [\d.]+ [MG]B of 10 MB RAM for 2 s; it continues later/);
   assert.ok(done.sessionId, 'it resumes its session later');
   assert.equal(git(origin, 'rev-parse', 'refs/heads/agent-orch/task-31'), done.sha, 'its work is pushed');
-  assert.equal(await offer(31), 'cap', 'the paused job is not taken back here for a while');
+  assert.equal(await offer(31), 'accept', 'the emergency pause is no placement gate');
   const after = await request(whome, { op: 'status' });
   assert.deepEqual([after.finished[0].id, after.finished[0].outcome], [31, 'aborted']);
   assert.match((await cli('status', '--once')).stdout, /#31 +Cap job 31 +aborted/);

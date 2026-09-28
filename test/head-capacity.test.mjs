@@ -1,6 +1,6 @@
-// #384: the head's slots come from its real hardware (three a core, at least 4; 2 cores → 6), 2 of them kept for
+// #384/#344: work slots follow cores (at least 4), plus 2 reserved for
 // controller-only work (integrators, reflection), and re-detected so a resize applies without a restart. Ordinary work
-// goes to the workers first; the head takes it only when every worker is at its target or none is online.
+// spreads by cores; the head also takes work when workers are full or offline.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -16,15 +16,15 @@ const url = (f) => JSON.stringify(new URL(`../${f}`, import.meta.url).href);
 const node = (script, ...args) => promisify(execFile)(process.execPath, ['--input-type=module', '-e', script, ...args], { cwd: ROOT, encoding: 'utf8', timeout: 45000 })
   .then(({ stdout }) => JSON.parse(stdout.trim().split('\n').pop()));
 
-test('the target comes from the cores: three a core, at least 4, two of them reserved', () => {
+test('the target comes from the cores: one per core, at least 4, plus two reserved', () => {
   assert.deepEqual(headTarget(2), { target: 6, reserved: 2, work: 4 });
-  assert.deepEqual(headTarget(1), { target: 4, reserved: 2, work: 2 });
-  assert.deepEqual(headTarget(4), { target: 12, reserved: 2, work: 10 });
-  assert.equal(headTarget(12).work, 16, 'work slots stop at 16, like the owner setting');
-  assert.deepEqual(headTarget(2, 0), { target: 6, reserved: 0, work: 6 });
+  assert.deepEqual(headTarget(1), { target: 6, reserved: 2, work: 4 });
+  assert.deepEqual(headTarget(4), { target: 6, reserved: 2, work: 4 });
+  assert.equal(headTarget(12).work, 12, 'work slots follow cores');
+  assert.deepEqual(headTarget(2, 0), { target: 4, reserved: 0, work: 4 });
 });
 
-test('workers first, the head only when they are full; integrators start on the head while its work slots are full', { timeout: 60000 }, async () => {
+test('eligible workers share work with the head; integrators use reserved slots when work slots are full', { timeout: 60000 }, async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'head-cap-'));
   const dataDir = path.join(tmp, 'data'), repos = path.join(tmp, 'repos');
   fs.mkdirSync(repos);
@@ -164,17 +164,17 @@ test('a resize is re-detected on the timer: the target and the stored controller
       o.attachCluster(c);
       const view = () => { const h = o.stateView().head, n = c.listNodes().find((x) => x.local); return { target: h.target, work: h.work, cores: n.inventory.cores, maxSlots: n.maxSlots }; };
       const before = view();
-      hw = { cores: 2, mem: 11 * GB };
+      hw = { cores: 8, mem: 11 * GB };
       await new Promise((r) => setTimeout(r, 600));
       const after = view();
       const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
       const event = db.prepare("SELECT message FROM events WHERE message LIKE 'this server now has%'").get()?.message || null;
       console.log(JSON.stringify({ before, after, event, setting: o.stateView().parallel.parallelTasks }));
       process.exit(0);`, tmp);
-    assert.deepEqual(r.before, { target: 4, work: 2, cores: 1, maxSlots: 4 }, 'the stale 1-core head: 4 in all');
-    assert.deepEqual(r.after, { target: 6, work: 4, cores: 2, maxSlots: 6 }, 'resized to 2 cores: 6 in all, 4 for work, and the node row says so');
-    assert.equal(r.setting, 4);
-    assert.match(r.event, /^this server now has 2 cores and 11\.0 GB \(was 1, 5\.9 GB\): 4 work slots plus 2 for integration$/);
+    assert.deepEqual(r.before, { target: 6, work: 4, cores: 1, maxSlots: 6 }, 'the 1-core head: 4 work plus 2 reserved');
+    assert.deepEqual(r.after, { target: 10, work: 8, cores: 8, maxSlots: 10 }, 'resized to 8 cores: 8 work plus 2 reserved');
+    assert.equal(r.setting, 8);
+    assert.match(r.event, /^this server now has 8 cores and 11\.0 GB \(was 1, 5\.9 GB\): 8 work slots plus 2 for integration$/);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

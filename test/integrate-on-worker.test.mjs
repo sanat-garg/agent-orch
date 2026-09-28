@@ -39,7 +39,7 @@ test('placement: integrators prefer a free reserved head slot, then a worker; pl
     import { execFileSync } from 'node:child_process';
     import path from 'node:path';
     const [dataDir, repos] = process.argv.slice(1), GB = 2 ** 30;
-    // 1 core: 2 work slots and 2 reserved ones on the head; the tick is parked, claims are made by hand.
+    // 1 core: 4 work slots and 2 reserved ones on the head; the tick is parked, claims are made by hand.
     const o = createOrchestrator({ query: () => (async function* () {})(), dataDir, claudeEnv: {}, getLimits: () => [], onSubscription: () => true,
       broadcast() {}, emitChat() {}, convoExists: () => false, config: { pollMs: 1e9, agentSlots: Infinity, hardware: () => ({ cores: 1, mem: 8 * GB }), meminfo: ${JSON.stringify(fileURLToPath(new URL('./fixtures/meminfo-ample', import.meta.url)))} } });
     const node = (id, features) => ({ id, name: id, os: 'darwin', local: false, status: 'online', connected: true, enabled: true, draining: false, maxSlots: 4, features,
@@ -64,7 +64,9 @@ test('placement: integrators prefer a free reserved head slot, then a worker; pl
     integrator('I2'); out.i2 = claim();                // reserved slots full: a worker that can integrate
     task('plan', 'P1'); out.p1 = claim();
     task('reflect', 'R2'); out.r2 = claim();           // a head work slot
-    task('reflect', 'R3'); out.r3 = claim();           // the last one
+    task('reflect', 'R3'); out.r3 = claim();
+    task('reflect', 'R-extra1'); claim();
+    task('reflect', 'R-extra2'); claim();             // the last work slot
     task('reflect', 'R4'); out.r4 = claim();           // the head is full: it waits, the free workers never get it
     task('plan', 'P2'); out.p2 = claim();              // plan tasks hold no slot
     console.log(JSON.stringify(out));

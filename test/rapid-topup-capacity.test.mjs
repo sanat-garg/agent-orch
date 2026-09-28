@@ -22,7 +22,7 @@ async function scenario(body) {
       const dataDir = process.argv[1], root = dataDir + '/project'; fs.mkdirSync(root);
       setModelCatalog('claude',{models:[{id:'opus',default:true}],error:null,at:Date.now()});
       const o = createOrchestrator({ disabled: true, dataDir, claudeEnv: {}, query: () => (async function*(){})(),
-        config: {pollMs:50, parallelTasks:2, agentSlots:4, meminfo:${JSON.stringify(new URL('./fixtures/meminfo-ample', import.meta.url).pathname)}},
+        config: {pollMs:50, parallelTasks:2, agentSlots:4, controllerWork:false, meminfo:${JSON.stringify(new URL('./fixtures/meminfo-ample', import.meta.url).pathname)}},
         getLimits: () => [], usageLog: { current: () => [], tokens(){}, windows(){}, limitCleared(){} }, onSubscription: () => true,
         broadcast() {}, emitChat() {}, convoExists: () => false });
       o.attachCluster({ listNodes: () => [{ id: 'pro', local: false, status: 'online', connected: true, enabled: true,

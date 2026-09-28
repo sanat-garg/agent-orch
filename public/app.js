@@ -4120,19 +4120,18 @@ function scheduleMachines(ms = 600) {
 }
 // Online / Draining / Disabled while connected; away: Connection lost (silent, no bye), Shut down (bye), Asleep (a legacy
 // row: a sleep is only known after the fact, from the worker's reconnect), else Offline.
-// Updating: waiting to be idle for its self-update, or restarting into it. Paused: its power policy takes no new tasks
-// for now (on battery, running hot).
+// Updating: waiting to be idle for its self-update, or restarting into it.
 function nodeState(n) {
   if (!n.enabled) return { dot: '', label: 'Disabled' };
   if (['pending', 'sent'].includes(n.update?.state) && !n.draining) return { dot: 'warn', label: 'Updating' };
   if (!n.connected) return n.away === 'asleep' ? { dot: '', label: 'Asleep' } : n.away === 'bye' ? { dot: '', label: 'Shut down' } : { dot: 'off', label: cap(n.awayLabel || 'offline') };
   if (n.draining) return { dot: 'warn', label: 'Draining' };
-  return n.status === 'paused' ? { dot: 'warn', label: 'Paused' } : { dot: 'on', label: 'Online' };
+  return { dot: 'on', label: 'Online' };
 }
 // 'Cluster: 3 machines · 7 cores · 14.2 GB free · 4 of 6 slots running': machines that are connected and enabled.
 function machineSummary(nodes) {
   const up = nodes.filter((n) => n.connected && n.enabled), sum = (f) => up.reduce((a, n) => a + (f(n) || 0), 0);
-  const used = sum((n) => n.used), slots = sum((n) => (n.draining || n.status === 'paused' ? n.used : Math.max(n.slots || 0, n.used)));
+  const used = sum((n) => n.used), slots = sum((n) => (n.draining ? n.used : Math.max(n.slots || 0, n.used)));
   const off = nodes.filter((n) => n.enabled && !n.connected).length, dis = nodes.filter((n) => !n.enabled).length;
   return [`Cluster: ${plural(up.length, 'machine')}`, plural(sum((n) => n.inventory?.cores), 'core'), `${fmtGB(sum((n) => n.resources?.memAvailable))} free`,
     `${used} of ${plural(slots, 'slot')} running`, off && `${off} offline`, dis && `${dis} disabled`].filter(Boolean).join(' · ');
@@ -4224,7 +4223,7 @@ function machineCard(n) {
   if (hd) {
     h.append(document.createTextNode('Integrating '), el('b', '', String(hd.reserved)), document.createTextNode(' · Work '), el('b', '', `${hd.workUsed}/${hd.work}`));
     h.title = `${plural(hd.reserved, 'slot')} kept for integrators and reflection (${hd.integrating} running), ${hd.workUsed} of ${plural(hd.work, 'work slot')} in use. ` +
-      `Sized from its ${plural(hd.cores, 'core')}: three a core, at least 4 in all. Work goes to the other machines first.`;
+      `Sized from its ${plural(hd.cores, 'core')}: one per core, at least 4 work slots, plus integration slots. Work spreads across eligible machines.`;
   } else h.append(document.createTextNode('Running · '), el('b', '', `${n.used} of ${n.slots ?? 0}`), document.createTextNode(` ${n.slots === 1 ? 'slot' : 'slots'}`));
   run.append(h);
   const tasks = n.tasks || [];
@@ -4260,20 +4259,23 @@ function poolLine(n) {
   if (!c) return null;
   const cores = c.cpu ?? inv.cores, mem = c.mem ?? inv.mem;
   const parts = [cores != null && `${+Number(cores).toFixed(2)} ${cores === 1 ? 'core' : 'cores'}`, mem != null && `${+(mem / 2 ** 30).toFixed(1)} GB`,
-    c.maxTasks != null && `at most ${plural(c.maxTasks, 'task')}`, c.onlyOnAc && 'on AC power only'].filter(Boolean);
+    c.maxTasks != null && `at most ${plural(c.maxTasks, 'task')}`].filter(Boolean);
   const p = el('p', 'mc-health mc-pool', `Pooled: ${parts.join(' · ')} (set on this ${n.os === 'darwin' ? 'Mac' : 'machine'})`);
   p.title = "This machine's own cap on what it lends the cluster (node worker.mjs limit, run on it). The scheduler never gives it more.";
   return p;
 }
 // A running remote task's step on its card ('installing deps'; nothing extra while the agent itself runs).
 const PHASE_DOING = { queued: 'starting', cloning: 'cloning', fetching: 'fetching', installing: 'installing deps', checking: 'checking', committing: 'committing', pushing: 'pushing', done: 'finishing' };
-// What the owner should know about a machine's health, one short line each: why it was drained automatically, why its
-// power policy pauses it, an update (waiting, restarting, failed) or how far behind it is, its last error today, a Mac's
-// battery and thermal state (and whether it is kept awake for its tasks), GitHub out of reach.
+// What the owner should know about a machine's health, one short line each: its last placement decision (why it got a
+// task or was skipped), why it was drained automatically, an update (waiting, restarting, failed) or how far behind it
+// is, its last error today, a Mac's battery and thermal state (information only: they never decide placement) and
+// whether it is kept awake for its tasks, GitHub out of reach.
 function machineHealth(n) {
   const out = [], res = n.resources || {}, line = (cls, text, title) => { const p = el('p', `mc-health ${cls}`, text); if (title) p.title = title; out.push(p); };
+  const d = n.lastDecision;
+  if (d?.text) line(`mc-decision${d.ok ? '' : ' warn'}`, `Placement: ${d.text}${d.at ? ` · ${relTime(d.at * 1000)}` : ''}`,
+    'The scheduler skips a machine only when its CPU is saturated for a minute, its agent is signed out, or it is full, draining or disabled');
   if (n.drainReason) line('warn', `Drained automatically${n.drainedAt ? ` ${relTime(n.drainedAt)}` : ''}: ${n.drainReason}. Turn on Machine settings → Run tasks on this machine when that's fixed.`);
-  if (n.slotsWhy) line('warn', `${n.slotsWhy}. It takes tasks once more memory is free.`);
   const paused = n.status === 'paused' ? res.intake?.reason : null;
   if (paused) line('warn', `${res.intake.text}. Its running tasks go on.`);
   const u = n.update, ro = n.rollout;
@@ -4285,8 +4287,8 @@ function machineHealth(n) {
   const e = n.lastError;
   if (e && Date.now() - e.at < 86400e3 && e.kind !== 'update') line('bad', `Error ${relTime(e.at)}: ${e.message}`, [e.kind, e.stderr || e.stack].filter(Boolean).join('\n\n'));
   const bat = res.battery, th = res.thermal;
-  if (bat && paused !== 'battery') line(bat.pct < 20 && !bat.charging ? 'warn' : '', `Battery ${bat.pct}%${bat.charging ? ' · charging' : bat.source === 'ac' ? ' · on power' : ''}`);
-  if (th?.pressure === 'throttled' && paused !== 'thermal') line('warn', th.speedLimit != null ? `Running hot: CPU limited to ${th.speedLimit}%` : 'Running hot: the CPU is throttled');
+  if (bat) line(bat.pct < 20 && !bat.charging ? 'warn' : '', `Battery ${bat.pct}%${bat.charging ? ' · charging' : bat.source === 'ac' ? ' · on power' : ''}`);
+  if (th?.pressure === 'throttled') line('warn', th.speedLimit != null ? `Running hot: CPU limited to ${th.speedLimit}%` : 'Running hot: the CPU is throttled');
   if (res.awake && n.connected) line('', 'Kept awake while its tasks run');
   if (res.net && !res.net.ok && n.connected) line('warn', `Can't reach ${res.net.host === 'github.com' ? 'GitHub' : res.net.host}${res.net.error ? ` (${res.net.error})` : ''}: it can't clone or push`);
   for (const [cls, text, title] of dropLines(n)) line(cls, text, title);
@@ -4721,7 +4723,7 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && UA.layer
 $('updateAll').addEventListener('click', () => openUpdateAll());
 // ----- machine settings (the 'Machine settings' disclosure at the foot of each card) -----
 // Plain words in at most three sections, a row each (label, one-line hint, one control; a switch's row is its label):
-//   Work: parallel tasks (Auto or a cap; the controller's own follow its free memory, capped in Settings) and Run tasks
+//   Work: parallel tasks (Auto or a cap; the controller's own follow its cores, capped in Settings) and Run tasks
 //     on this machine (off = draining: it finishes its running tasks, then takes no more; on also re-enables it).
 //   Staying awake (a Mac worker): its policy's keepAwake (power.mjs; on = 'always', off = 'never').
 //   Manage: rename, finish sound, check the connection (Ping), update and, set apart in red, remove from the cluster.
@@ -4769,8 +4771,8 @@ function machineSettings(n) {
   const work = section('Work');
   if (n.local) {
     const auto = el('span', 'mc-auto', 'Auto');
-    auto.title = `Sized from this server's ${n.head ? plural(n.head.cores, 'core') : 'cores'} (three tasks a core, at least 4), re-checked every 10 minutes. Settings → Parallel tasks caps tasks across all machines.`;
-    row(work, 'Parallel tasks', "Three a core on this server. Settings → Parallel tasks caps all machines.", auto);
+    auto.title = `Sized from this server's ${n.head ? plural(n.head.cores, 'core') : 'cores'} (one task per core, at least 4, plus integration slots), re-checked every 10 minutes. Settings → Parallel tasks caps tasks across all machines.`;
+    row(work, 'Parallel tasks', "One per core, at least 4, plus integration slots. Settings → Parallel tasks caps all machines.", auto);
   } else {
     const seg = el('span', 'seg-sm');
     seg.setAttribute('role', 'group');
@@ -4783,7 +4785,7 @@ function machineSettings(n) {
       b.addEventListener('click', () => { if (v !== n.maxSlots) patchNode(n, { maxSlots: v }); });
       seg.append(b);
     }
-    row(work, 'Parallel tasks', n.maxSlots == null ? `Auto: as many as ${where}'s cores and free memory allow` : `At most ${plural(n.maxSlots, 'task')} at once`, seg);
+    row(work, 'Parallel tasks', n.maxSlots == null ? `Auto: as many as ${where}'s cores allow (at least 4)` : `At most ${plural(n.maxSlots, 'task')} at once`, seg);
   }
   const taking = n.enabled && !n.draining;
   row(work, 'Run tasks on this machine', taking ? 'Accept new tasks' : n.enabled ? 'Finish current tasks, then stop' : 'Off: it takes no tasks',
@@ -6815,7 +6817,7 @@ $('stReflectModel').addEventListener('change', async (e) => {
   e.target.blur();
   renderSettings();
 });
-// Parallel tasks: what can run right now (state.capacity: this server's memory-guarded slots plus online workers') and
+// Parallel tasks: what can run right now (state.capacity: this server's slots plus online workers') and
 // how many run; the owner can only cap it lower ('' = no limit, else maxTasks).
 function renderParallel(s) {
   const sel = $('stParallel');
@@ -6825,10 +6827,11 @@ function renderParallel(s) {
   sel.disabled = !c;
   renderServerTasks(s, c);
   if (!c) { $('stParHint').textContent = 'Checking what can run…'; if (!sel.options.length) sel.append(new Option('No limit', '')); return; }
-  const where = c.workers ? ` (this server ${c.controller}, workers ${c.workers})` : '';
+  const tight = c.controller < c.controllerMax ? ` of ${c.controllerMax}` : '';
+  const where = c.workers ? ` (this server ${c.controller}${tight}, workers ${c.workers})` : tight ? ` (this server ${c.controller}${tight})` : '';
   const bits = [`${c.running} running`, `up to ${c.max} can run now${where}`];
   if (c.pacing != null && c.pacing < c.max) bits.push(`usage pacing allows ${c.pacing}`);
-  if (!c.max) bits[1] = 'none can start now: memory is low';
+  if (!c.max) bits[1] = 'none can start now: every machine is busy';
   $('stParHint').textContent = bits.join(' · ');
   if (document.activeElement === sel) return; // not rebuilt while the owner is choosing
   const opts = [new Option(`No limit${c.max ? ` (${c.max})` : ''}`, '')];

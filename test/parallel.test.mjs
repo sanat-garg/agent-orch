@@ -1,6 +1,7 @@
 // Parallel planning (#156): glob-aware file-overlap gating, multi-dependencies ("after": [...]), agent spreading across
-// the fallback list, and an integrator task that starts only after all its parts. #302: the controller's own slots are the
-// owner's setting (1-16, default from the head's cores: 4 on 2), memory only an emergency floor (/proc/meminfo fixture), and the low-memory pause.
+// the fallback list, and an integrator task that starts only after all its parts. #207/#344: Auto slots by default
+// (placement.mjs slotTarget), one or two with the setting whatever the free memory (/proc/meminfo fixture), and the low-memory pause, which
+// never stops a claim.
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -11,6 +12,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { filesOverlap, parseFiles, spreadAssign, readMemInfo, taskSlots } from '../parallel.mjs';
 import { extractTasks, resolveAfter, TASKS_FORMAT } from '../orchestrator.mjs';
+import { slotTarget } from '../placement.mjs';
 
 const url = (f) => JSON.stringify(new URL(`../${f}`, import.meta.url).href);
 const fixture = (f) => fileURLToPath(new URL(`./fixtures/${f}`, import.meta.url));
@@ -237,7 +239,7 @@ describe('parallel scheduling', { concurrency: true, timeout: 120000 }, () => {
       released.add('s1');
       await until(() => all().every((t) => t.status === 'done'));
       return { state, spans: spans(), rows: all().map((t) => ({ title: t.title, ran: t.ran_agent, agent: t.agent, moves: JSON.parse(t.moves || '[]'), reason: t.delegated_reason })) };`,
-    { config: { parallelTasks: 2 } });
+    { config: { parallelTasks: 2, agentSlots: 1 } });
     assert.equal(r.state.slots, 2);
     assert.deepEqual(r.state.lanes.map(l => l.agent).sort(), ['claude', 'codex']);
     assert.ok(r.state.lanes.every(l => l.task > 0 && l.model && l.elapsed >= 0));
@@ -250,7 +252,7 @@ describe('parallel scheduling', { concurrency: true, timeout: 120000 }, () => {
     assert.ok(overlaps(r.spans.S1, r.spans.S2), 'both ran at once, on two agents');
   });
 
-  test('four work tasks by default on a 2-core head; the owner sets 1-16 and memory above the floor never lowers it, re-checked per claim', async () => {
+  test('Auto slots by default (cores, at least 4); the setting of 1 runs one, 2 runs two whatever the free memory', async () => {
     const r = await scenario(`
       const two = (a, b) => [{ title: a, prompt: 'WAIT ' + a + '\\nWRITE ' + a + '.txt x', files: [a + '.txt'] }, { title: b, prompt: 'WRITE ' + b + '.txt y', files: [b + '.txt'] }];
       const phase = async (a, b) => {
@@ -267,7 +269,7 @@ describe('parallel scheduling', { concurrency: true, timeout: 120000 }, () => {
       o.setParallelSettings({ parallelTasks: 1 });
       const one = await phase('o1', 'o2');
       o.setParallelSettings({ parallelTasks: 2 });
-      setMem(1000, 2048); // 1 GB available, half the swap in use: above the emergency floor
+      setMem(500, 2048); // 500 MB available, half the swap in use: memory never gates claims
       const lowMem = await phase('l1', 'l2');
       return { byDefault, bad, one, lowMem, setting: o.stateView().parallel.parallelTasks, spans: spans() };`,
     { config: { hardware: { cores: 2 } } });
@@ -278,39 +280,34 @@ describe('parallel scheduling', { concurrency: true, timeout: 120000 }, () => {
     assert.deepEqual(r.one, { second: 'queued', slots: 1 }, 'setting 1: the second task waits');
     assert.ok(!overlaps(r.spans.o1, r.spans.o2));
     assert.equal(r.setting, 2);
-    assert.equal(r.lowMem.slots, 2, 'memory above the floor does not throttle');
+    assert.equal(r.lowMem.slots, 2, 'memory does not throttle');
     assert.notEqual(r.lowMem.second, 'queued');
     assert.ok(overlaps(r.spans.l1, r.spans.l2));
   });
 
-  test('low memory: nothing is claimed under 800 MB; 30 s under 300 MB pauses the newest task, which resumes later', async () => {
+  test('low memory: 30 s under 300 MB pauses the newest task (an emergency brake), and claiming goes on', async () => {
     const r = await scenario(`
       await plan([{ title: 'M', prompt: 'WAIT m\\nWRITE m.txt m', files: ['m.txt'] }]);
       await until(() => byTitle('M')?.status === 'running');
       setMem(200);
-      await until(() => byTitle('M').status === 'queued');
+      await until(() => db.prepare("SELECT 1 AS x FROM events WHERE message LIKE 'Paused #%'").get());
       const events = db.prepare("SELECT message FROM events WHERE message LIKE 'Paused #%' ORDER BY id").all().map((e) => e.message);
-      for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 150));
-      const whileLow = { status: byTitle('M').status, slots: o.stateView().slots,
-        waiting: db.prepare("SELECT 1 AS x FROM events WHERE message LIKE 'waiting: server memory low%'").get()?.x === 1 };
+      const whileLow = { slots: o.stateView().slots, waiting: db.prepare("SELECT 1 AS x FROM events WHERE message LIKE 'waiting: server memory low%'").get()?.x === 1 };
       setMem(12000); released.add('m');
       await until(() => byTitle('M').status === 'done');
       return { events, whileLow, runs: db.prepare('SELECT COUNT(*) AS n FROM runs WHERE task_id=?').get(byTitle('M').id).n, status: byTitle('M').status };`,
     { config: { memCheckMs: 100, memLowPauseSec: 0.5 } });
     assert.match(r.events[0], /^Paused #\d+: server memory low$/);
-    assert.deepEqual(r.whileLow, { status: 'queued', slots: 0, waiting: true });
+    assert.deepEqual(r.whileLow, { slots: slotTarget(os.cpus().length), waiting: false });
     assert.equal(r.status, 'done');
     assert.ok(r.runs >= 2, 'the paused task ran again');
   });
 });
 
-test('taskSlots: the setting (capped by pacing) whenever memory is above the 800 MB floor; none under it', () => {
-  const GB = 1024 ** 3;
-  assert.equal(taskSlots({ mem: { avail: 4 * GB, swapPct: 0 } }), 1);
-  assert.equal(taskSlots({ setting: 4, mem: { avail: 1 * GB, swapPct: 0 } }), 4);
-  assert.equal(taskSlots({ setting: 16, mem: { avail: 1 * GB, swapPct: 0.9 } }), 16, 'swap does not throttle');
-  assert.equal(taskSlots({ setting: 4, mem: { avail: 0.7 * GB, swapPct: 0 } }), 0);
-  assert.equal(taskSlots({ setting: 4, mem: { avail: 4 * GB, swapPct: 0 }, pacingLimit: 2 }), 2);
+test('taskSlots: one by default, the setting otherwise, pacing can drop it; memory plays no part', () => {
+  assert.equal(taskSlots({}), 1);
+  assert.equal(taskSlots({ setting: 2 }), 2);
+  assert.equal(taskSlots({ setting: 4, pacingLimit: 1 }), 1);
   const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-mem-')), 'meminfo');
   fs.writeFileSync(f, meminfo(3000, 1024));
   assert.deepEqual(readMemInfo(f), { avail: 3000 * 1024 ** 2, swapPct: 0.25 });

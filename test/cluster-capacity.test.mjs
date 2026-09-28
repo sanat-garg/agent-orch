@@ -1,5 +1,5 @@
 // The scheduler's view of the cluster (orchestrator nodesNow / capacityView), with a stub hub: an Auto worker (maxSlots
-// null) counts the slots its cores and free RAM allow (nodeCap), and a node change (cluster.version()) is seen by the
+// null) counts its cores, at least 4 (nodeCap, placement.mjs slotTarget), whatever its free RAM, and a node change (cluster.version()) is seen by the
 // next read, not after the one-second cache (else a worker that just reconnected looks offline to placement).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -26,18 +26,17 @@ test('capacity counts an Auto worker by its nodeCap and follows a node change at
       process.exit(0);`;
     const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script, dataDir], { encoding: 'utf8', timeout: 30000 });
     const r = JSON.parse(stdout.trim().split('\n').pop());
-    // Auto: min(4 cores, (4 GB free − the 800 MB floor) / 1.2 GB per Claude run) = 2.
-    assert.equal(r.auto, 2);
+    // Auto: its 4 cores; the 4 GB free plays no part.
+    assert.equal(r.auto, 4);
     assert.equal(r.drained, 0, 'the drain is seen by the next read');
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });
 
-// BRIEF goal 9: an owner-set cap (maxSlots) is the limit. A Mac capped at 10 with 4 GB free (under the old footprint and
-// 3 GB reserve arithmetic: no Claude run at all) counts 10 slots and takes a 6th task while 5 run there; only a
-// MemAvailable under MEM.pauseBelow (the emergency floor) keeps a capped node from getting work.
-test('an owner-capped node takes tasks up to its cap, stopped only by the emergency memory floor', { timeout: 60000 }, async () => {
+// BRIEF goal 9: an owner-set cap (maxSlots) is the limit. A Mac capped at 10 with 4 GB free counts 10 slots and takes a
+// 6th task while 5 run there; one with only 200 MB free takes work too (memory never gates placement).
+test('an owner-capped node takes tasks up to its cap, whatever its free memory', { timeout: 60000 }, async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-capped-'));
   const dataDir = path.join(tmp, 'data'), repo = path.join(tmp, 'repo');
   const common = `import { createOrchestrator } from ${JSON.stringify(new URL('../orchestrator.mjs', import.meta.url).href)};
@@ -67,19 +66,20 @@ test('an owner-capped node takes tasks up to its cap, stopped only by the emerge
     }
     d.prepare("INSERT INTO tasks(project_id,kind,title,prompt,created_at) VALUES(?,'work','sixth','p',?)").run(pid, t);
     process.exit(0);`;
-  // Boot 2 (the scheduler, its tick parked): the hub re-adopts the five, then the sixth is claimed.
+  // Boot 2 (the scheduler, its tick parked; the controller leaves work to the workers): the hub re-adopts the five, then the sixth is claimed.
   const check = `${common}
     const nodes = [{ id: 'controller', local: true, status: 'online', connected: true, enabled: true }, node('mac', 4 * GB), node('mac-low', 200 * MB)];
     let version = 1;
-    const o = createOrchestrator({ ...opts, config: { pollMs: 1e9 } });
+    const o = createOrchestrator({ ...opts, config: { pollMs: 1e9, controllerWork: false } });
     o.attachCluster({ listNodes: () => nodes, node: (id) => nodes.find((n) => n.id === id) || null, isConnected: () => false, send: () => false,
       onMessage() {}, version: () => version });
     const out = { workers: o.stateView().capacity.workers, running: o.machines(nodes).find((n) => n.id === 'mac').used, adopted: [1, 2, 3, 4, 5].map((id) => o.isRunning(id)) };
+    const macLow = nodes.splice(2, 1)[0]; version++; // the spread would pick the emptier mac-low: first only the Mac with 5 running
     const c = o.claimNext(null);
     out.sixth = c && [c.task.title, c.node];
-    // The same queue with only the capped node at 200 MB free: nothing goes to it.
+    // The same queue with only the capped node at 200 MB free: it takes it all the same.
     db().prepare("UPDATE tasks SET status='queued', node_id=NULL WHERE title='sixth'").run();
-    nodes.splice(1, 1); version++;
+    nodes.splice(1, 1, macLow); version++;
     const low = o.claimNext(null);
     out.low = low && [low.task.title, low.node];
     console.log(JSON.stringify(out));
@@ -90,10 +90,10 @@ test('an owner-capped node takes tasks up to its cap, stopped only by the emerge
     const r = JSON.parse((await run(check)).stdout.trim().split('\n').pop());
     assert.deepEqual(r.adopted, [true, true, true, true, true]);
     assert.equal(r.running, 5);
-    // The owner's 10 on each capped node (mac-low's 200 MB counts slots it can't use until memory is back).
+    // The owner's 10 on each capped node, mac-low's 200 MB free included.
     assert.equal(r.workers, 20);
     assert.deepEqual(r.sixth, ['sixth', 'mac']);
-    assert.equal(r.low, null, 'a capped node under the emergency floor gets nothing');
+    assert.deepEqual(r.low, ['sixth', 'mac-low'], 'low free memory never blocks a node');
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

@@ -183,13 +183,13 @@ test('PATCH edits name, draining and max slots', async () => {
   assert.deepEqual([n.name, n.draining, n.maxSlots, n.status], ['MacBook', true, 2, 'draining']);
   assert.equal((await api(`/api/cluster/nodes/${w.node}`, { method: 'PATCH', body: { maxSlots: -1 } })).status, 400);
   assert.equal((await api(`/api/cluster/nodes/${w.node}`, { method: 'PATCH', body: { maxSlots: 0 } })).status, 400);
-  // Auto (null): min(cores, (MemAvailable − the 800 MB floor) / 1.2 GB per Claude run) = min(4, 2) here.
+  // Auto (null): its cores, at least 4 (placement.mjs slotTarget); its 4 GB free plays no part.
   assert.equal((await (await api(`/api/cluster/nodes/${w.node}`, { method: 'PATCH', body: { maxSlots: null } })).json()).node.maxSlots, null);
   c.send('inventory', { node: w.node, name: 'laptop', os: 'linux', arch: 'arm64', cores: 4, mem: 16 * 1024 ** 3, agents: [], versions: {} });
   c.send('resources', { memAvailable: 4 * 1024 ** 3, load: [0.5, 0.4, 0.3], running: [] });
   await waitFor(async () => (await nodeOf(w.node)).resources?.memAvailable === 4 * 1024 ** 3, { timeout: 5000 });
   const m = await nodeOf(w.node);
-  assert.deepEqual([m.maxSlots, m.slots, m.used, m.tasks], [null, 2, 0, []]);
+  assert.deepEqual([m.maxSlots, m.slots, m.used, m.tasks], [null, 4, 0, []]);
   // The controller's slots come from its hardware (#384): its work slots plus the reserved ones, not its nodes row's 1.
   const head = await nodeOf('controller');
   assert.equal(head.slots, head.head.work + head.head.reserved);

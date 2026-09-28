@@ -971,6 +971,9 @@ Closing Skills & tools opened from Settings reopens Settings
 
 existing origins push without gh; repoOf handles all URL forms
 
+## 2026-09-28 16:58 — #344 Placement uses every machine: CPU-only gating, spread across nodes, explain skips [done (check passed)]
+
+CPU-only placement spreads work; skip explanations and tests pass.
 ## 2026-09-28 13:18 — #347 Fix the live browser: working stream, google.com by default, viewport follows the screen [done (check passed)]
 
 live browser e2e passes here; sharp 2× phone shot saved
@@ -1401,6 +1404,13 @@ CONTEXT.md conflict resolved again; Done-when tests pass (23/23)
 
 Restarts wait only for merges; integrators pause; friendly 404 retry
 
+## 2026-09-28 17:06 — #468 Integrate #344: Placement uses every machine: CPU-only gating, spread across nodes, explain skips [done (check passed)]
+
+Merge resolved; CPU-only placement and decision reporting verified.
+
+## 2026-09-28 17:06 — #468 Integrate #344: Placement uses every machine: CPU-only gating, spread across nodes, explain skips [verify failed (1)]
+
+Command: merge main again
 ## 2026-09-28 17:02 — #467 Integrate #453: Fix the post-restart claim stall: 19 free slots, ready tasks, nothing starts [done (check passed)]
 
 merge conflicts resolved; claim-stall and related tests pass
@@ -1449,3 +1459,7 @@ Merge resolved; the full-screen Machines view and main's changes both kept, test
 ## 2026-09-28 17:15 — #472 Integrate #382: Full-screen Machines window with the queue built in [done (check passed)]
 
 app.js conflicts resolved; stall text and full-screen queue both kept
+
+## 2026-09-28 17:31 — #468 Integrate #344: Placement uses every machine: CPU-only gating, spread across nodes, explain skips [done (check passed)]
+
+merge resolved; placement, stall, rapid and machines tests pass

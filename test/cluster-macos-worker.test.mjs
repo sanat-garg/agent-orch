@@ -1,8 +1,8 @@
 // A MacBook worker end to end: worker.mjs against an in-process hub (cluster.mjs), a stub codex, and the Mac's power
 // readings and caffeinate replaced by fixtures (AGENT_ORCH_WORKER_POWER, AGENT_ORCH_WORKER_CAFFEINATE), so it runs here.
 // Two machines pair with one multi-use code under their own names; the worker gets its policy in welcome, keeps the
-// machine awake (caffeinate -i -w <its pid>) only while a job runs on AC power, and declines new jobs on low battery or
-// when hot until the power comes back or the owner relaxes its policy.
+// machine awake (caffeinate -i -w <its pid>) only while a job runs on AC power, and takes new jobs at any battery level
+// and when hot (BRIEF goal 9), even under a legacy local cap saved with `limit --only-on-ac`.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFile, execFileSync } from 'node:child_process';
@@ -103,7 +103,7 @@ test('run: the policy arrives in welcome; idle on AC power it takes jobs and let
   await waitFor(() => view()?.status === 'online' && view().resources?.intake?.ok === true, { timeout: 20000, message: `online with intake\n${workerOut}` });
   assert.equal(view().resources.awake, false);
   assert.deepEqual(view().resources.battery, { pct: 80, charging: true, source: 'ac' });
-  assert.match(workerOut, /policy: new jobs on AC power or above 50% battery, none at heavy thermal pressure; awake while jobs run: on AC power/);
+  assert.match(workerOut, /policy: awake while jobs run: on AC power; at most \d+ jobs at once/);
   assert.deepEqual(caffeinate(), [], 'no caffeinate while idle');
 });
 
@@ -129,24 +129,30 @@ test('caffeinate -i -w <worker pid> runs only while a job runs on AC power', asy
   await waitFor(() => view().resources?.awake === false, { timeout: 5000 });
 });
 
-test('new jobs are declined on low battery and when hot, until the power returns or the owner relaxes the policy', async () => {
+test('new jobs are taken on low battery, with a bogus 1% on AC and when hot; even with a legacy --only-on-ac cap', async () => {
   const offer = async (job) => {
     hub.send(node, { t: 'job.offer', job, agent: 'codex' });
     return waitFor(() => got('job.accept', job)[0] || got('job.reject', job)[0], { timeout: 10000, message: `answer ${job}\n${workerOut}` });
   };
-  power(40, 'battery');
-  await waitFor(() => view().status === 'paused', { timeout: 10000, message: 'paused on battery' });
-  assert.equal(view().resources.intake.text, 'On battery at 40%: takes new tasks above 50%');
-  assert.deepEqual([(await offer(41)).t, (await offer(41)).reason], ['job.reject', 'power']);
-  // The owner allows battery work down to 30% (Machines → Power): the worker hears it at once.
-  hub.update(node, { policy: { minBattery: 30 } });
-  await waitFor(() => view().status === 'online', { timeout: 10000, message: 'online at 40% with a 30% threshold' });
+  const cancel = (job) => hub.send(node, { t: 'job.cancel', job, reason: 'test' });
+  power(3, 'battery');
+  await waitFor(() => view().resources?.battery?.pct === 3, { timeout: 10000, message: 'battery reading' });
+  assert.equal(view().status, 'online');
+  assert.equal((await offer(41)).t, 'job.accept');
+  cancel(41);
+  power(1, 'ac'); // the Pro's bogus reading
   assert.equal((await offer(42)).t, 'job.accept');
-  // Heavy thermal pressure on AC power pauses intake too, until it cools down.
-  power(90, 'ac', 2);
-  await waitFor(() => view().status === 'paused' && view().resources.intake.reason === 'thermal', { timeout: 10000, message: 'paused when hot' });
-  assert.equal((await offer(43)).reason, 'power');
-  power(90, 'ac', 0);
-  await waitFor(() => view().status === 'online', { timeout: 10000, message: 'online when cool' });
+  cancel(42);
+  power(90, 'ac', 2); // heavy thermal pressure
+  await waitFor(() => view().resources?.thermal?.level === 'heavy', { timeout: 10000, message: 'hot reading' });
+  assert.equal(view().status, 'online');
+  assert.equal((await offer(43)).t, 'job.accept');
+  cancel(43);
+  // A local cap saved with --only-on-ac before #344: power still never declines a job.
+  await workerCli(home, 'limit', '--only-on-ac');
+  power(60, 'battery');
+  await waitFor(() => view().resources?.battery?.source === 'battery', { timeout: 10000, message: 'on battery' });
   assert.equal((await offer(44)).t, 'job.accept');
+  cancel(44);
+  await workerCli(home, 'limit', '--reset');
 });

@@ -29,8 +29,8 @@ import { filesOverlap, headTarget, parseFiles, spreadAssign, readMemInfo, taskSl
 import { registerPid, withOwner } from './resources.mjs';
 import { LOCAL_NODE, HEALTH, awayNote } from './cluster.mjs';
 import { MSG, gitPath, graceMs, isRepoUrl } from './cluster-protocol.mjs';
-import { autoTasks, reserveBytes } from './power.mjs';
-import { CPU_PER_TASK, FOOTPRINT, GB, capSlots, capTasks, localCap } from './cap.mjs';
+import { CPU_PER_TASK, GB, capSlots, localCap } from './cap.mjs';
+import { cpuState, pickNode, slotTarget } from './placement.mjs';
 import { extractCommand, runCheck, toolLine } from './taskrun.mjs';
 import { gcRetention } from './retention.mjs';
 import { APPLY_UPDATES } from './rolling.mjs';
@@ -45,7 +45,7 @@ const CFG = {
   reservedSlots: 2,             // head slots kept on top of those for controller-only work (integrators, reflection)
   hardware: null,               // {cores, mem} or a function returning it: the controller's hardware (tests); null = os.cpus() and MemTotal
   hardwareMs: 600_000,          // re-detected this often, so a resized VPS applies without a restart
-  agentSlots: 1,                // concurrent tasks per connected account (or map by agent)
+  agentSlots: 'auto',                // concurrent tasks per connected account (or map by agent)
   meminfo: process.env.AGENT_ORCH_MEMINFO || '/proc/meminfo', // the memory guard's source (tests point it at a fixture)
   memCheckMs: 5000,             // memory guard interval while tasks run
   memLowPauseSec: 30,           // MemAvailable under MEM.pauseBelow this long → pause the newest running task
@@ -71,14 +71,10 @@ const CFG = {
   sessionMaxTasks: 6,
   contextBudgetBytes: 8000,
   delegate: { ...DELEGATE_CFG }, // maxWindowPct
-  // Cluster placement (BRIEF goal 11). footprint: an agent run's memory on a node, kept free above MEM.claimFloor
-  // (a constant until #209 measures the per-agent p90). cpuPerTask: the cores a task counts against a worker's local CPU
-  // cap, per agent (default CPU_PER_TASK until measured). controllerWork: whether the controller also runs work tasks that
-  // an online worker could run (default: no, it keeps its CPU/RAM for chat and the planner); the owner's kv
-  // parallel_settings overrides it. offerMs: a job.offer unanswered this long counts as a reject.
-  footprint: { ...FOOTPRINT },
+  // CPU-only placement (BRIEF goal 9). Owner CPU/task caps stay ceilings; the controller competes with workers.
+  // cpuPerTask counts tasks against an explicit local CPU cap. offerMs: unanswered offers time out.
   cpuPerTask: {},
-  controllerWork: false,
+  controllerWork: true,
   // overlapWaits: a work task whose declared files overlap a running task in its project waits for it. That is the rule
   // whenever Rapid development mode is off; in Rapid mode (default) overlap is only a preference (parallel.mjs FILE_CAP):
   // disjoint work takes free slots first, overlapping work still starts, and the two meet at merge time. true forces
@@ -1407,7 +1403,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   function parallelSettings() {
     let s = {};
     try { s = JSON.parse(kvGet('parallel_settings') || '{}') || {}; } catch {}
-    return { parallelTasks: validParallel(s.parallelTasks) ? s.parallelTasks : CFG.parallelTasks ?? headTarget(hw.cores, CFG.reservedSlots).work,
+    return { parallelTasks: validParallel(s.parallelTasks) ? s.parallelTasks : (CFG.parallelTasks === 'auto' ? null : CFG.parallelTasks) ?? headTarget(hw.cores, CFG.reservedSlots).work,
       controllerWork: typeof s.controllerWork === 'boolean' ? s.controllerWork : CFG.controllerWork,
       controllerBrowser: typeof s.controllerBrowser === 'boolean' ? s.controllerBrowser : CFG.controllerBrowser,
       maxTasks: Number.isInteger(s.maxTasks) && s.maxTasks > 0 ? s.maxTasks : null,
@@ -1417,7 +1413,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const applyUpdates = APPLY_UPDATES.includes(s.applyUpdates) ? s.applyUpdates : s.autoRestart === false ? 'manual' : 'auto';
     return { applyUpdates, autoRestart: applyUpdates !== 'manual' };
   }
-  const slotsFor = (a) => typeof CFG.agentSlots === 'number' ? CFG.agentSlots : CFG.agentSlots[a] ?? 1;
+  const slotsFor = (a) => CFG.agentSlots === 'auto' ? slotCount(decisionCache?.d) : typeof CFG.agentSlots === 'number' ? CFG.agentSlots : CFG.agentSlots[a] ?? 1;
 
   // ---- the head's own slots (#384): its work slots (parallelSettings().parallelTasks: the owner's, else its hardware's)
   // plus `reserved` kept for controller-only work (integrators, reflection). Hardware is re-detected at boot and every
@@ -1450,7 +1446,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // Work slots in use: ordinary work plus reserved-slot runs beyond the reserved slots.
   const headWorkUsed = (load = headLoad()) => load.work + Math.max(0, load.only - headSlots().reserved);
   // May the head start `task` now? 'reserved': an integrator or reflection takes a reserved slot (no pacing, owner cap or
-  // per-agent limit holds it back); 'work': a work slot is free (`slots`: slotCount, after pacing and the memory floor); null.
+  // per-agent limit holds it back); 'work': a work slot is free (`slots`: slotCount, after pacing); null.
   function headFree(task, slots, load = headLoad()) {
     if (reservedWork(task) && load.only < headSlots().reserved) return 'reserved';
     return headWorkUsed(load) < slots ? 'work' : null;
@@ -1501,9 +1497,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     catch (e) { return { error: e.message, status: /No such/.test(e.message) ? 404 : 409 }; }
   }
   const taskActions = (id) => (getTask(id) ? { ...approvals.actions(id), approvals: approvals.forTask(id) } : null);
-  // Read fresh before every claim: claiming at all depends on the memory available right now (MEM.claimFloor).
-  function slotCount(d, mem = readMemInfo(CFG.meminfo)) {
-    return taskSlots({ setting: parallelSettings().parallelTasks, mem,
+  // The controller's work slots: its setting, which pacing can drop (free memory plays no part: BRIEF goal 9).
+  function slotCount(d) {
+    return taskSlots({ setting: parallelSettings().parallelTasks,
       pacingLimit: d && (d.scarce || d.concurrency < CFG.concurrency) ? d.concurrency : Infinity });
   }
   function setParallelSettings(value) {
@@ -1522,20 +1518,21 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     pushState(); setTimeout(tick, 0);
     return { ok: true, state: stateView() };
   }
-  // What can run right now (Settings shows it; the owner can only cap it): the controller's slots (memory-guarded; none
-  // while workers are online unless controllerWork), each usable worker's slots (nodeCap: its max tasks, or Auto), pacing's
-  // limit, the owner's cap.
-  function capacityView(d = decisionCache?.d, mem = readMemInfo(CFG.meminfo)) {
+  // What can run right now (Settings shows it; the owner can only cap it): the controller's slots (none while workers are
+  // online unless controllerWork), each usable worker's slots (nodeCap: its max tasks, or Auto) unless its CPU is
+  // saturated, pacing's limit, the owner's cap.
+  function capacityView(d = decisionCache?.d) {
     const settings = parallelSettings();
-    const workers = nodesNow().filter((n) => !n.local && n.status === 'online' && n.connected && n.enabled !== false && !n.draining);
-    const controller = workers.length && !settings.controllerWork ? 0 : taskSlots({ setting: settings.parallelTasks, mem });
+    const workers = nodesNow().filter((n) => !n.local && n.status === 'online' && n.connected && n.enabled !== false && !n.draining && !cpuOf(n)?.saturated);
+    const local = nodesNow().find((n) => n.local);
+    const controllerMax = workers.length && !settings.controllerWork ? 0 : settings.parallelTasks;
+    const controller = !controllerMax || local?.draining || cpuOf(local)?.saturated ? 0 : taskSlots({ setting: controllerMax });
     const pacing = d && (d.scarce || d.concurrency < CFG.concurrency) ? Math.max(1, d.concurrency) : null;
     const max = controller + workers.reduce((sum, n) => sum + nodeCap(n), 0);
-    // controllerMax: what the controller takes when memory allows (controller < controllerMax: memory is holding it back).
-    return { controller, controllerMax: workers.length && !settings.controllerWork ? 0 : settings.parallelTasks, workers: max - controller, max, pacing, cap: settings.maxTasks, running: workEverywhere(),
+    return { controller, controllerMax, workers: max - controller, max, pacing, cap: settings.maxTasks, running: workEverywhere(),
       effective: Math.min(max, pacing ?? Infinity, settings.maxTasks ?? Infinity) };
   }
-  // Slots and agentSlots count the controller's own runs; each worker has its own (nodes.max_slots, headroom).
+  // Slots and agentSlots count the controller's own runs; each worker has its own (nodeCap).
   const runningOn = (agent) => [...running.values()].filter((r) => r.agent === agent && r.node === LOCAL_NODE).length;
   // Work slots hold work, reflect and integrator tasks; plan tasks (the owner's messages) run beside them as before.
   const workRunning = () => [...running.values()].filter((r) => r.kind !== 'plan' && r.node === LOCAL_NODE).length;
@@ -1572,37 +1569,39 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // Workers that could run `agent`: connected, enabled, not draining, with the agent installed and signed in.
   const workerNodes = (agent) => nodesNow().filter((n) => !n.local && n.status === 'online' && n.connected
     && (n.inventory?.agents || []).some((a) => a.id === agent && a.installed && a.signedIn));
-  const footprint = (agent) => CFG.footprint[agent] ?? CFG.footprint.claude;
   const nodeRuns = (id) => [...running.values()].filter((r) => r.node === id);
-  // A worker's spare memory: its last MemAvailable, less the footprint of runs placed on it since that reading.
-  function spareMem(n) {
-    const res = n.resources || {}, fresh = nodeRuns(n.id).filter((r) => r.startedAt * 1000 > (res.at || 0));
-    return (res.memAvailable || 0) - fresh.reduce((sum, r) => sum + footprint(r.agent), 0);
+  // Work tasks on a node (plan tasks aside), from the DB, so a claim that hasn't started yet counts: the spread's "running".
+  const nodeLoad = (id) => Math.max(q1("SELECT COUNT(*) AS n FROM tasks WHERE status='running' AND kind!='plan' AND COALESCE(node_id, :l)=:id", { l: LOCAL_NODE, id }).n,
+    nodeRuns(id).filter((r) => r.kind !== 'plan').length);
+  // A worker's slots: the owner's max tasks (nodes.max_slots) or Auto = its cores, at least 4 (placement.mjs slotTarget),
+  // never more than its local cap allows (`node worker.mjs limit`: --max-tasks, --cpu). RAM never changes the slot count.
+  const nodeCap = (n, agent = 'claude') => Math.min(n.maxSlots ?? slotTarget(n.inventory?.cores),
+    capSlots(localCap(n), { cpuPerTask: CFG.cpuPerTask?.[agent] ?? CPU_PER_TASK }));
+  const cpuOf = (n) => cpuState(n?.resources, n?.inventory?.cores ?? (n?.local ? os.cpus().length : null));
+  // Why worker n can't take a task of `agent`'s now (the text after 'skipped: '), or null. Only a genuinely saturated CPU
+  // skips an otherwise usable machine (placement.mjs cpuState).
+  function workerSkip(n, agent, taskId) {
+    if (!n.enabled) return 'disabled';
+    if (!n.connected) return (n.awayLabel || 'offline').toLowerCase();
+    if (n.draining) return 'draining';
+    if (n.status === 'updating') return 'updating itself';
+    if (n.status !== 'online') return n.status || 'offline';
+    const a = (n.inventory?.agents || []).find((x) => x.id === agent);
+    if (!a?.installed) return `agent ${agent} not installed`;
+    if (!a.signedIn) return `agent ${agent} signed out`;
+    if (taskId != null && rejected.get(`${n.id}/${taskId}`) > Date.now()) return `it declined #${taskId} a moment ago`;
+    const cpu = cpuOf(n);
+    if (cpu?.saturated) return `CPU saturated (${cpu.text})`;
+    const used = nodeLoad(n.id), slots = nodeCap(n, agent);
+    return used >= slots ? `full (${used}/${slots} running)` : null;
   }
-  // Headroom for one more `agent` run: it must stay at or above the same floor the controller keeps (MEM.claimFloor), or
-  // the RAM the node's power policy leaves free for its owner when that is more (a Mac: 3 GB; power.mjs).
-  const headroom = (n, agent) => spareMem(n) - footprint(agent);
-  const floorOf = (n) => Math.max(MEM.claimFloor, reserveBytes(n.policy));
-  // What a worker's jobs use: its last measured reading (resources.jobsMem), plus the footprint of runs placed there since
-  // (all its runs' footprints from a worker that doesn't measure).
-  function jobsMem(n) {
-    const res = n.resources || {}, runs = nodeRuns(n.id), fresh = runs.filter((r) => r.startedAt * 1000 > (res.at || 0));
-    const sum = (list) => list.reduce((a, r) => a + footprint(r.agent), 0);
-    return (Number.isFinite(res.jobsMem) ? res.jobsMem : sum(runs.filter((r) => !fresh.includes(r)))) + sum(fresh);
-  }
-  // A worker's slots (BRIEF goal 9). The owner's cap (nodes.max_slots, set in Machines) is the limit: min(it, the worker's
-  // own max tasks from `node worker.mjs limit --max-tasks`), with no footprint or spare-memory arithmetic, and it is
-  // admitted unless its last MemAvailable is under MEM.pauseBelow (the emergency floor). Auto (null) = min(its cores (a
-  // Mac keeps one for its owner), its runs + the Claude-sized runs its spare memory fits above its floor), never more than
-  // its local cap allows (a hard ceiling: cap.mjs capSlots = its max tasks, its CPU at cpuPerTask cores a task, its runs +
-  // what fits in the rest of its RAM cap at the agent's footprint), and headroom above its floor is checked per claim.
-  const nodeCap = (n, agent = 'claude') => (n.maxSlots != null ? Math.min(n.maxSlots, capTasks(localCap(n), CFG.cpuPerTask?.[agent] ?? CPU_PER_TASK))
-    : Math.min(autoTasks(n.os, n.inventory?.cores || 1), nodeRuns(n.id).length + Math.max(0, Math.floor((spareMem(n) - floorOf(n)) / footprint('claude'))),
-      capSlots(localCap(n), { runs: nodeRuns(n.id).length, jobsMem: jobsMem(n), footprint: footprint(agent), cpuPerTask: CFG.cpuPerTask?.[agent] ?? CPU_PER_TASK })));
-  const memOk = (n, agent) => (n.maxSlots != null ? !((n.resources?.memAvailable ?? Infinity) < MEM.pauseBelow) : headroom(n, agent) >= floorOf(n));
-  const freeWorkers = (agent, taskId) => workerNodes(agent).filter((n) => nodeRuns(n.id).length < nodeCap(n, agent)
-    && memOk(n, agent) && !(rejected.get(`${n.id}/${taskId}`) > Date.now()));
-  const workerSlots = (agent) => freeWorkers(agent).reduce((sum, n) => sum + nodeCap(n, agent) - nodeRuns(n.id).length, 0);
+  const freeWorkers = (agent, taskId) => workerNodes(agent).filter((n) => !workerSkip(n, agent, taskId));
+  const workerSlots = (agent) => freeWorkers(agent).reduce((sum, n) => sum + nodeCap(n, agent) - nodeLoad(n.id), 0);
+  // The Machines view's "last placement decision" per node: {at, ok, text, task}. picks: node id → the sequence number of
+  // the placement that last chose it (pickNode's round-robin among ties).
+  const decisions = new Map(), picks = new Map();
+  let pickSeq = 0;
+  const noteDecision = (id, ok, text, task = null) => decisions.set(id, { at: now(), ok, text: `${ok ? 'eligible' : 'skipped'}: ${text}`, task });
   // The owner drained the controller (Machines view): it starts no new work tasks; plan tasks still run here.
   const localDraining = () => !!nodesNow().find((n) => n.local)?.draining;
   // The project's GitHub clone URL (never with credentials), or null: remote nodes need one, and a project that is a
@@ -1641,20 +1640,22 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     }
   }
   const localAgentOk = (agent) => (agent === 'claude' ? onSubscription() : agentStatus(agent) === true && !(kvTime(`agent_auth_failed:${agent}`) > now()));
-  // Where a claimed task runs: the free worker with the most headroom (the node that last ran it first), else the
-  // controller when it has a free slot (localFree: headFree's answer for this task). Ordinary work goes to the workers
-  // first: the controller takes it only once every worker is at its target or none is online, and with the owner's
-  // controllerWork off it leaves it to the workers while one could run it (it waits for one to free up). A task in a
-  // reserved slot ignores the owner's cap and pacing (cap), so integration never waits behind work: an integrator takes one
-  // on the head while one is free, else it is placed like ordinary work (#435). null = not now.
+  // Where a claimed task runs (BRIEF goal 9, PLACEMENT RULE; placement.mjs). Among the nodes that can take it now (the
+  // agent signed in, a free slot, the CPU not saturated): the node that last ran it (its session resumes there), else the
+  // lowest (running + 1) / effective cores,
+  // ties round-robin, so every machine gets work. The controller competes like any node, except that while some worker
+  // could run a remote-capable work task it leaves that to the workers unless the owner's controllerWork setting says
+  // otherwise. Every node it weighed gets its verdict recorded (lastDecision in the Machines view). null = not now.
   // A browser task (browser.mjs) goes only to a worker that reports browserCapable, or to the controller when the owner
   // allows it (controllerBrowser), and never while another task uses the same profile (Chromium locks it).
   // why (optional): why it wasn't placed, for the stall diagnostics (claimNext's `why`); `hold`: a pending restart's reason.
   function place(task, agent, { localFree, localOk, cap, hold = null }, why = {}) {
     const no = (reason) => { why.reason = reason; return null; };
-    const headNo = () => (hold ? hold : !localOk ? 'server memory low' : 'no free slot on this server');
-    if (task.kind === 'plan') return localOk ? LOCAL_NODE : no(headNo());
-    if (task.integrates && localFree === 'reserved' && localOk && !localDraining() && localAgentOk(agent)) return LOCAL_NODE;
+    if (task.kind === 'plan') return localOk ? LOCAL_NODE : no(hold || 'no free slot on this server');
+    if (task.integrates && (!task.run_on || task.run_on === LOCAL_NODE) && localFree === 'reserved' && localOk && !localDraining() && localAgentOk(agent) && !cpuOf(nodesNow().find((n) => n.local))?.saturated) {
+      noteDecision(LOCAL_NODE, true, `${nodeLoad(LOCAL_NODE)}/${headSlots().total} running, took #${task.id}`, task.id);
+      return LOCAL_NODE;
+    }
     // Integrators and reflection (reserved slots) never count against the cap on ordinary work.
     if ((localFree !== 'reserved' || task.integrates) && ordinaryEverywhere() >= cap) return no(`at the ${parallelSettings().maxTasks === cap ? "owner's" : 'pacing'} cap of ${cap} running task${cap === 1 ? '' : 's'}`);
     const browser = needsBrowser(task);
@@ -1664,32 +1665,39 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const fits = (n) => (!browser || browserWorker(n)) && canClone(n, task, project) && (!task.integrates || integrateWorker(n));
     // Pinned by the owner (run_on): only that machine, waiting for it. A worker pin only binds a task that can run remotely.
     const pin = task.kind === 'work' && task.run_on && (task.run_on === LOCAL_NODE || remote || isBrowserTask(task)) ? task.run_on : null;
+    const cands = [], skips = [];
+    const weigh = (id, skip, slots, cores) => (skip ? (noteDecision(id, false, skip, task.id), skips.push(`${id === LOCAL_NODE ? 'this server' : nodeName(id)}: ${skip}`))
+      : cands.push({ id, running: nodeLoad(id), slots, cores: slotTarget(cores) }));
     if (remote && pin !== LOCAL_NODE) {
-      const free = freeWorkers(agent, task.id).filter((n) => fits(n) && (!isBrowserTask(task) || n.features?.includes('browser-task')) && (!pin || n.id === pin))
-        .sort((a, b) => (b.id === task.node_id) - (a.id === task.node_id) || headroom(b, agent) - headroom(a, agent));
-      if (free.length) return free[0].id;
+      for (const n of nodesNow()) {
+        if (n.local || (pin && n.id !== pin)) continue;
+        weigh(n.id, workerSkip(n, agent, task.id) || (browser && !browserWorker(n) ? 'no browser for browser tasks'
+          : !canClone(n, task, project) ? 'cannot clone this project'
+            : task.integrates && !integrateWorker(n) ? 'its worker is too old for integration'
+              : isBrowserTask(task) && !n.features?.includes('browser-task') ? 'its worker is too old for browser tasks' : null), nodeCap(n, agent), n.inventory?.cores);
+      }
     }
-    if (pin && pin !== LOCAL_NODE) return no(`pinned to ${nodeName(pin)}, which has no free slot`);
-    const workers = remote && !pin ? `${workersWhy(agent, task.id)}; ` : '';
-    if (!localOk || !localFree) return no(workers + headNo());
-    if (localDraining()) return no(`${workers}this server is drained`);
-    if (!localAgentOk(agent)) return no(`${workers}${agentName(agent)} is not signed in on this server`);
-    if (localFree !== 'reserved' && slotsFor(agent) - runningOn(agent) <= 0) return no(`${workers}${agentName(agent)} has no free slot on this server`);
-    if (browser && !parallelSettings().controllerBrowser && pin !== LOCAL_NODE) return no(`${workers}browser tasks are off on this server`);
-    if (remote && !pin && !parallelSettings().controllerWork && workerNodes(agent).some(fits)) return no(`${workers}this server leaves work to the workers`);
-    return LOCAL_NODE;
+    if (!pin || pin === LOCAL_NODE) {
+      const settings = parallelSettings(), cpu = cpuOf(nodesNow().find((n) => n.local)), slots = slotCount(decisionCache?.d);
+      weigh(LOCAL_NODE, !localOk ? hold || 'not claiming now' : localDraining() ? 'draining' : !localAgentOk(agent) ? `agent ${agent} signed out`
+        : browser && !settings.controllerBrowser && pin !== LOCAL_NODE ? 'browser tasks run on workers (Settings)'
+          : remote && !pin && !settings.controllerWork && workerNodes(agent).some(fits) ? 'leaves work tasks to the workers (Settings)'
+            : cpu?.saturated ? `CPU saturated (${cpu.text})`
+              : !localFree ? `full (${nodeLoad(LOCAL_NODE)}/${slots} running)`
+                : localFree !== 'reserved' && slotsFor(agent) - runningOn(agent) <= 0 ? `${agentName(agent)} already runs ${runningOn(agent)} task(s) here` : null, slots, nodesNow().find((n) => n.local)?.inventory?.cores ?? hw.cores);
+    }
+    const pick = cands.find((c) => c.id === task.node_id) || pickNode(cands, picks);
+    for (const c of cands) noteDecision(c.id, true, `${c.running}/${c.slots} running${c === pick ? `, took #${task.id}` : ''}`, task.id);
+    if (!pick) return no(pin === LOCAL_NODE ? decisions.get(LOCAL_NODE)?.text.replace(/^skipped: /, '') || 'this server cannot run it'
+      : pin ? `pinned to ${nodeName(pin)}: ${skips.join('; ') || 'not available'}` : skips.join('; ') || 'no machine can run it');
+    picks.set(pick.id, ++pickSeq);
+    return pick.id;
   }
-  // Why no worker takes a task now (stall diagnostics): 'no worker online', or each worker's state ('Mac: full 7/7').
+  // Why no worker takes a task now (stall diagnostics): 'no worker online', or each worker's state ('Mac: full (7/7 running)').
   function workersWhy(agent, taskId) {
     const all = nodesNow().filter((n) => !n.local && n.enabled !== false && n.connected && n.status !== 'offline');
     if (!all.length) return 'no worker online';
-    return `no free worker (${all.map((n) => {
-      const runs = nodeRuns(n.id).length, cap = nodeCap(n, agent);
-      const state = n.status !== 'online' ? n.status : n.draining ? 'draining'
-        : !(n.inventory?.agents || []).some((a) => a.id === agent && a.installed && a.signedIn) ? `${agentName(agent)} not signed in`
-          : runs >= cap ? `full ${runs}/${cap}` : !memOk(n, agent) ? 'low memory' : rejected.get(`${n.id}/${taskId}`) > Date.now() ? 'declined it' : 'cannot clone it';
-      return `${n.name || n.id}: ${state}`;
-    }).join('; ')})`;
+    return `no free worker (${all.map((n) => `${n.name || n.id}: ${workerSkip(n, agent, taskId) || 'cannot clone it'}`).join('; ')})`;
   }
   // A worker that can run a browser task: it has a browser, and its approval gate can ask the head (feature 'approvals').
   const browserWorker = (n) => n.inventory?.browser?.capable === true && (n.features || []).includes('approvals');
@@ -1699,7 +1707,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     .some((r) => r.kind === 'work' && identityOf(r) === identityOf(task));
 
   // Claims the next task and its node: { task, node, prevNode }. slots: the controller's work slots now (slotCount);
-  // localOk: it may claim on this server at all (memory, no pending restart: `hold` says why not); cap: ordinary work
+  // localOk: it may claim on this server at all (no pending restart: `hold` says why not); cap: ordinary work
   // allowed across all nodes (owner cap, pacing). why (a Map): each ready task left unclaimed → why (stall diagnostics).
   // One task that throws is logged and skipped; the rest are still considered, and the next tick retries it.
   function claimNext(allowed, { slots = slotCount(decisionCache?.d), localOk = slots > 0, cap = Infinity, hold = null, why = null } = {}) {
@@ -2730,13 +2738,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       const cap = Math.min(settings.maxTasks || Infinity, d.scarce || d.concurrency < CFG.concurrency ? Math.max(1, d.concurrency) : Infinity);
       let claimed = 0, why = new Map();
       for (;;) {
-        const mem = readMemInfo(CFG.meminfo), slots = slotCount(d, mem);
-        if (!slots) {
-          if (kvGet('announced_mem') !== '1') { kvSet('announced_mem', 1); logEvent(`waiting: server memory low (${Math.round(mem.avail / 1024 ** 2)} MB available)`, { level: 'warn' }); }
-          if (!workerNodes('claude').length && !workerNodes('codex').length) { why = null; setStall('server memory low'); break; } // workers can still take work
-        } else kvSet('announced_mem', 0);
         why = new Map();
-        const localOk = slots > 0 && !hold, free = localOk && headWorkUsed() < slots, claim = claimNext(d.allowed, { slots, localOk, cap, hold, why });
+        const slots = slotCount(d), localOk = !hold, free = localOk && headWorkUsed() < slots, claim = claimNext(d.allowed, { slots, localOk, cap, hold, why });
         if (!claim) { if (free && scheduleReflections()) continue; break; }
         claimed++;
         startTask(claim.task, claim.node, claim.prevNode);
@@ -2946,8 +2949,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
 
   // Memory guard: MemAvailable under MEM.pauseBelow for CFG.memLowPauseSec pauses the newest running work task (a
-  // graceful abort: it requeues and resumes its session later); another pause needs another full low stretch.
-  // Claiming stays off until memory is back above MEM.claimFloor.
+  // graceful abort: it requeues and resumes its session later); another pause needs another full low stretch. An
+  // emergency brake only: memory never gates a claim (BRIEF goal 9).
   let memLowSince = 0;
   function memGuard() {
     if (readMemInfo(CFG.meminfo).avail >= MEM.pauseBelow) { memLowSince = 0; return; }
@@ -3230,6 +3233,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       job.reject = (reason) => {
         if (job.started) return;
         rejected.set(`${nodeId}/${id}`, Date.now() + 60_000);
+        noteDecision(nodeId, false, `declined #${id} (${reason})`, id);
         finish({ outcome: 'aborted', text: `${name} declined the job (${reason})` });
       };
       // Batches may be re-sent after a reconnect: `from` + index dedupes them.
@@ -3319,7 +3323,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       }, 1000);
       if (attach) return;
       const assigned = running.get(id)?.assigned ? { assigned: true } : {};
-      if (!cluster.send(nodeId, { t: MSG.JOB_OFFER, job: id, agent: spec.agent, model: spec.model, footprint: Math.round(footprint(spec.agent)), ...assigned })) {
+      if (!cluster.send(nodeId, { t: MSG.JOB_OFFER, job: id, agent: spec.agent, model: spec.model, ...assigned })) {
         return finish({ outcome: 'aborted', text: `${name} is not connected` });
       }
       offerTimer = setTimeout(() => job.reject('no answer'), CFG.offerMs);
@@ -4238,7 +4242,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         activity: r.activity || null, started_at: r.startedAt, elapsed: Math.max(0, now() - r.startedAt), node: r.node, node_name: r.node === LOCAL_NODE ? null : nodeName(r.node), waiting_for: r.waiting || null };
     });
     return { activeUsage, blocks, blockedUntil: blockedUntil(), blockedReason: kvGet('blocked_reason'),
-      pacing: d?.reason || kvGet('budget_reason'), slots: slotCount(d, mem), parallel, lanes, hot_files: hotFilesAll(), capacity: capacityView(d, mem), rapid: rapidStatus(),
+      pacing: d?.reason || kvGet('budget_reason'), slots: slotCount(d), parallel, lanes, hot_files: hotFilesAll(), capacity: capacityView(d), rapid: rapidStatus(),
       running: running.size, workRunning: workRunning(), remoteRunning: workEverywhere() - workRunning(), draining: draining || !!restartHold, restartHold: holdReason(), stall, subscription: onSubscription(), head: headView(d) };
   }
   // The head's slots as the Machines view splits them ('Integrating 2 · Work 1/4'): its hardware and target, the reserved
@@ -4261,15 +4265,24 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
           phase: running.get(t.id)?.phase || null }; // a remote job's current phase (job.phase)
       });
       const head = n.local ? headView() : null;
-      return { ...n, tasks, used: tasks.filter((t) => t.kind !== 'plan').length, slots: head ? head.work + head.reserved : nodeCap(n), slotsWhy: slotsWhy(n), ...(head && { head }) };
+      return { ...n, tasks, used: tasks.filter((t) => t.kind !== 'plan').length, slots: head ? head.work + head.reserved : nodeCap(n), lastDecision: decisions.get(n.id) || nodeNow(n), ...(head && { head }) };
     });
   }
-  // Why a connected worker on Auto gets no slot at all (its Machines card says so): its free memory, or its local cap.
-  function slotsWhy(n) {
-    if (n.local || n.maxSlots != null || !n.connected || nodeRuns(n.id).length || nodeCap(n) > 0) return null;
-    const gb = (b) => `${+(Math.max(0, b) / GB).toFixed(1)} GB`;
-    if (spareMem(n) - floorOf(n) < footprint('claude')) return `Auto fits no task: ${gb(spareMem(n))} free, and a task needs ${gb(footprint('claude'))} on top of the ${gb(floorOf(n))} kept free`;
-    return 'Auto fits no task: its local cap (node worker.mjs limit, set on it) allows none';
+  // A node's verdict now, before placement: prefer an agent it can actually run when explaining resource skips.
+  function nodeNow(n) {
+    const out = (ok, text) => ({ at: null, ok, text: `${ok ? 'eligible' : 'skipped'}: ${text}`, task: null });
+    const agents = (n.inventory?.agents || []).filter((a) => isAgent(a.id));
+    const agent = agents.find((a) => a.installed && a.signedIn) || agents.find((a) => a.installed) || agents[0];
+    if (n.local) {
+      const cpu = cpuOf(n), used = nodeLoad(n.id), slots = slotCount(decisionCache?.d);
+      if (localDraining()) return out(false, 'draining');
+      if (agent && !agent.installed) return out(false, `agent ${agent.id} not installed`);
+      if (agent && !agent.signedIn) return out(false, `agent ${agent.id} signed out`);
+      return cpu?.saturated ? out(false, `CPU saturated (${cpu.text})`)
+        : used >= slots ? out(false, `full (${used}/${slots} running)`) : out(true, `${used}/${slots} running`);
+    }
+    const why = workerSkip(n, agent?.id || 'claude');
+    return why ? out(false, why) : out(true, `${nodeLoad(n.id)}/${nodeCap(n, agent?.id)} running`);
   }
   let browserHeld = () => false;
   const attachBrowserViews = (views) => { browserHeld = (node, identity) => views.isTakenOver(node, identity); };

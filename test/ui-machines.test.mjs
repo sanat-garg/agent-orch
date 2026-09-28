@@ -203,7 +203,7 @@ test('Machines view: one card per node with its state, capacity, running tasks a
 
   const card = page.locator('.mc-node', { hasText: 'build-vps' });
   const text = await card.textContent();
-  for (const want of ['Online', 'Linux · arm64', '4 cores', 'load 1.50', '8.0 GB used', '16.0 GB free of 24.0 GB', 'Claude Code', 'Build the machines view', '#' + t1, '13m', 'Running · 1 of 1 slot']) {
+  for (const want of ['Online', 'Linux · arm64', '4 cores', 'load 1.50', '8.0 GB used', '16.0 GB free of 24.0 GB', 'Claude Code', 'Build the machines view', '#' + t1, '13m', 'Running · 1 of 4 slots']) {
     assert.ok(text.includes(want), `build-vps card shows "${want}": ${text}`);
   }
   assert.match(await page.locator('.mc-node', { hasText: 'studio-mac' }).textContent(), /macOS · arm64[\s\S]*Nothing running|macOS · arm64[\s\S]*Idle/);

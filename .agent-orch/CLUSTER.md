@@ -64,12 +64,12 @@ Direction: C = controller → worker, W = worker → controller (`DIRECTION`; `v
 | `hello` | W | node, protocol, version, jobs[{job, state, sha, next}], sha, features | first frame; `jobs` = work still on this machine, finished ones whose `job.done` wasn't acked included (re-attach); `sha` = its agent-orch checkout; `features` see Health |
 | `welcome` | C | node, protocol, heartbeatMs, wipPushMs, graceMs, features, policy, queued | settings for this node; `policy` see Power policy; `queued` see Local cap and status view |
 | `inventory` | W | node, name, os (linux/darwin), arch, cores, mem, agents[{id, installed, version, signedIn, account, models}], limits, versions{agentOrch, node, git, sha, build}, cap, browser{capable, headed, error}, ext{hash, error, kept} | after `welcome` and whenever it changes; `cap` see Local cap and status view; `ext` = the extension bundle applied there (see Extensions) |
-| `resources` | W | memAvailable, load[1,5,15], running[job ids], swapUsedPct + health telemetry: cpu[% per core], memTotal, swapTotal, swapUsed, disk{path, free, total}, net{host, ok, ms, at, error}, agents[{id, installed, version, signedIn}], uptime, procUptime, version, sha, battery{pct, charging, source}, thermal{pressure, speedLimit, level}, intake{ok, reason, text}, awake, cap, jobsMem, jobsCpu | every heartbeat (10 s), from /proc or `vm_stat`/`sysctl`/`pmset`/`notifyutil` on macOS; see Health, Power policy and Local cap |
+| `resources` | W | memAvailable, load[1,5,15], psi (CPU some avg60), running[job ids], swapUsedPct + health telemetry: cpu[% per core], memTotal, swapTotal, swapUsed, disk{path, free, total}, net{host, ok, ms, at, error}, agents[{id, installed, version, signedIn}], uptime, procUptime, version, sha, battery{pct, charging, source}, thermal{pressure, speedLimit, level}, intake{ok, reason, text}, awake, cap, jobsMem, jobsCpu | every heartbeat (10 s), from /proc or `vm_stat`/`sysctl`/`pmset`/`notifyutil` on macOS; see Health, Power policy and Local cap |
 | `heartbeat` | both | queued (C) | liveness; the controller's carries `queued` |
 | `ack` / `error` / `bye` | both | re (+job) / message / reason | replies; the controller acks each `job.done` with its `job` (the worker then forgets the job); `bye` before a clean shutdown |
 | `wake` | W | sleptAt, sleptMs | a time jump on the worker (a laptop's sleep), sent after the next `welcome` |
-| `job.offer` | C | job, agent, model, footprint, assigned? | "can you take this?"; `assigned` = the owner started it here by hand, so it goes over the head's task cap (never the local cap) |
-| `job.accept` / `job.reject` | W | job / job, reason (busy, low_memory, agent_missing, not_signed_in, draining, version, other, power, cap) | answer within 10 s or counts as reject; `power` only to a controller with feature `policy`, `cap` only with feature `cap` |
+| `job.offer` | C | job, agent, model, assigned? | "can you take this?"; `assigned` overrides the head task cap, never the local cap |
+| `job.accept` / `job.reject` | W | job / job, reason (busy, low_memory, agent_missing, not_signed_in, draining, version, other, power, cap) | answer within 10 s or counts as reject; `power`/`low_memory` are legacy reasons; `cap` only with feature `cap` |
 | `job.start` | C | job, title, prompt, systemAppend, agent, model, effort, account, repo, baseSha, branch, doneWhen, resume, timeouts{taskSec, verifySec, installSec}, autonomous, tools, install[argv], capabilities["browser"], identity, execution?, ext | run it (a browser task gets the Playwright MCP on that profile, browser.mjs); `ext` = the controller's extension bundle hash, fetched first unless the worker has it |
 | `job.event` | W | job, from, events[≤200 normalised agent events] | batched every ~1 s; `from` = index of the first event so resends dedupe |
 | `job.check` | W | job, command, output, pass, code | result of the done-when check, run on the worker in the task's worktree |
@@ -182,23 +182,20 @@ controller appends a project's persona to `job.start.systemAppend`.
 - The controller keeps a node table (cluster.mjs `nodes`: id, name, os, arch, token_hash, created_at, last_seen, status
   online/offline/draining/disabled, inventory JSON, resources JSON, max_slots, enabled, draining). The local node is
   the row `controller`, fed from /proc directly. Revoking a node deletes its row.
-- `claimNext` becomes claim + place. A task is placeable on a node when: the node is connected (or local), not
-  draining, its task's resolved agent is `installed && signedIn` there (for the account the route wants), the node has
-  a free slot, and `memAvailable - footprint(agent)` stays above the node's floor (the local node keeps today's
-  `MEM` thresholds; workers report the same numbers). `footprint(agent)` is the per-agent measured RSS from #209
-  (until then a constant per agent, e.g. 1.2 GB for claude, 0.8 GB for codex).
-- Slots per node when its max tasks is Auto (`max_slots` 0, API `maxSlots: null`) = `min(cores, floor((memAvailable -
-  floor) / footprint))`, with headroom above the floor checked per claim. A Mac's Auto keeps a core and its policy's RAM
-  reserve for its owner: `min(cores − 1, (memAvailable − max(floor, reserve)) / footprint)` (power.mjs `autoTasks`,
-  orchestrator `nodeCap`/`floorOf`), and a worker's own local cap is a hard ceiling on top (see Local cap and status
-  view). An owner-set `maxSlots` (Machines, 1-16; BRIEF goal 9) is the limit: `min(maxSlots, the worker's own
-  --max-tasks)`, with no footprint or spare-memory arithmetic and no headroom check; the node is admitted unless its
-  last reported `memAvailable` is under `MEM.pauseBelow` (the emergency floor). New Linux nodes start at 1 task, new
-  Macs on Auto. A node whose worker reports no intake (status `paused`, see Power policy) gets nothing new. The local
-  node keeps its current `taskSlots` rule.
-- Placement picks the placeable node with the most headroom, preferring: the node that last ran the task (warm
-  worktree and session), then remote nodes over the local one (the controller also serves the UI and merges). Plan and
-  reflect tasks always run on the local node: they need the DB and project context (asserted, see Compute-only workers).
+- `claimNext` claims and places a task on a connected, enabled node with the resolved agent installed and signed in,
+  a free slot, and no drain. CPU saturation is the only resource gate: Linux PSI `cpu some avg60 > 90%`, otherwise
+  the 1-minute load average `> 2.5 × cores`. RAM, battery, AC power, thermal state and legacy intake never gate placement.
+- Auto slots (`max_slots` 0, API `maxSlots: null`) follow cores, with a floor of 4 for LLM-waiting agents on small VPSs.
+  Owner-set task and CPU caps remain ceilings. New nodes start on Auto. RAM only triggers the existing emergency
+  pause of the newest running task; it never reduces slots or blocks offers.
+- Placement compares `(running tasks + 1) / effective cores` across eligible nodes, including the controller, with
+  round-robin ties. Effective cores have the same floor of 4, independently of owner caps. A resumable session prefers
+  its previous node; `run_on` pins a machine. Plan/reflect tasks and live local worktrees stay local. Integrators prefer
+  a reserved head slot, then a worker with `git` + `integrate`; workers with `git` clone through the head even without
+  a GitHub origin. The head keeps two reserved slots on top of its core-based work slots. The owner's
+  `controllerWork: false` setting still reserves the controller.
+- Every weighed node records `lastDecision: {at, ok, text, task}` in the orchestrator, exposed by GET
+  `/api/cluster/nodes` and shown on its Machines card. Before any placement, the API supplies its current eligibility.
 - The offer is a two-phase claim: the task stays `queued` with `offered_to` set until `job.accept`; a reject or 10 s
   timeout clears it and tries the next node. `files`/`filesOverlap` and `task_deps` rules apply across nodes
   unchanged, because they are checked on the controller before placement.
@@ -318,24 +315,13 @@ changes either, `node.policy`; the worker enforces it, and the scheduler keeps t
 
 | setting | default | meaning |
 | --- | --- | --- |
-| `minBattery` | 50 | on battery power, new jobs only above this charge (%); null = only on AC power |
 | `keepAwake` | `ac` | while jobs run, `caffeinate -i -w <worker pid>`: `ac` (only on AC power), `always`, `never` |
-| `thermal` | `heavy` | no new jobs at this thermal pressure or worse: `moderate`, `heavy`, `off` |
-| `reserveGB` | 3 (Mac), 0 (Linux) | RAM a new job must leave free for the owner (never below `MEM.claimFloor`) |
 
-- **Readings** (worker, power.mjs `readPower`, no root, no powermetrics): `pmset -g batt` (charge, AC or battery),
-  `pmset -g therm` (CPU speed limit, thermal warnings) and the thermal pressure level (`notifyutil -g
-  com.apple.system.thermalpressurelevel`: nominal, moderate, heavy, trapping, sleeping; without it pmset alone: a speed
-  limit is moderate, 70% or less heavy). Read once a minute, and again (≤ 15 s old) before an offer is answered.
-- **Intake** (`intake(policy, power)`): on battery at or under `minBattery`, or at the `thermal` level or worse, the
-  worker takes no new jobs. It says so in every `resources` frame (`intake {ok: false, reason, text}`); the controller
-  shows the node as `paused` (view status; only from a reading on the current connection) and places nothing there,
-  and an offer that races it is declined with reason `power`. Running jobs go on. No reading (a VPS, a Mac mini's
-  battery) never blocks.
-- **Caps**: at most `maxTasks` jobs (Auto: cores − 1 on a Mac, all cores elsewhere) and none that would leave less than
-  `max(MEM.claimFloor, reserveGB)` free (`low_memory`). The controller's placement uses the same numbers for a
-  node on Auto; an owner-set `maxSlots` replaces them there (see Scheduling), though this worker-side offer check
-  still declines `low_memory` by them.
+- **Readings** (power.mjs `readPower`, no root): `pmset -g batt`, `pmset -g therm` and
+  `notifyutil -g com.apple.system.thermalpressurelevel` feed telemetry and keep-awake only.
+- **Intake**: worker offers check agent sign-in, CPU/task ceilings and sustained CPU saturation (see Scheduling).
+  `minBattery`, `thermal` and `reserveGB` settings are removed. The head sends neutral legacy fields
+  (`minBattery: 0`, `thermal: 'off'`, `reserveGB: 0`) for older workers; updated workers ignore them.
 - **Keep awake** (`createKeepAwake`): `caffeinate -i -w <worker pid>` runs while the worker has a job that isn't paused
   and `keepAwake` allows it for the power source; it is stopped (process group SIGTERM) when the last job ends, on
   battery under `ac`, or at shutdown, and exits by itself if the worker dies (`-w`). `-i` only prevents idle sleep: a
@@ -388,17 +374,15 @@ A worker's owner decides how much of the machine the cluster may use; everything
   (`jobsMem` bytes, `jobsCpu` cores: their process trees, from /proc or `ps`).
 - **The head's ceiling** (orchestrator `nodeCap`, cap.mjs `capSlots`, `localCap` = `resources.cap` over
   `inventory.cap`): slots = min(the head's own setting (max tasks or Auto), the cap's max tasks, its CPU cap at
-  `CFG.cpuPerTask` cores a task (1 until measured), and its running jobs + (RAM cap − `jobsMem` − footprints placed
-  since that reading) / the agent's footprint). `--only-on-ac` makes a Mac on battery report no intake (`paused`).
+  `CFG.cpuPerTask` cores a task (1 until measured)). RAM never sizes slots; legacy `--only-on-ac` is ignored.
   The Machines card says "Pooled: 4 cores · 8 GB (set on this Mac)".
-- **The worker enforces it too** (worker.mjs, worker-cap.mjs): it declines a `job.offer` that would go over it (reason
-  `cap`; `busy`/`low_memory` to an older head); every agent CLI and done-when check runs through a wrapper in
+- **The worker enforces it too** (worker.mjs, worker-cap.mjs): it declines a `job.offer` that exceeds a CPU/task ceiling (reason
+  `cap`; `busy` to an older head); every agent CLI and done-when check runs through a wrapper in
   `<home>/run` that records its pid and execs it under the cap: on Linux a transient scope per job (`systemd-run --user
   --scope -p CPUQuota=… -p MemoryMax=…`, the user manager kept by lingering; checked per spawn, else nice), on macOS a
   low priority (`nice -n 10`; no per-process quota without root, and `taskpolicy -b` would confine jobs to the
   efficiency cores); and a memory watch pauses the newest job when its jobs stay over the RAM cap for 30 s: WIP pushed,
-  `job.done {outcome: 'aborted'}` with its session, so the head requeues it to resume later, and it isn't taken back
-  there for 10 min. `AGENT_ORCH_WORKER_LIMITER=off|nice|systemd` overrides the choice.
+  `job.done {outcome: 'aborted'}` with its session, so the head requeues it to resume later. This pause never blocks future offers. `AGENT_ORCH_WORKER_LIMITER=off|nice|systemd` overrides the choice.
 - **Status view** (worker-status.mjs): `node worker.mjs status` draws, every second until q or Ctrl-C (plain ANSI,
   alternate screen), what the daemon answers on `~/.agent-orch-worker/worker.sock` (0600 in a 0700 dir; `{op:
   'status'}`): machine name, connection (Connected; Reconnecting while away less than its grace; Offline after that or

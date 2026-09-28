@@ -6,6 +6,7 @@
 
 import fs from 'node:fs';
 import os from 'node:os';
+import { slotTarget } from './placement.mjs';
 
 // A task's declared files: trimmed, deduplicated relative paths/globs ('./' dropped), or null (= everything).
 export function parseFiles(v) {
@@ -123,24 +124,20 @@ export function readMemInfo(file = '/proc/meminfo') {
   } catch { return { avail: os.freemem(), swapPct: 0 }; }
 }
 
+// The memory emergency brake only (BRIEF goal 9): RAM never gates a claim or sizes slots.
 export const MEM = {
-  claimFloor: 800 * 1024 ** 2,   // below this nothing new is claimed (plan tasks included)
-  pauseBelow: 300 * 1024 ** 2,   // sustained below this, the newest running task is paused
+  pauseBelow: 300 * 1024 ** 2,   // sustained below this, the newest running task is paused (orchestrator memGuard)
   reapBelow: 1.5 * 1024 ** 3,    // below this the reaper (resources.mjs) runs right before claiming
 };
 
-// Work-task slots (BRIEF goal 9, rapid development mode): the owner's 'This server runs up to N' setting (1-16) is the
-// limit; memory is only an emergency floor, never a pre-emptive throttle. Re-checked before every claim; pacing can
-// still lower it; 0 = under MEM.claimFloor, too low to claim anything.
-export function taskSlots({ setting = 1, mem, pacingLimit = Infinity }) {
-  if (mem.avail < MEM.claimFloor) return 0;
+// The controller's work-task slots (BRIEF goal 9): the setting (placement.mjs slotTarget by default), which pacing can
+// still drop to one. Free memory plays no part.
+export function taskSlots({ setting = 1, pacingLimit = Infinity }) {
   return Math.max(1, Math.min(setting, pacingLimit));
 }
 
-// The head's slots from its real hardware (BRIEF goal 9, #384): agents mostly wait on the LLM, so three a core and at
-// least 4 in all. Of them, up to `reserve` are kept for controller-only work (integrators, reflection) so it never waits
-// behind ordinary work; the rest (at most 16, like the owner's setting) take work. 2 cores → {target 6, reserved 2, work 4}.
+// Work slots follow cores (at least 4); controller-only work keeps its reserved slots on top.
 export function headTarget(cores, reserve = 2) {
-  const target = Math.max(4, Math.max(1, Math.floor(Number(cores)) || 1) * 3), reserved = Math.max(0, Math.min(reserve, target - 1));
-  return { target, reserved, work: Math.min(16, target - reserved) };
+  const work = slotTarget(cores), reserved = Math.max(0, Math.floor(reserve));
+  return { target: work + reserved, reserved, work };
 }

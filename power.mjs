@@ -1,39 +1,31 @@
 // A worker machine's power policy (BRIEF goal 11; .agent-orch/CLUSTER.md "Power policy"), set per node on the head and
-// enforced by the worker. The controller (cluster.mjs) stores each node's settings and sends the effective policy in
-// `welcome` and `node.policy`; the worker (worker.mjs) decides its intake from its own readings and keeps a Mac awake
-// while it runs jobs. Only node built-ins, helpers.mjs and the pmset parsers in resources.mjs.
-//   minBattery  new jobs on battery power only above this charge (%); null = only on AC power
+// applied by the worker. The controller (cluster.mjs) stores each node's settings and sends the effective policy in
+// `welcome` and `node.policy`; the worker (worker.mjs) keeps a Mac awake while it runs jobs. Battery, AC power, heat and
+// RAM never decide whether a machine takes work (BRIEF goal 9, PLACEMENT RULE; placement.mjs): the readings here are
+// telemetry for the Machines view and keep-awake only. Only node built-ins, helpers.mjs and the pmset parsers in resources.mjs.
 //   keepAwake   while jobs run, `caffeinate -i -w <worker pid>`: 'ac' (only on AC power), 'always' or 'never'
-//   thermal     no new jobs at this thermal pressure or worse: 'moderate', 'heavy' or 'off'
-//   reserveGB   RAM a new job must leave free for the machine's owner (a Mac: 3 GB; elsewhere 0 = only the claim floor)
-// Its task cap is the node's max tasks (nodes.max_slots, sent as maxTasks): Auto = cores − 1 on a Mac, all cores elsewhere.
+// Its task cap is the node's max tasks (nodes.max_slots, sent as maxTasks): Auto = placement.mjs slotTarget.
 import fs from 'node:fs';
 import { helperOut, killGroup, spawnHelper } from './helpers.mjs';
 import { parseBattery, parseThermal } from './resources.mjs';
 
 export const KEEP_AWAKE = ['ac', 'always', 'never'];
-export const THERMAL = ['moderate', 'heavy', 'off'];
 // macOS thermal pressure levels (kOSThermalPressureLevel*, <libkern/OSThermalNotification.h>), mildest first.
 export const PRESSURE = ['nominal', 'moderate', 'heavy', 'trapping', 'sleeping'];
 export const PRESSURE_KEY = 'com.apple.system.thermalpressurelevel';
-const GB = 1024 ** 3;
 
-export const policyDefaults = (os) => ({ minBattery: 50, keepAwake: 'ac', thermal: 'heavy', reserveGB: os === 'darwin' ? 3 : 0 });
-// The owner's settings over the defaults for the node's OS (stored = only what the owner changed; null = none).
-export const effectivePolicy = (os, stored) => ({ ...policyDefaults(os), ...(stored || {}) });
-// Auto task cap: a Mac keeps one core for its owner.
-export const autoTasks = (os, cores) => Math.max(1, os === 'darwin' ? (cores || 1) - 1 : cores || 1);
-export const reserveBytes = (policy) => Math.round((policy?.reserveGB || 0) * GB);
+export const policyDefaults = () => ({ keepAwake: 'ac' });
+// The owner's settings over the defaults (stored = only what the owner changed; null = none). Settings from before #344
+// (minBattery, thermal, reserveGB) are dropped: nothing gates on them any more.
+export const effectivePolicy = (os, stored) => ({ ...policyDefaults(os), ...(KEEP_AWAKE.includes(stored?.keepAwake) ? { keepAwake: stored.keepAwake } : {}) });
 
 // An owner's edit (PATCH /api/cluster/nodes/:id {policy}): only the keys given. {value} or {error}.
 export function checkPolicy(patch) {
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return { error: 'policy must be an object, or null for the defaults' };
   for (const [k, v] of Object.entries(patch)) {
-    const bad = k === 'minBattery' ? v !== null && !(Number.isInteger(v) && v >= 0 && v <= 100) && 'minBattery must be null (AC power only) or 0-100'
-      : k === 'keepAwake' ? !KEEP_AWAKE.includes(v) && `keepAwake must be one of ${KEEP_AWAKE.join(', ')}`
-        : k === 'thermal' ? !THERMAL.includes(v) && `thermal must be one of ${THERMAL.join(', ')}`
-          : k === 'reserveGB' ? !(typeof v === 'number' && v >= 0 && v <= 256) && 'reserveGB must be a number 0-256'
-            : `unknown policy setting ${k}`;
+    const bad = k === 'keepAwake' ? !KEEP_AWAKE.includes(v) && `keepAwake must be one of ${KEEP_AWAKE.join(', ')}`
+      : ['minBattery', 'thermal', 'reserveGB'].includes(k) ? `${k} is no longer a setting: battery, heat and RAM never decide where tasks run`
+        : `unknown policy setting ${k}`;
     if (bad) return { error: bad };
   }
   return { value: { ...patch } };
@@ -75,20 +67,6 @@ export async function readPower({ fixture = process.env.AGENT_ORCH_WORKER_POWER 
 }
 
 const onBattery = (power) => power?.battery?.source === 'battery';
-// Whether the machine takes new jobs now: {ok: true} or {ok: false, reason: 'battery' | 'thermal', text}. Jobs already
-// running go on either way. No reading (a Mac mini has no battery, a VPS neither) never blocks.
-export function intake(policy, power) {
-  const p = { ...policyDefaults(), ...policy }, b = power?.battery;
-  if (onBattery(power) && Number.isFinite(b.pct)) {
-    if (p.minBattery == null) return { ok: false, reason: 'battery', text: `On battery (${b.pct}%): takes new tasks only on AC power` };
-    if (b.pct <= p.minBattery) return { ok: false, reason: 'battery', text: `On battery at ${b.pct}%: takes new tasks above ${p.minBattery}%` };
-  }
-  const level = thermalLevel(power?.thermal);
-  if (p.thermal !== 'off' && level && PRESSURE.indexOf(level) >= PRESSURE.indexOf(p.thermal)) {
-    return { ok: false, reason: 'thermal', text: `Running hot (${level} thermal pressure): takes new tasks once it cools down` };
-  }
-  return { ok: true };
-}
 // Keep the machine awake now? Only while jobs run, and per keepAwake ('ac': not on battery power).
 export const wantsAwake = (policy, power, busy) => !!busy && (policy?.keepAwake === 'always' || (policy?.keepAwake === 'ac' && !onBattery(power)));
 

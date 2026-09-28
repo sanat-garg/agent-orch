@@ -788,9 +788,8 @@ function emit(cid, ev) {
 // CW_NO_ORCHESTRATOR=1 (preflight against a copy of real data): the DB is opened and migrated, but nothing runs or pushes.
 const NO_ORCH = process.env.CW_NO_ORCHESTRATOR === '1';
 const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
-  // The controller's work slots come from its hardware (parallel.mjs headTarget; memory is only an emergency floor) unless
-  // the owner sets 1-16 in Settings, and any agent may fill them all (rate limits are the fallback list's job).
-  config: { agentSlots: Infinity },
+  // CPU-only work slots from its cores, plus reserved slots for controller-only work.
+  config: { agentSlots: 'auto' },
   query,
   claudeBin: CLAUDE_BIN,
   claudeEnv: CLAUDE_ENV,
@@ -896,7 +895,7 @@ const cluster = orch && createCluster({
     return {
       inventory: { cores: os.cpus().length, mem: os.totalmem(),
         agents: Object.values(AGENTS).map((a) => { const installed = !!a.available(); return { id: a.id, installed, signedIn: installed && !!a.loggedIn() }; }) },
-      resources: { memAvailable: sys.memAvailable ?? os.freemem(), load: sys.load, swapUsedPct: Math.round(swapUsed * 1000) / 10, at: Date.now(),
+      resources: { memAvailable: sys.memAvailable ?? os.freemem(), load: sys.load, ...(sys.psi != null ? { psi: sys.psi } : {}), swapUsedPct: Math.round(swapUsed * 1000) / 10, at: Date.now(),
         ...(cpu?.length ? { cpu } : {}), ...(disk ? { disk } : {}) },
     };
   },

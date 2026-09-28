@@ -5,8 +5,8 @@
 // pushed to the head's git endpoint (cluster-git.mjs; GitHub only when the head's is unreachable). It
 // reports richly: each job's phases with progress hints, health telemetry every heartbeat, structured errors, its log
 // tail on request, and it updates itself (git pull + service restart) when the controller asks while it is idle. On a
-// Mac it follows its power policy from the controller (power.mjs): no new jobs on low battery or when hot, and awake
-// (caffeinate) only while jobs run.
+// Mac it follows its power policy from the controller (power.mjs): awake (caffeinate) only while jobs run. Battery, AC
+// power, heat and free RAM never make it decline a job (BRIEF goal 9, PLACEMENT RULE).
 // Compute-only (BRIEF goal 11): no chat, planner, reflection or management here, and nothing of the controller's is
 // loaded (server.mjs, orchestrator.mjs, cluster.mjs). It acts only on the head's allow-listed frames (cluster-protocol.mjs
 // WORKER_ACCEPTS), rejecting and logging anything else; it opens no TCP port; its slots, power policy and draining come
@@ -49,13 +49,13 @@ import { createModelStore } from './models.mjs';
 import { createLimitStore } from './usage.mjs';
 import { cpuPercent, createResources, readSystem, registerPid, withOwner } from './resources.mjs';
 import { helperOut, runHelper } from './helpers.mjs';
-import { autoTasks, createKeepAwake, effectivePolicy, intake as intakeOf, readPower, reserveBytes, wantsAwake } from './power.mjs';
-import { MEM } from './parallel.mjs';
+import { createKeepAwake, effectivePolicy, readPower, wantsAwake } from './power.mjs';
+import { cpuState, slotTarget } from './placement.mjs';
 import { GIT_ID, MERGE_ATTRIBUTES, commitAll, taskBranch } from './worktrees.mjs';
 import { isBrowserTask } from './browser-task.mjs';
 import { extractCommand, runCheck, toolLine } from './taskrun.mjs';
 import { JOB_ENV, workerHome } from './role.mjs';
-import { FOOTPRINT, applyLimit, capRejection, capTasks, capText, fmtCores, fmtGB, resolveCap } from './cap.mjs';
+import { applyLimit, capRejection, capTasks, capText, fmtCores, fmtGB, resolveCap } from './cap.mjs';
 import { createJobUsage, createWrappers, heldBy, probeLimiter } from './worker-cap.mjs';
 import { request as statusRequest, serveStatus, statusCli } from './worker-status.mjs';
 import { ensureBrowser, needsBrowser, normIdentity } from './browser.mjs';
@@ -92,10 +92,9 @@ const POWERED = process.platform === 'darwin' || !!POWER_FIXTURE;
 // The agent-orch checkout this worker runs from, which node.update pulls (tests point it at a scratch repo).
 const SRC_DIR = process.env.AGENT_ORCH_WORKER_SRC || ROOT;
 // The local cap (cap.mjs): running jobs' CPU/RAM are sampled this often; jobs over its RAM cap for CAP_PAUSE_MS pause the
-// newest, which isn't taken back here for CAP_DECLINE_MS (tests shorten the pause).
+// newest (tests shorten the pause). RAM never gates a new offer.
 const USAGE_MS = 2000;
 const CAP_PAUSE_MS = Number(process.env.AGENT_ORCH_WORKER_CAP_PAUSE_MS) || 30_000;
-const CAP_DECLINE_MS = 10 * 60_000;
 const RECENT = 5; // finished jobs the status view lists
 // Browser tasks (browser.mjs): at start the worker checks for a Chromium/Chrome and, without one, installs Playwright's.
 // AGENT_ORCH_WORKER_BROWSER=off|check|install; under node:test it only checks unless told to install.
@@ -298,7 +297,6 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   const wrappers = createWrappers({ dir: path.join(home, 'run'), cap: () => cap, mode: () => limiter || 'off' });
   const usage = createJobUsage();
   let use = { at: 0, cpu: 0, mem: 0, jobs: new Map() }, sampling = null, overSince = 0;
-  const capPaused = new Map(); // job id -> until (ms): the memory watch paused it; not taken back here meanwhile
   // For the status view: the last finished jobs, the head's count of tasks up next for this machine, the connection.
   const recent = [];
   let queued = null, downSince = Date.now(), retryAt = 0, connError = null, status = null;
@@ -587,7 +585,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
 
   // ---- health telemetry, sent with every resources frame: CPU % per core, memory, swap, disk free on the volume holding
   // the repos, GitHub's reachability, the agents as last checked (never polled: BRIEF goal 7), uptimes, version and sha,
-  // and on a Mac its battery and thermal state, whether its power policy lets it take new jobs, and whether it is held awake.
+  // and on a Mac its battery and thermal state (telemetry only), its CPU eligibility,
+  // and whether it is held awake. psi / load: the head's CPU saturation signal (placement.mjs).
   let prevCpus = null, netState = null, netAt = 0, netBusy = false, power = null, powerAt = 0, powerBusy = null;
   function probeNet() {
     if (NET_PROBE === 'off' || netBusy || Date.now() - netAt < PROBE_EVERY_MS) return;
@@ -612,23 +611,19 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     powerAt = Date.now();
     return powerBusy = readPower().then((p) => { power = p; syncAwake(); }, () => {}).finally(() => { powerBusy = null; });
   }
-  // ---- power policy (power.mjs): intake (no new jobs on low battery or when hot) and keep-awake while jobs run. The local
-  // cap's --only-on-ac comes first: on battery, no new jobs at any charge.
-  function intakeNow() {
-    if (!POWERED) return { ok: true };
-    const b = power?.battery;
-    if (cap?.onlyOnAc && b?.source === 'battery') return { ok: false, reason: 'battery', text: `On battery (${b.pct}%): this machine's local cap takes tasks only on AC power` };
-    return intakeOf(policy, power);
+  // CPU is the only resource gate. Power readings control caffeinate, never intake.
+  function intakeNow(sys = process.platform === 'darwin' ? { load: os.loadavg() } : readSystem()) {
+    const cpu = cpuState(sys, os.cpus().length);
+    return cpu?.saturated ? { ok: false, reason: 'cpu', text: `CPU saturated (${cpu.text})` } : { ok: true };
   }
   const activeJobs = () => [...jobs.values()].filter((j) => j.state !== 'paused').length;
-  // At most the head's max tasks (Auto: cores − 1 on a Mac, all cores elsewhere): slots are set on the head only.
-  const maxJobs = () => policy.maxTasks ?? autoTasks(process.platform, os.cpus().length);
+  // At most the head's max tasks (Auto: its cores, at least 4: placement.mjs slotTarget): slots are set on the head only.
+  const maxJobs = () => policy.maxTasks ?? slotTarget(os.cpus().length);
   function syncAwake() { awake?.set(!stopping && wantsAwake(policy, power, activeJobs())); }
   function setPolicy(p) {
-    policy = { ...effectivePolicy(process.platform), ...p };
-    const rules = !POWERED ? '' : `new jobs on AC power${policy.minBattery == null ? ' only' : ` or above ${policy.minBattery}% battery`}` +
-      `${policy.thermal === 'off' ? '' : `, none at ${policy.thermal} thermal pressure`}; awake while jobs run: ${{ ac: 'on AC power', always: 'always', never: 'never' }[policy.keepAwake]}; `;
-    const text = `${rules}at most ${maxJobs()} jobs at once, leaving ${+(Math.max(MEM.claimFloor, reserveBytes(policy)) / 1024 ** 3).toFixed(1)} GB free`;
+    policy = { ...effectivePolicy(process.platform, p), maxTasks: p?.maxTasks ?? null };
+    const rules = !POWERED ? '' : `awake while jobs run: ${{ ac: 'on AC power', always: 'always', never: 'never' }[policy.keepAwake]}; `;
+    const text = `${rules}at most ${maxJobs()} jobs at once`;
     if (text !== policyText) log(`policy: ${text}`);
     policyText = text;
     syncAwake();
@@ -646,13 +641,13 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       ...(lastInv ? { agents: lastInv.agents.map(({ id, installed, version, signedIn }) => ({ id, installed, version, signedIn })) } : {}),
       uptime: Math.round(sys.uptime || os.uptime()), procUptime: Math.round(process.uptime()), version: VERSION, ...(srcSha ? { sha: srcSha } : {}),
       ...(power?.battery ? { battery: power.battery } : {}), ...(power?.thermal ? { thermal: power.thermal } : {}),
-      ...(POWERED ? { intake: intakeNow(), awake: !!awake?.active() } : {}),
+      ...(POWERED ? { intake: intakeNow(sys), awake: !!awake?.active() } : {}),
     };
   }
   function sendResources() {
     const sys = readSystem();
     const swapUsedPct = sys.swapTotal ? Math.round((sys.swapTotal - (sys.swapFree || 0)) / sys.swapTotal * 1000) / 10 : 0;
-    raw(MSG.RESOURCES, { memAvailable: sys.memAvailable ?? os.freemem(), load: sys.load, running: [...jobs.keys()], swapUsedPct, ...telemetry(sys),
+    raw(MSG.RESOURCES, { memAvailable: sys.memAvailable ?? os.freemem(), load: sys.load, ...(sys.psi != null ? { psi: sys.psi } : {}), running: [...jobs.keys()], swapUsedPct, ...telemetry(sys),
       cap, jobsMem: Math.round(use.mem), jobsCpu: use.cpu });
   }
 
@@ -685,11 +680,10 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     return sampling = usage.sample(new Map([...jobs.keys()].map((id) => [id, wrappers.pids(id)])))
       .then((u) => { use = u; memWatch(); return u; }, () => use).finally(() => { sampling = null; });
   }
-  const usageNow = () => (Date.now() - use.at < USAGE_MS ? Promise.resolve(use) : sampleUsage());
   const sampler = setInterval(() => { if (jobs.size || use.mem) sampleUsage(); }, USAGE_MS);
   // The memory watch: the jobs together over the RAM cap for CAP_PAUSE_MS → the newest running one stops, pushes its WIP
   // and goes back to the head as aborted (it requeues and resumes its session, like the controller's memGuard); it isn't
-  // taken back here for CAP_DECLINE_MS. Another pause needs another full stretch over the cap.
+  // blocked from new placement. Another pause needs another full stretch over the cap.
   function memWatch() {
     if (cap?.mem == null || use.mem <= cap.mem) { overSince = 0; return; }
     overSince ||= Date.now();
@@ -697,22 +691,17 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     const job = [...jobs.values()].filter((j) => ['running', 'checking'].includes(j.state) && !j.stop).sort((a, b) => b.startedAt - a.startedAt)[0];
     if (!job) return;
     overSince = Date.now();
-    capPaused.set(job.id, Date.now() + CAP_DECLINE_MS);
     const text = `paused by ${config.name || 'this machine'}'s local cap: its jobs used ${fmtGB(use.mem)} of ${fmtGB(cap.mem)} RAM for ${Math.round(CAP_PAUSE_MS / 1000)} s; it continues later`;
     log(`job ${job.id} ${text}`, 'warn');
     job.stop = { kind: 'cap', text };
     job.ac?.abort();
   }
   // Why taking the offered job would go over the local cap (the reject reason), or null.
-  async function capCheck(msg) {
-    const paused = capPaused.get(msg.job) > Date.now();
-    if (!cap && !paused) return null;
-    const u = await usageNow();
-    const over = paused ? { kind: 'memory', text: `it was paused here for the local RAM cap less than ${CAP_DECLINE_MS / 60_000} min ago` }
-      : capRejection(cap, { jobs: activeJobs(), jobsMem: u.mem, footprint: msg.footprint || FOOTPRINT[msg.agent] || FOOTPRINT.claude });
+  function capCheck(msg) {
+    const over = capRejection(cap, { jobs: activeJobs() });
     if (!over) return null;
     log(`declined job ${msg.job}: ${over.text} (node worker.mjs limit)`);
-    return peer.has('cap') ? 'cap' : over.kind === 'memory' ? 'low_memory' : 'busy';
+    return peer.has('cap') ? 'cap' : 'busy';
   }
   // The finished jobs the status view lists (outcome, how long this run of it took).
   function remember(job, outcome) {
@@ -900,9 +889,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     }
   }
 
-  // Declined while stopping or updating, without the agent or its sign-in, at the task cap, over the local cap (its task
-  // count, CPU or RAM: capCheck), when the job would leave less free memory than the claim floor or the policy's reserve
-  // for the owner, or while the power policy pauses intake (checked on a reading at most 15 s old).
+  // Auth, owner CPU/task ceilings and sustained CPU saturation are the offer gates.
   async function offerRejection(msg) {
     if (stopping || updating) return 'draining';
     const st = agentStatus(msg.agent);
@@ -911,10 +898,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     if (activeJobs() >= maxJobs() && !msg.assigned) return 'busy'; // the owner's assignment overrides the head's cap, never the local one
     const over = await capCheck(msg);
     if (over) return over;
-    const avail = readSystem().memAvailable ?? os.freemem();
-    if (avail - (msg.footprint || 0) < Math.max(MEM.claimFloor, reserveBytes(policy))) return 'low_memory';
-    await probePower(15_000);
-    if (!intakeNow().ok) return peer.has('policy') ? 'power' : 'busy';
+    const intake = intakeNow();
+    if (!intake.ok) { log(`declined job ${msg.job}: ${intake.text}`); return 'busy'; }
     return null;
   }
 
@@ -1561,7 +1546,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
 // ---------------------------------------------------------------- CLI
 
 const LIMIT_USAGE = 'usage: node worker.mjs limit --cpu <cores|N%> --mem <GB|N%> [--max-tasks N] [--only-on-ac] | --show | --reset\n' +
-  '  sets only the parts given; "off" removes one (--cpu off); the worker applies it at once and the head keeps to it';
+  '  sets only the parts given; "off" removes one (--cpu off); CPU/task caps limit intake, RAM caps pause jobs in emergencies\n' +
+  '  legacy --only-on-ac is ignored; power never gates tasks';
 // `limit` options: --cpu/--mem/--max-tasks take a value; --only-on-ac takes none (or on/off); --show and --reset none.
 export function limitArgs(argv) {
   const opts = {}, keys = { cpu: 'cpu', mem: 'mem', 'max-tasks': 'maxTasks' };
@@ -1602,7 +1588,7 @@ async function limitCli(argv) {
       if (c.cpu != null) console.log(`  CPU        ${fmtCores(c.cpu)} of ${machine.cores}${typeof saved.cpu === 'string' ? ` (${saved.cpu})` : ''}`);
       if (c.mem != null) console.log(`  RAM        ${fmtGB(c.mem)} of ${fmtGB(machine.memTotal)}${typeof saved.mem === 'string' ? ` (${saved.mem})` : ''}`);
       if (c.maxTasks != null) console.log(`  Max tasks  ${c.maxTasks}`);
-      if (c.onlyOnAc) console.log('  Power      takes tasks only on AC power');
+      if (c.onlyOnAc) console.log('  Power      legacy --only-on-ac ignored: power never gates tasks');
     }
     console.log(LIMIT_USAGE);
     return 0;
@@ -1612,7 +1598,7 @@ async function limitCli(argv) {
   writeConfig(home, { ...readConfig(home), cap: r.cap ?? undefined }); // re-read: everything else stays as it is
   const c = resolveCap(r.cap, machine);
   console.log(c ? `Local cap saved: ${capText(c, machine)}.` : `Local cap removed: ${cfg.name || 'this machine'} lends all its CPU and RAM (the head's settings apply).`);
-  if (c && (capTasks(c) < 1 || (c.mem != null && c.mem < FOOTPRINT.codex))) console.log('Note: that fits no task (each counts 1 core and about 0.8-1.2 GB), so this machine takes none.');
+  if (c && capTasks(c) < 1) console.log('Note: that CPU cap fits no task (each counts 1 core), so this machine takes none.');
   const ans = await statusRequest(home, { op: 'reload' }).catch(() => null);
   console.log(ans?.ok ? `Applied now: the worker reloaded it${ans.connected ? ' and told the head' : '; the head hears it once the worker reconnects'}.`
     : 'The worker isn\'t running here; it applies the cap when it starts.');

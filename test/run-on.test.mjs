@@ -23,7 +23,7 @@ test('a pinned task runs only on its machine and waits for it; the pin is valida
     const [dataDir, repos] = process.argv.slice(1), GB = 2 ** 30;
     const worker = (id, free, maxSlots) => ({ id, name: id + '-name', os: 'linux', local: false, status: 'online', connected: true, enabled: true, draining: false,
       maxSlots, inventory: { cores: 8, agents: [{ id: 'claude', installed: true, signedIn: true }] }, resources: { memAvailable: free * GB, at: Date.now() } });
-    const nodes = [{ id: 'controller', name: 'oracle-vm', local: true, status: 'online', connected: true, enabled: true }, worker('roomy', 32, 4), worker('small', 8, 1)];
+    const nodes = [{ id: 'controller', name: 'oracle-vm', local: true, status: 'online', connected: true, enabled: true }, worker('roomy', 32, 4), worker('small', 8, 2)];
     const o = createOrchestrator({ query: () => (async function* () {})(), dataDir, disabled: true, claudeEnv: {}, getLimits: () => [],
       onSubscription: () => true, broadcast() {}, emitChat() {}, convoExists: () => false });
     o.attachCluster({ listNodes: () => nodes, onMessage() {}, version: () => 1 });
@@ -44,7 +44,7 @@ test('a pinned task runs only on its machine and waits for it; the pin is valida
     o.setTaskRunOn(b, 'small');
     o.setTaskRunOn(c, 'controller');
     out.seq = [claim()];
-    nodes[2].status = 'offline'; // 'small' goes away (a disabled orchestrator never starts A, so it can't look full)
+    nodes[2].status = 'offline'; // 'small' goes away (2 slots: A, claimed there, leaves room for B)
     out.seq.push(claim(), claim(), claim());
     out.running = o.setTaskRunOn(a, null).status; // A is running now: no more pinning
     nodes[2].status = 'online';
@@ -56,8 +56,8 @@ test('a pinned task runs only on its machine and waits for it; the pin is valida
     const r = JSON.parse(stdout.trim().split('\n').pop());
     assert.deepEqual(r.bad, [400, 404]);
     assert.equal(r.pinA, 'small-name');
-    // A goes to 'small' though 'roomy' has more headroom; B (also pinned to 'small', now gone) waits; C runs on the
-    // controller though workers are free and controllerWork is off; D (unpinned) takes the roomiest worker.
+    // A goes to 'small' though 'roomy' is emptier; B (also pinned to 'small', now gone) waits; C runs on the
+    // controller though workers are free and controllerWork is off; D (unpinned) takes the other worker.
     assert.deepEqual(r.seq, [['A', 'small'], ['C', 'controller'], ['D', 'roomy'], null]);
     assert.equal(r.running, 409);
     assert.deepEqual(r.afterA, ['B', 'small'], 'once its machine is back, B runs there');

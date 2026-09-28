@@ -74,7 +74,7 @@ async function scenario(body, { live = false } = {}) {
         yield {type:'result',subtype:'success',result:'AGENT-ORCH-STATUS: done — verified',session_id:'test',num_turns:1};
       })();
       let windows = {}, limits = [];
-      const o = createOrchestrator({ disabled: ${!live}, dataDir, claudeEnv: {}, query, config: {pollMs:50, parallelTasks:2,agentSlots:4,meminfo:${JSON.stringify(new URL('./fixtures/meminfo-ample', import.meta.url).pathname)}},
+      const o = createOrchestrator({ disabled: ${!live}, dataDir, claudeEnv: {}, query, config: {pollMs:50, parallelTasks:2,agentSlots:4,controllerWork:false,meminfo:${JSON.stringify(new URL('./fixtures/meminfo-ample', import.meta.url).pathname)}},
         getLimits: () => limits, usageLog: { current: (a) => windows[a] || [], tokens(){}, windows(){}, limitCleared(){} }, onSubscription: () => true,
         broadcast() {}, emitChat() {}, convoExists: () => false });
       o.attachCluster({ listNodes: () => [{ id: 'worker', local: false, status: 'online', connected: true, enabled: true,

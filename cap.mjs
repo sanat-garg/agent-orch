@@ -6,9 +6,7 @@
 // job.offer, worker-cap.mjs for the processes). Shared by both sides, so no deps.
 
 export const GB = 1024 ** 3;
-// An agent run's memory (the scheduler's footprint per agent; a constant until each agent's p90 is measured) and the
-// cores a task counts against a CPU cap (until each agent's CPU is measured).
-export const FOOTPRINT = { claude: 1.2 * GB, codex: 0.8 * GB };
+// The cores a task counts against an explicit CPU cap (until each agent's CPU is measured).
 export const CPU_PER_TASK = 1;
 
 const NUM = /^(\d+(?:\.\d+)?)$/, PCT = /^(\d+(?:\.\d+)?)\s*%$/, MEM = /^(\d+(?:\.\d+)?)\s*(?:g|gb|gib)?$/i, OFF = /^(off|none|no)$/i;
@@ -95,39 +93,30 @@ export function localCap(n) {
   return cleanCap(r && 'cap' in r ? r.cap : n?.inventory?.cap);
 }
 
-// '4 cores · 8 GB · at most 3 tasks · on AC power only' (machine: its totals, shown for a part that isn't capped).
+// '4 cores · 8 GB · at most 3 tasks' (machine: its totals, shown for a part that isn't capped).
 export function capText(cap, machine = null) {
   if (!cap) return 'no local cap';
   const cpu = cap.cpu ?? machine?.cores, mem = cap.mem ?? machine?.memTotal;
-  return [cpu != null && fmtCores(cpu), mem != null && fmtGB(mem), cap.maxTasks != null && `at most ${plural(cap.maxTasks, 'task')}`,
-    cap.onlyOnAc && 'on AC power only'].filter(Boolean).join(' · ');
+  return [cpu != null && fmtCores(cpu), mem != null && fmtGB(mem), cap.maxTasks != null && `at most ${plural(cap.maxTasks, 'task')}`].filter(Boolean).join(' · ');
 }
 
 // Tasks the cap allows by count: its max tasks, and its CPU at cpuPerTask cores each.
 export const capTasks = (cap, cpuPerTask = CPU_PER_TASK) => Math.min(cap?.maxTasks ?? Infinity,
   cap?.cpu != null ? Math.floor(cap.cpu / cpuPerTask + 1e-9) : Infinity);
 
-// The head's ceiling for a node under its local cap (Infinity without one): its max tasks, its CPU cap at cpuPerTask
-// cores a task, and its running jobs plus what fits in the rest of its RAM cap (cap − jobsMem, the memory its jobs use)
-// at `footprint` a task.
-export function capSlots(cap, { runs = 0, jobsMem = 0, footprint = FOOTPRINT.claude, cpuPerTask = CPU_PER_TASK } = {}) {
-  if (!cap) return Infinity;
-  let n = capTasks(cap, cpuPerTask);
-  if (cap.mem != null) n = Math.min(n, runs + Math.max(0, Math.floor((cap.mem - jobsMem) / footprint)));
-  return n;
+// Placement and offer acceptance use only CPU/task ceilings. RAM belongs to the existing emergency pause watch;
+// legacy onlyOnAc is retained in saved configs for compatibility but never gates intake (BRIEF goal 9).
+export function capSlots(cap, { cpuPerTask = CPU_PER_TASK } = {}) {
+  return capTasks(cap, cpuPerTask);
 }
 
-// The worker's own check before it accepts a job: why taking one more (`footprint` bytes) would go over the cap, as
-// {kind: 'tasks' | 'memory', text}, or null. jobs: its jobs that aren't paused; jobsMem: what they use now.
-export function capRejection(cap, { jobs = 0, jobsMem = 0, footprint = FOOTPRINT.claude, cpuPerTask = CPU_PER_TASK } = {}) {
+// The worker's CPU/task ceiling before it accepts one more job, or null.
+export function capRejection(cap, { jobs = 0, cpuPerTask = CPU_PER_TASK } = {}) {
   if (!cap) return null;
   const tasks = capTasks(cap, cpuPerTask);
   if (jobs + 1 > tasks) {
     const why = cap.maxTasks != null && cap.maxTasks === tasks ? 'max tasks' : `${fmtCores(cap.cpu)} at ${fmtCores(cpuPerTask)} a task`;
     return { kind: 'tasks', text: `the local cap allows ${plural(tasks, 'task')} (${why}) and ${plural(jobs, 'job')} ${jobs === 1 ? 'runs' : 'run'}` };
-  }
-  if (cap.mem != null && jobsMem + footprint > cap.mem) {
-    return { kind: 'memory', text: `its jobs use ${fmtGB(jobsMem)} of the local ${fmtGB(cap.mem)} RAM cap and one more needs about ${fmtGB(footprint)}` };
   }
   return null;
 }

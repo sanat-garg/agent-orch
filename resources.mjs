@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { runHelperSync } from './helpers.mjs';
+import { parsePsi } from './placement.mjs';
 
 export const OWNER_ENV = 'AGENT_ORCH_OWNER';
 export const ownerTag = (kind, id, server = process.pid) => `${server}:${kind}:${id}`;
@@ -86,9 +87,10 @@ export function readSystem(dir = '/proc') {
     cpus.push({ total: v.slice(0, 8).reduce((a, b) => a + b, 0), idle: v[3] + (v[4] || 0) });
   }
   const load = (read(path.join(dir, 'loadavg')) || '0 0 0').split(' ').slice(0, 3).map(Number);
+  const psi = parsePsi(read(path.join(dir, 'pressure', 'cpu'))); // CPU pressure, % of the last 60 s (placement.mjs)
   return {
     memTotal: kb(mem, 'MemTotal'), memAvailable: kb(mem, 'MemAvailable'), swapTotal: kb(mem, 'SwapTotal'), swapFree: kb(mem, 'SwapFree'),
-    load, cpus, uptime: Number((read(path.join(dir, 'uptime')) || '0').split(' ')[0]),
+    load, ...(psi != null ? { psi } : {}), cpus, uptime: Number((read(path.join(dir, 'uptime')) || '0').split(' ')[0]),
   };
 }
 

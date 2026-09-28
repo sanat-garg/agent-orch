@@ -83,7 +83,7 @@ test('a pending restart with two head integrators running still places ready wor
     await waitFor(() => o.stateView().stall, { message: 'a stall reason for the head-only task' });
     const s = o.stateView(), done = await restart;
     return { integrators: [i1, i2].map((id) => get(id).status), work: [...work, more].map((id) => [get(id).status, get(id).node_id]),
-      head: get(head).status, hold: s.restartHold, stall: s.stall, rapid, restart: done.ok };`);
+      head: get(head).status, hold: s.restartHold, stall: s.stall, rapid, restart: done.ok };`, { config: { controllerWork: false } });
   assert.deepEqual(r.integrators, ['paused', 'paused'], 'the restart pauses the head integrators');
   assert.deepEqual(r.work, [['running', 'w1'], ['running', 'w1'], ['running', 'w1'], ['running', 'w1']], 'the pending restart does not hold claims for workers');
   assert.equal(r.head, 'queued', 'a new claim on the head waits for the restart');

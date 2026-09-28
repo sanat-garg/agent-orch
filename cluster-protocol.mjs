@@ -95,8 +95,9 @@ export const OS_KINDS = ['linux', 'darwin'];
 export const EVENT_KINDS = ['text', 'tool', 'tool_result', 'result', 'limit', 'image', 'windows', 'audit', 'approval', 'mcp'];
 // runAgentCli outcomes plus the worker's own: setup_failed (clone/worktree/install), lost (controller gave up on it).
 export const OUTCOMES = ['ok', 'rate_limited', 'auth_error', 'aborted', 'timeout', 'max_turns', 'error', 'empty_response', 'setup_failed', 'lost'];
-// power: its power policy pauses intake (on battery, running hot); sent only to a controller with feature 'policy'.
-// cap: taking it would go over the machine's local cap (`node worker.mjs limit`); only to a controller with feature 'cap'.
+// power: a worker from before #344 whose power policy paused intake (on battery, running hot); no longer sent.
+// busy: task slots are full or CPU is saturated for a minute (placement.mjs).
+// cap: taking it would go over the machine's CPU/task cap (`node worker.mjs limit`); only to a controller with feature 'cap'.
 export const REJECT_REASONS = ['busy', 'low_memory', 'agent_missing', 'not_signed_in', 'draining', 'version', 'other', 'power', 'cap'];
 // starting → url (open it; a device code may ride along) or waiting_code (paste the page's code back) → done | failed |
 // cancelled; signed_out answers login.logout.
@@ -109,7 +110,8 @@ export const PHASES = ['queued', 'cloning', 'fetching', 'installing', 'running',
 const S = {
   // sha: the worker's agent-orch checkout (the controller compares it with its origin/main); features: see FEATURES.
   hello: { node: 'str', protocol: 'int', version: 'str', jobs: 'arr', sha: 'sha?', features: 'arr?' },
-  // policy: the node's power policy and caps (power.mjs: minBattery, keepAwake, thermal, reserveGB, plus maxTasks).
+  // policy: the node's power policy and task cap (power.mjs keepAwake, plus maxTasks; minBattery 0, thermal 'off' and
+  // reserveGB 0 ride along so a worker from before #344 gates on none of them).
   // queued: work tasks on the head ready to start that this node could take ("up next" in its status view).
   welcome: { node: 'str', protocol: 'int', heartbeatMs: 'int', wipPushMs: 'int', graceMs: 'int', features: 'arr?', policy: 'obj?', queued: 'int?' },
   // cap: the machine's local cap in effect (cap.mjs resolveCap: {cpu: cores, mem: bytes, maxTasks, onlyOnAc}; null = none).
@@ -121,12 +123,13 @@ const S = {
   // swapTotal/swapUsed (bytes), disk {path, free, total} (the volume holding its repos), net {host, ok, ms, at, error}
   // (reachability of GitHub), agents [{id, installed, version, signedIn}] (as last checked, never polled), uptime (s),
   // procUptime (s), version, sha, and on macOS battery {pct, charging, source} and thermal {pressure, speedLimit, level}.
-  // intake: whether its power policy lets it take new jobs ({ok} or {ok: false, reason, text}); awake: caffeinate holds it awake.
+  // psi: Linux CPU pressure (/proc/pressure/cpu some avg60, %), the scheduler's saturation signal (placement.mjs).
+  // intake: CPU eligibility ({ok} or {ok: false, reason, text}); awake: caffeinate holds it awake. Older battery intake is ignored.
   // cap: its local cap in effect (as in inventory; null = none); jobsMem (bytes) / jobsCpu (cores): what its jobs use now.
   resources: {
     memAvailable: 'int', load: 'arr', running: 'arr', swapUsedPct: 'num?', cpu: 'arr?', memTotal: 'int?', swapTotal: 'int?', swapUsed: 'int?',
     disk: 'obj?', net: 'obj?', agents: 'arr?', uptime: 'num?', procUptime: 'num?', version: 'str?', sha: 'sha?', battery: 'obj?', thermal: 'obj?',
-    intake: 'obj?', awake: 'bool?', cap: 'obj?', jobsMem: 'int?', jobsCpu: 'num?',
+    intake: 'obj?', awake: 'bool?', cap: 'obj?', jobsMem: 'int?', jobsCpu: 'num?', psi: 'num?',
   },
   heartbeat: { queued: 'int?' }, // queued: the controller's, as in welcome
   ack: { re: 'int', job: 'int?' }, // job: the controller acks a job.done (the worker then forgets the job)

@@ -558,6 +558,10 @@ the same origin. `run-on` accepts only a string or null naming a known node.
 - **Fix:** Class Enter and Ctrl/Meta+Enter key presses, and `type` with `submit`, as outbound unless the snapshot shows
   no form or composer is focused. Add Post, Reply, Submit, Buy, Order, Checkout, Tweet and Save & send to the defaults,
   and treat nameless buttons as outbound.
+- **Fixed** (task #294): `parseSnapshot` records `[active]`; Enter/NumpadEnter/Ctrl/Meta/Cmd+Enter is outbound when a non-search text field
+  (or a button matching a pattern) is focused or there is no snapshot; `type` with `submit` is outbound unless the target is a
+  searchbox or named search/filter/find; the defaults add Post, Reply, Submit, Buy, Order, Checkout, Tweet and Save & send
+  (`BENIGN_RE` keeps "Order history", "Your orders" etc. draft); a nameless button is outbound. `key` values are unchanged.
 
 ### 41. [low] Browser tasks can open loopback services, and Chromium runs without its sandbox on Linux (gate.mjs:123-126; browser.mjs:96; browser-live.mjs:70)
 - **What:** `browser_navigate` to `http://127.0.0.1:…` is draft. The controller has ttyd on `127.0.0.1:7682` (`-W`, no

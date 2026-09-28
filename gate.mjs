@@ -13,9 +13,12 @@ import crypto from 'node:crypto';
 export const CLASSES = ['read', 'draft', 'outbound'];
 export const APPROVAL_TTL_MS = 24 * 3600_000; // an unanswered approval is denied after this
 // Accessible names that make a browser step outbound (whole words, any case). The owner adds more (kv gate_settings).
-export const DEFAULT_PATTERNS = ['Send', 'Pay', 'Transfer', 'Submit order', 'Publish', 'Share', 'Delete', 'Confirm', 'Place order', 'Sign'];
-// Everyday names the default verbs would otherwise catch ("Sign in" is not signing anything).
-const BENIGN_RE = /^\s*(sign|log)\s*(-\s*)?(in|up|out|on)\b/i;
+export const DEFAULT_PATTERNS = ['Send', 'Pay', 'Transfer', 'Submit order', 'Publish', 'Share', 'Delete', 'Confirm', 'Place order', 'Sign',
+  'Post', 'Reply', 'Submit', 'Buy', 'Order', 'Checkout', 'Tweet', 'Save & send'];
+// Everyday names the default verbs would otherwise catch ("Sign in" is not signing anything, "Order history" orders nothing).
+const BENIGN_RE = new RegExp('^\\s*(?:(?:sign|log)\\s*(?:-\\s*)?(?:in|up|out|on)\\b' +
+  '|(?:(?:view|track|see|show|your|my|all|recent|past|previous)\\s+)*(?:orders|posts|replies|(?:order|checkout|post|reply|purchase)\\s+(?:history|details|status|number|tracking))\\s*(?:\\(\\d+\\))?\\s*$' +
+  '|(?:view|track|see)\\s+(?:your\\s+|my\\s+|this\\s+)?(?:order|post|reply)\\s*$)', 'i');
 // Navigating to (or clicking a link to) one of these is outbound: checkout, payment, billing, place-order pages.
 export const CHECKOUT_URL_RE = /(^|[/._?=&#-])(checkout|payments?|pay|billing|purchase|place-?order|order-?confirm\w*)([/._?=&#-]|$)/i;
 
@@ -57,7 +60,8 @@ export const patternsWith = (extra) => [...new Set([...DEFAULT_PATTERNS, ...(Arr
 
 const unq = (s) => { try { return JSON.parse(`"${s}"`); } catch { return s; } };
 // A Playwright MCP snapshot (the text of browser_snapshot, or any result that inlines one) → {url, title, dialog, refs:
-// Map ref → {ref, role, name, value?, url?}}. Nameless elements take their text children as the name.
+// Map ref → {ref, role, name, value?, url?, active?}}. Nameless elements take their text children as the name; `active` is
+// the focused element (Playwright marks it [active]).
 export function parseSnapshot(text) {
   const s = String(text || ''), out = { url: null, title: null, dialog: null, refs: new Map() };
   out.url = /- Page URL: (\S+)/.exec(s)?.[1] || null;
@@ -67,9 +71,10 @@ export function parseSnapshot(text) {
   for (const line of s.split('\n')) {
     const m = /^(\s*)- ([a-z]+)(?: "((?:[^"\\]|\\.)*)")?([^\n]*?)\[ref=([^\]\s]+)\](.*)$/.exec(line);
     if (m) {
-      const [, ind, role, name, , ref, rest] = m;
+      const [, ind, role, name, attrs, ref, rest] = m;
       const value = /^(?:\s*\[[^\]]*\])*:\s+(.+)$/.exec(rest)?.[1];
-      last = { ref, role, name: name != null ? unq(name) : '', indent: ind.length, ...(value != null && { value: unq(value.trim().replace(/^"|"$/g, '')) }) };
+      last = { ref, role, name: name != null ? unq(name) : '', indent: ind.length, ...(value != null && { value: unq(value.trim().replace(/^"|"$/g, '')) }),
+        ...(/\[active\]/.test(attrs) && { active: true }) };
       out.refs.set(ref, last);
       continue;
     }
@@ -99,6 +104,11 @@ function fieldsOf(snap, n = 4) {
     .slice(0, n).map((e) => `${e.name}: ${clip(e.value, 60)}`);
 }
 const targetOf = (args) => args?.target ?? args?.ref ?? null;
+// Keys that submit the focused field (Enter sends in Slack, WhatsApp and LinkedIn; Ctrl/Cmd+Enter sends in Gmail).
+const SUBMIT_KEY_RE = /^(?:(?:control|ctrl|meta|cmd|command|controlormeta)\+)?(?:numpad)?enter$/i;
+const TEXT_FIELD_RE = /^(textbox|combobox|searchbox)$/;
+// A field where submitting only searches or filters the page.
+const isSearchField = (e) => e?.role === 'searchbox' || /search|filter|find/i.test(e?.name || '');
 
 // Classifies one call. ctx: {server, kind: 'browser' | 'connector', snapshot (parseSnapshot, fresh), patterns,
 // connector: {outbound: [names], read: [names], draft: [names]}}. Returns {cls, reason, action (what the owner reads),
@@ -145,13 +155,27 @@ export function classify(tool, args = {}, ctx = {}) {
     if (hit && (tool === 'browser_click' || tool === 'browser_drag' || (tool === 'browser_type' && args.submit))) {
       return { cls: 'outbound', reason: `target matches "${hit}"`, action, key: k, target: pick(el) };
     }
+    if (tool === 'browser_type' && args.submit && !isSearchField(el)) return { cls: 'outbound', reason: 'submits the field', action, key: k, target: pick(el) };
+    // An icon-only button: only the agent's own description says what it does.
+    if (tool === 'browser_click' && els.some((e) => e.role === 'button' && !e.name && !e.selector && !e.url)) {
+      return { cls: 'outbound', reason: 'button with no accessible name', action, key: k, target: pick(el) };
+    }
     if (tool === 'browser_click' && els.some((e) => e.url && CHECKOUT_URL_RE.test(safePath(e.url)))) {
       return { cls: 'outbound', reason: 'links to a checkout/payment page', action, key: k, target: pick(el) };
     }
     return { cls: 'draft', reason: 'page interaction', action, key: k, target: pick(el) };
   }
+  if (tool === 'browser_press_key') {
+    const focus = [...snap.refs.values()].find((e) => e.active);
+    const inField = focus && TEXT_FIELD_RE.test(focus.role) && !isSearchField(focus);
+    const hit = focus && !TEXT_FIELD_RE.test(focus.role) ? matchPattern(focus.name, patterns) : null;
+    const submits = SUBMIT_KEY_RE.test(String(args.key || '').replace(/\s+/g, '')) && (inField || hit || !snap.refs.size);
+    const action = `press key ${args.key}${focus?.name ? ` in "${clip(focus.name, 80)}" ${focus.role}` : ''}${where}`;
+    return { cls: submits ? 'outbound' : 'draft', reason: !submits ? 'page interaction' : hit ? `focused element matches "${hit}"` : 'may submit the focused field',
+      action, key: key(args.key), ...(focus && { target: pick(focus) }) };
+  }
   if (BROWSER_DRAFT.has(tool)) {
-    const detail = tool === 'browser_press_key' ? ` ${args.key}` : tool === 'browser_fill_form' ? ` (${(args.fields || []).length} fields)` : '';
+    const detail = tool === 'browser_fill_form' ? ` (${(args.fields || []).length} fields)` : '';
     return { cls: 'draft', reason: 'page interaction', action: `${tool.replace(/^browser_/, '').replace(/_/g, ' ')}${detail}${where}`, key: key(args.key) };
   }
   // browser_evaluate, browser_run_code_unsafe and anything new: arbitrary effects, so the owner decides.

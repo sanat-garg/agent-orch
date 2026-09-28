@@ -17,3 +17,7 @@ Update test/approval-gate.test.mjs `classify:` cases with these four behaviours 
 ## Done when
 
 `npm test -- test/approval-gate.test.mjs test/approval-gate-browser.test.mjs` passes
+
+## Result — done (check passed) (2026-09-28 08:52)
+
+AGENT-ORCH-STATUS: done — Browser gate now holds Enter, submit, Post-style and nameless buttons

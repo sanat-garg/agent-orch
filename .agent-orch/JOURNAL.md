@@ -877,3 +877,7 @@ Controller runs get gate/browser config; tests catch regressions
 ## 2026-09-28 08:49 — #293 AUDIT #43: the restart drain preflights the new HEAD before exiting, and README adds StartLimitIntervalSec=0 [done (check passed)]
 
 restart preflights HEAD; failed boot stays up; README has StartLimitIntervalSec=0
+
+## 2026-09-28 08:52 — #294 AUDIT #40: the browser classifier treats Enter, submit and common outbound buttons as outbound [done (check passed)]
+
+Browser gate now holds Enter, submit, Post-style and nameless buttons

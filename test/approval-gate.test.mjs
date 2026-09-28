@@ -55,6 +55,39 @@ test('classify: element names from the snapshot, checkout URLs, reads, custom pa
   assert.equal(matchPattern('Sender', patternsWith([])), null, 'whole words only');
   assert.equal(matchPattern('Submit  order', patternsWith([])), 'Submit order');
   assert.equal(matchPattern('Archive all', ['/arch(ive)?/i']), '/arch(ive)?/i');
+  // Keyboard sends, submit, the wider verb list and icon-only buttons (AUDIT #40).
+  const slack = parseSnapshot(`- Page URL: https://app.slack.com/client/T1/C1
+- generic [ref=e1]:
+  - searchbox "Search Acme" [ref=e2]
+  - textbox "Message #general" [active] [ref=e3]: hello team
+  - button "Post" [ref=e4]
+  - button [ref=e5]:
+    - img [ref=e6]
+  - link "Order history" [ref=e7]:
+    - /url: /account/orders`), sctx = { server: 'playwright', snapshot: slack };
+  assert.equal(slack.refs.get('e3').active, true, 'the focused field');
+  const enter = classify('browser_press_key', { key: 'Enter' }, sctx);
+  assert.equal(enter.cls, 'outbound');
+  assert.equal(enter.reason, 'may submit the focused field');
+  assert.equal(enter.action, 'press key Enter in "Message #general" textbox on app.slack.com/client/T1/C1');
+  assert.equal(enter.key, 'playwright|browser_press_key|enter', 'the "always allow" key is unchanged');
+  assert.equal(classify('browser_press_key', { key: 'Control+Enter' }, sctx).cls, 'outbound', 'Ctrl+Enter sends in Gmail');
+  assert.equal(classify('browser_press_key', { key: 'Control+Enter' }, {}).cls, 'outbound', 'no snapshot: assume a composer');
+  assert.equal(classify('browser_press_key', { key: 'ArrowDown' }, sctx).cls, 'draft', 'other keys');
+  assert.equal(classify('browser_press_key', { key: 'Enter' }, ctx).cls, 'draft', 'nothing focused');
+  assert.equal(classify('browser_press_key', { key: 'Enter' }, { ...sctx, snapshot: parseSnapshot(SNAP.replace('"To" [ref=e2]', '"To" [active] [ref=e2]')) }).cls, 'outbound', 'a focused compose field');
+  assert.equal(classify('browser_type', { target: 'e3', text: 'hi', submit: true }, sctx).cls, 'outbound', 'Enter sends in Slack');
+  assert.equal(classify('browser_type', { target: 'e3', text: 'hi', submit: true }, sctx).reason, 'submits the field');
+  assert.equal(classify('browser_type', { target: 'e2', text: 'hi', submit: true }, sctx).cls, 'draft', 'a searchbox');
+  assert.equal(classify('browser_type', { target: 'e3', text: 'hi' }, sctx).cls, 'draft', 'typing without submit');
+  assert.equal(classify('browser_click', { element: 'Post', target: 'e4' }, sctx).cls, 'outbound');
+  const icon = classify('browser_click', { element: 'the blue icon', target: 'e5' }, sctx);
+  assert.equal(icon.cls, 'outbound');
+  assert.equal(icon.reason, 'button with no accessible name');
+  assert.match(icon.action, /^Click "the blue icon" button on app\.slack\.com/);
+  assert.equal(classify('browser_click', { target: 'e7' }, sctx).cls, 'draft', '"Order history" orders nothing');
+  for (const t of ['Post', 'Reply', 'Submit', 'Buy now', 'Order', 'Checkout', 'Tweet', 'Save & send']) assert.ok(matchPattern(t), t);
+  for (const t of ['Order history', 'Orders', 'Posts', 'Replies', 'Checkout history', 'Your orders', 'Track order']) assert.equal(matchPattern(t), null, t);
   // Connectors: marked tools and outbound verbs in their names.
   const conn = { server: 'gmail', kind: 'connector', connector: { outbound: ['modify_labels'] } };
   assert.equal(classify('send_email', { to: 'a@b.c' }, conn).cls, 'outbound');

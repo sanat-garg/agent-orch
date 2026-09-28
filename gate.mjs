@@ -22,14 +22,14 @@ const BENIGN_RE = new RegExp('^\\s*(?:(?:sign|log)\\s*(?:-\\s*)?(?:in|up|out|on)
 // Navigating to (or clicking a link to) one of these is outbound: checkout, payment, billing, place-order pages.
 export const CHECKOUT_URL_RE = /(^|[/._?=&#-])(checkout|payments?|pay|billing|purchase|place-?order|order-?confirm\w*)([/._?=&#-]|$)/i;
 
-// Playwright MCP tools by class. Element tools resolve their target in a fresh snapshot; anything not listed is outbound.
+// Playwright MCP tools by class. Element tools resolve their target in a fresh snapshot; anything not listed is outbound,
+// including browser_file_upload (hands local files to the page) and the coordinate clicks/drags (no element to classify).
 const BROWSER_READ = new Set(['browser_snapshot', 'browser_take_screenshot', 'browser_console_messages', 'browser_network_requests',
   'browser_network_request', 'browser_wait_for', 'browser_hover', 'browser_resize', 'browser_find', 'browser_emulate_media',
   'browser_install', 'browser_close', 'browser_generate_locator', 'browser_verify_element_visible', 'browser_verify_text_visible',
   'browser_verify_list_visible', 'browser_verify_value', 'browser_pdf_save', 'browser_mouse_move_xy']);
 const BROWSER_DRAFT = new Set(['browser_navigate', 'browser_navigate_back', 'browser_navigate_forward', 'browser_click', 'browser_type',
-  'browser_fill_form', 'browser_select_option', 'browser_press_key', 'browser_file_upload', 'browser_drag', 'browser_drop',
-  'browser_handle_dialog', 'browser_tabs', 'browser_mouse_click_xy', 'browser_mouse_drag_xy']);
+  'browser_fill_form', 'browser_select_option', 'browser_press_key', 'browser_drag', 'browser_drop', 'browser_handle_dialog', 'browser_tabs']);
 const ELEMENT_TOOLS = new Set(['browser_click', 'browser_type', 'browser_select_option', 'browser_drag', 'browser_handle_dialog']);
 export const isBrowserRead = (tool) => BROWSER_READ.has(tool);
 // Connector tools with no explicit marking: names like send_email, create_payment, delete_file, publish_design, share_doc.
@@ -112,6 +112,10 @@ const isSearchField = (e) => e?.role === 'searchbox' || /search|filter|find/i.te
 
 // Arbitrary-code browser tools: no "always" covers them, since the next call's code can do anything.
 const CODE_TOOL_RE = /evaluate|run_code|execute/i;
+// URL schemes that run code in the page (like browser_evaluate), and ones that open the machine itself (files, browser internals).
+const CODE_SCHEME_RE = /^(javascript|data|blob|vbscript)$/;
+const LOCAL_SCHEME_RE = /^(file|chrome|chrome-extension|chrome-untrusted|devtools)$/;
+const schemeOf = (u) => { try { return new URL(u).protocol.slice(0, -1).toLowerCase(); } catch { return /^[\s\x00-\x1f]*([a-z][a-z0-9+.-]*):/i.exec(String(u || '').replace(/[\t\n\r]/g, ''))?.[1]?.toLowerCase() || ''; } };
 // Connector args that say who or what a call reaches; their values go into the "always" key.
 const RECIPIENT_ARG_RE = /^(to|cc|bcc|recipient|recipients|email|channel|chat|phone|number|account|payee|url|path|id)s?$/i;
 // A url's host is loopback, link-local or private (a bare hostname like `caddy` counts): the controller's ttyd, app and
@@ -140,7 +144,9 @@ export function isLocalUrl(u, { base } = {}) {
 // Classifies one call. ctx: {server, kind: 'browser' | 'connector', snapshot (parseSnapshot, fresh), patterns,
 // connector: {outbound: [names], read: [names], draft: [names]}}. Returns {cls, reason, action (what the owner reads),
 // key (the "always allow" identity: null for arbitrary-code tools, so no "always" covers them; a connector's includes a
-// hash of its recipient-like args), target?, url?}. Navigating to (or clicking a link to) a local or private host is outbound.
+// hash of its recipient-like args; a file upload's a hash of its paths; a key press's names the focused element), target?,
+// url?}. Navigating to (or clicking a link to) a local or private host, or to a javascript:/data:/blob:/vbscript: URL, is
+// outbound; so are file uploads and clicks or drags by coordinates.
 export function classify(tool, args = {}, ctx = {}) {
   const { server = 'mcp', kind = 'browser', patterns = DEFAULT_PATTERNS } = ctx;
   const snap = ctx.snapshot || { url: null, refs: new Map(), dialog: null };
@@ -160,8 +166,9 @@ export function classify(tool, args = {}, ctx = {}) {
   const key = (...parts) => [server, tool, ...parts].map((x) => String(x ?? '').toLowerCase().trim()).join('|');
   if (BROWSER_READ.has(tool)) return { cls: 'read', reason: 'reads the page', action: `${tool.replace(/^browser_/, '')}${where}`, key: key() };
   if (tool === 'browser_navigate') {
-    const to = String(args.url || '');
-    const hit = CHECKOUT_URL_RE.test(safePath(to)), local = !hit && isLocalUrl(to);
+    const to = String(args.url || ''), scheme = schemeOf(to);
+    if (CODE_SCHEME_RE.test(scheme)) return { cls: 'outbound', reason: 'runs code in the page', action: `Open ${clip(to, 200)}`, key: null, url: to };
+    const hit = CHECKOUT_URL_RE.test(safePath(to)), local = !hit && (LOCAL_SCHEME_RE.test(scheme) || isLocalUrl(to));
     return { cls: hit || local ? 'outbound' : 'draft', reason: hit ? 'opens a checkout/payment page' : local ? 'opens a local or private service' : 'navigation', action: `Open ${clip(to, 200)}`, key: key(hostOf(to)), url: to };
   }
   if (tool === 'browser_handle_dialog') {
@@ -204,7 +211,16 @@ export function classify(tool, args = {}, ctx = {}) {
     const submits = SUBMIT_KEY_RE.test(String(args.key || '').replace(/\s+/g, '')) && (inField || hit || !snap.refs.size);
     const action = `press key ${args.key}${focus?.name ? ` in "${clip(focus.name, 80)}" ${focus.role}` : ''}${where}`;
     return { cls: submits ? 'outbound' : 'draft', reason: !submits ? 'page interaction' : hit ? `focused element matches "${hit}"` : 'may submit the focused field',
-      action, key: key(args.key), ...(focus && { target: pick(focus) }) };
+      action, key: focus ? key(args.key, focus.role, focus.name) : key(args.key, 'none'), ...(focus && { target: pick(focus) }) };
+  }
+  if (tool === 'browser_file_upload') {
+    const paths = (Array.isArray(args.paths) ? args.paths : []).map(String);
+    return { cls: 'outbound', reason: 'uploads local files', action: `Upload ${clip(paths.join(', ') || '(no files)', 300)}${where}`,
+      key: `${server}|${tool}|${sha(JSON.stringify([...paths].sort()))}` };
+  }
+  if (tool === 'browser_mouse_click_xy' || tool === 'browser_mouse_drag_xy') {
+    const at = tool === 'browser_mouse_click_xy' ? `Click at (${args.x}, ${args.y})` : `Drag from (${args.startX}, ${args.startY}) to (${args.endX}, ${args.endY})`;
+    return { cls: 'outbound', reason: 'clicks by coordinates, target unknown', action: `${at}${args.element ? ` "${clip(args.element, 80)}"` : ''}${where}`, key: null };
   }
   if (BROWSER_DRAFT.has(tool)) {
     const detail = tool === 'browser_fill_form' ? ` (${(args.fields || []).length} fields)` : '';

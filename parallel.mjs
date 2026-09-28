@@ -95,14 +95,12 @@ export const MEM = {
   claimFloor: 800 * 1024 ** 2,   // below this nothing new is claimed (plan tasks included)
   pauseBelow: 300 * 1024 ** 2,   // sustained below this, the newest running task is paused
   reapBelow: 1.5 * 1024 ** 3,    // below this the reaper (resources.mjs) runs right before claiming
-  secondSlot: 2.5 * 1024 ** 3,   // a second task needs more than this available...
-  secondSlotSwap: 0.25,          // ...and under 25% of swap in use
 };
 
-// Work-task slots (BRIEF goal 9): one by default. The owner's 'Parallel tasks: 2' setting only counts while the server
-// has headroom, re-checked before every claim; pacing can still drop it to one; 0 = memory too low to claim anything.
+// Work-task slots (BRIEF goal 9, rapid development mode): the owner's 'This server runs up to N' setting (1-16) is the
+// limit; memory is only an emergency floor, never a pre-emptive throttle. Re-checked before every claim; pacing can
+// still lower it; 0 = under MEM.claimFloor, too low to claim anything.
 export function taskSlots({ setting = 1, mem, pacingLimit = Infinity }) {
   if (mem.avail < MEM.claimFloor) return 0;
-  const n = setting > 1 && mem.avail > MEM.secondSlot && mem.swapPct < MEM.secondSlotSwap ? setting : 1;
-  return Math.max(1, Math.min(n, pacingLimit));
+  return Math.max(1, Math.min(setting, pacingLimit));
 }

@@ -39,7 +39,7 @@ import { commitAll, ensureWorktree, isMerged, listWorktrees, mergeBack, parkWork
 
 const CFG = {
   concurrency: 2,               // pacing reference (pacing may drop work to one slot)
-  parallelTasks: 1,             // work tasks at once unless the owner's setting says 2 (parallel.mjs taskSlots)
+  parallelTasks: 4,             // the controller's own work tasks at once unless the owner sets 1-16 (parallel.mjs taskSlots)
   agentSlots: 1,                // concurrent tasks per connected account (or map by agent)
   meminfo: process.env.AGENT_ORCH_MEMINFO || '/proc/meminfo', // the memory guard's source (tests point it at a fixture)
   memCheckMs: 5000,             // memory guard interval while tasks run
@@ -1013,15 +1013,15 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       db.exec("DELETE FROM kv WHERE key='reflect_settings'");
     }
   }
-  // Parallel tasks: the owner no longer picks the controller's 1 or 2 slots; Settings shows what can run and caps it
-  // (maxTasks). Once, an existing install that ran one at a time keeps doing so as a cap of 1.
+  // Parallel tasks: the old controller setting of 1 or 2 slots is dropped (the default applies; 3-16 is today's setting,
+  // kept as is). Once, an existing install that ran one at a time keeps doing so as a cap of 1 (maxTasks).
   if (!db.prepare("SELECT 1 FROM kv WHERE key='parallel_cap_migrated'").get()) {
     const row = db.prepare("SELECT value FROM kv WHERE key='parallel_settings'").get();
     let s = {};
     try { s = JSON.parse(row?.value || '{}') || {}; } catch {}
     const existing = !!db.prepare('SELECT 1 FROM tasks LIMIT 1').get();
-    if ((existing || 'parallelTasks' in s) && s.maxTasks == null && s.parallelTasks !== 2) s.maxTasks = 1;
-    delete s.parallelTasks;
+    if ((existing || 'parallelTasks' in s) && s.maxTasks == null && !(s.parallelTasks >= 2)) s.maxTasks = 1;
+    if (!(Number.isInteger(s.parallelTasks) && s.parallelTasks > 2 && s.parallelTasks <= 16)) delete s.parallelTasks;
     db.prepare("INSERT OR REPLACE INTO kv(key,value) VALUES('parallel_settings', ?)").run(JSON.stringify(s));
     db.exec("INSERT INTO kv(key,value) VALUES('parallel_cap_migrated','1')");
   }
@@ -1314,14 +1314,15 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     setTimeout(tick, 100);
     return { ok: true, order };
   }
-  // kv parallel_settings { parallelTasks: 1 | 2 (the controller's own work slots), controllerWork: bool (see
+  // kv parallel_settings { parallelTasks: 1-16 (the controller's own work slots; memory only an emergency floor), controllerWork: bool (see
   // CFG.controllerWork), controllerBrowser: bool (see CFG.controllerBrowser), maxTasks: null | n (owner cap on work tasks across every node),
   // rapidDevelopment: bool (default on: fill free cluster slots plus two ready tasks),
   // autoRestart: bool (server.mjs restarts itself once idle after merged commits touched server code; default off) }. Older shapes read as defaults.
+  function validParallel(n) { return Number.isInteger(n) && n >= 1 && n <= 16; }
   function parallelSettings() {
     let s = {};
     try { s = JSON.parse(kvGet('parallel_settings') || '{}') || {}; } catch {}
-    return { parallelTasks: [1, 2].includes(s.parallelTasks) ? s.parallelTasks : CFG.parallelTasks,
+    return { parallelTasks: validParallel(s.parallelTasks) ? s.parallelTasks : CFG.parallelTasks,
       controllerWork: typeof s.controllerWork === 'boolean' ? s.controllerWork : CFG.controllerWork,
       controllerBrowser: typeof s.controllerBrowser === 'boolean' ? s.controllerBrowser : CFG.controllerBrowser,
       maxTasks: Number.isInteger(s.maxTasks) && s.maxTasks > 0 ? s.maxTasks : null,
@@ -1374,7 +1375,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     catch (e) { return { error: e.message, status: /No such/.test(e.message) ? 404 : 409 }; }
   }
   const taskActions = (id) => (getTask(id) ? { ...approvals.actions(id), approvals: approvals.forTask(id) } : null);
-  // Read fresh before every claim: the second slot and claiming at all depend on the memory available right now.
+  // Read fresh before every claim: claiming at all depends on the memory available right now (MEM.claimFloor).
   function slotCount(d, mem = readMemInfo(CFG.meminfo)) {
     return taskSlots({ setting: parallelSettings().parallelTasks, mem,
       pacingLimit: d && (d.scarce || d.concurrency < CFG.concurrency) ? d.concurrency : Infinity });
@@ -1383,8 +1384,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const v = value && typeof value === 'object' ? value : {};
     let next = {};
     try { next = JSON.parse(kvGet('parallel_settings') || '{}') || {}; } catch {} // only what the owner set is stored
-    if (!['parallelTasks', 'controllerWork', 'controllerBrowser', 'maxTasks', 'autoRestart', 'rapidDevelopment'].some((k) => k in v)) return { error: 'Expected parallelTasks 1 or 2' };
-    if ('parallelTasks' in v) { if (![1, 2].includes(v.parallelTasks)) return { error: 'Expected parallelTasks 1 or 2' }; next.parallelTasks = v.parallelTasks; }
+    if (!['parallelTasks', 'controllerWork', 'controllerBrowser', 'maxTasks', 'autoRestart', 'rapidDevelopment'].some((k) => k in v)) return { error: 'Expected parallelTasks 1-16' };
+    if ('parallelTasks' in v) { if (!validParallel(v.parallelTasks)) return { error: 'Expected parallelTasks 1-16' }; next.parallelTasks = v.parallelTasks; }
     if ('controllerWork' in v) { if (typeof v.controllerWork !== 'boolean') return { error: 'controllerWork must be true or false' }; next.controllerWork = v.controllerWork; }
     if ('controllerBrowser' in v) { if (typeof v.controllerBrowser !== 'boolean') return { error: 'controllerBrowser must be true or false' }; next.controllerBrowser = v.controllerBrowser; }
     if ('rapidDevelopment' in v) { if (typeof v.rapidDevelopment !== 'boolean') return { error: 'rapidDevelopment must be true or false' }; next.rapidDevelopment = v.rapidDevelopment; }

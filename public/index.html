@@ -446,6 +446,10 @@
         <select id="stParallel" aria-describedby="stParHint"></select>
       </label>
       <label class="st-row">
+        <span class="st-text"><strong>This server runs up to N</strong><small id="stServerHint">Tasks at once on this server; memory only stops new ones when it is nearly full</small></span>
+        <select id="stServerTasks" aria-describedby="stServerHint"></select>
+      </label>
+      <label class="st-row">
         <span class="st-text"><strong>Rapid development mode</strong><small id="stRapidHint">Keep free slots fed with small parallel tasks. Off waits for an empty queue.</small></span>
         <input type="checkbox" class="st-switch" id="stRapid" name="rapidDevelopment" role="switch" aria-describedby="stRapidHint" checked>
       </label>

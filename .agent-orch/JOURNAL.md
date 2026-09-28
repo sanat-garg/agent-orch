@@ -890,6 +890,9 @@ disabled nodes refused, sign-ins withheld; worker screenshot ids now validated
 
 Touch devices get 16px fields and 44pt targets, tests pass
 
+## 2026-09-28 11:21 — #302 Goal 9 controller slots: parallelTasks 1-16 (default 4), memory only an emergency floor, Settings select for this server [done (check passed)]
+
+Test runner falls back to lockf on macOS; check passes
 ## 2026-09-28 10:58 — #304 Web Push backend without a new dependency: push.mjs with VAPID keys, subscriptions, aes128gcm and send; /api/push routes [done (check passed)]
 
 Web Push backend and /api/push routes built; both test files pass
@@ -999,3 +1002,7 @@ Verifier accepts env/cd prefixes and 2>&1, and skips file names
 ## 2026-09-28 12:36 — #354 Browser tab ui: an Earlier prompts list under the activity panel with tap-to-show and Ask again [done (check passed)]
 
 Browser tab lists earlier prompts with show, Back to latest and Ask again
+
+## 2026-09-28 12:37 — #311 Integrate #302: Goal 9 controller slots: parallelTasks 1-16 (default 4), memory only an emergency floor, Settings select for this server [done (check passed)]
+
+merge conflicts resolved; parallel slots 1-16 and rapid mode both kept

@@ -5531,9 +5531,9 @@ function renderParallel(s) {
   const c = s.capacity || (s.parallel && { running: s.workRunning ?? s.running ?? 0, max: s.slots ?? 0, controller: s.slots ?? 0,
     controllerMax: s.slots ?? 0, workers: 0, pacing: null, cap: s.parallel.maxTasks ?? null });
   sel.disabled = !c;
+  renderServerTasks(s, c);
   if (!c) { $('stParHint').textContent = 'Checking what can run…'; if (!sel.options.length) sel.append(new Option('No limit', '')); return; }
-  const tight = c.controller < c.controllerMax ? ` of ${c.controllerMax}, needs more free memory` : '';
-  const where = c.workers ? ` (this server ${c.controller}${tight}, workers ${c.workers})` : tight ? ` (this server ${c.controller}${tight})` : '';
+  const where = c.workers ? ` (this server ${c.controller}, workers ${c.workers})` : '';
   const bits = [`${c.running} running`, `up to ${c.max} can run now${where}`];
   if (c.pacing != null && c.pacing < c.max) bits.push(`usage pacing allows ${c.pacing}`);
   if (!c.max) bits[1] = 'none can start now: memory is low';
@@ -5545,6 +5545,15 @@ function renderParallel(s) {
   sel.replaceChildren(...opts);
   sel.value = c.cap ? String(c.cap) : '';
 }
+// This server's own work slots (parallelTasks 1-16): the owner's limit; memory is only an emergency floor. controllerMax
+// is 0 while workers take the work, so the stored setting shows then.
+function renderServerTasks(s, c) {
+  const sel = $('stServerTasks');
+  sel.disabled = !s.parallel;
+  if (document.activeElement === sel) return;
+  if (sel.options.length !== 16) sel.replaceChildren(...Array.from({ length: 16 }, (_, i) => new Option(`${i + 1} ${i ? 'tasks' : 'task'}`, String(i + 1))));
+  sel.value = String(c?.controllerMax || s.parallel?.parallelTasks || 4);
+}
 // The approval gate's extra outbound names (on top of its defaults), saved on blur.
 async function loadGatePatterns() {
   try { const g = await api('/api/orch/gate'); if (document.activeElement !== $('stGatePatterns')) $('stGatePatterns').value = (g.patterns || []).join('\n'); } catch {}
@@ -5554,6 +5563,7 @@ $('stGatePatterns').addEventListener('change', async (e) => {
   catch (err) { toast(err.message, { kind: 'error' }); }
 });
 $('stParallel').addEventListener('change', (e) => { saveParallel({ maxTasks: e.target.value ? Number(e.target.value) : null }); e.target.blur(); });
+$('stServerTasks').addEventListener('change', (e) => { saveParallel({ parallelTasks: Number(e.target.value) }); e.target.blur(); });
 $('stRapid').addEventListener('change', async (e) => { await saveParallel({ rapidDevelopment: e.target.checked }); e.target.blur(); renderSettings(); });
 $('stAutoRestart').addEventListener('change', async (e) => { await saveParallel({ autoRestart: e.target.checked }); e.target.blur(); renderSettings(); });
 // Reflection direction (per project, optional): saved as you type (debounced) and on blur; blank = the reflector decides.

@@ -184,7 +184,7 @@ test('parallel settings validate, persist, and appear in state', async () => {
   const url = '/api/orch/parallel';
   const unauth = await fetch(base + url, { method: 'PUT', body: '{}' });
   assert.equal(unauth.status, 401); await unauth.arrayBuffer();
-  for (const value of [null, {}, { parallelTasks: 3 }, { parallelTasks: 0 }, { parallelTasks: '2' }, { maxParallel: 2 }]) {
+  for (const value of [null, {}, { parallelTasks: 17 }, { parallelTasks: 0 }, { parallelTasks: '2' }, { maxParallel: 2 }]) {
     assert.equal((await put(url, value)).status, 400);
   }
   const before = await put(url, { parallelTasks: 1 });

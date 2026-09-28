@@ -1,6 +1,6 @@
 // Parallel planning (#156): glob-aware file-overlap gating, multi-dependencies ("after": [...]), agent spreading across
-// the fallback list, and an integrator task that starts only after all its parts. #207: one task at a time by default,
-// a second only with the setting and memory headroom (/proc/meminfo fixture), and the low-memory pause.
+// the fallback list, and an integrator task that starts only after all its parts. #302: the controller's own slots are the
+// owner's setting (1-16, default 4), memory only an emergency floor (/proc/meminfo fixture), and the low-memory pause.
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -250,7 +250,7 @@ describe('parallel scheduling', { concurrency: true, timeout: 120000 }, () => {
     assert.ok(overlaps(r.spans.S1, r.spans.S2), 'both ran at once, on two agents');
   });
 
-  test('one work task at a time by default; the setting of 2 counts only with memory headroom, re-checked per claim', async () => {
+  test('four work tasks by default; the owner sets 1-16 and memory above the floor never lowers it, re-checked per claim', async () => {
     const r = await scenario(`
       const two = (a, b) => [{ title: a, prompt: 'WAIT ' + a + '\\nWRITE ' + a + '.txt x', files: [a + '.txt'] }, { title: b, prompt: 'WRITE ' + b + '.txt y', files: [b + '.txt'] }];
       const phase = async (a, b) => {
@@ -263,24 +263,23 @@ describe('parallel scheduling', { concurrency: true, timeout: 120000 }, () => {
         return seen;
       };
       const byDefault = await phase('d1', 'd2');
-      const bad = o.setParallelSettings({ parallelTasks: 3 }).error;
+      const bad = o.setParallelSettings({ parallelTasks: 17 }).error;
+      o.setParallelSettings({ parallelTasks: 1 });
+      const one = await phase('o1', 'o2');
       o.setParallelSettings({ parallelTasks: 2 });
-      setMem(2000); // under 2.5 GB available
+      setMem(1000, 2048); // 1 GB available, half the swap in use: above the emergency floor
       const lowMem = await phase('l1', 'l2');
-      setMem(8000, 2048); // half the swap in use
-      const swap = await phase('s1', 's2');
-      setMem(8000);
-      const headroom = await phase('h1', 'h2');
-      return { byDefault, bad, lowMem, swap, headroom, setting: o.stateView().parallel.parallelTasks, spans: spans() };`);
-    assert.deepEqual(r.byDefault, { second: 'queued', slots: 1 }, 'default: the second task waits');
-    assert.ok(!overlaps(r.spans.d1, r.spans.d2));
-    assert.match(r.bad, /1 or 2/);
+      return { byDefault, bad, one, lowMem, setting: o.stateView().parallel.parallelTasks, spans: spans() };`);
+    assert.equal(r.byDefault.slots, 4, 'default: four slots');
+    assert.notEqual(r.byDefault.second, 'queued', 'default: the second task runs too');
+    assert.ok(overlaps(r.spans.d1, r.spans.d2));
+    assert.match(r.bad, /1-16/);
+    assert.deepEqual(r.one, { second: 'queued', slots: 1 }, 'setting 1: the second task waits');
+    assert.ok(!overlaps(r.spans.o1, r.spans.o2));
     assert.equal(r.setting, 2);
-    assert.deepEqual(r.lowMem, { second: 'queued', slots: 1 }, 'setting 2 without 2.5 GB free runs one');
-    assert.deepEqual(r.swap, { second: 'queued', slots: 1 }, 'setting 2 with swap over 25% runs one');
-    assert.equal(r.headroom.slots, 2);
-    assert.notEqual(r.headroom.second, 'queued', 'setting 2 with headroom runs a second task');
-    assert.ok(overlaps(r.spans.h1, r.spans.h2));
+    assert.equal(r.lowMem.slots, 2, 'memory above the floor does not throttle');
+    assert.notEqual(r.lowMem.second, 'queued');
+    assert.ok(overlaps(r.spans.l1, r.spans.l2));
   });
 
   test('low memory: nothing is claimed under 800 MB; 30 s under 300 MB pauses the newest task, which resumes later', async () => {
@@ -304,14 +303,13 @@ describe('parallel scheduling', { concurrency: true, timeout: 120000 }, () => {
   });
 });
 
-test('taskSlots: one by default, two only with the setting, >2.5 GB available and <25% swap; none under 800 MB', () => {
-  const GB = 1024 ** 3, ok = { avail: 4 * GB, swapPct: 0 };
-  assert.equal(taskSlots({ mem: ok }), 1);
-  assert.equal(taskSlots({ setting: 2, mem: ok }), 2);
-  assert.equal(taskSlots({ setting: 2, mem: { avail: 2.4 * GB, swapPct: 0 } }), 1);
-  assert.equal(taskSlots({ setting: 2, mem: { avail: 4 * GB, swapPct: 0.3 } }), 1);
-  assert.equal(taskSlots({ setting: 2, mem: ok, pacingLimit: 1 }), 1);
-  assert.equal(taskSlots({ setting: 2, mem: { avail: 0.7 * GB, swapPct: 0 } }), 0);
+test('taskSlots: the setting (capped by pacing) whenever memory is above the 800 MB floor; none under it', () => {
+  const GB = 1024 ** 3;
+  assert.equal(taskSlots({ mem: { avail: 4 * GB, swapPct: 0 } }), 1);
+  assert.equal(taskSlots({ setting: 4, mem: { avail: 1 * GB, swapPct: 0 } }), 4);
+  assert.equal(taskSlots({ setting: 16, mem: { avail: 1 * GB, swapPct: 0.9 } }), 16, 'swap does not throttle');
+  assert.equal(taskSlots({ setting: 4, mem: { avail: 0.7 * GB, swapPct: 0 } }), 0);
+  assert.equal(taskSlots({ setting: 4, mem: { avail: 4 * GB, swapPct: 0 }, pacingLimit: 2 }), 2);
   const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-mem-')), 'meminfo');
   fs.writeFileSync(f, meminfo(3000, 1024));
   assert.deepEqual(readMemInfo(f), { avail: 3000 * 1024 ** 2, swapPct: 0.25 });

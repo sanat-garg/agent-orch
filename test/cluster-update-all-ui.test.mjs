@@ -86,7 +86,8 @@ test('the label: how many are behind, all up to date, or the rollout under way; 
 
 test('Machines view: Update all button, its confirm sheet, live progress with Retry, then All up to date', { skip: noBrowser }, async () => {
   const [name, value] = cookie.split('=');
-  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  // Under 768px every machine card is listed at once (wider, each sits in its machine's side panel).
+  const ctx = await browser.newContext({ viewport: { width: 760, height: 900 } });
   await ctx.addCookies([{ name, value, url: base }]);
   const page = await ctx.newPage();
   const errors = [];

@@ -158,10 +158,16 @@ test('the Machines view shows each machine\'s build and tags an outdated worker'
   });
   await page.goto(base + '/');
   await page.locator('#machinesBtn').click();
-  const card = (id) => page.locator(`#mMachines .mc-node[data-node="${id}"] .mc-name`);
+  const card = (id) => page.locator(`#caWrap .cc[data-node="${id}"] .cc-open`);
   await card('w1').waitFor({ timeout: 10000 });
-  assert.match(await card('w1').textContent(), /studio-mac.*v4\.10.*outdated/);
-  assert.doesNotMatch(await card('w2').textContent(), /outdated/);
+  assert.match(await card('w1').textContent(), /studio-mac.*v4\.10/);
+  assert.match(await card('w1').getAttribute('aria-label'), /v4\.10, outdated/);
+  assert.equal(await card('w1').locator('.cc-build.outdated').count(), 1);
+  assert.equal(await card('w2').locator('.cc-build.outdated').count(), 0);
+  assert.doesNotMatch(await card('w2').getAttribute('aria-label'), /outdated/);
+  // Its side panel's card says it in words.
+  await card('w1').click();
+  await page.locator('#ndBody .mc-node[data-node="w1"] .mc-name', { hasText: /studio-mac.*v4\.10.*outdated/ }).waitFor();
   await page.unrouteAll({ behavior: 'ignoreErrors' });
   await ctx.close();
 });

@@ -129,10 +129,10 @@ test('desktop: the diagram and the queue side by side, lanes per machine, live u
   const panel = await box(page, '#mxModal .mx-panel');
   assert.deepEqual([panel.l, panel.t, panel.w, panel.h], [0, 0, 1440, 900]);
   assert.equal(await page.locator('.mx-tabs').isVisible(), false, 'no tabs on a desktop: both sides show');
-  // The summary line and the diagram: the head and both workers, a chip for each running task.
+  // The summary line and the diagram: the head and both workers, each with a card listing its running tasks.
   await page.locator('#caWrap:not([hidden]) .ca-node[data-node]').nth(2).waitFor();
   assert.equal(await page.locator('#caWrap .ca-node').count(), 3);
-  await page.locator(`#caWrap .ca-chip[data-task="${ids.build}"]`).waitFor();
+  await page.locator(`#caWrap .cc[data-node="${vps.node}"] .cc-task[data-task="${ids.build}"]`).waitFor();
   assert.match(await page.locator('#mcSum').textContent(), /^Cluster: 3 machines · \d+ cores · [\d.]+ GB free · 2 of \d+ slots running$/);
   // The queue: counts, a lane per machine, then the queued cards in scheduler order ('after #N' on the dependent).
   await page.locator('#mxQueue #qList .tcard').nth(3).waitFor();
@@ -161,7 +161,7 @@ test('desktop: the diagram and the queue side by side, lanes per machine, live u
   studio.tx('resources', { memAvailable: 18 * GB, load: [2.5, 2, 2], running: [] });
   await page.locator('#mxLanes .mx-lane', { hasText: 'studio-mac' }).locator('.mc-task', { hasText: 'Profile the worker' }).waitFor({ timeout: 15000 });
   await page.locator('#mxCounts', { hasText: /^Running 3 · Queued 4/ }).waitFor();
-  await page.locator(`#caWrap .ca-chip[data-task="${ids.profile}"]`).waitFor();
+  await page.locator(`#caWrap .cc[data-node="${studio.node}"] .cc-task[data-task="${ids.profile}"]`).waitFor();
 
   // Reorder from the keyboard (the same move as a drag): the dark theme goes above the polish block.
   await page.locator(`#qList .tcard[data-task="${ids.dark}"]`).focus();
@@ -208,16 +208,16 @@ test('desktop: the diagram and the queue side by side, lanes per machine, live u
 test("the sidebar machine card opens the whole view; a diagram machine opens its side panel and swaps it", { skip, timeout: 60000 }, async () => {
   const { ctx, page, errors } = await open({ viewport: { width: 1280, height: 800 } });
   await page.locator('#miniStats').click(); // every machine (#447), not the one the card shows
-  await page.locator('#mxModal:not([hidden]) #caWrap:not([hidden]) .ca-node.head').waitFor();
+  await page.locator('#mxModal:not([hidden]) #caWrap:not([hidden]) .cc.head').waitFor();
   assert.equal(await page.locator('#nodeModal').isHidden(), true);
-  await page.locator('#caWrap .ca-node.head .ca-name').click();
+  await page.locator('#caWrap .cc.head .cc-open').click();
   await page.locator('#mxModal:not([hidden]) #nodeModal:not([hidden]) #ndBody #serverDetails').waitFor();
   assert.match(await page.locator('#ndSub').textContent(), /^This server · the head/);
   assert.equal(await page.locator('.modal:not([hidden])').count(), 1, 'one window: the detail is a side panel inside it');
   const side = await box(page, '#nodeModal'), view = await box(page, '#mxModal .mx-panel');
   assert.ok(side.r >= view.r - 1 && side.l > view.l + 200, `a panel on the right: ${JSON.stringify(side)}`);
   assert.equal(await page.locator('#caWrap .ca-node').first().isVisible(), true, 'the diagram stays in view beside it');
-  await page.locator(`#caWrap .ca-node[data-node="${vps.node}"] .ca-name`).click();
+  await page.locator(`#caWrap .cc[data-node="${vps.node}"] .cc-open`).click();
   await page.locator('#ndTitle', { hasText: 'build-vps' }).waitFor();
   assert.equal(await page.locator('#ndBack').isVisible(), true);
   await page.keyboard.press('Escape');

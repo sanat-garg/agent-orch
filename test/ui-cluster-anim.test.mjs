@@ -184,21 +184,24 @@ test('the diagram: the head in the middle, a node per worker with its state, and
   assert.equal(await page.locator('#caWrap .ca-link.off').count(), 2);
   assert.notEqual(await page.locator('#caWrap .ca-link.off').first().evaluate((p) => getComputedStyle(p).strokeDasharray), 'none');
   assert.match(await node(W.air.node).getAttribute('class'), /\basleep\b/);
-  assert.equal(await node(W.air.node).locator('.ca-moon').evaluate((m) => getComputedStyle(m).opacity), '1');
+  await waitFor(async () => (await node(W.air.node).locator('.ca-moon').evaluate((m) => getComputedStyle(m).opacity)) === '1', { timeout: 3000, message: 'the moon fades in' });
   assert.equal(await node(W.vps.node).locator('.ca-moon').evaluate((m) => getComputedStyle(m).opacity), '0');
   assert.match(await node(W.studio.node).getAttribute('class'), /\bdraining\b/);
   const drain = node(W.studio.node).locator('.ca-drain');
   assert.equal(await drain.evaluate((c) => getComputedStyle(c).opacity), '1');
   assert.equal(await drain.evaluate((c) => getComputedStyle(c).stroke), await resolved(page, '--warn'));
-  // Gauges: CPU (mean of the cores) and RAM in the theme's accent, labelled in words too.
-  assert.match(await node(W.vps.node).locator('.ca-sub').textContent(), /^CPU 51% · RAM 50%$/);
+  // Gauges: CPU (mean of the cores) and RAM in the theme's accent, in words on its card too (from 768px).
+  assert.deepEqual(await page.locator(`#caWrap .cc[data-node="${W.vps.node}"] .cc-m .v`).allTextContents(), ['51%', '50%']);
   assert.equal(await node(W.gpu.node).locator('.ca-gauge').first().evaluate((c) => getComputedStyle(c).stroke), await resolved(page, '--accent'));
   assert.match(await node(W.vps.node).getAttribute('aria-label'), /^build-vps: Online, CPU 51% · RAM 50%, 1 task running\. Show details$/);
-  // Running tasks rest as chips by their machine (drawn as they are on the first look, not dispatched again).
+  // Running tasks are rows on their machine's card; their chips rest hidden at the card's edge by the machine (drawn as
+  // they are on the first look, not dispatched again), only travelling when they move.
+  await page.locator(`#caWrap .cc[data-node="${W.vps.node}"] .cc-task[data-task="${T.vps}"]`).waitFor();
   const chip = page.locator(`#caWrap .ca-chip[data-task="${T.vps}"]`);
   assert.equal(await chip.getAttribute('data-phase'), 'running');
+  assert.equal(await chip.getAttribute('opacity'), '0.000');
   const [cx, cy] = (await chip.getAttribute('transform')).match(/[-\d.]+/g).map(Number), vps = await nodeAt(page, W.vps.node);
-  assert.ok(dist([cx, cy], vps) < 140, 'the chip rests by its machine');
+  assert.ok(dist([cx, cy], vps) < 60, 'the chip rests by its machine');
   assert.equal(await page.locator(`#caWrap .ca-chip[data-task="${T.local}"]`).getAttribute('data-phase'), 'running');
   assert.equal(await page.evaluate(() => CA.anims.size), 0, 'nothing moves on the first look');
   await ctx.close();
@@ -214,12 +217,14 @@ test('dispatch → merge: a chip travels head → worker, cross-fades its phases
   await watchChip(page, id);
   await otask(id);
   const chip = page.locator(`#caWrap .ca-chip[data-task="${id}"]`);
-  await chip.waitFor({ timeout: 10000 });
+  await chip.waitFor({ state: 'attached', timeout: 10000 });
   await waitFor(() => page.evaluate(() => CA.anims.size === 0 && window.__chip.samples.length > 0), { timeout: 15000, message: 'the dispatch settles' });
+  await page.locator(`#caWrap .cc[data-node="${W.gpu.node}"] .cc-task[data-task="${id}"]`).waitFor();
   let log = await chipLog(page);
   const first = log.samples[0], rest = log.samples.at(-1), seat = [rest.x, rest.y];
   assert.ok(dist([first.x, first.y], head) < 1 && first.o === 0, `it leaves from the head, faded in from nothing: ${JSON.stringify(first)} vs ${head}`);
-  assert.ok(dist(seat, gpu) < 140 && dist(seat, head) > 150 && rest.o === 1, `it rests by gpu-vps: ${JSON.stringify(rest)}`);
+  assert.ok(dist(seat, gpu) < 60 && dist(seat, head) > 150 && rest.o === 0, `it fades into gpu-vps's card: ${JSON.stringify(rest)}`);
+  assert.ok(log.samples.some((s) => s.o === 1), 'seen on its way');
   const off = Math.max(...log.samples.map((s) => offPath([s.x, s.y], [head, gpu, seat])));
   assert.ok(off < 1.5, `it travels along the link through its machine (at most ${off.toFixed(2)}px off)`);
   const moves = new Set(log.samples.map((s) => `${Math.round(s.x)},${Math.round(s.y)}`));
@@ -337,7 +342,7 @@ test('reduced motion: state changes land statically (no travel, no particles)', 
   const id = seed('Quietly placed', W.gpu.node);
   await watchChip(page, id);
   await otask(id);
-  await page.locator(`#caWrap .ca-chip[data-task="${id}"]`).waitFor({ timeout: 10000 });
+  await page.locator(`#caWrap .ca-chip[data-task="${id}"]`).waitFor({ state: 'attached', timeout: 10000 });
   await sleep(600);
   const log = await chipLog(page);
   assert.equal(new Set(log.samples.map((s) => `${s.x},${s.y},${s.o}`)).size, 1, 'it appears at its seat, fully drawn');

@@ -100,8 +100,7 @@ test('UI: Add machine shows a command per OS with a fresh code, then the machine
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto(`${base}/`);
   await page.locator('#miniStats').click();
-  await page.locator('#mMachines li').first().waitFor();
-  assert.match(await page.locator('#mMachines').textContent(), /this server/);
+  await page.locator('#caWrap .cc[data-node="controller"]').waitFor(); // the head's card beside it
   await page.locator('#addMachine').click();
   const cmds = page.locator('#amBody pre.am-cmd');
   await cmds.nth(1).waitFor();
@@ -119,7 +118,7 @@ test('UI: Add machine shows a command per OS with a fresh code, then the machine
   await page.keyboard.press('Escape');
   assert.equal(await page.locator('#machineModal').isHidden(), true);
   assert.equal(await page.locator('#mxModal').isVisible(), true, 'Escape closes only the wizard');
-  await page.locator('#mMachines li', { hasText: 'mac-mini' }).waitFor();
+  await page.locator('#caWrap .cc', { hasText: 'mac-mini' }).waitFor();
   await ctx.close();
   assert.deepEqual(errors, []);
 });
@@ -257,7 +256,7 @@ test('the controller node opens this server’s details in the node detail: its 
   await page.goto(`${base}/`);
   // The sidebar card opens the Machines view; the diagram's head opens the controller's node detail.
   await page.locator('#miniStats').click();
-  await page.locator('#mxModal:not([hidden]) #caWrap:not([hidden]) .ca-node.head .ca-name').click();
+  await page.locator('#mxModal:not([hidden]) #caWrap:not([hidden]) .cc.head .cc-open').click();
   await page.locator('#nodeModal:not([hidden]) #ndBody #serverDetails').waitFor();
   assert.equal(await page.locator('.modal:not([hidden])').count(), 1, 'one window (the Machines view), no separate Server details');
   assert.match(await page.locator('#ndSub').textContent(), /^This server · the head/);
@@ -271,7 +270,7 @@ test('the controller node opens this server’s details in the node detail: its 
   await page.locator('#mTop tbody tr').first().waitFor();
   // A worker from the diagram: its tiles in the same order and style, then back to this server.
   const vps = (await call('/api/cluster/nodes')).body.nodes.find((n) => n.connected && !n.local);
-  await page.locator(`#caWrap .ca-node[data-node="${vps.id}"] .ca-name`).click();
+  await page.locator(`#caWrap .cc[data-node="${vps.id}"] .cc-open`).click();
   await page.locator('#ndTitle', { hasText: vps.name }).waitFor();
   assert.equal(await page.locator('#ndBody #serverDetails').count(), 0, "this server's details are parked");
   assert.deepEqual(await page.locator('#ndCharts .m-card').evaluateAll((els) => els.map((e) => e.dataset.chart)), ['cpu', 'mem', 'disk', 'net', 'load']);
@@ -280,7 +279,7 @@ test('the controller node opens this server’s details in the node detail: its 
   await page.locator('#ndBack').click();
   await page.locator('#ndBody #serverDetails').waitFor();
   // Clicking the controller node keeps its charts in the node detail.
-  await page.locator('#caWrap .ca-node[data-node="controller"] .ca-name').click();
+  await page.locator('#caWrap .cc[data-node="controller"] .cc-open').click();
   assert.equal(await page.locator('#ndBack').isHidden(), true);
   assert.ok((await charts()).every((d) => d.startsWith('M')), 'the CPU and RAM charts are drawn');
   await page.keyboard.press('Escape');

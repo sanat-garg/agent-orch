@@ -103,7 +103,8 @@ test('a Ping button per worker card and Ping all: a chip group with a red pill p
   await waitFor(async () => (await call('/api/cluster/nodes')).body.nodes.find((n) => n.id === away.node)?.connected === false, { timeout: 10000 });
 
   const [name, value] = cookie.split('=');
-  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  // Under 768px every machine card is listed at once (wider, each sits in its machine's side panel).
+  const ctx = await browser.newContext({ viewport: { width: 760, height: 900 } });
   await ctx.addCookies([{ name, value, url: base }]);
   const page = await ctx.newPage(), errors = [];
   // Server details' own charts can't read load averages on a macOS head (renderMetrics): not this view's concern.

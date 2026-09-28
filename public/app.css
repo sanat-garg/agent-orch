@@ -809,6 +809,46 @@ label.mc-row { cursor: pointer; }
 .ca-mark.bad circle { fill: var(--danger); }
 .ca-mark path { fill: none; stroke: var(--panel); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 @media (prefers-reduced-motion: reduce) { .ca-plate, .ca-gauge, .ca-drain, .ca-moon, .ca-cd { transition: none; } }
+/* machine cards beside the diagram's machines (app.js caCard, from 768px): name, CPU/RAM, every running task */
+.ca-wrap { position: relative; }
+.ca-wrap.cards { border: 0; border-radius: 0; background: none; overflow: visible; }
+.ca-cards { position: absolute; left: 0; top: 0; width: 100%; pointer-events: none; }
+.cc { position: absolute; box-sizing: border-box; pointer-events: auto; display: flex; flex-direction: column; gap: 6px; padding: 7px 8px 6px; border: 1px solid var(--border);
+  border-radius: 11px; background: var(--panel); box-shadow: 0 1px 3px rgba(0,0,0,.08); font-size: 12px; color: var(--muted); }
+.cc.moves { transition: left .35s ease, top .35s ease; }
+.cc.head { border-color: var(--border-strong); }
+.cc.away .cc-meters, .cc.away .cc-tasks { opacity: .6; }
+.cc-head { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.cc-open { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; margin: -3px -4px; padding: 3px 4px; border: 0; border-radius: 6px; background: none;
+  color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.cc-open:hover, .cc-gear:hover, .cc-task:hover { background: var(--raised); }
+.cc-open .dot { width: 7px; height: 7px; }
+.cc-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
+.cc-st { flex: none; font-size: 11px; color: var(--muted); }
+.cc-build { flex: none; margin-left: auto; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.cc-build.outdated { color: var(--warn); font-weight: 600; }
+.cc-gear { flex: none; width: 24px; height: 24px; display: grid; place-items: center; margin: -3px -3px -3px 0; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--muted); cursor: pointer; }
+.cc-gear svg { width: 15px; height: 15px; }
+.cc-gear:hover { color: var(--text); }
+.cc-meters { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.cc-m { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: 11px; font-variant-numeric: tabular-nums; }
+.cc-m .k { color: var(--faint); font-weight: 600; }
+.cc-m .v { flex: none; min-width: 27px; text-align: right; color: var(--text); }
+.cc-bar { flex: 1; min-width: 16px; height: 4px; border-radius: 2px; background: var(--accent-soft); overflow: hidden; }
+.cc-bar b { display: block; height: 100%; border-radius: 2px; background: var(--accent); transition: width .6s ease; }
+.cc-bar.warn b { background: var(--warn); }
+.cc-bar.crit b { background: var(--danger); }
+.cc-tasks { display: flex; flex-direction: column; max-height: 178px; margin: 0 -4px; overflow-y: auto; overscroll-behavior: contain; } /* about 8 rows, then it scrolls */
+.cc-grp { padding: 3px 4px 1px; font-size: 10.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
+.cc-task { flex: none; display: flex; align-items: center; gap: 6px; height: 22px; padding: 0 4px; border: 0; border-radius: 5px; background: none; color: var(--text);
+  font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.cc-t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cc-task .e { flex: none; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.cc-task .e.wait { color: var(--warn); }
+.cc-idle { margin: 0; padding: 0 4px 2px; }
+.cc .as-btn { align-self: flex-start; height: 24px; min-height: 0; padding: 0 9px; font-size: 11.5px; }
+.cc :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+@media (prefers-reduced-motion: reduce) { .cc.moves, .cc-bar b { transition: none; } }
 /* a machine's detail (tap it in the diagram): the Machines view's side panel (.mx-side) */
 .nd-back { margin-left: -8px; }
 .sd-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 12px; }

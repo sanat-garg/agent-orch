@@ -69,7 +69,7 @@ async function open(ctxOpts) {
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto(`${base}/`);
   await page.locator('#machinesBtn').dispatchEvent('click'); // the Machines view; the sidebar is off-canvas on a phone
-  await page.locator('#mMachines li').first().waitFor();
+  await page.locator('#mxModal :is(#mMachines li, #caWrap .cc)').first().waitFor(); // a phone's card list, else the diagram's cards
   return { ctx, page, errors };
 }
 

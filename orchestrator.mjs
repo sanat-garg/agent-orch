@@ -4255,12 +4255,12 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // shows too), the work slots they hold and its slot count (the controller: slotCount plus its reserved slots, split in
   // `head`; a worker: nodeCap).
   function machines(nodes) {
-    const rows = qa(`SELECT t.id, t.project_id, p.name AS project, t.kind, t.title, t.agent, t.model, t.ran_agent, t.ran_model, t.started_at, t.node_id
+    const rows = qa(`SELECT t.id, t.project_id, p.name AS project, t.kind, t.integrates, t.title, t.agent, t.model, t.ran_agent, t.ran_model, t.started_at, t.node_id
       FROM tasks t LEFT JOIN projects p ON p.id=t.project_id WHERE t.status='running' ORDER BY t.started_at, t.id`);
     return nodes.map((n) => {
       const tasks = rows.filter((t) => (t.node_id || LOCAL_NODE) === n.id).map((t) => {
         const agent = t.ran_agent || t.agent || 'claude';
-        return { id: t.id, project_id: t.project_id, project: t.project, kind: t.kind, title: t.title, agent,
+        return { id: t.id, project_id: t.project_id, project: t.project, kind: t.kind, integrates: t.integrates || null, title: t.title, agent,
           model: t.ran_model || t.model || delegator.defaultModel(agent) || null, started_at: t.started_at, waiting_for: running.get(t.id)?.waiting || null,
           phase: running.get(t.id)?.phase || null }; // a remote job's current phase (job.phase)
       });

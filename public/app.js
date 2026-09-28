@@ -3649,6 +3649,7 @@ function buildMetrics() {
 // Swaps a number with a quick blur: the old value blurs out, the new one sharpens in.
 // Only runs when the shown text actually changes.
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+const CA_WIDE = matchMedia('(min-width: 768px)'); // the Machines view's cards beside the diagram's machines (phones: a list)
 function tween(node, value, fmt, force) {
   if (!node) return;
   node._cur = value;
@@ -4140,6 +4141,18 @@ function renderMachines() {
   caSync(MC.nodes);
   if (ND.id) ndRender();
   mxLanesRender();
+  mcRender();
+}
+// Where the full machine cards live (#mMachines): on a phone all of them under the diagram; from 768px only the open
+// machine's, in its side panel's Machine section (its settings, health, ping, agents, updates), else parked.
+function mcHome() {
+  const ul = $('mMachines'), wide = CA_WIDE.matches, sec = ND.els?.machine;
+  if (sec) sec.hidden = !wide;
+  const to = !wide ? $('mxMain') : ND.id && sec ? sec : $('sdStash');
+  if (ul.parentNode !== to) to.append(ul);
+}
+function mcRender() {
+  mcHome();
   // A menu in use (a finish sound, the add-a-sound URL) isn't replaced under the owner's finger: the render waits until it loses focus.
   if (document.activeElement?.matches?.('#mMachines select, #mMachines .snd-add input')) { MC.stale = true; return; }
   MC.stale = false;
@@ -4155,7 +4168,7 @@ function renderMachines() {
   // Live re-renders keep keyboard focus on the same control of the same card.
   const f = document.activeElement, card = f?.closest?.('#mMachines .mc-node'), key = (b) => b.dataset.act || b.dataset.task || b.textContent;
   const was = card && f.matches('button, summary, input') && [card.dataset.node, key(f)];
-  $('mMachines').replaceChildren(...nodes.map(machineCard));
+  $('mMachines').replaceChildren(...(CA_WIDE.matches ? nodes.filter((n) => n.id === ND.id) : nodes).map(machineCard));
   if (was) [...$('mMachines').querySelectorAll(`.mc-node[data-node="${CSS.escape(was[0])}"] :is(button, summary, input)`)].find((b) => key(b) === was[1])?.focus({ preventScroll: true });
 }
 // A labelled meter: 'CPU  4 cores · load 1.20' over a bar (warn ≥ 75%, crit ≥ 90%).
@@ -4171,8 +4184,9 @@ function mcMeter(label, parts, pct) {
   }
   return m;
 }
+// From 768px it shows only in the machine's side panel, whose charts and Running here stand in for its meters and tasks.
 function machineCard(n) {
-  const li = el('li', 'm-card mc-node'), st = nodeState(n), inv = n.inventory || {}, res = n.resources || {};
+  const li = el('li', 'm-card mc-node'), st = nodeState(n), inv = n.inventory || {}, res = n.resources || {}, brief = CA_WIDE.matches;
   li.dataset.node = n.id;
   if (!n.connected || !n.enabled) li.classList.add('away');
   const top = el('div', 'mc-top'), icon = el('span', 'mc-os'), id = el('div', 'mc-id'), name = el('span', 'mc-name', n.name);
@@ -4190,13 +4204,13 @@ function machineCard(n) {
   li.append(top);
 
   const load = res.load?.[0];
-  if (inv.cores) li.append(mcMeter('CPU', [{ b: String(inv.cores) }, ` ${inv.cores === 1 ? 'core' : 'cores'}`, ...(load != null ? [' · load ', { b: load.toFixed(2) }] : [])],
+  if (inv.cores && !brief) li.append(mcMeter('CPU', [{ b: String(inv.cores) }, ` ${inv.cores === 1 ? 'core' : 'cores'}`, ...(load != null ? [' · load ', { b: load.toFixed(2) }] : [])],
     load != null ? (load / inv.cores) * 100 : null));
-  if (inv.mem && res.memAvailable != null) {
+  if (inv.mem && res.memAvailable != null && !brief) {
     const used = Math.max(0, inv.mem - res.memAvailable);
     li.append(mcMeter('RAM', [{ b: fmtGB(used) }, ' used · ', { b: fmtGB(res.memAvailable) }, ` free of ${fmtGB(inv.mem)}`], (used / inv.mem) * 100));
   }
-  if (res.disk?.total) {
+  if (res.disk?.total && !brief) {
     const used = Math.max(0, res.disk.total - res.disk.free);
     li.append(mcMeter('Disk', [{ b: fmtGB(res.disk.free) }, ` free of ${fmtGB(res.disk.total)}`], (used / res.disk.total) * 100));
   }
@@ -4216,6 +4230,11 @@ function machineCard(n) {
   }
   if (!signed.length) ag.append(el('span', 'mc-idle', inv.agents ? 'No agents signed in' : 'Agents not reported yet'));
   li.append(ag);
+  if (brief) {
+    if (canUpdate(n)) li.append(updateButton(n));
+    li.append(machineSettings(n));
+    return li;
+  }
 
   // Running tasks (plan tasks too, though they hold no work slot); tap one for its drawer. This server splits its slots:
   // 'Integrating 2 · Work 1/4' (the reserved ones for integrators and reflection, then its work slots in use).
@@ -4866,7 +4885,7 @@ async function patchNode(n, body) {
   loadMachines();
 }
 
-// ----- cluster diagram (the Machines view, above the cards) -----
+// ----- cluster diagram (the Machines view; its machine cards on wider screens) -----
 // One SVG drawn by one requestAnimationFrame loop: the head (this server) in the middle and the workers around it (a
 // vertical list under 640px), each with CPU (outer) and RAM (inner) ring gauges, its OS icon and its running tasks as
 // chips. It moves on data the page already gets: a worker's newer reading (resources.at, sent every heartbeat) pulses it
@@ -4876,6 +4895,10 @@ async function patchNode(n, body) {
 // chip. Offline machines turn grey with a dashed link, asleep Macs wear a moon and draining ones an amber ring. The loop
 // runs only while something moves, the Machines view is open, the diagram in view and the page visible (at most 60 fps),
 // and never reads layout; with reduced motion every change is a static swap. Colours are theme variables (app.css .ca-*).
+// From 768px (CA_WIDE) each machine wears a small HTML card beside its node instead of labels and chips (caCard): name,
+// status and build, CPU/RAM, then every task running there (the head's split into Integrating and Work). A card sits
+// outward from the head and is nudged until it clears the other cards, the machines and the links (caPlace*); chips
+// still travel the links and fade into the card. Phones keep the labels, the chips and the card list under the diagram.
 const SVGNS = 'http://www.w3.org/2000/svg';
 const sv = (tag, attrs, parent) => {
   const n = document.createElementNS(SVGNS, tag);
@@ -4890,7 +4913,9 @@ const CA_TONE = { running: 'run', checking: 'check', committing: 'check', finish
 // nodes: id → view (its group, place, link); chips: task id → chip; anims: what moves now; seen: node id → its newest
 // reading's time; status: task id → its last pushed status; emit: node id → particle throttle; ready: the first
 // snapshot since the Machines view opened is drawn (later changes animate).
-const CA = { wrap: null, svg: null, g: {}, w: 0, h: 0, list: false, key: '', head: null, nodes: new Map(), chips: new Map(), anims: new Set(),
+const CC_W = 220, CC_GAP = 12; // a machine card's width and its distance from its machine
+CA_WIDE.addEventListener('change', () => { if (mxOpen()) renderMachines(); }); // cards ↔ the phone's list
+const CA = { wrap: null, svg: null, layer: null, cards: false, g: {}, w: 0, h: 0, list: false, key: '', head: null, nodes: new Map(), chips: new Map(), anims: new Set(),
   seen: new Map(), status: new Map(), emit: new Map(), raf: 0, last: 0, ready: false, inView: true, asked: 0, mark: null, markPath: null, markAnim: null, markTimer: 0 };
 
 function caBuild() {
@@ -4902,6 +4927,15 @@ function caBuild() {
   CA.mark = sv('g', { class: 'ca-mark', opacity: 0 }, CA.g.marks);
   sv('circle', { r: 10 }, CA.mark);
   CA.markPath = sv('path', {}, CA.mark);
+  CA.layer = el('div', 'ca-cards');
+  CA.wrap.append(CA.layer);
+  CA.layer.addEventListener('click', (e) => {
+    const row = e.target.closest('.cc-task'), card = e.target.closest('.cc');
+    if (row) return openTask(Number(row.dataset.task));
+    if (!card || !e.target.closest('.cc-open, .cc-gear')) return;
+    openNode(card.dataset.node);
+    if (e.target.closest('.cc-gear')) ND.els?.machine?.scrollIntoView({ block: 'start' }); // its settings
+  });
   new ResizeObserver(([e]) => {
     const w = Math.round(e.contentRect.width);
     if (w && w !== CA.w) { CA.w = w; caLayout(); }
@@ -4919,7 +4953,7 @@ function caBuild() {
 }
 function caClear() {
   caFlush();
-  for (const v of CA.nodes.values()) { v.g.remove(); v.link?.remove(); v.glow?.remove(); }
+  for (const v of CA.nodes.values()) { v.g.remove(); v.link?.remove(); v.glow?.remove(); v.card?.remove(); }
   for (const c of CA.chips.values()) c.g.remove();
   CA.nodes.clear(); CA.chips.clear(); CA.seen.clear();
   CA.key = ''; CA.head = null; CA.ready = false;
@@ -4928,19 +4962,22 @@ function caClear() {
 function caSync(nodes) {
   if (!mxOpen()) return; // drawn only while the Machines view is open; the next open starts fresh
   const head = nodes.find((n) => n.local);
-  if (!head || !nodes.some((n) => !n.local)) { if (CA.wrap) { CA.wrap.hidden = true; caClear(); } return; } // alone: just its card
+  // Alone on a phone: just its card in the list. Wider, the head's card beside its node.
+  if (!head || (!nodes.some((n) => !n.local) && !CA_WIDE.matches)) { if (CA.wrap) { CA.wrap.hidden = true; caClear(); } return; }
   caBuild();
   CA.wrap.hidden = false;
+  if (CA.cards !== CA_WIDE.matches) { caClear(); CA.cards = CA_WIDE.matches; CA.wrap.classList.toggle('cards', CA.cards); }
   if (!CA.w) CA.w = Math.round(CA.wrap.clientWidth); // until the ResizeObserver's first report
   const ids = new Set(nodes.map((n) => n.id));
-  for (const [id, v] of CA.nodes) if (!ids.has(id)) { v.g.remove(); v.link?.remove(); v.glow?.remove(); CA.nodes.delete(id); CA.seen.delete(id); }
+  for (const [id, v] of CA.nodes) if (!ids.has(id)) { v.g.remove(); v.link?.remove(); v.glow?.remove(); v.card?.remove(); CA.nodes.delete(id); CA.seen.delete(id); }
   for (const n of nodes) {
     const v = CA.nodes.get(n.id) || caNode(n);
     v.n = n;
     CA.nodes.set(n.id, v);
+    if (CA.cards) caCard(v);
   }
   CA.head = CA.nodes.get(head.id);
-  if (`${CA.w}|${[...ids].join(',')}` !== CA.key) caLayout();
+  if (CA.cards || `${CA.w}|${[...ids].join(',')}` !== CA.key) caLayout(); // a card's height follows its tasks
   else for (const v of CA.nodes.values()) caPaint(v);
   // Heartbeats: a worker's newer reading (not on the first look).
   for (const n of nodes) {
@@ -4989,8 +5026,9 @@ function caLayout() {
   const W = CA.w, all = [...CA.nodes.values()], head = CA.head, workers = all.filter((v) => v !== head);
   if (!W || !head) return;
   CA.key = `${W}|${all.map((v) => v.n.id).join(',')}`;
-  CA.list = W < 640;
-  if (CA.list) {
+  CA.list = W < (CA.cards ? 820 : 640);
+  if (CA.cards) caCardLayout(W, head, workers);
+  else if (CA.list) {
     let y = 6;
     for (const v of [head, ...workers]) {
       const h = v === head ? 84 : 76;
@@ -5018,6 +5056,7 @@ function caLayout() {
   }
   CA.svg.setAttribute('viewBox', `0 0 ${W} ${CA.h}`);
   CA.svg.setAttribute('height', CA.h);
+  if (CA.cards) CA.layer.style.height = `${CA.h}px`;
   for (const v of all) {
     caShape(v);
     caPaint(v);
@@ -5029,6 +5068,138 @@ function caLayout() {
   }
   caSeats(false); // resting chips move to their new seats at once; travelling ones land there
 }
+// The card layout's places. Narrow (< 820px): a list, the head on top, each card right of its machine and each row as
+// tall as its card. Wider: caLayout's ellipse, each card outward from the head (beside a machine to the left or right,
+// growing away from the head's row; above or below one near the top or bottom; the head's toward its widest gap),
+// nudged further out until it clears the cards placed before it, every machine and every link. An ellipse too wide
+// for the view shrinks and tries again.
+function caCardLayout(W, head, workers) {
+  const all = [head, ...workers], size = (v, w) => { v.card.style.width = `${w}px`; v.cw = w; v.ch = v.card.offsetHeight; };
+  if (CA.list) {
+    let y = 8;
+    for (const v of all) {
+      const r = v === head ? 26 : 22, cx = 70 + r + 14;
+      size(v, Math.max(150, Math.min(CC_W, W - cx - 8)));
+      Object.assign(v, { r, side: 'right', x: 70, y: y + r + 6, cl: cx, ct: y + 4 });
+      y += Math.max(2 * r + 18, v.ch + 14);
+    }
+    CA.h = y + 4;
+    for (const v of workers) v.poly = caPoly(caElbow(v, head, 28));
+  } else {
+    for (const v of all) size(v, CC_W);
+    const n = workers.length;
+    let rx = Math.max(140, Math.min(W / 2 - CC_W - 26 - CC_GAP - 12, n <= 1 ? 250 : 170 + 45 * n)), box;
+    for (let tries = 0; tries < 8; tries++) {
+      const ry = Math.max(100, Math.min(170, rx * 0.5)), angles = [];
+      Object.assign(head, { r: 34, x: 0, y: 0 });
+      workers.forEach((v, i) => {
+        const a = n === 1 ? 0 : -Math.PI / 2 + (2 * Math.PI / n) * (i + (n % 2 ? 0 : 0.5)), c = Math.cos(a), s = Math.sin(a);
+        angles.push(a);
+        Object.assign(v, { r: 26, x: rx * c, y: ry * s, side: c > 0.3 ? 'right' : c < -0.3 ? 'left' : s < 0 ? 'above' : 'below', up: s < -0.05 });
+      });
+      // The head's card: below, right, left or above, whichever is furthest from every link.
+      const gap = (a) => Math.min(Infinity, ...angles.map((b) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)))));
+      head.side = [['below', Math.PI / 2], ['right', 0], ['left', Math.PI], ['above', -Math.PI / 2]].reduce((best, s) => (gap(s[1]) > gap(best[1]) + 0.01 ? s : best))[0];
+      head.up = head.side === 'above';
+      const placed = [];
+      for (const v of all) placed.push(caCardSpot(v, placed, all, head));
+      box = [Infinity, -Infinity, Infinity, -Infinity];
+      for (const v of all) for (const [l, r, t, b] of [[v.x - v.r - 8, v.x + v.r + 8, v.y - v.r - 8, v.y + v.r + 8], [v.cl, v.cl + v.cw, v.ct, v.ct + v.ch]]) {
+        box = [Math.min(box[0], l), Math.max(box[1], r), Math.min(box[2], t), Math.max(box[3], b)];
+      }
+      if (box[1] - box[0] <= W - 16 || rx <= 140) break;
+      rx = Math.max(140, rx - (box[1] - box[0] - W + 16) / 2 - 4);
+    }
+    const dx = Math.round(W / 2 - (box[0] + box[1]) / 2), dy = Math.round(12 - box[2]);
+    for (const v of all) { v.x += dx; v.y += dy; v.cl += dx; v.ct += dy; }
+    CA.h = Math.round(box[3] - box[2] + 24);
+    for (const v of workers) v.poly = caPoly([[v.x, v.y], [head.x, head.y]]);
+  }
+  for (const v of all) {
+    Object.assign(v.card.style, { left: `${Math.round(v.cl)}px`, top: `${Math.round(v.ct)}px` });
+    v.placed = true;
+    v.seat = [Math.max(v.cl, Math.min(v.cl + v.cw, v.x)), Math.max(v.ct, Math.min(v.ct + v.ch, v.y))];
+  }
+}
+// One card's spot beside its machine, pushed 6px at a time away from the head's row until it overlaps no card placed
+// before it (8px apart), no machine and no link. Returns its box [left, right, top, bottom].
+function caCardSpot(v, placed, all, head) {
+  const { x, y, r, cw, ch } = v, s = v.side;
+  v.cl = s === 'right' ? x + r + CC_GAP : s === 'left' ? x - r - CC_GAP - cw : x - cw / 2;
+  v.ct = s === 'above' ? y - r - CC_GAP - ch : s === 'below' ? y + r + CC_GAP : v.up ? y + 16 - ch : y - 16;
+  const dir = v.up ? -1 : 1, hits = (l, t) => {
+    const rr = l + cw, bb = t + ch;
+    if (placed.some(([a, b, c, d]) => l < b + 8 && rr > a - 8 && t < d + 8 && bb > c - 8)) return true;
+    if (all.some((u) => Math.hypot(u.x - Math.max(l, Math.min(rr, u.x)), u.y - Math.max(t, Math.min(bb, u.y))) < u.r + 6)) return true;
+    return all.some((u) => {
+      if (u === head) return false;
+      const len = Math.hypot(head.x - u.x, head.y - u.y), k = Math.ceil(len / 4);
+      for (let i = 0; i <= k; i++) {
+        const px = u.x + ((head.x - u.x) * i) / k, py = u.y + ((head.y - u.y) * i) / k;
+        if (px > l - 4 && px < rr + 4 && py > t - 4 && py < bb + 4) return true;
+      }
+      return false;
+    });
+  };
+  for (let i = 0; i < 120 && hits(v.cl, v.ct); i++) v.ct += 6 * dir;
+  return [v.cl, v.cl + cw, v.ct, v.ct + ch];
+}
+// Integrators and reflection take the head's reserved slots: its card lists them under Integrating.
+const caIntegrating = (t) => !!t.integrates || (t.kind !== 'work' && t.kind !== 'plan');
+// A machine's card: its header (status dot, name, build; it opens the machine's detail, as does the gear, where its
+// settings live), CPU and RAM, then every task running there as a row ('#412 Files ops · Claude' and how long it has
+// run; a click opens its drawer), the head's under Integrating and Work. Past about 8 rows the list scrolls. Rebuilt on
+// every snapshot, keeping focus and the list's scroll.
+function caCard(v) {
+  const n = v.n, st = nodeState(n), card = (v.card ||= el('div', 'cc'));
+  if (card.parentNode !== CA.layer) CA.layer.append(card);
+  card.dataset.node = n.id;
+  card.className = `cc${n.local ? ' head' : ''}${!n.connected || !n.enabled ? ' away' : ''}${v.placed ? ' moves' : ''}`; // placed once: later moves glide
+  const a = document.activeElement, focus = card.contains(a) ? a.dataset.task || a.dataset.act || a.className : null, scroll = card.querySelector('.cc-tasks')?.scrollTop || 0;
+  const top = el('div', 'cc-head'), open = el('button', 'cc-open'), gear = el('button', 'cc-gear'), ver = fmtVersion(n.build);
+  open.type = gear.type = 'button';
+  const dot = el('span', `dot ${st.dot}`);
+  dot.title = st.label;
+  open.append(dot, el('span', 'cc-name', n.name));
+  if (st.label !== 'Online') open.append(el('span', 'cc-st', st.label));
+  const old = !n.local && (n.behind > 0 || (n.behind == null && n.build && VER.running?.build && n.build < VER.running.build)); // as machineCard's tag
+  if (ver) {
+    const b = open.appendChild(el('span', old ? 'cc-build outdated' : 'cc-build', ver));
+    if (old) b.title = n.behind > 0 ? `Outdated: ${plural(n.behind, 'commit')} behind` : 'Outdated';
+  }
+  open.setAttribute('aria-label', `${n.name}${n.local ? ' (this server, the head)' : ''}: ${st.label}${ver ? `, ${ver}${old ? ', outdated' : ''}` : ''}. Show details`);
+  gear.innerHTML = GEAR_ICON;
+  gear.setAttribute('aria-label', `${n.name} settings`);
+  gear.title = 'Settings and details';
+  top.append(open, gear);
+  const meters = el('div', 'cc-meters');
+  for (const [k, pct] of [['CPU', caCpu(n)], ['RAM', caRam(n)]]) {
+    const m = el('span', 'cc-m'), bar = el('i', `cc-bar${pct >= 90 ? ' crit' : pct >= 75 ? ' warn' : ''}`), fill = el('b');
+    fill.style.width = `${pct == null ? 0 : Math.max(2, Math.min(100, pct))}%`;
+    bar.append(fill);
+    m.append(el('span', 'k', k), bar, el('span', 'v', pct == null ? '–' : `${Math.round(pct)}%`));
+    meters.append(m);
+  }
+  const list = el('div', 'cc-tasks'), tasks = n.tasks || [], hd = n.head;
+  if (hd) {
+    const integ = tasks.filter(caIntegrating), work = tasks.filter((t) => !caIntegrating(t));
+    list.append(el('div', 'cc-grp', `Integrating ${integ.length}/${hd.reserved}`), ...integ.map(ccRow), el('div', 'cc-grp', `Work ${hd.workUsed}/${hd.work}`), ...work.map(ccRow));
+  } else if (tasks.length) list.append(...tasks.map(ccRow));
+  else list.append(el('p', 'cc-idle', n.connected && n.enabled && !n.draining ? 'Idle' : 'Nothing running'));
+  card.replaceChildren(top, meters, list, renderAssignButton(n)); // the owner's rule: every machine card keeps Assign task
+  list.scrollTop = scroll;
+  if (focus) [...card.querySelectorAll('button')].find((b) => (b.dataset.task || b.dataset.act || b.className) === focus)?.focus({ preventScroll: true });
+}
+function ccRow(t) {
+  const b = el('button', 'cc-task'), wait = !!t.waiting_for, e = el('span', wait ? 'e wait' : 'e', wait ? 'waiting' : fmtDur(Date.now() / 1000 - t.started_at));
+  b.type = 'button';
+  b.dataset.task = t.id;
+  if (!wait) e.dataset.started = t.started_at;
+  b.append(el('span', 'cc-t', `#${t.id} ${displayTitle(t)} · ${shortLabel(t.agent)}`), e);
+  b.title = [`#${t.id} ${displayTitle(t)}`, t.project, `${shortLabel(t.agent)} · ${modelName(t.agent, t.model)}`,
+    t.phase && t.phase !== 'running' ? PHASE_DOING[t.phase] : '', wait ? `waiting for ${t.waiting_for}` : ''].filter(Boolean).join(' · ');
+  return b;
+}
 // A machine's extent around its centre [left, right, top, bottom]: glyph, labels, two chip seats and a '+N'.
 function caBox(v) {
   const r = v.r, w = CA_CHIP + 40, low = 33 + CA_ROW + 11;
@@ -5039,6 +5210,7 @@ function caBox(v) {
 }
 // Seat k of a machine's chips, in drawing coordinates (the list layout has one per row).
 function caSeat(v, k) {
+  if (CA.cards) return v.seat || [v.x, v.y]; // the card's edge nearest its machine
   const r = v.r, w = CA_CHIP / 2;
   const [dx, dy] = CA.list ? [r + 12 + w, 25] : v.side === 'right' ? [r + 10 + w, 33 + CA_ROW * k] : v.side === 'left' ? [-(r + 10 + w), 33 + CA_ROW * k]
     : v.side === 'above' ? [0, -r - 48 - CA_ROW * k] : [0, r + 51 + CA_ROW * k];
@@ -5085,9 +5257,9 @@ function caPaint(v) {
     for (const [a, val] of [['width', s], ['height', s], ['x', -s / 2], ['y', -s / 2]]) i.setAttribute(a, val);
     v.icon.dataset.k = k;
   }
-  v.name.textContent = n.name.length > 20 ? `${n.name.slice(0, 19)}…` : n.name;
+  v.name.textContent = CA.cards ? '' : n.name.length > 20 ? `${n.name.slice(0, 19)}…` : n.name; // a card says it all
   const pct = [cpu != null && `CPU ${Math.round(cpu)}%`, ram != null && `RAM ${Math.round(ram)}%`].filter(Boolean).join(' · ');
-  v.sub.textContent = n.local ? ['Head', pct].filter(Boolean).join(' · ') : !n.enabled ? 'Disabled'
+  v.sub.textContent = CA.cards ? '' : n.local ? ['Head', pct].filter(Boolean).join(' · ') : !n.enabled ? 'Disabled'
     : !n.connected ? `${st.label} · ${n.lastSeen ? `seen ${relTime(n.lastSeen)}` : 'never connected'}` : st.label === 'Online' ? pct || 'Online' : [st.label, pct].filter(Boolean).join(' · ');
   const tasks = n.tasks?.length || 0;
   const label = `${n.name}${n.local ? ' (this server, the head)' : ''}: ${st.label}${pct ? `, ${pct}` : ''}, ${tasks ? `${plural(tasks, 'task')} running` : 'nothing running'}. Show details`;
@@ -5265,11 +5437,11 @@ function caChips(nodes) {
 }
 // Each machine's chips, oldest first, take its seats (two; one in the list layout); the rest fold into '+N'.
 function caSeats(animate) {
-  const rows = CA.list ? 1 : 2;
+  const rows = CA.cards ? 0 : CA.list ? 1 : 2; // a card lists them all: its chips only travel
   for (const v of CA.nodes.values()) {
     const mine = [...CA.chips.values()].filter((c) => c.node === v.n.id && !c.leaving).sort((a, b) => (a.t.started_at || 0) - (b.t.started_at || 0) || a.id - b.id);
-    mine.forEach((c, k) => { c.slot = Math.min(k, rows - 1); c.hidden = k >= rows; });
-    const over = mine.length - rows;
+    mine.forEach((c, k) => { c.slot = Math.max(0, Math.min(k, rows - 1)); c.hidden = k >= rows; });
+    const over = CA.cards ? 0 : mine.length - rows;
     v.more.textContent = over > 0 ? `+${over}` : '';
     if (over > 0) {
       const [x, y] = caSeat(v, rows - 1), left = !CA.list && v.side === 'left';
@@ -5288,7 +5460,7 @@ function caGo(c, animate) {
     // Dispatched: packed at the head, along the link, unpacking onto its seat.
     c.fresh = false;
     if (moving) return caTravel(c, [[head.x, head.y], ...(v === head ? [] : [...caRoute(v, true), [v.x, v.y]]), [sx, sy]],
-      (u) => ({ e: u < 0.78 ? 0 : caEase((u - 0.78) / 0.22), s: 0.6 + 0.4 * Math.min(1, u / 0.15), o: Math.min(1, u / 0.1) * (o || Math.max(0, 1 - (u - 0.85) / 0.15)) }));
+      (u) => ({ e: u < 0.78 ? 0 : caEase((u - 0.78) / 0.22), s: 0.6 + 0.4 * Math.min(1, u / 0.15), o: Math.min(1, u / 0.1) * (o || Math.max(0, Math.min(1, 1 - (u - 0.85) / 0.15))) })); // hidden at rest: it fades out as it lands
   } else if (c.from != null) {
     // Moved to another machine: home through the head, then out again.
     const from = CA.nodes.get(c.from);
@@ -5331,7 +5503,7 @@ function caLeave(c) {
   };
   if (!CA.ready || !head) { caStop(c.motion); c.g.remove(); CA.chips.delete(c.id); return; }
   caTravel(c, [[c.x, c.y], ...(v && v !== head ? [[v.x, v.y], ...caRoute(v, false)] : []), [head.x, head.y]],
-    (u, e0) => ({ e: e0 * Math.max(0, 1 - u / 0.2), s: u > 0.82 ? 1 - (0.65 * (u - 0.82)) / 0.18 : 1, o: (c.hidden ? 0.001 : 1) * (u > 0.86 ? (1 - u) / 0.14 : 1) }), 0, home);
+    (u, e0) => ({ e: e0 * Math.max(0, 1 - u / 0.2), s: u > 0.82 ? 1 - (0.65 * (u - 0.82)) / 0.18 : 1, o: (c.hidden && !CA.cards ? 0.001 : 1) * (u > 0.86 ? (1 - u) / 0.14 : 1) }), 0, home);
 }
 function caMerged(kind) {
   const head = CA.head;
@@ -5488,6 +5660,7 @@ function openNode(id) {
   $('nodeModal').hidden = false;
   ndBuild();
   ndRender();
+  mcRender();
   ndMetrics();
   $('ndBody').scrollTop = 0;
   (back ? $('ndBack') : $('nodeModal').querySelector('[data-close].icon-btn')).focus();
@@ -5506,6 +5679,7 @@ function closeNode(all) {
   $('nodeModal').hidden = true;
   parkServerDetails();
   ND.id = ND.back = null;
+  if (CA_WIDE.matches) mcRender(); // its machine card goes back to the stash
   ND.lastFocus?.focus?.({ preventScroll: true });
 }
 $('nodeModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeNode(true); });
@@ -5520,10 +5694,12 @@ document.addEventListener('keydown', (e) => {
   else closeMachines();
 }, true);
 function ndBuild() {
-  const n = ndNode(), body = $('ndBody'), run = section('Running here'), log = section('Log');
+  const n = ndNode(), body = $('ndBody'), run = section('Running here'), log = section('Log'), machine = section('Machine');
   run.id = 'ndRun';
   log.id = 'ndLog';
-  ND.els = { run, log };
+  machine.id = 'ndMachine';
+  $('sdStash').append($('mMachines')); // out of the old body; mcHome puts it into this one's Machine section
+  ND.els = { run, log, machine };
   $('ndBack').hidden = !ND.back;
   if (n.local) {
     // This server: its details (charts, then Running here in its slot, top processes), then the log.
@@ -5531,8 +5707,9 @@ function ndBuild() {
     for (const c of [...body.children]) if (c.id !== 'serverDetails') c.remove();
     $('sdRun').replaceChildren(run);
     renderServerDetails(body);
-    body.append(log);
+    body.append(machine, log);
     ndLogRender();
+    mcHome();
     return;
   }
   parkServerDetails();
@@ -5572,8 +5749,9 @@ function ndBuild() {
     });
   });
   ND.els.charts = grid;
-  body.replaceChildren(row, grid, run, log);
+  body.replaceChildren(row, grid, run, machine, log);
   ndLogRender();
+  mcHome();
 }
 function ndRender() {
   const n = ndNode();
@@ -5731,7 +5909,7 @@ async function ndLogs() {
 // Live times while the Machines view is open: elapsed per task (cards, lanes, the detail) and the running step of each timeline.
 setInterval(() => {
   if (!mxOpen()) return;
-  for (const n of document.querySelectorAll('#mxModal .mc-task .e[data-started]')) n.textContent = fmtDur(Date.now() / 1000 - Number(n.dataset.started));
+  for (const n of document.querySelectorAll('#mxModal :is(.mc-task, .cc-task) .e[data-started]')) n.textContent = fmtDur(Date.now() / 1000 - Number(n.dataset.started));
   for (const n of document.querySelectorAll('#ndBody .tl-bar i[data-since]')) n.style.flexGrow = String(Math.max(1, Date.now() - Number(n.dataset.since)));
   for (const n of document.querySelectorAll('#ndBody .tl-steps [data-since]')) n.textContent = `${fmtDur((Date.now() - Number(n.dataset.since)) / 1000)}…`;
 }, 1000);

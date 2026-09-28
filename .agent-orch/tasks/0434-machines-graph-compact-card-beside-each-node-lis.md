@@ -14,3 +14,7 @@ On desktop/laptop (Mac) screens, the Machines usage window (the full-screen view
 ## Done when
 
 `node --test test/ui-machines-graph-cards*.test.mjs` passes (anchored non-overlapping cards, all running tasks listed without '+N', task row opens drawer), and `! grep -nE "\+\$\{[^}]*\} more" public/app.js` for the machine task list
+
+## Result — done (check passed) (2026-09-28 17:52)
+
+AGENT-ORCH-STATUS: done — Wide Machines view: compact cards beside each node, every running task listed

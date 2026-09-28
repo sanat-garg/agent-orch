@@ -208,8 +208,8 @@ test('UI: the card rotates head → workers without dots, keeps its size, holds 
   // The click opens the full-screen Machines view (every machine), not build-vps's detail.
   await page.locator('#miniStats').click();
   await page.locator('#mxModal:not([hidden])').waitFor();
-  await page.locator('#mMachines .mc-node').nth(4).waitFor({ timeout: 10000 });
-  assert.equal(await page.locator('#mMachines .mc-node').count(), NODES.length, 'every machine listed');
+  await page.locator('#caWrap .cc').nth(4).waitFor({ timeout: 10000 });
+  assert.equal(await page.locator('#caWrap .cc').count(), NODES.length, 'every machine on the diagram, each with its card');
   assert.equal(await page.locator('#nodeModal').isHidden(), true, 'no single machine opened');
   await page.keyboard.press('Escape');
   await page.locator('#mxModal').waitFor({ state: 'hidden' });

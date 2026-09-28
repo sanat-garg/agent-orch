@@ -1467,3 +1467,6 @@ merge resolved; placement, stall, rapid and machines tests pass
 ## 2026-09-28 17:34 — #423 CLUSTER.md docs: Scheduling and Local cap describe the real head-capacity and placement rules [done (check passed)]
 
 CLUSTER.md Scheduling and head's-ceiling now match current placement code
+## 2026-09-28 17:52 — #434 Machines graph: compact card beside each node, listing every running task [done (check passed)]
+
+Wide Machines view: compact cards beside each node, every running task listed

@@ -9,7 +9,7 @@ import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 
 export const SOCKET = 'agent-orch-login';
-export const LOGIN_TIMEOUT = 3 * 60_000;
+export const LOGIN_TIMEOUT = 10 * 60_000; // opening the link, approving and pasting a code back takes a while
 export const LOGIN_PROMPT_TIMEOUT = 10_000;
 const EXIT_RE = /__AO_EXIT:(\d+)/;
 
@@ -111,15 +111,16 @@ export const onPath = (bin, env = process.env) => String(env.PATH || '').split('
 });
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 export const tmuxRunnerFor = (socket) => (args) => new Promise((resolve) => {
-  execFile('tmux', ['-L', socket, ...args], { timeout: 5000 }, (err, out) => resolve({ ok: !err, out: String(out || '') }));
+  execFile('tmux', ['-L', socket, ...args], { timeout: 5000 }, (err, out, stderr) => resolve({ ok: !err, out: String(out || ''), err: String(stderr || err?.message || '').trim() }));
 });
 export const tmuxRunner = tmuxRunnerFor(SOCKET);
 // The sign-in socket for a server instance. Each instance clears its own socket at boot (orphans of a previous run:
-// createConnections), and the socket is per user, not per instance: a test server (its own data dir) booting on the
-// live server's socket ended the owner's sign-in in progress ("the sign-in session ended unexpectedly"). So the live
-// server (the default data dir) keeps SOCKET and any other data dir gets its own, stable across its restarts.
+// createConnections), and a tmux socket is per user, not per instance: a test server (its own data dir) booting on the
+// live server's socket ended the owner's sign-in in progress ("the sign-in session ended unexpectedly"). So every data
+// dir has its own socket, stable across its restarts. The live server's isn't plain SOCKET either: older checkouts on
+// the same machine (task worktrees, other sessions' worktrees) still clear SOCKET when their test servers boot.
 export function loginSocketFor(dataDir, liveDataDir) {
-  if (path.resolve(dataDir) === path.resolve(liveDataDir)) return SOCKET;
+  if (path.resolve(dataDir) === path.resolve(liveDataDir)) return `${SOCKET}-live`;
   return `${SOCKET}-${crypto.createHash('sha256').update(path.resolve(dataDir)).digest('hex').slice(0, 10)}`;
 }
 
@@ -174,7 +175,7 @@ export function ptyRunner({ platform = process.platform, script = 'script' } = {
 // row fields while signed in. health({installed, signedIn, account}):
 // the row's `health` (health.mjs healthRow). onChange(list) fires on every state change (the server broadcasts it).
 // tmux/pollMs/timeoutMs are injectable for tests.
-export function createConnections({ entries, env = process.env, onChange = () => {}, tmux = tmuxRunner, pollMs = 1000, timeoutMs = LOGIN_TIMEOUT, promptTimeoutMs = LOGIN_PROMPT_TIMEOUT }) {
+export function createConnections({ entries, env = process.env, onChange = () => {}, tmux = tmuxRunner, pollMs = 1000, timeoutMs = LOGIN_TIMEOUT, promptTimeoutMs = LOGIN_PROMPT_TIMEOUT, log = () => {} }) {
   const byId = new Map(entries.map((e) => [e.id, e]));
   const logins = new Map(); // id -> {state, url, code, needsPastedCode, error, startedAt, timer, answered}
   const session = (id) => `login-${id}`;
@@ -200,6 +201,7 @@ export function createConnections({ entries, env = process.env, onChange = () =>
   // Acts only on login `l` while it is still the current one, so an orphaned timer can't end a newer login.
   async function finish(id, state, error = null, l = logins.get(id)) {
     if (!l || logins.get(id) !== l || l.state !== 'waiting') return;
+    log(`${id}: sign-in ${state}${error ? `: ${error}` : ''} after ${Math.round((Date.now() - l.startedAt) / 1000)} s`);
     clearInterval(l.timer);
     clearTimeout(l.deadline);
     Object.assign(l, { state, error });
@@ -215,7 +217,12 @@ export function createConnections({ entries, env = process.env, onChange = () =>
     try {
       const r = await tmux(['capture-pane', '-p', '-J', '-S', '-200', '-t', `=${session(id)}:`]);
       if (logins.get(id) !== l || l.state !== 'waiting') return;
-      if (!r.ok) return finish(id, 'failed', 'the sign-in session ended unexpectedly', l);
+      if (!r.ok) {
+        const has = await tmux(['has-session', '-t', `=${session(id)}`]);
+        log(`${id}: capture-pane failed (${r.err || 'no detail'}); the session ${has.ok ? 'still exists' : `is gone (${has.err || 'no detail'})`}`);
+        if (has.ok) return; // a passing hiccup: the next poll tries again
+        return finish(id, 'failed', 'the sign-in session ended unexpectedly', l);
+      }
       const p = parsePane(l.spec, r.out);
       for (const i of p.prompts) {
         if (l.answered.has(i)) continue;
@@ -263,7 +270,8 @@ export function createConnections({ entries, env = process.env, onChange = () =>
     }
     if (!r.ok) { logins.delete(id); return { status: 500, error: 'could not start tmux' }; }
     l.timer = setInterval(() => poll(id, l).catch(() => {}), pollMs);
-    l.deadline = setTimeout(() => finish(id, 'failed', 'timed out after 10 minutes', l), timeoutMs);
+    l.deadline = setTimeout(() => finish(id, 'failed', `timed out after ${Math.round(timeoutMs / 60_000)} minutes`, l), timeoutMs);
+    log(`${id}: sign-in started (${session(id)})`);
     changed();
     poll(id, l).catch(() => {});
     return { status: 200, login: view(l) };

@@ -261,7 +261,8 @@ test('sign-in sessions run 1000 columns wide, so a long OAuth URL fits on one li
 // its tmux socket at boot, and test servers booting on the same machine used the live server's socket.
 test('each server instance signs in on its own tmux socket; one booting never ends another\'s sign-in', async () => {
   const { loginSocketFor, tmuxRunnerFor, SOCKET } = await import('../connections.mjs');
-  assert.equal(loginSocketFor('/srv/agent-orch/data', '/srv/agent-orch/data/'), SOCKET, 'the live server keeps its socket');
+  // The live server's socket is not plain SOCKET, which older checkouts' test servers still clear at boot.
+  assert.equal(loginSocketFor('/srv/agent-orch/data', '/srv/agent-orch/data/'), `${SOCKET}-live`);
   const a = loginSocketFor('/tmp/cw-test-a', '/srv/agent-orch/data'), b = loginSocketFor('/tmp/cw-test-b', '/srv/agent-orch/data');
   assert.notEqual(a, SOCKET);
   assert.notEqual(a, b);
@@ -287,4 +288,25 @@ test('each server instance signs in on its own tmux socket; one booting never en
   } finally {
     for (const s of [live, other]) spawnSync('tmux', ['-L', s, 'kill-server']);
   }
+});
+
+test('a read of the sign-in session that fails while the session still exists is a hiccup, not the end', async () => {
+  let reads = 0, has = true;
+  const logs = [];
+  const tmux = async (args) => {
+    if (args[0] === 'capture-pane') return ++reads === 1 ? { ok: false, out: '', err: 'timed out' } : { ok: true, out: 'https://example.test/x\n' };
+    if (args[0] === 'has-session') return { ok: has, out: '', err: has ? '' : "can't find session" };
+    return { ok: true, out: '' };
+  };
+  const c = createConnections({ tmux, pollMs: 10, log: (m) => logs.push(m), entries: [{ id: 'x', label: 'X', installed: () => true, signedIn: () => false, spec: { start: ['x'], url: /(https:\/\/\S+)/ } }] });
+  await c.start('x');
+  await new Promise((r) => setTimeout(r, 120));
+  assert.equal(c.list()[0].login.state, 'waiting', 'still waiting after one failed read');
+  assert.equal(c.list()[0].login.url, 'https://example.test/x');
+  assert.ok(logs.some((m) => /capture-pane failed \(timed out\); the session still exists/.test(m)), logs.join('\n'));
+  has = false; reads = 0; // now the session is really gone
+  await new Promise((r) => setTimeout(r, 120));
+  assert.equal(c.list()[0].login.state, 'failed');
+  assert.equal(c.list()[0].login.error, 'the sign-in session ended unexpectedly');
+  assert.ok(logs.some((m) => /is gone \(can't find session\)/.test(m)) && logs.some((m) => /x: sign-in failed/.test(m)), logs.join('\n'));
 });

@@ -717,6 +717,7 @@ let agentShare = null;
 const connections = createConnections({
   // Its own tmux socket: a test server on this machine must never clear the live server's sign-in in progress.
   tmux: tmuxRunnerFor(loginSocketFor(DATA, path.join(ROOT, 'data'))),
+  log: (m) => console.log(`[connections] ${m}`),
   entries: [
     agentEntry(AGENTS.claude, { spec: SPECS.claude, account: () => AGENTS.claude.account() }),
     { id: 'claude-machines', label: 'Claude for your machines', installed: () => !!agentShare && AGENTS.claude.available(),

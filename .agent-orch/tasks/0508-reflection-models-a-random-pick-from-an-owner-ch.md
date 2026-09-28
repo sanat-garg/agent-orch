@@ -13,3 +13,7 @@ Change how reflection tasks choose their model (orchestrator.mjs reflection spaw
 ## Done when
 
 `node --test test/reflect-pool*.test.mjs` passes (random pick, limited excluded, retry on a different model, exhausted waits, fallbacks ignored, migration), and Settings shows Reflection models
+
+## Result — done (check passed) (2026-09-28 19:16)
+
+AGENT-ORCH-STATUS: done — reflections use random pool models; Settings shows Reflection models

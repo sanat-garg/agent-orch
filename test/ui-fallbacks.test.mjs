@@ -1,7 +1,6 @@
 // The fallback sheet in a real browser: boots server.mjs (stub codex CLI with a wide catalog, CW_NO_ORCHESTRATOR=1, temp data dir) on a
 // spare port. Chat: the composer's model pill opens it, and remove, undo, reorder (Alt+↑ and drag) and add each
-// persist through PUT /api/convos/:id/fallbacks. Reflection: the Settings sheet opens the same sheet at once, without
-// any request, and saves via PUT /api/orch/projects/:id/reflect-settings. Skips when Playwright's Chromium can't launch.
+// persist through PUT /api/convos/:id/fallbacks. Reflection models (Settings) save via PUT /api/orch/projects/:id/reflect-settings. Skips when Playwright's Chromium can't launch.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -168,7 +167,8 @@ test('chat fallbacks: the picker has no Auto Delegate; the sheet removes, undoes
   await ctx.close();
 });
 
-test('reflection fallbacks: the sidebar Settings sheet opens the same fallback sheet instantly, without any request, and saves for this project', { skip, timeout: 90000 }, async () => {
+// #508: Reflection models replace the reflection model + fallbacks: checkboxes grouped by agent, saved as the pool.
+test('reflection models: Settings shows a multi-select grouped by agent, saves the pool and keeps at least one', { skip, timeout: 90000 }, async () => {
   const [name, value] = cookie.split('=');
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
   await ctx.addCookies([{ name, value, url: base }]);
@@ -176,34 +176,28 @@ test('reflection fallbacks: the sidebar Settings sheet opens the same fallback s
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   const seed = await fetch(base + `/api/orch/projects/${pid}/reflect-settings`, { method: 'PUT', headers: { cookie, 'content-type': 'application/json' },
-    body: JSON.stringify({ fallbacks: [{ agent: 'codex', model: 'gpt-6-astra' }] }) });
+    body: JSON.stringify({ pool: [{ agent: 'codex', model: 'gpt-6-astra' }] }) });
   assert.equal(seed.status, 200); await seed.json();
+  const empty = await fetch(base + `/api/orch/projects/${pid}/reflect-settings`, { method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: '{"pool":[]}' });
+  assert.equal(empty.status, 400); await empty.json();
   await page.goto(`${base}/#${CID}`);
   await page.waitForLoadState('networkidle');
-  await page.locator('#settingsBtn').click();
-  await page.waitForFunction(() => ((document.querySelector('#stReflectBtn')?.getAttribute('aria-label') || '').match(/^Fallbacks: /) ? document.querySelector('#stReflectBtn').getAttribute('aria-label').split(', then ').length : 0) === 1);
-  const requests = [];
-  page.on('request', (r) => requests.push(r.url()));
-  // Rendered in the same task as the click: no fetch, no loading state.
-  const shown = await page.evaluate(() => {
-    document.querySelector('#stReflectBtn').click();
-    return { open: !document.querySelector('#fbModal').hidden, title: document.querySelector('#fbTitle').textContent,
-      rows: [...document.querySelectorAll('#fbModal .fe-row .fe-model')].map((e) => e.textContent) };
-  });
-  assert.equal(shown.open, true);
-  assert.match(shown.title, /^If .+ hits its limit$/);
-  assert.deepEqual(shown.rows, ['GPT-6-Astra']);
-  await page.waitForTimeout(300);
-  assert.deepEqual(requests, [], 'opening the reflection sheet fetches nothing');
-
-  await page.locator('#fbModal .fe-add-btn').click();
-  await page.locator('#fbModal .fe-search').fill('sol');
-  await page.locator('#fbModal .fe-opt', { hasText: 'GPT-6-Sol' }).click();
-  const stored = () => JSON.parse(db.prepare('SELECT reflect_fallbacks FROM projects WHERE id=?').get(pid)?.reflect_fallbacks || '[]');
+  await page.evaluate(() => openSettings());
+  const box = page.locator('#stReflectPool');
+  await page.waitForFunction(() => document.querySelectorAll('#stReflectPool input:checked').length === 1);
+  assert.match(await page.locator('#stPoolHint').innerText(), /^Each reflection runs on a random model from this list, so you get different views\./);
+  assert.ok((await box.locator('.st-pool-agent').allInnerTexts()).length >= 1);
+  const stored = () => JSON.parse(db.prepare('SELECT reflect_pool FROM projects WHERE id=?').get(pid)?.reflect_pool || '[]');
+  await box.locator('label', { hasText: 'GPT-6-Sol' }).locator('input').check();
   for (let i = 0; i < 50 && stored().length < 2; i++) await new Promise((r) => setTimeout(r, 100));
   assert.deepEqual(stored(), [{ agent: 'codex', model: 'gpt-6-astra' }, { agent: 'codex', model: 'gpt-6-sol' }]);
-  assert.ok(requests.some((u) => u.endsWith(`/api/orch/projects/${pid}/reflect-settings`)));
-  assert.equal(await page.locator('#stReflectBtn .fb-name').count(), 2);
+  await box.locator('label', { hasText: 'GPT-6-Astra' }).locator('input').uncheck();
+  for (let i = 0; i < 50 && stored().length > 1; i++) await new Promise((r) => setTimeout(r, 100));
+  assert.deepEqual(stored(), [{ agent: 'codex', model: 'gpt-6-sol' }]);
+  // The last one can't be unchecked.
+  await box.locator('label', { hasText: 'GPT-6-Sol' }).locator('input').click();
+  assert.equal(await box.locator('label', { hasText: 'GPT-6-Sol' }).locator('input').isChecked(), true);
+  assert.deepEqual(stored(), [{ agent: 'codex', model: 'gpt-6-sol' }]);
   assert.deepEqual(errors, []);
   await ctx.close();
 });
@@ -315,9 +309,9 @@ test('reflection direction: typed or picked from presets in Settings → This pr
   await ctx.close();
 });
 
-// The bug: the chat was switched to Fable but the reflection fallback sheet still said Opus, because the project's
-// default model only followed the chat on the next message and the sheet used the work route, not the reflection model.
-test('fallback sheets name the model they back up: the chat\'s new model at once, and the reflection model for reflection', { skip, timeout: 90000 }, async () => {
+// The bug: the chat was switched to Fable but the sheets still said Opus, because the project's default model only
+// followed the chat on the next message.
+test('fallback sheets name the model they back up: the chat\'s new model at once, and reflection defaults to it', { skip, timeout: 90000 }, async () => {
   const [name, value] = cookie.split('=');
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
   await ctx.addCookies([{ name, value, url: base }]);
@@ -336,18 +330,9 @@ test('fallback sheets name the model they back up: the chat\'s new model at once
     assert.equal(db.prepare('SELECT model FROM projects WHERE id=?').get(pid).model, 'claude-fable-5-1');
     await page.waitForFunction(() => O.project?.reflect_route?.model === 'claude-fable-5-1');
     await page.waitForFunction((id) => O.tasks.get(id)?.runs_model === 'claude-fable-5-1', queued);
+    // With no Reflection models set, the pool is the chat's model (#508).
     await page.evaluate(() => openSettings());
-    assert.match(await page.locator('#stReflectBtn').getAttribute('title'), /^If claude-fable-5-1 hits its limit, reflection tasks/);
-    assert.equal(await page.locator('#stReflectModel option').first().innerText(), 'Default');
-    await page.locator('#stReflectBtn').click();
-    assert.equal(await page.locator('#fbTitle').innerText(), 'If claude-fable-5-1 hits its limit');
-    await page.keyboard.press('Escape');
-    // Its own model in Settings wins over the chat's.
-    await page.locator('#stReflectModel').selectOption({ label: 'GPT-6-Sol' });
-    await page.waitForFunction(() => /^If GPT-6-Sol hits its limit/.test(document.querySelector('#stReflectBtn').title));
-    await page.locator('#stReflectBtn').click();
-    assert.equal(await page.locator('#fbTitle').innerText(), 'If GPT-6-Sol hits its limit');
-    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => [...document.querySelectorAll('#stReflectPool input:checked')].map((c) => c.value).join() === 'claude\nclaude-fable-5-1');
     await page.keyboard.press('Escape');
     // The chat's own sheet and a queued task's sheet name the chat's new model too.
     assert.match(await page.locator('#modelChip').getAttribute('title'), /^Model claude-fable-5-1, then /);

@@ -53,6 +53,8 @@ const CFG = {
   memCheckMs: 5000,             // memory guard interval while tasks run
   memLowPauseSec: 30,           // MemAvailable under MEM.pauseBelow this long → pause the newest running task
   maxAttempts: 3,               // non-limit failures before a task is marked failed
+  random: Math.random,          // the reflection pool's pick (tests pass a seeded RNG)
+  reflectWaitSec: 600,          // an exhausted reflection pool with no known reset waits this long
   startRetries: 5,              // failures after a claim but before the run began, retried without an attempt
   startRetrySec: 30,            // ...this long after each
   maxContinuations: 4,          // times a worker may say "not finished yet"
@@ -391,6 +393,22 @@ export function rapidAgentsLimited(agents, windowsFor, at = now()) {
   return agents.length > 0 && agents.every((agent) => windowsFor(agent).some((w) =>
     ['five_hour', '5h'].includes(w.window) && w.pct != null && Number(w.pct) >= 90 &&
     (w.resetsAt == null || w.resetsAt > at)));
+}
+
+// Reflection pool (#508). The one-time migration: the retired reflection model, then its fallbacks, without repeats
+// (null = none: the chat's model). A model-less Claude choice meant the chat's model.
+export function migrateReflectPool(p) {
+  const first = p.reflect_agent && (p.reflect_model || (p.reflect_agent === 'claude' ? p.model : null));
+  const all = [...(first ? [{ agent: p.reflect_agent, model: first }] : []), ...(parseFallbacks(p.reflect_fallbacks) || [])];
+  const pool = all.filter((x, i) => all.findIndex((y) => y.agent === x.agent && y.model === x.model) === i);
+  return pool.length ? pool : null;
+}
+// Each reflection run takes a uniformly random pool entry among those not tried this round and usable now (its agent
+// signed in, its limit group not blocked). pick null = none: `left` untried entries remain (all unusable now).
+export function pickReflectModel(pool, { usable = () => true, tried = [], random = Math.random } = {}) {
+  const key = (x) => `${x.agent}/${x.model}`, seen = new Set(tried.map(key));
+  const left = pool.filter((x) => !seen.has(key(x))), ok = left.filter((x) => usable(x.agent, x.model));
+  return { pick: ok.length ? ok[Math.min(ok.length - 1, Math.floor(random() * ok.length))] : null, left: left.length, usable: ok.length };
 }
 
 export function reflectPrompt(project, rows, journalTail, overage, limits, reason, failures, outcomes, environment, rapid = null) {
@@ -1046,6 +1064,17 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       if (g.agent) db.prepare('UPDATE projects SET reflect_agent=?, reflect_model=? WHERE reflect_agent IS NULL').run(g.agent, g.model || null);
       if (Array.isArray(g.fallbacks)) db.prepare('UPDATE projects SET reflect_fallbacks=?').run(JSON.stringify(g.fallbacks));
       db.exec("DELETE FROM kv WHERE key='reflect_settings'");
+    }
+  }
+  // projects.reflect_pool (#508): JSON [{agent, model}], the models a reflection picks from at random (NULL = the chat's
+  // model). Created once from the retired reflect_agent/reflect_model + reflect_fallbacks. tasks.reflect_pick: JSON
+  // {agent, model, of, tried: [{agent, model, outcome}], waiting?, until?}, a reflect task's pick and this round's misses.
+  if (!db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === 'reflect_pick')) db.exec('ALTER TABLE tasks ADD COLUMN reflect_pick TEXT');
+  if (!db.prepare('PRAGMA table_info(projects)').all().some((c) => c.name === 'reflect_pool')) {
+    db.exec('ALTER TABLE projects ADD COLUMN reflect_pool TEXT');
+    for (const p of db.prepare('SELECT id, model, reflect_agent, reflect_model, reflect_fallbacks FROM projects').all()) {
+      const pool = migrateReflectPool(p);
+      if (pool) db.prepare('UPDATE projects SET reflect_pool=? WHERE id=?').run(JSON.stringify(pool), p.id);
     }
   }
   // Parallel tasks: the old controller setting of 1 or 2 slots is dropped (the default applies; 3-16 is today's setting,
@@ -1770,10 +1799,12 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       if (!isBrowserTask(r) && !projectReady(getProject(r.project_id)?.path)) return note(r, 'its project has no git repo yet'), false;
       return true;
     });
-    for (const r of rows) guarded(r, () => { if (waitsForLimit(r)) delegate(r); });
+    // A reflection takes a random model from its project's pool instead (owner fallbacks never apply to it).
+    for (const r of rows) guarded(r, () => { if (r.kind === 'reflect') reflectPick(r); else if (waitsForLimit(r)) delegate(r); });
     rows = rows.map((r) => getTask(r.id)).filter(Boolean);
     const ready = rows.filter((r) => {
       if (!waitsForLimit(r)) return true;
+      if (r.kind === 'reflect') return note(r, reflectWaitNote(r)), false;
       const route = guarded(r, () => routeNow(r, getProject(r.project_id)));
       if (route) note(r, `${limitName(route.agent, route.model)} is at its usage limit`);
       return false;
@@ -2319,6 +2350,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // A task waits only while the limit scope it would run on is at its limit (routeFor never falls back onto a blocked
   // Claude). A plan task also waits while its (non-Claude) agent's sign-in recently failed.
   const waitsForLimit = (task, project) => {
+    if (task.kind === 'reflect') return !reflectPicked(task);
     const { agent: a, model } = routeNow(task, project || getProject(task.project_id));
     return !!blockedUntilFor(a, model) || (task.kind === 'plan' && a !== 'claude' && kvTime(`agent_auth_failed:${a}`) > now());
   };
@@ -2344,7 +2376,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
   const delegateTried = new Map(); // task id -> last attempt (s): a task with no usable fallback is rechecked once a minute
   function delegate(task) {
-    if (!['work', 'reflect'].includes(task.kind || 'work') || !parseFallbacks(task.fallbacks)?.length || now() - (delegateTried.get(task.id) || 0) < 60) return false;
+    if ((task.kind || 'work') !== 'work' || !parseFallbacks(task.fallbacks)?.length || now() - (delegateTried.get(task.id) || 0) < 60) return false;
     delegateTried.set(task.id, now());
     const from = intendedRoute(task, getProject(task.project_id));
     const top = delegator.nextModel(task, from);
@@ -2363,6 +2395,60 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   const addMove = (task, m) => JSON.stringify([...(parseJsonList(task.moves)), { at: now(), ...m }]);
   const parseJsonList = (v) => { try { const a = JSON.parse(v || '[]'); return Array.isArray(a) ? a : []; } catch { return []; } };
   const labelOf = (agent, model) => (modelCatalog(agent).models || []).find((m) => m.id === model)?.label || model || agent;
+  // ---- reflection pool (#508): a reflect task runs on a random model from its project's pool (projects.reflect_pool,
+  // else the chat's model) whose agent is signed in here (reflection stays on the head) and not at its limit. A
+  // model-side failure retries on one it hasn't tried this round (tasks.reflect_pick.tried); a round with none left
+  // waits for the earliest reset. Owner fallbacks never apply to it; the work it queues routes as usual.
+  function reflectPool(p) {
+    const list = parseFallbacks(p?.reflect_pool);
+    if (list?.length) return list;
+    const agent = agentForModel(p?.model) || 'claude';
+    return [{ agent, model: p?.model || delegator.defaultModel(agent) }];
+  }
+  const reflectUsable = (agent, model) => localAgentOk(agent) && !blockedUntilFor(agent, model);
+  const pickState = (task) => { try { const s = JSON.parse(task.reflect_pick || 'null'); return s && typeof s === 'object' ? s : {}; } catch { return {}; } };
+  const reflectLabel = (s) => `${labelOf(s.agent, s.model)} (random from ${s.of})`;
+  // Its current pick, when that is still usable.
+  function reflectPicked(task) {
+    const s = pickState(task);
+    return s.agent && task.agent === s.agent && (task.model || null) === (s.model || null) && reflectUsable(s.agent, s.model) ? s : null;
+  }
+  function reflectPick(task) {
+    if (reflectPicked(task)) return true;
+    const s = pickState(task), pool = reflectPool(getProject(task.project_id)), tried = Array.isArray(s.tried) ? s.tried : [];
+    const { pick } = pickReflectModel(pool, { usable: reflectUsable, tried, random: CFG.random });
+    if (!pick) return false;
+    const next = { agent: pick.agent, model: pick.model, of: pool.length, tried };
+    updateTask(task.id, { agent: pick.agent, model: pick.model, session_id: null, reflect_pick: JSON.stringify(next) });
+    logEvent(`Reflection on ${reflectLabel(next)}`, { projectId: task.project_id, taskId: task.id });
+    return true;
+  }
+  // Why a reflection waits (the queue's stall note and its task).
+  function reflectWaitNote(task) {
+    const s = pickState(task), pool = reflectPool(getProject(task.project_id));
+    return s.waiting || `all ${pool.length} reflection model${pool.length === 1 ? ' is' : 's are'} at a limit or signed out; it waits for the earliest reset`;
+  }
+  // A reflection run that failed for a model-side reason (a limit, sign-in, the model unavailable, a crash before its
+  // verdict): the next untried usable pool model, else this round is over and it waits for the earliest reset. A round
+  // where some model really failed (not just limits or sign-in) costs an attempt.
+  async function reflectRetry(task, project, outcome, detail) {
+    const s = pickState(task), pool = reflectPool(project);
+    const was = { agent: s.agent || task.ran_agent || 'claude', model: s.agent ? s.model : task.ran_model || null };
+    const tried = [...(Array.isArray(s.tried) ? s.tried : []), { ...was, outcome }];
+    const { pick } = pickReflectModel(pool, { usable: reflectUsable, tried, random: CFG.random });
+    const why = `[${outcome}] ${String(detail || '').trim()}`.slice(0, 2000);
+    if (pick) {
+      requeueIfRunning(task.id, { agent: null, model: null, session_id: null, not_before: 0, last_error: why, reflect_pick: JSON.stringify({ of: pool.length, tried }) });
+      return logEvent(`reflection #${task.id} on ${labelOf(was.agent, was.model)} ended (${outcome}); retrying on another pool model`, { level: 'warn', projectId: project.id, taskId: task.id });
+    }
+    const attempts = task.attempts + (tried.every((x) => ['rate_limited', 'auth_error'].includes(x.outcome)) ? 0 : 1);
+    if (attempts >= CFG.maxAttempts) return fail(task, project, outcome, `Every reflection model failed: ${tried.map((x) => `${labelOf(x.agent, x.model)} (${x.outcome})`).join(', ')}. ${why}`.slice(0, 2000));
+    const resets = pool.map((x) => blockedUntilFor(x.agent, x.model) || (kvTime(`agent_auth_failed:${x.agent}`) > now() ? kvTime(`agent_auth_failed:${x.agent}`) : 0)).filter((u) => u > now());
+    const until = resets.length ? Math.min(...resets) : now() + CFG.reflectWaitSec;
+    const waiting = `Tried all ${pool.length} reflection model${pool.length === 1 ? '' : 's'} (${tried.map((x) => `${labelOf(x.agent, x.model)}: ${x.outcome}`).join(', ')}); waiting for the earliest reset`;
+    requeueIfRunning(task.id, { agent: null, model: null, session_id: null, attempts, not_before: until, last_error: `[${outcome}] ${waiting}`, reflect_pick: JSON.stringify({ of: pool.length, tried: [], waiting, until }) });
+    logEvent(`⏸ reflection #${task.id}: ${waiting} (${fmtAt(until)})`, { level: 'warn', projectId: project.id, taskId: task.id });
+  }
   // Manual delegation (the task drawer's "Delegate…" sheet). The owner is choosing, so the fallback list doesn't apply;
   // every model of a connected agent is listed with its status, available ones first.
   function agentUsage(agent, model) {
@@ -2939,15 +3025,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // Every project's hot files (stateView; the Queue modal shows the open project's in its Running header).
   const hotFilesAll = () => qa("SELECT DISTINCT project_id FROM tasks WHERE status='running' AND kind='work'").flatMap((r) => hotFiles(r.project_id).map((h) => ({ project_id: r.project_id, ...h })));
   function rapidLimitReason(p) {
-    const primary = intendedRoute({ kind: 'reflect', title: 'Reflect: what else should be done?', prompt: '', ...reflectFor(p) }, p);
-    const fallbacks = reflectFallbacksFor(p);
-    const agents = [...new Set(fallbacks?.length ? fallbacks.map((f) => f.agent) : [primary.agent])];
+    const agents = [...new Set(reflectPool(p).map((f) => f.agent))];
     const limited = rapidAgentsLimited(agents, (agent) => {
       const reported = agent === 'claude' ? (getLimits() || []).filter((w) => w.limit_type === 'five_hour') : [];
       return reported.length ? reported.map((w) => ({ window: w.limit_type, pct: w.utilization == null ? null : w.utilization * 100, resetsAt: w.resets_at }))
         : usageLog.current?.(agent) || [];
     });
-    return limited ? `Rapid top-up paused for ${p.name}: ${fallbacks?.length ? 'all fallback agents are' : 'the reflection agent is'} at or above 90% of the 5 h window.` : null;
+    return limited ? `Rapid top-up paused for ${p.name}: ${agents.length > 1 ? 'all reflection agents are' : 'the reflection agent is'} at or above 90% of the 5 h window.` : null;
   }
   function rapidStatus() {
     if (!parallelSettings().rapidDevelopment) return null;
@@ -2987,9 +3071,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       // Nothing to improve until the owner has said what the project is and some work has landed.
       if (!q1("SELECT 1 AS x FROM tasks WHERE project_id=:p AND kind='work' AND status='done' LIMIT 1", { p: p.id })) continue;
       run('UPDATE projects SET next_reflect_at=:u WHERE id=:id', { u: t + (rapid ? 180 : 120), id: p.id });
-      const rs = reflectFor(p);
-      const id = addTask(p.id, { title: 'Reflect: what else should be done?', prompt: '(reflection)', kind: 'reflect', source: 'reflection', agent: rs.agent, model: rs.model,
-        fallbacks: reflectFallbacksFor(p) });
+      const id = addTask(p.id, { title: 'Reflect: what else should be done?', prompt: '(reflection)', kind: 'reflect', source: 'reflection' }); // its model: reflectPick
       if (p.convo_id) emitChat(p.convo_id, { t: 'reflect', taskId: id, text: p.reflect_direction ? `${REFLECT_ASK} Direction: ${p.reflect_direction}` : REFLECT_ASK });
       logEvent(`${rapid ? `${rapid.ready} ready for ${rapid.workers.free} open slots: planning ${rapid.requested} more` : 'queue empty → reflecting'} (task #${id})`, { projectId: p.id, taskId: id });
       added = true;
@@ -3079,6 +3161,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         return;
       }
       logEvent(`#${task.id} crashed: ${e?.message || e}`, { level: 'error', projectId: project.id, taskId: task.id });
+      if (task.kind === 'reflect' && getTask(task.id)?.status === 'running') return await reflectRetry(getTask(task.id), project, 'crash', String(e?.message || e));
       const attempts = task.attempts + 1;
       if (attempts >= CFG.maxAttempts) await fail(getTask(task.id), project, 'crash', String(e?.message || e));
       else requeueIfRunning(task.id, { attempts, not_before: now() + Math.min(300 * 2 ** (attempts - 1), 3600), last_error: `[crash] ${e?.message || e}`.slice(0, 2000) });
@@ -3129,7 +3212,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       const oc = q1(`SELECT SUM(status='done') AS done, SUM(status='failed') AS failed FROM tasks WHERE project_id=:p AND source='reflection' AND kind='work' AND finished_at>=:s`,
         { p: project.id, s: now() - 7 * 86400 }) || {};
       body = reflectPrompt(project, qa('SELECT * FROM tasks WHERE project_id=:p ORDER BY id DESC LIMIT 50', { p: project.id }).map((r) => ({ ...r, deps: depsOf(r.id) })), recentJournal(project.path), contextOverage(project.path),
-        limitsRows(), decision().reason, failures, { done: oc.done || 0, failed: oc.failed || 0 }, `${ENVIRONMENT}\nOwner fallback list (used when a model hits its limit): ${JSON.stringify(reflectFallbacksFor(project) || [])}`, parallelSettings().rapidDevelopment ? rapidQueue(project) : null);
+        limitsRows(), decision().reason, failures, { done: oc.done || 0, failed: oc.failed || 0 }, `${ENVIRONMENT}\nOwner fallback list (used when a model hits its limit): ${JSON.stringify(workFallbacksFor(project) || [])}`, parallelSettings().rapidDevelopment ? rapidQueue(project) : null);
       system = REFLECT_SYSTEM;
       tools = [...PLANNER_TOOLS, ...CFG.safeTools.filter((t) => t.startsWith('Bash('))];
       autonomous = false;
@@ -3146,7 +3229,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const prompt = resume && !reused && !isBrowserTask(task) ? resumePrompt(task) : body;
     const effort = taskEffort(task, project, route);
     const { runId, logPath } = startRun(task.id, task.kind, route.agent, LOCAL_NODE, effort);
-    updateTask(task.id, { ran_agent: route.agent, ran_model: route.model || null, route_note: routeNote(route), node_id: LOCAL_NODE });
+    const pick = task.kind === 'reflect' ? reflectPicked(task) : null; // recorded on the task: 'Reflection on X (random from N)'
+    updateTask(task.id, { ran_agent: route.agent, ran_model: route.model || null, route_note: pick ? `Reflection on ${reflectLabel(pick)}` : routeNote(route), node_id: LOCAL_NODE });
     if (running.has(task.id)) running.get(task.id).agent = route.agent;
     pushState(); // Publish the actual route once fallback/model resolution has finished.
     const r = running.get(task.id);
@@ -3592,6 +3676,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       if (task.kind === 'plan') return updateTask(tid, { status: 'done', finished_at: now(), result: (res.text || '').slice(0, 4000) });
       return finishWork(task, project, res, signal);
     }
+    // A reflection that ended for any other reason than a stop moves on through its pool (reflectRetry).
+    const reflectMiss = task.kind === 'reflect' && res.outcome !== 'aborted' && !stopIntents.has(tid);
+    if (reflectMiss && res.outcome !== 'auth_error') return reflectRetry(task, project, res.outcome, res.text || res.stderr || res.outcome);
     if (res.outcome === 'rate_limited') {
       requeueIfRunning(tid, { session_id: res.sessionId || task.session_id });
       if (ran !== 'claude') return logEvent(`#${tid} hit the ${limitName(ran, ranModel)} usage limit; ${task.kind === 'plan' ? `resumes ${fmtAt(blockedUntilFor(ran, ranModel) || now())}` : 'retrying on Claude'}`, { level: 'warn', projectId: pid, taskId: tid });
@@ -3599,17 +3686,19 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       return logEvent(`⏸ #${tid} hit the Claude ${res.limitType || 'usage'} limit; resumes ${u ? fmtAt(u) : 'soon'}`, { level: 'warn', projectId: pid, taskId: tid });
     }
     if (res.outcome === 'auth_error' && ran !== 'claude') {
-      requeueIfRunning(tid);
+      if (!reflectMiss) requeueIfRunning(tid);
       kvSet(`agent_auth_failed:${ran}`, now() + 600);
       pushState();
+      if (reflectMiss) return reflectRetry(task, project, res.outcome, res.text || res.stderr || res.outcome);
       return logEvent(`${agentName(ran)} is not signed in; its tasks run on Claude for 10 min`, { level: 'error', projectId: pid, taskId: tid });
     }
     if (res.outcome === 'auth_error') {
-      requeueIfRunning(tid);
+      if (!reflectMiss) requeueIfRunning(tid);
       kvSet('blocked_until', now() + 600);
       kvSet('blocked_known', 0);
       kvSet('blocked_reason', 'Claude Code is not signed in');
       pushState();
+      if (reflectMiss) return reflectRetry(task, project, res.outcome, res.text || res.stderr || res.outcome);
       return logEvent('Claude Code is not authenticated; rechecking every 10 min', { level: 'error', projectId: pid, taskId: tid });
     }
     if (res.outcome === 'aborted' && res.lost) {
@@ -3827,7 +3916,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   async function finishReflection(task, project, res) {
     const [clean, payload] = extractTasks(res.text);
-    // The project's curated reflection fallbacks are snapshotted, so a later edit doesn't change what's already queued.
+    // Its work routes like the chat's: it snapshots the chat's fallbacks, so a later edit doesn't change what's queued.
     const fresh = getProject(project.id);
     if (!fresh.perpetual) { // switched off while it ran: nothing it proposes is queued
       const n = payload?.tasks?.length || 0;
@@ -3837,7 +3926,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       if (project.convo_id && convoExists(project.convo_id)) emitChat(project.convo_id, { t: 'notice', text: note });
       return logEvent(`reflection #${task.id}: ${note}`, { projectId: project.id, taskId: task.id });
     }
-    const ids = queuePayload(fresh, payload, 'reflection', { fallbacks: reflectFallbacksFor(fresh) });
+    const ids = queuePayload(fresh, payload, 'reflection', { fallbacks: workFallbacksFor(fresh) });
     // No block (or an unparsable one) is a reflector slip, not a verdict: the empty streak stays and it retries in 5 min.
     const key = `reflect_empty_streak:${project.id}`, missing = payload === null;
     const streak = ids.length ? 0 : missing ? null : (parseInt(kvGet(key, '0'), 10) || 0) + 1;
@@ -4180,29 +4269,32 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     startTask(getTask(id), n.id, task.node_id || null, null, true);
     return { started: true, taskId: id, node: n.id, ...(cpuBusy(n) && { warning: 'CPU busy' }) };
   }
-  // Reflection fallbacks (list already validated by the server): [{agent, model}] or null = none.
+  // Retired reflection fallbacks (#508: only migrated into the pool; stored, never used): [{agent, model}] or null.
   function setReflectFallbacks(id, list) {
     if (!getProject(id)) return { error: 'No such project', status: 404 };
     updateProject(id, { reflect_fallbacks: list == null ? null : JSON.stringify(list) });
     logEvent(`reflection fallbacks: ${list == null ? 'none' : list.map((f) => `${f.agent}/${f.model}`).join(' → ') || 'none'}`, { projectId: id });
     return { ok: true, project: projectView(getProject(id)) };
   }
-  // A project's reflection settings (Settings → This project): its reflect tasks run on agent/model (null = routes, else
-  // Claude), and they and the work they queue snapshot fallbacks (null = none: they wait at a limit).
-  const reflectFor = (p) => ({ agent: p.reflect_agent || null, model: p.reflect_model || null, fallbacks: parseFallbacks(p.reflect_fallbacks) });
-  // v: {model?: {agent, model} | null, fallbacks?: [{agent, model}] | null}, already validated by the server.
+  // A project's reflection settings (Settings → This project): `pool` is its Reflection models (null = the chat's model).
+  // custom false = no list set: the pool is the chat's model.
+  const reflectFor = (p) => ({ pool: reflectPool(p), custom: !!parseFallbacks(p.reflect_pool)?.length });
+  // v: {pool?: [{agent, model}] (≥ 1) | null, model?: {agent, model} | null (a pool of one), fallbacks?: [...] | null},
+  // already validated by the server.
   function setReflectSettings(id, v) {
     const p = getProject(id);
     if (!p) return { error: 'No such project', status: 404 };
     const f = {};
-    if ('model' in v) { f.reflect_agent = v.model?.agent || null; f.reflect_model = v.model?.model || null; }
+    if ('model' in v) f.reflect_pool = v.model ? JSON.stringify([{ agent: v.model.agent, model: v.model.model }]) : null;
+    if ('pool' in v) f.reflect_pool = v.pool?.length ? JSON.stringify(v.pool) : null;
     if ('fallbacks' in v) f.reflect_fallbacks = v.fallbacks == null ? null : JSON.stringify(v.fallbacks);
-    updateProject(id, f);
+    if (Object.keys(f).length) updateProject(id, f);
     const next = reflectFor(getProject(id));
-    logEvent(`reflection: ${next.agent ? `${next.agent}/${next.model || 'default'}` : 'default model'}; fallbacks ${next.fallbacks?.map((x) => `${x.agent}/${x.model}`).join(' → ') || 'none'}`, { projectId: id });
+    logEvent(`reflection models: ${next.custom ? next.pool.map((x) => `${x.agent}/${x.model}`).join(', ') : "the chat's model"}`, { projectId: id });
     return { ok: true, reflect: next, project: projectView(getProject(id)) };
   }
-  const reflectFallbacksFor = (p) => reflectFor(p).fallbacks;
+  // What reflection-queued work snapshots: the chat's fallbacks, like the chat's own tasks.
+  const workFallbacksFor = (p) => parseFallbacks(p.convo_id ? convoFallbacks(p.convo_id) : null);
   function pauseProject(id) {
     for (const [tid, r] of running) if (r.projectId === id) r.abort.abort(); // sessions are kept and resumed
   }
@@ -4242,6 +4334,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       continuations: t.continuations, not_before: t.not_before, source: t.source, created_at: t.created_at,
       started_at: t.started_at, finished_at: t.finished_at, commit_sha: t.commit_sha,
       agent: t.agent, model: t.model, ran_agent: t.ran_agent, ran_model: t.ran_model, route_note: t.route_note ?? null,
+      reflect_pick: t.kind === 'reflect' && t.reflect_pick ? pickState(t) : null,
       origin: t.origin ?? null, delegated_from: t.delegated_from ?? null, delegated_reason: t.delegated_reason ?? null, fallbacks: parseFallbacks(t.fallbacks), has_verify_failure: t.verify_output != null,
       // The agent a queued task would run on now: the UI shows it waiting only while its limit scope (limit_scope, a
       // state.blocks key: the agent) is limited.

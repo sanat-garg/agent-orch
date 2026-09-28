@@ -1606,3 +1606,6 @@ Head card sits above its node; workers ring the rest
 ## 2026-09-28 19:12 — #510 Sidebar projects: drag and drop to set project priority [done (check passed)]
 
 project drag/keyboard priority order tested; header hint added
+## 2026-09-28 19:16 — #508 Reflection models: a random pick from an owner-chosen pool, no fallbacks [done (check passed)]
+
+reflections use random pool models; Settings shows Reflection models

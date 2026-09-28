@@ -118,7 +118,7 @@ test('the sidebar gear opens Settings: a sound switch, parallel tasks (what can 
   assert.deepEqual([...sheet.matchAll(/data-ext-open="(\w+)"/g)].map((m) => m[1]), ['skills']);
   assert.match(sheet, /id="stExtSummary"/);
   assert.match(sheet, /<div class="modal sheet" id="extModal" hidden>[\s\S]*role="tablist"[\s\S]*id="extBody" role="tabpanel"/);
-  assert.match(sheet, /id="stSound"[\s\S]*id="stParallel"[\s\S]*id="stReflectModel"[\s\S]*id="stReflectBtn"[\s\S]*id="stDirection"/);
+  assert.match(sheet, /id="stSound"[\s\S]*id="stParallel"[\s\S]*id="stReflectPool"[\s\S]*id="stDirection"/);
   // Sound is one switch; each machine's sound (and custom sounds) are picked in Machines (#481).
   const alerts = sheet.slice(sheet.indexOf('class="st-sec">Alerts'), sheet.indexOf('class="st-sec">Tasks'));
   assert.match(alerts, /<strong>Play a sound when a task finishes<\/strong><small id="stSoundHint">Choose each machine's sound in Machines<\/small>/);
@@ -130,10 +130,13 @@ test('the sidebar gear opens Settings: a sound switch, parallel tasks (what can 
   assert.match(sheet.slice(sheet.indexOf('id="stProject"')), /<strong>Keep improving<\/strong>[\s\S]*<input type="checkbox" class="st-switch" id="stPerpetual"/);
   assert.match(appJs, /\$\('stPerpetual'\)\.checked = !!p\.perpetual/);
   assert.match(appJs, /\/api\/orch\/project\/\$\{p\.id\}`, 'POST', \{ perpetual: on \}/);
-  // Reflection is per project and one row: the model and its fallbacks together, inside This project.
+  // Reflection models (#508) are per project, inside This project: one multi-select row with its hint; no fallbacks chip.
   const project = sheet.slice(sheet.indexOf('id="stProject"'));
   const reflect = project.slice(project.indexOf('class="st-row st-reflect"'), project.indexOf('st-dir'));
-  assert.ok(reflect.includes('id="stReflectModel"') && reflect.includes('id="stReflectBtn"'));
+  assert.ok(reflect.includes('<strong>Reflection models</strong>') && reflect.includes('id="stReflectPool" role="group"'));
+  assert.ok(reflect.includes('Each reflection runs on a random model from this list, so you get different views. If one fails or hits its limit, another from the list is used.'));
+  for (const gone of ['stReflectModel', 'stReflectBtn']) assert.ok(!indexHtml.includes(gone) && !appJs.includes(gone), gone);
+  assert.match(appJs, /'PUT', \{ pool \}/);
   assert.match(appJs, /\/api\/orch\/projects\/\$\{O\.project\.id\}\/reflect-settings/);
   // Parallel tasks: a live readout and a cap, not a 1-or-2 choice.
   assert.match(sheet, /id="stParHint"/);
@@ -146,7 +149,6 @@ test('the sidebar gear opens Settings: a sound switch, parallel tasks (what can 
   assert.match(appJs, /O\.state\?\.parallel\?\.applyUpdates === 'idle' \? 'Restarting once idle \(automatic\)…'/);
   assert.match(appJs, /toast\(`Updated to v\$\{s\.updated\.version\}`/);
   assert.doesNotMatch(sheet, /stRank|stRoutes|Project priority|Routes/, 'no priority or routes rows in project settings');
-  assert.match(appJs, /openFallbacks\(reflectFallbacks\(\), /);
   assert.match(appJs, /sound\?\.custom \? `\/api\/settings\/sound\?v=\$\{sound\.at\}` : DEFAULT_TASK_SOUND/);
 });
 

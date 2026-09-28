@@ -2064,22 +2064,6 @@ function chatFallbacks() {
     },
     confirmedOf: (c) => c.fallbacks ?? null };
 }
-// Reflection fallbacks (Settings, PUT /api/orch/reflect-settings): one list for every project. Reflect tasks move down it
-// when their model is at its limit, and the work they queue snapshots it. Its primary is the reflection model: the
-// Settings choice, else what a reflect task routes to (a 'reflect' route, else the chat's model).
-function reflectPrimary() {
-  const r = O.project?.reflect || {};
-  return r.agent ? { agent: r.agent, model: r.model || '' } : O.project?.reflect_route || O.project?.work_route || { agent: 'claude', model: '' };
-}
-// Per project (Settings → This project): PUT /api/orch/projects/:id/reflect-settings.
-function reflectFallbacks() {
-  const r = () => O.project?.reflect || {};
-  return { what: 'reflection tasks', primary: reflectPrimary(),
-    list: () => r().fallbacks ?? null,
-    url: O.project ? `/api/orch/projects/${O.project.id}/reflect-settings` : null,
-    apply: (list) => { if (O.project) O.project.reflect = { ...r(), fallbacks: list }; renderReflectBtn(); },
-    confirmedOf: (res) => res.reflect?.fallbacks ?? null };
-}
 // One task's own fallback snapshot (PATCH /api/orch/tasks/:id/fallbacks). reset: back to its chat's list when it differs.
 function taskFallbacks(id) {
   const task = () => ({ ...(O.detail?.task.id === id ? O.detail.task : {}), ...(O.tasks.get(id) || {}) });
@@ -2122,10 +2106,6 @@ function renderModelPill() {
   $('modelChip').setAttribute('aria-label', text);
   // Non-Claude usage windows (the dot) come with the usage history; load them once if nothing has yet.
   if (list[0] && list[0].agent !== 'claude' && !usageSlides.at && !usageSlides.loading) loadSidebarUsage();
-}
-function renderReflectBtn() {
-  const h = reflectFallbacks();
-  fbChipText($('stReflectBtn'), h.primary, h.list(), h.what);
 }
 // Optimistic: shown and stored at once; PUTs run in order, and if the latest fails the last saved list comes back.
 function fbSave(list) {
@@ -3924,7 +3904,6 @@ function claudeCardWindows(u) {
 }
 function renderUsage(fresh = false) {
   renderModelPill(); // its usage dot follows the same readings
-  renderReflectBtn();
   const ids = runningUsageAgents();
   usageSlides.ids = ids;
   if (!ids.includes(usageSlides.agent)) usageSlides.agent = ids[0];
@@ -7241,8 +7220,7 @@ function renderSettings() {
   $('stRapidHint').textContent = s.rapid?.reason || 'Keep free slots fed with small parallel tasks. Off waits for an empty queue.';
   $('stApplyUpdates').disabled = !s.parallel;
   if (document.activeElement !== $('stApplyUpdates')) $('stApplyUpdates').value = s.parallel?.applyUpdates || 'auto';
-  renderReflectModel();
-  renderReflectBtn();
+  renderReflectPool();
   $('stProject').hidden = !p;
   if (!p) return;
   $('stProjectTitle').textContent = `This project · ${p.path.split('/').pop()}`;
@@ -7251,31 +7229,50 @@ function renderSettings() {
   // Never overwrite what the owner is typing (renderSettings runs on every state push).
   if (document.activeElement !== $('stDirection') && !DIR.timer && !DIR.saving) { $('stDirection').value = p.reflect_direction || ''; fitDirection(); }
 }
-// Reflection model: every discovered model of a signed-in agent; '' = routes, else Claude. Not rebuilt while open.
-function renderReflectModel() {
-  const sel = $('stReflectModel');
-  if (document.activeElement === sel) return;
-  const r = O.project?.reflect || {}, cur = r.agent ? `${r.agent}\n${r.model || ''}` : '';
-  sel.replaceChildren(new Option('Default', ''));
+// Reflection models (#508, projects.reflect_pool): a checkbox per discovered model of each signed-in agent, grouped by
+// agent; each reflection runs on a random checked one. At least one stays checked (default: the chat's model). Saved at
+// once (PUT …/reflect-settings {pool}); not rebuilt while focused or saving.
+const POOL = { saving: 0 };
+function renderReflectPool() {
+  const box = $('stReflectPool');
+  if (box.contains(document.activeElement) || POOL.saving) return;
+  const r = O.project?.reflect || {}, pool = r.pool || [], key = (x) => `${x.agent}\n${x.model}`, on = new Set(pool.map(key));
+  const row = (agent, model, label) => {
+    const l = el('label', 'st-pool-item'), c = document.createElement('input');
+    c.type = 'checkbox'; c.value = `${agent}\n${model}`; c.checked = on.has(c.value);
+    l.append(c, el('span', '', label));
+    return l;
+  };
+  const groups = [];
   for (const a of AGENT_LIST) {
     if (!a.models?.length || !a.available || a.loggedIn === false) continue;
-    const g = document.createElement('optgroup');
-    g.label = a.label;
-    for (const m of a.models) g.append(new Option(m.label || m.id, `${a.id}\n${m.id}`));
-    sel.append(g);
+    const g = el('div', 'st-pool-group');
+    g.setAttribute('role', 'group');
+    g.setAttribute('aria-label', a.label);
+    g.append(el('div', 'st-pool-agent', a.label), ...a.models.map((m) => row(a.id, m.id, m.label || m.id)));
+    groups.push(g);
   }
-  if (cur && ![...sel.options].some((o) => o.value === cur)) sel.append(new Option(`${r.agent} · ${r.model || 'default'} (unavailable)`, cur));
-  sel.value = cur;
+  const shown = new Set(groups.flatMap((g) => [...g.querySelectorAll('input')].map((c) => c.value)));
+  const gone = pool.filter((x) => !shown.has(key(x)));
+  if (gone.length) {
+    const g = el('div', 'st-pool-group');
+    g.append(el('div', 'st-pool-agent', 'Unavailable'), ...gone.map((x) => row(x.agent, x.model, `${x.agent} · ${x.model}`)));
+    groups.push(g);
+  }
+  box.replaceChildren(...groups);
 }
-$('stReflectModel').addEventListener('change', async (e) => {
-  const [agent, model] = e.target.value.split('\n');
+$('stReflectPool').addEventListener('change', async (e) => {
+  if (!O.project || e.target.type !== 'checkbox') return;
+  const boxes = [...$('stReflectPool').querySelectorAll('input:checked')];
+  if (!boxes.length) { e.target.checked = true; toast('Keep at least one reflection model', { kind: 'error' }); return; }
+  const pool = boxes.map((c) => { const [agent, model] = c.value.split('\n'); return { agent, model }; });
+  POOL.saving++;
   try {
-    if (!O.project) return;
-    const d = await api(`/api/orch/projects/${O.project.id}/reflect-settings`, 'PUT', { model: agent ? { agent, model } : null });
+    const d = await api(`/api/orch/projects/${O.project.id}/reflect-settings`, 'PUT', { pool });
     if (d.project && O.project?.id === d.project.id) O.project = d.project;
   } catch (err) { toast(err.message, { kind: 'error' }); }
-  e.target.blur();
-  renderSettings();
+  POOL.saving--;
+  if (!$('stReflectPool').contains(document.activeElement)) renderReflectPool();
 });
 // Parallel tasks: what can run right now (state.capacity: this server's slots plus online workers') and
 // how many run; the owner can only cap it lower ('' = no limit, else maxTasks).
@@ -7383,8 +7380,6 @@ document.querySelector('.st-presets').addEventListener('click', (e) => {
   fitDirection();
   saveDirection();
 });
-// Reflection fallbacks: the same sheet as a chat's, saved for every project (no fetch).
-$('stReflectBtn').addEventListener('click', () => openFallbacks(reflectFallbacks(), $('stReflectBtn')));
 
 // ----- the task drawer
 function openTask(id) {

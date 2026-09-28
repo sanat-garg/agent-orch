@@ -1272,11 +1272,14 @@ label.st-row, label.st-text { cursor: pointer; }
 .snd-hint { flex-basis: 100%; color: var(--muted); font-size: 12px; }
 .mc-group > .snd-add { padding: 6px 0 8px; }
 @media (pointer: coarse) { .snd-add input[type=url] { height: 44px; font-size: 16px; } .snd-add .btn.small { height: 44px; } }
-/* Reflection: one row (model, then its fallbacks); on phones both go under the text, the model select taking the width. */
+/* Reflection models (#508): the hint, then a checkbox per model grouped by agent (columns where they fit). */
 .st-reflect { flex-wrap: wrap; row-gap: 8px; }
 .st-reflect .st-text { flex-basis: 100%; }
-.st-reflect select { flex: 1; min-width: 0; max-width: none; }
-.st-reflect .fb-chip { flex: none; height: 34px; }
+.st-pool { flex-basis: 100%; display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px 16px; }
+.st-pool-agent { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; margin-bottom: 2px; }
+.st-pool-item { display: flex; align-items: center; gap: 8px; min-height: 30px; font-size: 13.5px; cursor: pointer; }
+.st-pool-item input { margin: 0; accent-color: var(--accent-strong); }
+@media (pointer: coarse) { .st-pool-item { min-height: 44px; } }
 .st-dir { flex-wrap: wrap; }
 .st-dir .st-text { flex-basis: 100%; }
 .st-dir textarea { flex-basis: 100%; min-height: 56px; max-height: 180px; resize: vertical; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; font-size: 13.5px; line-height: 1.4; }

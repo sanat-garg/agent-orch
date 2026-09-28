@@ -167,8 +167,8 @@ test('the pill reads "primary → first fallback +N", picks the primary in the s
   assert.equal(await page.locator('#fbModal').isVisible(), true);
   await page.mouse.click(640, 80);
   assert.equal(await page.locator('#fbModal').isHidden(), true);
-  // Task and reflection lists still open the same sheet without the Model section.
-  await page.evaluate(() => openFallbacks(reflectFallbacks(), document.body));
+  // A task's list still opens the same sheet without the Model section.
+  await page.evaluate(() => openFallbacks({ ...chatFallbacks(), models: false, url: null }, document.body));
   assert.equal(await page.locator('#fbModelSec').isHidden(), true);
   await page.keyboard.press('Escape');
   assert.deepEqual(errors, []);

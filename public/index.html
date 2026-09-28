@@ -520,9 +520,8 @@
           <input type="checkbox" class="st-switch" id="stPerpetual" name="perpetual" role="switch" aria-describedby="stPerpetualHint">
         </label>
         <div class="st-row st-reflect">
-          <label class="st-text" for="stReflectModel"><strong>Reflection</strong><small>Plans what's next when the queue empties</small></label>
-          <select id="stReflectModel" aria-label="Reflection model"></select>
-          <button type="button" class="chip fb-chip" id="stReflectBtn" aria-haspopup="dialog" aria-controls="fbModal">No fallbacks</button>
+          <span class="st-text" id="stPoolLabel"><strong>Reflection models</strong><small id="stPoolHint">Each reflection runs on a random model from this list, so you get different views. If one fails or hits its limit, another from the list is used.</small></span>
+          <div class="st-pool" id="stReflectPool" role="group" aria-labelledby="stPoolLabel" aria-describedby="stPoolHint"></div>
         </div>
         <div class="st-row st-dir">
           <label class="st-text" for="stDirection"><strong>Reflection direction</strong><small id="stDirHint">Optional. Leave blank and it decides what matters most</small></label>

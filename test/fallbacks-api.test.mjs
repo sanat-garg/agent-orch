@@ -277,22 +277,25 @@ test('PUT /api/orch/projects/:id/reflect-settings (per project) and the task sou
   const add = (name) => Number(db.prepare("INSERT INTO projects(path,name,status,created_at) VALUES(?,?,'paused',0)").run(path.join(dataDir, name), name).lastInsertRowid);
   const pid = add('rs-one'), other = add('rs-two');
   const url = `/api/orch/projects/${pid}/reflect-settings`;
-  for (const bad of [{}, { model: { agent: 'codex', model: 'gpt-9000' } }, { fallbacks: [{ agent: 'nope', model: 'x' }] }]) {
+  for (const bad of [{}, { model: { agent: 'codex', model: 'gpt-9000' } }, { fallbacks: [{ agent: 'nope', model: 'x' }] }, { pool: [] }, { pool: null }, { pool: [{ agent: 'codex', model: 'gpt-9000' }] }]) {
     assert.equal((await put(url, bad)).status, 400, JSON.stringify(bad));
   }
   assert.equal((await put('/api/orch/projects/999999/reflect-settings', { model: null })).status, 404);
   const gone = await fetch(base + '/api/orch/reflect-settings', { method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: '{"model":null}' });
   assert.equal(gone.status, 404, 'the old every-project route is gone'); await gone.arrayBuffer();
-  let r = await put(url, { model: { agent: 'codex', model: 'gpt-5.5' } });
+  // Reflection models (#508): a pool of at least one, duplicates dropped; {model} is a pool of one.
+  const two = [{ agent: 'codex', model: 'gpt-5.5' }, { agent: 'codex', model: 'gpt-6-sol' }];
+  let r = await put(url, { pool: [...two, two[0]] });
   assert.equal(r.status, 200, JSON.stringify(r.body));
-  assert.deepEqual(r.body.reflect, { agent: 'codex', model: 'gpt-5.5', fallbacks: null });
+  assert.deepEqual(r.body.reflect, { pool: two, custom: true });
   assert.deepEqual(r.body.project.reflect, r.body.reflect);
-  r = await put(url, { fallbacks: [{ agent: 'codex', model: 'gpt-5.5' }] });
-  assert.deepEqual(r.body.reflect, { agent: 'codex', model: 'gpt-5.5', fallbacks: [{ agent: 'codex', model: 'gpt-5.5' }] }, 'fields save independently');
-  const row = (id) => ({ ...db.prepare('SELECT reflect_agent, reflect_model, reflect_fallbacks FROM projects WHERE id=?').get(id) });
-  assert.deepEqual(row(other), { reflect_agent: null, reflect_model: null, reflect_fallbacks: null }, 'another project is untouched');
+  r = await put(url, { model: { agent: 'codex', model: 'gpt-5.5' } });
+  assert.deepEqual(r.body.reflect, { pool: [two[0]], custom: true });
+  const row = (id) => ({ ...db.prepare('SELECT reflect_pool FROM projects WHERE id=?').get(id) });
+  assert.deepEqual(row(other), { reflect_pool: null }, 'another project is untouched');
   r = await put(url, { model: null });
-  assert.deepEqual([r.body.reflect.agent, r.body.reflect.model], [null, null]);
+  assert.equal(r.body.reflect.custom, false, "back to the chat's model");
+  assert.equal(r.body.reflect.pool.length, 1);
   db.close();
 
   assert.deepEqual((await get('/api/settings')).body.sound, { custom: false, at: null });

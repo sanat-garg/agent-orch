@@ -1797,7 +1797,8 @@ async function handleRequest(req, res) {
     const r = resources.killPid(pid);
     return json(res, r.error ? r.status : 200, r);
   }
-  // Settings → This project: its reflection model {model: {agent, model} | null} and/or fallbacks {fallbacks: [...] | null}.
+  // Settings → This project: its Reflection models {pool: [{agent, model}, ...]}; the older {model} sets a pool of one and
+  // the retired {fallbacks} is only stored.
   const rs = p.match(/^\/api\/orch\/projects\/(\d+)\/reflect-settings$/);
   if (rs && req.method === 'PUT') {
     const body = await readBody(req), v = {};
@@ -1814,7 +1815,14 @@ async function handleRequest(req, res) {
       if (error) return json(res, 400, { error });
       v.fallbacks = list;
     }
-    if (!Object.keys(v).length) return json(res, 400, { error: 'Expected model and/or fallbacks' });
+    // Reflection models (#508): each reflection runs on a random one; at least one.
+    if ('pool' in body) {
+      if (!Array.isArray(body.pool) || !body.pool.length) return json(res, 400, { error: 'Pick at least one reflection model' });
+      const { list, error } = checkFallbacks(body.pool);
+      if (error) return json(res, 400, { error });
+      v.pool = list;
+    }
+    if (!Object.keys(v).length) return json(res, 400, { error: 'Expected pool, model and/or fallbacks' });
     const r = orch.setReflectSettings(Number(rs[1]), v);
     return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r);
   }

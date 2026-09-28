@@ -13,3 +13,7 @@ Fix AUDIT.md finding #46 in agent-share.mjs `fromWorker(nodeId, msg)` (around li
 ## Done when
 
 `node --test test/agent-share.test.mjs` passes and `grep -n 'auth.json.prev' agent-share.mjs` prints a line
+
+## Result — done (check passed) (2026-09-28 12:34)
+
+AGENT-ORCH-STATUS: done — fromWorker blocks future/mismatched-JWT refreshes and keeps auth.json.prev

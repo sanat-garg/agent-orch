@@ -5,8 +5,10 @@
 //           CLAUDE_CODE_OAUTH_TOKEN; the head's own login (and its refresh token) never leaves the head.
 //   codex:  the head's ~/.codex/auth.json (a ChatGPT login; copying it is how Codex signs in headless machines). Codex
 //           refreshes it now and then and the refresh token rotates, so whichever machine refreshes first sends its copy
-//           back; the head keeps the newest (same ChatGPT account only) and re-shares it, so no machine is left holding
-//           a used refresh token.
+//           back; the head keeps the newest and re-shares it, so no machine is left holding a used refresh token. A
+//           copy is adopted only when its account_id is the head's, its id/access token JWT names that same account,
+//           and its last_refresh is newer than ours but not in the future; the replaced file is kept as auth.json.prev
+//           (0600) so a bad adoption can be undone by hand.
 // Everything here is local file IO; `send(nodeId, frame)` and `targets()` (connected workers that read the frame) come
 // from the cluster hub.
 
@@ -25,6 +27,21 @@ export function parseCodexAuth(text) {
   if (j?.auth_mode !== 'chatgpt' || j.OPENAI_API_KEY || !t?.access_token || !t?.refresh_token || !t?.account_id) return null;
   const at = Date.parse(j.last_refresh || '');
   return { accountId: t.account_id, lastRefresh: Number.isFinite(at) ? at : 0 };
+}
+
+// The ChatGPT account a Codex token names: the JWT payload (base64url middle segment; the signature is not checked)
+// of tokens.id_token, else tokens.access_token, carries it under "https://api.openai.com/auth".chatgpt_account_id.
+function codexTokenAccount(text) {
+  let t;
+  try { t = JSON.parse(String(text || '')).tokens; } catch { return null; }
+  for (const jwt of [t?.id_token, t?.access_token]) {
+    try {
+      const p = JSON.parse(Buffer.from(String(jwt).split('.')[1], 'base64url').toString('utf8'));
+      const id = p?.['https://api.openai.com/auth']?.chatgpt_account_id || p?.chatgpt_account_id;
+      if (typeof id === 'string' && id) return id;
+    } catch {}
+  }
+  return null;
 }
 
 // Atomic write, owner-only.
@@ -76,13 +93,19 @@ export function createAgentShare({ dataDir, home = os.homedir(), send, targets =
   const timer = setInterval(checkCodex, watchMs);
   timer.unref?.();
 
-  // A worker's Codex copy refreshed itself: keep it if it is the same ChatGPT account and newer than ours.
+  // A worker's Codex copy refreshed itself: keep it if it is the same ChatGPT account (by account_id and by its token)
+  // and newer than ours, but not from the future; the file it replaces stays as auth.json.prev.
   function fromWorker(nodeId, msg) {
     if (msg.agent !== 'codex' || !msg.value) return { ignored: 'only a refreshed codex login comes back from a worker' };
     const theirs = parseCodexAuth(msg.value), ours = parseCodexAuth(codexText);
     if (!theirs) return { ignored: 'not a ChatGPT login' };
     if (!ours || theirs.accountId !== ours.accountId) return { ignored: 'a different account than the head\'s' };
+    if (theirs.lastRefresh > Date.now() + 5 * 60e3) return { ignored: 'last_refresh is in the future' };
     if (theirs.lastRefresh <= ours.lastRefresh) return { ignored: 'not newer than the head\'s' };
+    if (codexTokenAccount(msg.value) !== ours.accountId) return { ignored: 'token does not belong to this account' };
+    let prev = null;
+    try { prev = fs.readFileSync(codexFile, 'utf8'); } catch {}
+    if (prev != null) writePrivate(`${codexFile}.prev`, prev); // auth.json.prev: the login this replaces
     writePrivate(codexFile, msg.value);
     codexText = msg.value;
     log(`adopted the Codex sign-in ${nodeId} refreshed; re-sharing it`);

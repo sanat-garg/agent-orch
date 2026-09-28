@@ -638,6 +638,7 @@ the same origin. `run-on` accepts only a string or null naming a known node.
 - **Fix:** Keep the previous file (`auth.json.prev`), reject a `last_refresh` more than a few minutes in the future,
   and adopt only after checking that the id_token/access_token JWT decodes to the same account (or that `codex login
   status` passes against the new file in a temp `CODEX_HOME`).
+- **Fixed** (task #316): `fromWorker` refuses a `last_refresh` over 5 min ahead and a copy whose id_token/access_token JWT doesn't name the head's `chatgpt_account_id`, and keeps the replaced file as `auth.json.prev` (0600); test/agent-share.test.mjs.
 
 ### 47. [low] A task pinned to a machine that is later removed waits forever, with no notice (cluster.mjs:301-312; orchestrator.mjs:1459-1466)
 - **What:** `setTaskRunOn` checks the node only when the pin is set. `revoke()` deletes the node row but leaves

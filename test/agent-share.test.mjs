@@ -21,8 +21,10 @@ import { waitFor } from './helpers/wait.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TOKEN = `sk-ant-oat01-${'A1b2_C3-'.repeat(12)}`;
-const codexAuth = (account, iso, access = 'at-1') => JSON.stringify({ auth_mode: 'chatgpt', OPENAI_API_KEY: null,
-  tokens: { id_token: 'id', access_token: access, refresh_token: `rt-${access}`, account_id: account }, last_refresh: iso }, null, 2);
+// A real-shaped auth.json: the id_token is a JWT naming the ChatGPT account (`jwtAccount`, default the same one).
+const jwt = (account) => ['e30', Buffer.from(JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: account } })).toString('base64url'), 'sig'].join('.');
+const codexAuth = (account, iso, access = 'at-1', jwtAccount = account) => JSON.stringify({ auth_mode: 'chatgpt', OPENAI_API_KEY: null,
+  tokens: { id_token: jwt(jwtAccount), access_token: access, refresh_token: `rt-${access}`, account_id: account }, last_refresh: iso }, null, 2);
 const mode = (f) => fs.statSync(f).mode & 0o777;
 
 function fixture() {
@@ -70,10 +72,19 @@ test('Codex: the head shares its ChatGPT login; a worker\'s refresh is adopted o
     assert.match(f.share.fromWorker('n1', { agent: 'codex', value: older }).ignored, /not newer/);
     assert.match(f.share.fromWorker('n1', { agent: 'codex', value: other }).ignored, /different account/);
     assert.match(f.share.fromWorker('n1', { agent: 'claude', value: TOKEN }).ignored, /only a refreshed codex/);
+    const future = codexAuth('acct-1', new Date(Date.now() + 60 * 60e3).toISOString(), 'at-f');
+    assert.equal(f.share.fromWorker('n1', { agent: 'codex', value: future }).ignored, 'last_refresh is in the future');
+    const wrongJwt = codexAuth('acct-1', '2026-09-27T00:00:00Z', 'at-w', 'acct-2');
+    assert.equal(f.share.fromWorker('n1', { agent: 'codex', value: wrongJwt }).ignored, 'token does not belong to this account');
+    const noJwt = JSON.stringify({ ...JSON.parse(newer), tokens: { ...JSON.parse(newer).tokens, id_token: 'id', access_token: 'at' } });
+    assert.equal(f.share.fromWorker('n1', { agent: 'codex', value: noJwt }).ignored, 'token does not belong to this account');
     assert.equal(fs.readFileSync(path.join(f.home, '.codex', 'auth.json'), 'utf8'), ours, 'nothing was taken');
+    assert.equal(fs.existsSync(path.join(f.home, '.codex', 'auth.json.prev')), false);
     assert.deepEqual(f.share.fromWorker('n1', { agent: 'codex', value: newer }), { adopted: true });
     assert.equal(fs.readFileSync(path.join(f.home, '.codex', 'auth.json'), 'utf8'), newer);
     assert.equal(mode(path.join(f.home, '.codex', 'auth.json')), 0o600);
+    assert.equal(fs.readFileSync(path.join(f.home, '.codex', 'auth.json.prev'), 'utf8'), ours, 'the replaced login is kept');
+    assert.equal(mode(path.join(f.home, '.codex', 'auth.json.prev')), 0o600);
     assert.deepEqual(f.sent.map((x) => [x.id, x.value]), [['n2', newer]], 'every other worker, not the sender');
   } finally { f.done(); }
 });

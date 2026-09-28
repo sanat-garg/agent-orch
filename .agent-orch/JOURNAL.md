@@ -982,3 +982,7 @@ Worktrees under a symlinked root are reused and kept, tested
 ## 2026-09-28 12:33 — #351 push.mjs AUDIT #53: a VAPID key pair is made only when the file is missing; a bad file or PEM turns push off instead of overwriting or throwing [done (check passed)]
 
 Unusable VAPID key file now disables push instead of replacing it
+
+## 2026-09-28 12:34 — #316 AUDIT #46: fromWorker keeps auth.json.prev, rejects a future last_refresh and checks the token's account [done (check passed)]
+
+fromWorker blocks future/mismatched-JWT refreshes and keeps auth.json.prev

@@ -13,3 +13,7 @@ Mobile HIG finding #7 in .agent-orch/UI-REVIEW.md: body copy is 14-15px and meta
 ## Done when
 
 `npm test -- test/ui-static.test.mjs` passes and `grep -q '| 7 | med · \*\*fixed\*\*' .agent-orch/UI-REVIEW.md`
+
+## Result — done (check passed) (2026-09-28 05:49)
+
+AGENT-ORCH-STATUS: done — Phones now get 16px body text and 12px-minimum metadata

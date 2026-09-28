@@ -203,6 +203,29 @@ test('inline code pills clone across lines, 44pt tool rows on touch, system-font
   }
 });
 
+test('phones get 16px body copy and 12px-minimum metadata (UI-REVIEW #7)', () => {
+  // Top-level `@media (max-width: 600px) { ... }` bodies, brace-matched; later rules win, like the cascade.
+  const sizes = new Map();
+  for (const m of appCss.matchAll(/@media \(max-width: 600px\) \{/g)) {
+    let i = m.index + m[0].length, depth = 1;
+    const start = i;
+    for (; depth; i++) depth += appCss[i] === '{' ? 1 : appCss[i] === '}' ? -1 : 0;
+    for (const r of appCss.slice(start, i - 1).matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+      const px = r[2].match(/font-size:\s*([\d.]+)px/);
+      if (px) for (const sel of r[1].split(',')) sizes.set(sel.trim(), Number(px[1]));
+    }
+  }
+  for (const sel of ['.msg.text', '.tcard', '.convo .ct', '.dr-summary']) assert.equal(sizes.get(sel), 16, `${sel} is 16px on phones`);
+  for (const sel of ['.tc-tag', '.ms-age', '.ms-open', '.ms-note', '.cn-step.muted', '.att-size', '.fb-pop .m-head h2']) {
+    assert.ok(sizes.get(sel) >= 12, `${sel} is at least 12px on phones (got ${sizes.get(sel)})`);
+  }
+  // the block sits after every base rule it overrides (same specificity: the later rule wins)
+  const block = appCss.lastIndexOf('.fb-pop .m-head h2 { font-size: 12px; }');
+  for (const base of ['.att-size { font-size: 11.5px', '.fb-pop .m-head h2 { font-size: 11px', '.tc-tag { font-size: 11.5px']) {
+    assert.ok(appCss.indexOf(base) < block, `${base} comes before the phone block`);
+  }
+});
+
 test('top-level function names are unique across the classic public/*.js scripts (a later one silently wins)', () => {
   const seen = new Map();
   const dups = [];

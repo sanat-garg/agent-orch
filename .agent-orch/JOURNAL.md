@@ -822,3 +822,7 @@ Queue drag is now qDragMove, so sidebar project drag works; test blocks duplicat
 ## 2026-09-28 05:47 — #276 Integrator merge deletes the integrated task's branch from origin; remove the stale task-258 branch [done (check passed)]
 
 integrator merges delete owner's origin branch; task-258 removed
+
+## 2026-09-28 05:49 — #277 UI-REVIEW #7: 16px body text and 12px-minimum metadata on phones [done (check passed)]
+
+Phones now get 16px body text and 12px-minimum metadata

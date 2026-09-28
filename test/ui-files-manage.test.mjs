@@ -71,7 +71,8 @@ async function open(viewport = { width: 1280, height: 860 }, mobile = false) {
   page.on('dialog', (d) => { dialogs.push(d.message()); d.dismiss(); });
   await page.goto(`${base}/#c0`);
   await page.waitForFunction(() => !document.getElementById('app').inert, null, { timeout: 15000 }).catch(() => page.click('#splashSkip'));
-  await page.click('.seg button[data-view="files"]');
+  if (await page.locator('.seg button[data-view="files"]').isVisible()) await page.click('.seg button[data-view="files"]');
+  else { await page.click('#viewBtn'); await page.click('#viewMenu [data-view="files"]'); } // phones switch views from the title's menu (#450)
   await page.locator('#fxMain [role="tree"] [data-i]').first().waitFor();
   return { page, errors, dialogs, ctx };
 }

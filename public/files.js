@@ -1,7 +1,10 @@
 'use strict';
-// ---------- Files: a Finder-style browser of the open chat's project (server: files.mjs) ----------
-// Opens at the project's root (or the last folder, remembered per project). Icon and list views (list folders open in place
-// with disclosure triangles), back/forward, a path bar, a name filter,
+// ---------- Files: a Finder-style browser of the whole disk, opening on the open chat's project (server: files.mjs) ----------
+// Opens at the project's root (or the last folder, remembered per project for this page load only). Paths are absolute: the
+// path bar runs from '/', ↑ Parent (⌥↑, Backspace) climbs to '/', Places jumps to Project, Home, / and /tmp, and Go to folder
+// (⌘L) takes a typed absolute, ~ or relative path with completion from the listings. Protected entries (secrets) show a lock
+// and never open; a read-only location shows a tag and disables the menu's write actions. Icon and list views (list folders
+// open in place with disclosure triangles), back/forward, a name filter,
 // hidden files on request (⌘⇧.), project-wide search by name or inside files (Enter in the search field; Names | Contents), and Quick Look (Space or double-click) for text, Markdown and images.
 // The Changed view lists the files that differ from git HEAD with +/− counts; Quick Look shows their diff.
 // Ask in chat (Quick Look's header, a Contents hit's trailing button, Shift+Enter on a row) puts `path[:line]` into the composer. Loaded after
@@ -9,7 +12,7 @@
 // Selection: click, ⌘/Ctrl-click, Shift-click ranges, ⌘A. A context menu (right-click, long-press, a row's ⋯, Shift+F10) offers
 // Open, Copy/Cut/Paste (⌘C ⌘X ⌘V), Compress to ZIP, Extract here, Rename… (F2), New file…/New folder…, Delete (Delete or
 // Backspace, after an in-page confirm), Copy path and Ask in chat. The clipboard is app-internal
-// (project-relative paths plus copy|cut) and outlives folder changes; pasting POSTs /api/files/copy or /move {paths, dest},
+// (absolute paths plus copy|cut) and outlives folder changes; pasting POSTs /api/files/copy or /move {paths, dest},
 // and /zip {paths, dest} and /unzip {path, dest} make and extract archives (cid rides in the query like every files route).
 // Rename and New edit a name in place (FX.edit, redrawn by every render): POST /api/files/rename {path, name},
 // /api/files/new {dir, name, type}; Delete POSTs /api/files/delete {paths}.
@@ -22,12 +25,23 @@ const FX = {
   expanded: new Set(), kids: new Map(), built: false, ql: null,
   picked: new Set(), anchor: null, // the selection (FX.sel is its lead row) and the Shift-click anchor
   root: null, clip: null, menu: null, press: 0, // root: the project key; clip: {mode: 'copy'|'cut', paths, root}
+  proj: null, places: null, last: new Map(), restored: false, // proj: the project's real path; last: root → folder (this page load)
+  goto: { cache: new Map(), opts: [], i: -1, seq: 0 }, // Go to folder's suggestions
+  climbed: false, // the selection is only the folder ↑ Parent came out of: Backspace climbs on instead of deleting it
   edit: null, // a name being typed: {kind: 'rename', rel, value} | {kind: 'new', type: 'file'|'dir', dir, value}
 };
 const FX_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 const fxKeys = (k) => (FX_MAC ? `⌘${k}` : `Ctrl+${k}`);
 const FX_THUMB_MAX = 3e6; // images up to this size show as their own thumbnail in the icon view
 const touch = () => matchMedia('(pointer: coarse)').matches;
+// Absolute paths: '/' has no parent; a relative path (a search result, the Changed view) is inside the project.
+const fxParent = (p) => (p.startsWith('/') ? p.replace(/\/[^/]*$/, '') || '/' : p.split('/').slice(0, -1).join('/'));
+const fxJoin = (a, b) => (a === '/' ? `/${b}` : a ? `${a}/${b}` : b);
+const fxAbs = (p) => (p.startsWith('/') || !FX.proj ? p : p ? fxJoin(FX.proj, p) : FX.proj);
+const fxRel = (p) => (FX.proj && p.startsWith(FX.proj + '/') ? p.slice(FX.proj.length + 1) : p); // what chat is told
+const fxBase = (p) => (p === '/' ? '/' : p.split('/').pop());
+const FX_RO = "Read-only location: agent-orch can't change files here";
+const FX_PROT = 'Protected file: contents hidden';
 const fxUrl = (kind, rel) => `/api/files/${kind}?cid=${encodeURIComponent(FX.cid)}&path=${encodeURIComponent(rel)}`;
 // A folder's listing: `dir` is the contract; `path` keeps servers from before it working.
 const fxListUrl = (rel) => `/api/files/list?cid=${encodeURIComponent(FX.cid)}&dir=${encodeURIComponent(rel)}&path=${encodeURIComponent(rel)}`;
@@ -69,16 +83,23 @@ function pageSvg(label) {
   const t = (label || '').slice(0, 4).toUpperCase();
   return `<svg viewBox="0 0 48 60" aria-hidden="true"><path d="M5 2h26l14 14v39a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3V5a3 3 0 0 1 3-3z" fill="var(--fx-page)" stroke="var(--fx-page-line)" stroke-width="1.5"/><path d="M31 2v11a3 3 0 0 0 3 3h11" fill="var(--fx-page-fold)" stroke="var(--fx-page-line)" stroke-width="1.5" stroke-linejoin="round"/>${t ? `<text x="24" y="47" text-anchor="middle" font-size="${t.length > 3 ? 8.5 : 10}" font-weight="700" fill="var(--fx-page-text)" font-family="system-ui, sans-serif">${t.replace(/[<&]/g, '')}</text>` : ''}</svg>`;
 }
+const LOCK_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="7" width="10" height="7.5" rx="1.6" fill="currentColor"/><path d="M5.3 7V5a2.7 2.7 0 0 1 5.4 0v2" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>';
 function iconFor(e, rel, big) {
   const box = el('span', 'fx-ico');
   if (e.dir) box.innerHTML = FOLDER_SVG;
-  else if (big && isImage(e.name) && e.size <= FX_THUMB_MAX) {
+  else if (big && isImage(e.name) && e.size <= FX_THUMB_MAX && !e.protected) {
     const img = el('img');
     img.loading = 'lazy'; img.decoding = 'async'; img.alt = ''; img.src = fxUrl('raw', rel);
     img.onerror = () => { box.innerHTML = pageSvg(extOf(e.name)); };
     box.classList.add('thumb');
     box.append(img);
   } else box.innerHTML = pageSvg(extOf(e.name));
+  if (e.protected) {
+    const lock = el('span', 'fx-lock');
+    lock.innerHTML = LOCK_SVG;
+    lock.title = FX_PROT;
+    box.append(lock);
+  }
   return box;
 }
 
@@ -94,9 +115,12 @@ function fxBuild() {
       <div class="fx-nav" role="group" aria-label="History">
         <button type="button" class="icon-btn" id="fxBack" aria-label="Back" title="Back (⌘[)"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         <button type="button" class="icon-btn" id="fxFwd" aria-label="Forward" title="Forward (⌘])"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <button type="button" class="icon-btn fx-up" id="fxUp" aria-label="Parent folder" title="Parent folder (⌥↑)"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path d="M12 19V6M6 11.5l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="fx-up-l">Parent</span></button>
       </div>
       <h2 class="fx-title" id="fxTitle">Files</h2>
+      <span class="fx-ro" id="fxRO" title="${FX_RO}" hidden>Read-only</span>
       <div class="fx-tools">
+        <button type="button" class="btn small fx-places" id="fxPlaces" aria-haspopup="menu" title="Places and Go to folder (${fxKeys('L')})">Places<svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><path d="M2.5 4.5l3.5 3.5 3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         <div class="fx-views seg-sm" role="radiogroup" aria-label="View as">
           <button type="button" role="radio" data-fxview="icons" aria-label="Icons" title="as Icons">${ICON_GRID}</button>
           <button type="button" role="radio" data-fxview="list" aria-label="List" title="as List">${ICON_LIST}</button>
@@ -113,11 +137,28 @@ function fxBuild() {
         </div>
       </div>
     </div>
+    <form class="fx-goto" id="fxGotoBar" hidden>
+      <label for="fxGoto">Go to folder</label>
+      <div class="fx-goto-f">
+        <input id="fxGoto" type="text" placeholder="/path, ~/path or a subfolder" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="go"
+          role="combobox" aria-autocomplete="list" aria-controls="fxSugg" aria-expanded="false">
+        <div class="fx-sugg" id="fxSugg" role="listbox" aria-label="Folders" hidden></div>
+      </div>
+      <button type="submit" class="btn small">Go</button>
+      <button type="button" class="icon-btn" id="fxGotoX" aria-label="Close" title="Close (Esc)"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+    </form>
     <div class="fx-main" id="fxMain"></div>
     <div class="fx-busy" id="fxBusy" role="status" hidden><span class="fx-prog" aria-hidden="true"></span><span id="fxBusyText"></span></div>
     <div class="fx-path" id="fxPath"></div>`;
   $('fxBack').onclick = () => fxHistory(-1);
   $('fxFwd').onclick = () => fxHistory(1);
+  $('fxUp').onclick = () => fxUp();
+  $('fxPlaces').onclick = () => { const k = $('fxPlaces').getBoundingClientRect(); fxPlacesOpen(k.left, k.bottom + 4); };
+  $('fxGotoBar').onsubmit = (e) => { e.preventDefault(); fxGotoGo(); };
+  $('fxGotoX').onclick = () => fxGotoClose(true);
+  $('fxGoto').addEventListener('input', () => fxGotoSuggest());
+  $('fxGoto').addEventListener('keydown', fxGotoKey);
+  $('fxGoto').addEventListener('blur', () => setTimeout(() => { if (!$('fxGotoBar').contains(document.activeElement)) fxGotoList([]); }, 150));
   $('fxRefresh').onclick = () => (FX.find ? fxFind(FX.find.q) : FX.view === 'changed' ? fxChanged() : fxLoad());
   v.querySelectorAll('[data-fxmode]').forEach((b) => b.addEventListener('click', () => {
     FX.mode = b.dataset.fxmode; store.set('cw.files.mode', FX.mode);
@@ -152,18 +193,23 @@ function fxBuild() {
     if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === '.') { e.preventDefault(); fxToggleHidden(); }
     else if ((e.metaKey || e.ctrlKey) && (e.key === '[' || e.key === ']')) { e.preventDefault(); fxHistory(e.key === '[' ? -1 : 1); }
   });
+  // ⌘L / Ctrl+L: Go to folder, wherever the focus is while Files is showing.
+  document.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'l' && $('app').dataset.view === 'files' && FX.cid) { e.preventDefault(); fxGotoOpen(); }
+  });
 }
 
 // ----- data
-// Shows the open chat's project; a different chat starts at its last folder (remembered per chat).
+// Shows the open chat's project; a different chat starts at its last folder (remembered per project until the page reloads).
 function filesShow() {
   fxBuild();
   const cid = currentConvo()?.id || null;
   if (cid !== FX.cid) {
-    const root = currentConvo()?.cwd || cid;
-    Object.assign(FX, { cid, root, path: (root && store.get('cw.files.path.' + root)) || '', back: [], fwd: [], sel: null, picked: new Set(), anchor: null, filter: '', data: null, err: '', find: null, changed: null, edit: null });
+    const root = currentConvo()?.cwd || cid, last = (root && FX.last.get(root)) || '';
+    Object.assign(FX, { cid, root, path: last, restored: !!last, proj: null, places: null, back: [], fwd: [], sel: null, picked: new Set(), anchor: null, filter: '', data: null, err: '', find: null, changed: null, edit: null });
     FX.expanded.clear(); FX.kids.clear();
     $('fxFilter').value = ''; $('fxFindBar').hidden = true;
+    fxGotoClose();
   }
   if (!cid) { fxRender(); return; }
   fxLoad();
@@ -176,7 +222,10 @@ async function fxLoad(focus = false) {
   try {
     const d = await api(fxListUrl(path));
     if (seq !== FX.seq || cid !== FX.cid) return;
-    FX.data = d; FX.err = ''; FX.path = d.path ?? path;
+    FX.data = d; FX.err = ''; FX.path = d.dir ?? d.path ?? path; FX.restored = false;
+    if (d.places?.length) FX.places = d.places;
+    FX.proj = d.places?.find((p) => p.label === 'Project')?.path || FX.proj || (path ? null : d.dir) || null;
+    if (FX.root) FX.last.set(FX.root, FX.path);
     // Refresh any folders opened in place in the list view.
     for (const rel of [...FX.expanded]) {
       try { FX.kids.set(rel, (await api(fxListUrl(rel))).entries); } catch { FX.expanded.delete(rel); FX.kids.delete(rel); }
@@ -185,17 +234,22 @@ async function fxLoad(focus = false) {
   } catch (e) {
     if (seq !== FX.seq) return;
     FX.data = null; FX.err = e.message;
-    if (FX.path && /Not found|Not a folder|Outside/.test(e.message)) { FX.path = ''; store.del('cw.files.path.' + FX.root); return fxLoad(focus); }
+    // The remembered folder is gone: back to the project. A folder asked for by hand shows why it didn't open.
+    if (FX.restored && /Not found|Not a folder|Outside/.test(e.message)) { FX.path = ''; FX.restored = false; FX.last.delete(FX.root); return fxLoad(focus); }
   } finally { if (seq === FX.seq) $('filesView').classList.remove('loading'); }
   fxRender();
   if (focus) fxFocus();
 }
 function fxGo(rel, { push = true } = {}) {
   if (push && rel !== FX.path) { FX.back.push(FX.path); FX.fwd = []; }
-  FX.path = rel; FX.sel = null; FX.picked.clear(); FX.filter = ''; FX.edit = null; FX.find = null; $('fxFilter').value = ''; $('fxFindBar').hidden = true;
-  FX.expanded.clear(); FX.kids.clear();
-  store.set('cw.files.path.' + FX.root, rel);
+  FX.path = rel; FX.sel = null; FX.climbed = false; FX.picked.clear(); FX.filter = ''; FX.edit = null; FX.find = null; $('fxFilter').value = ''; $('fxFindBar').hidden = true;
+  FX.expanded.clear(); FX.kids.clear(); FX.restored = false;
   fxLoad(true);
+}
+// Somewhere else on the disk (Places, Go to folder): out of the Changed view first, which has no folder.
+function fxNav(p) {
+  if (FX.view === 'changed') { FX.view = 'icons'; store.set('cw.files.view', FX.view); }
+  fxGo(p);
 }
 function fxHistory(dir) {
   const from = dir < 0 ? FX.back : FX.fwd, to = dir < 0 ? FX.fwd : FX.back;
@@ -205,11 +259,14 @@ function fxHistory(dir) {
   fxGo(from.pop(), { push: false });
   FX.sel = prev.startsWith(FX.path) ? prev : null; // back out of a folder: it stays selected
 }
+// The folder above this one; null at '/' (and before the first listing).
+const fxUpPath = () => (!FX.path.startsWith('/') || FX.path === '/' ? null : FX.data?.dir === FX.path && 'parent' in FX.data ? FX.data.parent : fxParent(FX.path));
 function fxUp() {
-  if (!FX.path) return;
+  const up = fxUpPath();
+  if (!up || FX.view === 'changed') return;
   const child = FX.path;
-  fxGo(FX.path.split('/').slice(0, -1).join('/'));
-  FX.sel = child;
+  fxGo(up);
+  FX.sel = child; FX.climbed = true;
 }
 function fxToggleHidden() {
   FX.hidden = !FX.hidden; store.set('cw.files.hidden', FX.hidden ? '1' : '0'); fxRender();
@@ -255,15 +312,14 @@ function fxFindExit(clear) {
 }
 // Opening a result shows its folder with it selected (hidden files turn on when it is one).
 function fxReveal(r) {
-  const parts = r.rel.split('/');
-  if (!FX.hidden && parts.some((p) => p.startsWith('.'))) fxToggleHidden();
-  fxGo(parts.slice(0, -1).join('/'));
+  if (!FX.hidden && fxRel(r.rel).split('/').some((p) => p.startsWith('.'))) fxToggleHidden();
+  fxGo(fxParent(r.rel));
   FX.sel = r.rel;
 }
-const join = (a, b) => (a ? `${a}/${b}` : b);
 const ICON_ASK = '<svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
 // `rel[:line]` into the composer at the caret (spaced from its neighbours), then back to the chat with the caret after it.
 function fxAskAbout(rel, line) {
+  rel = fxRel(rel);
   const input = $('input'), ref = line ? `${rel}:${line}` : rel, v = input.value;
   const a = input.selectionStart ?? v.length, b = input.selectionEnd ?? a;
   const before = v.slice(0, a), after = v.slice(b);
@@ -288,10 +344,12 @@ function fxRender() {
   const main = $('fxMain'), d = FX.data;
   $('fxBack').disabled = !FX.back.length;
   $('fxFwd').disabled = !FX.fwd.length;
+  $('fxUp').disabled = !fxUpPath() || FX.view === 'changed';
+  $('fxRO').hidden = !fxReadOnly();
   $('fxHidden').setAttribute('aria-pressed', String(FX.hidden));
   $('filesView').querySelectorAll('[data-fxview]').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.fxview === FX.view)));
   $('filesView').querySelectorAll('[data-fxmode]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.fxmode === FX.mode)));
-  $('fxTitle').textContent = (FX.view === 'changed' ? d?.crumbs[0].name : d?.name) || currentConvo()?.title || 'Files';
+  $('fxTitle').textContent = (FX.view === 'changed' ? fxRootName() : FX.path.startsWith('/') ? fxBase(FX.path) : d?.name) || currentConvo()?.title || 'Files';
   main.textContent = '';
   main.className = `fx-main ${FX.view}`;
   if (!FX.cid) {
@@ -302,14 +360,17 @@ function fxRender() {
   if (FX.find) return fxFound(main);
   if (FX.view === 'changed') return fxChangedList(main);
   if (!d) {
-    main.append(FX.err ? fxEmpty("Couldn't open this folder", FX.err) : el('div', 'fx-loading', 'Loading…'));
-    $('fxPath').textContent = '';
+    FX.rows = [];
+    if (!FX.err) main.append(el('div', 'fx-loading', 'Loading…'));
+    else if (/Permission denied/i.test(FX.err)) main.append(fxEmpty('Permission denied', "agent-orch's user isn't allowed to open this folder. ↑ Parent or Places take you elsewhere.", 'fx-denied'));
+    else main.append(fxEmpty("Couldn't open this folder", FX.err));
+    if (FX.path.startsWith('/')) fxPathBar(); else $('fxPath').textContent = ''; // the path bar still climbs out
     return;
   }
   FX.rows = [];
   const add = (entries, base, depth) => {
     for (const e of fxSorted(entries)) {
-      const rel = join(base, e.name);
+      const rel = e.path || fxJoin(base, e.name);
       FX.rows.push({ e, rel, depth });
       if (FX.view === 'list' && e.dir && FX.expanded.has(rel) && FX.kids.has(rel)) add(FX.kids.get(rel), rel, depth + 1);
     }
@@ -331,17 +392,29 @@ function fxPrune() {
 }
 // Search results and the Changed view are flat lists: one row at a time, no clipboard or context menu.
 const fxFlat = () => !!FX.find || FX.view === 'changed';
-const fxRootName = () => FX.data?.crumbs?.[0]?.name || String(currentConvo()?.cwd || '').split('/').filter(Boolean).pop() || 'Project';
+const fxRootName = () => (FX.proj && fxBase(FX.proj)) || String(currentConvo()?.cwd || '').split('/').filter(Boolean).pop() || 'Project';
+// '/' then one crumb per folder down to this one.
 function fxCrumbs() {
-  const parts = FX.path ? FX.path.split('/') : [];
-  return [{ name: fxRootName(), path: '' }, ...parts.map((name, i) => ({ name, path: parts.slice(0, i + 1).join('/') }))];
+  if (!FX.path.startsWith('/')) return [{ name: fxRootName(), path: '' }];
+  const parts = FX.path.split('/').filter(Boolean);
+  return [{ name: '/', path: '/' }, ...parts.map((name, i) => ({ name, path: '/' + parts.slice(0, i + 1).join('/') }))];
+}
+// No writes here: the listing's own flag when there is one, else writes land only under the project, home and /tmp (Places
+// but '/'): this folder is one of them or inside one, or holds a writable entry that isn't a link or one of them (/private/tmp).
+function fxReadOnly() {
+  const d = FX.data;
+  if (!d || fxFlat() || !d.dir) return false;
+  if (typeof d.writable === 'boolean') return !d.writable;
+  const roots = (FX.places || []).filter((p) => p.path !== '/').map((p) => p.path.replace(/\/$/, ''));
+  if (roots.some((r) => d.dir === r || d.dir.startsWith(r + '/'))) return false;
+  return !d.entries.some((e) => e.writable && !e.isSymlink && !roots.includes(e.path));
 }
 function fxFound(main) {
   const { q, mode, data, err } = FX.find;
   $('fxPath').textContent = '';
   if (!data) { FX.rows = []; return main.append(err ? fxEmpty("Couldn't search this project", err) : el('div', 'fx-loading', 'Searching…')); }
   if (mode === 'contents') return fxFoundLines(main);
-  FX.rows = data.entries.map((e) => ({ e, rel: e.path, depth: 0 }));
+  FX.rows = data.entries.map((e) => ({ e, rel: fxAbs(e.path), depth: 0 }));
   fxPrune();
   if (!FX.rows.length) main.append(fxEmpty(`No files named like “${q}”`, data.truncated ? 'The project is too big to search all of it.' : 'Hidden folders, .git and node_modules are skipped.'));
   else {
@@ -350,11 +423,11 @@ function fxFound(main) {
     t.setAttribute('aria-label', `Files named like “${q}”, ${FX.rows.length} found`);
     t.tabIndex = 0;
     FX.rows.forEach((r, i) => {
-      const o = optionFor(r, i, 'fx-row'), folder = r.rel.split('/').slice(0, -1).join('/') || fxRootName();
+      const o = optionFor(r, i, 'fx-row'), up = fxParent(r.rel), folder = !up || up === FX.proj ? fxRootName() : fxRel(up);
       const name = el('span', 'fx-c name'), nm = el('span', 'fx-n');
       nm.append(el('span', 'fx-nt', r.e.name), el('span', 'fx-sub', r.e.dir ? folder : `${folder} · ${fxSize(r.e.size)}`)); // sub: phones only
       name.append(el('span', 'fx-disc-sp'), iconFor(r.e, r.rel, false), nm);
-      o.title = r.rel;
+      o.title = fxRel(r.rel);
       o.append(name, el('span', 'fx-c folder', folder), el('span', 'fx-c size', r.e.dir ? '--' : fxSize(r.e.size)));
       t.append(o);
     });
@@ -463,8 +536,8 @@ function fxMarked(node, text, q) {
   if (i < text.length) node.append(text.slice(i));
   return node;
 }
-function fxEmpty(title, text) {
-  const box = el('div', 'fx-empty');
+function fxEmpty(title, text, cls = '') {
+  const box = el('div', `fx-empty ${cls}`.trim());
   box.innerHTML = FOLDER_SVG;
   box.append(el('strong', '', title), el('p', '', text));
   return box;
@@ -475,7 +548,8 @@ function optionFor(r, i, cls) {
   o.dataset.i = String(i);
   o.setAttribute('role', FX.view === 'list' && !FX.find ? 'treeitem' : 'option');
   o.setAttribute('aria-selected', String(FX.picked.has(r.rel)));
-  o.title = r.e.name;
+  o.title = r.e.protected ? `${r.e.name}: ${FX_PROT}` : r.e.readable === false ? `${r.e.name}: permission denied` : r.e.name;
+  if (r.e.readable === false) o.classList.add('fx-noread');
   if (fxIsCut(r.rel)) o.classList.add('fx-cut');
   o.addEventListener('click', (ev) => {
     if (ev.target.closest('.fx-disc, .fx-ask, .fx-more, .fx-edit')) return;
@@ -513,7 +587,7 @@ function fxMoreBtn(r) {
 function fxIcons() {
   const g = el('div', 'fx-grid');
   g.setAttribute('role', 'listbox');
-  g.setAttribute('aria-label', `${FX.data.name}, ${FX.rows.length} items`);
+  g.setAttribute('aria-label', `${$('fxTitle').textContent}, ${FX.rows.length} items`);
   g.tabIndex = 0;
   if (FX.edit?.kind === 'new') g.append(fxNewRow('fx-item'));
   FX.rows.forEach((r, i) => {
@@ -536,7 +610,7 @@ function fxList() {
   }
   const t = el('div', 'fx-rows');
   t.setAttribute('role', 'tree');
-  t.setAttribute('aria-label', `${FX.data.name}, ${FX.rows.length} items`);
+  t.setAttribute('aria-label', `${$('fxTitle').textContent}, ${FX.rows.length} items`);
   t.tabIndex = 0;
   if (FX.edit?.kind === 'new') t.append(fxNewRow('fx-row'));
   FX.rows.forEach((r, i) => {
@@ -569,24 +643,36 @@ function fxActive(container) {
   if (i >= 0) container.setAttribute('aria-activedescendant', `fx-o-${i}`);
   else container.removeAttribute('aria-activedescendant');
 }
+// The full path from '/', every folder clickable; on phones the middle folders fold into a … that unfolds them.
 function fxPathBar() {
   const bar = $('fxPath');
   bar.textContent = '';
   const crumbs = el('nav', 'fx-crumbs');
   crumbs.setAttribute('aria-label', 'Path');
-  const all = fxCrumbs();
+  const all = fxCrumbs(), fold = all.length > 4;
   all.forEach((c, i) => {
-    if (i) crumbs.append(el('span', 'fx-sep', '›'));
-    const b = el('button', 'fx-crumb');
+    const mid = fold && i > 0 && i < all.length - 2;
+    if (i === 1 && fold) {
+      const ell = el('button', 'fx-ell', '…');
+      ell.type = 'button';
+      ell.setAttribute('aria-label', 'Show the whole path');
+      ell.title = FX.path;
+      ell.onclick = () => crumbs.classList.add('open');
+      crumbs.append(ell);
+    }
+    if (i) crumbs.append(el('span', `fx-sep${mid ? ' mid' : ''}`, '›'));
+    const b = el('button', `fx-crumb${mid ? ' mid' : ''}${c.path === '/' ? ' fx-root' : ''}`);
     b.type = 'button';
-    b.innerHTML = FOLDER_SVG;
+    b.title = c.path === FX.proj ? `${c.path} (project)` : c.path;
+    if (c.path === '/') b.setAttribute('aria-label', 'Root folder /');
+    else b.innerHTML = FOLDER_SVG;
     b.append(el('span', '', c.name));
     if (i === all.length - 1) b.setAttribute('aria-current', 'location');
-    b.onclick = () => { if (c.path !== FX.path) fxGo(c.path); };
+    b.onclick = () => { if (c.path !== FX.path || !FX.data) fxGo(c.path); };
     crumbs.append(b);
   });
-  const n = FX.rows.length, hiddenCount = FX.hidden ? 0 : FX.data.entries.filter((e) => e.hidden).length;
-  bar.append(crumbs, el('span', 'fx-count', `${n} item${n === 1 ? '' : 's'}${hiddenCount && !FX.filter ? ` · ${hiddenCount} hidden` : ''}${FX.data.truncated ? ' · first 5,000 shown' : ''}`));
+  const n = FX.rows.length, hiddenCount = FX.hidden || !FX.data ? 0 : FX.data.entries.filter((e) => e.hidden).length;
+  bar.append(crumbs, el('span', 'fx-count', !FX.data ? '' : `${n} item${n === 1 ? '' : 's'}${hiddenCount && !FX.filter ? ` · ${hiddenCount} hidden` : ''}${FX.data.truncated ? ' · first 5,000 shown' : ''}`));
   crumbs.scrollLeft = crumbs.scrollWidth;
 }
 async function fxExpand(rel, open) {
@@ -602,6 +688,7 @@ async function fxExpand(rel, open) {
 // ----- selection, keyboard, opening
 // how: null = just this row, 'toggle' = ⌘-click, 'range' = Shift-click (from the anchor), 'all' = ⌘A.
 function fxSelect(rel, how = null) {
+  FX.climbed = false;
   const i = FX.rows.findIndex((r) => r.rel === rel);
   if (how === 'all') FX.picked = new Set(FX.rows.map((r) => r.rel));
   else if (how === 'toggle') { if (!FX.picked.delete(rel)) FX.picked.add(rel); FX.anchor = rel; }
@@ -654,7 +741,7 @@ function fxKey(e) {
     const o = $('fxMain').querySelector(`#fx-o-${i}`), k2 = (o || e.currentTarget).getBoundingClientRect();
     fxMenuOpen(cur || null, k2.left + 24, o ? k2.bottom : k2.top + 24);
   } else if (!fxFlat() && e.key === 'F2' && !mod) { e.preventDefault(); if (FX.picked.size === 1 && cur) fxRenameStart(cur); }
-  else if (!fxFlat() && (e.key === 'Delete' || e.key === 'Backspace') && !mod && FX.picked.size) { e.preventDefault(); fxConfirmDelete(fxPickedRows()); }
+  else if (!fxFlat() && (e.key === 'Delete' || (e.key === 'Backspace' && !FX.climbed)) && !mod && FX.picked.size) { e.preventDefault(); fxConfirmDelete(fxPickedRows()); }
   else if (FX.find && (e.key === 'Escape' || e.key === 'Backspace' || (mod && e.key === 'ArrowUp'))) { e.preventDefault(); fxFindExit(true); $('fxFilter').focus(); }
   else if ((FX.find || changed) && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) e.preventDefault();
   else if (changed && (e.key === 'Backspace' || ((mod || e.altKey) && e.key === 'ArrowUp'))) e.preventDefault(); // no folder to go up from
@@ -672,7 +759,7 @@ function fxKey(e) {
     e.preventDefault();
     if (FX.view !== 'list') move(-1);
     else if (cur?.e.dir && FX.expanded.has(cur.rel)) fxExpand(cur.rel, false);
-    else if (cur?.depth) fxSelect(cur.rel.split('/').slice(0, -1).join('/'));
+    else if (cur?.depth) fxSelect(fxParent(cur.rel));
   } else if (e.key === 'Home') { e.preventDefault(); if (FX.rows[0]) fxSelect(FX.rows[0].rel); }
   else if (e.key === 'End') { e.preventDefault(); if (FX.rows.length) fxSelect(FX.rows.at(-1).rel); }
 }
@@ -680,16 +767,19 @@ function fxKey(e) {
 // ----- clipboard, context menu and file operations
 const fxClipOk = () => !!FX.clip?.paths.length && FX.clip.root === FX.root;
 const fxIsCut = (rel) => FX.clip?.mode === 'cut' && fxClipOk() && FX.clip.paths.includes(rel);
-const fxParent = (rel) => rel.split('/').slice(0, -1).join('/');
 const fxLabel = (paths) => (paths.length === 1 ? `“${paths[0].split('/').pop()}”` : `${paths.length} items`);
-const fxFolderName = (rel) => (rel ? rel.split('/').pop() : fxRootName());
+const fxFolderName = (p) => (p ? fxBase(p) : fxRootName());
+// Can things be written into folder p? (The current folder, or a folder row of it.)
+const fxWritableDir = (p) => (p === FX.path ? !fxReadOnly() : FX.rows.find((r) => r.rel === p)?.e.writable !== false);
 // Cut rows look dimmed until they are pasted.
 function fxMarkCut() {
   $('fxMain').querySelectorAll('[data-i]').forEach((o) => o.classList.toggle('fx-cut', fxIsCut(FX.rows[+o.dataset.i]?.rel)));
 }
 function fxClipSet(mode) {
-  const paths = fxPickedRows().map((r) => r.rel);
+  const rows = fxPickedRows(), paths = rows.map((r) => r.rel);
   if (!paths.length) return;
+  if (rows.some((r) => r.e.protected)) return toast(`${FX_PROT}: it can't be copied or moved.`, { kind: 'error' });
+  if (mode === 'cut' && fxReadOnly()) return toast(`${FX_RO}. Copy instead.`, { kind: 'error' });
   FX.clip = { mode, paths, root: FX.root };
   fxMarkCut();
   toast(`${fxLabel(paths)} ${mode === 'cut' ? 'cut: paste to move' : 'copied: paste to make a copy'} (${fxKeys('V')})`, { duration: 2500 });
@@ -697,6 +787,7 @@ function fxClipSet(mode) {
 async function fxPaste(dest) {
   if (!fxClipOk()) return;
   const { mode, paths } = FX.clip;
+  if (!fxWritableDir(dest)) return toast(`${FX_RO}.`, { kind: 'error' });
   if (mode === 'cut' && paths.some((p) => dest === p || dest.startsWith(p + '/'))) return toast("A folder can't be moved into itself.", { kind: 'error' });
   const res = await fxOp(mode === 'cut' ? 'move' : 'copy', { paths, dest });
   if (!res) return;
@@ -717,6 +808,7 @@ async function fxUnzip(r) {
 // field open (the toast says why). The renamed or created entry ends up selected.
 function fxRenameStart(r) {
   if (!r || fxFlat()) return;
+  if (fxReadOnly() || r.e.protected) return toast(`${fxReadOnly() ? FX_RO : FX_PROT}.`, { kind: 'error' });
   fxSelect(r.rel);
   FX.edit = { kind: 'rename', rel: r.rel, name: r.e.name, dir: r.e.dir, value: r.e.name, fresh: true };
   fxRender();
@@ -800,6 +892,7 @@ async function fxEditCommit() {
 function fxConfirmDelete(rows) {
   const paths = rows.map((r) => r.rel);
   if (!paths.length || $('fxConfirm')) return;
+  if (fxReadOnly() || rows.some((r) => r.e.protected)) return toast(`${fxReadOnly() ? FX_RO : FX_PROT}.`, { kind: 'error' });
   const back = document.activeElement;
   const m = el('div', 'modal sheet fx-confirm');
   m.id = 'fxConfirm';
@@ -880,43 +973,53 @@ function fxMenuOpen(r, x, y) {
   else if (!r) fxSelect(null);
   const rows = fxPickedRows(), paths = rows.map((x) => x.rel), dest = r?.e.dir ? r.rel : FX.path;
   const zip = rows.length === 1 && !rows[0].e.dir && extOf(rows[0].e.name) === 'zip';
+  // Write actions: off in a read-only location (and for protected files), with the reason as their tooltip.
+  const ro = fxReadOnly(), prot = rows.some((x) => x.e.protected), why = (bad) => (bad ? (ro ? FX_RO : FX_PROT) : '');
+  const destRo = !fxWritableDir(dest);
   const items = [
     ['open', 'Open', '', !!r, () => fxOpen(r)],
     '-',
-    ['copy', 'Copy', fxKeys('C'), !!rows.length, () => fxClipSet('copy')],
-    ['cut', 'Cut', fxKeys('X'), !!rows.length, () => fxClipSet('cut')],
-    ['paste', r?.e.dir ? `Paste into “${r.e.name}”` : 'Paste', fxKeys('V'), fxClipOk(), () => fxPaste(dest)],
+    ['copy', 'Copy', fxKeys('C'), !!rows.length && !prot, () => fxClipSet('copy'), prot ? FX_PROT : ''],
+    ['cut', 'Cut', fxKeys('X'), !!rows.length && !ro && !prot, () => fxClipSet('cut'), why(ro || prot)],
+    ['paste', r?.e.dir ? `Paste into “${r.e.name}”` : 'Paste', fxKeys('V'), fxClipOk() && !destRo, () => fxPaste(dest), destRo ? FX_RO : ''],
     '-',
-    ['zip', 'Compress to ZIP', '', !!rows.length, () => fxZip(rows)],
-    ...(zip ? [['unzip', 'Extract here', '', true, () => fxUnzip(rows[0])]] : []),
+    ['zip', 'Compress to ZIP', '', !!rows.length && !ro && !prot, () => fxZip(rows), why(ro || prot)],
+    ...(zip ? [['unzip', 'Extract here', '', !ro, () => fxUnzip(rows[0]), ro ? FX_RO : '']] : []),
     '-',
-    ['rename', 'Rename…', 'F2', rows.length === 1 && !!r, () => fxRenameStart(r)],
-    ['newfile', 'New file…', '', !r || r.e.dir, () => fxNewStart('file', dest)],
-    ['newdir', 'New folder…', '', !r || r.e.dir, () => fxNewStart('dir', dest)],
+    ['rename', 'Rename…', 'F2', rows.length === 1 && !!r && !ro && !prot, () => fxRenameStart(r), why(ro || prot)],
+    ['newfile', 'New file…', '', (!r || r.e.dir) && !destRo, () => fxNewStart('file', dest), destRo ? FX_RO : ''],
+    ['newdir', 'New folder…', '', (!r || r.e.dir) && !destRo, () => fxNewStart('dir', dest), destRo ? FX_RO : ''],
     '-',
-    ['delete', 'Delete', FX_MAC ? '⌫' : 'Del', !!rows.length, () => fxConfirmDelete(rows)],
+    ['delete', 'Delete', FX_MAC ? '⌫' : 'Del', !!rows.length && !ro && !prot, () => fxConfirmDelete(rows), why(ro || prot)],
     '-',
     ['path', paths.length > 1 ? 'Copy paths' : 'Copy path', '', !!rows.length, async () => {
       toast((await copyToClipboard(paths.join('\n'))) ? `${paths.length > 1 ? 'Paths' : 'Path'} copied` : "Couldn't copy", { duration: 2000 });
     }],
-    ['ask', 'Ask in chat', '⇧Enter', !!rows.length, () => fxAskAbout(paths.join(' '))],
+    ['ask', 'Ask in chat', '⇧Enter', !!rows.length, () => fxAskAbout(paths.map(fxRel).join(' '))],
   ];
+  fxMenuShow(items, r ? r.e.name : fxFolderName(FX.path), x, y, ro ? `${FX_RO}.` : '');
+}
+// Builds and shows a menu: items are '-' or [act, label, keys, enabled, run, tooltip]; note: a line of text at the end.
+function fxMenuShow(items, label, x, y, note = '') {
+  fxMenuClose();
   const m = el('div', 'cmenu fx-menu');
   m.id = 'fxMenu';
   m.setAttribute('role', 'menu');
-  m.setAttribute('aria-label', r ? r.e.name : fxFolderName(FX.path));
+  m.setAttribute('aria-label', label);
   for (const it of items) {
     if (it === '-') { m.append(el('div', 'cm-sep')); continue; }
-    const [act, label, keys, on, run] = it;
+    const [act, text, keys, on, run, tip] = it;
     const b = el('button', 'cm-opt');
     b.type = 'button'; b.tabIndex = -1; b.disabled = !on; b.dataset.act = act;
+    if (tip) b.title = tip;
     b.setAttribute('role', 'menuitem');
-    b.append(el('span', 'cm-l', label));
+    b.append(el('span', 'cm-l', text));
     if (keys) b.append(el('span', 'cm-h', keys));
     if (act === 'delete') b.classList.add('fx-danger');
-    b.onclick = () => { fxMenuClose(!['open', 'ask', 'rename', 'newfile', 'newdir', 'delete'].includes(act)); run(); };
+    b.onclick = () => { fxMenuClose(!['open', 'ask', 'place', 'goto', 'rename', 'newfile', 'newdir', 'delete'].includes(act)); run(); };
     m.append(b);
   }
+  if (note) m.append(el('div', 'fx-menu-note', note));
   m.addEventListener('keydown', (e) => {
     const opts = [...m.querySelectorAll('.cm-opt:not(:disabled)')], k = opts.indexOf(document.activeElement), n = opts.length;
     if (e.key === 'Escape' || e.key === 'Tab') { e.preventDefault(); e.stopPropagation(); fxMenuClose(true); }
@@ -928,12 +1031,116 @@ function fxMenuOpen(r, x, y) {
   m.style.left = `${Math.max(8, Math.min(x, innerWidth - w - 8))}px`;
   m.style.top = `${Math.max(8, y + h > innerHeight - 8 ? Math.min(y - h, innerHeight - h - 8) : y)}px`;
   const close = () => fxMenuClose();
-  const outside = (e) => { if (!m.contains(e.target)) fxMenuClose(); };
+  const outside = (e) => { if (!m.contains(e.target) && !e.target.closest?.('#fxPlaces')) fxMenuClose(); }; // Places toggles its own
   FX.menu = { el: m, close, outside };
   document.addEventListener('pointerdown', outside, true);
   window.addEventListener('resize', close);
   $('fxMain').addEventListener('scroll', close);
   m.querySelector('.cm-opt:not(:disabled)')?.focus({ preventScroll: true });
+  return m;
+}
+// Places: the project, home, / and /tmp (as the server names them), then Go to folder.
+function fxPlacesOpen(x, y) {
+  if (FX.menu?.el.dataset.places) return fxMenuClose(true);
+  const places = FX.places || [{ label: 'Project', path: FX.proj || '' }, { label: '/', path: '/' }, { label: '/tmp', path: '/tmp' }];
+  const m = fxMenuShow([
+    ...places.map((p) => ['place', p.label, p.label === p.path ? '' : fxTilde(p.path), !!FX.cid, () => fxNav(p.path), p.path]),
+    '-',
+    ['goto', 'Go to folder…', fxKeys('L'), !!FX.cid, () => fxGotoOpen()],
+  ], 'Places', x, y);
+  m.dataset.places = '1';
+  m.querySelectorAll('[data-act="place"]').forEach((b, i) => { if (places[i].path === FX.path) b.setAttribute('aria-current', 'location'); });
+}
+
+// ----- Go to folder (⌘L): an absolute, ~ or relative path; folder names complete from the listings (Tab, ↓↑, a click)
+const fxHome = () => (FX.places || []).find((p) => p.label === 'Home')?.path || null;
+const fxTilde = (p) => { const h = fxHome(); return h && (p === h || p.startsWith(h + '/')) ? '~' + p.slice(h.length) : p; };
+// A typed path as a clean absolute one ('..' and '.' resolved); null when it names ~ but home isn't known.
+function fxResolve(t) {
+  t = t.trim();
+  if (t === '~' || t.startsWith('~/')) { const h = fxHome(); if (!h) return null; t = h + t.slice(1); }
+  else if (!t.startsWith('/')) t = fxJoin(FX.path.startsWith('/') ? FX.path : FX.proj || '/', t);
+  const out = [];
+  for (const s of t.split('/')) { if (s === '..') out.pop(); else if (s && s !== '.') out.push(s); }
+  return '/' + out.join('/');
+}
+function fxGotoOpen() {
+  fxMenuClose();
+  const bar = $('fxGotoBar'), input = $('fxGoto');
+  bar.hidden = false;
+  FX.goto.cache.clear();
+  if (!input.value) input.value = FX.path.startsWith('/') ? fxTilde(FX.path) + (FX.path === '/' ? '' : '/') : '';
+  input.focus();
+  input.select();
+  fxGotoSuggest();
+}
+function fxGotoClose(refocus) {
+  if (!FX.built) return;
+  $('fxGotoBar').hidden = true;
+  $('fxGoto').value = '';
+  fxGotoList([]);
+  if (refocus) fxFocus();
+}
+function fxGotoGo(p) {
+  const t = p ?? $('fxGoto').value;
+  if (!t.trim()) return;
+  const to = fxResolve(t);
+  if (!to) return toast("Home isn't known yet: type the full path.", { kind: 'error' });
+  fxGotoClose();
+  fxNav(to);
+}
+// The folders in the typed path's folder that start with its last part (the open listing when it's this folder).
+async function fxGotoSuggest() {
+  const t = $('fxGoto').value, seq = ++FX.goto.seq;
+  const slash = t.lastIndexOf('/'), head = t.slice(0, slash + 1), part = t.slice(slash + 1).toLowerCase();
+  const dir = head ? fxResolve(head) : t.startsWith('~') ? null : FX.path;
+  if (!dir || !t.trim()) return fxGotoList([]);
+  let entries = dir === FX.path && FX.data?.dir === dir ? FX.data.entries : FX.goto.cache.get(dir);
+  if (!entries) {
+    try { entries = (await api(fxListUrl(dir))).entries; } catch { entries = []; }
+    FX.goto.cache.set(dir, entries);
+    if (seq !== FX.goto.seq) return;
+  }
+  const opts = entries.filter((e) => e.dir && e.name.toLowerCase().startsWith(part) && (FX.hidden || !e.hidden || part.startsWith('.')))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })).slice(0, 8)
+    .map((e) => ({ name: e.name, value: `${head}${e.name}/`, path: fxJoin(dir, e.name) }));
+  fxGotoList(opts.length === 1 && opts[0].value === t ? [] : opts);
+}
+function fxGotoList(opts, i = -1) {
+  const box = $('fxSugg'), input = $('fxGoto');
+  FX.goto.opts = opts; FX.goto.i = i;
+  box.textContent = '';
+  box.hidden = !opts.length;
+  input.setAttribute('aria-expanded', String(!!opts.length));
+  input.removeAttribute('aria-activedescendant');
+  opts.forEach((o, k) => {
+    const b = el('div', 'fx-sug');
+    b.id = `fx-sug-${k}`;
+    b.setAttribute('role', 'option');
+    b.setAttribute('aria-selected', String(k === i));
+    b.title = o.path;
+    b.innerHTML = FOLDER_SVG;
+    b.append(el('span', '', o.name));
+    b.addEventListener('pointerdown', (e) => e.preventDefault()); // keep the focus in the field
+    b.onclick = () => fxGotoPick(o);
+    box.append(b);
+  });
+  if (i >= 0) input.setAttribute('aria-activedescendant', `fx-sug-${i}`);
+}
+function fxGotoPick(o) {
+  const input = $('fxGoto');
+  input.value = o.value;
+  input.focus();
+  fxGotoSuggest();
+}
+function fxGotoKey(e) {
+  const { opts, i } = FX.goto;
+  if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); if (opts.length) fxGotoList([]); else fxGotoClose(true); }
+  else if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && opts.length) {
+    e.preventDefault();
+    fxGotoList(opts, e.key === 'ArrowDown' ? (i + 1) % opts.length : i <= 0 ? opts.length - 1 : i - 1);
+  } else if (e.key === 'Tab' && !e.shiftKey && opts.length) { e.preventDefault(); fxGotoPick(opts[Math.max(0, i)]); }
+  else if (e.key === 'Enter' && i >= 0 && opts[i]) { e.preventDefault(); fxGotoGo(opts[i].path); }
 }
 
 // ----- Quick Look: text (line numbers), Markdown (rendered or source), images and diffs (Changed view: coloured or
@@ -982,12 +1189,14 @@ async function fxPreview(r) {
   $('fxQLSub').textContent = r.hit ? `${r.file} · line ${r.hit.line}` : `${kindOf(r.e)} · ${fxSize(r.e.size)} · ${fxDate(r.e.mtime)}`;
   $('fxQLOpen').href = url;
   $('fxQLOpen').title = 'Open in a new tab';
+  $('fxQLOpen').hidden = !!r.e.protected;
   $('fxQLFile').hidden = true;
   $('fxQLMode').hidden = !r.ch; // a diff always has Preview | Source: hiding it would drop the focus of the one just clicked
   body.className = 'fx-ql-body';
   body.textContent = '';
   if (!wasOpen) m.querySelector('[data-close].icon-btn').focus();
   if (r.ch) return fxDiff(r, seq);
+  if (r.e.protected) return body.append(fxEmpty(FX_PROT, 'agent-orch never shows secrets such as keys, tokens and credentials.', 'fx-prot'));
   if (isImage(r.e.name)) {
     body.classList.add('img');
     const img = el('img');

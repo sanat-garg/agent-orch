@@ -1302,6 +1302,9 @@ Command: merge main again
 
 merge conflicts resolved; rolling-restart, version, and UI tests pass
 
+## 2026-09-28 15:07 — #438 Files tab: go to parent folders and anywhere on the VPS, still opening on the project [done (check passed)]
+
+Files tab browses the whole VPS; scope tests pass
 ## 2026-09-28 14:55 — #407 Version format: v<major>.<minor> from the commit count (352 → v3.52) [done (check passed)]
 
 Builds now show as v3.52 in About, sidebar, toasts, Machines
@@ -1380,3 +1383,6 @@ CONTEXT.md conflict resolved again; Done-when tests pass (23/23)
 ## 2026-09-28 16:55 — #459 Rolling restart waits only for the git merge itself, not a whole integrator run [done (check passed)]
 
 Restarts wait only for merges; integrators pause; friendly 404 retry
+## 2026-09-28 16:59 — #460 Integrate #438: Files tab: go to parent folders and anywhere on the VPS, still opening on the project [done (check passed)]
+
+#438 merged with main; all Files UI tests pass

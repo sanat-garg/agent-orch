@@ -1,6 +1,7 @@
 // Files view (files.js) navigation and file operations in a real browser against server.mjs (temporary HOME, data and port;
-// no orchestrator), with /api/files/list, /copy, /move, /zip and /unzip mocked by the page: it opens at the project root,
-// the path bar and history navigate, the context menu and ⌘C/⌘X/⌘V/⌘A post the contract's bodies, and the menu stays on screen.
+// no orchestrator), with /api/files/list, /copy, /move, /zip and /unzip mocked by the page (absolute paths, the project at
+// /w/proj): it opens at the project root, the path bar and history navigate, a reload opens the project again, the context
+// menu and ⌘C/⌘X/⌘V/⌘A post the contract's bodies, and the menu stays on screen.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -18,14 +19,16 @@ let browser, skip = false;
 try { browser = await chromium.launch(); } catch (e) { skip = `cached Chromium unavailable: ${e.message.split('\n')[0]}`; }
 let child, base, root, home, dataDir, cookie;
 
-const f = (name, size = 10) => ({ name, dir: false, size, mtime: 1.7e12, hidden: name.startsWith('.') });
-const d = (name) => ({ name, dir: true, size: null, mtime: 1.7e12, hidden: false });
+const P = '/w/proj';
+const f = (name, size = 10) => ({ name, dir: false, type: 'file', size, mtime: 1.7e12, hidden: name.startsWith('.'), readable: true, writable: true });
+const d = (name) => ({ name, dir: true, type: 'dir', size: null, mtime: 1.7e12, hidden: false, readable: true, writable: true });
 const TREE = {
-  '': [f('README.md'), d('src'), f('a.zip', 300), d('docs')],
-  src: [f('app.js'), d('lib')],
-  'src/lib': [f('util.js')],
-  docs: [f('guide.md')],
+  [P]: [f('README.md'), d('src'), f('a.zip', 300), d('docs')],
+  [`${P}/src`]: [f('app.js'), d('lib')],
+  [`${P}/src/lib`]: [f('util.js')],
+  [`${P}/docs`]: [f('guide.md')],
 };
+const PLACES = [{ label: 'Project', path: P }, { label: 'Home', path: '/w' }, { label: '/', path: '/' }, { label: '/tmp', path: '/tmp' }];
 
 before(async () => {
   if (skip) return;
@@ -69,17 +72,18 @@ async function open(viewport = { width: 1280, height: 860 }) {
   const errors = [], lists = [], ops = [], mock = { fail: null };
   page.on('pageerror', (e) => errors.push(e.message));
   await page.route('**/api/files/list?*', (route) => {
-    const u = new URL(route.request().url()), dir = u.searchParams.get('dir');
-    lists.push(dir);
+    const u = new URL(route.request().url()), asked = u.searchParams.get('dir'), dir = asked || P;
+    lists.push(asked);
     if (!(dir in TREE)) return route.fulfill({ status: 404, json: { error: 'Not found' } });
-    route.fulfill({ json: { name: dir.split('/').pop() || 'proj', path: dir, entries: TREE[dir], truncated: false } });
+    route.fulfill({ json: { dir, parent: dir.replace(/\/[^/]*$/, '') || '/', entries: TREE[dir].map((e) => ({ ...e, path: `${dir}/${e.name}` })), places: PLACES,
+      name: dir.split('/').pop(), path: dir, truncated: false } });
   });
   await page.route(/\/api\/files\/(copy|move|zip|unzip)\?/, async (route) => {
     const u = new URL(route.request().url()), op = u.pathname.split('/').pop(), body = route.request().postDataJSON();
     ops.push({ op, cid: u.searchParams.get('cid'), body, method: route.request().method() });
     if (op === 'zip') await new Promise((r) => setTimeout(r, 300)); // long enough to see the progress bar
     if (mock.fail) { const error = mock.fail; mock.fail = null; return route.fulfill({ status: 400, json: { error } }); }
-    route.fulfill({ json: op === 'zip' ? { path: 'Archive.zip' } : op === 'unzip' ? { path: 'a' } : { paths: body.paths.map((p) => `${body.dest ? body.dest + '/' : ''}${p.split('/').pop()}`) } });
+    route.fulfill({ json: op === 'zip' ? { path: `${P}/Archive.zip` } : op === 'unzip' ? { path: `${P}/a` } : { paths: body.paths.map((p) => `${body.dest}/${p.split('/').pop()}`) } });
   });
   await page.goto(`${base}/#c0`);
   await page.waitForFunction(() => !document.getElementById('app').inert, null, { timeout: 15000 }).catch(() => page.click('#splashSkip'));
@@ -95,49 +99,51 @@ async function openFiles(page) {
 }
 async function menu(page, target, pick) {
   if (target) await page.click(target, { button: 'right' });
-  else { const b = await page.locator('#fxMain').boundingBox(); await page.mouse.click(b.x + b.width - 20, b.y + b.height - 20, { button: 'right' }); }
+  else { // the folder's background, bottom-right, where a toast may sit
+    await page.evaluate(() => document.querySelectorAll('#toasts .toast').forEach((t) => t.remove()));
+    const b = await page.locator('#fxMain').boundingBox(); await page.mouse.click(b.x + b.width - 20, b.y + b.height - 20, { button: 'right' }); }
   await page.locator('#fxMenu').waitFor();
   if (pick) await page.click(`#fxMenu [data-act="${pick}"]`);
 }
 const until = (fn) => { const t0 = Date.now(); return (async function poll() { const v = await fn(); if (v || Date.now() - t0 > 5000) return v; await new Promise((r) => setTimeout(r, 50)); return poll(); })(); };
 
-test('opens at the project root, folders first; the path bar, Enter, Backspace, Alt+Up and Back/Forward navigate; the folder is remembered', { skip, timeout: 60000 }, async () => {
+test('opens at the project root, folders first; the path bar, Enter, Backspace, Alt+Up and Back/Forward navigate; a reload opens the project', { skip, timeout: 60000 }, async () => {
   const { page, errors, lists, ctx } = await open();
   await openFiles(page);
   assert.equal(lists[0], '', 'the first listing is the root');
   assert.deepEqual(await names(page), ['docs', 'src', 'a.zip', 'README.md']);
-  assert.deepEqual(await crumbs(page), ['proj']);
+  assert.deepEqual(await crumbs(page), ['/', 'w', 'proj']);
 
   await page.dblclick(rowSel('src'));
-  await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 2);
+  await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 4);
   await page.click(rowSel('lib'));
   await page.keyboard.press('Enter');
-  await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 3);
-  assert.deepEqual(await crumbs(page), ['proj', 'src', 'lib']);
+  await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 5);
+  assert.deepEqual(await crumbs(page), ['/', 'w', 'proj', 'src', 'lib']);
   assert.deepEqual(await names(page), ['util.js']);
 
   await page.click('#fxPath .fx-crumb:has-text("proj")');
-  await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 1);
+  await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 3);
   assert.deepEqual(await names(page), ['docs', 'src', 'a.zip', 'README.md']);
   await page.click('#fxBack');
-  await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 3);
+  await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 5);
   await page.keyboard.press('Backspace');
-  await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 2);
+  await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 4);
   assert.equal(await page.getAttribute(rowSel('lib'), 'aria-selected'), 'true', 'the folder backed out of stays selected');
   await page.click('#fxBack');
-  await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 3);
+  await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 5);
   await page.click('#fxFwd');
-  await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 2);
-  assert.deepEqual(await crumbs(page), ['proj', 'src']);
+  await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 4);
+  assert.deepEqual(await crumbs(page), ['/', 'w', 'proj', 'src']);
   await page.keyboard.press('Alt+ArrowUp');
-  await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 1);
+  await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 3);
   await page.dblclick(rowSel('docs'));
-  await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 2);
+  await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 4);
 
   await page.reload();
   await page.waitForFunction(() => !document.getElementById('app').inert, null, { timeout: 15000 }).catch(() => page.click('#splashSkip'));
   await openFiles(page);
-  assert.deepEqual(await crumbs(page), ['proj', 'docs'], 'the last folder of this project is remembered');
+  assert.deepEqual(await crumbs(page), ['/', 'w', 'proj'], 'the last folder is remembered only until the page reloads');
   assert.deepEqual(errors, []);
   await ctx.close();
 });
@@ -161,19 +167,19 @@ test('context menu: copy then paste into a folder, cut (dimmed) then paste as mo
   assert.match(await page.textContent('#fxMenu [data-act="paste"]'), /Paste into “src”/);
   await page.click('#fxMenu [data-act="paste"]');
   await until(() => ops.length === 1);
-  assert.deepEqual(ops[0], { op: 'copy', cid: 'c0', body: { paths: ['README.md'], dest: 'src' }, method: 'POST' });
+  assert.deepEqual(ops[0], { op: 'copy', cid: 'c0', body: { paths: [`${P}/README.md`], dest: `${P}/src` }, method: 'POST' });
   await until(async () => (await toasts(page)).some((t) => /Copied “README.md” to src/.test(t)));
 
   await menu(page, rowSel('a.zip'), 'cut');
   await page.waitForFunction(() => document.querySelector('.fx-cut')?.textContent.includes('a.zip'));
   await page.dblclick(rowSel('docs'));
-  await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 2);
+  await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 4);
   await menu(page, null, 'paste'); // the folder's background: paste into the current folder
   await until(() => ops.length === 2);
-  assert.deepEqual(ops[1].body, { paths: ['a.zip'], dest: 'docs' });
+  assert.deepEqual(ops[1].body, { paths: [`${P}/a.zip`], dest: `${P}/docs` });
   assert.equal(ops[1].op, 'move');
   await page.click('#fxPath .fx-crumb:has-text("proj")');
-  await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 1);
+  await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 3);
   assert.equal(await page.locator('.fx-cut').count(), 0, 'nothing is dimmed after the move');
   await menu(page, rowSel('README.md'));
   assert.equal(await page.isDisabled('#fxMenu [data-act="paste"]'), true, 'a cut is pasted once');
@@ -185,13 +191,13 @@ test('context menu: copy then paste into a folder, cut (dimmed) then paste as mo
   await page.locator('#fxBusy:not([hidden])').waitFor();
   assert.match(await page.textContent('#fxBusy'), /Compressing 2 items/);
   await until(() => ops.length === 3);
-  assert.deepEqual(ops[2], { op: 'zip', cid: 'c0', body: { paths: ['src', 'README.md'], dest: '' }, method: 'POST' });
+  assert.deepEqual(ops[2], { op: 'zip', cid: 'c0', body: { paths: [`${P}/src`, `${P}/README.md`], dest: P }, method: 'POST' });
   await page.locator('#fxBusy').waitFor({ state: 'hidden' });
   await until(async () => (await toasts(page)).some((t) => /Created “Archive.zip”/.test(t)));
 
   await menu(page, rowSel('a.zip'), 'unzip');
   await until(() => ops.length === 4);
-  assert.deepEqual(ops[3], { op: 'unzip', cid: 'c0', body: { path: 'a.zip', dest: '' }, method: 'POST' });
+  assert.deepEqual(ops[3], { op: 'unzip', cid: 'c0', body: { path: `${P}/a.zip`, dest: P }, method: 'POST' });
   await until(async () => (await toasts(page)).some((t) => /Extracted “a.zip”/.test(t)));
 
   mock.fail = 'Disk full';
@@ -219,17 +225,17 @@ test('keyboard: ⌘A, Shift-click ranges, ⌘C/⌘X/⌘V with the list focused; 
   await page.keyboard.press('ControlOrMeta+c');
   await page.keyboard.press('ControlOrMeta+v');
   await until(() => ops.length === 1);
-  assert.deepEqual(ops[0].body, { paths: ['README.md'], dest: '' });
+  assert.deepEqual(ops[0].body, { paths: [`${P}/README.md`], dest: P });
   assert.equal(ops[0].op, 'copy');
 
   await page.click(rowSel('a.zip'));
   await page.keyboard.press('ControlOrMeta+x');
   await page.waitForFunction(() => document.querySelector('.fx-cut')?.textContent.includes('a.zip'));
   await page.dblclick(rowSel('src'));
-  await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 2);
+  await page.waitForFunction(() => document.querySelectorAll('#fxPath .fx-crumb').length === 4);
   await page.keyboard.press('ControlOrMeta+v');
   await until(() => ops.length === 2);
-  assert.deepEqual(ops[1], { op: 'move', cid: 'c0', body: { paths: ['a.zip'], dest: 'src' }, method: 'POST' });
+  assert.deepEqual(ops[1], { op: 'move', cid: 'c0', body: { paths: [`${P}/a.zip`], dest: `${P}/src` }, method: 'POST' });
 
   // The ⋯ button opens the same menu; near the corner the menu flips to stay inside the viewport.
   await page.click(`${rowSel('app.js')} .fx-more`);

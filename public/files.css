@@ -1,4 +1,4 @@
-/* ---------- Files view (public/files.js): a Finder-style browser of the open chat's project ---------- */
+/* ---------- Files view (public/files.js): a Finder-style browser of the disk, opening on the open chat's project ---------- */
 :root {
   --fx-folder: #7cc3f5; --fx-folder-back: #5aa9e6; --fx-folder-line: rgba(255, 255, 255, .45);
   --fx-page: #ffffff; --fx-page-line: #cfcbbf; --fx-page-fold: #f0eee6; --fx-page-text: #6b675e;
@@ -21,6 +21,29 @@
 .fx-nav { display: flex; gap: 2px; flex: none; }
 .fx-nav .icon-btn:disabled { opacity: .35; cursor: default; }
 .fx-title { flex: 1; min-width: 0; margin: 0; font-size: 15px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.icon-btn.fx-up { width: auto; gap: 4px; padding: 0 9px 0 7px; display: flex; align-items: center; font: inherit; font-size: 13px; }
+.fx-ro { flex: none; margin-left: -2px; padding: 2px 7px; border: 1px solid var(--border); border-radius: 6px; font-size: 11.5px; font-weight: 550;
+  color: var(--muted); cursor: help; }
+.fx-ro[hidden] { display: none; }
+.btn.small.fx-places { display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 10px; font-size: 13px; flex: none; }
+.fx-places svg { opacity: .7; }
+/* Go to folder (⌘L): a field under the toolbar with folder suggestions below it */
+.fx-goto { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--border); flex: none; font-size: 13px; }
+.fx-goto[hidden] { display: none; }
+.fx-goto label { color: var(--muted); white-space: nowrap; }
+.fx-goto-f { position: relative; flex: 1; min-width: 0; }
+.fx-goto input { width: 100%; height: 30px; padding: 0 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--text);
+  font-family: var(--mono); font-size: 13px; outline: 0; }
+.fx-goto input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus); }
+.fx-goto .btn.small { height: 30px; flex: none; }
+.fx-sugg { position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; right: 0; max-height: 280px; overflow-y: auto; padding: 4px; border: 1px solid var(--border);
+  border-radius: 10px; background: var(--panel); box-shadow: 0 8px 24px rgba(0, 0, 0, .18); }
+.fx-sugg[hidden] { display: none; }
+.fx-sug { display: flex; align-items: center; gap: 8px; min-height: 28px; padding: 0 8px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.fx-sug svg { width: 16px; height: 13px; flex: none; }
+.fx-sug span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fx-sug:hover { background: var(--raised); }
+.fx-sug[aria-selected="true"] { background: var(--fx-sel); color: var(--fx-sel-text); }
 .fx-tools { display: flex; align-items: center; gap: 6px; flex: none; }
 .fx-views button { display: grid; place-items: center; height: 26px; padding: 0 9px; }
 .fx-views .fx-ch-btn { font-size: 12.5px; font-weight: 550; }
@@ -43,8 +66,13 @@
 .fx-empty svg { width: 64px; opacity: .55; margin-bottom: 6px; }
 .fx-empty strong { color: var(--text); font-size: 15px; font-weight: 600; }
 .fx-empty p { margin: 0; max-width: 380px; font-size: 13px; }
-.fx-ico { display: grid; place-items: center; flex: none; }
+.fx-ico { display: grid; place-items: center; flex: none; position: relative; }
 .fx-ico svg { display: block; width: 100%; height: 100%; }
+/* a protected entry (a secret): a lock on its icon; an unreadable one is dimmed */
+.fx-lock { position: absolute; right: 0; bottom: 0; display: grid; place-items: center; width: 40%; max-width: 22px; min-width: 11px; aspect-ratio: 1;
+  border-radius: 50%; background: var(--panel); color: var(--warn, #b7791f); box-shadow: 0 0 0 1px var(--border); }
+.fx-lock svg { width: 70%; height: 70%; }
+.fx-noread .fx-ico, .fx-noread .fx-name, .fx-noread .fx-nt { opacity: .5; }
 
 /* icon view */
 .fx-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(108px, 1fr)); gap: 10px 4px; align-content: start; padding: 16px 12px; min-height: 100%; }
@@ -151,6 +179,8 @@ a.fx-ql-file { color: var(--text); text-decoration: none; }
 .fx-menu .cm-opt::after { display: none; }
 .fx-menu .cm-h { margin-left: 16px; }
 .fx-menu .cm-opt:disabled .cm-h { opacity: .6; }
+.fx-menu-note { max-width: 240px; padding: 6px 10px 4px; border-top: 1px solid var(--border); margin-top: 4px; font-size: 11.5px; color: var(--muted); }
+.fx-menu .cm-opt[aria-current] .cm-l { font-weight: 600; }
 .fx-menu .cm-opt.fx-danger:not(:disabled) .cm-l { color: var(--danger); }
 /* a name typed in place (Rename, New file/folder) */
 .fx-edit { min-width: 0; height: 22px; padding: 0 5px; border: 1px solid var(--accent); border-radius: 5px; outline: 0; background: var(--panel);
@@ -184,6 +214,10 @@ a.fx-ql-file { color: var(--text); text-decoration: none; }
 .fx-crumb:hover, .fx-crumb[aria-current] { color: var(--text); }
 .fx-crumb:hover { background: var(--raised); }
 .fx-sep { color: var(--faint); flex: none; }
+.fx-crumb.fx-root { font-family: var(--mono); font-weight: 600; }
+.fx-ell { display: none; align-items: center; height: 24px; padding: 0 8px; border: 0; border-radius: 5px; background: var(--raised); color: inherit;
+  font: inherit; cursor: pointer; flex: none; }
+.fx-empty.fx-denied strong, .fx-empty.fx-prot strong { color: var(--text); }
 .fx-count { flex: none; }
 
 /* Quick Look */
@@ -217,7 +251,12 @@ a.fx-ql-file { color: var(--text); text-decoration: none; }
 @media (pointer: coarse) {
   .fx-row { height: 44px; }
   .fx-disc { width: 28px; height: 36px; }
-  .fx-crumb { height: 36px; }
+  .fx-crumb, .fx-ell { height: 36px; }
+  .icon-btn.fx-up, .btn.small.fx-places { min-height: 44px; min-width: 44px; }
+  .fx-goto input { height: 44px; font-size: 16px; }
+  .fx-goto .btn.small { height: 44px; }
+  .fx-goto .icon-btn { width: 44px; height: 44px; }
+  .fx-sug { min-height: 44px; font-size: 15px; }
   .fx-views button { min-height: 44px; min-width: 44px; } /* UI-REVIEW #22 */
   .fx-bar .fx-search { height: 44px; } /* UI-REVIEW #22: .fx-bar beats the phone block's 36px below */
   .btn.small.fx-find-btn { height: 44px; }
@@ -237,6 +276,10 @@ a.fx-ql-file { color: var(--text); text-decoration: none; }
 @media (max-width: 640px) {
   .fx-bar { flex-wrap: wrap; row-gap: 8px; padding: 8px 10px; }
   .fx-title { order: 0; }
+  .fx-up-l, .fx-goto label { display: none; }
+  /* the path folds its middle folders into … (a tap unfolds them) */
+  .fx-crumbs:not(.open) .mid { display: none; }
+  .fx-crumbs:not(.open) .fx-ell { display: inline-flex; }
   .fx-tools { flex: 1 1 100%; flex-wrap: wrap; row-gap: 8px; }
   .fx-search { order: 3; flex: 1 1 60%; width: auto; height: 36px; } /* its own row, shared with Search project */
   .fx-find { order: 4; flex: 1 1 100%; }

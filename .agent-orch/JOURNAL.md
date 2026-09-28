@@ -1027,3 +1027,7 @@ forwarded calls now time out after callMs; late answers dropped
 ## 2026-09-28 12:43 — #360 Head: tell 'asleep' apart from 'network lost' and show the real reason [done (check passed)]
 
 drops show 'connection lost'; reported reasons counted and shown per machine
+
+## 2026-09-28 12:43 — #362 Completion sound plays while the tab is active too [done (check passed)]
+
+completion sound now plays in active tabs too; tests pass

@@ -13,3 +13,7 @@ In public/app.js (~line 2811) the task-done sound returns early when the tab is 
 ## Done when
 
 `node --test test/ui-sound*.test.mjs` (or the existing sound test file) passes including the active-tab case, and `! grep -n "document.hasFocus())) return" public/app.js`
+
+## Result — done (check passed) (2026-09-28 12:43)
+
+AGENT-ORCH-STATUS: done — completion sound now plays in active tabs too; tests pass

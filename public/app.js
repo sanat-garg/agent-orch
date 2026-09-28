@@ -2808,7 +2808,7 @@ function observeTaskCompletion(t) {
     completionSound.done.add(t.id);
     if (!completionSound.synced || !previous || previous === 'done' || !['work', 'reflect'].includes(t.kind)) return;
   }
-  if (!$('stSound').checked || (document.visibilityState !== 'hidden' && document.hasFocus())) return;
+  if (!$('stSound').checked) return; // plays whether this tab is focused or in the background
   const now = performance.now();
   if (now - completionSound.lastPlayed < 3000) return;
   completionSound.lastPlayed = now;

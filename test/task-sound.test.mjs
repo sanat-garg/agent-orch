@@ -38,15 +38,24 @@ test('completion sound: live transitions, replay, first completion, focus, kinds
   await f.event(6, 'running', 'plan'); await f.event(6, 'done', 'plan');
   assert.equal(f.plays, 1, 'plans excluded');
   f.document.visibilityState = 'visible'; f.document.hasFocus = () => true;
-  await f.event(7, 'running'); await f.event(7, 'done'); assert.equal(f.plays, 1);
-  f.document.hasFocus = () => false;
-  await f.event(8, 'running', 'reflect'); await f.event(8, 'done', 'reflect'); assert.equal(f.plays, 2);
+  await f.event(7, 'running'); await f.event(7, 'done'); assert.equal(f.plays, 2, 'active, focused tab plays too');
+  f.advance(); f.document.hasFocus = () => false;
+  await f.event(8, 'running', 'reflect'); await f.event(8, 'done', 'reflect'); assert.equal(f.plays, 3);
   f.advance(); f.document.visibilityState = 'hidden'; f.document.hasFocus = () => true;
-  await f.event(9, 'running'); await f.event(9, 'done'); assert.equal(f.plays, 3);
+  await f.event(9, 'running'); await f.event(9, 'done'); assert.equal(f.plays, 4);
   f.advance(); await f.event(10, 'running'); f.run('resetCompletionSync()');
   await f.event(10, 'done'); f.run("syncCompletionSound([{id:11,status:'done'}])");
-  await f.event(11, 'done'); assert.equal(f.plays, 3, 'reconnect replay suppressed');
-  await f.event(12, 'running'); await f.event(12, 'done'); assert.equal(f.plays, 4);
+  await f.event(11, 'done'); assert.equal(f.plays, 4, 'reconnect replay suppressed');
+  await f.event(12, 'running'); await f.event(12, 'done'); assert.equal(f.plays, 5);
+});
+
+test('completion sound plays in an active, focused tab; the switch alone turns it off', async () => {
+  const f = fixture();
+  f.document.visibilityState = 'visible'; f.document.hasFocus = () => true;
+  f.run('syncCompletionSound([])');
+  await f.event(1, 'running'); await f.event(1, 'done'); assert.equal(f.plays, 1);
+  f.advance(); f.elements.stSound.checked = false;
+  await f.event(2, 'running'); await f.event(2, 'done'); assert.equal(f.plays, 1, 'switch off');
 });
 
 test('sound preference, manual test and one-time muted unlock', async () => {

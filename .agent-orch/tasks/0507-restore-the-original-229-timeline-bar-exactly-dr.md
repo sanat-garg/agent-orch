@@ -13,3 +13,7 @@ The owner still doesn't like the Timeline bar after #497/#501 and wants the ORIG
 ## Done when
 
 `node --test test/ui-phase-strip*.test.mjs` passes with the restored .tl-bar (6px, 2px gaps, --tl-done/--run/--danger) in the drawer and .tl-bar.compact on cards
+
+## Result — done (check passed) (2026-09-28 19:09)
+
+AGENT-ORCH-STATUS: done — Original #229 .tl-bar restored in drawer; cards use .tl-bar.compact

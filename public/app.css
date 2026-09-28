@@ -35,16 +35,6 @@
   --focus: rgba(201, 100, 66, 0.28);
   --chart-2: #3b6fa0;
   --chart-3: #6a8f3a;
-  /* Task phase colours (app.js phaseBar: the cards' phase strip and the drawer's Timeline; the Queue sheet's legend):
-     muted and desaturated so the strip stays quiet (slate, steel blue, clay, dusty violet, sage, soft green, brick, ochre). */
-  --ph-queued: #a3a7ad;
-  --ph-prep: #7d95b0;
-  --ph-agent: #c4876c;
-  --ph-check: #9a8ab3;
-  --ph-ship: #7ea69c;
-  --ph-done: #8fb08a;
-  --ph-failed: #b86b62;
-  --ph-limit: #c4a466;
   --pace-over: #c2410c;
   --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
   --scroll: rgba(0, 0, 0, 0.18);
@@ -87,14 +77,6 @@
     --focus: rgba(217, 119, 87, 0.35);
     --chart-2: #7eaed8;
     --chart-3: #a3c77a;
-    --ph-queued: #6f747b;
-    --ph-prep: #6d85a0;
-    --ph-agent: #b67a60;
-    --ph-check: #8a7ba3;
-    --ph-ship: #6f968c;
-    --ph-done: #7a9c76;
-    --ph-failed: #a8615a;
-    --ph-limit: #b09358;
     --pace-over: #f08a3c;
     --scroll: rgba(255, 255, 255, 0.14);
     --scroll-hover: rgba(255, 255, 255, 0.3);
@@ -966,7 +948,7 @@ label.mc-row { cursor: pointer; }
 .cc-id { flex: none; color: var(--faint); font-variant-numeric: tabular-nums; }
 .cc-t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cc-am { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--muted); }
-.cc-task .tc-strip { left: 7px; right: 7px; bottom: 2px; opacity: .75; } /* the shared compact strip, quieter */
+.cc-task > .tl-bar.compact { position: absolute; left: 7px; right: 7px; bottom: 2px; } /* the cards' compact Timeline bar */
 .cc-task .e { flex: none; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .cc-task .e.wait { color: var(--warn); }
 .cc-idle { margin: 0; padding: 0 4px 2px; }
@@ -1354,45 +1336,9 @@ label.st-row, label.st-text { cursor: pointer; }
 @media (pointer: coarse) { .dr-model > .tc-tag.model { min-height: 44px; } }
 .notice.moved { cursor: pointer; }
 .tcard .chev { color: var(--faint); flex: none; }
-/* The phase strip (app.js syncPhaseStrip): a segmented bar just above the card's lower border. */
-/* A phase bar (app.js phaseBar): a rounded track of segments as wide as each step's time, a thin vertical milestone line
-   (b.ph-ms, zero-width so shares stay exact) standing through it at every phase boundary, the live step with a slow shimmer
-   (none under reduced motion) and, full size, a 'now' dot at its end. Full size = the drawer's Timeline; .ph-compact = the
-   cards' strip (2px track, 1px hairline milestones, no dot). */
-.ph-bar { --ph-track: 5px; --ph-ms: var(--muted); display: flex; align-items: center; height: 13px; }
-.ph-bar i { position: relative; flex: 1 1 0; min-width: 3px; height: var(--ph-track); background-color: var(--ph, var(--ph-queued)); }
-.ph-bar i:first-child { border-radius: 99px 0 0 99px; }
-.ph-bar i:last-child { border-radius: 0 99px 99px 0; }
-.ph-bar i:only-child { border-radius: 99px; }
-.ph-bar i.bad { --ph: var(--ph-failed); }
-.ph-bar i.limit { --ph: var(--ph-limit); }
-.ph-bar i.stopped { opacity: .5; }
-.ph-bar i.cur, .ph-bar i.limit { background-image: linear-gradient(90deg, transparent, rgb(255 255 255 / .38), transparent);
-  background-size: 50% 100%; background-repeat: no-repeat; animation: ph-shimmer 2.8s ease-in-out infinite; }
-.ph-bar:not(.ph-compact) i.cur:last-child::after { content: ""; position: absolute; right: -4px; top: 50%; width: 9px; height: 9px; margin-top: -4.5px;
-  border-radius: 50%; background: var(--ph); box-shadow: 0 0 0 2px var(--bg); }
-.ph-bar b.ph-ms { position: relative; z-index: 1; flex: none; width: 0; align-self: stretch; }
-.ph-bar b.ph-ms::before { content: ""; position: absolute; top: 0; bottom: 0; left: -0.75px; width: 1.5px; border-radius: 1px; background: var(--ph-ms); opacity: .55; }
-.ph-bar b.ph-ms.cur::before { opacity: 1; }
-@keyframes ph-shimmer { from { background-position: -100% 0; } to { background-position: 200% 0; } }
-@media (prefers-reduced-motion: reduce) { .ph-bar i.cur, .ph-bar i.limit { animation: none; background-image: none; } }
-.ph-bar.ph-compact { --ph-track: 2px; --ph-ms: var(--faint); height: 6px; }
-.ph-bar.ph-compact b.ph-ms::before { left: -0.5px; width: 1px; border-radius: 0; opacity: .8; }
-/* On a card: just above its bottom border, dimmed until the card is hovered or selected. */
-.tcard:has(> .tc-strip) { position: relative; padding-bottom: 10px; }
-.tc-strip { position: absolute; left: 10px; right: 10px; bottom: 1px; opacity: .5; transition: opacity .15s; }
-.tcard:hover > .tc-strip, .tcard:focus-visible > .tc-strip, .tcard.active > .tc-strip { opacity: 1; }
-[data-tone="queued"] { --ph: var(--ph-queued); }
-[data-tone="prep"] { --ph: var(--ph-prep); }
-[data-tone="agent"] { --ph: var(--ph-agent); }
-[data-tone="check"] { --ph: var(--ph-check); }
-[data-tone="ship"] { --ph: var(--ph-ship); }
-[data-tone="done"] { --ph: var(--ph-done); }
-[data-tone="failed"] { --ph: var(--ph-failed); }
-[data-tone="limit"] { --ph: var(--ph-limit); }
-.tc-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; font-size: 11.5px; color: var(--muted); }
-.tc-legend .lg { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
-.tc-legend i { width: 12px; height: 2px; border-radius: 99px; background: var(--ph); }
+/* A card's Timeline bar (app.js syncPhaseStrip): the drawer's .tl-bar in compact form, just above the card's lower border. */
+.tcard:has(> .tl-bar.compact) { position: relative; padding-bottom: 10px; }
+.tcard > .tl-bar.compact { position: absolute; left: 10px; right: 10px; bottom: 2px; }
 
 /* status glyph: one shape per state */
 .tc-glyph { position: relative; width: 22px; height: 22px; flex: none; border-radius: 50%; display: grid; place-items: center; }
@@ -1518,9 +1464,19 @@ label.st-row, label.st-text { cursor: pointer; }
 .dr-events time { font-variant-numeric: tabular-nums; color: var(--faint); flex: none; font-size: 11.5px; padding-top: 1px; }
 .dr-events li.warn span { color: var(--warn); }
 .dr-events li.error span { color: var(--danger); }
-/* A remote run's timeline (app.js timelineSection): the full-size phase bar (steps sized by their time, a milestone line at
-   each boundary). The step list under it carries every value in text. */
-.tl-bar { margin: 4px 0 8px; }
+/* A remote run's timeline (app.js timelineSection): one thin bar of steps sized by their time with 2px surface gaps;
+   done steps neutral (--tl-done: >= 3:1 on the drawer in both themes), the step in progress in the running blue, the
+   step it failed in red. The step list under it carries every value in text. .compact: the cards' form (3px, 1px gaps). */
+.tl-bar { --tl-done: #8a867c; display: flex; gap: 2px; height: 6px; margin: 2px 0 8px; }
+@media (prefers-color-scheme: dark) { .tl-bar { --tl-done: #7c786f; } }
+.tl-bar i { min-width: 3px; background: var(--tl-done); }
+.tl-bar i:first-child { border-radius: 3px 0 0 3px; }
+.tl-bar i:last-child { border-radius: 0 3px 3px 0; }
+.tl-bar i:only-child { border-radius: 3px; }
+.tl-bar i.cur { background: var(--run); animation: pulse 1.6s ease-in-out infinite; }
+.tl-bar i.bad { background: var(--danger); }
+.tl-bar.compact { height: 3px; gap: 1px; margin: 0; }
+@media (prefers-reduced-motion: reduce) { .tl-bar i.cur, .tl-steps li.cur::before { animation: none; } }
 .tl-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .tl-steps li { display: inline-flex; align-items: baseline; gap: 5px; }
 .tl-steps .n { color: var(--text); }

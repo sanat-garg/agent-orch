@@ -1596,3 +1596,7 @@ CONTEXT.md conflict resolved; browser-view tests pass
 ## 2026-09-28 18:58 — #504 Integrate #500: Browser failover: switch to another machine when one can't open the browser [done (check passed)]
 
 CONTEXT.md conflict resolved; browser-failover tests pass
+
+## 2026-09-28 19:09 — #507 Restore the original #229 Timeline bar exactly, drawer and cards [done (check passed)]
+
+Original #229 .tl-bar restored in drawer; cards use .tl-bar.compact

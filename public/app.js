@@ -5292,7 +5292,7 @@ function ccRow(t) {
   b.title = [`#${t.id} ${displayTitle(t)}`, t.project, `${shortLabel(t.agent)} · ${modelName(t.agent, t.model)}`,
     t.phase && t.phase !== 'running' ? PHASE_DOING[t.phase] : '', wait ? `waiting for ${t.waiting_for}` : ''].filter(Boolean).join(' · ');
   const full = { ...(O.tasks.get(t.id) || {}), ...t, status: 'running' }; // the queue's copy may lag the machine's phase
-  syncPhaseStrip(b, full, taskState(full)); // the shared progress strip, quieter here (app.css .cc-task .tc-strip)
+  syncPhaseStrip(b, full, taskState(full)); // the cards' compact Timeline bar (app.css .cc-task > .tl-bar.compact)
   return b;
 }
 // A machine's extent around its centre [left, right, top, bottom]: glyph, labels, two chip seats and a '+N'.
@@ -6752,15 +6752,12 @@ function fillCard(b, id) {
   if (b.isConnected) { syncReviewPanel(b, t); syncApprovalPanels(b, t); }
   else queueMicrotask(() => { if (b.isConnected) { syncReviewPanel(b, O.tasks.get(id)); syncApprovalPanels(b, O.tasks.get(id)); } });
 }
-// The phase strip along a card's bottom edge, the compact phaseBar of the drawer's Timeline (hairline milestones, no dot): one segment per step of the
-// task's latest run, each as wide as the time it took (the queue wait, then the run's phase_log from the server), the step
-// in progress growing live; a failed task's last step in brick, a limit wait in ochre, a done task capped in green,
-// nothing drawn for steps still to come. Its hover title lists the steps with their times ('Agent 4m 12s · Checking 38s').
+// A card's Timeline bar, the drawer Timeline's .tl-bar in compact form (3px, 1px gaps, no step list) just above the card's
+// bottom edge: one segment per step of the task's latest run, each taking its share of the time (the queue wait, then the
+// run's phase_log from the server), done steps neutral, the step in progress in the running blue (growing live), a
+// failed task's last step in red. Its hover title lists the steps with their times and names the current one.
 const PHASE_LABEL = { queued: 'Queued', cloning: 'Cloning', fetching: 'Fetching', installing: 'Installing', running: 'Agent', checking: 'Checking',
   committing: 'Committing', pushing: 'Pushing', merging: 'Merging', done: 'Done' };
-const STRIP_LEGEND = [['queued', 'Queued'], ['prep', 'Preparing'], ['agent', 'Agent'], ['check', 'Checking'], ['ship', 'Pushing / merging'],
-  ['done', 'Done'], ['failed', 'Failed'], ['limit', 'Waiting on limit']];
-const stripTone = (k) => ({ cloning: 'prep', fetching: 'prep', installing: 'prep', running: 'agent', checking: 'check', committing: 'ship', pushing: 'ship', merging: 'ship' })[k] || k;
 function stripDur(sec) {
   sec = Math.max(0, Math.round(sec));
   return sec < 60 || sec >= 3600 ? fmtDur(sec) : `${Math.floor(sec / 60)}m ${sec % 60}s`;
@@ -6792,53 +6789,28 @@ function stripSegs(t, s) {
   else if (t.status === 'done') segs.push({ phase: 'done', ms: 0 });
   return segs;
 }
-// One phase bar, the drawer's Timeline and (compact) the cards' strip alike: segs [{phase, ms, cls, since}] as a track of
-// segments sized by time and coloured by phase (--ph-* via data-tone), a thin vertical milestone line (b.ph-ms, zero-width,
-// so the segments keep their exact share) at each phase boundary with its step and start as the tooltip, the one before the
-// live step stronger; a live segment (since) keeps growing with the ticker below and ends in a 'now' dot (full size only).
-function phaseBar(bar, segs, { name = (p) => PHASE_LABEL[p] || p, compact = false } = {}) {
-  const timed = segs.filter((g) => g.phase !== 'done'), dur = (g) => `${name(g.phase)} ${stripDur(g.ms / 1000)}`;
-  bar.classList.add('ph-bar');
-  bar.classList.toggle('ph-compact', compact);
-  let at = 0;
-  bar.replaceChildren(...segs.flatMap((g, n) => {
-    const i = el('i', g.cls || '');
-    i.dataset.phase = g.phase;
-    i.dataset.tone = stripTone(g.phase);
-    i.style.flexGrow = String(Math.max(1, g.ms));
-    if (g.since != null) i.dataset.since = g.since;
-    i.title = g.phase === 'done' ? 'Done' : dur(g);
-    const out = [i];
-    if (n) {
-      const m = el('b', g.cls === 'cur' || g.cls === 'limit' ? 'ph-ms cur' : 'ph-ms');
-      m.dataset.phase = g.phase;
-      m.title = `${name(g.phase)} · from ${stripDur(at / 1000)}`;
-      out.unshift(m);
-    }
-    at += g.ms;
-    return out;
-  }));
-  bar.title = timed.map(dur).join(' · ');
-  bar.setAttribute('role', 'img');
-  bar.setAttribute('aria-label', `Time per step: ${timed.map(dur).join(', ')}`);
-  return bar;
-}
 function syncPhaseStrip(b, t, s) {
-  let bar = b.querySelector(':scope > .tc-strip');
+  let bar = b.querySelector(':scope > .tl-bar');
   if (t.kind === 'review') { bar?.remove(); return; } // a checkpoint never runs
   if (!bar) {
-    bar = b.appendChild(el('span', 'tc-strip'));
+    bar = b.appendChild(el('span', 'tl-bar compact'));
     bar.addEventListener('pointerenter', () => bar._redo?.()); // the live step's time, fresh on hover
   }
-  bar._redo = () => phaseBar(bar, stripSegs(t, s), { compact: true });
+  bar._redo = () => {
+    const segs = stripSegs(t, s).filter((g) => g.phase !== 'done'), dur = (g) => `${PHASE_LABEL[g.phase] || g.phase} ${stripDur(g.ms / 1000)}`;
+    bar.replaceChildren(...segs.map((g) => {
+      const cls = g.cls === 'cur' || g.cls === 'limit' ? 'cur' : g.cls === 'bad' ? 'bad' : '', i = el('i', cls);
+      i.style.flex = `${Math.max(1, g.ms)} 0 3px`;
+      if (cls === 'cur' && g.since != null) i.dataset.since = g.since;
+      i.title = dur(g);
+      return i;
+    }));
+    const now = segs.find((g) => g.cls === 'cur' || g.cls === 'limit');
+    bar.title = segs.map(dur).join(' · ') + (now ? `\nNow: ${PHASE_LABEL[now.phase] || now.phase}` : '');
+    bar.setAttribute('role', 'img');
+    bar.setAttribute('aria-label', `Time per step: ${segs.map(dur).join(', ')}${now ? `; now ${PHASE_LABEL[now.phase] || now.phase}` : ''}`);
+  };
   bar._redo();
-}
-// The legend of the strip's colours (the Queue sheet's header).
-function phaseLegend() {
-  const l = el('div', 'tc-legend');
-  l.setAttribute('aria-label', 'Phase colours');
-  for (const [k, name] of STRIP_LEGEND) { const s = el('span', 'lg'); const sw = el('i'); sw.dataset.tone = k; s.append(sw, name); l.append(s); }
-  return l;
 }
 // A running work task's card pauses it; a paused one's resumes it (the card itself is a button, so this is a role=button span).
 function cardControl(t) {
@@ -7568,8 +7540,8 @@ function section(title) {
   return s;
 }
 
-// A remote run's timeline (job.phase from its worker): one full-size phaseBar (the cards' strip is its compact form) whose
-// segments take each step's share of the time in its phase colour, a milestone line at each boundary (the step it failed in brick),
+// A remote run's timeline (job.phase from its worker): one thin bar whose segments take each step's share of the time
+// (a 2px gap between them; the step in progress in the running blue, done ones neutral, the step it failed in red),
 // then the same steps as text, which carries every value (the bar's hover titles only repeat it; a step cut short when
 // the run stopped says so), the latest progress hints while the agent runs, and the errors the worker reported with
 // their stderr or stack. The step in progress counts up live (the ticker below).
@@ -7582,19 +7554,23 @@ function timelineSection(run, live) {
   const steps = phases.filter((p) => p.phase !== 'done'), end = phases.find((p) => p.phase === 'done');
   const ms = (p) => p.ms ?? Math.max(0, Date.now() - p.at);
   if (steps.length) {
-    const list = el('ol', 'tl-steps'), segs = [];
+    const bar = el('div', 'tl-bar'), list = el('ol', 'tl-steps');
     steps.forEach((p, i) => {
       const last = i === steps.length - 1, cur = live && !end && last && p.ms == null;
       const bad = last && end && end.outcome !== 'ok';
-      const name = PHASE_NAME[p.phase] || p.phase;
-      segs.push({ phase: p.phase, ms: ms(p), cls: cur ? 'cur' : bad ? 'bad' : '', since: cur ? p.at : null });
+      const seg = el('i', cur ? 'cur' : bad ? 'bad' : ''), name = PHASE_NAME[p.phase] || p.phase;
+      seg.style.flex = `${Math.max(1, ms(p))} 0 3px`;
+      seg.title = `${name} · ${fmtDur(ms(p) / 1000)}${p.cut ? ' · stopped' : ''}`;
       const li = el('li', cur ? 'cur' : bad ? 'bad' : ''), time = el('span', 't', `${fmtDur(ms(p) / 1000)}${cur ? '…' : p.cut ? ' · stopped' : ''}`);
-      if (cur) time.dataset.since = p.at;
+      if (cur) { time.dataset.since = p.at; seg.dataset.since = p.at; }
       li.append(el('span', 'n', name), time);
+      bar.append(seg);
       list.append(li);
     });
     if (end) list.append(el('li', end.outcome === 'ok' ? 'end' : 'end bad', end.outcome === 'ok' ? 'Done' : OUTCOME_TEXT[end.outcome] || end.outcome.replace(/_/g, ' ')));
-    c.append(phaseBar(el('div', 'tl-bar'), segs, { name: (k) => PHASE_NAME[k] || k }), list);
+    bar.setAttribute('role', 'img');
+    bar.setAttribute('aria-label', `Time per step: ${steps.map((p) => `${PHASE_NAME[p.phase] || p.phase} ${fmtDur(ms(p) / 1000)}`).join(', ')}`);
+    c.append(bar, list);
   }
   const hint = steps.findLast((p) => p.progress)?.progress;
   if (hint && (live || hint.tools)) {
@@ -7610,9 +7586,9 @@ function timelineSection(run, live) {
   }
   return c;
 }
-// The step in progress grows on every phase bar (cards and the drawer), and counts up in an open drawer's step list.
+// The step in progress grows on every Timeline bar (cards and the drawer), and counts up in an open drawer's step list.
 setInterval(() => {
-  for (const n of document.querySelectorAll('.ph-bar i[data-since]')) n.style.flexGrow = String(Math.max(1, Date.now() - Number(n.dataset.since)));
+  for (const n of document.querySelectorAll('.tl-bar i[data-since]')) n.style.flexGrow = String(Math.max(1, Date.now() - Number(n.dataset.since)));
   if (!O.drawer) return;
   for (const n of document.querySelectorAll('#drBody .tl-steps [data-since]')) n.textContent = `${fmtDur((Date.now() - Number(n.dataset.since)) / 1000)}…`;
 }, 1000);
@@ -8199,7 +8175,6 @@ function closeQueue(refocus = true) {
   if (refocus) Q.lastFocus?.focus?.();
 }
 $('obQueue').addEventListener('click', openQueue);
-$('qLegend').replaceWith(Object.assign(phaseLegend(), { id: 'qLegend' }));
 $('queueModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeQueue(); });
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || $('queueModal').hidden) return;

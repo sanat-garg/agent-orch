@@ -182,7 +182,7 @@ test('1440×900: a star of 4 machines around the head; big cards list every task
   for (const [id, want] of Object.entries(tasks)) {
     const card = page.locator(id === 'head' ? '#caWrap .cc.head' : `#caWrap .cc[data-node="${id}"]`);
     const rows = await card.locator('.cc-task').evaluateAll((els) => els.map((e) => ({
-      id: Number(e.dataset.task), strip: !!e.querySelector('.tc-strip i'), text: e.textContent })));
+      id: Number(e.dataset.task), strip: !!e.querySelector('.tl-bar.compact i'), text: e.textContent })));
     assert.deepEqual(rows.map((r) => r.id).sort((a, b) => a - b), [...want].sort((a, b) => a - b));
     for (const r of rows) {
       assert.ok(r.strip, `task #${r.id} has a progress strip`);

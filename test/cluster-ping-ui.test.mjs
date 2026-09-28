@@ -96,7 +96,7 @@ test('the API: /api/health needs no session; POST …/ping needs one and answers
   await call(`/api/cluster/nodes/${a.node}`, 'DELETE');
 });
 
-test('a Ping button per worker card and Ping all: results inline, failures in red, a disconnected Mac\'s test command', { skip: noBrowser, timeout: 60000 }, async () => {
+test('a Ping button per worker card and Ping all: a chip group with a red pill per failure, a disconnected Mac\'s test command', { skip: noBrowser, timeout: 60000 }, async () => {
   const up = await mac('MacBook Air (Desk)');
   const away = await mac('MacBook Pro (Bag)');
   away.ws.terminate();
@@ -122,26 +122,31 @@ test('a Ping button per worker card and Ping all: results inline, failures in re
   assert.equal(await page.locator('#pingAll').isVisible(), true);
 
   await upCard.locator('button[data-act="ping"]').click();
-  const sum = upCard.locator('.mc-ping-sum');
-  await sum.waitFor({ timeout: 10000 });
-  assert.match(await sum.textContent(), /^Ping \d+ ms · DNS failed \(ENOTFOUND, 30 ms\) · head HTTPS failed \(ENOTFOUND\) · GitHub ok$/);
-  assert.deepEqual(await sum.locator('span.bad').allTextContents(), ['DNS failed (ENOTFOUND, 30 ms)', 'head HTTPS failed (ENOTFOUND)']);
-  const red = await sum.locator('span.bad').first().evaluate((e) => getComputedStyle(e).color);
-  assert.notEqual(red, await sum.locator('span:not(.bad)').first().evaluate((e) => getComputedStyle(e).color), 'failures are coloured');
-  assert.match(await upCard.locator('.mc-ping .mc-health.bad').first().textContent(), /^DNS lookup of the head failed on this Mac: its router or ISP can't resolve head\.example\./);
+  const chip = upCard.locator('.mc-ping .pg-pill').first();
+  await chip.waitFor({ timeout: 10000 });
+  assert.match(await upCard.locator('.mc-ping .pg-rtt').textContent(), /^\d+ ms$/);
+  const pills = await upCard.locator('.mc-ping .pg-pill').evaluateAll((xs) => xs.map((x) => [x.className, x.title]));
+  assert.deepEqual(pills, [['pg-pill bad', 'DNS failed (ENOTFOUND, 30 ms)'], ['pg-pill bad', 'head HTTPS failed (ENOTFOUND)'], ['pg-pill ok', 'GitHub ok']]);
+  const dot = (i) => upCard.locator('.mc-ping .pg-dot').nth(i).evaluate((e) => getComputedStyle(e).backgroundColor);
+  assert.notEqual(await dot(0), await dot(2), 'failures are coloured');
+  // The hints open on a tap.
+  assert.equal(await upCard.locator('.mc-ping .pg-det').isVisible(), false);
+  await upCard.locator('.mc-ping button[data-act="ping-more"]').click();
+  assert.match(await upCard.locator('.mc-ping .pg-det .mc-health.bad').first().textContent(), /^DNS lookup of the head failed on this Mac: its router or ISP can't resolve head\.example\./);
 
   await awayCard.locator('button[data-act="ping"]').click();
+  await awayCard.locator('.mc-ping .pg-pill').waitFor({ timeout: 10000 });
+  assert.match(await awayCard.locator('.mc-ping .pg-hint').textContent(), /^Last seen .* · connection lost$/);
+  await awayCard.locator('.mc-ping button[data-act="ping-more"]').click();
   const cmd = awayCard.locator('.mc-cmd code');
-  await cmd.waitFor({ timeout: 10000 });
   assert.equal(await cmd.textContent(), `curl -sS -o /dev/null -w '%{http_code} %{time_total}s\\n' ${base}/api/health`);
-  assert.match(await awayCard.locator('.mc-ping').textContent(), /Not connected · last seen .* · connection lost/);
   assert.match(await awayCard.locator('.mc-ping').textContent(), /Drops in the last 24 h: 1 \(unexplained 1\)/);
 
   // Ping all asks every worker again.
   const before = up.frames.filter((f) => f.t === 'ping').length;
   await page.locator('#pingAll').click();
   await waitFor(() => up.frames.filter((f) => f.t === 'ping').length > before, { timeout: 10000, message: 'Ping all reached the connected Mac' });
-  await upCard.locator('.mc-ping-sum').waitFor({ timeout: 10000 });
+  await upCard.locator('.mc-ping .pg-pill').first().waitFor({ timeout: 10000 });
   if (process.env.PING_SHOT) await page.locator('#mMachines').screenshot({ path: process.env.PING_SHOT });
   await ctx.close();
   assert.deepEqual(errors, []);

@@ -1328,6 +1328,9 @@ assign API lists runnable tasks and starts them immediately
 
 card opens all-machines window, dots gone, tests pass
 
+## 2026-09-28 15:08 — #454 Ping result: restyled and fades away after 10 seconds [done (check passed)]
+
+Ping result chip group now auto-fades after 10 seconds
 ## 2026-09-28 15:05 — #455 Plain-language refill status instead of 'Workers: 19 free · 12 ready → topping up' [done (check passed)]
 
 Queue now shows plain-language refill status with an explanation popover
@@ -1349,3 +1352,7 @@ orchestrator bar shows Running X · Queue Y; tests pass
 ## 2026-09-28 15:16 — #448 Integrate #435: Integrators run on workers too, so merges use Mac capacity [done (check passed)]
 
 CONTEXT.md conflict resolved; worker-integration tests pass 5/5
+
+## 2026-09-28 16:53 — #462 Integrate #454: Ping result: restyled and fades away after 10 seconds [done (check passed)]
+
+CONTEXT.md conflict resolved; ping-result tests pass

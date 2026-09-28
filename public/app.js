@@ -3980,7 +3980,7 @@ setInterval(() => { if (M.usage) renderUsage(); }, 30e3); // keep the "in 2h 9m"
 const AM = { code: null, expiresAt: 0, uses: 1, pairing: null, err: '', timer: null, lastFocus: null };
 const AM_USES = [1, 2, 3, 4, 5, 6, 8, 10];
 // open: the cards whose Machine settings are open; stale: a render skipped while a finish sound menu was in use.
-// pings: node id → the owner's last Ping ({busy} | {r: the answer} | {error}), shown under the node (pingBox).
+// pings: node id → the owner's last Ping ({busy} | {r: the answer} | {error}), shown under the node until it fades (pingBox).
 // soundAdd: the node whose Finish sound row shows the add-a-custom-sound form.
 const MC = { nodes: [], at: 0, timer: null, loading: false, open: new Set(), stale: false, pings: new Map(), soundAdd: null };
 const fmtGB = (b) => `${((b || 0) / 2 ** 30).toFixed(1)} GB`;
@@ -4183,33 +4183,107 @@ function dropLines(n) {
   out.push([d.total >= 3 ? 'warn' : '', `Connection drops today: ${d.total} (${by.join(', ')})`, 'Connections this machine lost without saying goodbye in the last 24 hours, by the reason its worker reported on reconnect.']);
   return out;
 }
+// ----- ping result -----
 // The owner's Ping (POST /api/cluster/nodes/:id/ping; cluster.mjs ping, pingReport), per worker card and 'Ping all' in
-// the Machines header. Connected: the round trip and the worker's own check ('Ping 84 ms · DNS ok (…, 12 ms) · head HTTPS
-// 200 (140 ms) · GitHub ok'), failures in red with a hint each. Not connected: when it was last seen, why it dropped, its
-// drops today and a command to test the head from that machine.
+// the Machines header, shown under the node as a chip group (pingBox): the round trip ('84 ms'), then one pill per check
+// (pingChecks: DNS, Head, Git, GitHub) with a status dot (ok; warn: over PING_SLOW ms; bad: failed), its label and time,
+// its full text as the tooltip. No answer, an error or a disconnected machine: one red pill and a one-line hint. The
+// details (every check in words, the hints, the last connection error; a disconnected machine's last drop, its drops
+// today and a command to test the head from there) open on a tap. It fades out and collapses PING_MS after the answer
+// (removed at once under prefers-reduced-motion), paused while hovered, focused or open; pinging again replaces it.
+// A MC.pings entry: {busy} | {r} | {error}, plus box (kept across renders), left (ms to go), t0, timer, fading, holds, open.
+const PING_MS = 10000, PING_SLOW = 500, PING_FADE = 250;
 async function pingNode(n) {
   if (MC.pings.get(n.id)?.busy) return;
+  pingDrop(n.id);
   MC.pings.set(n.id, { busy: true });
   renderMachines();
-  try { MC.pings.set(n.id, { r: await api(`/api/cluster/nodes/${encodeURIComponent(n.id)}/ping`, 'POST') }); } catch (e) { MC.pings.set(n.id, { error: e.message }); }
+  let p;
+  try { p = { r: await api(`/api/cluster/nodes/${encodeURIComponent(n.id)}/ping`, 'POST') }; } catch (e) { p = { error: e.message }; }
+  MC.pings.set(n.id, Object.assign(p, { left: PING_MS, holds: new Set(), open: false }));
   renderMachines();
+  pingArm(n.id);
 }
 $('pingAll').addEventListener('click', () => { for (const n of MC.nodes) if (!n.local) pingNode(n); });
+function pingDrop(id) {
+  const p = MC.pings.get(id);
+  if (!p) return;
+  clearTimeout(p.timer);
+  clearTimeout(p.fading);
+  p.box?.remove();
+  MC.pings.delete(id);
+}
+function pingArm(id) {
+  const p = MC.pings.get(id);
+  if (!p?.holds || p.timer || p.fading || p.holds.size) return;
+  p.t0 = Date.now();
+  p.timer = setTimeout(() => pingFade(id, p), p.left);
+}
+// why: 'hover', 'focus' or 'open'. Holding stops the clock (and a fade under way); the last release restarts it.
+function pingHold(id, p, why, on) {
+  if (MC.pings.get(id) !== p) return;
+  if (!on) { p.holds.delete(why); pingArm(id); return; }
+  p.holds.add(why);
+  if (p.timer) { clearTimeout(p.timer); p.timer = null; p.left = Math.max(0, p.left - (Date.now() - p.t0)); }
+  if (p.fading) { clearTimeout(p.fading); p.fading = null; p.left = Math.max(p.left, 2000); p.box?.classList.remove('out'); }
+}
+function pingFade(id, p) {
+  p.timer = null;
+  p.left = 0;
+  if (MC.pings.get(id) !== p) return;
+  const gone = () => { p.fading = null; pingDrop(id); };
+  if (!p.box || matchMedia('(prefers-reduced-motion: reduce)').matches) return gone();
+  p.box.classList.add('out');
+  p.fading = setTimeout(gone, PING_FADE);
+}
+// A connected answer's checks, in pingReport's order (so parts[i + 1] is each one's words): {label, ms, state, title}.
+function pingChecks(r) {
+  const d = r.diag || {}, out = [], ms = (x) => (Number.isFinite(x?.ms) ? Math.round(x.ms) : null);
+  const add = (label, x, ok) => out.push({ label, ms: ms(x), state: !ok ? 'bad' : ms(x) > PING_SLOW ? 'warn' : 'ok' });
+  if (d.dns) add('DNS', d.dns, d.dns.ok);
+  if (d.head) add('Head', d.head, d.head.ok && d.head.status >= 200 && d.head.status < 400);
+  if (d.git) add('Git', d.git, d.git.ok);
+  if (d.github && !d.github.skipped) add('GitHub', d.github, d.github.ok);
+  out.forEach((c, i) => { c.title = `${r.parts?.[i + 1]?.text || c.label}${c.state === 'warn' ? ' · slow' : ''}`; });
+  return out;
+}
 function pingBox(n) {
   const p = MC.pings.get(n.id), r = p?.r;
   if (!p || (r && r.connected !== n.connected)) return null; // it came back (or went away) since: that answer is stale
-  const box = el('div', 'mc-ping'), line = (cls, text) => { const x = el('p', `mc-health ${cls}`, text); box.append(x); return x; };
+  return (p.box ||= pingChip(n, p));
+}
+function pingChip(n, p) {
+  const r = p.r, box = el('div', 'mc-ping'), clip = el('div', 'pg-clip'), body = el('div', 'pg-body'), row = el('div', 'pg-row');
   box.setAttribute('role', 'status');
-  if (p.busy) line('', 'Pinging…');
-  else if (p.error) line('bad', `Ping: ${p.error === 'no answer' ? 'no answer (its worker did not reply within 8 s)' : p.error}`);
-  else if (r.connected) {
-    const sum = line('mc-ping-sum', '');
-    r.parts.forEach((x, i) => { if (i) sum.append(' · '); sum.append(el('span', x.bad ? 'bad' : '', x.text)); });
+  box.append(clip);
+  clip.append(body);
+  body.append(row);
+  if (p.busy) { row.append(el('span', 'pg-wait', 'Pinging…')); return box; }
+  const pill = (state, label, ms, title) => {
+    const x = el('span', `pg-pill ${state}`);
+    x.append(el('i', 'pg-dot'), el('span', 'pg-l', label));
+    if (ms != null) x.append(el('span', 'pg-ms', `${ms} ms`));
+    x.title = title || label;
+    row.append(x);
+  };
+  const det = el('div', 'pg-det'), line = (cls, text) => det.append(el('p', `mc-health ${cls}`, text));
+  let hint = '', worst = 'bad';
+  if (p.error) {
+    pill('bad', p.error === 'no answer' ? 'No answer' : 'Failed', null, `Ping: ${p.error}`);
+    hint = p.error === 'no answer' ? 'Its worker did not reply within 8 s' : p.error;
+  } else if (r.connected) {
+    const checks = pingChecks(r), rtt = el('span', 'pg-rtt', `${r.rtt} ms`);
+    rtt.title = 'Round trip';
+    row.append(rtt);
+    for (const c of checks) pill(c.state, c.label, c.ms, c.title);
+    worst = ['bad', 'warn'].find((s) => checks.some((c) => c.state === s)) || 'ok';
+    line('', (r.parts || []).map((x) => x.text).join(' · '));
     for (const h of r.hints || []) line('bad', h);
     const c = r.diag?.conn;
     if (c?.lastError) line('', `Last connection error ${relTime(c.lastErrorAt)}: ${c.lastError}`);
   } else {
-    line('warn', ['Not connected', r.lastSeen ? `last seen ${relTime(r.lastSeen)}` : 'never connected', r.awayLabel].filter(Boolean).join(' · '));
+    pill('bad', 'Not connected');
+    hint = [r.lastSeen ? `Last seen ${relTime(r.lastSeen)}` : 'Never connected', r.awayLabel].filter(Boolean).join(' · ');
     if (r.reason) line('', `Last drop ${relTime(r.reason.at)}: ${r.reason.reason === 'asleep' && n.os === 'darwin' ? 'the Mac was asleep' : DROP_WHY[r.reason.reason] || r.reason.reason}${r.reason.error ? ` (${r.reason.error})` : ''}`);
     if (r.drops?.total) line(r.drops.total >= 3 ? 'warn' : '', `Drops in the last 24 h: ${r.drops.total} (${Object.entries(r.drops.by).map(([k, v]) => `${DROP_NAME[k] || k} ${v}`).join(', ')})`);
     if (r.command) {
@@ -4219,9 +4293,38 @@ function pingBox(n) {
       copy.dataset.act = 'copy-ping';
       copy.addEventListener('click', async () => { copy.textContent = (await copyToClipboard(r.command)) ? 'Copied' : 'Copy failed'; });
       cmd.append(code, copy);
-      box.append(cmd);
+      det.append(cmd);
     }
   }
+  box.classList.add(worst);
+  if (hint) {
+    const h = el('p', 'pg-hint', hint);
+    h.title = hint;
+    body.append(h);
+  }
+  if (det.children.length) {
+    const more = el('button', 'pg-more');
+    more.type = 'button';
+    more.dataset.act = 'ping-more';
+    more.setAttribute('aria-label', 'Ping details');
+    more.setAttribute('aria-expanded', 'false');
+    more.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M7 10l5 5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    row.append(more);
+    row.classList.add('tap');
+    det.hidden = true;
+    body.append(det);
+    row.addEventListener('click', () => {
+      p.open = !p.open;
+      det.hidden = !p.open;
+      more.setAttribute('aria-expanded', String(p.open));
+      box.classList.toggle('open', p.open);
+      pingHold(n.id, p, 'open', p.open);
+    });
+  }
+  box.addEventListener('mouseenter', () => pingHold(n.id, p, 'hover', true));
+  box.addEventListener('mouseleave', () => pingHold(n.id, p, 'hover', false));
+  box.addEventListener('focusin', () => pingHold(n.id, p, 'focus', true));
+  box.addEventListener('focusout', (e) => { if (!box.contains(e.relatedTarget)) pingHold(n.id, p, 'focus', false); });
   return box;
 }
 // ----- assign a task (the 'Assign task' button on every machine card and machine detail) -----

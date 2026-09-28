@@ -567,9 +567,34 @@ code, pre, kbd { font-family: var(--mono); }
 .mc-health.warn { color: var(--warn); }
 .mc-health.bad { color: var(--danger); }
 .mc-acts { display: flex; gap: 8px; }
-.mc-ping { display: flex; flex-direction: column; gap: 4px; }
-.mc-ping-sum { color: var(--text); font-variant-numeric: tabular-nums; }
-.mc-ping-sum .bad { color: var(--danger); font-weight: 550; }
+/* Ping result (app.js pingBox): a rounded chip group under the node, the round trip then one pill per check with a
+   status dot. After 10 s it fades out and collapses (.out: the grid row shrinks to 0, pulling the card's gap with it). */
+.mc-ping { display: grid; grid-template-rows: 1fr; transition: opacity .25s ease, grid-template-rows .25s ease, margin-top .25s ease; }
+.mc-ping.out { opacity: 0; grid-template-rows: 0fr; margin-top: -10px; }
+.pg-clip { min-height: 0; min-width: 0; overflow: hidden; }
+.pg-body { display: flex; flex-direction: column; gap: 6px; padding: 6px; border: 1px solid var(--border); border-radius: 12px; background: var(--raised); }
+.mc-ping.bad .pg-body { border-color: color-mix(in srgb, var(--danger) 35%, var(--border)); }
+.pg-row { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; min-width: 0; }
+.pg-row.tap { cursor: pointer; }
+.pg-rtt { padding: 0 4px; color: var(--text); font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pg-wait { padding: 0 4px; font-size: 12.5px; }
+.pg-pill { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--panel); color: var(--text); font-size: 12px; white-space: nowrap; }
+.pg-pill .pg-ms { color: var(--muted); font-variant-numeric: tabular-nums; }
+.pg-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+.pg-pill.warn { border-color: transparent; background: var(--warn-soft); }
+.pg-pill.warn .pg-dot { background: var(--warn); }
+.pg-pill.bad { border-color: transparent; background: var(--danger-soft); color: var(--danger); font-weight: 550; }
+.pg-pill.bad .pg-dot { background: var(--danger); }
+.pg-pill.bad .pg-ms { color: inherit; font-weight: 400; }
+.pg-more { display: grid; place-items: center; width: 24px; height: 24px; margin-left: auto; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--muted); cursor: pointer; }
+.pg-more:hover { background: var(--panel); color: var(--text); }
+.pg-more svg { transition: transform .2s ease; }
+.mc-ping.open .pg-more svg { transform: rotate(180deg); }
+@media (pointer: coarse) { .pg-more { width: 44px; height: 44px; margin: -11px -6px -11px auto; } }
+.pg-hint { margin: 0 4px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pg-det { display: flex; flex-direction: column; gap: 4px; margin: 0 4px; padding-top: 6px; border-top: 1px solid var(--border); }
+.pg-det[hidden] { display: none; }
+@media (prefers-reduced-motion: reduce) { .mc-ping, .pg-more svg { transition: none; } }
 .mc-cmd { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .mc-cmd code { flex: 1; min-width: 0; padding: 6px 8px; border-radius: 8px; background: var(--code-bg); color: var(--text); font-size: 12px; overflow-x: auto; white-space: nowrap; }
 /* Assign task (app.js renderAssignButton): a button under what runs on each machine. Its picker is a popover by the

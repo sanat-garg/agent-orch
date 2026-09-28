@@ -13,3 +13,7 @@ Fix rows 15 and 16 of .agent-orch/UI-REVIEW.md, both small typography changes in
 ## Done when
 
 `node --test test/ui-static.test.mjs` and `grep -q 'box-decoration-break: clone' public/app.css` and `! grep -E 'aw-list time.*var\(--mono\)' public/app.css` and `grep -E '^\| 16 \|' .agent-orch/UI-REVIEW.md | grep -q fixed`
+
+## Result — done (check passed) (2026-09-28 05:26)
+
+AGENT-ORCH-STATUS: done — code pills clone across lines, 44pt touch tool rows, system-font times

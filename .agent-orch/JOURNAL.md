@@ -810,3 +810,7 @@ faint text and filled buttons now clear 4.5:1, with a contrast test
 ## 2026-09-28 05:25 — #272 UI-REVIEW #10: Connections opens as a bottom sheet on phones, no focus ring on touch, status lines wrap [done (check passed)]
 
 Connections is a bottom sheet on phones; touch opens skip focus
+
+## 2026-09-28 05:26 — #273 UI-REVIEW #15 and #16: inline code pills clone across lines, 44pt tool rows, system-font time cells [done (check passed)]
+
+code pills clone across lines, 44pt touch tool rows, system-font times

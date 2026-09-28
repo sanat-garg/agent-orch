@@ -192,3 +192,13 @@ test('composer follows the on-screen keyboard via visualViewport and --kb (UI-RE
   assert.match(appCss, /\.app \{ height: calc\(100dvh - var\(--kb, 0px\)\); \}/);
   assert.match(appCss, /html\.kb-open \.orch-bar \{ display: none; \}/);
 });
+
+test('inline code pills clone across lines, 44pt tool rows on touch, system-font time cells (UI-REVIEW #15, #16)', () => {
+  assert.match(appCss, /\.msg\.text code \{[^}]*box-decoration-break: clone/);
+  assert.match(appCss, /@media \(pointer: coarse\) \{ \.tool > summary \{ min-height: 44px; \} \}/);
+  for (const sel of ['.aw-list time', '.dr-events time']) {
+    const rule = appCss.match(new RegExp(`${sel.replace('.', '\\.')} \\{[^}]*\\}`))[0];
+    assert.ok(!rule.includes('var(--mono)'), `${sel} uses the system font`);
+    assert.match(rule, /font-variant-numeric: tabular-nums/);
+  }
+});

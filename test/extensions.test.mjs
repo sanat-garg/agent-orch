@@ -167,6 +167,37 @@ test('MCP servers: secrets masked and kept; handed to runs through 0600 files, S
   assert.ok(!fs.existsSync(file));
 });
 
+test('MCP connectors: an http server keeps its outbound list and a gated run withholds it; a stdio one is gated', () => {
+  const { home, x } = setup();
+  const mail = x.saveMcp({ name: 'mail', type: 'http', url: 'https://example.com/mcp', outbound: 'send_mail' });
+  assert.deepEqual(mail.outbound, ['send_mail']);
+  assert.equal(mail.ungatedOutbound, true);
+  assert.equal(mail.gated, false);
+  assert.deepEqual(x.list().mcp.find((m) => m.name === 'mail').outbound, ['send_mail']);
+  const pay = x.saveMcp({ name: 'pay', type: 'stdio', commandLine: 'node pay.js', outbound: 'charge, refund_*' });
+  assert.equal(pay.gated, true);
+  assert.equal(pay.ungatedOutbound, false);
+  x.saveMcp({ name: 'docs', type: 'http', url: 'https://example.com/docs' });
+
+  const dir = path.join(home, 'gate'), withheld = [];
+  fs.mkdirSync(dir);
+  const onWithheld = (name, reason) => withheld.push([name, reason]);
+  const gatedRun = x.mcpFor('claude', { gate: { dir, onWithheld } });
+  assert.deepEqual(Object.keys(gatedRun), ['pay', 'docs'], 'the http connector is left out; a plain http server stays');
+  assert.deepEqual(withheld, [['mail', 'connector with outbound tools over http cannot be gated yet; add it as a stdio command']]);
+  assert.equal(gatedRun.pay.command, process.execPath, 'the stdio connector runs behind the gate proxy');
+  assert.match(gatedRun.pay.args.at(-1), /proxy-pay\.json$/);
+  assert.deepEqual(JSON.parse(read(dir, 'proxy-pay.json')).connector, { outbound: ['charge', 'refund_*'] });
+
+  withheld.length = 0;
+  x.mcpRun('claude', { gate: { dir }, onWithheld });
+  assert.deepEqual(withheld.map(([n]) => n), ['mail'], 'mcpRun passes run.onWithheld through');
+
+  const plain = x.mcpFor('claude');
+  assert.deepEqual(Object.keys(plain), ['mail', 'pay', 'docs'], 'a run without a gate is unchanged');
+  assert.deepEqual(plain.mail, { type: 'http', url: 'https://example.com/mcp' });
+});
+
 test('personas: saved, prompt block for a run, unique names, removed', () => {
   const { x } = setup();
   const seen = [];

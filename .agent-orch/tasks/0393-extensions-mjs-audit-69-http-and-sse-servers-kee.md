@@ -13,3 +13,7 @@ Verified gap in extensions.mjs `saveMcp`: the `outbound` tool list is parsed onl
 ## Done when
 
 `npm test -- test/extensions.test.mjs test/ui-ext.test.mjs`
+
+## Result — done (check passed) (2026-09-28 13:55)
+
+AGENT-ORCH-STATUS: done — gated runs withhold http outbound connectors; UI tests skipped, no Chromium

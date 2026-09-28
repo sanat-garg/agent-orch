@@ -28,6 +28,7 @@
 .ext-main small.mono { font-family: var(--mono); font-size: 12px; -webkit-line-clamp: 1; }
 .ext-tags { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; flex: none; max-width: 40%; }
 .ext-tag { padding: 1px 7px; border-radius: 6px; background: var(--raised); border: 1px solid var(--border); color: var(--muted); font-size: 11.5px; line-height: 18px; white-space: nowrap; }
+.ext-tag-warn { background: var(--warn-soft); border-color: transparent; color: var(--warn); }
 .ext-chev { flex: none; color: var(--faint); }
 /* Phones: the tags wrap under the name and description. */
 @media (max-width: 520px) {

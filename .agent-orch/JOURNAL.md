@@ -1086,3 +1086,6 @@ owner-set worker slots now keep the worker's CPU cap
 ## 2026-09-28 13:54 — #394 mcp-probe.mjs: probe an MCP server over stdio or streamable http and report its tools or the error [done (check passed)]
 
 mcp-probe.mjs probes stdio/http MCP servers; 7 tests pass
+## 2026-09-28 13:55 — #393 extensions.mjs AUDIT #69: http and sse servers keep their outbound list, and a gated run withholds a connector the proxy cannot gate [done (check passed)]
+
+gated runs withhold http outbound connectors; UI tests skipped, no Chromium

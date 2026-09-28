@@ -8,6 +8,8 @@
 // `--mcp-config <DATA>/extensions/claude-mcp.json`, codex `-p agent-orch` (~/.codex/agent-orch.config.toml, a profile
 // layered on the owner's config.toml). The terminal's own CLI sessions don't load them. A persona is a named set of instructions a chat picks, appended to its system prompt and to the
 // system prompt of its project's planner and task runs.
+// A server's `outbound` tools are held for the owner in task runs (gate.mjs), but only a stdio server can be gated:
+// a gated run leaves out an http/sse server with outbound tools (mcpFor's run.onWithheld hears why).
 // Cluster workers get the same skills, subagents and enabled MCP servers: syncBundle() here, applyBundle() on the worker.
 import fs from 'node:fs';
 import os from 'node:os';
@@ -19,6 +21,7 @@ import { EXT_ENTRY_RE, EXT_MAX_BYTES, extBundleError, extHash } from './cluster-
 import { MCP_SERVER as BROWSER_MCP, browserServer } from './browser.mjs';
 
 const GATE_PROXY = fileURLToPath(new URL('./gate-proxy.mjs', import.meta.url));
+export const WITHHELD_REASON = 'connector with outbound tools over http cannot be gated yet; add it as a stdio command';
 
 export const NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/; // new skills and subagents (Claude's skill-name rule)
 export const MCP_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/; // a bare TOML key for codex, and part of Claude's mcp__<name>__<tool>
@@ -311,7 +314,8 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
   // ---------- MCP servers (agent-orch's own list, handed to each run)
   const readMcp = () => { const j = readJson(mcpFile, null); return Array.isArray(j?.servers) ? j.servers : []; };
   const writeMcp = (servers) => writeAtomic(mcpFile, JSON.stringify({ servers }, null, 2));
-  const publicMcp = (s) => ({ ...s, env: masked(s.env), headers: masked(s.headers), commandLine: s.type === 'stdio' ? joinCommand([s.command, ...(s.args || [])]) : '' });
+  const publicMcp = (s) => ({ ...s, env: masked(s.env), headers: masked(s.headers), commandLine: s.type === 'stdio' ? joinCommand([s.command, ...(s.args || [])]) : '',
+    gated: s.type === 'stdio' && !!(s.browser || s.outbound?.length), ungatedOutbound: s.type !== 'stdio' && !!s.outbound?.length });
   function saveMcp(b = {}) {
     const servers = readMcp();
     const prev = b.prev ? String(b.prev) : null, old = prev ? servers.find((s) => s.name === prev) : null;
@@ -325,15 +329,16 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
       const parts = Array.isArray(b.args) && b.command ? [String(b.command), ...b.args.map(String)] : splitCommand(text(b.commandLine ?? b.command, 4000, 'Command'));
       if (!parts[0]) throw new Error('Add the command that starts the server, e.g. npx -y @playwright/mcp@latest');
       Object.assign(s, { command: parts[0], args: parts.slice(1), env: parsePairs(b.env, '=', old?.env, 'variable') });
-      // A connector: its tools named here (or ending in *) are outbound and held for the owner in task runs (gate.mjs).
-      const outbound = (Array.isArray(b.outbound) ? b.outbound : String(b.outbound ?? (old?.outbound || []).join(', ')).split(/[\s,]+/))
-        .map((x) => String(x).trim()).filter((x) => /^[\w.-]{1,120}\*?$/.test(x)).slice(0, 200);
-      if (outbound.length) s.outbound = outbound;
     } else {
       const url = text(b.url, 2000, 'URL');
       try { if (!/^https?:$/.test(new URL(url).protocol)) throw 0; } catch { throw new Error('Add the server URL (http or https)'); }
       Object.assign(s, { url, headers: parsePairs(b.headers, ':', old?.headers, 'header') });
     }
+    // A connector: its tools named here (or ending in *) are outbound and held for the owner in task runs (gate.mjs).
+    // Only a stdio connector can be gated (gate-proxy.mjs); an http/sse one keeps its list and stays out of gated runs.
+    const outbound = (Array.isArray(b.outbound) ? b.outbound : String(b.outbound ?? (old?.outbound || []).join(', ')).split(/[\s,]+/))
+      .map((x) => String(x).trim()).filter((x) => /^[\w.-]{1,120}\*?$/.test(x)).slice(0, 200);
+    if (outbound.length) s.outbound = outbound;
     const next = servers.filter((x) => x.name !== prev && x.name !== name);
     const at = prev ? servers.findIndex((x) => x.name === prev) : -1;
     next.splice(at < 0 ? next.length : at, 0, s);
@@ -359,11 +364,19 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
   // run.browser ({identity, outputDir, home?, headed?}, a task with the browser capability) adds the Playwright MCP on
   // that identity's persistent profile (browser.mjs), replacing an owner server of the same name. run.gate ({dir, task,
   // patterns, ttlMs, hook}, a task run) puts that server and every connector (stdio servers with `outbound` tools) behind
-  // the approval gate: gate-proxy.mjs runs them, from a 0600 config in the run's gate dir.
+  // the approval gate: gate-proxy.mjs runs them, from a 0600 config in the run's gate dir. gate-proxy.mjs proxies stdio
+  // only, so a gated run leaves out an http/sse server with `outbound` tools and tells run.onWithheld (or
+  // run.gate.onWithheld) (name, reason).
   function mcpFor(agent, run = null) {
     let on = readMcp().filter((s) => s.enabled !== false && (s.agents || SKILL_AGENTS).includes(agent) && (agent !== 'codex' || s.type !== 'sse'));
     if (run?.browser) on = [...on.filter((s) => s.name !== BROWSER_MCP), { name: BROWSER_MCP, env: {}, browser: true, ...browserServer({ home, ...run.browser }) }];
-    if (run?.gate) on = on.map((s) => (s.type === 'stdio' && (s.browser || s.outbound?.length) ? gated(s, run.gate) : s));
+    if (run?.gate) {
+      on = on.filter((s) => {
+        if (s.type === 'stdio' || !s.outbound?.length) return true;
+        (run.onWithheld ?? run.gate.onWithheld)?.(s.name, WITHHELD_REASON);
+        return false;
+      }).map((s) => (s.type === 'stdio' && (s.browser || s.outbound?.length) ? gated(s, run.gate) : s));
+    }
     if (!on.length || !SKILL_AGENTS.includes(agent)) return null;
     if (agent === 'codex') {
       const toml = on.map((s) => [`[mcp_servers.${s.name}]`, ...(s.type === 'stdio'

@@ -1,9 +1,14 @@
 'use strict';
-// ---------- Files: a Finder-style, read-only browser of the open chat's project (server: files.mjs) ----------
-// Icon and list views (list folders open in place with disclosure triangles), back/forward, a path bar, a name filter,
+// ---------- Files: a Finder-style browser of the open chat's project (server: files.mjs) ----------
+// Opens at the project's root (or the last folder, remembered per project). Icon and list views (list folders open in place
+// with disclosure triangles), back/forward, a path bar, a name filter,
 // hidden files on request (⌘⇧.), project-wide search by name or inside files (Enter in the search field; Names | Contents), and Quick Look (Space or double-click) for text, Markdown and images.
 // Ask in chat (Quick Look's header, a Contents hit's trailing button, Shift+Enter on a row) puts `path[:line]` into the composer. Loaded after
-// app.js and uses its helpers ($, el, api, store, md, currentConvo).
+// app.js and uses its helpers ($, el, api, store, md, currentConvo, toast, copyToClipboard).
+// Selection: click, ⌘/Ctrl-click, Shift-click ranges, ⌘A. A context menu (right-click, long-press, a row's ⋯, Shift+F10) offers
+// Open, Copy/Cut/Paste (⌘C ⌘X ⌘V), Compress to ZIP, Extract here, Copy path and Ask in chat. The clipboard is app-internal
+// (project-relative paths plus copy|cut) and outlives folder changes; pasting POSTs /api/files/copy or /move {paths, dest},
+// and /zip {paths, dest} and /unzip {path, dest} make and extract archives (cid rides in the query like every files route).
 const FX = {
   cid: null, path: '', data: null, err: '', seq: 0, qseq: 0, fseq: 0, find: null, back: [], fwd: [], sel: null, filter: '', rows: [],
   view: store.get('cw.files.view') === 'list' ? 'list' : 'icons',
@@ -11,10 +16,16 @@ const FX = {
   hidden: store.get('cw.files.hidden') === '1',
   mode: store.get('cw.files.mode') === 'contents' ? 'contents' : 'names', // what Search project looks at
   expanded: new Set(), kids: new Map(), built: false, ql: null,
+  picked: new Set(), anchor: null, // the selection (FX.sel is its lead row) and the Shift-click anchor
+  root: null, clip: null, menu: null, press: 0, // root: the project key; clip: {mode: 'copy'|'cut', paths, root}
 };
+const FX_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+const fxKeys = (k) => (FX_MAC ? `⌘${k}` : `Ctrl+${k}`);
 const FX_THUMB_MAX = 3e6; // images up to this size show as their own thumbnail in the icon view
 const touch = () => matchMedia('(pointer: coarse)').matches;
 const fxUrl = (kind, rel) => `/api/files/${kind}?cid=${encodeURIComponent(FX.cid)}&path=${encodeURIComponent(rel)}`;
+// A folder's listing: `dir` is the contract; `path` keeps servers from before it working.
+const fxListUrl = (rel) => `/api/files/list?cid=${encodeURIComponent(FX.cid)}&dir=${encodeURIComponent(rel)}&path=${encodeURIComponent(rel)}`;
 const extOf = (name) => { const m = /\.([^.]+)$/.exec(name); return m && m[1] !== name.slice(1) ? m[1].toLowerCase() : ''; };
 const IMG_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp', 'ico', 'svg']);
 const isImage = (name) => IMG_EXT.has(extOf(name));
@@ -97,6 +108,7 @@ function fxBuild() {
       </div>
     </div>
     <div class="fx-main" id="fxMain"></div>
+    <div class="fx-busy" id="fxBusy" role="status" hidden><span class="fx-prog" aria-hidden="true"></span><span id="fxBusyText"></span></div>
     <div class="fx-path" id="fxPath"></div>`;
   $('fxBack').onclick = () => fxHistory(-1);
   $('fxFwd').onclick = () => fxHistory(1);
@@ -121,6 +133,13 @@ function fxBuild() {
     else if (e.key === 'Escape' && (FX.find || e.target.value)) { e.preventDefault(); fxFindExit(true); }
   });
   $('fxMain').addEventListener('keydown', fxKey);
+  $('fxMain').addEventListener('contextmenu', (e) => {
+    if (FX.find || !FX.data || e.target.closest('.fx-head')) return;
+    e.preventDefault();
+    if (Date.now() - FX.press < 1000) return; // a long-press already opened it
+    const o = e.target.closest('[data-i]');
+    fxMenuOpen(o ? FX.rows[+o.dataset.i] : null, e.clientX, e.clientY);
+  });
   v.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === '.') { e.preventDefault(); fxToggleHidden(); }
     else if ((e.metaKey || e.ctrlKey) && (e.key === '[' || e.key === ']')) { e.preventDefault(); fxHistory(e.key === '[' ? -1 : 1); }
@@ -133,7 +152,8 @@ function filesShow() {
   fxBuild();
   const cid = currentConvo()?.id || null;
   if (cid !== FX.cid) {
-    Object.assign(FX, { cid, path: (cid && store.get('cw.files.path.' + cid)) || '', back: [], fwd: [], sel: null, filter: '', data: null, err: '', find: null });
+    const root = currentConvo()?.cwd || cid;
+    Object.assign(FX, { cid, root, path: (root && store.get('cw.files.path.' + root)) || '', back: [], fwd: [], sel: null, picked: new Set(), anchor: null, filter: '', data: null, err: '', find: null });
     FX.expanded.clear(); FX.kids.clear();
     $('fxFilter').value = ''; $('fxFindBar').hidden = true;
   }
@@ -145,27 +165,27 @@ async function fxLoad(focus = false) {
   const seq = ++FX.seq, { cid, path } = FX;
   $('filesView').classList.add('loading');
   try {
-    const d = await api(fxUrl('list', path));
+    const d = await api(fxListUrl(path));
     if (seq !== FX.seq || cid !== FX.cid) return;
-    FX.data = d; FX.err = ''; FX.path = d.path;
+    FX.data = d; FX.err = ''; FX.path = d.path ?? path;
     // Refresh any folders opened in place in the list view.
     for (const rel of [...FX.expanded]) {
-      try { FX.kids.set(rel, (await api(fxUrl('list', rel))).entries); } catch { FX.expanded.delete(rel); FX.kids.delete(rel); }
+      try { FX.kids.set(rel, (await api(fxListUrl(rel))).entries); } catch { FX.expanded.delete(rel); FX.kids.delete(rel); }
     }
     if (seq !== FX.seq) return;
   } catch (e) {
     if (seq !== FX.seq) return;
     FX.data = null; FX.err = e.message;
-    if (FX.path && /Not found|Not a folder|Outside/.test(e.message)) { FX.path = ''; store.del('cw.files.path.' + cid); return fxLoad(focus); }
+    if (FX.path && /Not found|Not a folder|Outside/.test(e.message)) { FX.path = ''; store.del('cw.files.path.' + FX.root); return fxLoad(focus); }
   } finally { if (seq === FX.seq) $('filesView').classList.remove('loading'); }
   fxRender();
   if (focus) fxFocus();
 }
 function fxGo(rel, { push = true } = {}) {
   if (push && rel !== FX.path) { FX.back.push(FX.path); FX.fwd = []; }
-  FX.path = rel; FX.sel = null; FX.filter = ''; FX.find = null; $('fxFilter').value = ''; $('fxFindBar').hidden = true;
+  FX.path = rel; FX.sel = null; FX.picked.clear(); FX.filter = ''; FX.find = null; $('fxFilter').value = ''; $('fxFindBar').hidden = true;
   FX.expanded.clear(); FX.kids.clear();
-  store.set('cw.files.path.' + FX.cid, rel);
+  store.set('cw.files.path.' + FX.root, rel);
   fxLoad(true);
 }
 function fxHistory(dir) {
@@ -190,7 +210,7 @@ function fxToggleHidden() {
 async function fxFind(q) {
   if (!FX.cid || q.length < 2) return;
   const seq = ++FX.fseq, cid = FX.cid, mode = FX.mode;
-  FX.find = { q, mode, data: null, err: '' }; FX.sel = null;
+  FX.find = { q, mode, data: null, err: '' }; FX.sel = null; FX.picked.clear();
   fxRender();
   try {
     const d = await api(`${mode === 'contents' ? '/api/files/grep' : '/api/files/find'}?cid=${encodeURIComponent(cid)}&q=${encodeURIComponent(q)}`);
@@ -203,7 +223,7 @@ async function fxFind(q) {
   fxRender();
 }
 function fxFindExit(clear) {
-  FX.fseq++; FX.find = null; FX.sel = null;
+  FX.fseq++; FX.find = null; FX.sel = null; FX.picked.clear();
   if (clear) { FX.filter = ''; $('fxFilter').value = ''; $('fxFindBar').hidden = true; }
   fxRender();
 }
@@ -268,11 +288,23 @@ function fxRender() {
     }
   };
   add(d.entries, FX.path, 0);
-  if (FX.sel && !FX.rows.some((r) => r.rel === FX.sel)) FX.sel = null;
+  fxPrune();
   if (!FX.rows.length) main.append(fxEmpty(FX.filter ? 'No matches' : 'This folder is empty', FX.filter ? `Nothing here is named like “${FX.filter}”.` : d.entries.length ? 'It only has hidden files (⌘⇧. shows them).' : ''));
   else if (FX.view === 'icons') main.append(fxIcons());
   else main.append(fxList());
   fxPathBar();
+}
+// Drops picks that left the listing; a lead set elsewhere (a revealed result, the folder just backed out of) becomes the selection.
+function fxPrune() {
+  const have = new Set(FX.rows.map((r) => r.rel));
+  if (FX.sel && !have.has(FX.sel)) FX.sel = null;
+  for (const rel of FX.picked) if (!have.has(rel)) FX.picked.delete(rel);
+  if (FX.sel && !FX.picked.size) FX.picked.add(FX.sel);
+}
+const fxRootName = () => FX.data?.crumbs?.[0]?.name || String(currentConvo()?.cwd || '').split('/').filter(Boolean).pop() || 'Project';
+function fxCrumbs() {
+  const parts = FX.path ? FX.path.split('/') : [];
+  return [{ name: fxRootName(), path: '' }, ...parts.map((name, i) => ({ name, path: parts.slice(0, i + 1).join('/') }))];
 }
 function fxFound(main) {
   const { q, mode, data, err } = FX.find;
@@ -280,7 +312,7 @@ function fxFound(main) {
   if (!data) { FX.rows = []; return main.append(err ? fxEmpty("Couldn't search this project", err) : el('div', 'fx-loading', 'Searching…')); }
   if (mode === 'contents') return fxFoundLines(main);
   FX.rows = data.entries.map((e) => ({ e, rel: e.path, depth: 0 }));
-  if (FX.sel && !FX.rows.some((r) => r.rel === FX.sel)) FX.sel = null;
+  fxPrune();
   if (!FX.rows.length) main.append(fxEmpty(`No files named like “${q}”`, data.truncated ? 'The project is too big to search all of it.' : 'Hidden folders, .git and node_modules are skipped.'));
   else {
     const t = el('div', 'fx-rows fx-found');
@@ -288,7 +320,7 @@ function fxFound(main) {
     t.setAttribute('aria-label', `Files named like “${q}”, ${FX.rows.length} found`);
     t.tabIndex = 0;
     FX.rows.forEach((r, i) => {
-      const o = optionFor(r, i, 'fx-row'), folder = r.rel.split('/').slice(0, -1).join('/') || FX.data?.crumbs[0].name || '/';
+      const o = optionFor(r, i, 'fx-row'), folder = r.rel.split('/').slice(0, -1).join('/') || fxRootName();
       const name = el('span', 'fx-c name'), nm = el('span', 'fx-n');
       nm.append(el('span', 'fx-nt', r.e.name), el('span', 'fx-sub', r.e.dir ? folder : `${folder} · ${fxSize(r.e.size)}`)); // sub: phones only
       name.append(el('span', 'fx-disc-sp'), iconFor(r.e, r.rel, false), nm);
@@ -308,7 +340,7 @@ function fxFound(main) {
 function fxFoundLines(main) {
   const { q, data } = FX.find;
   FX.rows = data.hits.map((h) => ({ e: { name: h.path.split('/').pop(), dir: false, size: null, mtime: null }, rel: `${h.path}#L${h.line}`, file: h.path, hit: h, depth: 0 }));
-  if (FX.sel && !FX.rows.some((r) => r.rel === FX.sel)) FX.sel = null;
+  fxPrune();
   const nFiles = new Set(data.hits.map((h) => h.path)).size;
   if (!FX.rows.length) main.append(fxEmpty(`No text like “${q}” in this project`, data.truncated ? 'The project is too big to search all of it.' : 'Hidden folders, .git, node_modules, binary files and files over 1 MB are skipped.'));
   else {
@@ -368,11 +400,41 @@ function optionFor(r, i, cls) {
   o.id = `fx-o-${i}`;
   o.dataset.i = String(i);
   o.setAttribute('role', FX.view === 'list' && !FX.find ? 'treeitem' : 'option');
-  o.setAttribute('aria-selected', String(r.rel === FX.sel));
+  o.setAttribute('aria-selected', String(FX.picked.has(r.rel)));
   o.title = r.e.name;
-  o.addEventListener('click', (ev) => { if (ev.target.closest('.fx-disc, .fx-ask')) return; fxSelect(r.rel); if (touch()) fxOpen(r); });
-  o.addEventListener('dblclick', () => { if (!touch()) fxOpen(r); });
+  if (fxIsCut(r.rel)) o.classList.add('fx-cut');
+  o.addEventListener('click', (ev) => {
+    if (ev.target.closest('.fx-disc, .fx-ask, .fx-more')) return;
+    if (Date.now() - FX.press < 1000) return; // the click that ends a long-press
+    const mod = ev.metaKey || ev.ctrlKey;
+    fxSelect(r.rel, ev.shiftKey && !FX.find ? 'range' : mod && !FX.find ? 'toggle' : null);
+    if (touch() && !mod && !ev.shiftKey) fxOpen(r);
+  });
+  o.addEventListener('dblclick', (ev) => { if (!touch() && !ev.target.closest('.fx-more')) fxOpen(r); });
+  if (FX.find) return o;
+  // Long-press (touch) opens the context menu where the finger is.
+  let t = 0, at = null;
+  const stop = () => { clearTimeout(t); t = 0; };
+  o.addEventListener('pointerdown', (ev) => {
+    if (ev.pointerType !== 'touch' || ev.target.closest('.fx-disc, .fx-more')) return;
+    at = { x: ev.clientX, y: ev.clientY };
+    t = setTimeout(() => { t = 0; FX.press = Date.now(); fxMenuOpen(r, at.x, at.y); }, 500);
+  });
+  o.addEventListener('pointermove', (ev) => { if (t && Math.hypot(ev.clientX - at.x, ev.clientY - at.y) > 8) stop(); });
+  o.addEventListener('pointerup', stop);
+  o.addEventListener('pointercancel', stop);
   return o;
+}
+// A row's ⋯ button: the context menu for people without a right button or a long-press.
+function fxMoreBtn(r) {
+  const b = el('button', 'fx-more');
+  b.type = 'button'; b.tabIndex = -1;
+  b.setAttribute('aria-label', `Actions for ${r.e.name}`);
+  b.setAttribute('aria-haspopup', 'menu');
+  b.title = 'Actions';
+  b.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="6" cy="12" r="1.7" fill="currentColor"/><circle cx="12" cy="12" r="1.7" fill="currentColor"/><circle cx="18" cy="12" r="1.7" fill="currentColor"/></svg>';
+  b.onclick = (ev) => { ev.stopPropagation(); const k = b.getBoundingClientRect(); fxMenuOpen(r, k.left, k.bottom + 2); };
+  return b;
 }
 function fxIcons() {
   const g = el('div', 'fx-grid');
@@ -381,7 +443,7 @@ function fxIcons() {
   g.tabIndex = 0;
   FX.rows.forEach((r, i) => {
     const o = optionFor(r, i, 'fx-item');
-    o.append(iconFor(r.e, r.rel, true), el('span', 'fx-name', r.e.name));
+    o.append(iconFor(r.e, r.rel, true), el('span', 'fx-name', r.e.name), fxMoreBtn(r));
     g.append(o);
   });
   fxActive(g);
@@ -418,7 +480,7 @@ function fxList() {
     } else name.append(el('span', 'fx-disc-sp'));
     const nm = el('span', 'fx-n');
     nm.append(el('span', 'fx-nt', r.e.name), el('span', 'fx-sub', r.e.dir ? 'Folder' : `${fxSize(r.e.size)} · ${fxDate(r.e.mtime)}`)); // sub: phones only
-    name.append(iconFor(r.e, r.rel, false), nm);
+    name.append(iconFor(r.e, r.rel, false), nm, fxMoreBtn(r));
     o.append(name, el('span', 'fx-c date', fxDate(r.e.mtime)), el('span', 'fx-c size', r.e.dir ? '--' : fxSize(r.e.size)), el('span', 'fx-c kind', kindOf(r.e)));
     t.append(o);
   });
@@ -436,14 +498,15 @@ function fxPathBar() {
   bar.textContent = '';
   const crumbs = el('nav', 'fx-crumbs');
   crumbs.setAttribute('aria-label', 'Path');
-  FX.data.crumbs.forEach((c, i) => {
+  const all = fxCrumbs();
+  all.forEach((c, i) => {
     if (i) crumbs.append(el('span', 'fx-sep', '›'));
     const b = el('button', 'fx-crumb');
     b.type = 'button';
     b.innerHTML = FOLDER_SVG;
     b.append(el('span', '', c.name));
-    if (i === FX.data.crumbs.length - 1) b.setAttribute('aria-current', 'location');
-    b.onclick = () => fxGo(c.path);
+    if (i === all.length - 1) b.setAttribute('aria-current', 'location');
+    b.onclick = () => { if (c.path !== FX.path) fxGo(c.path); };
     crumbs.append(b);
   });
   const n = FX.rows.length, hiddenCount = FX.hidden ? 0 : FX.data.entries.filter((e) => e.hidden).length;
@@ -454,24 +517,31 @@ async function fxExpand(rel, open) {
   if (!open) { for (const k of [...FX.expanded]) if (k === rel || k.startsWith(rel + '/')) FX.expanded.delete(k); fxRender(); return; }
   FX.expanded.add(rel);
   if (!FX.kids.has(rel)) {
-    try { FX.kids.set(rel, (await api(fxUrl('list', rel))).entries); } catch (e) { FX.expanded.delete(rel); toast(e.message, { kind: 'error' }); }
+    try { FX.kids.set(rel, (await api(fxListUrl(rel))).entries); } catch (e) { FX.expanded.delete(rel); toast(e.message, { kind: 'error' }); }
   }
   fxRender();
   fxFocus();
 }
 
 // ----- selection, keyboard, opening
-function fxSelect(rel) {
-  FX.sel = rel;
+// how: null = just this row, 'toggle' = ⌘-click, 'range' = Shift-click (from the anchor), 'all' = ⌘A.
+function fxSelect(rel, how = null) {
+  const i = FX.rows.findIndex((r) => r.rel === rel);
+  if (how === 'all') FX.picked = new Set(FX.rows.map((r) => r.rel));
+  else if (how === 'toggle') { if (!FX.picked.delete(rel)) FX.picked.add(rel); FX.anchor = rel; }
+  else if (how === 'range' && FX.anchor != null && i >= 0) {
+    const a = FX.rows.findIndex((r) => r.rel === FX.anchor), lo = Math.min(a < 0 ? i : a, i), hi = Math.max(a < 0 ? i : a, i);
+    FX.picked = new Set(FX.rows.slice(lo, hi + 1).map((r) => r.rel));
+  } else { FX.picked = new Set(rel == null ? [] : [rel]); FX.anchor = rel; }
+  FX.sel = how === 'toggle' && !FX.picked.has(rel) ? [...FX.picked].at(-1) ?? null : how === 'all' ? FX.sel ?? FX.rows[0]?.rel ?? null : rel;
   const c = $('fxMain').querySelector('[role="listbox"], [role="tree"]');
   if (!c) return;
-  c.querySelectorAll('[aria-selected="true"]').forEach((o) => o.setAttribute('aria-selected', 'false'));
-  const i = FX.rows.findIndex((r) => r.rel === rel);
-  const o = c.querySelector(`#fx-o-${i}`);
-  if (o) { o.setAttribute('aria-selected', 'true'); o.scrollIntoView({ block: 'nearest' }); }
+  c.querySelectorAll('[data-i]').forEach((o) => o.setAttribute('aria-selected', String(FX.picked.has(FX.rows[+o.dataset.i]?.rel))));
+  if (how !== 'all') c.querySelector(`#fx-o-${i}`)?.scrollIntoView({ block: 'nearest' });
   fxActive(c);
-  if (FX.ql && i >= 0 && !FX.rows[i].e.dir) fxPreview(FX.rows[i]); // Quick Look follows the selection
+  if (FX.ql && i >= 0 && !FX.rows[i].e.dir && FX.picked.has(rel)) fxPreview(FX.rows[i]); // Quick Look follows the selection
 }
+const fxPickedRows = () => FX.rows.filter((r) => FX.picked.has(r.rel));
 function fxFocus(selectFirst) {
   const c = $('fxMain').querySelector('[role="listbox"], [role="tree"]');
   if (!c) return;
@@ -495,11 +565,20 @@ function fxKey(e) {
     for (const it of items) { if (it.offsetTop !== items[0].offsetTop) break; n++; }
     return Math.max(1, n);
   };
-  const move = (d) => { const n = Math.min(FX.rows.length - 1, Math.max(0, (i < 0 ? (d > 0 ? -1 : FX.rows.length) : i) + d)); if (FX.rows[n]) fxSelect(FX.rows[n].rel); };
-  const mod = e.metaKey || e.ctrlKey;
-  if (FX.find && (e.key === 'Escape' || e.key === 'Backspace' || (mod && e.key === 'ArrowUp'))) { e.preventDefault(); fxFindExit(true); $('fxFilter').focus(); }
+  const move = (d) => { const n = Math.min(FX.rows.length - 1, Math.max(0, (i < 0 ? (d > 0 ? -1 : FX.rows.length) : i) + d)); if (FX.rows[n]) fxSelect(FX.rows[n].rel, e.shiftKey && !FX.find ? 'range' : null); };
+  const mod = e.metaKey || e.ctrlKey, k = e.key.toLowerCase();
+  if (mod && !e.shiftKey && !e.altKey && !FX.find && ['a', 'c', 'x', 'v'].includes(k)) {
+    e.preventDefault();
+    if (k === 'a') fxSelect(null, 'all');
+    else if (k === 'v') fxPaste(FX.path);
+    else fxClipSet(k === 'x' ? 'cut' : 'copy');
+  } else if (!FX.find && (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10'))) {
+    e.preventDefault();
+    const o = $('fxMain').querySelector(`#fx-o-${i}`), k2 = (o || e.currentTarget).getBoundingClientRect();
+    fxMenuOpen(cur || null, k2.left + 24, o ? k2.bottom : k2.top + 24);
+  } else if (FX.find && (e.key === 'Escape' || e.key === 'Backspace' || (mod && e.key === 'ArrowUp'))) { e.preventDefault(); fxFindExit(true); $('fxFilter').focus(); }
   else if (FX.find && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) e.preventDefault();
-  else if (mod && e.key === 'ArrowUp') { e.preventDefault(); fxUp(); }
+  else if ((mod || e.altKey) && e.key === 'ArrowUp') { e.preventDefault(); fxUp(); }
   else if (e.shiftKey && e.key === 'Enter') { if (cur) { e.preventDefault(); fxAskAbout(cur.file || cur.rel, cur.hit?.line); } }
   else if ((mod && e.key === 'ArrowDown') || e.key === 'Enter') { if (cur) { e.preventDefault(); fxOpen(cur); } }
   else if (e.key === ' ') { e.preventDefault(); if (FX.ql) fxClosePreview(); else if (cur && !cur.e.dir) fxPreview(cur); }
@@ -516,6 +595,128 @@ function fxKey(e) {
     else if (cur?.depth) fxSelect(cur.rel.split('/').slice(0, -1).join('/'));
   } else if (e.key === 'Home') { e.preventDefault(); if (FX.rows[0]) fxSelect(FX.rows[0].rel); }
   else if (e.key === 'End') { e.preventDefault(); if (FX.rows.length) fxSelect(FX.rows.at(-1).rel); }
+}
+
+// ----- clipboard, context menu and file operations
+const fxClipOk = () => !!FX.clip?.paths.length && FX.clip.root === FX.root;
+const fxIsCut = (rel) => FX.clip?.mode === 'cut' && fxClipOk() && FX.clip.paths.includes(rel);
+const fxParent = (rel) => rel.split('/').slice(0, -1).join('/');
+const fxLabel = (paths) => (paths.length === 1 ? `“${paths[0].split('/').pop()}”` : `${paths.length} items`);
+const fxFolderName = (rel) => (rel ? rel.split('/').pop() : fxRootName());
+// Cut rows look dimmed until they are pasted.
+function fxMarkCut() {
+  $('fxMain').querySelectorAll('[data-i]').forEach((o) => o.classList.toggle('fx-cut', fxIsCut(FX.rows[+o.dataset.i]?.rel)));
+}
+function fxClipSet(mode) {
+  const paths = fxPickedRows().map((r) => r.rel);
+  if (!paths.length) return;
+  FX.clip = { mode, paths, root: FX.root };
+  fxMarkCut();
+  toast(`${fxLabel(paths)} ${mode === 'cut' ? 'cut: paste to move' : 'copied: paste to make a copy'} (${fxKeys('V')})`, { duration: 2500 });
+}
+async function fxPaste(dest) {
+  if (!fxClipOk()) return;
+  const { mode, paths } = FX.clip;
+  if (mode === 'cut' && paths.some((p) => dest === p || dest.startsWith(p + '/'))) return toast("A folder can't be moved into itself.", { kind: 'error' });
+  const res = await fxOp(mode === 'cut' ? 'move' : 'copy', { paths, dest });
+  if (!res) return;
+  if (mode === 'cut') { FX.clip = null; fxMarkCut(); }
+  const made = fxMade(res);
+  toast(`${mode === 'cut' ? 'Moved' : 'Copied'} ${made.length === paths.length ? fxLabel(made) : fxLabel(paths)} to ${fxFolderName(dest)}`, { kind: 'success' });
+}
+async function fxZip(rows) {
+  const paths = rows.map((r) => r.rel), dest = fxParent(paths[0]);
+  const res = await fxOp('zip', { paths, dest }, `Compressing ${fxLabel(paths)}…`);
+  if (res) toast(`Created ${fxLabel([fxMade(res)[0] || (paths.length === 1 ? `${paths[0]}.zip` : 'Archive.zip')])}`, { kind: 'success' });
+}
+async function fxUnzip(r) {
+  const res = await fxOp('unzip', { path: r.rel, dest: fxParent(r.rel) }, `Extracting “${r.e.name}”…`);
+  if (res) toast(`Extracted “${r.e.name}”${fxMade(res).length ? ` to ${fxLabel(fxMade(res))}` : ''}`, { kind: 'success' });
+}
+// What an operation made, as project paths, from whatever the server named ({path} | {paths} | {name} | {dest}).
+function fxMade(res) {
+  if (Array.isArray(res?.paths)) return res.paths.filter((p) => typeof p === 'string');
+  const one = res?.path || res?.name || res?.dest;
+  return typeof one === 'string' && one ? [one] : [];
+}
+// POST /api/files/<kind>; busy text shows a progress bar meanwhile. Errors toast; the listing refreshes either way.
+async function fxOp(kind, body, busy) {
+  const cid = FX.cid;
+  if (busy) { $('fxBusyText').textContent = busy; $('fxBusy').hidden = false; }
+  try {
+    return await api(`/api/files/${kind}?cid=${encodeURIComponent(cid)}`, 'POST', body);
+  } catch (e) {
+    toast(e.message, { kind: 'error' });
+    return null;
+  } finally {
+    if (busy) $('fxBusy').hidden = true;
+    if (cid === FX.cid) fxLoad(true);
+  }
+}
+function fxMenuClose(refocus) {
+  const m = FX.menu;
+  if (!m) return;
+  FX.menu = null;
+  m.el.remove();
+  document.removeEventListener('pointerdown', m.outside, true);
+  window.removeEventListener('resize', m.close);
+  $('fxMain').removeEventListener('scroll', m.close);
+  if (refocus) fxFocus();
+}
+// The context menu for row r (null: the folder's background) at (x, y), kept inside the viewport.
+function fxMenuOpen(r, x, y) {
+  fxMenuClose();
+  if (r && !FX.picked.has(r.rel)) fxSelect(r.rel);
+  else if (!r) fxSelect(null);
+  const rows = fxPickedRows(), paths = rows.map((x) => x.rel), dest = r?.e.dir ? r.rel : FX.path;
+  const zip = rows.length === 1 && !rows[0].e.dir && extOf(rows[0].e.name) === 'zip';
+  const items = [
+    ['open', 'Open', '', !!r, () => fxOpen(r)],
+    '-',
+    ['copy', 'Copy', fxKeys('C'), !!rows.length, () => fxClipSet('copy')],
+    ['cut', 'Cut', fxKeys('X'), !!rows.length, () => fxClipSet('cut')],
+    ['paste', r?.e.dir ? `Paste into “${r.e.name}”` : 'Paste', fxKeys('V'), fxClipOk(), () => fxPaste(dest)],
+    '-',
+    ['zip', 'Compress to ZIP', '', !!rows.length, () => fxZip(rows)],
+    ...(zip ? [['unzip', 'Extract here', '', true, () => fxUnzip(rows[0])]] : []),
+    '-',
+    ['path', paths.length > 1 ? 'Copy paths' : 'Copy path', '', !!rows.length, async () => {
+      toast((await copyToClipboard(paths.join('\n'))) ? `${paths.length > 1 ? 'Paths' : 'Path'} copied` : "Couldn't copy", { duration: 2000 });
+    }],
+    ['ask', 'Ask in chat', '⇧Enter', !!rows.length, () => fxAskAbout(paths.join(' '))],
+  ];
+  const m = el('div', 'cmenu fx-menu');
+  m.id = 'fxMenu';
+  m.setAttribute('role', 'menu');
+  m.setAttribute('aria-label', r ? r.e.name : fxFolderName(FX.path));
+  for (const it of items) {
+    if (it === '-') { m.append(el('div', 'cm-sep')); continue; }
+    const [act, label, keys, on, run] = it;
+    const b = el('button', 'cm-opt');
+    b.type = 'button'; b.tabIndex = -1; b.disabled = !on; b.dataset.act = act;
+    b.setAttribute('role', 'menuitem');
+    b.append(el('span', 'cm-l', label));
+    if (keys) b.append(el('span', 'cm-h', keys));
+    b.onclick = () => { fxMenuClose(act !== 'open' && act !== 'ask'); run(); };
+    m.append(b);
+  }
+  m.addEventListener('keydown', (e) => {
+    const opts = [...m.querySelectorAll('.cm-opt:not(:disabled)')], k = opts.indexOf(document.activeElement), n = opts.length;
+    if (e.key === 'Escape' || e.key === 'Tab') { e.preventDefault(); e.stopPropagation(); fxMenuClose(true); }
+    else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); opts[e.key === 'ArrowDown' ? (k + 1) % n : k <= 0 ? n - 1 : k - 1]?.focus(); }
+    else if (e.key === 'Home' || e.key === 'End') { e.preventDefault(); opts[e.key === 'Home' ? 0 : opts.length - 1]?.focus(); }
+  });
+  document.body.append(m);
+  const w = m.offsetWidth, h = m.offsetHeight;
+  m.style.left = `${Math.max(8, Math.min(x, innerWidth - w - 8))}px`;
+  m.style.top = `${Math.max(8, y + h > innerHeight - 8 ? Math.min(y - h, innerHeight - h - 8) : y)}px`;
+  const close = () => fxMenuClose();
+  const outside = (e) => { if (!m.contains(e.target)) fxMenuClose(); };
+  FX.menu = { el: m, close, outside };
+  document.addEventListener('pointerdown', outside, true);
+  window.addEventListener('resize', close);
+  $('fxMain').addEventListener('scroll', close);
+  m.querySelector('.cm-opt:not(:disabled)')?.focus({ preventScroll: true });
 }
 
 // ----- Quick Look: text (line numbers), Markdown (rendered or source) and images; ←/→ step through the folder's files

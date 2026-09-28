@@ -1092,3 +1092,6 @@ gated runs withhold http outbound connectors; UI tests skipped, no Chromium
 ## 2026-09-28 13:57 — #403 Files backend: copy, move, zip and unzip endpoints with safe paths [done (check passed)]
 
 Files copy/move/zip/unzip endpoints are live, safe and tested
+## 2026-09-28 14:01 — #404 Files tab: open the project folder, browse folders, right-click copy/cut/paste/zip/unzip [done (check passed)]
+
+Files tab: folder navigation, multi-select, clipboard and ZIP menu (browser tests skip here)

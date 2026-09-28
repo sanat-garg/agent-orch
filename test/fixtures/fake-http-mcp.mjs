@@ -2,12 +2,15 @@
 // free port and prints its url on stdout. initialize answers with an Mcp-Session-Id header; any later request without it
 // gets 400. tools/list has `send_message` (outbound) and `read_inbox`; tools/call answers as JSON, or as an SSE body when
 // the url has ?sse=1 or the tool is read_inbox; the tool `broken` gets a 500. Notifications get 202. Every request is
-// appended to the log as {method, rpc, name, session, protocol, auth, url, status, sse}.
+// appended to the log as {method, rpc, name, session, protocol, auth, url, status, sse}. A POST to /reset (not logged) plays
+// a restart: the current session is forgotten (404 from then on) and the next initialize issues fake-session-<n+1>; with
+// ?gone=1 every request carrying any session id gets 404 afterwards.
 import fs from 'node:fs';
 import http from 'node:http';
 
 const log = process.argv[2];
-const SESSION = 'fake-session-1';
+let gen = 1, gone = false;
+const session = () => `fake-session-${gen}`, forgotten = new Set();
 const TOOLS = [
   { name: 'send_message', description: 'Sends a message', inputSchema: { type: 'object' } },
   { name: 'read_inbox', description: 'Reads the inbox', inputSchema: { type: 'object' } },
@@ -40,12 +43,18 @@ const server = http.createServer((req, res) => {
       res.write(`id: 1\ndata: ${ans.slice(0, half)}`);
       setTimeout(() => { res.write(`${ans.slice(half)}\n\n`); res.end(); }, 20);
     };
+    const u = new URL(req.url, 'http://x'), sid = req.headers['mcp-session-id'];
+    if (req.method === 'POST' && u.pathname.endsWith('/reset')) {
+      forgotten.add(session()); gen++; gone = u.searchParams.get('gone') === '1';
+      res.writeHead(204); return res.end();
+    }
     if (req.method !== 'POST' || !m) return send(405);
-    if (m.method !== 'initialize' && req.headers['mcp-session-id'] !== SESSION) return send(400, { 'Content-Type': 'text/plain' }, 'missing session');
+    if (sid && (gone || forgotten.has(sid))) return send(404, { 'Content-Type': 'text/plain' }, 'unknown session');
+    if (m.method !== 'initialize' && sid !== session()) return send(400, { 'Content-Type': 'text/plain' }, 'missing session');
     if (m.id == null) return send(202);
     if (m.method === 'initialize') {
       const msg = { id: m.id, result: { protocolVersion: m.params?.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'fake-http', version: '1' } } };
-      return sse ? stream(msg, { 'Mcp-Session-Id': SESSION }) : json(msg, { 'Mcp-Session-Id': SESSION });
+      return sse ? stream(msg, { 'Mcp-Session-Id': session() }) : json(msg, { 'Mcp-Session-Id': session() });
     }
     if (m.method === 'tools/list') return sse ? stream({ id: m.id, result: { tools: TOOLS } }) : json({ id: m.id, result: { tools: TOOLS } });
     if (m.method === 'tools/call') {

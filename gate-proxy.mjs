@@ -10,7 +10,10 @@
 // callMs (a forwarded call unanswered this long becomes a tool error, its late answer dropped; default 5 min, at least 2 s)}.
 // Over http every message is a POST (with Mcp-Session-Id once initialize returned one); the answer is a JSON body (one
 // message or a batch) or an SSE stream of them, dispatched exactly like the child's stdout. A failed POST (non-2xx, network
-// error, or no answer to a request) becomes a JSON-RPC error `gate: <server> http <status/err>` for that request.
+// error, or no answer to a request) becomes a JSON-RPC error `gate: <server> http <status/err>` for that request, except
+// a 404 to a POST that carried a session id: the server restarted and forgot it, so (once per stale session, behind `ready`
+// so parallel calls share it) the client's last initialize and notifications/initialized are sent again, their answers
+// swallowed, and the message is retried once with the new session id.
 // A page that can't be read (the snapshot errors or times out) makes element tools, key presses and dialogs outbound.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -54,15 +57,16 @@ function stdioUpstream(u, onMessage) {
 }
 function httpUpstream(u, onMessage) {
   const url = new URL(u.url), mod = url.protocol === 'https:' ? https : http;
-  let session = null, version = null, inflight = 0, closing = false, ready = Promise.resolve();
+  let session = null, version = null, inflight = 0, closing = false, ready = Promise.resolve(), lastInit = null, renews = 0;
   const isRequest = (m) => m.id != null && m.method != null;
   const fail = (m, err) => {
     const message = `gate: ${server} http ${err}`;
     if (isRequest(m)) onMessage({ jsonrpc: '2.0', id: m.id, error: { code: -32603, message } });
     else process.stderr.write(`[gate] ${message}\n`);
   };
-  const post = (m) => new Promise((resolve) => {
-    const body = JSON.stringify(m);
+  // → {err (status or message, null when fine), stale (the session id a 404 was sent with)}. quiet: nothing reaches the client.
+  const post = (m, quiet = false) => new Promise((resolve) => {
+    const body = JSON.stringify(m), sent = session;
     let answered = false, settled = false;
     const got = (x) => {
       if (!x || typeof x !== 'object') return;
@@ -70,18 +74,17 @@ function httpUpstream(u, onMessage) {
         answered = true;
         if (m.method === 'initialize' && typeof x.result?.protocolVersion === 'string') version = x.result.protocolVersion;
       }
-      onMessage(x);
+      if (!quiet) onMessage(x);
     };
-    const end = (err) => {
+    const end = (err = null) => {
       if (settled) return;
       settled = true;
-      if (err != null) fail(m, err);
-      else if (isRequest(m) && !answered) fail(m, 'no answer');
-      resolve();
+      if (err == null && isRequest(m) && !answered) err = 'no answer';
+      resolve({ err, stale: err === 404 && sent ? sent : null });
     };
     const parse = (s) => { try { return JSON.parse(s); } catch { return undefined; } };
     const req = mod.request(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream',
-      ...(u.headers || {}), ...(session && { 'Mcp-Session-Id': session }), ...(version && { 'MCP-Protocol-Version': version }),
+      ...(u.headers || {}), ...(sent && { 'Mcp-Session-Id': sent }), ...(version && { 'MCP-Protocol-Version': version }),
       'Content-Length': Buffer.byteLength(body) } }, (res) => {
       res.on('error', (e) => end(e.message));
       if (res.statusCode < 200 || res.statusCode > 299) { res.resume(); return end(res.statusCode); }
@@ -109,13 +112,33 @@ function httpUpstream(u, onMessage) {
     req.on('error', (e) => end(e.message));
     req.end(body);
   });
+  // A new session after a 404: the first call to see `stale` starts it, the rest (session already moved on) wait for it.
+  const renew = (stale) => {
+    if (session !== stale) return ready;
+    session = null;
+    ready = ready.then(async () => {
+      const r = await post({ ...lastInit, id: `agent-orch-gate-init-${++renews}` }, true);
+      if (r.err != null || !session) return process.stderr.write(`[gate] ${server}: re-initialize failed: http ${r.err ?? 'no session id'}\n`);
+      await post({ jsonrpc: '2.0', method: 'notifications/initialized' }, true);
+    });
+    return ready;
+  };
+  const deliver = async (m) => {
+    let r = await post(m);
+    if (r.stale && lastInit && m.method !== 'initialize') {
+      await renew(r.stale);
+      if (session) r = await post(m);
+    }
+    if (r.err != null) fail(m, r.err);
+  };
   const quit = () => process.stdout.write('', () => process.exit(0));
   const done = () => { if (--inflight === 0 && closing) quit(); };
   return {
     // initialize goes first and alone, so every later POST carries the session id it returns.
     send(m) {
       inflight++;
-      const p = ready.then(() => post(m));
+      if (m.method === 'initialize') lastInit = m;
+      const p = ready.then(() => deliver(m));
       if (m.method === 'initialize') ready = p;
       p.then(done);
     },

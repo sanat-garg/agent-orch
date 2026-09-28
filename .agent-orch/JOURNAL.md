@@ -1158,3 +1158,7 @@ gcRetention now sweeps finished and orphaned browser-task workspaces, tests pass
 ## 2026-09-28 14:16 — #364 Integrate #345: Workers fetch and push code through the head, so no GitHub access is needed [done (check passed)]
 
 CONTEXT.md conflict resolved; cluster-git tests pass
+
+## 2026-09-28 14:23 — #430 gate-proxy.mjs http upstream: on a 404 for a stale session, initialize again once and retry the call [done (check passed)]
+
+http gate proxy re-initializes after a stale-session 404 and retries

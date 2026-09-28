@@ -13,3 +13,7 @@ Make the gate proxy's http transport survive a restarted MCP server. In gate-pro
 ## Done when
 
 `node --test test/gate-proxy-http.test.mjs test/gate-proxy.test.mjs`
+
+## Result — done (check passed) (2026-09-28 14:23)
+
+AGENT-ORCH-STATUS: done — http gate proxy re-initializes after a stale-session 404 and retries

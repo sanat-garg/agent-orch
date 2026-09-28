@@ -935,3 +935,7 @@ changes.mjs taskChanges returns branch/commit/none diffs; tests pass
 ## 2026-09-28 11:48 — #336 tests: worker-status.mjs serveStatus and request over a real unix socket [done (check passed)]
 
 worker-status socket lifecycle covered by 7 passing tests
+
+## 2026-09-28 11:48 — #326 Fix the stale cluster-protocol test: FEATURE_LIST includes browser-task [done (check passed)]
+
+cluster-protocol test now expects browser-task; all 11 pass

@@ -13,3 +13,7 @@ test/cluster-protocol.test.mjs fails on main: the test 'worker reports: job.phas
 ## Done when
 
 `npm test -- test/cluster-protocol.test.mjs` passes and `grep -n "'browser-task'" test/cluster-protocol.test.mjs` prints a line.
+
+## Result — done (check passed) (2026-09-28 11:48)
+
+AGENT-ORCH-STATUS: done — cluster-protocol test now expects browser-task; all 11 pass

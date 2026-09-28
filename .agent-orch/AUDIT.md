@@ -686,3 +686,232 @@ the same origin. `run-on` accepts only a string or null naming a known node.
   Claude token and Codex login, the extension bundle (MCP secrets) and every job prompt travel in cleartext. An attacker
   in the path can also serve skills and MCP commands that the worker runs, which means code execution.
 - **Fix:** Refuse a non-`https:` controller unless it is loopback (with an explicit `--insecure` flag for tests).
+
+## Round 7 (2026-09-28, task #324): push, screen prompts, rapid top-up, retention GC, worktree sweep, the verifier and agent-share
+
+Read at ac4f7b7, by code, plus throwaway node snippets: `createPush` on a temp dir, `gcRetention` on a fake data dir,
+`ensureWorktree`/`pruneOrphanWorktrees` on a temp repo, `extractCommand`/`runCheck` on sample Done-when texts and on the
+Done-when of all 262 task specs in `.agent-orch/tasks/`, and `browserTaskStatus` on sample replies. No source file was
+changed and the live server was not touched.
+
+Checked and found sound: push.mjs follows RFC 8291/8188 (one aes128gcm record, 0x02 delimiter, rs 4096; title ≤ 200 and
+body ≤ 1000 chars keep it far below the record size). The VAPID JWT's `aud` is the endpoint's origin and `exp` is 12 h
+(the limit is 24 h). `checkSub` requires an https endpoint, a 65-byte p256dh and a 16-byte auth. Only 404/410 remove a
+device. Both files are written 0600 through a tmp file and a rename. `/api/push/*` sits behind the session gate, and the
+POST also needs the same origin. The push service sees only ciphertext, its size and timing, the source IP and the
+server's VAPID public key (a stable id for this install), never titles. No client exists yet at this base (sw.js is
+task #305), so nothing subscribes today. #305's planned `clients.openWindow(url)` takes `url` from a payload only this
+server can encrypt, which is fine as long as it stays same-origin. Screen prompts: `profile()` checks the identity
+against `IDENTITY_RE` and the node's own profile list, the node must be known, `stopBrowserTask` 404s for other tasks,
+and `profileBusy` and take-over keep a second run off a profile. Rapid top-up: `requested` is never negative, only one
+reflect/plan per project is queued at a time, the 180 s spacing is read from the DB (so it survives restarts), and paused
+projects are skipped. Retention: logs of queued/running/paused/needs_integration tasks are always kept. Every age it uses
+is on the controller's clock (DB `now()`, and the mtimes of files the controller wrote; worker images are saved on the
+controller), so a worker's clock skew can't age anything. Media names must match `MEDIA_ID_RE`. Worktrees: paths with
+spaces, quotes and non-ASCII come back unquoted from `git worktree list --porcelain` (git 2.50), so `registered()`
+matches them (verified). The sweep deletes nothing when git can't list the main tree. Removing a worktree unlinks its
+`node_modules` symlink without following it (verified: the main tree's `node_modules` survives the sweep). The verifier
+kills the check's process group and keeps only the output's tail.
+
+### 53. [low] A VAPID key file that fails to load is replaced silently; a bad one stops the server from booting; failing devices never surface (push.mjs:59-68, :120-123; server.mjs:729)
+- **What:** `readJson` returns null for any error, so an unreadable `push-vapid.json` (EACCES after a restore or a
+  copy made as root, or EMFILE) counts as missing. A new key pair is then written over the old one, and every existing
+  subscription was made for the old `applicationServerKey`. Push services refuse those sends with 403 (VAPID key
+  mismatch). `send` only drops devices on 404/410, so each one counts as `failed` on every push forever. The only trace
+  is a console line, and `GET /api/push/key` still reports `subscribed: N`. There is also the opposite case: a file that
+  parses but holds a bad PEM makes `crypto.createPrivateKey` throw inside `createPush`. That call runs at server.mjs's
+  top level, so the app and the web terminal don't come up (the same outcome as #43). Two smaller cases: a p256dh that
+  isn't a point on the curve passes `checkSub`, then `computeSecret` throws on every send. And `sub` is
+  `mailto:owner@localhost`, which Apple's push service may refuse as BadJwtToken. That needs one real iPhone send to
+  confirm, before #305 relies on it.
+- **Repro (verified):** Call `createPush` once, `chmod 000 push-vapid.json`, then call `createPush` again. You get a new
+  public key and the file is back at 0600. Next, write `{"publicKey":"x","privateKey":"-----BEGIN PRIVATE
+  KEY-----\nAAAA\n-----END PRIVATE KEY-----"}`. `createPush` now throws `ERR_OSSL_UNSUPPORTED`.
+- **Fix:** Generate a key only on ENOENT. On any other read error or a bad PEM, log it and turn push off, without
+  overwriting or throwing. Drop a device after N straight non-2xx answers (or on 403), and show the last error in Settings.
+  Check the point in `checkSub` with a trial `computeSecret`. Use an https `sub` (the app's origin).
+
+### 54. [low] The per-tag limit drops different pushes and doesn't cap bursts (server.mjs:731-738; orchestrator.mjs:1070, :2493, :2507, :3307)
+- **What:** `notify` sends at most one push per tag per minute and silently drops the rest. The tag isn't a message
+  identity. Every `waiting:` event shares the tag `waiting`, and each one is announced only once (`announced_auth` /
+  `announced_mem`). A dropped push is never sent later, and a failed send (network error) still uses up the minute.
+  Nothing limits pushes across tags, and every failing task has its own tag.
+- **Failure:** Memory runs low 20 s after "Claude Code is not signed in" was pushed. The memory warning is dropped, and
+  since `announced_mem` is now 1 it is never pushed. In the other direction, a broken origin or a bad merge fails 15
+  queued tasks in a row, and the phone buzzes 15 times.
+- **Fix:** Keep the newest dropped message per tag and send it when the minute is up. Add a global budget (e.g. 5 per
+  10 min, then one "N more need you" summary).
+
+### 55. [low] Pushes show approval targets and check output on the lock screen, and the badge counts reviews nobody can see (orchestrator.mjs:1060, :1367, :3307, :3392-3401)
+- **What:** Push bodies are shown by iOS on the lock screen (and on a watch). They carry `#id title: <action>` for
+  approvals, e.g. `send_email to bob@acme.com "Offer"`, and for failures, the first 200 chars of `detail`, which for
+  `verification` is the command followed by its raw output (tests that print env or tokens). `badge` counts every
+  `awaiting_review` task in every project. `armCheckpoints` also runs before the `paused_all` check and ignores project
+  status. So a checkpoint in a paused project, or in one whose chat was deleted (`detachConvo`), still pushes "Review
+  needed". It then keeps the badge at ≥ 1 in every later push, and no open chat shows the card.
+- **Fix:** Use generic bodies ("Task #12 needs approval") with an opt-in for details, and never put check output in a
+  push. Count and arm only checkpoints of active projects with a chat.
+
+### 56. [low] A screen prompt for a machine that can't run it, or whose machine goes away, says "Waiting to start" forever (server.mjs:1618-1625; browser-view.mjs:188-194; orchestrator.mjs:3730-3744, :1518-1523, :2936-2940)
+- **What:** `POST /api/browser/task` only checks that the node lists the profile, then pins the task there
+  (`run_on: node`). `place()` gives a pinned browser task only to a worker that reports `browser.capable`, has the
+  `approvals` feature and has `browser-task`. A worker that shows its profiles in the live view but lacks one of those
+  (e.g. one that hasn't self-updated to `browser-task`) never matches. When the pinned worker drops mid-run, `job.lost`
+  says "it moves to another machine", but the pin keeps it on that one. The task waits with no event, no notice and no
+  timeout, and it holds a queue slot in `claimNext`'s first 25 rows.
+- **Fix:** Refuse the POST (409 with the reason) unless `place` could ever pick that node. For a lost screen prompt,
+  mark it failed with "the machine went away" (see #57) instead of waiting.
+
+### 57. [med] A retried or lost screen prompt sends the original request again, so it can repeat actions that were already done (orchestrator.mjs:2720-2721, :2742, :2798, :3177-3182, :3197)
+- **What:** Code tasks get `resumePrompt` or a handoff prompt on a retry. A browser task always gets `task.prompt`
+  again, even when it resumes its own session. After a lost worker (`session_id: null`), it starts from scratch with no
+  word about what the first run did. A max_turns or timeout retry resumes the session and repeats "Order the items in my
+  cart" as a new user turn, and a lost run gets that request fresh on a profile where the order already went through.
+  Only calls the classifier calls outbound reach the owner. Form fills, "Next" and "Confirm" steps that don't match a
+  pattern run again unasked, and an owner shown a second "Place order" approval can easily take it for the first.
+- **Fix:** On a resume, send "Continue the request; check the page for what is already done before acting again". On a
+  lost or failed run, don't re-run by itself: mark it failed with the steps done so far (browserSteps) and let the
+  owner re-send.
+
+### 58. [low] `browserTaskStatus` calls successes failed and failures done (browser-task.mjs:9-14; orchestrator.mjs:3202-3206)
+- **What:** Any "I couldn't / can't / was unable to" anywhere in the reply means `failed`. Any reply without one means
+  `done`.
+- **Repro (verified):** "I couldn't find a cheaper fare, so I booked the 9:40 flight as you asked." → failed. "Posted the
+  reply. The first click showed "We were unable to complete your request", the retry worked." → failed. "I can't
+  confirm the email arrived, but it was sent." → failed. "The site asks for a sign-in, so I stopped; nothing was
+  submitted." → done. "Blocked by a CAPTCHA on the checkout page." → done.
+- **Failure:** The Browser tab shows "Could not finish" for a flight that was booked, and the owner sends it again (a
+  second booking). A blocked run shows "Done". Screen-prompt failures also skip `fail()`, so they never send a
+  push.
+- **Fix:** Trust only the status marker: ask for `AGENT-ORCH-STATUS: done|failed — …` on the last line and treat a
+  missing marker as "unclear" (a third state shown as such). Route `failed` through `fail()`.
+
+### 59. [low] Every browser tool call makes the server re-read every run log of up to 100 screen prompts (orchestrator.mjs:3746-3758, :1808; public/browser.js:456-463)
+- **What:** Each `tool` entry broadcasts `olane`. Every open Browser tab that follows that profile then refetches
+  `GET /api/browser/tasks` (500 ms debounce). The handler synchronously `readFileSync`+`parseJsonl`s every run log of
+  the last 100 tasks on that profile, including done ones with Playwright snapshots in them. It builds every task's
+  steps and sends them all, though the panel shows one task.
+- **Failure:** After a few months of screen prompts on one profile, each click of a running task makes the 1-core
+  controller parse tens of MB, about twice a second per open tab, and chats and the scheduler stall while a task runs.
+- **Fix:** Return the list without steps, add `GET /api/browser/tasks/:id` for the shown task, and cache steps of
+  finished tasks.
+
+### 60. [med] Rapid top-up keeps reflecting every 3 minutes when queued work is blocked, and its quota guard rarely engages (orchestrator.mjs:2560-2564, :2583-2607, :363-367, :380-386)
+- **What:** `ready` counts only runnable tasks, so work behind a failed prerequisite (failures don't cascade), in
+  error backoff (`not_before`) or behind a checkpoint awaiting review counts as zero. `scheduleReflections` queues a
+  reflection whenever `requested > 0` and the last one was created 180 s ago. Nothing backs off after a reflection that
+  added nothing ready. The guard stops top-up only when every candidate agent has a cached 5 h reading ≥ 90% whose
+  reset is still ahead. Claude's reading changes only when the owner presses refresh (Goal 7), it expires at the reset,
+  and an agent with no reading at all never counts as limited. Rapid mode also drops the "if weekly capacity is tight,
+  queue none" section from the reflection prompt, and `requested` is global, so every perpetual project is asked for
+  the whole amount.
+- **Failure:** Task A fails its check, and B, C and D are `after` A. Overnight, the project's reflection runs back to
+  back. Each run sees A's failure, queues fixes `after` A or decides the owner must look first, and adds nothing ready.
+  So it runs again 3 minutes later. With an owner review break held, rapid mode also keeps queueing and merging new
+  work around the break all night. Both burn the 5 h window until the agent's hard limit hits.
+- **Fix:** After a reflection that added no ready task, double the project's spacing (3 → 6 → 12 … 60 min) until
+  `ready` grows. Don't top up past an `awaiting_review` checkpoint. Treat a 5 h reading older than its window as
+  unknown-and-cautious (one reflection per 30 min) rather than free. Split `requested` across perpetual projects.
+
+### 61. [med] Retention deletes approval screenshots after 7 days, even while the approval is still pending (retention.mjs:47-58; approvals.mjs:126-139; orchestrator.mjs:1367-1370)
+- **What:** Media stays only if its id appears in `<DATA>/logs` or a surviving run log. A local run's approval
+  screenshots are saved to the media store (`approvals.host` → `saveMedia`) and referenced only by the `approvals` table
+  and `<DATA>/audit/<task>.jsonl`, which the GC doesn't scan. They survive only when `emitChat` also wrote the
+  approval into a chat log. Screen prompts (the Browser project has no chat) and tasks of chat-less projects never
+  get that. Remote approvals are safe: the worker's `image` event lands in the run log. Checkpoint `result` JSON
+  (`taskShots`) isn't scanned either.
+- **Repro (verified):** Use a temp data dir with `media/<sha>.png` (mtime 8 days old) and `audit/12.jsonl` containing
+  `{"screenshot":"<sha>.png"}`. `gcRetention` → `{ media: 1 }`, and the file is gone.
+- **Failure:** An approval's TTL can be up to 336 h. On day 8 the owner opens the card to decide and the screenshot is
+  missing. After a week, every screen prompt's Actions timeline (the audit trail AGENTIC.md relies on) has broken
+  images.
+- **Fix:** Also scan `<DATA>/audit/` and the `approvals.screenshot` column (plus `tasks.result` of review tasks), or
+  have approvals keep a reference list the GC reads.
+
+### 62. [low] A symlinked worktrees root makes a reused worktree get deleted with its uncommitted work, and the task can never start again (worktrees.mjs:47-60, :86-90, :168-183)
+- **What:** `git worktree add` records the real path. `worktreePath` joins `dirname(realpath(top))` with
+  `.agent-orch-worktrees` without resolving that last part, so if the directory is a symlink (the owner moved it to a
+  bigger disk) no listed worktree ever matches. `ensureWorktree` then sees "not listed", `registered()` doesn't
+  include the path either, and it `rmSync`s the directory through the symlink. `pruneOrphanWorktrees` also deletes
+  registered worktrees of every non-live task, and `cleanupWorktrees` skips them all.
+- **Repro (verified):** Symlink `<parent>/.agent-orch-worktrees` → `<parent>/other`, `ensureWorktree(info, 7)`, and
+  write `work.txt` in it. The second `ensureWorktree(info, 7)` deletes `work.txt` and then throws "is a missing but
+  already registered worktree", on every later attempt too.
+- **Fix:** `realpathSync` the worktrees root (create it first), or compare `realpath`s in `registered`/`listWorktrees`.
+
+### 63. [low] Screen-prompt workspaces and their screenshots are never deleted, on the controller or on workers (orchestrator.mjs:2714-2715; worker.mjs:906, :1177-1178)
+- **What:** Each screen prompt runs in `<orchestrator>/browser-tasks/<id>` (worker: `~/.agent-orch-worker/browser-tasks/<id>`)
+  with Playwright's `outputDir` in `.agent-orch/shots/`. The controller never removes it, and neither retention nor the
+  worktree sweeps look there. On a worker, `dropWorktree` returns right away when `job.cache` is unset, which is always
+  the case for browser jobs, and `sweepLeftovers` only scans `worktrees/`. The images are already copied into the
+  media store, so these are duplicates.
+- **Fix:** Remove the workspace when a screen prompt reaches done/failed/cancelled (worker: in `dropWorktree`, before
+  the `job.cache` check), and sweep `browser-tasks/` at boot for tasks that aren't live.
+
+### 64. [med] Only the last command of a multi-line check block, or of a `;` snippet, decides pass or fail (taskrun.mjs:23-24, :31, :44)
+- **What:** A fenced block is passed to `bash -c` whole. Newlines aren't counted as separators (only `;` and `&&` are),
+  and bash returns the last command's status. A single snippet may hold one `;`, so the multi-snippet join wraps it as
+  `{ a; b; }`, whose status is `b`'s alone.
+- **Repro (verified):** A block with `node -e "process.exit(1)"` then `node -e "process.exit(0)"` gives
+  `runCheck` → `[true, '(no output)', 0]`. `` `test -f /nonexistent; test -d /tmp` `` → passes. A block of `npm test`
+  and `npm run lint` passes with failing tests.
+- **Failure:** Work with failing tests is merged as "(check passed)". None of this repo's 262 specs uses a block or `;`
+  (the planner learned to avoid them), but other projects' planners write fenced blocks naturally.
+- **Fix:** Run checks with `set -e` semantics (`bash -e -o pipefail -c`), or join the lines of a block with ` && `,
+  and join a `;` snippet's parts with `&&` too (a grep "prints nothing" suffix is the one intended `;`).
+
+### 65. [med] A check that exits 127 with "command not found" counts as passing, and file names in backticks become commands (orchestrator.mjs:3237-3243; taskrun.mjs:15, :18)
+- **What:** 127 with "command not found" means "program missing on this machine", and the task is accepted unverified.
+  But the program is often the project's own. An npm script that calls a missing local binary exits 127 (`sh: jest:
+  command not found`). And `looksLikeCommand` treats any snippet that starts with a runner name as a command, word
+  boundary or not: `node_modules`, `nodes.json`, `bundle.js`, `go.mod`, `makefile`, `yarn.lock`, `./README.md`.
+- **Repro (verified):** "Done when `node_modules` stays untracked and `npm test` passes" → `node_modules && npm test` →
+  `[false, 'bash: node_modules: command not found', 127]`, so npm test never runs and the task is accepted. A
+  package.json with `"test": "jestx"` → `npm test` → 127 `sh: jestx: command not found`, also accepted.
+- **Failure:** A task that deletes a dev dependency, or whose Done-when first mentions a file name, is merged with
+  its tests never run. The agent can also reach this state from inside its own worktree.
+- **Fix:** Require a word boundary after RUNNERS entries (`node\b` but not `node_`/`nodes`), and skip snippets that
+  look like paths with extensions. Accept 127 only when the missing program is the command's first word and is
+  absent from PATH (`command -v`) before the check runs, never when a script inside it is missing.
+
+### 66. [med] The Done-when filter drops real checks silently and still lets dangerous ones through (taskrun.mjs:17-18, :33, :43-45)
+- **What:** A refused snippet throws away the whole check. The task then runs no check at all and is merged with a
+  plain "done". Things that are refused: `>` anywhere, including `=>` inside a quoted grep pattern and `2>&1`; a third
+  `&&`; env prefixes (`CI=1 npm test`) and `cd web && …` (not command-like, so a lone snippet leaves no check). The
+  refusal list, meanwhile, misses: `git -C . push -f origin HEAD:main` (inside a fenced block), `|| true`, `&`,
+  `$(…)`, `wget -qO- … | sh`, and `node -e "require('fs').rmSync(…)"`.
+- **Repro (verified):** Today's `extractCommand` refuses the named command in 10 of this repo's 262 specs, and 9 of
+  those are recorded as a plain `done`, without "(check passed)". They include #292 (2026-09-28, the fix for #37:
+  `grep -q 'setMcpSource((agent, run) => ext.mcpRun(agent, run))' server.mjs`, refused for its `=>`), #34
+  (`grep -q … && grep -q … && npm test`), and #33/#35/#36 (`npm test 2>&1 | grep …`). Some of these predate the
+  current extractor, but #292 ran on it.
+- **Fix:** Blank quoted text before the `>`/`rm`/`curl` tests (use `unquoted`), allow `2>&1` and `&&` chains, and
+  accept env prefixes and a leading `cd <dir> &&`. When a snippet is refused, fail the task with "Done-when check was
+  refused: …" (or ask the planner to restate it) instead of merging unchecked. Treat the deny list as a lint, not a
+  sandbox: the verifier runs `node`/`npm`/`make` anyway, so the real limit is the run sandbox (#38).
+
+### 67. [low] Shared sign-ins reach every process on a worker, "Stop sharing" doesn't revoke the token, and sharing Codex wipes a worker's own login (worker.mjs:434-452, :987; agent-share.mjs:57-66)
+- **What:** The head's long-lived `sk-ant-oat01-…` token goes into the worker's `process.env`, so every child
+  inherits it: `npm ci`/`npm install` lifecycle scripts of whatever repo a job clones, the Done-when check, and codex
+  and any other agent's shell. "Stop sharing" only deletes the env var. The token stays valid for its year, in any
+  process or file that already read it. Codex: `applyCredential` writes the head's `auth.json` over
+  `~/.codex/auth.json` with no backup, even when the worker's owner signed Codex in there by hand with another ChatGPT
+  account. When the head stops sharing, the file is deleted, so that machine's own `codex` is signed out.
+- **Failure:** A repo's postinstall script (or a prompt-injected task on the Mac) reads `CLAUDE_CODE_OAUTH_TOKEN`, and
+  it keeps working after the owner presses "Stop sharing". A MacBook whose owner uses Codex on a personal account
+  silently becomes the head's account when paired, and loses its own login on unshare.
+- **Fix:** Keep the token in a variable and pass it only in Claude runs' env (and strip it from install/check env). Say
+  in the Connections UI that stopping doesn't revoke it (claude.ai → revoke). Before writing a shared Codex login,
+  move a different-account `auth.json` to `auth.json.own` and restore it on unshare.
+
+### Round 7 priorities
+1. **#64, #65, #66 (the verifier).** Together they let broken work merge as verified or unchecked. #66 has already
+   happened here: 9 real tasks were recorded as done with no check, #292 among them. They are small, testable changes in taskrun.mjs, and they
+   gate every other fix.
+2. **#57 and #58 (screen prompts repeating real-world actions).** Resume and lost-run prompts should not re-issue the
+   request, and the status should come from a marker, not phrase matching.
+3. **#60 (rapid runaway).** Add a backoff on empty top-ups and respect review breaks before rapid mode runs unwatched
+   overnight.
+4. **#61 (approval screenshots GC'd).** One extra scan dir and one DB column.
+5. Then #53-#56 (push robustness and content, stuck screen prompts), #59 (Browser tab cost), #62-#63 (worktree root
+   symlink, workspace leaks) and #67 (credential scope).

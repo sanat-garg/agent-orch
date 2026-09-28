@@ -29,6 +29,7 @@
   background: var(--panel); color: var(--faint); }
 .fx-search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus); }
 .fx-search input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; color: var(--text); font: inherit; font-size: 13px; }
+.btn.small.fx-find-btn { height: 30px; padding: 0 10px; font-size: 13px; white-space: nowrap; flex: none; }
 
 /* the folder */
 .fx-main { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
@@ -81,6 +82,9 @@
 .fx-n { min-width: 0; display: flex; flex-direction: column; }
 .fx-nt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fx-sub { display: none; }
+/* project-wide find results: Name, the folder it is in, Size */
+.fx-rows.fx-found { padding-top: 6px; }
+.fx-found .fx-row { grid-template-columns: minmax(0, 1fr) minmax(0, 38%) 90px; }
 
 /* path bar */
 .fx-path { display: flex; align-items: center; gap: 12px; min-height: 30px; padding: 0 12px; border-top: 1px solid var(--border); flex: none;
@@ -129,15 +133,18 @@
   .fx-crumb { height: 36px; }
   .fx-views button { min-height: 44px; min-width: 44px; } /* UI-REVIEW #22 */
   .fx-bar .fx-search { height: 44px; } /* UI-REVIEW #22: .fx-bar beats the phone block's 36px below */
+  .btn.small.fx-find-btn { height: 44px; }
   .fx-search input { font-size: 16px; } /* UI-REVIEW #20 */
 }
 /* phones: the search takes its own row; the list is one column with size and date under the name (like Files on iOS) */
 @media (max-width: 640px) {
   .fx-bar { flex-wrap: wrap; row-gap: 8px; padding: 8px 10px; }
   .fx-title { order: 0; }
-  .fx-search { order: 3; flex-basis: 100%; width: auto; height: 36px; }
+  .fx-tools { flex: 1 1 100%; flex-wrap: wrap; row-gap: 8px; }
+  .fx-search { order: 3; flex: 1 1 60%; width: auto; height: 36px; } /* its own row, shared with Search project */
+  .fx-find-btn { order: 4; }
   .fx-grid { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); padding: 14px 8px; }
-  .fx-head, .fx-row { grid-template-columns: minmax(0, 1fr); }
+  .fx-head, .fx-row, .fx-found .fx-row { grid-template-columns: minmax(0, 1fr); }
   .fx-head .fx-col:not(.name), .fx-row .fx-c:not(.name) { display: none; }
   .fx-row { height: 56px; border-radius: 10px; }
   .fx-row:nth-child(even) { background: none; }

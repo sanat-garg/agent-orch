@@ -13,3 +13,7 @@ The Files view (public/files.js, server files.mjs) filters only the current fold
 ## Done when
 
 `npm test -- test/files.test.mjs test/ui-static.test.mjs` passes and `grep -n 'api/files/find' public/files.js` prints a line.
+
+## Result — done (check passed) (2026-09-28 11:53)
+
+AGENT-ORCH-STATUS: done — Files tab finds files by name across the whole project

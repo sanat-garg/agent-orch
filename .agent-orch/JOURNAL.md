@@ -950,3 +950,7 @@ search.mjs searchConvos is implemented and its 3 tests pass
 ## 2026-09-28 11:52 — #324 AUDIT round 7: push, screen prompts, rapid top-up, retention GC, worktree sweep, the verifier and agent-share [done (check passed)]
 
 AUDIT.md Round 7 adds 15 findings (#53–#67), priorities included
+
+## 2026-09-28 11:53 — #331 Files tab: find files by name across the whole project [done (check passed)]
+
+Files tab finds files by name across the whole project

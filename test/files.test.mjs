@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { handleFiles, listDir, resolveInside, TEXT_MAX } from '../files.mjs';
+import { findFiles, FIND_VISIT_MAX, handleFiles, listDir, resolveInside, TEXT_MAX } from '../files.mjs';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-files-'));
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -91,4 +91,56 @@ test('GET /api/files/*: images as themselves, text capped, binary refused, sandb
   const again = await get('raw', 'README.md', 'c1', { 'If-Modified-Since': readme.headers.get('last-modified') });
   assert.equal(again.status, 304);
   assert.equal((await get('raw', 'src')).status, 400);
+});
+
+test('findFiles: matches at any depth, skips node_modules/.git/hidden folders, ignores links out, stops at the cap', () => {
+  const froot = path.join(tmp, 'findproj');
+  fs.mkdirSync(path.join(froot, 'a/b/c'), { recursive: true });
+  for (const d of ['node_modules/pkg', '.git/objects', '.cache', '.agent-orch-worktrees/x']) fs.mkdirSync(path.join(froot, d), { recursive: true });
+  for (const f of ['Widget.js', 'a/widget.test.js', 'a/b/c/deep-WIDGET.md', 'node_modules/pkg/widget.js', '.git/objects/widget', '.cache/widget.txt',
+    '.agent-orch-worktrees/x/widget.js', 'a/other.txt']) fs.writeFileSync(path.join(froot, f), 'x');
+  fs.mkdirSync(path.join(froot, 'widgets'));
+  fs.writeFileSync(path.join(outside, 'widget-secret.js'), 'top secret');
+  fs.symlinkSync(outside, path.join(froot, 'out-dir'));
+  fs.symlinkSync(path.join(outside, 'widget-secret.js'), path.join(froot, 'widget-out.js'));
+  fs.symlinkSync(path.join(froot, 'a'), path.join(froot, 'a-link')); // inside, but never descended (no duplicates, no loops)
+
+  const r = findFiles(froot, 'WIDGET');
+  assert.equal(r.q, 'WIDGET');
+  assert.equal(r.truncated, false);
+  assert.deepEqual(r.entries.map((e) => e.path), ['Widget.js', 'widgets', 'a/widget.test.js', 'a/b/c/deep-WIDGET.md']);
+  const deep = r.entries.at(-1);
+  assert.deepEqual([deep.name, deep.dir, deep.size, typeof deep.mtime], ['deep-WIDGET.md', false, 1, 'number']);
+  assert.equal(r.entries.find((e) => e.name === 'widgets').dir, true);
+  // A query starting with '.' looks inside hidden folders (still never .git or node_modules).
+  assert.deepEqual(findFiles(froot, '.cache').entries.map((e) => e.path), ['.cache']);
+  assert.throws(() => findFiles(path.join(tmp, 'gone'), 'x'), (e) => e.status === 404);
+
+  const capped = findFiles(froot, 'widget', { max: 2 });
+  assert.deepEqual([capped.entries.length, capped.truncated], [2, true]);
+  const many = path.join(tmp, 'many');
+  fs.mkdirSync(many);
+  for (let i = 0; i <= FIND_VISIT_MAX; i++) fs.writeFileSync(path.join(many, `f${i}`), '');
+  const walked = findFiles(many, 'nothing-like-this');
+  assert.deepEqual([walked.entries.length, walked.truncated], [0, true]);
+});
+
+test('GET /api/files/find: 2+ characters, only for a known chat', async (t) => {
+  const json = (res, status, body) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
+  const server = http.createServer((req, res) => {
+    if (!handleFiles(req, res, new URL(req.url, 'http://x'), { rootFor: (cid) => (cid === 'c1' ? root : null), json })) { res.writeHead(404); res.end(); }
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => server.close());
+  const find = (q, cid = 'c1') => fetch(`http://127.0.0.1:${server.address().port}/api/files/find?cid=${cid}&q=${encodeURIComponent(q)}`);
+  const ok = await find('app');
+  assert.equal(ok.status, 200);
+  assert.deepEqual((await ok.json()).entries.map((e) => e.path), ['src/app.js']);
+  const key = await find('key');
+  assert.deepEqual((await key.json()).entries, [], 'links out of the project are never listed or walked');
+  for (const [q, cid, status] of [['a', 'c1', 400], [' a ', 'c1', 400], ['app', 'other', 404]]) {
+    const r = await find(q, cid);
+    assert.equal(r.status, status, q);
+    await r.arrayBuffer();
+  }
 });

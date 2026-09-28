@@ -1,10 +1,10 @@
 'use strict';
 // ---------- Files: a Finder-style, read-only browser of the open chat's project (server: files.mjs) ----------
 // Icon and list views (list folders open in place with disclosure triangles), back/forward, a path bar, a name filter,
-// hidden files on request (⌘⇧.), and Quick Look (Space or double-click) for text, Markdown and images. Loaded after
+// hidden files on request (⌘⇧.), project-wide find by name (Enter in the search field), and Quick Look (Space or double-click) for text, Markdown and images. Loaded after
 // app.js and uses its helpers ($, el, api, store, md, currentConvo).
 const FX = {
-  cid: null, path: '', data: null, err: '', seq: 0, qseq: 0, back: [], fwd: [], sel: null, filter: '', rows: [],
+  cid: null, path: '', data: null, err: '', seq: 0, qseq: 0, fseq: 0, find: null, back: [], fwd: [], sel: null, filter: '', rows: [],
   view: store.get('cw.files.view') === 'list' ? 'list' : 'icons',
   sort: (() => { try { const s = JSON.parse(store.get('cw.files.sort')); if (s?.key) return s; } catch {} return { key: 'name', dir: 1 }; })(),
   hidden: store.get('cw.files.hidden') === '1',
@@ -85,20 +85,30 @@ function fxBuild() {
         </div>
         <button type="button" class="icon-btn" id="fxHidden" aria-pressed="false" title="Show hidden files (⌘⇧.)" aria-label="Show hidden files"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/></svg></button>
         <button type="button" class="icon-btn" id="fxRefresh" aria-label="Refresh" title="Refresh"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-        <label class="fx-search"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M16 16l4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><input id="fxFilter" type="search" placeholder="Search this folder" aria-label="Search this folder" autocomplete="off" spellcheck="false"></label>
+        <label class="fx-search"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M16 16l4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><input id="fxFilter" type="search" placeholder="Search this folder" aria-label="Search this folder" autocomplete="off" spellcheck="false" enterkeyhint="search"></label>
+        <button type="button" class="btn small fx-find-btn" id="fxFindBtn" hidden>Search project</button>
       </div>
     </div>
     <div class="fx-main" id="fxMain"></div>
     <div class="fx-path" id="fxPath"></div>`;
   $('fxBack').onclick = () => fxHistory(-1);
   $('fxFwd').onclick = () => fxHistory(1);
-  $('fxRefresh').onclick = () => fxLoad();
+  $('fxRefresh').onclick = () => (FX.find ? fxFind(FX.find.q) : fxLoad());
+  $('fxFindBtn').onclick = () => fxFind($('fxFilter').value.trim());
   $('fxHidden').onclick = () => fxToggleHidden();
   v.querySelectorAll('[data-fxview]').forEach((b) => b.addEventListener('click', () => {
     FX.view = b.dataset.fxview; store.set('cw.files.view', FX.view); fxRender(); fxFocus();
   }));
-  $('fxFilter').addEventListener('input', (e) => { FX.filter = e.target.value.trim().toLowerCase(); fxRender(); });
-  $('fxFilter').addEventListener('keydown', (e) => { if (e.key === 'ArrowDown' || e.key === 'Enter') { e.preventDefault(); fxFocus(true); } });
+  $('fxFilter').addEventListener('input', (e) => {
+    FX.filter = e.target.value.trim().toLowerCase();
+    $('fxFindBtn').hidden = FX.filter.length < 2;
+    if (!FX.filter && FX.find) fxFindExit(); else fxRender();
+  });
+  $('fxFilter').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && e.target.value.trim().length >= 2) { e.preventDefault(); fxFind(e.target.value.trim()); }
+    else if (e.key === 'ArrowDown' || e.key === 'Enter') { e.preventDefault(); fxFocus(true); }
+    else if (e.key === 'Escape' && (FX.find || e.target.value)) { e.preventDefault(); fxFindExit(true); }
+  });
   $('fxMain').addEventListener('keydown', fxKey);
   v.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === '.') { e.preventDefault(); fxToggleHidden(); }
@@ -112,9 +122,9 @@ function filesShow() {
   fxBuild();
   const cid = currentConvo()?.id || null;
   if (cid !== FX.cid) {
-    Object.assign(FX, { cid, path: (cid && store.get('cw.files.path.' + cid)) || '', back: [], fwd: [], sel: null, filter: '', data: null, err: '' });
+    Object.assign(FX, { cid, path: (cid && store.get('cw.files.path.' + cid)) || '', back: [], fwd: [], sel: null, filter: '', data: null, err: '', find: null });
     FX.expanded.clear(); FX.kids.clear();
-    $('fxFilter').value = '';
+    $('fxFilter').value = ''; $('fxFindBtn').hidden = true;
   }
   if (!cid) { fxRender(); return; }
   fxLoad();
@@ -142,7 +152,7 @@ async function fxLoad(focus = false) {
 }
 function fxGo(rel, { push = true } = {}) {
   if (push && rel !== FX.path) { FX.back.push(FX.path); FX.fwd = []; }
-  FX.path = rel; FX.sel = null; FX.filter = ''; $('fxFilter').value = '';
+  FX.path = rel; FX.sel = null; FX.filter = ''; FX.find = null; $('fxFilter').value = ''; $('fxFindBtn').hidden = true;
   FX.expanded.clear(); FX.kids.clear();
   store.set('cw.files.path.' + FX.cid, rel);
   fxLoad(true);
@@ -163,6 +173,34 @@ function fxUp() {
 }
 function fxToggleHidden() {
   FX.hidden = !FX.hidden; store.set('cw.files.hidden', FX.hidden ? '1' : '0'); fxRender();
+}
+// Project-wide find: results replace the folder until a result is opened, Escape, or the field is cleared.
+async function fxFind(q) {
+  if (!FX.cid || q.length < 2) return;
+  const seq = ++FX.fseq, cid = FX.cid;
+  FX.find = { q, data: null, err: '' }; FX.sel = null;
+  fxRender();
+  try {
+    const d = await api(`/api/files/find?cid=${encodeURIComponent(cid)}&q=${encodeURIComponent(q)}`);
+    if (seq !== FX.fseq || cid !== FX.cid || !FX.find) return;
+    FX.find.data = d;
+  } catch (e) {
+    if (seq !== FX.fseq || !FX.find) return;
+    FX.find.err = e.message;
+  }
+  fxRender();
+}
+function fxFindExit(clear) {
+  FX.fseq++; FX.find = null; FX.sel = null;
+  if (clear) { FX.filter = ''; $('fxFilter').value = ''; $('fxFindBtn').hidden = true; }
+  fxRender();
+}
+// Opening a result shows its folder with it selected (hidden files turn on when it is one).
+function fxReveal(r) {
+  const parts = r.rel.split('/');
+  if (!FX.hidden && parts.some((p) => p.startsWith('.'))) fxToggleHidden();
+  fxGo(parts.slice(0, -1).join('/'));
+  FX.sel = r.rel;
 }
 const join = (a, b) => (a ? `${a}/${b}` : b);
 function fxSorted(entries) {
@@ -188,6 +226,7 @@ function fxRender() {
     $('fxPath').textContent = '';
     return;
   }
+  if (FX.find) return fxFound(main);
   if (!d) {
     main.append(FX.err ? fxEmpty("Couldn't open this folder", FX.err) : el('div', 'fx-loading', 'Loading…'));
     $('fxPath').textContent = '';
@@ -208,6 +247,34 @@ function fxRender() {
   else main.append(fxList());
   fxPathBar();
 }
+function fxFound(main) {
+  const { q, data, err } = FX.find;
+  FX.rows = (data?.entries || []).map((e) => ({ e, rel: e.path, depth: 0 }));
+  $('fxPath').textContent = '';
+  if (!data) return main.append(err ? fxEmpty("Couldn't search this project", err) : el('div', 'fx-loading', 'Searching…'));
+  if (FX.sel && !FX.rows.some((r) => r.rel === FX.sel)) FX.sel = null;
+  if (!FX.rows.length) main.append(fxEmpty(`No files named like “${q}”`, data.truncated ? 'The project is too big to search all of it.' : 'Hidden folders, .git and node_modules are skipped.'));
+  else {
+    const t = el('div', 'fx-rows fx-found');
+    t.setAttribute('role', 'listbox');
+    t.setAttribute('aria-label', `Files named like “${q}”, ${FX.rows.length} found`);
+    t.tabIndex = 0;
+    FX.rows.forEach((r, i) => {
+      const o = optionFor(r, i, 'fx-row'), folder = r.rel.split('/').slice(0, -1).join('/') || FX.data?.crumbs[0].name || '/';
+      const name = el('span', 'fx-c name'), nm = el('span', 'fx-n');
+      nm.append(el('span', 'fx-nt', r.e.name), el('span', 'fx-sub', r.e.dir ? folder : `${folder} · ${fxSize(r.e.size)}`)); // sub: phones only
+      name.append(el('span', 'fx-disc-sp'), iconFor(r.e, r.rel, false), nm);
+      o.title = r.rel;
+      o.append(name, el('span', 'fx-c folder', folder), el('span', 'fx-c size', r.e.dir ? '--' : fxSize(r.e.size)));
+      t.append(o);
+    });
+    fxActive(t);
+    main.append(t);
+  }
+  const n = FX.rows.length;
+  $('fxPath').append(el('span', 'fx-crumbs', `Searching the whole project for “${q}”`),
+    el('span', 'fx-count', `${n} found${data.truncated ? ' · stopped early' : ''}`));
+}
 function fxEmpty(title, text) {
   const box = el('div', 'fx-empty');
   box.innerHTML = FOLDER_SVG;
@@ -218,7 +285,7 @@ function optionFor(r, i, cls) {
   const o = el('div', cls);
   o.id = `fx-o-${i}`;
   o.dataset.i = String(i);
-  o.setAttribute('role', FX.view === 'list' ? 'treeitem' : 'option');
+  o.setAttribute('role', FX.view === 'list' && !FX.find ? 'treeitem' : 'option');
   o.setAttribute('aria-selected', String(r.rel === FX.sel));
   o.title = r.e.name;
   o.addEventListener('click', (ev) => { if (ev.target.closest('.fx-disc')) return; fxSelect(r.rel); if (touch()) fxOpen(r); });
@@ -328,9 +395,11 @@ function fxFocus(selectFirst) {
   if (!c) return;
   if (selectFirst && !FX.sel && FX.rows[0]) fxSelect(FX.rows[0].rel);
   c.focus({ preventScroll: true });
+  c.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' }); // e.g. a revealed find result
 }
 function fxOpen(r) {
-  if (r.e.dir) fxGo(r.rel);
+  if (FX.find) fxReveal(r);
+  else if (r.e.dir) fxGo(r.rel);
   else fxPreview(r);
 }
 function fxKey(e) {
@@ -345,7 +414,9 @@ function fxKey(e) {
   };
   const move = (d) => { const n = Math.min(FX.rows.length - 1, Math.max(0, (i < 0 ? (d > 0 ? -1 : FX.rows.length) : i) + d)); if (FX.rows[n]) fxSelect(FX.rows[n].rel); };
   const mod = e.metaKey || e.ctrlKey;
-  if (mod && e.key === 'ArrowUp') { e.preventDefault(); fxUp(); }
+  if (FX.find && (e.key === 'Escape' || e.key === 'Backspace' || (mod && e.key === 'ArrowUp'))) { e.preventDefault(); fxFindExit(true); $('fxFilter').focus(); }
+  else if (FX.find && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) e.preventDefault();
+  else if (mod && e.key === 'ArrowUp') { e.preventDefault(); fxUp(); }
   else if ((mod && e.key === 'ArrowDown') || e.key === 'Enter') { if (cur) { e.preventDefault(); fxOpen(cur); } }
   else if (e.key === ' ') { e.preventDefault(); if (FX.ql) fxClosePreview(); else if (cur && !cur.e.dir) fxPreview(cur); }
   else if (e.key === 'Backspace') { e.preventDefault(); fxUp(); }

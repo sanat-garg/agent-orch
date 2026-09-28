@@ -4,12 +4,15 @@
 // as themselves, everything else as plain text (capped), under a sandbox CSP so nothing served can run as a page.
 //   GET /api/files/list?cid=<chat>&path=<rel>  → {name, path, crumbs, entries: [{name, dir, size, mtime, hidden}], truncated}
 //   GET /api/files/raw?cid=<chat>&path=<rel>   → the file (images), or text/plain (first TEXT_MAX bytes; 415 for binary)
+//   GET /api/files/find?cid=<chat>&q=<text>    → {q, entries: [{name, path, dir, size, mtime}], truncated} (q: 2+ chars)
 import fs from 'node:fs';
 import path from 'node:path';
 
 export const TEXT_MAX = 1024 * 1024;
 export const IMAGE_MAX = 25 * 1024 * 1024;
 export const LIST_MAX = 5000;
+export const FIND_VISIT_MAX = 20000;
+const FIND_SKIP = new Set(['.git', 'node_modules', '.agent-orch-worktrees']);
 export const IMAGE_TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp',
   '.avif': 'image/avif', '.bmp': 'image/bmp', '.ico': 'image/x-icon', '.svg': 'image/svg+xml' };
 const SANDBOX = "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'";
@@ -45,6 +48,43 @@ export function listDir(rootDir, rel) {
   return { name: crumbs.at(-1).name, path: clean, crumbs, entries, truncated: names.length > LIST_MAX };
 }
 
+// Project-wide find by name (case-insensitive substring), breadth first so shallow hits come first. Skips FIND_SKIP and
+// hidden folders (unless q itself starts with '.'), never descends a symlink (no loops or duplicates) and leaves out links
+// that point outside the project. Stops after `max` hits or FIND_VISIT_MAX entries looked at (truncated: true).
+export function findFiles(rootDir, q, { max = 200 } = {}) {
+  const { root } = resolveInside(rootDir, '');
+  const needle = String(q || '').toLowerCase(), dotted = needle.startsWith('.');
+  const entries = [], queue = [''];
+  let visited = 0, truncated = false;
+  walk: while (queue.length) {
+    const rel = queue.shift();
+    let names;
+    try { names = fs.readdirSync(path.join(root, rel)).sort(); } catch { continue; }
+    for (const name of names) {
+      if (++visited > FIND_VISIT_MAX) { truncated = true; break walk; }
+      const abs = path.join(root, rel, name), relPath = rel ? `${rel}/${name}` : name;
+      let st, link = false;
+      try {
+        st = fs.lstatSync(abs);
+        if (st.isSymbolicLink()) {
+          link = true;
+          const target = fs.realpathSync(abs);
+          if (target !== root && !target.startsWith(root + path.sep)) continue; // a link out of the project
+          st = fs.statSync(target);
+        }
+      } catch { continue; } // broken link, or gone mid-walk
+      if (!st.isDirectory() && !st.isFile()) continue;
+      if (st.isDirectory() && (FIND_SKIP.has(name) || (name.startsWith('.') && !dotted))) continue;
+      if (name.toLowerCase().includes(needle)) {
+        if (entries.length >= max) { truncated = true; break walk; }
+        entries.push({ name, path: relPath, dir: st.isDirectory(), size: st.isFile() ? st.size : null, mtime: Math.round(st.mtimeMs) });
+      }
+      if (st.isDirectory() && !link) queue.push(relPath);
+    }
+  }
+  return { q: String(q || ''), entries, truncated };
+}
+
 // Serves one file. Images (by extension) as their type; anything else as UTF-8 text, first TEXT_MAX bytes, or 415 when
 // the start of it looks binary (a NUL byte).
 export function sendFile(req, res, rootDir, rel) {
@@ -73,12 +113,17 @@ export function sendFile(req, res, rootDir, rel) {
 
 // The route handler: rootFor(cid) → the chat's project folder, or null. Returns true when it answered.
 export function handleFiles(req, res, url, { rootFor, json }) {
-  const m = url.pathname.match(/^\/api\/files\/(list|raw)$/);
+  const m = url.pathname.match(/^\/api\/files\/(list|raw|find)$/);
   if (!m || req.method !== 'GET') return false;
   const root = rootFor(url.searchParams.get('cid'));
   try {
     if (!root) throw new FileError(404, 'No project for this chat');
     if (m[1] === 'list') json(res, 200, listDir(root, url.searchParams.get('path')));
+    else if (m[1] === 'find') {
+      const q = (url.searchParams.get('q') || '').trim();
+      if (q.length < 2) throw new FileError(400, 'Type at least 2 characters');
+      json(res, 200, findFiles(root, q));
+    }
     else sendFile(req, res, root, url.searchParams.get('path'));
   } catch (e) {
     if (res.headersSent) { res.destroy(); return true; }

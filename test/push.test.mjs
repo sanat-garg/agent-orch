@@ -63,6 +63,55 @@ test('checkSub accepts a PushSubscription and refuses non-https endpoints and ba
   assert.match(checkSub({ endpoint: 'https://x.test/a' }), /p256dh/);
 });
 
+test('checkSub refuses a 65-byte p256dh that is not a point on P-256', () => {
+  const { keys } = receiver();
+  const offCurve = b64u(Buffer.concat([Buffer.from([4]), Buffer.alloc(64)]));
+  assert.equal(checkSub({ endpoint: 'https://x.test/a', keys: { ...keys, p256dh: offCurve } }), 'keys.p256dh must be a P-256 point');
+  assert.equal(checkSub({ endpoint: 'https://x.test/a', keys }), null);
+});
+
+// A key file that exists but can't be used turns push off and is left exactly as it was.
+function assertOff(push, file, before) {
+  assert.equal(typeof push.disabled, 'string');
+  assert.equal(push.publicKey(), null);
+  assert.throws(() => push.subscribe({ endpoint: 'https://x.test/a', keys: receiver().keys }), /^Error: push is off: /);
+  assert.equal(fs.readFileSync(file, 'utf8'), before);
+}
+
+test('a key file with a bad PEM turns push off without throwing or touching the file', async () => {
+  const dir = path.join(tmp, 'badpem');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'push-vapid.json');
+  const before = JSON.stringify({ publicKey: 'x', privateKey: '-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----' });
+  fs.writeFileSync(file, before, { mode: 0o600 });
+  fs.writeFileSync(path.join(dir, 'push-subscriptions.json'), JSON.stringify([{ endpoint: 'https://x.test/1', keys: receiver().keys }]));
+  const logs = [];
+  const push = createPush({ dataDir: dir, log: (m) => logs.push(m) });
+  assertOff(push, file, before);
+  assert.match(push.disabled, /private key/);
+  assert.equal(push.count(), 1, 'the saved devices are still counted');
+  assert.deepEqual(await push.send({ title: 't' }), { sent: 0, failed: 0, off: true });
+  assert.ok(logs.some((l) => /push is off/.test(l)), logs.join('\n'));
+  fs.writeFileSync(file, '{not json');
+  assertOff(createPush({ dataDir: dir }), file, '{not json');
+});
+
+test('an unreadable key file turns push off and keeps its content and mode', { skip: process.getuid?.() === 0 && 'root reads any file' }, () => {
+  const dir = path.join(tmp, 'eacces');
+  const first = createPush({ dataDir: dir });
+  const file = path.join(dir, 'push-vapid.json');
+  const before = fs.readFileSync(file, 'utf8');
+  fs.chmodSync(file, 0o000);
+  try {
+    const push = createPush({ dataDir: dir });
+    assert.match(push.disabled, /EACCES/);
+    assert.equal(push.publicKey(), null);
+    assert.equal(fs.statSync(file).mode & 0o777, 0o000);
+  } finally { fs.chmodSync(file, 0o600); }
+  assert.equal(fs.readFileSync(file, 'utf8'), before);
+  assert.equal(createPush({ dataDir: dir }).publicKey(), first.publicKey());
+});
+
 test('the VAPID public key is made once and stable across restarts', () => {
   const dir = path.join(tmp, 'stable');
   const a = createPush({ dataDir: dir }), b = createPush({ dataDir: dir });
@@ -71,6 +120,8 @@ test('the VAPID public key is made once and stable across restarts', () => {
   assert.equal(Buffer.from(a.publicKey(), 'base64url')[0], 4);
   assert.equal(fs.statSync(path.join(dir, 'push-vapid.json')).mode & 0o777, 0o600);
   assert.notEqual(createPush({ dataDir: path.join(tmp, 'other') }).publicKey(), a.publicKey());
+  assert.equal(a.disabled, null);
+  assert.equal(b.disabled, null);
 });
 
 test('send encrypts per RFC 8291 and signs a VAPID JWT for the endpoint origin', async () => {
@@ -97,7 +148,7 @@ test('send encrypts per RFC 8291 and signs a VAPID JWT for the endpoint origin',
   assert.deepEqual(JSON.parse(Buffer.from(m[1], 'base64url')), { typ: 'JWT', alg: 'ES256' });
   const claims = JSON.parse(Buffer.from(m[2], 'base64url'));
   assert.equal(claims.aud, svc.url);
-  assert.equal(claims.sub, 'mailto:owner@localhost');
+  assert.equal(claims.sub, 'https://agent-orch.local', 'the default subject is an https URL');
   const now = Date.now() / 1000;
   assert.ok(claims.exp > now + 11 * 3600 && claims.exp <= now + 12 * 3600 + 1);
   const pub = Buffer.from(push.publicKey(), 'base64url');

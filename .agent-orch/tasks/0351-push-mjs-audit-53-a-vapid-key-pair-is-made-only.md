@@ -13,3 +13,7 @@ Reliability fix in push.mjs createPush (read the module header and .agent-orch/A
 ## Done when
 
 `npm test -- test/push.test.mjs` passes and `grep -q 'ENOENT' push.mjs` and `grep -q 'disabled' push.mjs`
+
+## Result — done (check passed) (2026-09-28 12:33)
+
+AGENT-ORCH-STATUS: done — Unusable VAPID key file now disables push instead of replacing it

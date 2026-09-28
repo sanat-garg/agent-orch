@@ -2,7 +2,10 @@
 // so notifications reach the owner's phone while the app is closed. The VAPID key pair is made once and kept in
 // <dataDir>/push-vapid.json (0600); subscribed devices in <dataDir>/push-subscriptions.json
 // [{endpoint, keys, ua, addedAt, fails, pausedUntil}].
-//   createPush({dataDir, log}) → { publicKey(), subscribe(sub), unsubscribe(endpoint), count(), send(msg) }
+//   createPush({dataDir, subject, log}) → { publicKey(), subscribe(sub), unsubscribe(endpoint), count(), send(msg), disabled }
+// `subject` is the JWT `sub` (an https URL; default https://agent-orch.local). A key pair is made only when the key file
+// does not exist (ENOENT). Any other read error, bad JSON or a bad PEM leaves the file untouched and turns push off:
+// `disabled` holds the reason (null when on), publicKey() is null, subscribe() throws, send() resolves {sent:0, failed:0, off:true}.
 // send({title, body, tag, url, badge}) posts to every device and resolves {sent, removed, failed, skipped}; it never throws.
 // A 404 or 410 means the device is gone, so that subscription is dropped. 400/401/403/413 (bad subscription, VAPID
 // mismatch, payload too large) count as `fails`; a 2xx resets it and the third in a row drops the device. A 429 or 503
@@ -17,7 +20,7 @@ import https from 'node:https';
 export const TTL = 86400;
 export const JWT_TTL_S = 12 * 3600;
 export const RECORD_SIZE = 4096;
-const SUBJECT = 'mailto:owner@localhost';
+const DEFAULT_SUBJECT = 'https://agent-orch.local';
 const TIMEOUT_MS = 15_000;
 export const MAX_FAILS = 3;
 const PERMANENT = new Set([400, 401, 403, 413]);
@@ -51,6 +54,8 @@ export function checkSub(sub) {
   if (u.protocol !== 'https:') return 'endpoint must be an https URL';
   const { p256dh, auth } = sub.keys || {};
   if (typeof p256dh !== 'string' || !B64U_RE.test(p256dh) || unb64u(p256dh).length !== 65) return 'keys.p256dh must be a base64url P-256 key';
+  try { const e = crypto.createECDH('prime256v1'); e.generateKeys(); e.computeSecret(unb64u(p256dh)); }
+  catch { return 'keys.p256dh must be a P-256 point'; }
   if (typeof auth !== 'string' || !B64U_RE.test(auth) || unb64u(auth).length !== 16) return 'keys.auth must be a base64url 16-byte secret';
   return null;
 }
@@ -70,25 +75,55 @@ export function encrypt(payload, p256dh, auth, { salt = crypto.randomBytes(16), 
   return Buffer.concat([head, as, record]);
 }
 
-export function createPush({ dataDir, log = () => {} }) {
-  const keyFile = path.join(dataDir, 'push-vapid.json'), subFile = path.join(dataDir, 'push-subscriptions.json');
-  let vapid = readJson(keyFile);
-  if (!vapid?.publicKey || !vapid?.privateKey) {
+// The saved VAPID key pair and its signing key, or {off: reason}. Only a missing file (ENOENT) makes a new pair; anything
+// else is left alone, since a new key would orphan every existing subscription (push services answer 403 for good).
+function loadVapid(keyFile, log) {
+  let text;
+  try { text = fs.readFileSync(keyFile, 'utf8'); } catch (e) {
+    if (e.code !== 'ENOENT') return { off: `can't read ${path.basename(keyFile)}: ${e.code || e.message}` };
     const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
     const { x, y } = publicKey.export({ format: 'jwk' });
-    vapid = { publicKey: b64u(Buffer.concat([Buffer.from([4]), unb64u(x), unb64u(y)])),
+    const vapid = { publicKey: b64u(Buffer.concat([Buffer.from([4]), unb64u(x), unb64u(y)])),
       privateKey: privateKey.export({ format: 'pem', type: 'pkcs8' }), createdAt: Date.now() };
     writeJson(keyFile, vapid);
     log('made a new VAPID key pair');
+    return { vapid, signer: privateKey };
   }
-  const signer = crypto.createPrivateKey(vapid.privateKey);
+  let vapid;
+  try { vapid = JSON.parse(text); } catch (e) { return { off: `${path.basename(keyFile)} is not valid JSON: ${e.message}` }; }
+  if (typeof vapid?.publicKey !== 'string' || typeof vapid?.privateKey !== 'string') return { off: `${path.basename(keyFile)} has no key pair` };
+  try { return { vapid, signer: crypto.createPrivateKey(vapid.privateKey) }; } catch (e) {
+    return { off: `${path.basename(keyFile)} holds a bad private key: ${e.code || e.message}` };
+  }
+}
+
+export function createPush({ dataDir, subject = DEFAULT_SUBJECT, log = () => {} }) {
+  const keyFile = path.join(dataDir, 'push-vapid.json'), subFile = path.join(dataDir, 'push-subscriptions.json');
   let subs = Array.isArray(readJson(subFile)) ? readJson(subFile) : [];
   const save = () => writeJson(subFile, subs);
+  function unsubscribe(endpoint) {
+    const n = subs.length;
+    subs = subs.filter((x) => x.endpoint !== endpoint);
+    if (subs.length !== n) { save(); log(`unsubscribed a device (${subs.length} left)`); }
+    return n - subs.length;
+  }
+  const { vapid, signer, off } = loadVapid(keyFile, log);
+  if (off) {
+    log(`push is off: ${off}`);
+    return {
+      disabled: off,
+      publicKey: () => null,
+      count: () => subs.length,
+      subscribe() { throw new Error(`push is off: ${off}`); },
+      unsubscribe,
+      send: async () => ({ sent: 0, failed: 0, off: true }),
+    };
+  }
 
   // `vapid t=<ES256 JWT for the endpoint's origin>, k=<public key>` (RFC 8292).
   function authorization(endpoint) {
     const enc = (o) => b64u(JSON.stringify(o));
-    const data = `${enc({ typ: 'JWT', alg: 'ES256' })}.${enc({ aud: new URL(endpoint).origin, exp: Math.floor(Date.now() / 1000) + JWT_TTL_S, sub: SUBJECT })}`;
+    const data = `${enc({ typ: 'JWT', alg: 'ES256' })}.${enc({ aud: new URL(endpoint).origin, exp: Math.floor(Date.now() / 1000) + JWT_TTL_S, sub: subject })}`;
     const sig = crypto.sign('sha256', Buffer.from(data), { key: signer, dsaEncoding: 'ieee-p1363' });
     return `vapid t=${data}.${b64u(sig)}, k=${vapid.publicKey}`;
   }
@@ -112,6 +147,7 @@ export function createPush({ dataDir, log = () => {} }) {
   }
 
   return {
+    disabled: null,
     publicKey: () => vapid.publicKey,
     count: () => subs.length,
     subscribe(sub) {
@@ -122,12 +158,7 @@ export function createPush({ dataDir, log = () => {} }) {
       log(`subscribed ${new URL(s.endpoint).host} (${subs.length} device${subs.length === 1 ? '' : 's'})`);
       return subs.length;
     },
-    unsubscribe(endpoint) {
-      const n = subs.length;
-      subs = subs.filter((x) => x.endpoint !== endpoint);
-      if (subs.length !== n) { save(); log(`unsubscribed a device (${subs.length} left)`); }
-      return n - subs.length;
-    },
+    unsubscribe,
     async send({ title, body, tag, url, badge } = {}) {
       const r = { sent: 0, removed: 0, failed: 0, skipped: 0 };
       let dirty = false;

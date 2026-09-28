@@ -979,3 +979,6 @@ extractCommand now refuses substitution, including inside double quotes
 ## 2026-09-28 12:32 — #352 worktrees.mjs AUDIT #62: a symlinked worktrees root still matches git's list, so a reused worktree is never deleted [done (check passed)]
 
 Worktrees under a symlinked root are reused and kept, tested
+## 2026-09-28 12:33 — #351 push.mjs AUDIT #53: a VAPID key pair is made only when the file is missing; a bad file or PEM turns push off instead of overwriting or throwing [done (check passed)]
+
+Unusable VAPID key file now disables push instead of replacing it

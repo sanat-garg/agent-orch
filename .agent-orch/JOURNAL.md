@@ -814,3 +814,7 @@ Connections is a bottom sheet on phones; touch opens skip focus
 ## 2026-09-28 05:26 — #273 UI-REVIEW #15 and #16: inline code pills clone across lines, 44pt tool rows, system-font time cells [done (check passed)]
 
 code pills clone across lines, 44pt touch tool rows, system-font times
+
+## 2026-09-28 05:45 — #275 Fix the duplicate dragMove in app.js (sidebar project drag is dead) and guard top-level names [done (check passed)]
+
+Queue drag is now qDragMove, so sidebar project drag works; test blocks duplicate names

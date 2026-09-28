@@ -13,3 +13,7 @@ Bug: public/app.js declares `function dragMove` twice at top level: the sidebar 
 ## Done when
 
 `npm test -- test/ui-static.test.mjs` passes and `grep -c '^function dragMove' public/app.js` prints 1 and `grep -q 'qDragMove' public/app.js`
+
+## Result — done (check passed) (2026-09-28 05:45)
+
+AGENT-ORCH-STATUS: done — Queue drag is now qDragMove, so sidebar project drag works; test blocks duplicate names

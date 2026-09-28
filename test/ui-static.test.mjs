@@ -202,3 +202,20 @@ test('inline code pills clone across lines, 44pt tool rows on touch, system-font
     assert.match(rule, /font-variant-numeric: tabular-nums/);
   }
 });
+
+test('top-level function names are unique across the classic public/*.js scripts (a later one silently wins)', () => {
+  const seen = new Map();
+  const dups = [];
+  for (const f of ['app.js', 'files.js', 'stats.js', 'ext.js', 'browser.js']) {
+    for (const m of read(`public/${f}`).matchAll(/^(?:async )?function\s*\*?\s*([\w$]+)\s*\(/gm)) {
+      if (seen.has(m[1])) dups.push(`${m[1]} (${seen.get(m[1])}, ${f})`);
+      else seen.set(m[1], f);
+    }
+  }
+  assert.deepEqual(dups, [], `duplicate top-level functions: ${dups.join('; ')}`);
+  // the sidebar project drag and the Queue sheet card drag each call their own mover
+  assert.match(appJs, /^function dragMove\(y\)/m);
+  assert.match(appJs, /liftCard\(card, y0\); dragMove\(ev\.clientY\)/);
+  assert.match(appJs, /^function qDragMove\(\)/m);
+  assert.match(appJs, /return qDragMove\(\);/);
+});

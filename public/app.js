@@ -6499,12 +6499,12 @@ function startDrag(p) {
   });
   void list.offsetHeight;
   qShift(d);
-  dragMove();
+  qDragMove();
   const scroll = () => {
     if (Q.drag !== d) return;
     const r = $('qBody').getBoundingClientRect(), edge = Math.min(64, r.height / 4);
     const v = d.y < r.top + edge ? -(r.top + edge - d.y) / edge : d.y > r.bottom - edge ? (d.y - (r.bottom - edge)) / edge : 0;
-    if (v) { $('qBody').scrollTop += Math.max(-1, Math.min(1, v)) * 14; dragMove(); }
+    if (v) { $('qBody').scrollTop += Math.max(-1, Math.min(1, v)) * 14; qDragMove(); }
     d.raf = requestAnimationFrame(scroll);
   };
   d.raf = requestAnimationFrame(scroll);
@@ -6515,7 +6515,7 @@ function qShift(d) {
     c.style.transform = k >= d.slot ? `translateY(${d.gap}px)` : '';
   });
 }
-function dragMove() {
+function qDragMove() {
   const d = Q.drag;
   if (!d) return;
   d.ghost.style.transform = `translate3d(${d.left}px, ${d.y - d.offY}px, 0)`; // keeps its indent: it only moves among its siblings
@@ -6547,7 +6547,7 @@ $('qBody').addEventListener('pointerdown', qPointerDown);
 addEventListener('pointermove', (e) => {
   const p = Q.press;
   if (!p || e.pointerId !== p.pid) return;
-  if (Q.drag) { Q.drag.x = e.clientX; Q.drag.y = e.clientY; return dragMove(); }
+  if (Q.drag) { Q.drag.x = e.clientX; Q.drag.y = e.clientY; return qDragMove(); }
   const dist = Math.hypot(e.clientX - p.x, e.clientY - p.y);
   if (p.touch) { if (dist > 8) cancelPress(); } // a swipe: let it scroll
   else if (dist > 5) startDrag(p);

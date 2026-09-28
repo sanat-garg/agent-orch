@@ -704,8 +704,9 @@
       <div>
         <h2 id="mxTitle">Machines</h2>
         <p class="m-sub mc-sum" id="mcSum"></p>
+        <p class="m-sub mx-psum" id="mxSum"></p>
       </div>
-      <span class="mc-acts"><button class="btn small" id="updateAll" type="button" hidden>Update all</button><button class="btn small" id="pingAll" type="button" hidden>Ping all</button><button class="btn small" id="addMachine" type="button">Add machine</button></span>
+      <span class="mc-acts" id="mxActs"><button class="btn small" id="updateAll" type="button" hidden>Update all</button><button class="btn small" id="pingAll" type="button" hidden>Ping all</button><button class="btn small" id="addMachine" type="button">Add machine</button></span>
       <button class="icon-btn" data-close aria-label="Close">
         <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
       </button>
@@ -716,8 +717,10 @@
     </div>
     <div class="mx-body">
       <section class="mx-main" id="mxMain" role="tabpanel" aria-labelledby="mxTabMachines">
+        <button class="mx-diag-btn" id="mxDiagBtn" type="button" aria-expanded="false" aria-controls="caWrap">Show diagram</button>
         <div class="ca-wrap" id="caWrap" hidden></div>
         <ul class="mc-grid" id="mMachines"></ul>
+        <div class="mx-more" id="mxMore"></div>
       </section>
       <section class="mx-queue" id="mxQueue" role="tabpanel" aria-labelledby="mxTabQueue">
         <div class="mx-qhead"><h3 id="mxQTitle">Queue</h3><p class="mx-counts" id="mxCounts" role="status"></p></div>
@@ -726,7 +729,7 @@
         <div class="modal-panel nd" role="dialog" aria-labelledby="ndTitle">
           <div class="m-head">
             <button class="icon-btn nd-back" id="ndBack" type="button" aria-label="Back to this server" hidden>
-              <svg viewBox="0 0 24 24" width="20" height="20"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+              <svg viewBox="0 0 24 24" width="20" height="20"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span class="nd-back-t" id="ndBackT">Machines</span>
             </button>
             <div>
               <h2 id="ndTitle">Machine</h2>

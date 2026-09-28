@@ -3,7 +3,7 @@
 // queue for the open project. Desktop: the cluster diagram and the queue side by side (count header, running lanes per
 // machine, queued cards in order with 'after #N'), live lanes from the worker's pushes, Alt+↑ reorders, a queued card opens
 // its drawer over the view, and the sidebar machine card opens the view on that machine's side panel. Phone (390px): a
-// full-height sheet with Machines and Queue tabs. CW_MXF_KEEP=1 keeps the seeded server up for screenshots.
+// full-height sheet with Machines and Queue tabs (the phone cards themselves: ui-machines-mobile.test.mjs). CW_MXF_KEEP=1 keeps the seeded server up for screenshots.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -242,9 +242,9 @@ test('phone (390px): a full-height sheet with Machines and Queue tabs; a queued 
   const tabs = page.locator('.mx-tabs [role="tab"]');
   assert.deepEqual(await tabs.allTextContents(), ['Machines', 'Queue 4']);
   assert.equal(await page.locator('#mxTabMachines').getAttribute('aria-selected'), 'true');
-  await page.locator('#caWrap:not([hidden]) .ca-node').nth(2).waitFor();
+  await page.locator('#mMachines .mc-node .mc-open').nth(2).waitFor(); // a compact card per machine; the diagram behind 'Show diagram' (#433)
   assert.equal(await page.locator('#mxQueue').isVisible(), false);
-  assert.equal(await page.locator('#mMachines .mc-node').first().isVisible(), true);
+  assert.equal(await page.locator('#caWrap').isVisible(), false);
   const fits = () => page.evaluate(() => { const p = document.querySelector('#mxModal .mx-panel'); return document.documentElement.scrollWidth <= innerWidth && p.scrollWidth <= p.clientWidth + 1; });
   assert.equal(await fits(), true, 'the machines fit 390px');
   const tabBox = await box(page, '#mxTabQueue');
@@ -268,12 +268,12 @@ test('phone (390px): a full-height sheet with Machines and Queue tabs; a queued 
   await page.locator('#mxTabMachines').tap();
   assert.equal(await page.locator('#mxMain').isVisible(), true);
   assert.equal(await page.locator('#mxQueue').isVisible(), false);
-  // A machine's detail covers the sheet; its close button goes back to the view.
-  await page.locator(`#caWrap .ca-node[data-node="${studio.node}"] .ca-name`).tap();
+  // A machine's detail is a page over the sheet; its back button goes back to the view.
+  await page.locator(`#mMachines .mc-node[data-node="${studio.node}"] .mc-open`).tap();
   await page.locator('#ndTitle', { hasText: 'studio-mac' }).waitFor();
   const side = await box(page, '#nodeModal');
   assert.deepEqual([side.l, side.t, side.w], [0, 0, 390]);
-  await page.locator('#nodeModal [data-close]').tap();
+  await page.locator('#ndBack').tap();
   assert.equal(await page.locator('#nodeModal').isHidden(), true);
   assert.equal(await page.locator('#mxModal').isVisible(), true);
   await ctx.close();

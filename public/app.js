@@ -3629,10 +3629,25 @@ function sparkline(host, get, fmt, fixedMax) {
     tip.textContent = `${fmt(vals[i])} · ${long ? when.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' : ''}${when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: long ? undefined : '2-digit' })}`;
     tip.style.left = `${Math.max(70, Math.min(w - 70, cx))}px`;
   }
-  host.addEventListener('pointermove', (e) => { hoverX = e.clientX - host.getBoundingClientRect().left; draw(); });
-  host.addEventListener('pointerleave', () => { hoverX = null; draw(); });
+  chartPointer(host, (x) => { hoverX = x; }, () => draw());
   M.draws.push(draw);
 }
+// A chart's readout: a mouse hovers; a touch (tap, or a drag along it) shows the nearest reading, which stays until a
+// tap elsewhere (no hover-only values on phones). set(x | null) moves the crosshair, draw() repaints.
+let chartTap = null;
+function chartPointer(host, set, draw) {
+  const at = (e) => e.clientX - host.getBoundingClientRect().left;
+  host.addEventListener('pointermove', (e) => { if (e.pointerType === 'mouse' || chartTap?.host === host) { set(at(e)); draw(); } });
+  host.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') { set(null); draw(); } });
+  host.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse') return;
+    if (chartTap?.host !== host) chartTap?.clear();
+    chartTap = { host, clear: () => { chartTap = null; set(null); draw(); } };
+    set(at(e));
+    draw();
+  });
+}
+document.addEventListener('pointerdown', (e) => { if (chartTap && !chartTap.host.contains(e.target)) chartTap.clear(); });
 
 function tile(id, title, { bar, spark, pair } = {}) {
   const card = el('div', 'm-card');
@@ -4119,7 +4134,7 @@ const AM_USES = [1, 2, 3, 4, 5, 6, 8, 10];
 // pings: node id → the owner's last Ping ({busy} | {r: the answer} | {error}), shown under the node until it fades (pingBox).
 // soundAdd: the node whose Finish sound row shows the add-a-custom-sound form.
 // target: the version workers update to ({sha, build, version}); rollout: the owner's Update all in progress (cluster.mjs).
-const MC = { nodes: [], at: 0, timer: null, loading: false, open: new Set(), stale: false, pings: new Map(), soundAdd: null, target: null, rollout: null };
+const MC = { nodes: [], at: 0, raf: 0, cards: new Map(), timer: null, loading: false, open: new Set(), stale: false, pings: new Map(), soundAdd: null, target: null, rollout: null };
 const fmtGB = (b) => `${((b || 0) / 2 ** 30).toFixed(1)} GB`;
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const NODE_ST = { online: 'Online', draining: 'Draining', disabled: 'Disabled', updating: 'Updating', paused: 'Paused' };
@@ -4138,8 +4153,12 @@ async function loadMachines() {
   } catch { return; } finally { MC.loading = false; }
   if (was && !was.doneAt && MC.rollout?.doneAt && MC.rollout.startedAt === was.startedAt) toast(rolloutSummary(MC.rollout), { duration: 8000 });
   setMachineSounds(MC.nodes);
-  renderMachines();
-  miniRender();
+  mcPaint();
+}
+// Live readings arrive in bursts (a push per worker, task changes): their DOM writes land together in the next frame.
+function mcPaint() {
+  if (MC.raf) return;
+  MC.raf = requestAnimationFrame(() => { MC.raf = 0; renderMachines(); miniRender(); });
 }
 // Coalesces bursts (task updates, pushes) into one read while the Machines view is open.
 function scheduleMachines(ms = 600) {
@@ -4167,6 +4186,7 @@ function machineSummary(nodes) {
 }
 function renderMachines() {
   caSync(MC.nodes);
+  $('mxDiagBtn').hidden = $('caWrap').hidden;
   if (ND.id) ndRender();
   mxLanesRender();
   mcRender();
@@ -4186,6 +4206,7 @@ function mcRender() {
   MC.stale = false;
   const nodes = MC.nodes;
   $('mcSum').textContent = nodes.length ? machineSummary(nodes) : '';
+  $('mxSum').textContent = nodes.length ? phoneSummary(nodes) : '';
   const remote = nodes.some((n) => !n.local);
   $('pingAll').hidden = !remote;
   const ua = updateAllLabel(nodes, MC.target, MC.rollout);
@@ -4196,9 +4217,21 @@ function mcRender() {
   // Live re-renders keep keyboard focus on the same control of the same card.
   const f = document.activeElement, card = f?.closest?.('#mMachines .mc-node'), key = (b) => b.dataset.act || b.dataset.task || b.textContent;
   const was = card && f.matches('button, summary, input') && [card.dataset.node, key(f)];
-  $('mMachines').replaceChildren(...(CA_WIDE.matches ? nodes.filter((n) => n.id === ND.id) : nodes).map(machineCard));
+  // A card whose machine didn't change keeps its nodes (no relayout under a scrolling finger); relative times refresh each minute.
+  const era = [Math.floor(Date.now() / 60e3), AS.node, CA_WIDE.matches, VER.running?.build, JSON.stringify([MC.target, MC.rollout])].join('|'), cards = new Map();
+  const cardOf = (n) => {
+    const key = MC.pings.has(n.id) || MC.soundAdd === n.id ? null : `${era}|${nodeKey(n)}`, old = MC.cards.get(n.id);
+    const li = key && old?.key === key ? old.li : machineCard(n);
+    cards.set(n.id, { key, li });
+    return li;
+  };
+  const list = (CA_WIDE.matches ? nodes.filter((n) => n.id === ND.id) : nodes).map(cardOf), box = $('mMachines');
+  if (list.length !== box.children.length || list.some((li, i) => box.children[i] !== li)) box.replaceChildren(...list);
+  MC.cards = cards;
   if (was) [...$('mMachines').querySelectorAll(`.mc-node[data-node="${CSS.escape(was[0])}"] :is(button, summary, input)`)].find((b) => key(b) === was[1])?.focus({ preventScroll: true });
 }
+// What a machine's card shows, as a string: heartbeats only move lastSeen, which the card shows as a relative time.
+const nodeKey = (n) => JSON.stringify({ ...n, lastSeen: n.lastSeen && relTime(n.lastSeen) });
 // A labelled meter: 'CPU  4 cores · load 1.20' over a bar (warn ≥ 75%, crit ≥ 90%).
 function mcMeter(label, parts, pct) {
   const m = el('div', 'mc-meter'), d = el('div', 'detail');
@@ -4212,11 +4245,68 @@ function mcMeter(label, parts, pct) {
   }
   return m;
 }
+// ----- Machines on phones (<768px, #433) -----
+// Each card is one button (.mc-open; the rest of the card is hidden there): name, OS, status and build, CPU and memory
+// ring gauges side by side, and one line of what runs ('3 running · #412, #418…'). A tap pushes the machine's detail
+// page (#nodeModal as a full-screen page with a back button and edge swipe: charts, running, recent history, settings).
+const PHONE_MQ = matchMedia('(max-width: 767px)');
+const isPhone = () => PHONE_MQ.matches;
+// CPU as a % of the whole machine (its per-core readings, else the 1-min load over its cores) and memory in use.
+function nodeUsage(n) {
+  const inv = n.inventory || {}, res = n.resources || {};
+  const cpu = Array.isArray(res.cpu) && res.cpu.length ? res.cpu.reduce((a, c) => a + (Number(c) || 0), 0) / res.cpu.length
+    : res.load?.[0] != null && inv.cores ? (res.load[0] / inv.cores) * 100 : null;
+  const mem = inv.mem && res.memAvailable != null ? Math.max(0, (1 - res.memAvailable / inv.mem) * 100) : null;
+  return { cpu: cpu == null ? null : Math.min(100, Math.max(0, cpu)), mem };
+}
+// A ring gauge: the value in the middle, its label beside it ('CPU', '4 cores'); warn ≥ 75%, crit ≥ 90%.
+function ringGauge(label, pct, sub) {
+  const g = el('span', 'mo-gauge'), r = 15, c = 2 * Math.PI * r, v = pct == null ? null : Math.round(pct);
+  const tone = v == null ? 'none' : v >= 90 ? 'crit' : v >= 75 ? 'warn' : '';
+  g.innerHTML = `<svg viewBox="0 0 36 36" aria-hidden="true"><circle class="mo-track" cx="18" cy="18" r="${r}"/><circle class="mo-arc ${tone}" cx="18" cy="18" r="${r}" stroke-dasharray="${((v || 0) / 100) * c} ${c}"/></svg>`;
+  const t = el('span', 'mo-gt');
+  t.append(el('span', 'mo-gv', v == null ? '–' : `${v}%`), el('span', 'mo-gl', label));
+  if (sub) t.append(el('span', 'mo-gl mo-gs', sub));
+  g.append(t);
+  g.setAttribute('role', 'img');
+  g.setAttribute('aria-label', `${label} ${v == null ? 'not reported' : `${v}%`}${tone === 'crit' ? ', very high' : tone === 'warn' ? ', high' : ''}`);
+  return g;
+}
+// '3 running · #412, #418…' (two ids, then an ellipsis); 'Idle' / 'Nothing running'.
+function runLine(n) {
+  const tasks = n.tasks || [];
+  if (!tasks.length) return n.connected && n.enabled && !n.draining ? 'Idle' : 'Nothing running';
+  return `${tasks.length} running · ${tasks.slice(0, 2).map((t) => `#${t.id}`).join(', ')}${tasks.length > 2 ? '…' : ''}`;
+}
+function mcOpen(n, st) {
+  const b = el('button', 'mc-open'), top = el('span', 'mo-top'), icon = el('span', 'mc-os'), id = el('span', 'mo-id'), pill = el('span', 'mc-st');
+  b.type = 'button';
+  b.dataset.act = 'open';
+  icon.innerHTML = OS_ICON[n.os] || OS_ICON.linux;
+  id.append(el('span', 'mo-name', n.name), el('span', 'mo-meta', [n.local ? 'This server' : OS_NAME[n.os] || n.os, n.build && fmtVersion(n.build)].filter(Boolean).join(' · ')));
+  pill.append(el('span', `dot ${st.dot}`), document.createTextNode(st.label));
+  top.append(icon, id, pill, el('span', 'mo-chev'));
+  const u = nodeUsage(n), cores = n.inventory?.cores, mem = n.inventory?.mem, gauges = el('span', 'mo-gauges');
+  gauges.append(ringGauge('CPU', u.cpu, cores && plural(cores, 'core')), ringGauge('Memory', u.mem, mem && `${Math.round(mem / 2 ** 30)} GB`));
+  const run = el('span', `mo-run${n.tasks?.length ? ' on' : ''}`, runLine(n));
+  b.append(top, gauges, run);
+  b.setAttribute('aria-label', `${n.name}, ${st.label}. ${runLine(n)}. Open details`);
+  b.addEventListener('click', () => openNode(n.id));
+  return b;
+}
+// 'Machines' summary on phones: '3 of 4 online · 7 running · 9 free slots'.
+function phoneSummary(nodes) {
+  const up = nodes.filter((n) => n.connected && n.enabled);
+  const running = nodes.reduce((a, n) => a + (n.tasks?.length || 0), 0);
+  const free = up.filter((n) => !n.draining && n.status !== 'paused').reduce((a, n) => a + Math.max(0, (n.slots || 0) - (n.used || 0)), 0);
+  return `${up.length} of ${plural(nodes.length, 'machine')} online · ${running} running · ${plural(free, 'free slot')}`;
+}
 // From 768px it shows only in the machine's side panel, whose charts and Running here stand in for its meters and tasks.
 function machineCard(n) {
   const li = el('li', 'm-card mc-node'), st = nodeState(n), inv = n.inventory || {}, res = n.resources || {}, brief = CA_WIDE.matches;
   li.dataset.node = n.id;
   if (!n.connected || !n.enabled) li.classList.add('away');
+  li.append(mcOpen(n, st));
   const top = el('div', 'mc-top'), icon = el('span', 'mc-os'), id = el('div', 'mc-id'), name = el('span', 'mc-name', n.name);
   icon.innerHTML = OS_ICON[n.os] || OS_ICON.linux;
   icon.title = OS_NAME[n.os] || n.os || '';
@@ -4247,7 +4337,7 @@ function machineCard(n) {
   if (pool) li.append(pool);
   const health = machineHealth(n);
   if (health.length) li.append(...health);
-  const ping = !n.local && pingBox(n);
+  const ping = !n.local && !isPhone() && pingBox(n); // phones show it on the detail page
   if (ping) li.append(ping);
 
   const ag = el('div', 'mc-agents'), signed = (inv.agents || []).filter((a) => a.signedIn);
@@ -4776,10 +4866,11 @@ $('updateAll').addEventListener('click', () => openUpdateAll());
 //   Manage: rename, finish sound, check the connection (Ping), update and, set apart in red, remove from the cluster.
 // MC.open: the cards whose disclosure is open, kept across live re-renders.
 const GEAR_ICON = '<svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>'; // a gear (Feather's settings icon)
-function machineSettings(n) {
-  const box = el('details', 'mc-set'), sum = el('summary');
-  box.open = MC.open.has(n.id);
-  box.addEventListener('toggle', () => { if (box.open) MC.open.add(n.id); else MC.open.delete(n.id); });
+// inline: a machine's detail page on phones shows the settings open, under their own section title.
+function machineSettings(n, inline = false) {
+  const box = el('details', inline ? 'mc-set inline' : 'mc-set'), sum = el('summary');
+  box.open = inline || MC.open.has(n.id);
+  if (!inline) box.addEventListener('toggle', () => { if (box.open) MC.open.add(n.id); else MC.open.delete(n.id); });
   sum.dataset.act = 'settings';
   sum.innerHTML = GEAR_ICON;
   sum.append(el('span', '', 'Machine settings'));
@@ -5570,6 +5661,7 @@ function openMachines(id) {
     $('mxModal').hidden = false;
     $('mxQueue').append($('qBody'));
     CA.ready = false; // the cluster diagram's first snapshot is drawn as it is, not replayed
+    mxPlace();
     mxTab('machines');
     loadMachines();
     renderQueue();
@@ -5609,6 +5701,28 @@ $('mxModal').querySelector('.mx-tabs').addEventListener('keydown', (e) => {
 });
 $('mxModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]') && !$('nodeModal').contains(e.target)) closeMachines(); });
 $('machinesBtn').addEventListener('click', () => openMachines());
+// Phones: Update all / Ping all / Add machine go under the list, and the diagram sits behind 'Show diagram'.
+function mxPlace() {
+  const acts = $('mxActs'), head = $('mxModal').querySelector('.mx-head');
+  if (isPhone()) $('mxMore').append(acts);
+  else if (acts.parentNode !== head) head.insertBefore(acts, head.querySelector('[data-close]'));
+  mxDiagram(store.get('cw.mx.diagram') === '1');
+}
+function mxDiagram(on) {
+  $('mxModal').toggleAttribute('data-diagram', on);
+  $('mxDiagBtn').textContent = on ? 'Hide diagram' : 'Show diagram';
+  $('mxDiagBtn').setAttribute('aria-expanded', String(on));
+}
+$('mxDiagBtn').addEventListener('click', () => {
+  const on = !$('mxModal').hasAttribute('data-diagram');
+  store.set('cw.mx.diagram', on ? '1' : '0');
+  mxDiagram(on);
+});
+PHONE_MQ.addEventListener('change', () => {
+  if (!mxOpen()) return;
+  mxPlace();
+  if (ND.id) { ndBuild(); ndRender(); ndMetrics(); }
+});
 // 'Running 5 · Queued 12 · 11 free slots': tasks running on every machine, the open project's queue, and the slots free
 // on the machines taking work (connected, enabled, not draining or paused).
 function mxCounts(nodes, queued) {
@@ -5662,7 +5776,7 @@ function mxCountsRender() {
 const ND_RANGES = ['15m', '1h', '6h', '24h'];
 // els: the sheet's parts (charts grid, running list, log section, log button), built per open; back: the node to return to.
 const ND = { id: null, range: ND_RANGES.includes(store.get('cw.nd.range')) ? store.get('cw.nd.range') : '1h', samples: null, err: '', at: 0, seq: 0,
-  runs: new Map(), taskKey: '', log: null, lastFocus: null, draws: [], els: {}, back: null };
+  runs: new Map(), taskKey: '', log: null, lastFocus: null, draws: [], els: {}, back: null, fold: 0 };
 // A worker's tiles, styled as this server's: [key, title, value of a sample, format, top of the scale, status, detail,
 // optional (hidden while no sample has it)].
 const ND_CHARTS = [
@@ -5691,6 +5805,7 @@ function openNode(id) {
   mcRender();
   ndMetrics();
   $('ndBody').scrollTop = 0;
+  $('nodeModal').querySelector('.nd').classList.remove('scrolled');
   (back ? $('ndBack') : $('nodeModal').querySelector('[data-close].icon-btn')).focus();
 }
 // Back to this server's details when a worker was opened from them; `all` closes the panel.
@@ -5712,6 +5827,47 @@ function closeNode(all) {
 }
 $('nodeModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeNode(true); });
 $('ndBack').addEventListener('click', () => closeNode());
+// Phones: the large title folds into the bar once the page scrolls (one class write per frame at most).
+$('ndBody').addEventListener('scroll', () => {
+  if (ND.fold) return;
+  ND.fold = requestAnimationFrame(() => { ND.fold = 0; $('nodeModal').querySelector('.nd').classList.toggle('scrolled', isPhone() && $('ndBody').scrollTop > 24); });
+}, { passive: true });
+// Phones: swipe from the left edge back to the list (or this server), the page following the finger.
+(() => {
+  const page = $('nodeModal').querySelector('.nd');
+  let sw = null;
+  const reset = () => { page.style.transition = ''; page.style.transform = ''; };
+  $('nodeModal').addEventListener('touchstart', (e) => {
+    const t = e.touches[0];
+    sw = isPhone() && e.touches.length === 1 && t.clientX < 28 ? { x: t.clientX, y: t.clientY, t: e.timeStamp, dx: 0, on: false, raf: 0 } : null;
+  }, { passive: true });
+  $('nodeModal').addEventListener('touchmove', (e) => {
+    if (!sw) return;
+    const t = e.touches[0], dx = t.clientX - sw.x, dy = t.clientY - sw.y;
+    if (!sw.on) {
+      if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 8) { sw = null; return; } // a scroll
+      if (dx < 8) return;
+      sw.on = true;
+    }
+    e.preventDefault();
+    sw.dx = Math.max(0, dx);
+    sw.v = sw.dx / Math.max(1, e.timeStamp - sw.t);
+    if (!sw.raf) sw.raf = requestAnimationFrame(() => { if (sw) { sw.raf = 0; page.style.transform = `translateX(${sw.dx}px)`; } });
+  }, { passive: false });
+  const end = () => {
+    const s = sw;
+    sw = null;
+    if (!s?.on) return;
+    cancelAnimationFrame(s.raf);
+    const w = page.clientWidth, go = s.dx > w * 0.35 || (s.dx > 40 && s.v > 0.5), still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (still) { reset(); if (go) closeNode(); return; }
+    page.style.transition = 'transform .2s ease-out';
+    page.style.transform = `translateX(${go ? w : 0}px)`;
+    setTimeout(() => { reset(); if (go) closeNode(); }, 200);
+  };
+  $('nodeModal').addEventListener('touchend', end);
+  $('nodeModal').addEventListener('touchcancel', end);
+})();
 // Escape: a drag is dropped back, then the panel closes (or goes back to this server), then the view. The task drawer
 // and Add machine sit above and take it first.
 document.addEventListener('keydown', (e) => {
@@ -5728,13 +5884,15 @@ function ndBuild() {
   machine.id = 'ndMachine';
   $('sdStash').append($('mMachines')); // out of the old body; mcHome puts it into this one's Machine section
   ND.els = { run, log, machine };
-  $('ndBack').hidden = !ND.back;
+  ndBackLabel();
+  const phone = isPhone() && ndPhoneSections();
   if (n.local) {
     // This server: its details (charts, then Running here in its slot, top processes), then the log.
     ND.draws = [];
     for (const c of [...body.children]) if (c.id !== 'serverDetails') c.remove();
     $('sdRun').replaceChildren(run);
     renderServerDetails(body);
+    if (phone) { body.prepend(phone.info); body.append(phone.hist, phone.set); }
     body.append(machine, log);
     ndLogRender();
     mcHome();
@@ -5777,9 +5935,61 @@ function ndBuild() {
     });
   });
   ND.els.charts = grid;
-  body.replaceChildren(row, grid, run, machine, log);
+  body.replaceChildren(...(phone ? [phone.info, row, grid, run, phone.hist, phone.set] : [row, grid, run]), machine, log);
   ndLogRender();
   mcHome();
+}
+// The back button: to this server's details (a worker opened from them), or on phones to the list ('‹ Machines').
+function ndBackLabel() {
+  const to = ND.back && MC.nodes.find((x) => x.id === ND.back);
+  $('ndBack').hidden = !ND.back && !isPhone();
+  $('ndBackT').textContent = ND.back ? to?.name || 'This server' : 'Machines';
+  $('ndBack').setAttribute('aria-label', ND.back ? 'Back to this server' : 'Back to Machines');
+}
+// Phones: the card's other parts move to the detail page: status (health, agents, ping, update), recent history, settings.
+function ndPhoneSections() {
+  const info = el('section', 'dr-sec nd-info'), hist = section('Recent'), set = section('Machine settings');
+  hist.id = 'ndHist';
+  set.id = 'ndSet';
+  Object.assign(ND.els, { info, hist, set, keys: {} });
+  return { info, hist, set };
+}
+function ndPhoneRender(n) {
+  const { info, hist, set, keys } = ND.els;
+  if (!info) return;
+  const k = `${Math.floor(Date.now() / 60e3)}|${nodeKey(n)}|${JSON.stringify([MC.target, MC.rollout, VER.running?.build])}`;
+  if (keys.info !== k || MC.pings.has(n.id)) {
+    keys.info = k;
+    const inv = n.inventory || {}, u = nodeUsage(n), gauges = el('div', 'mo-gauges nd-gauges');
+    gauges.append(ringGauge('CPU', u.cpu, inv.cores && plural(inv.cores, 'core')), ringGauge('Memory', u.mem, inv.mem && `${fmtGB(n.resources?.memAvailable)} free`));
+    const ag = el('div', 'mc-agents'), signed = (inv.agents || []).filter((a) => a.signedIn);
+    for (const a of signed) ag.append(el('span', 'tc-tag on', a.account ? `${agentLabel(a.id)} · ${a.account}` : agentLabel(a.id)));
+    if (!signed.length) ag.append(el('span', 'mc-idle', inv.agents ? 'No agents signed in' : 'Agents not reported yet'));
+    const pool = !n.local && poolLine(n), ping = !n.local && pingBox(n);
+    info.replaceChildren(gauges, ...machineHealth(n), ...(pool ? [pool] : []), ...(ping ? [ping] : []), ag, ...(canUpdate(n) ? [updateButton(n)] : []));
+  }
+  const rk = JSON.stringify(n.recent || []) + Math.floor(Date.now() / 60e3);
+  if (keys.hist !== rk) {
+    keys.hist = rk;
+    hist.replaceChildren(hist.firstElementChild);
+    if (!n.recent?.length) hist.append(el('p', 'nd-note', 'Nothing finished here this week.'));
+    for (const t of n.recent || []) {
+      const b = el('button', `mc-task nd-hrow ${t.status}`), main = el('span');
+      b.type = 'button';
+      b.dataset.task = t.id;
+      main.append(el('span', 't', displayTitle(t)), el('span', 's', [`#${t.id}`, t.project, t.status === 'done' ? 'Done' : t.status === 'failed' ? 'Failed' : 'Cancelled'].filter(Boolean).join(' · ')));
+      b.append(el('i', 'nd-hmark'), main, el('span', 'e', relTime(t.finished_at * 1000)));
+      b.addEventListener('click', () => openTask(t.id));
+      hist.append(b);
+    }
+  }
+  // Settings: rebuilt only when the machine changed, never under a menu or field in use; focus stays on the same control.
+  const sk = `${nodeKey(n)}|${MC.soundAdd}`, f = document.activeElement;
+  if (keys.set === sk || (set.contains(f) && f.matches('select, input:not([type=checkbox])'))) return;
+  keys.set = sk;
+  const act = set.contains(f) && f.dataset.act;
+  set.replaceChildren(set.firstElementChild, machineSettings(n, true));
+  if (act) set.querySelector(`[data-act="${CSS.escape(act)}"]`)?.focus({ preventScroll: true });
 }
 function ndRender() {
   const n = ndNode();
@@ -5805,6 +6015,7 @@ function ndRender() {
     box.append(wrap);
   }
   box.append(renderAssignButton(n));
+  ndPhoneRender(n);
 }
 async function ndLoadRun(id) {
   const node = ND.id;
@@ -5838,9 +6049,10 @@ function ndChart(host, get, fmt, top, onValue) {
   host.className = 'sline';
   host.innerHTML = '<svg aria-hidden="true"><line class="base"/><path class="area"/><path class="line"/><line class="cross" hidden/><circle class="pt" r="4" hidden/></svg><div class="tip" hidden></div>';
   const svg = host.querySelector('svg'), [base, area, line, cross, pt] = svg.children, tip = host.querySelector('.tip');
-  const label = el('div', 'sline-label'), [lFrom, lStat] = [el('span'), el('span', 'stat')];
+  const label = el('div', 'sline-label'), [lFrom, lStat] = [el('span'), el('span', 'stat')], yTop = el('span', 'sline-y');
   label.append(lFrom, lStat, el('span', '', 'now'));
   host.after(label);
+  host.append(yTop); // the top of the scale (phones)
   let hoverX = null, pts = [];
   function draw() {
     const n = ndNode(), w = host.clientWidth, h = host.clientHeight, end = Date.now(), start = end - RANGE_MS[ND.range], span = end - start;
@@ -5859,6 +6071,7 @@ function ndChart(host, get, fmt, top, onValue) {
       return;
     }
     const vals = pts.map((p) => p[1]), max = top(n, vals) || 1;
+    yTop.textContent = fmt(max);
     const x = (t) => ((t - start) / span) * w, y = (v) => h - 1 - Math.min(v / max, 1) * (h - 6);
     // A gap in the readings (the machine was away) breaks the line instead of bridging it.
     const steps = pts.slice(1).map((p, i) => p[0] - pts[i][0]).sort((a, b) => a - b), gap = Math.max(60e3, 3 * steps[Math.floor(steps.length / 2)]);
@@ -5887,8 +6100,7 @@ function ndChart(host, get, fmt, top, onValue) {
     tip.textContent = `${fmt(pts[i][1])} · ${new Date(pts[i][0]).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: span <= 3600e3 ? '2-digit' : undefined })}`;
     tip.style.left = `${Math.max(70, Math.min(w - 70, cx))}px`;
   }
-  host.addEventListener('pointermove', (e) => { hoverX = e.clientX - host.getBoundingClientRect().left; draw(); });
-  host.addEventListener('pointerleave', () => { hoverX = null; draw(); });
+  chartPointer(host, (x) => { hoverX = x; }, () => draw());
   return draw;
 }
 // The worker's log tail, fetched when asked (this server logs to its journal instead).

@@ -120,6 +120,7 @@ async function openDiagram(ctxOpts) {
   const [name, value] = cookie.split('=');
   const ctx = await browser.newContext(ctxOpts);
   await ctx.addCookies([{ name, value, url: base }]);
+  await ctx.addInitScript(() => localStorage.setItem('cw.mx.diagram', '1')); // phones show it behind 'Show diagram' (#433)
   const page = await ctx.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));

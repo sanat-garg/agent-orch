@@ -1463,6 +1463,9 @@ Merge resolved; the full-screen Machines view and main's changes both kept, test
 
 app.js conflicts resolved; stall text and full-screen queue both kept
 
+## 2026-09-28 17:44 — #433 Machines view on iPhone: a real mobile design, reviewed against Apple's HIG [done (check passed)]
+
+Phone Machines redesign, detail page, tests, screenshots and review complete
 ## 2026-09-28 17:31 — #468 Integrate #344: Placement uses every machine: CPU-only gating, spread across nodes, explain skips [done (check passed)]
 
 merge resolved; placement, stall, rapid and machines tests pass
@@ -1470,6 +1473,14 @@ merge resolved; placement, stall, rapid and machines tests pass
 ## 2026-09-28 17:34 — #423 CLUSTER.md docs: Scheduling and Local cap describe the real head-capacity and placement rules [done (check passed)]
 
 CLUSTER.md Scheduling and head's-ceiling now match current placement code
+
+## 2026-09-28 17:56 — #474 Integrate #433: Machines view on iPhone: a real mobile design, reviewed against Apple's HIG [done (check passed)]
+
+orchestrator.mjs conflict resolved; mobile tests pass; screenshots recaptured
+
+## 2026-09-28 17:56 — #474 Integrate #433: Machines view on iPhone: a real mobile design, reviewed against Apple's HIG [verify failed (1)]
+
+Command: merge main again
 ## 2026-09-28 17:52 — #434 Machines graph: compact card beside each node, listing every running task [done (check passed)]
 
 Wide Machines view: compact cards beside each node, every running task listed
@@ -1484,3 +1495,6 @@ viewer follows agent's new tab after restart; tests pass
 ## 2026-09-28 18:00 — #475 Images open fully fitted in their original aspect ratio, with no scrolling [done (check passed)]
 
 Lightbox opens fitted; thumbnails contain; fit tests pass
+## 2026-09-28 18:08 — #474 Integrate #433: Machines view on iPhone: a real mobile design, reviewed against Apple's HIG [done (check passed)]
+
+conflicts resolved; mobile Machines tests pass; ui-machines test 5 still fails

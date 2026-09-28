@@ -4262,6 +4262,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   function machines(nodes) {
     const rows = qa(`SELECT t.id, t.project_id, p.name AS project, t.kind, t.integrates, t.title, t.agent, t.model, t.ran_agent, t.ran_model, t.started_at, t.node_id
       FROM tasks t LEFT JOIN projects p ON p.id=t.project_id WHERE t.status='running' ORDER BY t.started_at, t.id`);
+    // Recent history (a machine's detail on phones): its last 5 finished tasks of the past week.
+    const done = qa(`SELECT * FROM (SELECT t.id, t.title, t.status, t.finished_at, t.started_at, p.name AS project, COALESCE(t.node_id, :local) AS node,
+      ROW_NUMBER() OVER (PARTITION BY COALESCE(t.node_id, :local) ORDER BY t.finished_at DESC) AS k
+      FROM tasks t LEFT JOIN projects p ON p.id=t.project_id WHERE t.finished_at>=:since AND t.status IN ('done','failed','cancelled') AND t.kind='work') WHERE k<=5`,
+    { local: LOCAL_NODE, since: now() - 7 * 86400 });
     return nodes.map((n) => {
       const tasks = rows.filter((t) => (t.node_id || LOCAL_NODE) === n.id).map((t) => {
         const agent = t.ran_agent || t.agent || 'claude';
@@ -4270,7 +4275,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
           phase: running.get(t.id)?.phase || null }; // a remote job's current phase (job.phase)
       });
       const head = n.local ? headView() : null;
-      return { ...n, tasks, used: tasks.filter((t) => t.kind !== 'plan').length, slots: head ? head.work + head.reserved : nodeCap(n), lastDecision: decisions.get(n.id) || nodeNow(n), ...(head && { head }) };
+      const recent = done.filter((t) => t.node === n.id).map(({ node, k, ...t }) => t);
+      return { ...n, tasks, recent, used: tasks.filter((t) => t.kind !== 'plan').length, slots: head ? head.work + head.reserved : nodeCap(n), lastDecision: decisions.get(n.id) || nodeNow(n), ...(head && { head }) };
     });
   }
   // A node's verdict now, before placement: prefer an agent it can actually run when explaining resource skips.

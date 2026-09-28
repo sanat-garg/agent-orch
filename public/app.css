@@ -580,6 +580,101 @@ code, pre, kbd { font-family: var(--mono); }
   .mx-side > .modal-panel.nd { border: 0; box-shadow: none; }
 }
 @media (pointer: coarse) { .mx-tabs button { min-height: 44px; } }
+/* Machines on phones (<768px, #433): a large title and summary, the Machines | Queue segment, one tappable card per
+   machine (.mc-open: status, CPU/memory rings, one running line; the card's other parts live on its detail page), the
+   diagram behind 'Show diagram', the actions under the list. A machine's detail is a pushed page with a back button. */
+.mc-open, .mx-psum, .mx-diag-btn, .mx-more, .nd-back-t, .sline-y { display: none; }
+@media (max-width: 767px) {
+  .mx-head { align-items: flex-start; padding: 6px 12px 10px 16px; }
+  #mxTitle { font-size: 34px; font-weight: 700; line-height: 1.15; letter-spacing: .01em; }
+  .mx-head .mc-sum { display: none; }
+  .mx-psum { display: block; margin-top: 2px; font-size: 15px; font-variant-numeric: tabular-nums; }
+  .mx-tabs { margin: 0 16px 10px; }
+  .mx-body { border-top: 0; }
+  .mx-main { display: flex; flex-direction: column; gap: 12px; padding: 4px 16px max(24px, env(safe-area-inset-bottom)); }
+  .mx-main > * { flex-shrink: 0; } /* a column that scrolls: the diagram (overflow: hidden) must not be squeezed */
+  #mMachines { order: 1; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .mx-diag-btn { order: 2; display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 48px; padding: 0 16px; border: 1px solid var(--border);
+    border-radius: 14px; background: var(--panel); color: var(--text); font: inherit; font-size: 16px; text-align: left; cursor: pointer; }
+  .mx-diag-btn::after { content: ''; width: 8px; height: 8px; border: solid var(--muted); border-width: 0 2px 2px 0; transform: translateY(-2px) rotate(45deg); }
+  .mx-diag-btn[aria-expanded="true"]::after { transform: translateY(2px) rotate(-135deg); }
+  #caWrap { order: 3; margin: 0; }
+  .mx:not([data-diagram]) #caWrap { display: none; }
+  #caWrap :is(.ca-sub, .ca-more, .ca-chip text) { font-size: 12px; }
+  .mx-more { order: 4; display: block; }
+  .mx-more .mc-acts { display: flex; flex-direction: column; gap: 8px; }
+  .mx-more .btn { width: 100%; min-height: 48px; justify-content: center; font-size: 16px; border-radius: 14px; }
+  .mc-grid > .mc-node { padding: 0; gap: 0; overflow: hidden; }
+  .mc-node > :not(.mc-open) { display: none; }
+  .mc-open { display: flex; flex-direction: column; gap: 12px; width: 100%; padding: 14px 16px; border: 0; border-radius: inherit; background: none;
+    color: inherit; font: inherit; text-align: left; cursor: pointer; -webkit-tap-highlight-color: transparent; transition: background-color .15s; }
+  .mc-open:active { background: var(--raised); }
+  .mc-open:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .mo-top { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .mo-id { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .mo-name { color: var(--text); font-size: 17px; font-weight: 600; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mo-meta { color: var(--muted); font-size: 13px; line-height: 1.35; }
+  .mo-top .mc-st { height: 28px; font-size: 13px; }
+  .mo-chev { flex: none; width: 9px; height: 9px; margin: 0 2px 0 -2px; border: solid var(--muted); border-width: 0 2px 2px 0; transform: rotate(-45deg); }
+  .mo-gauges { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+  .mc-node.away .mo-gauges { opacity: .55; }
+  .mo-run { padding-top: 10px; border-top: 1px solid var(--border); color: var(--muted); font-size: 16px; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mo-run.on { color: var(--text); }
+  /* the detail: a page pushed over the view */
+  .mx-side > .modal-panel.nd { animation: push-in .32s cubic-bezier(.2, .9, .3, 1); box-shadow: -8px 0 30px rgba(0,0,0,.18); will-change: transform; }
+  #nodeModal .nd > .m-head { flex-wrap: wrap; gap: 0; padding: calc(4px + env(safe-area-inset-top)) 16px 6px 6px; }
+  #nodeModal .nd > .m-head > div { order: 2; flex-basis: 100%; padding: 2px 0 0 10px; }
+  #nodeModal .nd > .m-head [data-close] { display: none; }
+  #ndTitle { font-size: 30px; font-weight: 700; line-height: 1.2; overflow-wrap: anywhere; }
+  #ndSub { font-size: 15px; }
+  #nodeModal .nd-back { width: auto; min-width: 44px; height: 44px; margin: 0; padding: 0 10px 0 2px; display: inline-flex; gap: 0; color: var(--accent-ink); font-size: 17px; }
+  #nodeModal .nd-back:hover { background: transparent; color: var(--accent-ink); }
+  #nodeModal .nd-back svg { width: 26px; height: 26px; }
+  .nd-back-t { display: inline; max-width: 60vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nd-body { padding: 8px 16px max(24px, env(safe-area-inset-bottom)); font-size: 16px; }
+  .nd-info { display: flex; flex-direction: column; gap: 10px; }
+  .nd-info .mc-health { font-size: 15px; }
+  .nd-info > .btn { align-self: flex-start; }
+  .nd-body .m-grid, .nd-grid { grid-template-columns: minmax(0, 1fr); }
+  .nd-body .sline { height: 120px; margin-top: 22px; touch-action: pan-y; }
+  .nd-body .sline-y { display: block; position: absolute; top: -20px; left: 0; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; pointer-events: none; }
+  .nd-body .sline-label { font-size: 13px; color: var(--muted); }
+  .nd-body .sline .tip { font-size: 13px; top: -26px; }
+  .nd-body .range-row { font-size: 15px; }
+  .nd-body .mc-task .t { font-size: 16px; }
+  .nd-body .mc-task .s, .nd-body .mc-task .e { font-size: 13px; }
+  .nd-hrow { margin-top: 6px; }
+  .nd-hrow > span:not(.e) { flex: 1; min-width: 0; }
+  /* the large title folds into the bar once the page scrolls, as on iOS */
+  #nodeModal .nd.scrolled > .m-head { box-shadow: 0 1px 0 var(--border); }
+  #nodeModal .nd.scrolled #ndTitle { font-size: 20px; }
+  #nodeModal .nd.scrolled #ndSub { display: none; }
+  #ndTitle { transition: font-size .15s ease; }
+  .nd-hmark { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--ok); }
+  .nd-hrow.failed .nd-hmark { background: var(--danger); }
+  .nd-hrow.cancelled .nd-hmark { background: var(--faint); }
+  .mc-set.inline { margin: 0; padding: 4px 16px 8px; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); }
+  .mc-set.inline > summary { display: none; }
+  .mc-set.inline .mc-group:first-of-type { margin-top: 0; }
+  .mc-set.inline .mc-rl { font-size: 16px; }
+  .mc-set.inline .mc-rh { font-size: 14px; }
+  .mx .mc-group h5, .mx .tc-tag, .mx .mx-lane-h { font-size: 12px; }
+  .mx .mc-health, .mx .mc-idle, .nd-note { font-size: 14px; }
+}
+@media (max-width: 767px) and (pointer: coarse) { .mc-row .st-switch { width: 51px; height: 31px; border-radius: 16px; }
+  .mc-row .st-switch::after { width: 27px; height: 27px; top: 2px; left: 2px; } .mc-row .st-switch:checked::after { transform: translateX(20px); } }
+@keyframes push-in { from { transform: translateX(100%); } }
+.mo-gauge { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.mo-gauge svg { flex: none; width: 44px; height: 44px; transform: rotate(-90deg); }
+.mo-track { fill: none; stroke: var(--border); stroke-width: 4; }
+.mo-arc { fill: none; stroke: var(--accent); stroke-width: 4; stroke-linecap: round; transition: stroke-dasharray .4s ease; }
+.mo-arc.warn { stroke: var(--warn); }
+.mo-arc.crit { stroke: var(--danger); }
+.mo-arc.none { stroke-opacity: 0; }
+.mo-gt { display: flex; flex-direction: column; min-width: 0; }
+.mo-gv { color: var(--text); font-size: 20px; font-weight: 650; line-height: 1.15; font-variant-numeric: tabular-nums; }
+.mo-gl { color: var(--muted); font-size: 13px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mo-gs { color: var(--faint); }
 .mc-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 12px; }
 .mc-node { display: flex; flex-direction: column; gap: 10px; font-size: 13px; color: var(--muted); }
 .mc-node.away .mc-meter, .mc-node.away .mc-agents { opacity: .55; }

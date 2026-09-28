@@ -1290,3 +1290,7 @@ merge conflicts resolved; custom-sound and machine-settings tests pass
 ## 2026-09-28 14:42 — #446 Integrate #426: Rolling restart: new server code goes live within minutes, even when busy [done (check passed)]
 
 merge conflicts resolved; rolling-restart, version, and UI tests pass
+
+## 2026-09-28 14:53 — #431 AUDIT ledger round 8: #68 gate loopholes, #69 ungated http connectors, #70 the head ignored a worker's CPU cap [done (check passed)]
+
+AUDIT.md has Round 8 (#68–#70), with #61 and #63 marked

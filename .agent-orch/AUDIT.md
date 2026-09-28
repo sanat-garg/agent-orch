@@ -823,6 +823,7 @@ kills the check's process group and keeps only the output's tail.
   unknown-and-cautious (one reflection per 30 min) rather than free. Split `requested` across perpetual projects.
 
 ### 61. [med] Retention deletes approval screenshots after 7 days, even while the approval is still pending (retention.mjs:47-58; approvals.mjs:126-139; orchestrator.mjs:1367-1370)
+- **Fixed** (task #369, dbc5e94): `gcRetention` also scans `<DATA>/audit/`, the `approvals.screenshot` column and `tasks.result`, so a pending approval's screenshot and review shots are kept; test/retention.test.mjs.
 - **What:** Media stays only if its id appears in `<DATA>/logs` or a surviving run log. A local run's approval
   screenshots are saved to the media store (`approvals.host` → `saveMedia`) and referenced only by the `approvals` table
   and `<DATA>/audit/<task>.jsonl`, which the GC doesn't scan. They survive only when `emitChat` also wrote the
@@ -850,6 +851,7 @@ kills the check's process group and keeps only the output's tail.
 - **Fix:** `realpathSync` the worktrees root (create it first), or compare `realpath`s in `registered`/`listWorktrees`.
 
 ### 63. [low] Screen-prompt workspaces and their screenshots are never deleted, on the controller or on workers (orchestrator.mjs:2714-2715; worker.mjs:906, :1177-1178)
+- **Fixed (head half)** (task #422, 3108835): `gcRetention` sweeps finished screen-prompt workspaces under `<DATA>/orchestrator/browser-tasks/`; test/retention.test.mjs. The worker half stays open: `dropWorktree` still returns when `job.cache` is unset and `sweepLeftovers` only scans `worktrees/`, so `~/.agent-orch-worker/browser-tasks/<id>` is never removed.
 - **What:** Each screen prompt runs in `<orchestrator>/browser-tasks/<id>` (worker: `~/.agent-orch-worker/browser-tasks/<id>`)
   with Playwright's `outputDir` in `.agent-orch/shots/`. The controller never removes it, and neither retention nor the
   worktree sweeps look there. On a worker, `dropWorktree` returns right away when `job.cache` is unset, which is always
@@ -928,3 +930,33 @@ kills the check's process group and keeps only the output's tail.
 4. **#61 (approval screenshots GC'd).** One extra scan dir and one DB column.
 5. Then #53-#56 (push robustness and content, stuck screen prompts), #59 (Browser tab cost), #62-#63 (worktree root
    symlink, workspace leaks) and #67 (credential scope).
+
+## Round 8 (2026-09-28, reflect #379): gate loopholes, ungated http connectors, the head's view of a worker's cap
+
+Checked against the code at b898c75 (`git log`, gate.mjs, extensions.mjs, gate-proxy.mjs, orchestrator.mjs `nodeCap`,
+cap.mjs, retention.mjs, worker.mjs). Line numbers are from the code before each fix. No source file was changed.
+
+### 68. [med] Uploads, coordinate clicks and code URLs passed the browser gate as draft, and Enter's Always key was the key name alone (gate.mjs:30-32, :162-166, :200-207)
+- **Fixed** (task #428, 874fea5): `browser_file_upload` is outbound (keyed by the sorted paths), `browser_mouse_click_xy`/`_drag_xy` are outbound with no Always key, `javascript:`/`data:`/`blob:`/`vbscript:` navigation is outbound with no Always key, and `browser_press_key`'s key names the key, the focused field's role and name and the host; test/gate-classify.test.mjs. Still to come: an end-to-end gate-proxy test with the fake browser MCP (ROADMAP Later).
+- **What:** `classify` put `browser_file_upload`, `browser_mouse_click_xy` and `browser_mouse_drag_xy` in `BROWSER_DRAFT`,
+  so a task could upload any local file (an SSH key, `.env`) to the open page without asking, and a click by coordinates
+  skipped the element classifier entirely (a "Send" or "Pay" button clicked at (x, y) was draft). `browser_navigate` only
+  checked checkout paths and local hosts, so `javascript:` and `data:` URLs, which run code in the page, were draft too.
+  And the Always key for `browser_press_key` was `server|tool|key`, so one "Always allow Enter" covered Enter in every
+  field on every site.
+
+### 69. [low] http and sse connectors lost their outbound list, so they ran ungated in task runs (extensions.mjs:315-335, :361-382)
+- **Fixed** in three steps: #393 (303f428) keeps `outbound` for http/sse servers and withholds such a connector from gated runs; #412 (00f5261) gives gate-proxy.mjs a streamable-http upstream; #420 (fbfe54a) runs http connectors with outbound tools through the proxy (`upstream: {url, headers}`); tests in test/extensions.test.mjs, test/gate-proxy-http.test.mjs and test/ext-gate-http.test.mjs.
+- **Deferred:** an sse connector with outbound tools is still withheld from gated runs (`WITHHELD_REASON`), because the proxy doesn't speak sse. The owner can re-add it as http or a stdio command.
+- **What:** `saveMcp` read the `outbound` list only in the stdio branch, and `mcpFor` gated only stdio servers. An http
+  or sse connector that the owner had marked as sending mail or posting messages lost that list on save and was passed
+  to task runs directly, so its outbound tools ran with no approval.
+
+### 70. [med] The head ignored a worker's CPU cap once the owner set max slots (orchestrator.mjs:1469)
+- **Fixed** (task #388, 4f47cb7): with `maxSlots` set, `nodeCap` takes `min(maxSlots, capTasks(localCap(n), cpuPerTask))`, so a worker's CPU and max-tasks cap still apply; test/worker-cap.test.mjs. By design the head no longer applies the RAM part of a worker's local cap there (BRIEF goal 9: memory is only an emergency guard); the worker still refuses a job that would pass its RAM cap (cap.mjs `capRejection`).
+- **What:** A #311 regression. With the owner's max slots set, `nodeCap` used `localCap(n)?.maxTasks` only, dropping the
+  CPU part of the worker's local cap. A worker whose CPU cap fits fewer tasks than its max slots was offered them all,
+  and the worker had to refuse the extra jobs one by one. test/worker-cap.test.mjs failed on main.
+
+### Round 8 priorities
+1. The worker half of #63 and the #68 end-to-end proxy test are what's left; #69's sse remainder waits for demand.

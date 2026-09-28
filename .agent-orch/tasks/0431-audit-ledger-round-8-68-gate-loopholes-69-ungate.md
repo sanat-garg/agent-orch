@@ -14,3 +14,7 @@ Append a 'Round 8 (2026-09-28, reflect #379)' section to .agent-orch/AUDIT.md in
 ## Done when
 
 `grep -q '^### 68\. ' .agent-orch/AUDIT.md` && `grep -q '^### 70\. ' .agent-orch/AUDIT.md` && `grep -q 'Round 8' .agent-orch/AUDIT.md`
+
+## Result — done (check passed) (2026-09-28 14:53)
+
+AGENT-ORCH-STATUS: done — AUDIT.md has Round 8 (#68–#70), with #61 and #63 marked

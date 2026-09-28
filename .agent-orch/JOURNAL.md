@@ -993,3 +993,6 @@ fromWorker blocks future/mismatched-JWT refreshes and keeps auth.json.prev
 ## 2026-09-28 12:36 — #334 Integrate #319: UI-REVIEW #23: Stats heatmap labels at 11px, a text value per cell, and 14 days on phones with Show all days [done (check passed)]
 
 Conflicts resolved; phone range chip and heatmap tests both pass
+## 2026-09-28 12:36 — #350 Verifier AUDIT #65/#66: runner word boundaries, path-like snippets skipped, 2>&1, env prefixes and a leading cd accepted [done (check passed)]
+
+Verifier accepts env/cd prefixes and 2>&1, and skips file names

@@ -12,10 +12,20 @@ export const toolLine = (e) => {
 
 // Only ever returns a command when the done_when text clearly names one; anything ambiguous or
 // risky returns null, because a false positive means running something unattended.
-const RUNNERS = ['python3', 'python', 'pytest', 'npm', 'npx', 'pnpm', 'yarn', 'node', 'make', 'cargo', 'go', 'uv', 'bun', 'deno', './'];
-// A single-backtick snippet counts as a command only if it starts like one; `server.mjs` or `loggedIn` don't.
-const CMD_START = /^(!|test\s|\[\s|grep\b|node\b|npm\b|bash\b|sh\s|curl\b|python)/;
-const looksLikeCommand = (s) => RUNNERS.some((r) => s.startsWith(r)) || CMD_START.test(s);
+// A runner is a whole word (`node_modules`, `nodes.json`, `go.mod`, `yarn.lock` aren't), or a ./script.
+const RUNNER = /^((python3|python|pytest|npm|npx|pnpm|yarn|node|make|cargo|go|uv|bun|deno)(?=\s|$)|\.\/[\w-])/;
+// A single-backtick snippet counts as a command only if it starts like one; `server.mjs` or `loggedIn` don't. cd and
+// curl count so that a snippet using them is judged (and refused) rather than silently dropped.
+const CMD_START = /^(!|test\s|\[\s|grep\s|bash\s|sh\s|curl\s|cd\s)/;
+// `./README.md`, `src/x.mjs`: a path with an extension and no space is a file name, never a command.
+const PATH_LIKE = /^[\w.\/~-]+\.[A-Za-z0-9]+$/;
+// What may precede the runner: `cd <relative dir without ..> && `, then env assignments (`CI=1 TMPDIR=/x `).
+const CD_PREFIX = /^cd\s+(?![/~])(?![\w./-]*\.\.)[\w./-]+\s*&&\s*/;
+const ENV_PREFIX = /^([A-Za-z_]\w*=[\w.,:/@%+-]*\s+)+/;
+const stripPrefix = (s) => s.replace(CD_PREFIX, '').replace(ENV_PREFIX, '');
+const looksLikeCommand = (s) => !PATH_LIKE.test(s) && (RUNNER.test(stripPrefix(s)) || CMD_START.test(stripPrefix(s)));
+// A redirect of stderr only (`2>&1`, `2>/dev/null`) is harmless; any other > still refuses the check.
+const STDERR_REDIRECT = /(^|\s)2>(&1|\/dev\/null)(?=\s|$|\|)/g;
 // The command with its quoted and backslash-escaped text blanked out, leaving only what the shell parses as operators.
 const unquoted = (s) => s.replace(/'[^']*'|"(?:\\.|[^"\\])*"|\\./g, '_');
 // The command with only single-quoted and backslash-escaped text blanked: bash still expands $( ` ${ inside "…".
@@ -35,7 +45,7 @@ export function extractCommand(doneWhen) {
   if (/`/.test(doneWhen)) return null;
   for (let line of doneWhen.split('\n')) {
     line = line.trim().replace(/^\$\s+/, '');
-    if (RUNNERS.some((r) => line.startsWith(r))) return checkCommand(line, doneWhen);
+    if (RUNNER.test(line)) return checkCommand(line, doneWhen);
   }
   return null;
 }
@@ -46,11 +56,12 @@ function checkCommand(cand, doneWhen) {
   // doesn't void the check; a real redirect or an unquoted rm/sudo/curl/git push still refuses it. Command and process
   // substitution ($(…), backticks, ${…}, <(…), >(…)) is refused wherever it appears, double quotes included, since
   // it could hide any of those; only single-quoted (or backslash-escaped) text is inert. $? still works.
-  const bare = unquoted(cand);
+  const bare = unquoted(cand).replace(STDERR_REDIRECT, '$1_');
   if (!cand || />|\brm\s|\bsudo\b|\bgit\s+push\b|\bcurl\b/.test(bare)) return null;
   if (/\$[({]|`|[<>]\(/.test(expandable(cand))) return null;
-  if ((bare.match(/;/g) || []).length + (bare.match(/&&/g) || []).length > 1) return null;
-  if (!RUNNERS.some((r) => cand.startsWith(r)) && !/^(test|ls|grep|cat|git|!|\[|bash|sh)(\s|\b)/.test(cand)) return null;
+  if ((bare.match(/;/g) || []).length > 1 || (bare.match(/&&/g) || []).length > 3) return null;
+  const head = stripPrefix(cand);
+  if (!RUNNER.test(head) && !/^(test|ls|grep|cat|git|!|\[|bash|sh)(\s|\b)/.test(head)) return null;
   // "`grep …` prints nothing": grep exits 1 when clean, so pass only on exit 1 (matches → 0, errors → 2 still fail).
   // Only a lone grep: after a pipe or a list $? is another command's, but a | ; & in its quoted pattern is just regex
   // (`grep -n 'cat <<.*|' x.sh` used to stay as written and fail the check when clean).

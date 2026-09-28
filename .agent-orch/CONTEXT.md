@@ -33,7 +33,7 @@ _What the code doesn't say. History: JOURNAL.md. Bugs: AUDIT.md. Mobile HIG rows
 
 ## Gotchas
 - This checkout IS the live app. Never restart/kill it or call `POST /api/restart-when-idle` on port 3000. Test instances MUST use another port and `CW_DATA_DIR=$(mktemp -d)`. Server edits go live only on restart: a failing Done-when may be stale running code, and new DB tables don't exist until then.
-- The verifier runs every command-like backtick snippet in Done-when, joined with ` && `; `>` and `curl` are refused. Absence checks use `! grep …`. A `|` inside a quoted grep pattern is regex, not a pipe.
+- The verifier runs every command-like backtick snippet in Done-when (a whole runner word, not `node_modules`/`x.mjs`), joined with ` && `; `>` (except `2>&1`, `2>/dev/null`), `curl` and more than three `&&` are refused; `CI=1 ` and `cd <relative dir> && ` prefixes are fine. Absence checks use `! grep …`. A `|` inside a quoted grep pattern is regex, not a pipe.
 - /tmp is a small tmpfs with a per-user quota; run heavy tests with `TMPDIR=` on the home disk. test/helper-kill.test.mjs is racy under load and can leave `test/fixtures/helper-parent.mjs` running, hanging the shared test lock: kill that pid. Without `flock` (the MacBook worker) bin/test.mjs locks with `node_modules/.cache/agent-orch-test.lock.d` (holder pid inside).
 - `bin/agent-smoke.mjs` and `bin/orch-e2e.mjs` cost quota; never send Claude logout (`confirm: true`) in tests.
 - Other sessions and orchestrator auto-commits touch the live checkout at once: re-read before editing. A branch failing in files you didn't touch is usually a stale snapshot base: fast-forward the worktree to main and re-run.

@@ -13,3 +13,7 @@ Reliability fix in taskrun.mjs extractCommand/looksLikeCommand/checkCommand (rea
 ## Done when
 
 `npm test -- test/verify.test.mjs` passes and `node -e "import('./taskrun.mjs').then(m=>{const a=m.extractCommand('Done when \`node_modules\` stays untracked and \`npm test\` passes');const b=m.extractCommand('\`CI=1 npm test\` passes');process.exit(a==='npm test'&&b==='CI=1 npm test'?0:1)})"` exits 0
+
+## Result — done (check passed) (2026-09-28 12:36)
+
+AGENT-ORCH-STATUS: done — Verifier accepts env/cd prefixes and 2>&1, and skips file names

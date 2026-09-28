@@ -13,3 +13,7 @@ cluster.mjs checkHealth() auto-drains a worker when its resources frame reports 
 ## Done when
 
 `node --test test/cluster-health.test.mjs` passes and `grep -n 'diskRecoverBytes' cluster.mjs` prints a match
+
+## Result — done (check passed) (2026-09-28 04:58)
+
+AGENT-ORCH-STATUS: done — Low-disk drains now lift themselves after three recovered frames

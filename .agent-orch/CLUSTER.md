@@ -252,7 +252,10 @@ Workers report richly; the controller keeps what the owner needs and acts on it.
   them failed on another machine too (orchestrator.mjs `checkNodeFailures`), when the disk holding its repos has under
   2 GB free, or when it lost its connection 3 times in 30 min without a bye (missed heartbeats or a dropped socket; a
   Mac's reported sleep excuses its drop). Undraining (the owner) sets `health_ack`: older evidence stops counting, and
-  low disk doesn't drain it again within the hour.
+  low disk doesn't drain it again within the hour. A low-disk drain (`nodes.drain_kind` = `disk`) lifts itself once 3
+  resources frames in a row report at least 3 GB free (`diskMinBytes + diskRecoverBytes`): it sets `health_ack` too and
+  sends an info notice ("<name> has 3.4 GB free again and takes tasks again"). Owner drains, lost-connection drains and
+  task-failure drains are only lifted by the owner.
 - **Updates**: the controller compares `hello.sha` with its own checkout's `origin/main` (`git rev-list --count`,
   cached). More than `OUTDATED_AFTER` (20; `AGENT_ORCH_OUTDATED_COMMITS`) commits behind = outdated: the node takes no
   new work (status `updating`) and gets `node.update` once idle (its telemetry from this connection lists no job and

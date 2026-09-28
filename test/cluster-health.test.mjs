@@ -176,6 +176,34 @@ test('auto-drain: under 2 GB free on its disk drains the worker with a notice; a
   w.ws.close();
 });
 
+test('auto-undrain: a low-disk drain lifts itself after 3 frames with 3 GB free; an owner drain stays', async () => {
+  const w = await fakeWorker({ name: 'refill' });
+  const disk = (gbFree) => res({ disk: { path: '/x', free: gbFree * 1024 ** 3, total: 100e9 } });
+  w.send('resources', disk(1.5));
+  await waitFor(() => hub.node(w.node).draining, { timeout: 5000 });
+  // 2.5 GB is back above the drain mark but not the recovery one, and it breaks the run of good frames.
+  w.send('resources', disk(3.4));
+  w.send('resources', disk(3.4));
+  w.send('resources', disk(2.5));
+  w.send('resources', disk(3.4));
+  await sleep(HEARTBEAT_MS * 2);
+  assert.equal(hub.node(w.node).draining, true, 'not three recovered frames in a row yet');
+  w.send('resources', disk(3.4));
+  w.send('resources', disk(3.4));
+  const n = await waitFor(() => { const x = hub.node(w.node); return !x.draining && x; }, { timeout: 5000 });
+  assert.equal(n.status, 'online');
+  assert.equal(n.drainReason, null);
+  assert.ok(n.healthAck > 0);
+  const note = notices.find((x) => x.node === w.node && x.level === 'info');
+  assert.equal(note.text, 'refill has 3.4 GB free again and takes tasks again');
+  // An owner's drain is never lifted by good disk frames.
+  hub.update(w.node, { draining: true });
+  for (let i = 0; i < 4; i++) w.send('resources', disk(50));
+  await sleep(HEARTBEAT_MS * 2);
+  assert.equal(hub.node(w.node).draining, true);
+  w.ws.close();
+});
+
 test('auto-drain: losing its connection 3 times in 30 min drains a worker; a Mac that reports each sleep is left alone', async () => {
   const w = await fakeWorker({ name: 'flaky' });
   for (let i = 0; i < 3; i++) { await drop(w); await connect(w); }
@@ -185,6 +213,9 @@ test('auto-drain: losing its connection 3 times in 30 min drains a worker; a Mac
   w.send('resources', res());
   const n = await waitFor(() => { const x = hub.node(w.node); return x.draining && x; }, { timeout: 5000 });
   assert.match(n.drainReason, /lost its connection 3 times in 30 min \(missed heartbeats\)/);
+  for (let i = 0; i < 4; i++) w.send('resources', res({ disk: { path: '/x', free: 50e9, total: 100e9 } }));
+  await sleep(HEARTBEAT_MS * 2);
+  assert.equal(hub.node(w.node).draining, true, 'good disk frames never lift a lost-connection drain');
 
   const mac = await fakeWorker({ name: 'mac', kind: 'darwin' });
   for (let i = 0; i < 3; i++) {

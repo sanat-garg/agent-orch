@@ -782,3 +782,7 @@ Verifier treats | in quoted grep patterns as regex
 ## 2026-09-28 04:56 — #264 Worker disk hygiene: prune unreferenced deps caches and the npm cache [done (check passed)]
 
 Worker now prunes stale deps caches and oversized npm-cache
+
+## 2026-09-28 04:58 — #265 Cluster: auto-undrain a worker once the low disk that drained it has recovered [done (check passed)]
+
+Low-disk drains now lift themselves after three recovered frames

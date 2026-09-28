@@ -25,8 +25,10 @@ const MAX_ERRORS = 5; // invalid frames per connection before the worker is disc
 // Auto-health: a worker is drained, and the owner told, when the disk holding its repos has under 2 GB free, when it lost
 // its connection 3 times in 30 min (missed heartbeats or a dropped socket, not a Mac's sleep), or when 3 different tasks
 // failed there in 30 min that no other machine failed (orchestrator.mjs checkNodeFailures). Evidence from before the
-// owner last undrained it doesn't count, and low disk doesn't drain it again within the hour after that.
-export const HEALTH = { diskMinBytes: 2 * 1024 ** 3, drops: 3, failures: 3, windowMs: 30 * 60_000, ackQuietMs: 3600e3 };
+// owner last undrained it doesn't count, and low disk doesn't drain it again within the hour after that. A low-disk drain
+// lifts itself once 3 frames in a row report at least diskMinBytes + diskRecoverBytes (3 GB) free (it sets health_ack like
+// the owner's undrain, with an info notice); an owner drain or any other automatic drain waits for the owner.
+export const HEALTH = { diskMinBytes: 2 * 1024 ** 3, diskRecoverBytes: 1024 ** 3, recoverFrames: 3, drops: 3, failures: 3, windowMs: 30 * 60_000, ackQuietMs: 3600e3 };
 // A worker whose agent-orch checkout is more commits behind the controller's origin/main than this is outdated; the
 // controller then gives it no new work (status 'updating'), sends node.update once it is idle, and it comes back updated
 // (bye, service restart, hello with the new sha).
@@ -83,11 +85,12 @@ CREATE TABLE IF NOT EXISTS pairings (
 // Added later: grace_ms (the owner's per-node grace before its jobs are reassigned; NULL = graceMs(os)); away (why a
 // node is offline: 'bye' after a clean shutdown, 'asleep' when a Mac went silent, 'lost' otherwise); slept_at/slept_ms
 // (the last sleep a worker reported on wake). max_slots 0 = Auto (the scheduler sizes it from cores and free RAM).
-// drain_reason/drained_at: why and when auto-health drained it (NULL when the owner did); health_ack: when the owner last
+// drain_reason/drained_at: why and when auto-health drained it (NULL when the owner did); drain_kind: which rule did
+// ('disk' | 'drops'; NULL for the owner and for task failures), so only a disk drain lifts itself; health_ack: when the owner last
 // undrained it (older evidence no longer counts); last_error: JSON of its last node.error {at, kind, message, stack, stderr}.
 // policy: JSON of the owner's power-policy settings (power.mjs; NULL = the defaults for its OS).
 const COLUMNS = [['grace_ms', 'INTEGER'], ['away', 'TEXT'], ['slept_at', 'INTEGER'], ['slept_ms', 'INTEGER'],
-  ['drain_reason', 'TEXT'], ['drained_at', 'INTEGER'], ['health_ack', 'INTEGER'], ['last_error', 'TEXT'], ['policy', 'TEXT']];
+  ['drain_reason', 'TEXT'], ['drained_at', 'INTEGER'], ['health_ack', 'INTEGER'], ['last_error', 'TEXT'], ['policy', 'TEXT'], ['drain_kind', 'TEXT']];
 
 const statusOf = (row, connected) => (!row.enabled ? 'disabled' : !connected ? 'offline' : row.draining ? 'draining' : 'online');
 const parse = (s) => { try { return s ? JSON.parse(s) : null; } catch { return null; } };
@@ -115,6 +118,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
   const get = (id) => db.prepare('SELECT * FROM nodes WHERE id=?').get(id);
   const metrics = metricsDir ? createNodeMetrics({ dir: metricsDir, log }) : null;
   const drops = new Map(); // node id -> when (ms) it lost its connection without a bye, last HEALTH.windowMs
+  const recovered = new Map(); // node id -> resources frames in a row with the disk back above the low-disk drain's mark
   const updates = new Map(); // node id -> { state: 'pending' | 'sent' | 'failed', target, from, by, at, error }
   const failedFor = new Map(); // node id -> the origin/main sha an automatic update failed for (not retried on its own)
   const requests = new Map(); // request id -> { node, done(frame) } (log tails)
@@ -266,7 +270,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
       set[k] = body[k] ? 1 : 0;
     }
     // The owner drains or undrains by hand: no automatic reason; undraining sets aside the evidence so far.
-    if (set.draining !== undefined) Object.assign(set, { drain_reason: null, drained_at: set.draining ? Date.now() : null, ...(set.draining ? {} : { health_ack: Date.now() }) });
+    if (set.draining !== undefined) Object.assign(set, { drain_reason: null, drain_kind: null, drained_at: set.draining ? Date.now() : null, ...(set.draining ? {} : { health_ack: Date.now() }) });
     const grace = body.graceSec ?? body.grace_sec;
     if (grace !== undefined) {
       if (grace !== null && !(Number.isInteger(grace) && grace >= 10 && grace <= 86400)) return { status: 400, error: 'graceSec must be null or an integer 10-86400' };
@@ -301,7 +305,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     const c = conns.get(id);
     if (c) { conns.delete(id); c.ws.close(4003, 'revoked'); }
     metrics?.remove(id);
-    for (const m of [drops, updates, failedFor]) m.delete(id);
+    for (const m of [drops, recovered, updates, failedFor]) m.delete(id);
     log(`revoked node ${id}`);
     changed();
     return { ok: true };
@@ -488,11 +492,13 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     const t = Date.now();
     drops.set(id, [...(drops.get(id) || []).filter((x) => x > t - health.windowMs), t]);
   }
-  // Drains a worker on its own, with a notice for the owner. False when it is already draining (or disabled).
-  function autoDrain(id, reason) {
+  // Drains a worker on its own, with a notice for the owner. False when it is already draining (or disabled). kind: the
+  // rule ('disk' lifts itself once the disk recovers; anything else waits for the owner).
+  function autoDrain(id, reason, kind = null) {
     const row = get(id);
     if (!row || id === LOCAL_NODE || row.draining || !row.enabled) return false;
-    db.prepare('UPDATE nodes SET draining=1, drain_reason=?, drained_at=? WHERE id=?').run(reason, Date.now(), id);
+    db.prepare('UPDATE nodes SET draining=1, drain_reason=?, drain_kind=?, drained_at=? WHERE id=?').run(reason, kind, Date.now(), id);
+    recovered.delete(id);
     setStatus(get(id), conns.has(id));
     log(`node ${id} drained automatically: ${reason}`);
     notice({ node: id, level: 'warn', text: `${row.name} was drained automatically: ${reason}. It finishes what it runs and takes no new tasks until you undrain it (Server details → Machines).` });
@@ -503,14 +509,29 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
   // after the welcome, so lost connections count only once this one is a heartbeat and a half old.
   function checkHealth(id, c, res) {
     const row = get(id), t = Date.now();
-    if (!row || row.draining || !row.enabled) return;
+    if (!row || !row.enabled) return;
     const ack = row.health_ack || 0, free = res.disk?.free;
+    if (row.draining) return checkRecovered(row, free);
     if (Number.isFinite(free) && free < health.diskMinBytes && t - ack > health.ackQuietMs) {
-      return autoDrain(id, `only ${gb(free)} is free on the disk that holds its repos (under ${gb(health.diskMinBytes)})`);
+      return autoDrain(id, `only ${gb(free)} is free on the disk that holds its repos (under ${gb(health.diskMinBytes)})`, 'disk');
     }
     if (t - c.connectedAt < heartbeatMs * 1.5) return;
     const lost = (drops.get(id) || []).filter((x) => x > Math.max(t - health.windowMs, ack));
-    if (lost.length >= health.drops) autoDrain(id, `it lost its connection ${lost.length} times in ${Math.round(health.windowMs / 60_000)} min (missed heartbeats)`);
+    if (lost.length >= health.drops) autoDrain(id, `it lost its connection ${lost.length} times in ${Math.round(health.windowMs / 60_000)} min (missed heartbeats)`, 'drops');
+  }
+  // A low-disk drain lifts itself after recoverFrames frames in a row with diskMinBytes + diskRecoverBytes free. Rows
+  // drained before drain_kind existed are known by their reason's text.
+  function checkRecovered(row, free) {
+    const disk = row.drain_kind === 'disk' || (!row.drain_kind && /is free on the disk that holds its repos/.test(row.drain_reason || ''));
+    if (!disk || !Number.isFinite(free) || free < health.diskMinBytes + health.diskRecoverBytes) return void recovered.delete(row.id);
+    const n = (recovered.get(row.id) || 0) + 1;
+    if (n < health.recoverFrames) return void recovered.set(row.id, n);
+    recovered.delete(row.id);
+    db.prepare('UPDATE nodes SET draining=0, drain_reason=NULL, drain_kind=NULL, drained_at=NULL, health_ack=? WHERE id=?').run(Date.now(), row.id);
+    setStatus(get(row.id), conns.has(row.id));
+    log(`node ${row.id} undrained automatically: ${gb(free)} free again`);
+    notice({ node: row.id, level: 'info', text: `${row.name} has ${gb(free)} free again and takes tasks again` });
+    changed();
   }
 
   // ---- version check and updates

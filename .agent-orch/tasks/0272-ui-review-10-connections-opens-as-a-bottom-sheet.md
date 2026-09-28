@@ -13,3 +13,7 @@ Fix row 10 of .agent-orch/UI-REVIEW.md. In public/index.html `#connsModal` is a 
 ## Done when
 
 `node --test test/ui-connections-sheet.test.mjs` and `grep -E '^\| 10 \|' .agent-orch/UI-REVIEW.md | grep -q fixed`
+
+## Result — done (check passed) (2026-09-28 05:25)
+
+AGENT-ORCH-STATUS: done — Connections is a bottom sheet on phones; touch opens skip focus

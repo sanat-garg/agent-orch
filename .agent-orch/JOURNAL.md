@@ -806,3 +806,7 @@ isAgent guards all agent names; chat modes validated against MODES
 ## 2026-09-28 05:22 — #271 UI-REVIEW #6: light-theme contrast to 4.5:1 for faint text and filled buttons, with a static contrast test [done (check passed)]
 
 faint text and filled buttons now clear 4.5:1, with a contrast test
+
+## 2026-09-28 05:25 — #272 UI-REVIEW #10: Connections opens as a bottom sheet on phones, no focus ring on touch, status lines wrap [done (check passed)]
+
+Connections is a bottom sheet on phones; touch opens skip focus

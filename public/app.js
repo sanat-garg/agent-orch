@@ -6749,7 +6749,7 @@ function openConnections(id) {
   renderConnections(true);
   refreshConnections();
   loadConnNodes();
-  $('connsModal').querySelector('[data-close].icon-btn').focus();
+  if (!coarse) $('connsModal').querySelector('[data-close].icon-btn').focus(); // a touch tap would paint a focus ring on it
   const row = id && $('connsList').querySelector(`[data-conn="${id}"]`);
   if (!row) return;
   row.scrollIntoView({ block: 'nearest' });

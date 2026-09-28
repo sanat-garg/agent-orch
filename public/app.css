@@ -201,6 +201,7 @@ code, pre, kbd { font-family: var(--mono); }
 .seg button[aria-selected="true"] { background: var(--panel); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.12); }
 .icon-btn { width: 36px; height: 36px; display: grid; place-items: center; border: 0; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; flex: none; }
 .icon-btn:hover { background: var(--raised); color: var(--text); }
+.icon-btn:focus:not(:focus-visible) { outline: none; } /* rings for keyboard focus only, never a mouse click or tap */
 .only-mobile { display: none; }
 
 .banner {
@@ -637,7 +638,7 @@ code, pre, kbd { font-family: var(--mono); }
 
 /* sidebar connections (agent CLI + GitHub sign-ins) */
 .modal-panel.conns { width: min(520px, 100%); font-size: 13px; color: var(--muted); }
-.cn-body { padding: 0 20px 20px; overflow-y: auto; min-height: 0; }
+.cn-body { padding: 0 20px max(20px, env(safe-area-inset-bottom)); overflow-y: auto; overscroll-behavior: contain; min-height: 0; }
 .cn-app, .cn-list { border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
 .cn-list { margin-top: 12px; }
 .cn-list:empty { display: none; }
@@ -652,6 +653,14 @@ code, pre, kbd { font-family: var(--mono); }
 .cn-status { display: flex; align-items: center; gap: 5px; min-width: 0; font-size: 12.5px; color: var(--muted); }
 .cn-status .dot { width: 7px; height: 7px; }
 .cn-st { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 800px) {
+  .modal-panel.conns { width: 100%; } /* a bottom sheet (.modal.sheet) */
+  .cn-body { padding: 0 14px max(16px, env(safe-area-inset-bottom)); }
+  /* Account emails and status text wrap to two lines instead of truncating. */
+  .cn-status { align-items: flex-start; }
+  .cn-status .dot { margin-top: 5px; } /* centred on the first line */
+  .cn-st { white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-height: 1.35; }
+}
 .dot.warn { background: var(--warn); }
 .dot.wait { background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
 .cn-btn.btn.small { flex: none; height: 26px; padding: 0 9px; font-size: 12px; border-radius: 7px; }

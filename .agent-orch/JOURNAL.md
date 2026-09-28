@@ -723,3 +723,7 @@ macOS installer, bash 3.2 build script and non-skipping test pass
 ## 2026-09-28 02:22 — #255 Design computer-work agents: connectors, browser, approvals (AGENTIC.md) [done]
 
 AGENTIC.md covers connectors, browser, safety, task shape and rollout
+
+## 2026-09-28 02:35 — #256 Browser capability: Playwright MCP with persistent profiles for agent runs [done (check passed)]
+
+browser tasks get Playwright MCP; persistent-profile cookie test passes

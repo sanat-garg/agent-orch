@@ -18,7 +18,8 @@ import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { AGENTS, agentEfforts, agentStatus, clampEffort, codexExhausted, codexLatestSnapshot, isMissingSession, limitScope, limitScopes, modelCatalog, modelNames, runAgentCli, toolInputSummary, windowLabel } from './agents.mjs';
-import { mediaCollector } from './media.mjs';
+import { SHOTS_DIR, mediaCollector } from './media.mjs';
+import { BROWSER_SYSTEM, needsBrowser, normIdentity, parseCapabilities } from './browser.mjs';
 import { createUsageLog } from './usage.mjs';
 import { DELEGATE_CFG, createDelegator, parseFallbacks } from './delegate.mjs';
 import { filesOverlap, parseFiles, spreadAssign, readMemInfo, taskSlots, MEM } from './parallel.mjs';
@@ -66,6 +67,9 @@ const CFG = {
   footprint: { ...FOOTPRINT },
   cpuPerTask: {},
   controllerWork: false,
+  // controllerBrowser: whether browser tasks (capabilities ["browser"]) may run on the controller at all (default: no,
+  // they wait for a browserCapable worker); the owner's kv parallel_settings overrides it.
+  controllerBrowser: false,
   offerMs: 10_000,
   // Tools a worker may use without full autonomy. Anything else is refused, never prompted.
   // File changes are limited to the project folder (./** is relative to the session's cwd).
@@ -109,7 +113,9 @@ export const TASKS_FORMAT = `Emit work as a fenced block exactly like this (stri
     "after": [0],
     "files": ["src/api/users.mjs", "test/users.test.mjs", "public/css/*.css"],
     "agent": "optional: claude | codex",
-    "model": "optional model id"}
+    "model": "optional model id",
+    "capabilities": ["browser"],
+    "identity": "optional browser profile, e.g. xero"}
  ],
  "routes": [{"match": "tests", "agent": "codex", "model": null, "scope": "project"}, {"remove": 3}]}
 \`\`\`
@@ -129,6 +135,9 @@ export const TASKS_FORMAT = `Emit work as a fenced block exactly like this (stri
   tasks just to keep them in order: tasks already run in queue order. Omit \`after\` when nothing is needed first.
 - Plan sequential chains; use \`after\` only for true prerequisites; the machine runs one task at a time.
 - \`files\` (optional metadata) lists the paths or globs (\`src/**/*.css\`, \`test/\`) the task will create or modify.
+- \`capabilities\` (optional): \`["browser"]\` only for tasks that must use a real web browser (a web app with no API);
+  omit it otherwise. Such a task runs on a machine with Chromium, on a persistent browser profile the owner signs in to:
+  \`identity\` names it (default "default"); tasks sharing a profile run one at a time.
 - Each task is run by a FRESH Claude Code session with no memory of this conversation. It will read
   .agent-orch/BRIEF.md and .agent-orch/CONTEXT.md, so put durable context there and keep each prompt self-contained.
 - Never repeat work that is already queued, running, or done.
@@ -505,6 +514,8 @@ export function extractTasks(text) {
       priority: t.priority != null ? clamp(t.priority, 1, 90, null) : null,
       agent: normalizeAgent(t.agent),
       model: t.model ? String(t.model).trim().slice(0, 100) || null : null,
+      capabilities: parseCapabilities(t.capabilities),
+      identity: t.identity != null ? normIdentity(t.identity) : null,
     });
     const last = tasks[tasks.length - 1];
     last.model = fitModel(last.agent, last.model, `task '${last.title}'`);
@@ -936,6 +947,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     db.exec('ALTER TABLE tasks ADD COLUMN files TEXT');
     db.exec('INSERT OR IGNORE INTO task_deps(task_id, depends_on) SELECT id, depends_on FROM tasks WHERE depends_on IS NOT NULL');
   }
+  // tasks.capabilities: JSON ["browser"] (browser.mjs; NULL = none); tasks.browser_identity: the browser profile a browser
+  // task uses (NULL = 'default'). Browser tasks run on browserCapable nodes, one per profile at a time (`place`).
+  for (const col of ['capabilities', 'browser_identity']) {
+    if (!db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === col)) db.exec(`ALTER TABLE tasks ADD COLUMN ${col} TEXT`);
+  }
   // messages.task_id: the plan task that took a saved message (status 'taken'); it is 'done' once answered.
   if (!db.prepare('PRAGMA table_info(messages)').all().some((c) => c.name === 'task_id')) db.exec('ALTER TABLE messages ADD COLUMN task_id INTEGER');
   // tasks.position: the owner's manual queue order within a project (lower runs first; see `runnable`). Existing rows
@@ -1032,7 +1048,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   // dependsOn: a task id or an array of them (all must be done first). files: [path or glob] it will modify, or null.
   function addTask(projectId, { title, prompt, kind = 'work', source = 'user', priority = null, urgency = 'normal', deadline = null, dependsOn = null, doneWhen = null, agent = null, model = null,
-    origin = source === 'reflection' ? 'reflection' : null, fallbacks = null, files = null, position = null }) {
+    origin = source === 'reflection' ? 'reflection' : null, fallbacks = null, files = null, position = null, capabilities = null, identity = null }) {
+    capabilities = parseCapabilities(capabilities);
+    identity = capabilities?.includes('browser') && identity != null ? normIdentity(identity) : null;
     const deps = [...new Set((Array.isArray(dependsOn) ? dependsOn : [dependsOn]).filter((d) => d != null).map(Number))];
     files = parseFiles(files);
     deadline = parseDeadline(deadline);
@@ -1041,10 +1059,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         : urgency !== 'normal' && URGENCY[urgency] ? URGENCY[urgency] : PRIORITY[source] ?? 50;
     }
     const pos = position ?? insertPosition(projectId, effectivePriority({ priority, deadline }, getProject(projectId)), deps);
-    const r = run(`INSERT INTO tasks(project_id,kind,title,prompt,priority,urgency,deadline,depends_on,done_when,source,agent,model,origin,fallbacks,files,position,created_at)
-      VALUES(:p,:k,:ti,:pr,:pri,:u,:d,:dep,:dw,:s,:ag,:mo,:or,:fb,:fi,:pos,:c)`,
+    const r = run(`INSERT INTO tasks(project_id,kind,title,prompt,priority,urgency,deadline,depends_on,done_when,source,agent,model,origin,fallbacks,files,position,capabilities,browser_identity,created_at)
+      VALUES(:p,:k,:ti,:pr,:pri,:u,:d,:dep,:dw,:s,:ag,:mo,:or,:fb,:fi,:pos,:cap,:bi,:c)`,
       { p: projectId, k: kind, ti: title, pr: prompt, pri: priority, u: urgency, d: deadline, dep: deps[0] ?? null, dw: doneWhen, s: source, ag: agent, mo: model,
-        or: origin, fb: fallbacks ? JSON.stringify(fallbacks) : null, fi: files ? JSON.stringify(files) : null, pos, c: now() });
+        or: origin, fb: fallbacks ? JSON.stringify(fallbacks) : null, fi: files ? JSON.stringify(files) : null, pos,
+        cap: capabilities ? JSON.stringify(capabilities) : null, bi: identity, c: now() });
     const id = Number(r.lastInsertRowid);
     for (const d of deps) run('INSERT OR IGNORE INTO task_deps(task_id, depends_on) VALUES(:t,:d)', { t: id, d });
     pushTask(id);
@@ -1231,12 +1250,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return { ok: true, order };
   }
   // kv parallel_settings { parallelTasks: 1 | 2 (the controller's own work slots), controllerWork: bool (see
-  // CFG.controllerWork), maxTasks: null | n (owner cap on work tasks across every node) }. Older shapes read as defaults.
+  // CFG.controllerWork), controllerBrowser: bool (see CFG.controllerBrowser), maxTasks: null | n (owner cap on work tasks across every node) }. Older shapes read as defaults.
   function parallelSettings() {
     let s = {};
     try { s = JSON.parse(kvGet('parallel_settings') || '{}') || {}; } catch {}
     return { parallelTasks: [1, 2].includes(s.parallelTasks) ? s.parallelTasks : CFG.parallelTasks,
       controllerWork: typeof s.controllerWork === 'boolean' ? s.controllerWork : CFG.controllerWork,
+      controllerBrowser: typeof s.controllerBrowser === 'boolean' ? s.controllerBrowser : CFG.controllerBrowser,
       maxTasks: Number.isInteger(s.maxTasks) && s.maxTasks > 0 ? s.maxTasks : null };
   }
   const slotsFor = (a) => typeof CFG.agentSlots === 'number' ? CFG.agentSlots : CFG.agentSlots[a] ?? 1;
@@ -1249,9 +1269,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const v = value && typeof value === 'object' ? value : {};
     let next = {};
     try { next = JSON.parse(kvGet('parallel_settings') || '{}') || {}; } catch {} // only what the owner set is stored
-    if (!['parallelTasks', 'controllerWork', 'maxTasks'].some((k) => k in v)) return { error: 'Expected parallelTasks 1 or 2' };
+    if (!['parallelTasks', 'controllerWork', 'controllerBrowser', 'maxTasks'].some((k) => k in v)) return { error: 'Expected parallelTasks 1 or 2' };
     if ('parallelTasks' in v) { if (![1, 2].includes(v.parallelTasks)) return { error: 'Expected parallelTasks 1 or 2' }; next.parallelTasks = v.parallelTasks; }
     if ('controllerWork' in v) { if (typeof v.controllerWork !== 'boolean') return { error: 'controllerWork must be true or false' }; next.controllerWork = v.controllerWork; }
+    if ('controllerBrowser' in v) { if (typeof v.controllerBrowser !== 'boolean') return { error: 'controllerBrowser must be true or false' }; next.controllerBrowser = v.controllerBrowser; }
     if ('maxTasks' in v) { if (v.maxTasks !== null && !(Number.isInteger(v.maxTasks) && v.maxTasks >= 1 && v.maxTasks <= 64)) return { error: 'maxTasks must be null or 1-64' }; next.maxTasks = v.maxTasks; }
     kvSet('parallel_settings', JSON.stringify(next));
     pushState(); setTimeout(tick, 0);
@@ -1365,18 +1386,27 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // Where a claimed task runs: the free worker with the most headroom (the node that last ran it first), else the
   // controller when it has a free slot. While some worker could run a work task, the controller leaves it to the
   // workers (it waits for one to free up) unless the owner's controllerWork setting says otherwise. null = not now.
+  // A browser task (browser.mjs) goes only to a worker that reports browserCapable, or to the controller when the owner
+  // allows it (controllerBrowser), and never while another task uses the same profile (Chromium locks it).
   function place(task, agent, { localFree, localOk, cap }) {
     if (task.kind === 'plan') return localOk ? LOCAL_NODE : null;
     if (workEverywhere() >= cap) return null;
+    const browser = needsBrowser(task);
+    if (browser && profileBusy(task)) return null;
     const remote = remoteCapable(task, getProject(task.project_id));
     if (remote) {
-      const free = freeWorkers(agent, task.id).sort((a, b) => (b.id === task.node_id) - (a.id === task.node_id) || headroom(b, agent) - headroom(a, agent));
+      const free = freeWorkers(agent, task.id).filter((n) => !browser || n.inventory?.browser?.capable === true).sort((a, b) => (b.id === task.node_id) - (a.id === task.node_id) || headroom(b, agent) - headroom(a, agent));
       if (free.length) return free[0].id;
     }
     if (!localOk || !localFree || localDraining() || !localAgentOk(agent) || slotsFor(agent) - runningOn(agent) <= 0) return null;
-    if (remote && !parallelSettings().controllerWork && workerNodes(agent).length) return null;
+    if (browser && !parallelSettings().controllerBrowser) return null;
+    if (remote && !parallelSettings().controllerWork && workerNodes(agent).some((n) => !browser || n.inventory?.browser?.capable === true)) return null;
     return LOCAL_NODE;
   }
+  const identityOf = (task) => (needsBrowser(task) ? normIdentity(task.browser_identity) : null);
+  // The profile lock: a claimed (running) task already uses this identity. Read from the DB, so a claim not yet started counts.
+  const profileBusy = (task) => qa("SELECT id, kind, capabilities, browser_identity FROM tasks WHERE status='running' AND capabilities IS NOT NULL AND id!=:id", { id: task.id })
+    .some((r) => r.kind === 'work' && identityOf(r) === identityOf(task));
 
   // Claims the next task and its node: { task, node, prevNode }. localFree: the controller has a free work slot;
   // localOk: it may claim at all (memory); cap: work tasks allowed across all nodes (owner cap, pacing).
@@ -1656,7 +1686,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return writeEntry;
   }
 
-  async function runAgent({ agent = 'claude', prompt, cwd, resume, model, append, tools, autonomous, signal, timeoutSec, taskId, runId, logPath, onMessage, onEvent, partial, effort }) {
+  async function runAgent({ agent = 'claude', prompt, cwd, resume, model, append, tools, autonomous, signal, timeoutSec, taskId, runId, logPath, onMessage, onEvent, partial, effort, browser }) {
     const ac = new AbortController();
     let stopped = null;
     const onAbort = () => { stopped = stopped || 'aborted'; ac.abort(); };
@@ -1670,7 +1700,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     let res;
     try {
       res = await runAgentCli({
-        agent, model, prompt, cwd, resume, systemAppend: append, autonomous, effort, signal: ac.signal,
+        agent, model, prompt, cwd, resume, systemAppend: append, autonomous, effort, signal: ac.signal, ...(browser && { browser }),
         onEvent: taskId ? (e) => {
           onEvent?.(e);
           if (e.k === 'image') { const img = media.image(e); if (img) writeEntry({ k: 'image', ...img, tool: e.tool }); return; }
@@ -2086,7 +2116,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       if (dup) { logEvent(`skipped duplicate: ${t.title} (already #${dup.id})`, { projectId: project.id }); batch.push(dup.id); continue; }
       const dependsOn = resolveAfter(t.after, batch).filter((d) => getTask(d));
       const id = addTask(project.id, { title: t.title, prompt: t.prompt, kind: 'work', source, priority: t.priority, urgency: t.urgency, deadline: t.deadline, dependsOn, doneWhen: t.done_when,
-        agent: t.agent, model: t.model, files: t.files, ...origin });
+        agent: t.agent, model: t.model, files: t.files, capabilities: t.capabilities, identity: t.identity, ...origin });
       writeTaskSpec(project.path, getTask(id));
       ids.push(id);
       batch.push(id);
@@ -2249,6 +2279,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const cid = convoId || project?.convo_id, p = cid ? convoPersona(cid) : null;
     return p ? `${system}\n\n${p}` : system;
   };
+  // A browser task's system text always carries BROWSER_SYSTEM (its content is untrusted), even on a resume (system null).
+  const withBrowser = (task, system) => (task?.kind === 'work' && needsBrowser(task) ? (system ? `${system}\n\n${BROWSER_SYSTEM}` : BROWSER_SYSTEM) : system);
   const plannerSession = (project, agent) => (agent === 'claude' ? project.chat_session_id : kvGet(`planner_session:${project.id}:${agent}`) || null);
   const setPlannerSession = (project, agent, id) => (agent === 'claude' ? updateProject(project.id, { chat_session_id: id }) : kvSet(`planner_session:${project.id}:${agent}`, id || ''));
 
@@ -2530,9 +2562,12 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     pushState(); // Publish the actual route once fallback/model resolution has finished.
     const r = running.get(task.id);
     if (r) r.runId = runId;
+    // A browser run: the Playwright MCP on its profile, screenshots into the run's shots dir, and the untrusted-content
+    // rules in its system prompt (on a resume too).
+    const browser = task.kind === 'work' && needsBrowser(task) ? { identity: identityOf(task), outputDir: path.join(cwd, SHOTS_DIR) } : null;
     const res = await runAgent({
-      agent: route.agent, prompt, cwd, resume, model: route.model, append: resume ? null : withPersona(system, project), tools, autonomous, effort,
-      signal, timeoutSec: CFG.taskTimeoutSec, taskId: task.id, runId, logPath,
+      agent: route.agent, prompt, cwd, resume, model: route.model, append: withBrowser(task, resume ? null : withPersona(system, project)), tools, autonomous, effort,
+      signal, timeoutSec: CFG.taskTimeoutSec, taskId: task.id, runId, logPath, browser,
     });
     finishRun(runId, res);
     if (task.handoff && res.sessionId) updateTask(task.id, { handoff: null }); // the new agent's own session carries on from here
@@ -2585,7 +2620,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     pushState();
     logEvent(`#${task.id} runs on ${name}`, { projectId: project.id, taskId: task.id });
     const res = await remoteJob(task.id, nodeId, name, { runId, logPath }, {
-      title: task.title, prompt, systemAppend: resume ? undefined : withPersona(WORKER_SYSTEM, project), agent: route.agent, model: route.model || undefined, effort: effort || undefined,
+      title: task.title, prompt, systemAppend: withBrowser(task, resume ? null : withPersona(WORKER_SYSTEM, project)) || undefined, agent: route.agent, model: route.model || undefined, effort: effort || undefined,
+      ...(needsBrowser(task) && { capabilities: ['browser'], identity: identityOf(task) }),
       repo, baseSha, branch: taskBranch(task.id), doneWhen: task.done_when || undefined, resume: resume || undefined,
       timeouts: { taskSec: CFG.taskTimeoutSec, verifySec: CFG.verifyTimeoutSec, installSec: 900 }, autonomous: !!project.autonomous,
     }, signal);
@@ -3566,6 +3602,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     // A sidebar chat's project rank ({id, position, priority}), or null when its folder has no orchestrator project.
     projectRank: (cwd) => q1('SELECT id, position, priority FROM projects WHERE path=:p', { p: cwd }) ?? null,
     isRunning: (id) => running.has(Number(id)), logEvent, attachCluster,
+    claimNext, // tests: claims the next task and its node, as one tick step would (without starting it)
     unwatch: (ws) => { for (const set of runSubs.values()) set.delete(ws); },
   };
 }

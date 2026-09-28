@@ -181,15 +181,19 @@ function* claudeEvents(m) {
 
 // MCP servers every run gets (extensions.mjs mcpRun, set by the server): Claude → an --mcp-config file, codex → a config
 // profile layered on ~/.codex/config.toml (codex -p <name>); null for none. Files, so no secret is on a command line.
-// A run's own `mcp` option replaces it.
+// A run's own `mcp` option replaces it. A run's `browser` ({identity, outputDir}, browser.mjs) is handed to the source,
+// which adds the Playwright MCP on that identity's profile.
 let mcpSource = () => null;
 export const setMcpSource = (fn) => { mcpSource = fn || (() => null); };
-const mcpOf = (agent, own) => { if (own !== undefined) return own; try { return mcpSource(agent); } catch (e) { console.error('[agents] mcp source failed', e); return null; } };
+const mcpOf = (agent, own, browser) => {
+  if (own !== undefined) return own;
+  try { return browser ? mcpSource(agent, { browser }) : mcpSource(agent); } catch (e) { console.error('[agents] mcp source failed', e); return null; }
+};
 
 // Extra options: query (SDK override, for tests), bin, env, partial (stream deltas), onMessage (raw SDK messages).
 // effort: a level from CLAUDE.efforts (the SDK's `effort` option), or null for the model's default.
-async function runClaude({ model, prompt, cwd, resume, systemAppend, signal, onEvent, query = sdkQuery, bin, env = process.env, partial, onMessage, effort, mcp }) {
-  mcp = mcpOf('claude', mcp);
+async function runClaude({ model, prompt, cwd, resume, systemAppend, signal, onEvent, query = sdkQuery, bin, env = process.env, partial, onMessage, effort, mcp, browser }) {
+  mcp = mcpOf('claude', mcp, browser);
   const ac = new AbortController();
   let aborted = false;
   const onAbort = () => { aborted = true; ac.abort(); };
@@ -525,11 +529,11 @@ function* codexEvents(m, started = new Set()) {
 // append flag, so systemAppend is prepended to the prompt. effort: a level from CODEX.efforts, passed as
 // `-c model_reasoning_effort=<level>` (also on `exec resume`); null keeps the model's default.
 // images: local image paths attached to the prompt with -i (a chat's attached pictures; exec and exec resume both take it).
-async function runCodex({ model, prompt, cwd, resume, systemAppend, signal, onEvent, bin, env = process.env, autonomous = true, onMessage, codexHome, effort, mcp, images }) {
+async function runCodex({ model, prompt, cwd, resume, systemAppend, signal, onEvent, bin, env = process.env, autonomous = true, onMessage, codexHome, effort, mcp, images, browser }) {
   const res = { outcome: 'error', text: '', sessionId: resume || null, usage: {}, numTurns: 0, resetsAt: null, limitType: null, stderr: '', errorCode: null, windows: null };
   const startedAt = Date.now();
   // The MCP profile goes before `exec`: `exec resume` has no -p of its own.
-  const profile = mcpOf('codex', mcp);
+  const profile = mcpOf('codex', mcp, browser);
   const args = [...(profile ? ['-p', profile] : []), 'exec', ...(resume ? ['resume'] : []), '--json', '--skip-git-repo-check', '-c', 'forced_login_method="chatgpt"'];
   if (model) args.push('-m', model);
   if (effort) args.push('-c', `model_reasoning_effort=${effort}`);

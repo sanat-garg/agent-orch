@@ -63,14 +63,14 @@ Direction: C = controller → worker, W = worker → controller (`DIRECTION`; `v
 | --- | --- | --- | --- |
 | `hello` | W | node, protocol, version, jobs[{job, state, sha, next}], sha, features | first frame; `jobs` = work still on this machine, finished ones whose `job.done` wasn't acked included (re-attach); `sha` = its agent-orch checkout; `features` see Health |
 | `welcome` | C | node, protocol, heartbeatMs, wipPushMs, graceMs, features, policy, queued | settings for this node; `policy` see Power policy; `queued` see Local cap and status view |
-| `inventory` | W | node, name, os (linux/darwin), arch, cores, mem, agents[{id, installed, version, signedIn, account, models}], limits, versions{agentOrch, node, git}, cap | after `welcome` and whenever it changes; `cap` see Local cap and status view |
+| `inventory` | W | node, name, os (linux/darwin), arch, cores, mem, agents[{id, installed, version, signedIn, account, models}], limits, versions{agentOrch, node, git}, cap, browser{capable, headed, error} | after `welcome` and whenever it changes; `cap` see Local cap and status view |
 | `resources` | W | memAvailable, load[1,5,15], running[job ids], swapUsedPct + health telemetry: cpu[% per core], memTotal, swapTotal, swapUsed, disk{path, free, total}, net{host, ok, ms, at, error}, agents[{id, installed, version, signedIn}], uptime, procUptime, version, sha, battery{pct, charging, source}, thermal{pressure, speedLimit, level}, intake{ok, reason, text}, awake, cap, jobsMem, jobsCpu | every heartbeat (10 s), from /proc or `vm_stat`/`sysctl`/`pmset`/`notifyutil` on macOS; see Health, Power policy and Local cap |
 | `heartbeat` | both | queued (C) | liveness; the controller's carries `queued` |
 | `ack` / `error` / `bye` | both | re (+job) / message / reason | replies; the controller acks each `job.done` with its `job` (the worker then forgets the job); `bye` before a clean shutdown |
 | `wake` | W | sleptAt, sleptMs | a time jump on the worker (a laptop's sleep), sent after the next `welcome` |
 | `job.offer` | C | job, agent, model, footprint | "can you take this?" |
 | `job.accept` / `job.reject` | W | job / job, reason (busy, low_memory, agent_missing, not_signed_in, draining, version, other, power, cap) | answer within 10 s or counts as reject; `power` only to a controller with feature `policy`, `cap` only with feature `cap` |
-| `job.start` | C | job, title, prompt, systemAppend, agent, model, account, repo, baseSha, branch, doneWhen, resume, timeouts{taskSec, verifySec, installSec}, autonomous, tools, install[argv] | run it |
+| `job.start` | C | job, title, prompt, systemAppend, agent, model, account, repo, baseSha, branch, doneWhen, resume, timeouts{taskSec, verifySec, installSec}, autonomous, tools, install[argv], capabilities["browser"], identity | run it (a browser task gets the Playwright MCP on that profile, browser.mjs) |
 | `job.event` | W | job, from, events[≤200 normalised agent events] | batched every ~1 s; `from` = index of the first event so resends dedupe |
 | `job.check` | W | job, command, output, pass, code | result of the done-when check, run on the worker in the task's worktree |
 | `job.wip` | W | job, sha, branch | a WIP commit was pushed to `agent-orch/task-<id>` |

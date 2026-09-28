@@ -13,6 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { runHelper } from './helpers.mjs';
+import { MCP_SERVER as BROWSER_MCP, browserServer } from './browser.mjs';
 
 export const NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/; // new skills and subagents (Claude's skill-name rule)
 export const MCP_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/; // a bare TOML key for codex, and part of Claude's mcp__<name>__<tool>
@@ -346,8 +347,11 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
     return publicMcp(s);
   }
   // The servers a run on `agent` gets: Claude → an SDK/--mcp-config mcpServers record, codex → config.toml tables; null for none.
-  function mcpFor(agent) {
-    const on = readMcp().filter((s) => s.enabled !== false && (s.agents || SKILL_AGENTS).includes(agent) && (agent !== 'codex' || s.type !== 'sse'));
+  // run.browser ({identity, outputDir, home?, headed?}, a task with the browser capability) adds the Playwright MCP on
+  // that identity's persistent profile (browser.mjs), replacing an owner server of the same name.
+  function mcpFor(agent, run = null) {
+    let on = readMcp().filter((s) => s.enabled !== false && (s.agents || SKILL_AGENTS).includes(agent) && (agent !== 'codex' || s.type !== 'sse'));
+    if (run?.browser) on = [...on.filter((s) => s.name !== BROWSER_MCP), { name: BROWSER_MCP, env: {}, ...browserServer({ home, ...run.browser }) }];
     if (!on.length || !SKILL_AGENTS.includes(agent)) return null;
     if (agent === 'codex') {
       const toml = on.map((s) => [`[mcp_servers.${s.name}]`, ...(s.type === 'stdio'
@@ -360,15 +364,31 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
       : { type: s.type, url: s.url, ...(Object.keys(s.headers || {}).length && { headers: s.headers }) }]));
   }
   // What a run passes (writing the file first when it changed): Claude → the --mcp-config file, codex → the profile name.
-  function mcpRun(agent) {
-    const cfg = mcpFor(agent), file = agent === 'codex' ? codexMcpFile : claudeMcpFile;
+  // A browser run gets its own file / profile (named by a hash of its config), and ones a day old are swept.
+  function mcpRun(agent, run = null) {
     if (!SKILL_AGENTS.includes(agent)) return null;
+    const cfg = mcpFor(agent, run);
+    let file = agent === 'codex' ? codexMcpFile : claudeMcpFile, profile = CODEX_PROFILE;
+    if (run?.browser && cfg) {
+      const key = crypto.createHash('sha256').update(JSON.stringify(cfg)).digest('hex').slice(0, 12);
+      profile = `${CODEX_PROFILE}-run-${key}`;
+      file = agent === 'codex' ? path.join(codexHome, `${profile}.config.toml`) : path.join(extDir, 'runs', `claude-mcp-${key}.json`);
+      sweepRunFiles();
+    }
     const text = cfg == null ? null : agent === 'codex' ? cfg : JSON.stringify({ mcpServers: cfg }, null, 2);
     let cur = null;
     try { cur = fs.readFileSync(file, 'utf8'); } catch {}
     if (text == null) { if (cur != null) fs.rmSync(file, { force: true }); return null; }
     if (cur !== text) writeAtomic(file, text);
-    return agent === 'codex' ? CODEX_PROFILE : file;
+    else if (run?.browser) fs.utimesSync(file, new Date(), new Date());
+    return agent === 'codex' ? profile : file;
+  }
+  function sweepRunFiles(maxAgeMs = 86_400_000) {
+    const old = (f) => { try { return Date.now() - fs.statSync(f).mtimeMs > maxAgeMs; } catch { return false; } };
+    const ls = (d, re) => { try { return fs.readdirSync(d).filter((n) => re.test(n)).map((n) => path.join(d, n)); } catch { return []; } };
+    for (const f of [...ls(path.join(extDir, 'runs'), /^claude-mcp-[0-9a-f]+\.json$/), ...ls(codexHome, new RegExp(`^${CODEX_PROFILE}-run-[0-9a-f]+\\.config\\.toml$`))]) {
+      if (old(f)) fs.rmSync(f, { force: true });
+    }
   }
 
   // ---------- personas

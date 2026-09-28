@@ -14,3 +14,7 @@ Implement the browser runtime from .agent-orch/AGENTIC.md. 1) Tasks can declare 
 ## Done when
 
 `node --test test/browser-capability*.test.mjs` passes, showing the MCP config for browser tasks includes Playwright with a persistent profile and a cookie persisting across two runs
+
+## Result — done (check passed) (2026-09-28 02:35)
+
+AGENT-ORCH-STATUS: done — browser tasks get Playwright MCP; persistent-profile cookie test passes

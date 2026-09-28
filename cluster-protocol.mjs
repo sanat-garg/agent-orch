@@ -93,7 +93,8 @@ const S = {
   // queued: work tasks on the head ready to start that this node could take ("up next" in its status view).
   welcome: { node: 'str', protocol: 'int', heartbeatMs: 'int', wipPushMs: 'int', graceMs: 'int', features: 'arr?', policy: 'obj?', queued: 'int?' },
   // cap: the machine's local cap in effect (cap.mjs resolveCap: {cpu: cores, mem: bytes, maxTasks, onlyOnAc}; null = none).
-  inventory: { node: 'str', name: 'str', os: 'os', arch: 'str', cores: 'int', mem: 'int', agents: 'arr', limits: 'obj?', versions: 'obj', cap: 'obj?' },
+  // browser: {capable, headed, error?}: whether it has a Chromium/Chrome for browser tasks (browser.mjs ensureBrowser).
+  inventory: { node: 'str', name: 'str', os: 'os', arch: 'str', cores: 'int', mem: 'int', agents: 'arr', limits: 'obj?', versions: 'obj', cap: 'obj?', browser: 'obj?' },
   // Also the worker's health telemetry (every heartbeat, the controller keeps a 24 h series): cpu (% per core), memTotal,
   // swapTotal/swapUsed (bytes), disk {path, free, total} (the volume holding its repos), net {host, ok, ms, at, error}
   // (reachability of GitHub), agents [{id, installed, version, signedIn}] (as last checked, never polled), uptime (s),
@@ -114,9 +115,10 @@ const S = {
   'job.reject': { job: 'int', reason: 'reject' },
   'job.start': {
     // effort: the reasoning-effort level the controller read at this session boundary (the worker clamps it to the agent).
+    // capabilities ["browser"] + identity: the run gets the Playwright MCP on that browser profile (browser.mjs).
     job: 'int', title: 'str', prompt: 'str', systemAppend: 'str?', agent: 'agent', model: 'str?', effort: 'str?', account: 'str?',
     repo: 'repo', baseSha: 'sha', branch: 'branch', doneWhen: 'str?', resume: 'str?',
-    timeouts: 'obj', autonomous: 'bool?', tools: 'arr?', install: 'arr?',
+    timeouts: 'obj', autonomous: 'bool?', tools: 'arr?', install: 'arr?', capabilities: 'arr?', identity: 'str?',
   },
   'job.event': { job: 'int', from: 'int', events: 'events' },
   'job.check': { job: 'int', command: 'str', output: 'str', pass: 'bool', code: 'int?' },

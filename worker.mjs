@@ -49,6 +49,8 @@ import { JOB_ENV, workerHome } from './role.mjs';
 import { FOOTPRINT, applyLimit, capRejection, capTasks, capText, fmtCores, fmtGB, resolveCap } from './cap.mjs';
 import { createJobUsage, createWrappers, heldBy, probeLimiter } from './worker-cap.mjs';
 import { request as statusRequest, serveStatus, statusCli } from './worker-status.mjs';
+import { ensureBrowser, needsBrowser, normIdentity } from './browser.mjs';
+import { createExtensions } from './extensions.mjs';
 
 const execFileP = promisify(execFile);
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -82,6 +84,9 @@ const USAGE_MS = 2000;
 const CAP_PAUSE_MS = Number(process.env.AGENT_ORCH_WORKER_CAP_PAUSE_MS) || 30_000;
 const CAP_DECLINE_MS = 10 * 60_000;
 const RECENT = 5; // finished jobs the status view lists
+// Browser tasks (browser.mjs): at start the worker checks for a Chromium/Chrome and, without one, installs Playwright's.
+// AGENT_ORCH_WORKER_BROWSER=off|check|install; under node:test it only checks unless told to install.
+const BROWSER_MODE = process.env.AGENT_ORCH_WORKER_BROWSER || (process.env.NODE_TEST_CONTEXT ? 'check' : 'install');
 const EDIT_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
 // The files an edit tool call touched: Claude's file_path, or codex's file_change lines ("add hello.txt").
 const editedFiles = (e) => (EDIT_TOOLS.has(e.name) ? String(e.input?.file_path || e.input?.path || '').split('\n')
@@ -233,6 +238,10 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   // For the status view: the last finished jobs, the head's count of tasks up next for this machine, the connection.
   const recent = [];
   let queued = null, downSince = Date.now(), retryAt = 0, connError = null, status = null;
+  // browser: {capable, headed, error?} once checked (inventory.browser); ext writes a browser run's MCP config (only the
+  // Playwright server: a worker has no MCP list of its own).
+  let browser = null, browserAbort = null;
+  const ext = createExtensions({ dataDir: home });
 
   // Model lists (once a day per agent, cached) and plan limits (only on limits.refresh): nothing polls (BRIEF goal 7).
   const models = createModelStore({ file: path.join(home, 'models.json'), log, onChange: () => sendInventory() });
@@ -437,8 +446,17 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     return {
       node: config.node, name: config.name || os.hostname(), os: process.platform, arch: process.arch, cores: os.cpus().length, mem: os.totalmem(),
       agents, limits: Object.fromEntries(ids.map((id) => [id, limits.get(id)]).filter(([, v]) => v)),
-      versions: { agentOrch: VERSION, node: process.version, git: gitVersion }, cap,
+      versions: { agentOrch: VERSION, node: process.version, git: gitVersion }, cap, ...(browser && { browser }),
     };
+  }
+  async function probeBrowser() {
+    if (BROWSER_MODE === 'off') return;
+    browserAbort = new AbortController();
+    const st = await ensureBrowser({ install: BROWSER_MODE === 'install', signal: browserAbort.signal }).catch((e) => ({ capable: false, error: e.message }));
+    if (stopping) return;
+    browser = { capable: st.capable, headed: !!st.headed, ...(st.error && { error: st.error }) };
+    log(st.capable ? `browser: ${st.executable}${st.headed ? ' (headed)' : ' (headless)'}` : `browser: none (${st.error || 'no Chromium or Chrome found'})`, st.capable ? 'info' : 'warn');
+    sendInventory();
   }
   let invBusy = null;
   // One inventory at a time; a change while one is being gathered (a sign-in arriving) sends another after it, so the
@@ -899,10 +917,12 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     try {
       // The agent CLI runs through its wrapper: under the local cap, with its pid recorded for the usage sampler.
       const bin = wrappers.wrap(job.id, spec.agent, [AGENTS[spec.agent]?.bin || spec.agent]);
+      const run = needsBrowser(spec) ? { browser: { identity: normIdentity(spec.identity), outputDir: path.join(job.dir, '.agent-orch', 'shots') } } : null;
       res = await runAgentCli({
         agent: spec.agent, model: spec.model || undefined, effort: spec.effort || undefined, prompt, cwd: job.dir, resume: resume || undefined, systemAppend: spec.systemAppend || undefined,
         autonomous: spec.autonomous ?? true, signal: job.ac.signal, onEvent: (e) => pushEvent(job, e), bin,
         env: jobEnv(job), onSpawn: ({ pid, pgid }) => registerPid({ pid, pgid, kind: 'task', id: job.id }),
+        ...(run && { mcp: ext.mcpRun(spec.agent, run) }),
       });
     } catch (e) {
       res = { outcome: 'error', text: `agent crashed: ${e?.message || e}` };
@@ -1143,6 +1163,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     setPolicy(policy);
     resources?.start();
     models.start().catch((e) => log(`model discovery failed: ${e.message}`, 'warn'));
+    probeBrowser().catch((e) => log(`browser check failed: ${e.message}`, 'warn'));
     connect();
   }
 
@@ -1151,6 +1172,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     if (stopping) return;
     stopping = true;
     clearTimeout(reconnectTimer);
+    browserAbort?.abort();
     const pausing = [...jobs.values()].filter((j) => j.state === 'running' || j.state === 'checking');
     for (const j of pausing) { j.stop = { kind: 'pause' }; j.ac?.abort(); }
     await Promise.race([

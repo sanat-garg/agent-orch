@@ -1,8 +1,9 @@
 // Which agent-orch build runs and which one waits on disk (Settings → About, GET /api/version, the Machines view).
-// A build number is `git rev-list --count <sha>`: it only grows along main, so "412" beats a sha for humans.
-// createVersion({dir, boot?, unit?}): `running()` = the build captured at boot {build, sha, subject, committedAt,
-// startedAt, serviceStartedAt} (times epoch ms; serviceStartedAt = systemd's ActiveEnterTimestamp when this process is
-// a systemd service, else null); `disk()` = the checkout's HEAD {build, sha, subject, ahead} (ahead: commits newer than
+// A build number is `git rev-list --count <sha>`: it only grows along main, so "412" beats a sha for humans. The
+// displayed version is derived from it, formatVersion(352) = 'v3.52' (package.json's "version" is not it, leave it be).
+// createVersion({dir, boot?, unit?}): `running()` = the build captured at boot {build, version, sha, subject,
+// committedAt, startedAt, serviceStartedAt} (times epoch ms; serviceStartedAt = systemd's ActiveEnterTimestamp when this process is
+// a systemd service, else null); `disk()` = the checkout's HEAD {build, version, sha, subject, ahead} (ahead: commits newer than
 // the running one), read on request; `buildOf(sha)` = a cached build number for another checkout's sha (null until
 // the count lands, or when this repo doesn't have it). `ready` resolves once the boot read finished.
 import { execFile } from 'node:child_process';
@@ -10,12 +11,16 @@ import { execFile } from 'node:child_process';
 const git = (cwd, args) => new Promise((resolve) => execFile('git', args, { cwd, timeout: 5000 }, (err, out) => resolve(err ? '' : out.trim())));
 const SHA_RE = /^[0-9a-f]{40}$/;
 
-// {build, sha, subject, committedAt} of `rev` in `dir`, or null when it isn't a git checkout (or has no such rev).
+// Build N → 'v<N/100>.<N%100, two digits>': 352 → 'v3.52', 5 → 'v0.05', 1000 → 'v10.00'; null for an unknown build.
+export const formatVersion = (n) => (Number.isInteger(n) && n >= 0 ? `v${Math.floor(n / 100)}.${String(n % 100).padStart(2, '0')}` : null);
+
+// {build, version, sha, subject, committedAt} of `rev` in `dir`, or null when it isn't a git checkout (or has no such rev).
 export async function readBuild(dir, rev = 'HEAD') {
   const [log, count] = await Promise.all([git(dir, ['log', '-1', '--format=%H%x00%ct%x00%s', rev, '--']), git(dir, ['rev-list', '--count', rev, '--'])]);
   const [sha, ct, subject = ''] = log.split('\0');
   if (!SHA_RE.test(sha || '')) return null;
-  return { build: Number(count) || null, sha, subject, committedAt: Number(ct) * 1000 || null };
+  const build = Number(count) || null;
+  return { build, version: formatVersion(build), sha, subject, committedAt: Number(ct) * 1000 || null };
 }
 
 // How many commits `to` has that `from` doesn't (0 when either is unknown).
@@ -35,7 +40,7 @@ function serviceStart(unit) {
 }
 
 export function createVersion({ dir, boot = '', unit = 'agent-orch.service' }) {
-  const running = { build: null, sha: '', subject: '', committedAt: null, startedAt: Math.round(Date.now() - process.uptime() * 1000), serviceStartedAt: null };
+  const running = { build: null, version: null, sha: '', subject: '', committedAt: null, startedAt: Math.round(Date.now() - process.uptime() * 1000), serviceStartedAt: null };
   const ready = Promise.all([
     readBuild(dir, boot || 'HEAD').then((b) => { if (b) Object.assign(running, b); }),
     serviceStart(unit).then((t) => { running.serviceStartedAt = t; }),
@@ -44,7 +49,7 @@ export function createVersion({ dir, boot = '', unit = 'agent-orch.service' }) {
     await ready;
     const d = await readBuild(dir);
     if (!d) return null;
-    return { build: d.build, sha: d.sha, subject: d.subject, ahead: running.sha && d.sha !== running.sha ? await commitsAhead(dir, running.sha, d.sha) : 0 };
+    return { build: d.build, version: d.version, sha: d.sha, subject: d.subject, ahead: running.sha && d.sha !== running.sha ? await commitsAhead(dir, running.sha, d.sha) : 0 };
   }
   const builds = new Map();
   function buildOf(sha) {

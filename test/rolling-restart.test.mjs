@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ROLLING, createRollingRestart, preflight, readRestartState, serverFile, versionOf } from '../rolling.mjs';
+import { ROLLING, createRollingRestart, preflight, readRestartState, serverFile } from '../rolling.mjs';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'cw-rolling-'));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -38,8 +38,6 @@ function harness(o = {}) {
 test('only server code needs a restart; public/ and tests do not', () => {
   for (const f of ['server.mjs', 'orchestrator.mjs', 'bin/test.mjs', 'package.json', 'package-lock.json']) assert.equal(serverFile(f), true, f);
   for (const f of ['public/app.js', 'public/x.mjs', 'test/a.test.mjs', 'README.md', '.agent-orch/CONTEXT.md', 'install-worker.sh']) assert.equal(serverFile(f), false, f);
-  assert.equal(versionOf(7, '1.0.0'), '1.07');
-  assert.equal(versionOf(412, '2.3.0'), '2.412');
 });
 
 test('a server code change schedules a restart within 2 min even with tasks running, then pauses, waits for chat and exits', async () => {

@@ -20,7 +20,6 @@ export const ROLLING = { delayMs: 30e3, windowMs: 10 * 60e3, busyRetryMs: 30e3, 
 export const APPLY_UPDATES = ['auto', 'idle', 'manual'];
 // Files whose change needs a restart: any *.mjs outside test/ and public/, and the dependency manifests.
 export const serverFile = (f) => (/\.mjs$/.test(f) && !/^(test|public)\//.test(f)) || f === 'package.json' || f === 'package-lock.json';
-export const versionOf = (count, pkgVersion = '1') => `${String(pkgVersion).split('.')[0] || '1'}.${String(count).padStart(2, '0')}`;
 
 export function readRestartState(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')) || {}; } catch { return {}; }

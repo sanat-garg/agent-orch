@@ -1291,6 +1291,9 @@ merge conflicts resolved; custom-sound and machine-settings tests pass
 
 merge conflicts resolved; rolling-restart, version, and UI tests pass
 
+## 2026-09-28 14:55 — #407 Version format: v<major>.<minor> from the commit count (352 → v3.52) [done (check passed)]
+
+Builds now show as v3.52 in About, sidebar, toasts, Machines
 ## 2026-09-28 14:53 — #431 AUDIT ledger round 8: #68 gate loopholes, #69 ungated http connectors, #70 the head ignored a worker's CPU cap [done (check passed)]
 
 AUDIT.md has Round 8 (#68–#70), with #61 and #63 marked
@@ -1303,3 +1306,7 @@ rename/new/delete endpoints added to files.mjs; files-ops tests pass
 ## 2026-09-28 14:56 — #445 Assign task button on machine cards: pick a ready task, start it there now [done (check passed)]
 
 Assign task picker on every machine card and detail panel
+
+## 2026-09-28 14:57 — #457 Integrate #407: Version format: v<major>.<minor> from the commit count (352 → v3.52) [done (check passed)]
+
+Conflict resolved; version tests and UI static tests pass

@@ -1,7 +1,7 @@
 // Settings → About in a real browser: server.mjs (no orchestrator, temp data dir) serves the app, GET /api/version is
-// mocked and the ws 'version' frame is rewritten to build 419. Checks the About lines (running build, restart time and
-// uptime, the build waiting on disk and its Restart button or "restarts when idle"), the sidebar's build label opening
-// About, the "Updated to build 419" toast for a browser that last saw an older build, and a worker's build and
+// mocked and the ws 'version' frame is rewritten to build 419 (v4.19). Checks the About lines (running build, restart time and
+// uptime, the build waiting on disk and its Restart button or "restarts when idle"), the sidebar's version label opening
+// About, the "Updated to v4.19" toast for a browser that last saw an older build, and a worker's build and
 // 'outdated' tag in the Machines view. The About text (aboutLines, pulled out of app.js's source like model-status.test)
 // is also checked without a browser; the browser part skips when Playwright's Chromium can't launch.
 import { test, before, after } from 'node:test';
@@ -14,15 +14,21 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
+import { findBrowser } from '../browser.mjs';
+import { macChromiumEnv } from './helpers/mac-chromium.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const appJs = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8');
 const src = (re) => { const m = appJs.match(re); assert.ok(m, `app.js: ${re}`); return m[0]; };
 const aboutLines = new Function([/^function aboutLines\(.*?^}$/ms, /^function relTime\(.*?^}$/ms, /^function fmtWhen\(.*?^}$/ms, /^function fmtDur\(.*?^}$/ms,
-  /^const plural = .*;$/m].map(src).join('\n') + '\nreturn aboutLines;')();
+  /^function fmtVersion\(.*$/m].map(src).join('\n') + '\nreturn aboutLines;')();
 const PASSWORD = 'version-ui-password';
 let browser, noBrowser = false;
-try { browser = await chromium.launch(); } catch (e) { noBrowser = `cached Chromium unavailable: ${e.message.split('\n')[0]}`; }
+try { browser = await chromium.launch(); } catch {
+  const mac = macChromiumEnv(); // the MacBook worker: Playwright's headless shell with the WindowManagement shim
+  try { browser = await chromium.launch(mac.AGENT_ORCH_BROWSER_PATH ? { executablePath: mac.AGENT_ORCH_BROWSER_PATH, env: { ...process.env, DYLD_INSERT_LIBRARIES: mac.DYLD_INSERT_LIBRARIES } }
+    : { executablePath: findBrowser() || undefined }); } catch (e) { noBrowser = `no Chromium: ${e.message.split('\n')[0]}`; }
+}
 let child, base, dataDir, cookie;
 
 const freePort = () => new Promise((resolve, reject) => {
@@ -63,21 +69,22 @@ test('About lines from a mocked GET /api/version', () => {
   const d = (disk, restart = { pending: false, reason: null, auto: false }) => aboutLines({ running, disk, restart }, now);
   const clock = new Date(startedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   const a = d({ build: 419, sha: 'f'.repeat(40), subject: 'Newer', ahead: 7 });
-  assert.equal(a.running, 'Running build 412 (a1b2c3d) · "Show the running build"');
+  assert.equal(a.running, 'Running v4.12 (a1b2c3d) · "Show the running build"');
   assert.equal(a.restarted, `Restarted 2h ago (${clock}) · up 2h 14m`);
   assert.match(a.runningTip, /^Committed /);
-  assert.equal(a.pending, 'Build 419 ready (7 newer commits)');
+  assert.equal(a.pending, 'v4.19 ready (7 newer)');
   assert.equal(a.restartButton, true);
   // A restart on its way (asked for, or the owner's automatic restart): no button.
   for (const restart of [{ pending: true, reason: 'draining', auto: false }, { pending: false, reason: null, auto: true }]) {
     const b = d({ build: 413, sha: 'f'.repeat(40), subject: 'Newer', ahead: 1 }, restart);
-    assert.equal(b.pending, 'Build 413 ready (1 newer commit) · restarts when idle');
+    assert.equal(b.pending, 'v4.13 ready (1 newer) · restarts when idle');
     assert.equal(b.restartButton, false);
   }
   const same = d({ build: 412, sha: running.sha, subject: running.subject, ahead: 0 });
   assert.equal(same.pending, null);
   assert.equal(same.restartButton, false);
-  assert.equal(aboutLines({ running: { startedAt }, disk: null, restart: {} }, now).running, 'Running build unknown (not a git checkout)');
+  assert.equal(aboutLines({ running: { startedAt }, disk: null, restart: {} }, now).running, 'Running version unknown (not a git checkout)');
+  assert.equal(aboutLines({ running: { ...running, build: 709 }, disk: null }, now).running, 'Running v7.09 (a1b2c3d) · "Show the running build"');
   // Days later: the date is part of it, in this timezone.
   assert.match(aboutLines({ running, disk: null }, now + 3 * 86400e3).restarted, /^Restarted 3d ago \(\w{3} .+\) · up 74h 14m$/);
 });
@@ -104,23 +111,23 @@ test('Settings → About renders the running build, restart time and the pending
   await page.goto(base + '/');
 
   // A browser that last saw build 412 is told about the update; the sidebar shows the build.
-  await page.locator('.toast', { hasText: 'Updated to build 419' }).waitFor({ timeout: 10000 });
-  await page.locator('#buildFoot', { hasText: 'build 419' }).waitFor();
+  await page.locator('.toast', { hasText: 'Updated to v4.19' }).waitFor({ timeout: 10000 });
+  await page.locator('#buildFoot', { hasText: 'v4.19' }).waitFor();
   assert.equal(await page.evaluate(() => localStorage.getItem('cw.build')), '419');
 
   await page.click('#buildFoot');
   await page.locator('#settingsModal:not([hidden])').waitFor();
-  await page.locator('#abRunning', { hasText: 'Running build 419' }).waitFor();
-  assert.equal(await page.textContent('#abRunning'), 'Running build 419 (a1b2c3d) · "Show the running build"');
+  await page.locator('#abRunning', { hasText: 'Running v4.19' }).waitFor();
+  assert.equal(await page.textContent('#abRunning'), 'Running v4.19 (a1b2c3d) · "Show the running build"');
   const restarted = await page.textContent('#abRestarted');
   const local = await page.evaluate((t) => fmtWhen(t), startedAt);
   assert.equal(restarted, `Restarted 2h ago (${local}) · up 2h 14m`);
-  assert.equal(await page.textContent('#abPendingText'), 'Build 426 ready (7 newer commits)');
+  assert.equal(await page.textContent('#abPendingText'), 'v4.26 ready (7 newer)');
   assert.ok(await page.isVisible('#abRestart'));
   assert.ok(await page.evaluate(() => { const r = document.getElementById('stAboutTitle').getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight; }), 'About scrolled into view');
 
   await page.click('#abRestart');
-  await page.locator('#abPendingText', { hasText: 'Build 426 ready (7 newer commits) · restarts when idle' }).waitFor();
+  await page.locator('#abPendingText', { hasText: 'v4.26 ready (7 newer) · restarts when idle' }).waitFor();
   assert.equal(restartCalls, 1);
   assert.ok(await page.isHidden('#abRestart'));
 
@@ -128,11 +135,11 @@ test('Settings → About renders the running build, restart time and the pending
   await page.unroute('**/api/version');
   await page.route('**/api/version', (route) => route.fulfill({ json: { running, disk: { build: 419, sha: running.sha, subject: running.subject, ahead: 0 }, restart: { pending: false, reason: null, auto: false } } }));
   await page.reload();
-  await page.locator('#buildFoot', { hasText: 'build 419' }).waitFor();
+  await page.locator('#buildFoot', { hasText: 'v4.19' }).waitFor();
   await page.click('#settingsBtn');
-  await page.locator('#abRunning', { hasText: 'Running build 419' }).waitFor();
+  await page.locator('#abRunning', { hasText: 'Running v4.19' }).waitFor();
   assert.ok(await page.isHidden('#abPending'));
-  assert.equal(await page.locator('.toast', { hasText: 'Updated to build' }).count(), 0);
+  assert.equal(await page.locator('.toast', { hasText: 'Updated to v' }).count(), 0);
   assert.deepEqual(errors.filter((e) => !/renderMetrics|load/i.test(e)), []);
   await ctx.close();
 });
@@ -153,7 +160,8 @@ test('the Machines view shows each machine\'s build and tags an outdated worker'
   await page.locator('#miniStats').click();
   const card = (id) => page.locator(`#mMachines .mc-node[data-node="${id}"] .mc-name`);
   await card('w1').waitFor({ timeout: 10000 });
-  assert.match(await card('w1').textContent(), /studio-mac.*build 410.*outdated/);
+  assert.match(await card('w1').textContent(), /studio-mac.*v4\.10.*outdated/);
   assert.doesNotMatch(await card('w2').textContent(), /outdated/);
+  await page.unrouteAll({ behavior: 'ignoreErrors' });
   await ctx.close();
 });

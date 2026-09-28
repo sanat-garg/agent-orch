@@ -33,9 +33,9 @@ import { saveUpload, readUpload, placeUploads, attachmentView, attachmentNote, c
 import { headRefusal } from './role.mjs';
 import { createBrowserViews, LOCAL as BV_LOCAL } from './browser-view.mjs';
 import { searchConvos } from './search.mjs';
-import { createRollingRestart, preflight, readRestartState, serverFile, versionOf } from './rolling.mjs';
+import { createRollingRestart, preflight, readRestartState, serverFile } from './rolling.mjs';
 import { createSounds, MAX_SOUND_BYTES as MAX_CUSTOM_SOUND_BYTES } from './sounds.mjs';
-import { createVersion } from './version.mjs';
+import { createVersion, formatVersion } from './version.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -371,7 +371,6 @@ async function autoRestartCheck() {
 // Rolling restarts (rolling.mjs): <DATA>/restart.json keeps the last one (the 10-min window, and "Updated to vX.YY"
 // for the clients of the process it started).
 const RESTART_STATE = path.join(DATA, 'restart.json'), BOOT_AT = Date.now();
-const PKG_VERSION = (() => { try { return JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version; } catch { return '1'; } })();
 const lastRestart = readRestartState(RESTART_STATE);
 const updatedTo = lastRestart.to && lastRestart.version && BOOT_AT - lastRestart.at < 10 * 60e3 ? { version: lastRestart.version, at: Math.round(lastRestart.at / 1000) } : null;
 const updateStatus = () => ({ restartPending, update: rolling.status(), updated: updatedTo && Date.now() - BOOT_AT < 10 * 60e3 ? updatedTo : null });
@@ -381,7 +380,7 @@ const rolling = createRollingRestart({
   bootCommit: () => bootCommit,
   head: () => git(['rev-parse', 'HEAD']),
   changed: async (head) => (head === bootCommit || !bootCommit ? [] : (await git(['diff', '--name-only', `${bootCommit}..${head}`])).split('\n').filter(serverFile)),
-  version: async (head) => versionOf(await git(['rev-list', '--count', head]) || 0, PKG_VERSION),
+  version: async (head) => formatVersion(Number(await git(['rev-list', '--count', head])) || 0).slice(1), // '3.59': readers add the v
   preflight: () => restartPreflight().catch((e) => String(e?.message || e)),
   busy: () => (restartPending ? 'a restart-when-idle drain is in progress' : orch?.restartBlocker() || ''),
   prepare: () => orch.prepareRestart(),
@@ -1696,9 +1695,11 @@ async function handleRequest(req, res) {
     } catch (e) { return json(res, 409, { error: e.message }); }
   }
   if (p.startsWith('/api/cluster/') && !cluster) return json(res, 503, { error: 'cluster unavailable' });
-  // build: the agent-orch build each machine runs (a worker's own report, else counted here from its sha).
-  if (p === '/api/cluster/nodes' && req.method === 'GET') return json(res, 200, { nodes: orch.machines(cluster.listNodes()).map((n) => ({ ...n,
-    build: n.local ? version.running().build : n.inventory?.versions?.build ?? version.buildOf(n.sha || n.inventory?.versions?.sha) })) });
+  // build: the agent-orch build each machine runs (a worker's own report, else counted here from its sha); version: its v3.52.
+  if (p === '/api/cluster/nodes' && req.method === 'GET') return json(res, 200, { nodes: orch.machines(cluster.listNodes()).map((n) => {
+    const build = n.local ? version.running().build : n.inventory?.versions?.build ?? version.buildOf(n.sha || n.inventory?.versions?.sha);
+    return { ...n, build, version: formatVersion(build) };
+  }) });
   // "Add machine": a pairing code, {uses: N} for one code that pairs N machines (valid 1 h); DELETE revokes a code.
   if (p === PAIR_PATH && req.method === 'POST') { const r = cluster.createPairing(await readBody(req)); return r.error ? json(res, r.status, { error: r.error }) : json(res, 200, r); }
   const pcode = p.match(/^\/api\/cluster\/pair\/([\w-]{1,20})$/);

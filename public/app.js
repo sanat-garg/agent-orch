@@ -4023,7 +4023,7 @@ function machineCard(n) {
   icon.innerHTML = OS_ICON[n.os] || OS_ICON.linux;
   icon.title = OS_NAME[n.os] || n.os || '';
   if (n.local) name.append(el('small', '', '(this server)'));
-  if (n.build) name.append(el('small', 'mc-build', `build ${n.build}`));
+  if (n.build) name.append(el('small', 'mc-build', fmtVersion(n.build)));
   // Behind the head's origin/main (or, while that count is unknown, an older build than the one running here).
   if (!n.local && (n.behind > 0 || (n.behind == null && n.build && VER.running?.build && n.build < VER.running.build))) name.append(el('span', 'tc-tag outdated', 'outdated'));
   const seen = n.local ? 'controller' : n.lastSeen ? `${n.connected ? 'seen' : 'last seen'} ${relTime(n.lastSeen)}` : 'never connected';
@@ -6232,15 +6232,17 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('sett
 // ----- About (Settings): the build this server runs and since when (ws 'version' on connect), and the newer one on
 // disk (GET /api/version). A build newer than the one this tab (or, on a fresh load, this browser) last saw toasts.
 const VER = { running: null, seq: 0 };
+// Build N (git rev-list --count) → 'v<N/100>.<N%100, two digits>', like version.mjs formatVersion: 352 → 'v3.52'.
+function fmtVersion(n) { return Number.isInteger(n) && n >= 0 ? `v${Math.floor(n / 100)}.${String(n % 100).padStart(2, '0')}` : null; }
 function onVersion(running) {
   const b = running?.build, prev = VER.running?.build || Number(store.get('cw.build')) || 0;
   VER.running = running || null;
   if (b) {
-    if (prev && b > prev) toast(`Updated to build ${b}`, { kind: 'success', duration: 8000 });
+    if (prev && b > prev) toast(`Updated to ${fmtVersion(b)}`, { kind: 'success', duration: 8000 });
     store.set('cw.build', String(b));
   }
   $('buildFoot').hidden = !b;
-  $('buildFoot').textContent = b ? `build ${b}` : '';
+  $('buildFoot').textContent = b ? fmtVersion(b) : '';
   if (!$('settingsModal').hidden) loadAbout();
 }
 async function loadAbout() {
@@ -6251,11 +6253,11 @@ async function loadAbout() {
 function aboutLines(d, now = Date.now()) {
   const r = d?.running || {}, disk = d?.disk, rs = d?.restart || {}, waits = !!(rs.pending || rs.auto);
   return {
-    running: r.sha ? `Running build ${r.build ?? '?'} (${r.sha.slice(0, 7)})${r.subject ? ` · "${r.subject}"` : ''}` : 'Running build unknown (not a git checkout)',
+    running: r.sha ? `Running ${fmtVersion(r.build) || 'version ?'} (${r.sha.slice(0, 7)})${r.subject ? ` · "${r.subject}"` : ''}` : 'Running version unknown (not a git checkout)',
     runningTip: r.committedAt ? `Committed ${fmtWhen(r.committedAt, now)}` : '',
     restarted: r.startedAt ? `Restarted ${relTime(r.startedAt, now)} (${fmtWhen(r.startedAt, now)}) · up ${fmtDur((now - r.startedAt) / 1000)}` : '',
     restartedTip: r.serviceStartedAt ? `Service started ${fmtWhen(r.serviceStartedAt, now)}` : '',
-    pending: disk?.ahead > 0 ? `Build ${disk.build} ready (${plural(disk.ahead, 'newer commit')})${waits ? ' · restarts when idle' : ''}` : null,
+    pending: disk?.ahead > 0 ? `${fmtVersion(disk.build) || 'A newer version'} ready (${disk.ahead} newer)${waits ? ' · restarts when idle' : ''}` : null,
     restartButton: disk?.ahead > 0 && !waits,
   };
 }

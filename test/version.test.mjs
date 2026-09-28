@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
-import { createVersion, readBuild, commitsAhead } from '../version.mjs';
+import { createVersion, readBuild, commitsAhead, formatVersion } from '../version.mjs';
 import { waitFor } from './helpers/wait.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -23,6 +23,14 @@ after(() => { child?.kill('SIGKILL'); fs.rmSync(tmp, { recursive: true, force: t
 const freePort = () => new Promise((resolve, reject) => {
   const s = net.createServer().listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); });
   s.on('error', reject);
+});
+
+test('formatVersion: v<build / 100>.<build % 100, two digits>', () => {
+  assert.equal(formatVersion(352), 'v3.52');
+  assert.equal(formatVersion(709), 'v7.09');
+  assert.equal(formatVersion(5), 'v0.05');
+  assert.equal(formatVersion(1000), 'v10.00');
+  assert.equal(formatVersion(null), null);
 });
 
 test('build numbers and commits ahead in a temp repo', async () => {
@@ -38,14 +46,15 @@ test('build numbers and commits ahead in a temp repo', async () => {
   await v.ready;
   const r = v.running();
   assert.equal(r.build, 3);
+  assert.equal(r.version, 'v0.03');
   assert.equal(r.sha, g('rev-parse', 'HEAD'));
   assert.equal(r.subject, 'three');
   assert.ok(Math.abs(r.committedAt - Date.now()) < 60e3);
   assert.ok(r.startedAt > 0 && r.startedAt <= Date.now());
-  assert.deepEqual(await v.disk(), { build: 3, sha: r.sha, subject: 'three', ahead: 0 });
+  assert.deepEqual(await v.disk(), { build: 3, version: 'v0.03', sha: r.sha, subject: 'three', ahead: 0 });
 
   commit('four'); const head = commit('five: the newest');
-  assert.deepEqual(await v.disk(), { build: 5, sha: head, subject: 'five: the newest', ahead: 2 });
+  assert.deepEqual(await v.disk(), { build: 5, version: 'v0.05', sha: head, subject: 'five: the newest', ahead: 2 });
   assert.equal(v.running().build, 3, 'the running build is fixed at boot');
   assert.equal(await commitsAhead(repo, second, head), 3);
   assert.equal(await commitsAhead(repo, '', head), 0);
@@ -95,12 +104,14 @@ test('GET /api/version and the ws version frame report the running build', async
   assert.equal(r.status, 200);
   const v = await r.json();
   assert.equal(v.running.build, count);
+  assert.equal(v.running.version, formatVersion(count));
+  assert.match(v.running.version, /^v\d+\.\d\d$/);
   assert.equal(v.running.sha, sha);
   assert.equal(typeof v.running.subject, 'string');
   assert.equal(typeof v.running.committedAt, 'number');
   assert.equal(typeof v.running.startedAt, 'number');
   assert.ok(v.running.startedAt <= Date.now() && v.running.startedAt > before - 60e3, `startedAt ${v.running.startedAt}`);
-  assert.deepEqual(v.disk, { build: count, sha, subject: v.running.subject, ahead: 0 });
+  assert.deepEqual(v.disk, { build: count, version: formatVersion(count), sha, subject: v.running.subject, ahead: 0 });
   assert.deepEqual(v.restart, { pending: false, reason: null, auto: false });
 
   const ws = new WebSocket(base.replace('http', 'ws') + '/ws', { headers: { cookie } });

@@ -1,6 +1,6 @@
 // Settings → About in a real browser: server.mjs (no orchestrator, temp data dir) serves the app, GET /api/version is
 // mocked and the ws 'version' frame is rewritten to build 419 (v4.19). Checks the About lines (running build, restart time and
-// uptime, the build waiting on disk and its Restart button or "restarts when idle"), the sidebar's version label opening
+// uptime, the build waiting on disk and its Restart button or "restarts when idle"), the version under the sidebar logo opening
 // About, the "Updated to v4.19" toast for a browser that last saw an older build, and a worker's build and
 // 'outdated' tag in the Machines view. The About text (aboutLines, pulled out of app.js's source like model-status.test)
 // is also checked without a browser; the browser part skips when Playwright's Chromium can't launch.
@@ -110,12 +110,12 @@ test('Settings → About renders the running build, restart time and the pending
   });
   await page.goto(base + '/');
 
-  // A browser that last saw build 412 is told about the update; the sidebar shows the build.
+  // A browser that last saw build 412 is told about the update; the sidebar shows the version under the logo.
   await page.locator('.toast', { hasText: 'Updated to v4.19' }).waitFor({ timeout: 10000 });
-  await page.locator('#buildFoot', { hasText: 'v4.19' }).waitFor();
+  await page.locator('#sideVer', { hasText: 'v4.19' }).waitFor();
   assert.equal(await page.evaluate(() => localStorage.getItem('cw.build')), '419');
 
-  await page.click('#buildFoot');
+  await page.click('#sideVer');
   await page.locator('#settingsModal:not([hidden])').waitFor();
   await page.locator('#abRunning', { hasText: 'Running v4.19' }).waitFor();
   assert.equal(await page.textContent('#abRunning'), 'Running v4.19 (a1b2c3d) · "Show the running build"');
@@ -135,7 +135,7 @@ test('Settings → About renders the running build, restart time and the pending
   await page.unroute('**/api/version');
   await page.route('**/api/version', (route) => route.fulfill({ json: { running, disk: { build: 419, sha: running.sha, subject: running.subject, ahead: 0 }, restart: { pending: false, reason: null, auto: false } } }));
   await page.reload();
-  await page.locator('#buildFoot', { hasText: 'v4.19' }).waitFor();
+  await page.locator('#sideVer', { hasText: 'v4.19' }).waitFor();
   await page.click('#settingsBtn');
   await page.locator('#abRunning', { hasText: 'Running v4.19' }).waitFor();
   assert.ok(await page.isHidden('#abPending'));

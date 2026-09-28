@@ -118,7 +118,12 @@ code, pre, kbd { font-family: var(--mono); }
   padding: max(12px, env(safe-area-inset-top)) 10px 10px;
 }
 .side-head { display: flex; align-items: center; gap: 10px; padding: 4px 6px 12px; }
-.side-title { font-weight: 650; flex: 1; }
+.side-name { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.2; }
+.side-title { font-weight: 650; }
+/* The running version under the title; tapping it opens Settings → About. */
+.side-ver { position: relative; align-self: flex-start; border: 0; padding: 0; background: none; color: var(--muted); font: inherit; font-size: 11.5px; font-variant-numeric: tabular-nums; cursor: pointer; }
+.side-ver:hover { color: var(--text); }
+@media (pointer: coarse) { .side-ver::after { content: ''; position: absolute; inset: -14px -10px; } } /* a 44pt target without a taller header */
 .new-chat {
   display: flex; align-items: center; gap: 8px;
   width: 100%; height: 40px; padding: 0 12px;
@@ -193,7 +198,7 @@ code, pre, kbd { font-family: var(--mono); }
 .side-foot:hover { background: var(--raised); color: var(--text); }
 .side-foot.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-soft); }
 .side-foot .host { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-@media (pointer: coarse) { .side-foot, #logout { min-height: 44px; } } /* UI-REVIEW #14 */
+@media (pointer: coarse) { .side-foot { min-height: 44px; } } /* UI-REVIEW #14 */
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
 .dot.on { background: var(--ok); }
 .dot.off { background: var(--danger); }
@@ -728,6 +733,7 @@ label.mc-row { cursor: pointer; }
 .cn-body { padding: 0 20px max(20px, env(safe-area-inset-bottom)); overflow-y: auto; overscroll-behavior: contain; min-height: 0; }
 .cn-app, .cn-list { border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
 .cn-list { margin-top: 12px; }
+.cn-account { margin-top: 20px; } /* this browser's own sign-in, apart from the agents */
 .cn-list:empty { display: none; }
 .cn-row { padding: 8px 12px; }
 .cn-row + .cn-row { border-top: 1px solid var(--border); }
@@ -1043,8 +1049,6 @@ label.st-row, label.st-text { cursor: pointer; }
 .ab-line { margin: 4px 0; overflow-wrap: anywhere; }
 .ab-sub { color: var(--muted); font-size: 12.5px; }
 .ab-pending { min-height: 44px; }
-.side-build { flex: none; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
-@media (pointer: coarse) { .side-build { min-height: 44px; } }
 .mc-name small.mc-build { font-variant-numeric: tabular-nums; }
 .mc-name .tc-tag.outdated { margin-left: 6px; font-size: 11px; color: var(--warn); border-color: currentColor; background: var(--warn-soft); }
 @media (pointer: coarse) { .st-presets .chip { min-height: 44px; } }

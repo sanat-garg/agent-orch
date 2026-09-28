@@ -1327,3 +1327,6 @@ Files menu has Rename, New file/folder and Delete; tests pass
 ## 2026-09-28 15:06 — #450 Simpler phone header [done (check passed)]
 
 phone header: one 44pt row, title menu switches views; tests pass
+## 2026-09-28 15:08 — #456 Sign out moves to the Connections window; version shown under the logo [done (check passed)]
+
+Sign out moved to Connections; version shows under logo

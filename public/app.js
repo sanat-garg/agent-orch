@@ -480,7 +480,9 @@ $('newChat').addEventListener('click', () => {
   closeSidebar();
   setView('chat');
 });
+// In the Connections window's 'agent-orch account' row: signs this browser out of agent-orch (not an agent CLI).
 $('logout').addEventListener('click', async () => {
+  if (!confirm('Sign out of agent-orch on this device?')) return;
   await fetch('/api/logout', { method: 'POST' });
   location.href = '/login';
 });
@@ -6279,9 +6281,16 @@ function onVersion(running) {
     if (prev && b > prev) toast(`Updated to ${fmtVersion(b)}`, { kind: 'success', duration: 8000 });
     store.set('cw.build', String(b));
   }
-  $('buildFoot').hidden = !b;
-  $('buildFoot').textContent = b ? fmtVersion(b) : '';
+  renderSideVer(running);
   if (!$('settingsModal').hidden) loadAbout();
+}
+// The version line under the sidebar logo: 'v3.52', with 'v3.52 · a1b2c3d · restarted 13:05' as its tooltip.
+function sideVerTip(r) { return [fmtVersion(r?.build), r?.sha?.slice(0, 7), r?.startedAt && `restarted ${fmtWhen(r.startedAt)}`].filter(Boolean).join(' · '); }
+function renderSideVer(r) {
+  const v = fmtVersion(r?.build);
+  $('sideVer').hidden = !v;
+  $('sideVer').textContent = v || '';
+  $('sideVer').title = v ? sideVerTip(r) : '';
 }
 async function loadAbout() {
   const seq = ++VER.seq;
@@ -6315,7 +6324,8 @@ $('abRestart').addEventListener('click', async () => {
   try { await api('/api/restart-when-idle', 'POST'); upd.pending = true; renderUpdateBanner(); } catch (e) { toast(e.message, { kind: 'error' }); }
   loadAbout();
 });
-$('buildFoot').addEventListener('click', () => { openSettings(); $('stAboutTitle').scrollIntoView({ block: 'start' }); });
+$('sideVer').addEventListener('click', () => { openSettings(); $('stAboutTitle').scrollIntoView({ block: 'start' }); });
+api('/api/version').then((d) => { if (d?.running && !VER.running) renderSideVer(d.running); }, () => {});
 function renderSettings() {
   if ($('settingsModal').hidden) return;
   const s = O.state || {}, p = O.project;

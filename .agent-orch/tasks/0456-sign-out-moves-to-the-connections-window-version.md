@@ -14,3 +14,7 @@ Two sidebar changes (public/index.html, public/app.js, public/app.css). 1) Remov
 ## Done when
 
 `node --test test/ui-signout-version*.test.mjs test/ui-static.test.mjs` passes (logout in Connections with confirmation, none in the footer, version under the logo)
+
+## Result — done (check passed) (2026-09-28 15:08)
+
+AGENT-ORCH-STATUS: done — Sign out moved to Connections; version shows under logo

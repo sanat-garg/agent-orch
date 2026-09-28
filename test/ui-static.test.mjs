@@ -269,7 +269,16 @@ test('sidebar footer in the body font at 44pt on touch; .btn.small centres its l
   const host = appCss.match(/\.side-foot \.host \{[^}]*\}/)[0];
   assert.doesNotMatch(host, /--mono/);
   assert.match(appCss, /\.btn\.small \{[^}]*display: inline-flex; align-items: center; justify-content: center/);
-  assert.match(appCss, /@media \(pointer: coarse\) \{ \.side-foot, #logout \{ min-height: 44px; \} \}/);
+  assert.match(appCss, /@media \(pointer: coarse\) \{ \.side-foot \{ min-height: 44px; \} \}/);
+});
+
+test('Sign out lives in the Connections window, not the sidebar footer; the version sits under the logo', () => {
+  const foot = indexHtml.match(/<div class="side-foot-row">[\s\S]*?<\/aside>/)[0];
+  assert.doesNotMatch(foot, /id="logout"|id="buildFoot"|side-build/);
+  const conns = indexHtml.match(/<div class="modal sheet" id="connsModal"[\s\S]*?\n<\/div>\n/)[0];
+  assert.match(conns, /agent-orch account[\s\S]*Signed in to agent-orch on this device[\s\S]*<button[^>]*class="btn small danger cn-btn" id="logout">Sign out<\/button>/);
+  assert.match(appJs, /\$\('logout'\)\.addEventListener\('click', async \(\) => \{\n  if \(!confirm\('Sign out of agent-orch on this device\?'\)\) return;\n  await fetch\('\/api\/logout'/);
+  assert.match(indexHtml, /<div class="side-head">[\s\S]*?<span class="side-title">agent-orch<\/span>\s*<button[^>]*id="sideVer"/);
 });
 
 test('touch screens get 16px fields and 44pt targets in Settings, Skills, Files, Browser, Stats, Machines, drawer, queue (UI-REVIEW #20, #22)', () => {

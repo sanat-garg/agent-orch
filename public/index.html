@@ -30,7 +30,10 @@
   <aside class="sidebar" id="sidebar">
     <div class="side-head">
       <img src="/logo.png" width="24" height="24" alt="">
-      <span class="side-title">agent-orch</span>
+      <span class="side-name">
+        <span class="side-title">agent-orch</span>
+        <button type="button" class="side-ver" id="sideVer" aria-haspopup="dialog" hidden></button>
+      </span>
       <button class="icon-btn only-mobile" id="closeSidebar" aria-label="Close sidebar">
         <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
       </button>
@@ -86,8 +89,6 @@
       <button type="button" class="icon-btn side-settings" id="settingsBtn" aria-haspopup="dialog" aria-label="Settings" title="Settings">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="16" cy="7" r="2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="8" cy="17" r="2" fill="none" stroke="currentColor" stroke-width="2"/></svg>
       </button>
-      <button type="button" class="link-btn side-build" id="buildFoot" aria-haspopup="dialog" title="About this build" hidden></button>
-      <button class="link-btn" id="logout">Sign out</button>
     </div>
   </aside>
   <div class="scrim" id="scrim"></div>
@@ -377,6 +378,13 @@
       <div class="cn-row cn-app" id="connsApp"></div>
       <div class="cn-bar"><span class="cn-checked" id="connsChecked"></span><button class="btn small" id="connsRefresh" type="button" title="Re-check every sign-in, model list and limit reading">Refresh</button></div>
       <div class="cn-list" id="connsList"></div>
+      <div class="cn-app cn-account">
+        <div class="cn-row cn-main">
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="12" cy="8" r="4" fill="none" stroke="currentColor" stroke-width="2"/><path d="M4 21a8 8 0 0 1 16 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <div class="cn-info"><span class="cn-label">agent-orch account</span><span class="cn-status"><span class="cn-st">Signed in to agent-orch on this device</span></span></div>
+          <button type="button" class="btn small danger cn-btn" id="logout">Sign out</button>
+        </div>
+      </div>
     </div>
   </div>
 </div>

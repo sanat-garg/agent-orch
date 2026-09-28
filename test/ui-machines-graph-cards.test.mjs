@@ -117,7 +117,7 @@ async function open(viewport, colorScheme = 'light') {
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto(`${base}/#${CID}`);
   await page.waitForFunction(() => O.project?.name === 'Fleet');
-  await page.locator('#machinesBtn').click();
+  await page.locator('#miniStats').dispatchEvent('click');
   await page.locator('#mxModal:not([hidden])').waitFor();
   return { ctx, page, errors };
 }

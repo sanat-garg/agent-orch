@@ -1263,7 +1263,7 @@ label.mc-row { cursor: pointer; }
 .chat:has(.orch-bar:not([hidden])) .jump { bottom: 196px; }
 
 /* Settings sheet (sidebar gear): grouped rows with one-line hints. */
-.side-settings, .side-machines { width: 32px; height: 32px; }
+.side-settings { width: 32px; height: 32px; }
 .modal-panel.st { width: min(520px, 100%); }
 .st-sec { margin: 22px 0 2px; font-size: 11.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
 .m-body > .st-sec:first-child { margin-top: 2px; }
@@ -1307,7 +1307,7 @@ label.st-row, label.st-text { cursor: pointer; }
 .st-switch:disabled { opacity: .5; cursor: default; }
 /* Phones: a row with a picker or buttons puts them under its text; switches stay beside it. */
 @media (max-width: 600px) { .st-row:has(select, .btn) { flex-wrap: wrap; } .st-row:has(select, .btn) .st-text { flex-basis: 100%; } .st-row select { max-width: 100%; flex: 1; } }
-@media (pointer: coarse) { .st-row select, .st-row .btn.small, .side-settings, .side-machines { height: 44px; } .side-settings, .side-machines { width: 44px; } }
+@media (pointer: coarse) { .st-row select, .st-row .btn.small, .side-settings { height: 44px; } .side-settings { width: 44px; } }
 @media (pointer: coarse) { .st-row select, .st-dir textarea, #stGatePatterns { font-size: 16px; } } /* UI-REVIEW #20: iOS zooms into smaller fields */
 
 /* task cards in the chat */

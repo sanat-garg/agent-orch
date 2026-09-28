@@ -122,7 +122,7 @@ const box = (page, sel) => page.locator(sel).evaluate((e) => { const r = e.getBo
 
 test('desktop: the diagram and the queue side by side, lanes per machine, live updates, reorder, a queued card opens its drawer', { skip, timeout: 90000 }, async () => {
   const { ctx, page, errors } = await open({ viewport: { width: 1440, height: 900 } });
-  await page.locator('#machinesBtn').click();
+  await page.locator('#miniStats').dispatchEvent('click');
   await page.locator('#mxModal:not([hidden])').waitFor();
   await settle(page);
   // A wide window over the app (its size: ui-machines-modal.test.mjs).
@@ -234,7 +234,7 @@ test("the sidebar machine card opens the whole view; a diagram machine opens its
 
 test('phone (390px): a full-height sheet with Machines and Queue tabs; a queued card opens its drawer', { skip, timeout: 60000 }, async () => {
   const { ctx, page, errors } = await open({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
-  await page.locator('#machinesBtn').dispatchEvent('click'); // the sidebar is off-canvas on a phone
+  await page.locator('#miniStats').dispatchEvent('click'); // the sidebar is off-canvas on a phone
   await page.locator('#mxModal:not([hidden])').waitFor();
   await settle(page); // the sheet's slide-up
   const panel = await box(page, '#mxModal .mx-panel');

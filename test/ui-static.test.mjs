@@ -192,7 +192,9 @@ test('server details live in the controller node detail, the Machines view\'s si
   assert.match(indexHtml, /<div id="sdStash" hidden>\s*<div class="sd" id="serverDetails">\s*<div class="sd-head">[\s\S]*?id="rangePicker"[\s\S]*?id="mGrid"><\/div>\s*<div id="sdRun"><\/div>\s*<div class="m-card m-top" id="mTopCard">[\s\S]*?class="m-top-scroll"><table class="m-table" id="mTop">[\s\S]*?<\/table><\/div>\s*<\/div>\s*<\/div>\s*<\/div>/);
   // The full-screen Machines view: summary, tabs (phones), the diagram and cards, the queue, then the node detail as its side panel.
   assert.match(indexHtml, /id="mxModal"[\s\S]*?id="mcSum"[\s\S]*?id="mxTabMachines"[\s\S]*?id="mxTabQueue"[\s\S]*?id="mxMain"[\s\S]*?id="caWrap"[\s\S]*?id="mMachines"[\s\S]*?id="mxQueue"[\s\S]*?id="mxCounts"[\s\S]*?<div class="mx-side" id="nodeModal" hidden>[\s\S]*?id="ndBack"[\s\S]*?id="ndBody"[\s\S]*?id="machineModal"/, 'Add machine stacks above the view');
-  assert.match(indexHtml, /id="machinesBtn"[^>]*aria-label="Machines"/);
+  // The sidebar footer has no Machines button (#485); the usage card is the way in.
+  assert.ok(!/id="machinesBtn"|side-machines/.test(indexHtml + appJs + appCss), 'no Machines button in the sidebar footer');
+  assert.doesNotMatch(indexHtml.match(/<div class="side-foot-row">[\s\S]*?<\/div>/)[0], /Machines/);
   assert.match(appJs, /function renderServerDetails\(container\) \{/);
   assert.match(appJs, /tile\('load', 'Load average'\),\n\s*\);/);
   // The sidebar card opens the full-screen Machines view, not the machine it shows (#447).

@@ -135,7 +135,7 @@ async function openDiagram(ctxOpts) {
     await route.fulfill({ response: res, json: body }).catch(() => {});
   });
   await page.goto(`${base}/`);
-  await page.locator('#machinesBtn').dispatchEvent('click'); // the Machines view; the sidebar is off-canvas on a phone
+  await page.locator('#miniStats').dispatchEvent('click'); // the Machines view; the sidebar is off-canvas on a phone
   const count = (await call('/api/cluster/nodes')).nodes.length;
   await waitFor(() => page.locator('#caWrap .ca-node').count().then((n) => n === count), { timeout: 15000, message: 'the diagram draws every node' });
   await waitFor(() => sock, { message: 'the page socket is routed' });

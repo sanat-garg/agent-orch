@@ -110,7 +110,7 @@ test('a Ping button per worker card and Ping all: a chip group with a red pill p
   // Server details' own charts can't read load averages on a macOS head (renderMetrics): not this view's concern.
   page.on('pageerror', (e) => { if (!/renderMetrics/.test(e.stack)) errors.push(e.message); });
   await page.goto(`${base}/`);
-  await page.locator('#machinesBtn').dispatchEvent('click');
+  await page.locator('#miniStats').dispatchEvent('click');
   const upCard = page.locator('.mc-node', { hasText: 'MacBook Air (Desk)' }), awayCard = page.locator('.mc-node', { hasText: 'MacBook Pro (Bag)' });
   await awayCard.waitFor();
   // One per worker card, under Machine settings → Manage → Check connection (the controller is this server: nothing to

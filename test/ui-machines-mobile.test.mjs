@@ -135,7 +135,7 @@ async function open(width, height, opts = {}) {
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto(`${base}/#${CID}`);
   await page.waitForFunction(() => O.project?.name === 'Fleet');
-  await page.locator('#machinesBtn').dispatchEvent('click'); // the sidebar is off-canvas on a phone
+  await page.locator('#miniStats').dispatchEvent('click'); // the sidebar is off-canvas on a phone
   await page.locator(opts.isMobile === false ? '#mxModal:not([hidden]) #caWrap .cc[data-node="controller"]' : '#mxModal:not([hidden]) #mMachines .mc-node').nth(opts.isMobile === false ? 0 : 4).waitFor(); // desktop: the diagram's cards
   await page.evaluate(() => Promise.all(document.querySelector('#mxModal .mx-panel').getAnimations().map((a) => a.finished.catch(() => {}))));
   return { ctx, page, errors };

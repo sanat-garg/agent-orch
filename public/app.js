@@ -5692,7 +5692,6 @@ $('mxModal').querySelector('.mx-tabs').addEventListener('keydown', (e) => {
   $('mxModal').querySelector(`.mx-tabs [data-tab="${tab}"]`).focus();
 });
 $('mxModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]') && !$('nodeModal').contains(e.target)) closeMachines(); });
-$('machinesBtn').addEventListener('click', () => openMachines());
 // Phones: Update all / Ping all / Add machine go under the list, and the diagram sits behind 'Show diagram'.
 function mxPlace() {
   const acts = $('mxActs'), head = $('mxModal').querySelector('.mx-head');

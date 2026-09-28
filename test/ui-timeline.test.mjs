@@ -114,7 +114,7 @@ test('UI: machine health on the cards, and the phase timeline in a remote taskâ€
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto(`${base}/`);
-  await page.locator('#machinesBtn').dispatchEvent('click'); // the Machines view; the sidebar is off-canvas on a phone
+  await page.locator('#miniStats').dispatchEvent('click'); // the Machines view; the sidebar is off-canvas on a phone
   const mac = page.locator('.mc-node', { hasText: 'studio-mac' });
   await mac.locator('.mc-health').first().waitFor();
   const macText = await mac.textContent();

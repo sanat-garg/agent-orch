@@ -1546,3 +1546,7 @@ Command: node --test test/restart-cancel*.test.mjs
 ## 2026-09-28 18:19 — #491 Integrate #478: Restart banner: a Cancel button for 'Restarting once idle' [done (check passed)]
 
 a re-armed restart clears the deferral at once; the restart-cancel tests pass
+
+## 2026-09-28 18:21 — #485 Remove the Machines icon from the sidebar footer [done (check passed)]
+
+Sidebar footer has no Machines button; usage card opens Machines

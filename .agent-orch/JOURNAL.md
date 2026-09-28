@@ -774,3 +774,7 @@ Full suite then failed 5 real-browser tests, on main too: Chromium aborts "Socke
 ## 2026-09-28 04:44 — #252 Integrate #248: Land worker skills/subagents/MCP sync from branch claude/heuristic-visvesvaraya-d78c0d [done (check passed)]
 
 main re-merged with ext sync kept; npm test passes 478/478
+
+## 2026-09-28 04:54 — #263 Verifier: a | inside a quoted grep pattern is regex, not a pipe (land the task-244 taskrun fix) [done (check passed)]
+
+Verifier treats | in quoted grep patterns as regex

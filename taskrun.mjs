@@ -16,6 +16,8 @@ const RUNNERS = ['python3', 'python', 'pytest', 'npm', 'npx', 'pnpm', 'yarn', 'n
 // A single-backtick snippet counts as a command only if it starts like one; `server.mjs` or `loggedIn` don't.
 const CMD_START = /^(!|test\s|\[\s|grep\b|node\b|npm\b|bash\b|sh\s|curl\b|python)/;
 const looksLikeCommand = (s) => RUNNERS.some((r) => s.startsWith(r)) || CMD_START.test(s);
+// The command with its quoted and backslash-escaped text blanked out, leaving only what the shell parses as operators.
+const unquoted = (s) => s.replace(/'[^']*'|"(?:\\.|[^"\\])*"|\\./g, '_');
 export function extractCommand(doneWhen) {
   if (!doneWhen) return null;
   const triple = doneWhen.match(/```(?:\w+\n)?([\s\S]*?)```/);
@@ -42,7 +44,9 @@ function checkCommand(cand, doneWhen) {
   if ((cand.match(/;/g) || []).length + (cand.match(/&&/g) || []).length > 1) return null;
   if (!RUNNERS.some((r) => cand.startsWith(r)) && !/^(test|ls|grep|cat|git|!|\[|bash|sh)(\s|\b)/.test(cand)) return null;
   // "`grep …` prints nothing": grep exits 1 when clean, so pass only on exit 1 (matches → 0, errors → 2 still fail).
-  if (/^grep\b/.test(cand) && !/[;&|]/.test(cand)) {
+  // Only a lone grep: after a pipe or a list $? is another command's, but a | ; & in its quoted pattern is just regex
+  // (`grep -n 'cat <<.*|' x.sh` used to stay as written and fail the check when clean).
+  if (/^grep\b/.test(cand) && !/[;&|]/.test(unquoted(cand))) {
     const after = doneWhen.slice(doneWhen.indexOf(cand) + cand.length).replace(/^[`\s]+/, '');
     if (/^(prints|outputs|returns|shows|produces|finds|gives)\s+(nothing|no\s+(output|match|matches|results|hits|lines))\b/i.test(after)) {
       return `${cand}; test $? -eq 1`;

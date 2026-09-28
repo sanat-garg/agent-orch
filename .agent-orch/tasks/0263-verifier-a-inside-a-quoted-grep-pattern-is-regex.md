@@ -13,3 +13,7 @@ The Done-when verifier (taskrun.mjs extractCommand/checkCommand) rewrites a lone
 ## Done when
 
 `node --test test/verify.test.mjs` passes and `grep -n 'unquoted' taskrun.mjs` prints a match
+
+## Result — done (check passed) (2026-09-28 04:54)
+
+AGENT-ORCH-STATUS: done — Verifier treats | in quoted grep patterns as regex

@@ -8,6 +8,15 @@ test('extractCommand joins every command snippet with &&', () => {
   assert.equal(extractCommand('`grep -n foo x.mjs` prints nothing and `npm test` passes'), '{ grep -n foo x.mjs; test $? -eq 1; } && npm test');
 });
 
+test('extractCommand: a | in the quoted grep pattern is regex, so "prints nothing" still passes only on exit 1', () => {
+  assert.equal(extractCommand("`grep -n 'cat <<.*|' a.sh` prints nothing"), "grep -n 'cat <<.*|' a.sh; test $? -eq 1");
+  assert.equal(extractCommand("`node --test t.mjs` passes, `grep -n 'cat <<.*|' a.sh` prints nothing, and `npm test` passes"),
+    "node --test t.mjs && { grep -n 'cat <<.*|' a.sh; test $? -eq 1; } && npm test");
+  assert.equal(extractCommand('`grep -nE "a|b;c" a.sh` finds nothing'), 'grep -nE "a|b;c" a.sh; test $? -eq 1');
+  // A real pipe: $? is the last command's, so it stays as written.
+  assert.equal(extractCommand('`grep -n foo a.sh | grep -v bar` prints nothing'), 'grep -n foo a.sh | grep -v bar');
+});
+
 test('extractCommand ignores file-name and identifier snippets', () => {
   assert.equal(extractCommand('`server.mjs` sets `loggedIn` and `npm test` passes'), 'npm test');
   assert.equal(extractCommand('`server.mjs` exports `loggedIn`'), null);

@@ -52,7 +52,7 @@ _Durable knowledge for every session. History: JOURNAL.md. Bugs: AUDIT.md. Mobil
 
 ## Gotchas
 - This checkout IS the live app. Never restart/kill it or call `POST /api/restart-when-idle` on port 3000. Test instances MUST use another port and `CW_DATA_DIR=$(mktemp -d)`. Server/orchestrator edits go live only on restart ("Restart when idle" banner), so a failing Done-when may be stale running code.
-- The verifier runs every command-like backtick snippet in Done-when, joined with ` && `; `>` and `curl` are refused. Absence checks use `! grep …`. A `|` inside a quoted grep pattern in a "prints nothing" check defeats the exit-1 rewrite until taskrun.mjs blanks quoted text first.
+- The verifier runs every command-like backtick snippet in Done-when, joined with ` && `; `>` and `curl` are refused. Absence checks use `! grep …`. A `|` inside a quoted grep pattern in a "prints nothing" check is regex, not a pipe (taskrun.mjs blanks quoted text first).
 - /tmp is a small tmpfs with a per-user quota (EDQUOT); run heavy tests with `TMPDIR=` on the home disk. Chromium puts a Unix socket (≤107 bytes) in TMPDIR; bin/test.mjs falls back to ~/.cache when the path is too long.
 - test/helper-kill.test.mjs is racy under load and can leave `test/fixtures/helper-parent.mjs` running, hanging `npm test` and the shared test lock. Kill that pid.
 - Playwright `hover()` scrolls the target into view; tooltips that hide on scroll flicker on this 1-core box (stats.js `wireTips` re-targets instead).

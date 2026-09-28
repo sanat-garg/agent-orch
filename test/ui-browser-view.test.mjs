@@ -196,7 +196,8 @@ test('desktop: the Browser tab shows the profile in place; the prompt posts to /
 test('iPhone (390px): the canvas fits the width and the prompt box stays on screen', { skip, timeout: 120000 }, async () => {
   const { ctx, p, s } = await app({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
   try {
-    await p.locator('.seg [data-view="browser"]').tap();
+    await p.locator('#viewBtn').tap(); // phones switch views from the title's menu (#450)
+    await p.locator('#viewMenu [data-view="browser"]').tap();
     await waitFor(() => s.bv.some((m) => m.t === 'bv_open' && m.identity === 'work'), { timeout: 10000, message: 'opens the profile' });
     await serverSays(p, { t: 'bv_state', node: 'mac', identity: 'work', url: 'https://mail.google.com/mail/u/0/', title: 'Inbox', active: true, takeover: false, role: 'watch', task: { id: 42, title: 'Archive' } });
     await serverSays(p, { t: 'bv_frame', node: 'mac', identity: 'work', n: 1, data: frame, w: 1280, h: 800 });
@@ -222,7 +223,8 @@ test('iPhone (390px): the canvas fits the width and the prompt box stays on scre
 test('iPhone (390px): two fingers pinch-zoom the canvas, a tap maps through the zoom, a double-tap goes back to fit', { skip, timeout: 120000 }, async () => {
   const { ctx, p, s } = await app({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
   try {
-    await p.locator('.seg [data-view="browser"]').tap();
+    await p.locator('#viewBtn').tap(); // phones switch views from the title's menu (#450)
+    await p.locator('#viewMenu [data-view="browser"]').tap();
     await waitFor(() => s.bv.some((m) => m.t === 'bv_open' && m.identity === 'work'), { timeout: 10000, message: 'opens the profile' });
     await serverSays(p, { t: 'bv_state', node: 'mac', identity: 'work', url: 'https://mail.google.com/mail/u/0/', title: 'Inbox', active: false, takeover: false, role: 'control', task: null });
     await serverSays(p, { t: 'bv_frame', node: 'mac', identity: 'work', n: 1, data: frame, w: 1280, h: 800 });

@@ -13,3 +13,7 @@ Redesign the top header on phones (<768px; public/index.html header, public/app.
 ## Done when
 
 `node --test test/ui-mobile-header*.test.mjs test/ui-static.test.mjs` passes (≤3 visible header controls at 390px, view switcher works, no overflow)
+
+## Result — done (check passed) (2026-09-28 15:06)
+
+AGENT-ORCH-STATUS: done — phone header: one 44pt row, title menu switches views; tests pass

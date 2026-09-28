@@ -1324,3 +1324,6 @@ Queue now shows plain-language refill status with an explanation popover
 ## 2026-09-28 15:06 — #419 Files tab ui: Rename, New file, New folder and Delete in the context menu [done (check passed)]
 
 Files menu has Rename, New file/folder and Delete; tests pass
+## 2026-09-28 15:06 — #450 Simpler phone header [done (check passed)]
+
+phone header: one 44pt row, title menu switches views; tests pass

@@ -130,7 +130,8 @@ test('desktop: the Browser tab shows the live page in place, and clicks and keys
 test('iPhone: a tap is a click and the keyboard field types into the page', { skip, timeout: 180000 }, async () => {
   const { ctx, p, errors } = await app({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
   try {
-    await p.locator('.seg [data-view="browser"]').tap();
+    await p.locator('#viewBtn').tap(); // phones switch views from the title's menu (#450)
+    await p.locator('#viewMenu [data-view="browser"]').tap();
     await waitFor(() => inControl(p), { timeout: 90000, message: 'in control' });
     await waitFor(() => p.evaluate((u) => document.getElementById('bxUrl').value === u, pageUrl), { timeout: 30000, message: 'the same page' });
     await waitFor(() => drawn(p), { timeout: 30000, message: 'a frame is drawn' });

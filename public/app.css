@@ -178,6 +178,16 @@ code, pre, kbd { font-family: var(--mono); }
 .menu button { display: block; width: 100%; text-align: left; padding: 8px 10px; border: 0; background: none; border-radius: 6px; cursor: pointer; font-size: 14px; }
 .menu button:hover { background: var(--raised); }
 .menu button.danger { color: var(--danger); }
+/* The phone header's view switcher (#viewMenu, opened from the title): 44pt rows, a check on the current view. */
+.view-menu { min-width: 210px; padding: 6px; border-radius: 14px; }
+.view-menu button { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 12px; border-radius: 9px; color: var(--text); font-size: 16px; }
+.view-menu .vm-check { flex: none; color: var(--accent-ink); visibility: hidden; }
+.view-menu [aria-checked="true"] { font-weight: 600; }
+.view-menu [aria-checked="true"] .vm-check { visibility: visible; }
+.vm-more { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); }
+.vm-more button { font-size: 15px; }
+.vm-more svg { flex: none; width: 16px; height: 16px; color: var(--muted); }
+.vm-more button.warn, .vm-more button.warn svg { color: var(--warn); }
 .side-foot-row { display: flex; align-items: center; gap: 4px; padding: 6px 0 0; border-top: 1px solid var(--border); }
 .side-foot { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 5px 6px; border: 1px solid transparent; border-radius: 8px; background: none; color: var(--muted); font-size: 13px; cursor: pointer; text-align: left; }
 .side-foot:hover { background: var(--raised); color: var(--text); }
@@ -200,6 +210,10 @@ code, pre, kbd { font-family: var(--mono); }
   flex: none;
 }
 .top-title { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 10px; }
+/* #viewBtn wraps the title: plain text on wider screens (disabled by app.js syncPhoneHeader), the view switcher on phones. */
+.title-btn { display: flex; align-items: baseline; flex: 0 1 auto; min-width: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; }
+.title-btn:disabled { cursor: default; }
+.title-btn .chev { display: none; }
 .top-title #title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 0; }
 .top-title .cwd { flex: 1 1 0; min-width: 0; }
 .cwd { font-family: var(--mono); font-size: 12px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -213,7 +227,7 @@ code, pre, kbd { font-family: var(--mono); }
 .icon-btn { width: 36px; height: 36px; display: grid; place-items: center; border: 0; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; flex: none; }
 .icon-btn:hover { background: var(--raised); color: var(--text); }
 .icon-btn:focus:not(:focus-visible) { outline: none; } /* rings for keyboard focus only, never a mouse click or tap */
-.only-mobile { display: none; }
+.only-mobile, .only-phone { display: none; }
 
 .banner {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
@@ -1477,6 +1491,25 @@ details.dr-more[open] > summary { margin-bottom: 12px; }
   .seg button span { display: none; }
   .chip { max-width: 150px; }
   #modelChip { max-width: 60vw; }
+}
+/* Phone header (HIG navigation bar): one 44pt row below the safe area with at most three controls: the sidebar button, the
+   title whose chevron opens #viewMenu (it replaces .seg and takes the repo link) and #topAction. The status stays in #orchBar. */
+@media (max-width: 767px) {
+  .topbar {
+    display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px; gap: 4px;
+    height: calc(44px + env(safe-area-inset-top, 0px)); padding: 0 4px; padding-top: env(safe-area-inset-top);
+  }
+  .topbar .seg, .topbar .cwd, .topbar .repo-link { display: none; }
+  .only-phone { display: grid; }
+  #openSidebar, #topAction { width: 44px; height: 44px; }
+  #openSidebar { grid-column: 1; }
+  .top-title { grid-column: 2; justify-content: center; align-items: center; }
+  #topAction { grid-column: 3; }
+  .title-btn { align-items: center; gap: 5px; max-width: 100%; height: 44px; padding: 0 10px; border-radius: 10px; cursor: pointer; }
+  .title-btn:active { background: var(--raised); }
+  .title-btn #title { font-size: 17px; }
+  .title-btn .chev { display: block; flex: none; color: var(--muted); transition: transform .15s ease; }
+  .title-btn[aria-expanded="true"] .chev { transform: rotate(180deg); }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0s !important; transition: none !important; }

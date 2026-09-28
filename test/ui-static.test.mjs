@@ -193,13 +193,18 @@ test('server details live in the controller node detail: charts, Running here, T
   assert.match(appCss, /\.modal-panel\.nd\.wide \{ width: min\(1120px, 100%\); \}/);
 });
 
-test('top bar keeps its 56px content row below the iPhone safe-area inset (UI-REVIEW #1)', () => {
+test('top bar keeps its content row below the iPhone safe-area inset: 56px, 44px on phones (UI-REVIEW #1, #450)', () => {
   const topbars = appCss.match(/\.topbar \{[^}]*\}/g);
-  assert.equal(topbars.length, 2, 'base rule and the max-width: 800px rule');
-  for (const r of topbars) {
-    assert.match(r, /height: calc\(56px \+ env\(safe-area-inset-top, 0px\)\)/);
+  assert.equal(topbars.length, 3, 'base rule, the max-width: 800px rule and the phone (max-width: 767px) rule');
+  topbars.forEach((r, i) => {
+    assert.match(r, i < 2 ? /height: calc\(56px \+ env\(safe-area-inset-top, 0px\)\)/ : /height: calc\(44px \+ env\(safe-area-inset-top, 0px\)\)/);
     assert.match(r, /padding-top: env\(safe-area-inset-top\)/);
-  }
+  });
+  assert.match(appCss, /@media \(max-width: 767px\) \{\n  \.topbar \{/, 'the 44pt row is phones only');
+  assert.match(appCss, /\.topbar \.seg, \.topbar \.cwd, \.topbar \.repo-link \{ display: none; \}/, 'the title menu replaces them on phones');
+  assert.match(indexHtml, /id="viewBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="viewMenu"/);
+  for (const v of ['chat', 'files', 'term', 'browser']) assert.match(indexHtml, new RegExp(`role="menuitemradio" data-view="${v}"`));
+  assert.match(appJs, /\$\('viewBtn'\)\.disabled = !phoneHeader\.matches/, 'plain text on wider screens');
 });
 
 test('composer follows the on-screen keyboard via visualViewport and --kb (UI-REVIEW #2)', () => {

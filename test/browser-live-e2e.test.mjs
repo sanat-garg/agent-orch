@@ -175,7 +175,8 @@ test('the Browser tab streams the home page, lays it out for the screen and maps
 test('iPhone: the page fills the Browser tab and the toolbar and prompt fit 390 px', { skip, timeout: 180000 }, async () => {
   const { ctx, p, errors } = await app({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 3 });
   try {
-    await p.locator('.seg [data-view="browser"]').tap();
+    await p.locator('#viewBtn').tap(); // phones switch views from the title's menu (#450)
+    await p.locator('#viewMenu [data-view="browser"]').tap();
     await waitFor(() => inControl(p), { timeout: 60000, message: 'in control' });
     await p.locator('#bxUrl').fill(homeUrl);
     await p.locator('#bxUrl').press('Enter');

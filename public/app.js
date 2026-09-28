@@ -94,6 +94,8 @@ function setView(view) {
   if (!['term', 'files', 'browser'].includes(view)) view = 'chat';
   $('app').dataset.view = view;
   document.querySelectorAll('.seg button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.view === view)));
+  document.querySelectorAll('#viewMenu [data-view]').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.view === view)));
+  $('topAction').hidden = view !== 'chat';
   $('chatView').hidden = view !== 'chat';
   $('filesView').hidden = view !== 'files';
   $('termView').hidden = view !== 'term';
@@ -108,6 +110,53 @@ function setView(view) {
   store.set('cw.view', view);
 }
 document.querySelectorAll('.seg button').forEach((b) => b.addEventListener('click', () => setView(b.dataset.view)));
+
+// Phone header (<768px, HIG navigation bar): the sidebar button, the title (its chevron opens #viewMenu: the views that
+// .seg shows on wider screens, then the overflow, i.e. the repo link) and one action for the view (#topAction).
+const phoneHeader = matchMedia('(max-width: 767px)');
+function syncPhoneHeader() {
+  $('viewBtn').disabled = !phoneHeader.matches;
+  if (!phoneHeader.matches) closeViewMenu();
+}
+phoneHeader.addEventListener('change', syncPhoneHeader);
+syncPhoneHeader();
+function openViewMenu() {
+  const m = $('viewMenu'), repo = $('repoLink'), item = $('viewMenuRepo');
+  $('viewMenuMore').hidden = repo.hidden;
+  if (!repo.hidden) {
+    item.replaceChildren(repo.querySelector('svg').cloneNode(true), $('repoText').textContent);
+    item.classList.toggle('warn', repo.classList.contains('warn'));
+  }
+  m.hidden = false;
+  $('viewBtn').setAttribute('aria-expanded', 'true');
+  const r = $('viewBtn').getBoundingClientRect();
+  m.style.top = `${r.bottom + 6}px`;
+  m.style.left = `${Math.max(8, Math.min(r.left + r.width / 2 - m.offsetWidth / 2, innerWidth - m.offsetWidth - 8))}px`;
+  (m.querySelector('[aria-checked="true"]') || m.querySelector('button')).focus({ preventScroll: true });
+}
+function closeViewMenu(refocus) {
+  if ($('viewMenu').hidden) return;
+  $('viewMenu').hidden = true;
+  $('viewBtn').setAttribute('aria-expanded', 'false');
+  if (refocus) $('viewBtn').focus({ preventScroll: true });
+}
+$('viewBtn').addEventListener('click', () => ($('viewMenu').hidden ? openViewMenu() : closeViewMenu()));
+$('viewMenu').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  closeViewMenu();
+  if (b.dataset.view) setView(b.dataset.view);
+  else if (b.id === 'viewMenuRepo') $('repoLink').click();
+});
+$('viewMenu').addEventListener('keydown', (e) => {
+  const items = [...$('viewMenu').querySelectorAll('button')].filter((b) => b.offsetParent);
+  const i = items.indexOf(document.activeElement);
+  if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeViewMenu(true); }
+  else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); items[(i + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length]?.focus(); }
+  else if (e.key === 'Tab') closeViewMenu();
+});
+document.addEventListener('pointerdown', (e) => { if (!e.target.closest('#viewMenu, #viewBtn')) closeViewMenu(); });
+$('topAction').addEventListener('click', () => $('newChat').click());
 $('bannerTerm').addEventListener('click', () => setView('term'));
 $('updateRestart').addEventListener('click', async () => {
   $('updateRestart').disabled = true;

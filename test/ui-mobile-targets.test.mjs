@@ -141,7 +141,8 @@ test('390×844: touch grows the composer and orch bar by at most one row; a fine
   const fine = await open({ width: 390, height: 844 }, false);
   const f = await composerHeights(fine.page);
   const sizes = await boxes(fine.page, '#send, #modelChip, #openSidebar');
-  assert.deepEqual(sizes.map((b) => [b.id, b.w > 0 && b.h]), [['openSidebar', 36], ['modelChip', 30], ['send', 36]]);
+  // The phone header's buttons fill its 44pt row whatever the pointer (#450).
+  assert.deepEqual(sizes.map((b) => [b.id, b.w > 0 && b.h]), [['openSidebar', 44], ['modelChip', 30], ['send', 36]]);
   const after = await hitArea(fine.page, '#usRefresh');
   assert.equal(after.inset, 0, 'no enlarged hit area with a fine pointer');
   await fine.ctx.close();

@@ -13,3 +13,7 @@ In stats.mjs (read its header: it only collects; the browser formats) add `resul
 ## Done when
 
 `npm test -- test/stats.test.mjs` && `grep -q 'export function failureWhy' stats.mjs`
+
+## Result — done (check passed) (2026-09-28 13:52)
+
+AGENT-ORCH-STATUS: done — stats tasks carry classified `why`; snapshot has `failures` summary

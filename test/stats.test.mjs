@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
-import { createStats, commitKind, parseGitLog, windowPeriods, ownerAction, runModel, hourlyMachine } from '../stats.mjs';
+import { createStats, commitKind, parseGitLog, windowPeriods, ownerAction, runModel, hourlyMachine, failureWhy } from '../stats.mjs';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-stats-'));
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -70,6 +70,28 @@ test('hourlyMachine: minute samples become hourly means and peaks', () => {
     [{ t: h, cpu: 20, mem: 45, peak: 30 }, { t: h + 3600e3, cpu: 5, mem: 45, peak: 5 }]);
 });
 
+test('failureWhy: a failed or cancelled task\'s result, classified', () => {
+  const k = (status, result) => failureWhy(status, result);
+  assert.equal(k('done', 'all good'), null);
+  assert.equal(k('queued', null), null);
+  assert.deepEqual(k('failed', '↻ #12 done-when check failed: npm test\nnot ok 3'), { kind: 'check', text: '↻ #12 done-when check failed: npm test' });
+  assert.equal(k('failed', '✖ #12 failed (verification): `npm test` still failing').kind, 'check');
+  assert.equal(k('failed', '`npm test` still failing after 3 sessions:\nnot ok 1').kind, 'check');
+  assert.deepEqual(k('failed', 'setup failed: fatal: could not read Username'), { kind: 'setup', text: 'setup failed: fatal: could not read Username' });
+  assert.deepEqual(k('failed', 'blocked: #187 (unfinished)'), { kind: 'blocked', text: 'blocked: #187 (unfinished)', task: 187 });
+  assert.deepEqual(k('failed', 'still not done after 3 sessions: AGENT-ORCH-STATUS: continue — tests remain'),
+    { kind: 'gave-up', text: 'still not done after 3 sessions: tests remain' });
+  assert.equal(k('failed', 'Command failed: git push origin agent-orch/task-9\nrejected').kind, 'push');
+  assert.equal(k('failed', 'push failed').kind, 'push');
+  assert.equal(k('failed', 'Playwright MCP exited before the first page').kind, 'browser');
+  assert.equal(k('failed', 'the browser tool server did not start').kind, 'browser');
+  assert.deepEqual(k('cancelled', 'cancelled with #40'), { kind: 'cascade', text: 'cancelled with #40', task: 40 });
+  assert.deepEqual(k('cancelled', 'cancelled with integrator #41'), { kind: 'cascade', text: 'cancelled with integrator #41', task: 41 });
+  assert.deepEqual(k('cancelled', null), { kind: 'cancelled', text: '' });
+  assert.equal(k('cancelled', 'the owner changed their mind').kind, 'cancelled');
+  assert.deepEqual(k('failed', `**AGENT-ORCH-STATUS: failed — ${'x'.repeat(200)}**\nmore`), { kind: 'other', text: 'x'.repeat(120) });
+});
+
 test('createStats: joins every source into one snapshot, cached until asked for fresh', async () => {
   const data = path.join(tmp, 'data'), repo = path.join(tmp, 'proj');
   fs.mkdirSync(path.join(data, 'orchestrator', 'runs'), { recursive: true });
@@ -89,7 +111,7 @@ test('createStats: joins every source into one snapshot, cached until asked for 
   db.exec(`CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT, name TEXT, status TEXT, created_at REAL);
     CREATE TABLE tasks (id INTEGER PRIMARY KEY, project_id INTEGER, kind TEXT, title TEXT, status TEXT, urgency TEXT, source TEXT, origin TEXT,
       attempts INTEGER, continuations INTEGER, created_at REAL, started_at REAL, finished_at REAL, agent TEXT, model TEXT, ran_agent TEXT,
-      ran_model TEXT, commit_sha TEXT, moves TEXT, node_id TEXT, effort TEXT);
+      ran_model TEXT, commit_sha TEXT, moves TEXT, node_id TEXT, effort TEXT, result TEXT);
     CREATE TABLE runs (id INTEGER PRIMARY KEY, task_id INTEGER, purpose TEXT, outcome TEXT, agent TEXT, node_id TEXT, effort TEXT,
       input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER, num_turns INTEGER, started_at REAL, finished_at REAL, log_path TEXT);
     CREATE TABLE events (id INTEGER PRIMARY KEY, ts REAL, level TEXT, project_id INTEGER, task_id INTEGER, message TEXT);
@@ -100,6 +122,10 @@ test('createStats: joins every source into one snapshot, cached until asked for 
   const addT = db.prepare('INSERT INTO tasks (id, project_id, kind, title, status, urgency, source, origin, attempts, continuations, created_at, started_at, finished_at, agent, model, ran_agent, ran_model, commit_sha) VALUES (?, 1, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)');
   addT.run(2, 'work', 'Add a', 'done', 'normal', 'planner', 'chat', T + 60, T + 70, T + 400, 'claude', null, 'claude', 'opus', 'abc');
   addT.run(3, 'work', 'Polish', 'cancelled', 'background', 'reflection', 'reflection', T + 100, null, T + 200, null, null, null, null, null);
+  addT.run(4, 'work', 'Wire', 'failed', 'normal', 'planner', 'chat', T + 110, T + 120, T + 300, null, null, null, null, null);
+  addT.run(5, 'work', 'Ship', 'cancelled', 'normal', 'planner', 'chat', T + 120, null, T + 310, null, null, null, null, null);
+  db.prepare('UPDATE tasks SET result = ? WHERE id = ?').run('blocked: #187 (unfinished)', 4);
+  db.prepare('UPDATE tasks SET result = ? WHERE id = ?').run('cancelled with #4', 5);
   const log = path.join(data, 'orchestrator', 'runs', 'run-000001.jsonl');
   fs.writeFileSync(log, `${JSON.stringify({ k: 'start', at: T + 70, agent: 'claude', model: 'claude-opus-5-5' })}\n{"k":"text","text":"hi"}\n`);
   db.prepare('INSERT INTO runs VALUES (1, 2, ?, ?, ?, ?, ?, 10, 20, 30, 4, ?, ?, ?)').run('work', 'ok', 'claude', 'controller', 'high', T + 70, T + 400, log);
@@ -127,7 +153,12 @@ test('createStats: joins every source into one snapshot, cached until asked for 
   const d = await stats.collect();
   assert.equal(d.since, T * 1000);
   assert.deepEqual(d.projects, [{ id: 1, name: 'proj', status: 'active', created: T * 1000 }]);
-  assert.deepEqual(d.tasks.map((t) => [t.id, t.from, t.agent, t.model, t.finished]), [[2, 'you', 'claude', 'opus', (T + 400) * 1000], [3, 'reflection', null, null, (T + 200) * 1000]]);
+  assert.deepEqual(d.tasks.map((t) => [t.id, t.from, t.agent, t.model, t.finished]), [[2, 'you', 'claude', 'opus', (T + 400) * 1000], [3, 'reflection', null, null, (T + 200) * 1000],
+    [4, 'you', null, null, (T + 300) * 1000], [5, 'you', null, null, (T + 310) * 1000]]);
+  // Why each failed or cancelled task ended, and those reasons counted.
+  assert.deepEqual(d.tasks.map((t) => t.why), [null, { kind: 'cancelled', text: '' },
+    { kind: 'blocked', text: 'blocked: #187 (unfinished)', task: 187 }, { kind: 'cascade', text: 'cancelled with #4', task: 4 }]);
+  assert.deepEqual(d.failures, [{ kind: 'blocked', n: 1, tasks: [4] }, { kind: 'cancelled', n: 1, tasks: [3] }, { kind: 'cascade', n: 1, tasks: [5] }]);
   // The run's tokens come from the matching usage record (cache writes included) and its model from its log.
   assert.deepEqual({ ...d.runs[0], start: 0, end: 0 }, { id: 1, task: 2, p: 1, purpose: 'work', outcome: 'ok', agent: 'claude', model: 'claude-opus-5-5',
     node: 'controller', effort: 'high', start: 0, end: 0, turns: 4, in: 1000, out: 20, cached: 30 });
@@ -150,5 +181,5 @@ test('createStats: joins every source into one snapshot, cached until asked for 
 
 test('createStats: a data dir with nothing in it gives empty lists', async () => {
   const d = await createStats({ dataDir: path.join(tmp, 'nothing') }).collect();
-  for (const k of ['projects', 'tasks', 'runs', 'chat', 'you', 'owner', 'checks', 'moves', 'windows', 'limits', 'commits', 'machine', 'nodes']) assert.deepEqual(d[k], [], k);
+  for (const k of ['projects', 'tasks', 'failures', 'runs', 'chat', 'you', 'owner', 'checks', 'moves', 'windows', 'limits', 'commits', 'machine', 'nodes']) assert.deepEqual(d[k], [], k);
 });

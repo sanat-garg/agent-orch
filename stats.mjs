@@ -1,8 +1,10 @@
 // Stats: one read-only snapshot of everything the owner and the orchestrator have done, for the Stats sheet
 // (public/stats.js). The server only collects; ranges, local-time buckets and insights are the browser's job, so
 // every timestamp here is epoch ms and nothing is formatted.
-//   GET /api/stats → { at, since, projects, tasks, runs, chat, you, owner, checks, moves, windows, limits, commits, machine, nodes }
+//   GET /api/stats → { at, since, projects, tasks, failures, runs, chat, you, owner, checks, moves, windows, limits, commits, machine, nodes }
 //   nodes: [{id, name, os, status, lastSeen}], the paired worker machines (tasks[].node / runs[].node point at their ids)
+//   tasks[].why: {kind, text, task?} for failed/cancelled tasks (failureWhy), else null
+//   failures: [{kind, n, tasks: [id, …newest first, ≤ 5]}], most common kind first
 // Sources: the orchestrator DB (own read-only connection), chat logs (<DATA>/logs/<convo>.jsonl), usage.jsonl,
 // minutes.jsonl and each project's git log (cached per HEAD). Missing sources give empty lists, never an error.
 import fs from 'node:fs';
@@ -99,6 +101,24 @@ export function runModel(agent, start, task) {
   return moves.flatMap((m) => [m.from, m.to]).find((x) => x.agent === agent)?.model || null;
 }
 
+// A failed or cancelled task's result → why it ended: {kind, text (first line, ≤ 120 chars, status marker stripped)},
+// plus `task` for the one it followed (blocked / cascade). null for any other status.
+const STATUS_MARK = /[*_`]*(?:AGENT-ORCH|AO2)-STATUS:[\s*_`]*(?:(?:done|failed|continue|blocked)\b[\s*_`]*(?:[—–-]\s*)?)?/gi;
+export function failureWhy(status, result) {
+  if (status !== 'failed' && status !== 'cancelled') return null;
+  const r = String(result || '');
+  const text = (r.split('\n').find((l) => l.trim()) || '').replace(STATUS_MARK, '').trim().slice(0, 120);
+  let m;
+  if ((m = /^blocked: #(\d+)/.exec(r))) return { kind: 'blocked', text, task: +m[1] };
+  if ((m = /^cancelled with (?:integrator )?#(\d+)/.exec(r))) return { kind: 'cascade', text, task: +m[1] };
+  if (/still not done after \d+ sessions/.test(r)) return { kind: 'gave-up', text };
+  if (/done-when check failed|failed \(verification\)|still failing after \d+ sessions/.test(r)) return { kind: 'check', text };
+  if (/^setup failed:/m.test(r)) return { kind: 'setup', text };
+  if (/Command failed: git push|push failed/i.test(r)) return { kind: 'push', text };
+  if (/playwright|browser tool server/i.test(r)) return { kind: 'browser', text };
+  return { kind: status === 'cancelled' ? 'cancelled' : 'other', text };
+}
+
 // Owner actions the orchestrator logged as events: what you steered, by kind.
 export function ownerAction(message) {
   const m = String(message || '');
@@ -151,7 +171,7 @@ export function createStats({ dataDir, dbFile = path.join(dataDir, 'orchestrator
       const all = (sql) => { try { return db.prepare(sql).all(); } catch { return []; } };
       return {
         projects: all('SELECT id, name, path, status, created_at FROM projects'),
-        tasks: all('SELECT id, project_id, kind, title, status, urgency, source, origin, attempts, continuations, created_at, started_at, finished_at, agent, model, ran_agent, ran_model, commit_sha, moves, node_id, effort FROM tasks'),
+        tasks: all('SELECT id, project_id, kind, title, status, urgency, source, origin, attempts, continuations, created_at, started_at, finished_at, agent, model, ran_agent, ran_model, commit_sha, moves, node_id, effort, result FROM tasks'),
         runs: all('SELECT id, task_id, purpose, outcome, agent, node_id, effort, input_tokens, output_tokens, cache_read_tokens, num_turns, started_at, finished_at, log_path FROM runs'),
         events: all('SELECT ts, level, project_id, task_id, message FROM events'),
         nodes: all('SELECT id, name, os, status, last_seen FROM nodes'),
@@ -233,19 +253,29 @@ export function createStats({ dataDir, dbFile = path.join(dataDir, 'orchestrator
     let machine = [];
     try { machine = hourlyMachine(readRecords(path.join(dataDir, 'metrics', 'minutes.jsonl'))); } catch {}
 
+    const taskRows = tasks.map((t) => ({
+      id: t.id, p: t.project_id, kind: t.kind || 'work', title: t.title, status: t.status, urgency: t.urgency,
+      // Who asked: you (chat or a direct task) or the orchestrator's own reflection.
+      from: t.source === 'reflection' || t.origin === 'reflection' ? 'reflection' : 'you',
+      created: ms(t.created_at), started: ms(t.started_at), finished: ms(t.finished_at), attempts: t.attempts || 0, continuations: t.continuations || 0,
+      agent: t.ran_agent || t.agent || null, model: t.ran_model || t.model || null, sha: t.commit_sha || null, node: t.node_id || null, effort: t.effort || null,
+      why: failureWhy(t.status, t.result),
+    }));
+    const byKind = new Map();
+    for (const t of taskRows.filter((x) => x.why).sort((a, b) => (b.finished ?? b.created ?? 0) - (a.finished ?? a.created ?? 0) || b.id - a.id)) {
+      const f = byKind.get(t.why.kind) || byKind.set(t.why.kind, { kind: t.why.kind, n: 0, tasks: [] }).get(t.why.kind);
+      if (f.n++ < 5) f.tasks.push(t.id);
+    }
+    const failures = [...byKind.values()].sort((a, b) => b.n - a.n || a.kind.localeCompare(b.kind));
+
     const you = yourMessages().map((m) => ({ t: m.t, p: projByPath.get(m.cwd) ?? null, words: m.words, text: m.text }));
     const all = [...tasks.map((t) => ms(t.created_at)), ...you.map((m) => m.t), ...projects.map((p) => ms(p.created_at))].filter(Number.isFinite);
     return {
       at: now(),
       since: all.length ? Math.min(...all) : now(),
       projects: projects.map((p) => ({ id: p.id, name: p.name, status: p.status, created: ms(p.created_at) })),
-      tasks: tasks.map((t) => ({
-        id: t.id, p: t.project_id, kind: t.kind || 'work', title: t.title, status: t.status, urgency: t.urgency,
-        // Who asked: you (chat or a direct task) or the orchestrator's own reflection.
-        from: t.source === 'reflection' || t.origin === 'reflection' ? 'reflection' : 'you',
-        created: ms(t.created_at), started: ms(t.started_at), finished: ms(t.finished_at), attempts: t.attempts || 0, continuations: t.continuations || 0,
-        agent: t.ran_agent || t.agent || null, model: t.ran_model || t.model || null, sha: t.commit_sha || null, node: t.node_id || null, effort: t.effort || null,
-      })),
+      tasks: taskRows,
+      failures,
       runs: runRows,
       chat: tokenRecs.filter((r) => r.source === 'chat').map((r) => ({ t: r.t, agent: r.agent, in: r.input || 0, out: r.output || 0, cached: r.cached || 0 })),
       you, owner, checks, moves,

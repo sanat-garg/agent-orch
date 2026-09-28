@@ -1076,3 +1076,6 @@ checkUnavailable exported and tested; orchestrator.mjs wiring still pending
 ## 2026-09-28 13:52 — #395 UI-REVIEW #28 (Stats and Skills & tools tabs): the selected segment gets its own --seg-on colour in dark mode and a 600 weight [done (check passed)]
 
 Stats and Skills & tools selected tabs: --seg-on, weight 600
+## 2026-09-28 13:52 — #391 stats.mjs: every failed or cancelled task carries a classified `why`, and the snapshot a `failures` summary [done (check passed)]
+
+stats tasks carry classified `why`; snapshot has `failures` summary

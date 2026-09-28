@@ -41,16 +41,24 @@ test('real browser: Send is held until approved, a denial leaves the page unchan
   const settled = (p) => Promise.race([p.then(() => true), new Promise((r) => setTimeout(() => r(false), 1500))]);
   try {
     await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } });
-    await call('browser_navigate', { url });
+    // The test page is on 127.0.0.1, so opening it is held too (AUDIT #41).
+    const nav = call('browser_navigate', { url });
+    await waitFor(() => asked().length === 1, { timeout: 30000 });
+    const n = JSON.parse(fs.readFileSync(path.join(dir, 'approvals', asked()[0]), 'utf8'));
+    assert.equal(n.reason, 'opens a local or private service');
+    answer(dir, 'approvals', n.id, { decision: 'approve' });
+    await nav;
     const snap = text(await call('browser_snapshot'));
     const ref = /button "Send" \[ref=(\w+)\]/.exec(snap)?.[1];
     assert.ok(ref, snap);
-    assert.equal(asked().length, 0, 'navigation and snapshots are not held');
+    assert.equal(asked().length, 1, 'snapshots are not held');
+    const seen = new Set(asked());
+    const fresh = () => asked().filter((f) => !seen.has(f));
 
     const denied = call('browser_click', { element: 'the blue button', target: ref });
-    await waitFor(() => asked().length === 1, { timeout: 30000 });
+    await waitFor(() => fresh().length === 1, { timeout: 30000 });
     assert.equal(await settled(denied), false, 'held');
-    const a = JSON.parse(fs.readFileSync(path.join(dir, 'approvals', asked()[0]), 'utf8'));
+    const a = JSON.parse(fs.readFileSync(path.join(dir, 'approvals', fresh()[0]), 'utf8'));
     assert.match(a.action, /^Click "Send" button on 127\.0\.0\.1:\d+\/compose · To: bob@example\.com, Subject: Invoice 42$/);
     assert.ok(fs.statSync(path.join(dir, 'shots', a.screenshot)).size > 1000, 'a real screenshot of the page');
     answer(dir, 'approvals', a.id, { decision: 'deny', reason: 'check the amount first' });
@@ -58,8 +66,8 @@ test('real browser: Send is held until approved, a denial leaves the page unchan
     assert.match(text(await call('browser_snapshot')), /Not sent/, 'the page is unchanged');
 
     const approved = call('browser_click', { element: 'Send', target: ref });
-    await waitFor(() => asked().length === 2, { timeout: 30000 });
-    const b = asked().map((n) => JSON.parse(fs.readFileSync(path.join(dir, 'approvals', n), 'utf8'))).find((x) => x.id !== a.id);
+    await waitFor(() => fresh().length === 2, { timeout: 30000 });
+    const b = fresh().map((f) => JSON.parse(fs.readFileSync(path.join(dir, 'approvals', f), 'utf8'))).find((x) => x.id !== a.id);
     answer(dir, 'approvals', b.id, { decision: 'approve' });
     await approved;
     assert.match(text(await call('browser_snapshot')), /Sent to bob@example\.com/);

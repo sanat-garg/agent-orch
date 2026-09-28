@@ -112,7 +112,7 @@ test('orchestrator: a connector send is held (the run paused past its timeout), 
         return (r.content || []).map((x) => x.text).join('');
       };
       results.push(await call('search_messages', { q: 'invoice' }));
-      for (const to of ['bob@example.com', 'amy@example.com', 'cat@example.com']) {
+      for (const to of ['bob@example.com', 'amy@example.com', 'amy@example.com']) {
         results.push(await call('send_email', { to, subject: 'Invoice 42', api_key: 'sk-live-0123456789abcdefghij' }));
       }
       c.close();
@@ -160,7 +160,7 @@ test('orchestrator: a connector send is held (the run paused past its timeout), 
   assert.equal(r.status, 'done');
   assert.equal(r.results[0], '2 messages: "Invoice 42", "Lunch"', 'reads pass without asking');
   assert.match(r.results[1], /^DENIED: The owner denied this action .*: Bob is not the client\. It was NOT performed/);
-  assert.deepEqual(r.results.slice(2), ['Sent to amy@example.com', 'Sent to cat@example.com'], 'approved once, then allowed for the rest of the task');
+  assert.deepEqual(r.results.slice(2), ['Sent to amy@example.com', 'Sent to amy@example.com'], 'approved once, then allowed to the same recipient for the rest of the task');
   assert.deepEqual(executed(log), ['search_messages', 'send_email', 'send_email'], 'the denied send never ran');
   assert.deepEqual(r.actions.approvals.map((a) => a.status), ['denied', 'always', 'auto']);
   const e = r.actions.entries;

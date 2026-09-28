@@ -572,6 +572,8 @@ the same origin. `run-on` accepts only a string or null naming a known node.
   once the run sandbox exists.
 - **Fix:** Pass `--blocked-origins` for loopback, link-local and private ranges to the Playwright MCP (or class such
   navigations as outbound), and set `AGENT_ORCH_BROWSER_SANDBOX=1` wherever the kernel allows it.
+- **Fixed** (task #317, gate half only): `browser_navigate`, or a click on a link, to a loopback, link-local, private or bare
+  hostname (`isLocalUrl`) is outbound, "opens a local or private service". The Chromium `--no-sandbox` half is still open.
 
 ### 42. [med] A paired worker can fill the controller's disk and stall its single core: no frame budget (cluster.mjs:380-421, :178, :347-359; node-metrics.mjs:83-91)
 - **What:** Frames have no rate limit. Each `resources` frame is appended to `<DATA>/metrics/nodes/<id>.jsonl` with its
@@ -665,6 +667,8 @@ the same origin. `run-on` accepts only a string or null naming a known node.
   followed by an `evaluate` that clicks Pay.
 - **Fix:** Don't offer Always for arbitrary-code tools. For connectors, key on the recipient-like arguments (or a hash
   of them), or label the button "every send_email in this task".
+- **Fixed** (task #317): arbitrary-code browser tools (/evaluate|run_code|execute/) get `key: null`, so no Always covers them,
+  and a connector key is `server|tool|<8-hex sha256 of its recipient-like args>`.
 
 ### 50. [low] `bv_open` with a URL navigates a profile a task is using, without take-over (browser-view.mjs:92; browser-live.mjs:228, :248)
 - **What:** Input and `bv_nav` check `canDrive`, but a `url` on `bv_open` is navigated to right away. That happens on a

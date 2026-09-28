@@ -13,3 +13,7 @@ Two classifier findings from AUDIT.md, both in gate.mjs `classify(tool, args, ct
 ## Done when
 
 `node --test test/approval-gate.test.mjs` passes and `grep -n 'local or private service' gate.mjs` prints a line
+
+## Result — done (check passed) (2026-09-28 12:44)
+
+AGENT-ORCH-STATUS: done — Code tools have no always key; local navigation now held

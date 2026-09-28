@@ -95,6 +95,25 @@ test('classify: element names from the snapshot, checkout URLs, reads, custom pa
   assert.equal(classify('modify_labels', {}, conn).cls, 'outbound');
   assert.equal(classify('search_messages', { q: 'x' }, conn).cls, 'read');
   assert.equal(classify('create_draft', {}, conn).cls, 'draft');
+  // "Always" keys (AUDIT #49): arbitrary code has none; a connector's covers only the same recipients.
+  const ev = classify('browser_evaluate', { function: `() => ${'x'.repeat(200)}` }, ctx);
+  assert.equal(ev.key, null, 'no "always" for arbitrary JS');
+  assert.equal(ev.action, `evaluate on mail.example.com/compose: () => ${'x'.repeat(114)}`, 'the first 120 chars of the code');
+  assert.equal(classify('browser_run_code', { code: 'x' }, ctx).key, null);
+  const bob = classify('send_email', { to: 'bob@acme.com', subject: 'Hi' }, conn).key;
+  assert.match(bob, /^gmail\|send_email\|[0-9a-f]{8}$/);
+  assert.equal(classify('send_email', { subject: 'Other', to: 'bob@acme.com' }, conn).key, bob, 'same recipient, same key');
+  assert.notEqual(classify('send_email', { to: 'x@evil.com', subject: 'Hi' }, conn).key, bob, 'another recipient is not covered');
+  assert.equal(classify('search_messages', { q: 'x' }, conn).key, 'gmail|search_messages', 'no recipient-like args');
+  // Local and private services are outbound (AUDIT #41).
+  for (const u of ['http://127.0.0.1:7682', 'http://192.168.1.5/', 'http://localhost:3000/', 'http://[::1]:2019/', 'http://caddy/', 'http://169.254.169.254/latest']) {
+    const nav = classify('browser_navigate', { url: u }, ctx);
+    assert.deepEqual([nav.cls, nav.reason], ['outbound', 'opens a local or private service'], u);
+  }
+  assert.equal(classify('browser_navigate', { url: 'https://example.com/' }, ctx).cls, 'draft');
+  const lan = parseSnapshot('- Page URL: https://example.com/\n- link "Docs" [ref=e1]:\n  - /url: http://10.0.0.2:8080/\n- link "About" [ref=e2]:\n  - /url: /about');
+  assert.equal(classify('browser_click', { target: 'e1' }, { ...ctx, snapshot: lan }).reason, 'opens a local or private service');
+  assert.equal(classify('browser_click', { target: 'e2' }, { ...ctx, snapshot: lan }).cls, 'draft', 'a relative link');
   assert.deepEqual(redact({ apiKey: 'k', q: 'token ya29.abcdefghijklmnop', fields: [{ name: 'Password', value: 'hunter2' }] }),
     { apiKey: '[redacted]', q: 'token [redacted]', fields: [{ name: 'Password', value: '[redacted]' }] });
 });

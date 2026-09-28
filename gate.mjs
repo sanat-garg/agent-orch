@@ -110,9 +110,37 @@ const TEXT_FIELD_RE = /^(textbox|combobox|searchbox)$/;
 // A field where submitting only searches or filters the page.
 const isSearchField = (e) => e?.role === 'searchbox' || /search|filter|find/i.test(e?.name || '');
 
+// Arbitrary-code browser tools: no "always" covers them, since the next call's code can do anything.
+const CODE_TOOL_RE = /evaluate|run_code|execute/i;
+// Connector args that say who or what a call reaches; their values go into the "always" key.
+const RECIPIENT_ARG_RE = /^(to|cc|bcc|recipient|recipients|email|channel|chat|phone|number|account|payee|url|path|id)s?$/i;
+// A url's host is loopback, link-local or private (a bare hostname like `caddy` counts): the controller's ttyd, app and
+// Caddy admin API live there (AUDIT #41). Element urls resolve against a public dummy base, so relative links never match.
+export function isLocalUrl(u, { base } = {}) {
+  let h;
+  try { h = new URL(String(u || ''), base).hostname; } catch {}
+  if (!h && !base) try { h = new URL(`http://${u}`).hostname; } catch {}
+  h = String(h || '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (!h) return false;
+  if (h === 'localhost' || h.endsWith('.localhost')) return true;
+  if (h.includes(':')) {
+    const m = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h);
+    if (m) { const a = parseInt(m[1], 16), b = parseInt(m[2], 16); h = [a >> 8, a & 255, b >> 8, b & 255].join('.'); } else {
+      return h === '::1' || h === '::' || /^fe[89ab][0-9a-f]:/.test(h) || /^f[cd][0-9a-f]{2}:/.test(h);
+    }
+  }
+  const v4 = /^(\d+)\.(\d+)\.\d+\.\d+$/.exec(h);
+  if (v4) {
+    const [a, b] = [+v4[1], +v4[2]];
+    return a === 127 || a === 10 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+  }
+  return !h.includes('.');
+}
+
 // Classifies one call. ctx: {server, kind: 'browser' | 'connector', snapshot (parseSnapshot, fresh), patterns,
 // connector: {outbound: [names], read: [names], draft: [names]}}. Returns {cls, reason, action (what the owner reads),
-// key (the "always allow" identity), target?, url?}.
+// key (the "always allow" identity: null for arbitrary-code tools, so no "always" covers them; a connector's includes a
+// hash of its recipient-like args), target?, url?}. Navigating to (or clicking a link to) a local or private host is outbound.
 export function classify(tool, args = {}, ctx = {}) {
   const { server = 'mcp', kind = 'browser', patterns = DEFAULT_PATTERNS } = ctx;
   const snap = ctx.snapshot || { url: null, refs: new Map(), dialog: null };
@@ -121,7 +149,8 @@ export function classify(tool, args = {}, ctx = {}) {
   if (kind !== 'browser') {
     const c = ctx.connector || {}, has = (list) => Array.isArray(list) && list.some((x) => x === tool || (x.endsWith('*') && tool.startsWith(x.slice(0, -1))));
     const summary = clip(Object.entries(redact(args)).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join(', '), 300);
-    const base = { action: `${server}: ${tool}${summary ? ` (${summary})` : ''}`, key: `${server}|${tool}` };
+    const who = Object.keys(args || {}).filter((k) => RECIPIENT_ARG_RE.test(k)).sort().map((k) => [k, args[k]]);
+    const base = { action: `${server}: ${tool}${summary ? ` (${summary})` : ''}`, key: `${server}|${tool}${who.length ? `|${sha(JSON.stringify(who)).slice(0, 8)}` : ''}` };
     if (has(c.outbound)) return { cls: 'outbound', reason: 'marked outbound', ...base };
     if (has(c.read)) return { cls: 'read', reason: 'marked read', ...base };
     if (has(c.draft)) return { cls: 'draft', reason: 'marked draft', ...base };
@@ -132,8 +161,8 @@ export function classify(tool, args = {}, ctx = {}) {
   if (BROWSER_READ.has(tool)) return { cls: 'read', reason: 'reads the page', action: `${tool.replace(/^browser_/, '')}${where}`, key: key() };
   if (tool === 'browser_navigate') {
     const to = String(args.url || '');
-    const hit = CHECKOUT_URL_RE.test(safePath(to));
-    return { cls: hit ? 'outbound' : 'draft', reason: hit ? 'opens a checkout/payment page' : 'navigation', action: `Open ${clip(to, 200)}`, key: key(hostOf(to)), url: to };
+    const hit = CHECKOUT_URL_RE.test(safePath(to)), local = !hit && isLocalUrl(to);
+    return { cls: hit || local ? 'outbound' : 'draft', reason: hit ? 'opens a checkout/payment page' : local ? 'opens a local or private service' : 'navigation', action: `Open ${clip(to, 200)}`, key: key(hostOf(to)), url: to };
   }
   if (tool === 'browser_handle_dialog') {
     const msg = snap.dialog || '', hit = args.accept !== false ? matchPattern(msg, patterns) : null;
@@ -163,6 +192,9 @@ export function classify(tool, args = {}, ctx = {}) {
     if (tool === 'browser_click' && els.some((e) => e.url && CHECKOUT_URL_RE.test(safePath(e.url)))) {
       return { cls: 'outbound', reason: 'links to a checkout/payment page', action, key: k, target: pick(el) };
     }
+    if (tool === 'browser_click' && els.some((e) => e.url && isLocalUrl(e.url, { base: 'https://page.invalid/' }))) {
+      return { cls: 'outbound', reason: 'opens a local or private service', action, key: k, target: pick(el) };
+    }
     return { cls: 'draft', reason: 'page interaction', action, key: k, target: pick(el) };
   }
   if (tool === 'browser_press_key') {
@@ -179,8 +211,9 @@ export function classify(tool, args = {}, ctx = {}) {
     return { cls: 'draft', reason: 'page interaction', action: `${tool.replace(/^browser_/, '').replace(/_/g, ' ')}${detail}${where}`, key: key(args.key) };
   }
   // browser_evaluate, browser_run_code_unsafe and anything new: arbitrary effects, so the owner decides.
-  const code = args.function ?? args.code;
-  return { cls: 'outbound', reason: 'unrecognised or arbitrary-code browser tool', action: `${tool.replace(/^browser_/, '').replace(/_/g, ' ')}${where}${code ? `: ${clip(code, 200)}` : ''}`, key: key(url ? hostOf(url).split('/')[0] : '') };
+  const code = args.function ?? args.code, isCode = CODE_TOOL_RE.test(tool);
+  return { cls: 'outbound', reason: 'unrecognised or arbitrary-code browser tool', action: `${tool.replace(/^browser_/, '').replace(/_/g, ' ')}${where}${code ? `: ${isCode ? String(code).slice(0, 120) : clip(code, 200)}` : ''}`,
+    key: isCode ? null : key(url ? hostOf(url).split('/')[0] : '') };
 }
 const pick = (e) => (e ? { role: e.role, name: e.name || e.selector || '', ...(e.ref && { ref: e.ref }) } : undefined);
 const safePath = (u) => { try { const x = new URL(u, 'http://x'); return `${x.pathname}${x.search}${x.hash}`; } catch { return String(u || ''); } };

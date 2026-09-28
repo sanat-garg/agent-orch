@@ -1031,3 +1031,6 @@ drops show 'connection lost'; reported reasons counted and shown per machine
 ## 2026-09-28 12:43 — #362 Completion sound plays while the tab is active too [done (check passed)]
 
 completion sound now plays in active tabs too; tests pass
+## 2026-09-28 12:44 — #317 AUDIT #49 and #41 in gate.mjs: no always key for arbitrary-code tools, argument hashes on connector keys, loopback navigation is outbound [done (check passed)]
+
+Code tools have no always key; local navigation now held

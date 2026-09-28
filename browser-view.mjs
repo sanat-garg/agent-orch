@@ -2,11 +2,13 @@
 // node is one session here, fanned out to every viewer on the app's /ws. The profile's node runs it (browser-live.mjs):
 // the controller in-process, a worker through screen.* cluster frames. Exactly one viewer controls a session. While a
 // task uses the profile the owner watches, or takes over (the node's take-over flag holds the task's browser actions)
-// until they hand back; closing the view hands back too.
-//   UI → server: bv_open {node, identity, url? (followed only when this socket may drive), thumb?}, bv_close, bv_input {events}, bv_nav {action, url?}, bv_take, bv_handback
+// until they hand back; closing the view hands back too. The page is laid out for a full viewer's canvas (bv_size, and
+// size on bv_open): the controller's, else the latest one's; thumbnails never size it.
+//   UI → server: bv_open {node, identity, url? (followed only when this socket may drive), thumb?, size?}, bv_close, bv_input {events},
+//   bv_nav {action, url?}, bv_take, bv_handback, bv_size {size: {width, height, dpr}}
 //   server → UI: bv_frame {node, identity, n, data, w, h}, bv_state {node, identity, url, title, active, takeover, role, task, closed?, error?, note?}
 import { MSG } from './cluster-protocol.mjs';
-import { createLiveBrowsers, screenOp, activeRun, takenOver } from './browser-live.mjs';
+import { createLiveBrowsers, screenOp, activeRun, takenOver, viewSize } from './browser-live.mjs';
 import { findBrowser, normIdentity, IDENTITY_RE } from './browser.mjs';
 
 export const LOCAL = 'controller';
@@ -49,7 +51,17 @@ export function createBrowserViews({ cluster = () => null, tasks = () => [], sen
     const active = s.state.active || !!taskFor(s);
     if (s.controller && !s.viewers.has(s.controller)) s.controller = null;
     if (!s.controller && !active) s.controller = [...s.viewers].find(([, v]) => !v.thumb)?.[0] || null;
+    fit(s);
   }
+  // The page follows the controller's canvas, else the one sized last; with none the node keeps the size it had.
+  function fit(s) {
+    const c = s.viewers.get(s.controller), z = c?.size || [...s.viewers.values()].filter((v) => v.size).sort((a, b) => b.sizedAt - a.sizedAt)[0]?.size;
+    const key = z && JSON.stringify(z);
+    if (!z || key === s.sized) return;
+    s.sized = key;
+    s.ready.then(() => op(s.node, { op: 'size', identity: s.identity, size: z })).catch(() => {});
+  }
+  const sizeViewer = (v, size) => { const z = !v.thumb && viewSize(size); if (z) Object.assign(v, { size: z, sizedAt: Date.now() }); return !!z; };
 
   function onFrame(s, f) {
     s.frame = f;
@@ -76,19 +88,23 @@ export function createBrowserViews({ cluster = () => null, tasks = () => [], sen
     if (s.state.takeover && !s.closed) op(s.node, { op: 'takeover', identity: s.identity, on: false }).catch(() => {});
   }
 
-  async function open(ws, { node, identity, url, thumb }) {
+  async function open(ws, { node, identity, url, thumb, size }) {
     node = typeof node === 'string' && node ? node : LOCAL;
     identity = normIdentity(identity);
     const key = keyOf(node, identity);
     let s = sessions.get(key);
     if (!s) {
-      s = { key, node, identity, viewers: new Map(), controller: null, state: {}, frame: null, closed: false, error: null, note: null };
+      s = { key, node, identity, viewers: new Map(), controller: null, state: {}, frame: null, closed: false, error: null, note: null, sized: null };
       sessions.set(key, s);
-      s.viewers.set(ws, { thumb: !!thumb });
+      const v = { thumb: !!thumb };
+      if (sizeViewer(v, size)) s.sized = JSON.stringify(v.size);
+      s.viewers.set(ws, v);
       // No url here: a worker's task state is known only once the view is open, so the url waits for canDrive below.
-      s.ready = op(node, { op: 'open', identity }, { onFrame: (f) => onFrame(s, f), onState: (st) => onState(s, st) });
+      s.ready = op(node, { op: 'open', identity, ...(v.size && { size: v.size }) }, { onFrame: (f) => onFrame(s, f), onState: (st) => onState(s, st) });
     } else {
-      s.viewers.set(ws, { thumb: !!thumb });
+      const v = { ...s.viewers.get(ws), thumb: !!thumb };
+      sizeViewer(v, size);
+      s.viewers.set(ws, v);
       if (s.frame) send(ws, { t: 'bv_frame', node, identity, n: s.frame.n, data: s.frame.data, w: s.frame.w, h: s.frame.h });
     }
     try { await s.ready; } catch (e) {
@@ -140,7 +156,11 @@ export function createBrowserViews({ cluster = () => null, tasks = () => [], sen
           s.state.takeover = true;
           op(node, { op: 'takeover', identity: s.identity, on: true }).catch(fail);
         }
+        fit(s);
         pushState(s);
+        break;
+      case 'bv_size':
+        if (s?.viewers.has(ws) && sizeViewer(s.viewers.get(ws), msg.size)) fit(s);
         break;
       case 'bv_handback':
         if (!s?.viewers.has(ws) || !s.state.takeover) break;

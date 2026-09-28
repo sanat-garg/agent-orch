@@ -64,16 +64,15 @@
 .bv-twait { position: absolute; font-size: 12.5px; color: var(--muted); }
 .bv-tline { margin: 6px 0 8px; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* The Browser tab (browser.js bx*): toolbar, the live canvas fitting the width, the prompt box and the agent's activity.
-   The section scrolls; the prompt box sticks to its bottom, so with the keyboard up (app.css shrinks .app by --kb)
-   it sits right above the keyboard. */
-.bx { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; background: var(--bg); overscroll-behavior: contain; }
+/* The Browser tab (browser.js bx*): toolbar, the live canvas, the prompt box and the agent's activity. The stage takes
+   all the height the others leave, and the page is laid out for exactly that area (bv_size), so the canvas fills it.
+   The activity scrolls on its own; with the keyboard up (app.css shrinks .app by --kb) the prompt sits right above it. */
+.bx { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; background: var(--bg); }
 .bx-bar { padding: 10px 16px 4px; flex-wrap: wrap; row-gap: 6px; }
 .bx-bar select { height: 36px; max-width: 220px; padding: 0 8px; border-radius: 9px; border: 1px solid var(--border-strong); background: var(--panel); color: var(--text); font: inherit; font-size: 14px; font-weight: 550; }
 .bx-bar select:focus-visible { outline: 2px solid var(--focus); border-color: var(--accent); }
 .bx-status { padding: 0 18px 6px; font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: none; }
-.bx-stage { flex: none; min-height: 220px; padding: 0 16px 8px; }
-.bx-stage canvas { max-height: max(260px, calc(100dvh - 330px)); }
+.bx-stage { flex: 1 1 0; min-height: 0; padding: 0 16px 8px; }
 .bx-stage .bv-wait { inset: 0 16px 8px; }
 .bx.watching .bx-stage canvas { cursor: not-allowed; }
 /* An agent is driving: a soft accent ring round the page and a pill; the owner can still Take over. */
@@ -85,11 +84,12 @@
   box-shadow: 0 2px 8px rgba(0,0,0,.12); pointer-events: none; }
 .bx-busy::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
 .bx-busy[hidden] { display: none; }
-.bx-prompt { position: sticky; bottom: 0; z-index: 2; padding: 6px 16px 8px; background: linear-gradient(to bottom, transparent, var(--bg) 14px); }
+.bx-prompt { position: sticky; bottom: 0; z-index: 2; padding: 6px 16px 8px; background: var(--bg); }
 .bx-prompt .box { max-width: 900px; }
 .bx-prompt textarea { padding-top: 12px; }
 .bx-hint { font-size: 12.5px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bx-act { width: 100%; max-width: 932px; margin: 0 auto; padding: 4px 16px max(16px, env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 8px; font-size: 13.5px; }
+.bx-act { flex: none; max-height: 30%; overflow-y: auto; overscroll-behavior: contain; width: 100%; max-width: 932px; margin: 0 auto;
+  padding: 4px 16px max(16px, env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 8px; font-size: 13.5px; }
 .bx-act:empty { display: none; }
 .bx-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .bx-st { display: inline-flex; align-items: center; gap: 6px; flex: none; font-weight: 600; color: var(--text); }
@@ -135,13 +135,12 @@
   /* Row 2: the address and the keyboard button (the ::before is the line break). */
   .bx-bar::before { content: ""; order: 9; flex-basis: 100%; height: 0; margin-bottom: -6px; }
   .bx-bar input { order: 10; flex: 1 1 0; }
-  #bxKbd, #bxPaste { order: 11; }
+  #bxKbd, #bxPaste, #bxTake { order: 11; }
   .bx-status { padding: 0 10px 4px; }
-  .bx-stage { padding: 0 6px 6px; min-height: 180px; }
-  .bx-stage canvas { max-height: none; }
+  .bx-stage { padding: 0 6px 6px; }
   .bx-stage .bv-wait { inset: 0 6px 6px; }
   .bx-prompt { padding: 6px 10px 8px; }
-  .bx-act { padding: 4px 12px max(12px, env(safe-area-inset-bottom)); }
+  .bx-act { max-height: 22%; padding: 4px 12px max(12px, env(safe-area-inset-bottom)); }
   html.kb-open .bx-act { display: none; } /* the prompt box sits on the keyboard */
 }
 @media (max-width: 480px) { #bxPaste { display: none; } }

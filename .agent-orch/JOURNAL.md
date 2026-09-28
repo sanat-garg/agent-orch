@@ -971,6 +971,9 @@ Closing Skills & tools opened from Settings reopens Settings
 
 existing origins push without gh; repoOf handles all URL forms
 
+## 2026-09-28 13:18 — #347 Fix the live browser: working stream, google.com by default, viewport follows the screen [done (check passed)]
+
+live browser e2e passes here; sharp 2× phone shot saved
 ## 2026-09-28 12:45 — #345 Workers fetch and push code through the head, so no GitHub access is needed [done (check passed)]
 
 workers now clone and push through the head; cluster-git tests pass
@@ -1192,6 +1195,13 @@ CONTEXT.md conflict resolved; ui-stats tests pass
 ## 2026-09-28 14:32 — #437 Files backend: browse the whole VPS, with guardrails for secrets and system folders [done (check passed)]
 
 Files API browses whole disk with secret and write guardrails
+## 2026-09-28 14:30 — #399 Integrate #347: Fix the live browser: working stream, google.com by default, viewport follows the screen [done (check passed)]
+
+merge resolved; browser e2e tests and phone screenshot verified
+
+## 2026-09-28 14:30 — #399 Integrate #347: Fix the live browser: working stream, google.com by default, viewport follows the screen [verify failed (1)]
+
+Command: merge main again
 ## 2026-09-28 14:28 — #398 Integrate #381: oracle-vm node in the Machines graph opens the full server details [done (check passed)]
 
 Merge resolved, Ping all kept, machines UI tests pass
@@ -1226,3 +1236,6 @@ Merge conflicts resolved; push-ui, ui-static and security-headers tests pass
 ## 2026-09-28 14:32 — #441 Integrate #437: Files backend: browse the whole VPS, with guardrails for secrets and system folders [done (check passed)]
 
 CONTEXT.md conflict resolved; files-scope tests pass
+## 2026-09-28 14:32 — #399 Integrate #347: Fix the live browser: working stream, google.com by default, viewport follows the screen [done (check passed)]
+
+CONTEXT conflict resolved; e2e passes; phone screenshot saved

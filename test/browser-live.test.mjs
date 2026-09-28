@@ -51,7 +51,8 @@ before(async () => {
   const port = await freePort();
   base = `http://127.0.0.1:${port}`;
   child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, PORT: String(port), CW_DATA_DIR: dataDir, CW_NO_ORCHESTRATOR: '1', AGENT_ORCH_BROWSER_HOME: browserHome, AGENT_ORCH_BROWSER_HEADLESS: '1' } });
+    env: { ...process.env, PORT: String(port), CW_DATA_DIR: dataDir, CW_NO_ORCHESTRATOR: '1', AGENT_ORCH_BROWSER_HOME: browserHome, AGENT_ORCH_BROWSER_HEADLESS: '1',
+      AGENT_ORCH_BROWSER_HOME_URL: pageUrl } }); // no trip to Google: its cookies would join the signed-in sites
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`server did not start:\n${out}`)), 20000);
     const onData = (d) => { out += d; if (out.includes(`127.0.0.1:${port}`)) { clearTimeout(timer); resolve(); } };
@@ -166,7 +167,7 @@ test('frames stream over /ws, input reaches the page, and take-over holds the ta
   // Open: Chromium starts on the profile, loads the page, and frames flow.
   say({ t: 'bv_open', url: pageUrl });
   await waitFor(() => state().url === pageUrl && state().role === 'control', { timeout: 90000, message: `the view opens on the page: ${JSON.stringify(states.slice(-3))}\n${out}` });
-  await waitFor(() => frames.length >= 2, { timeout: 30000, message: 'screencast frames arrive' });
+  await waitFor(() => frames.length >= 1, { timeout: 30000, message: 'screencast frames arrive' }); // a static page paints once
   const f = frames.at(-1);
   assert.equal(f.node, 'controller'); assert.equal(f.identity, 'live');
   assert.ok(Buffer.from(f.data, 'base64').subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff])), 'a JPEG');

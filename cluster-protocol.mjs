@@ -194,10 +194,11 @@ const S = {
   // reason (fed back to the agent on a denial). Sent again after the job re-attaches; a worker ignores answered ids.
   'job.approval': { job: 'int', id: 'str', decision: 'str', reason: 'str?', by: 'str?' },
   // The owner's live view of a browser profile on the node (browser-live.mjs; AGENTIC.md → Browser). screen.req ops:
-  // profiles, open (start streaming, url?), stop, nav (action go|back|forward|reload, url?), takeover (on: hold the
-  // profile's task actions), sites (cookie domains, never values), clear; answered by screen.res {req, result|error}.
+  // profiles, open (start streaming, url?, size?), stop, nav (action go|back|forward|reload, url?), size (size: the viewer's
+  // canvas {width, height} CSS px and dpr; the page is laid out for it), takeover (on: hold the profile's task actions),
+  // sites (cookie domains, never values), clear; answered by screen.res {req, result|error}.
   // screen.input events (mouse, click, key, text) are never logged. screen.frame: one JPEG (base64) of w×h CSS px, n counts them.
-  'screen.req': { req: 'str', op: 'str', identity: 'str?', url: 'str?', action: 'str?', on: 'bool?' },
+  'screen.req': { req: 'str', op: 'str', identity: 'str?', url: 'str?', action: 'str?', on: 'bool?', size: 'obj?' },
   'screen.res': { req: 'str', result: 'obj?', error: 'str?' },
   'screen.input': { identity: 'str', events: 'arr' },
   'screen.frame': { identity: 'str', n: 'int', data: 'str', w: 'int', h: 'int' },

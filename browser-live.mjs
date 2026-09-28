@@ -2,8 +2,10 @@
 // profile with a DevTools port on 127.0.0.1, started by whoever needs it first (a viewer here, or a browser task's MCP
 // shim, bin/browser-mcp.mjs) and attached to by the other. A view streams CDP Page.startScreencast JPEG frames (acked at
 // most FPS times a second, so a slow viewer slows Chromium down instead of queueing) and replays the owner's input with
-// Input.dispatch*. Take-over is a flag file the shim checks before each MCP tools/call, so it works the same on every
-// node. Worker-safe: node built-ins, ws and browser.mjs only (test/compute-only.test.mjs).
+// Input.dispatch*. The page is laid out for the viewer's screen (its canvas size and devicePixelRatio; a phone layout
+// below MOBILE_MAX px), else for a desktop VIEWPORT (no viewer's size yet, or a task nobody watches). A profile opens on
+// homeUrl(). Take-over is a flag file the shim checks before each MCP tools/call, so it works the same on every node.
+// Worker-safe: node built-ins, ws and browser.mjs only (test/compute-only.test.mjs).
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,7 +15,37 @@ import { browserRoot, profileDir, normIdentity, findBrowser, hasDisplay, IDENTIT
 
 export const FPS = 8;
 export const VIEWPORT = { width: 1280, height: 800 };
+export const MOBILE_MAX = 768;
+const MAX_SCALE = 2; // frames are at most 2× the page's CSS size (bandwidth) …
+const MAX_PIXELS = 2560 * 1600; // … and at most this many pixels
 const MAX_FRAME_B64 = 900 * 1024; // a frame must fit the cluster's MAX_FRAME with room to spare
+// Where a profile's browser opens, and where an empty tab goes: AGENT_ORCH_BROWSER_HOME_URL (tests), else Google.
+export const homeUrl = () => normUrl(process.env.AGENT_ORCH_BROWSER_HOME_URL) || 'https://www.google.com/';
+export const isBlank = (u) => !u || u === 'about:blank' || /^chrome:\/\/(newtab|new-tab-page)\/?$/i.test(u) || /^chrome-search:/i.test(u);
+// A viewer's {width, height} (its canvas's CSS px) and dpr → a sane copy, or null.
+export function viewSize(z) {
+  if (!z || typeof z !== 'object') return null;
+  const width = Math.round(num(z.width)), height = Math.round(num(z.height));
+  if (width < 120 || height < 120) return null;
+  return { width: Math.min(width, 3840), height: Math.min(height, 2400), dpr: Math.round(Math.min(Math.max(num(z.dpr, 1), 1), 4) * 100) / 100 };
+}
+// A viewer's size → the page's device metrics (Emulation.setDeviceMetricsOverride); no size → the desktop VIEWPORT.
+export function viewMetrics(z) {
+  z = viewSize(z) || { ...VIEWPORT, dpr: 1 };
+  return { width: z.width, height: z.height, deviceScaleFactor: Math.min(z.dpr, MAX_SCALE), mobile: z.width < MOBILE_MAX };
+}
+// The screencast's maxWidth/maxHeight for those metrics: the size × its scale, within MAX_PIXELS.
+export function castSize(m) {
+  const k = Math.min(m.deviceScaleFactor, Math.sqrt(MAX_PIXELS / (m.width * m.height)));
+  return { maxWidth: Math.round(m.width * k), maxHeight: Math.round(m.height * k) };
+}
+// The user agent for the view: headless Chromium's without "HeadlessChrome" (sites treat it as a bot), or a phone's.
+export function userAgent(base, mobile) {
+  const desktop = String(base || '').replace(/HeadlessChrome/g, 'Chrome');
+  if (!mobile) return desktop;
+  const v = desktop.match(/Chrome\/(\d+)/)?.[1] || '140';
+  return `Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${v}.0.0.0 Mobile Safari/537.36`;
+}
 // The browser home: the profiles' parent (tests point it at a temp dir).
 export const liveHome = () => process.env.AGENT_ORCH_BROWSER_HOME || os.homedir();
 const controlDir = (home) => path.join(browserRoot(home), 'control');
@@ -55,8 +87,11 @@ export async function endpointFor(identity, home = liveHome()) {
   const ws = port > 0 ? await probe(port) : null;
   return ws ? { port, ws } : null;
 }
-// Starts Chromium on the profile. The flags match Playwright's (basic password store, mock keychain) so cookies saved by
-// either stay readable by the other.
+// Headless Chromium screencasts at its screen's scale whatever the emulated deviceScaleFactor, so its screen is MAX_SCALE×
+// (frames of a 1× view are scaled down to castSize) and VIEWPORT-sized in CSS px.
+const screenInfo = `--screen-info={${VIEWPORT.width * MAX_SCALE}x${VIEWPORT.height * MAX_SCALE} devicePixelRatio=${MAX_SCALE}}`;
+// Starts Chromium on the profile, on homeUrl(). The flags match Playwright's (basic password store, mock keychain) so
+// cookies saved by either stay readable by the other.
 export async function launchChrome({ identity, home = liveHome(), executable = findBrowser(), headless = !hasDisplay(), timeoutMs = 45_000 } = {}) {
   if (!executable) throw new Error('no Chromium or Chrome on this machine');
   const profile = profileDir(identity, home);
@@ -66,8 +101,8 @@ export async function launchChrome({ identity, home = liveHome(), executable = f
   const args = [`--user-data-dir=${profile}`, '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
     '--no-first-run', '--no-default-browser-check', '--password-store=basic', '--use-mock-keychain', '--mute-audio',
     '--disable-features=Translate,MediaRouter', '--disable-background-timer-throttling', '--disable-renderer-backgrounding',
-    `--window-size=${VIEWPORT.width},${VIEWPORT.height}`, ...(headless ? ['--headless=new'] : []),
-    ...(process.platform === 'linux' && process.env.AGENT_ORCH_BROWSER_SANDBOX !== '1' ? ['--no-sandbox'] : []), 'about:blank'];
+    `--window-size=${VIEWPORT.width},${VIEWPORT.height}`, ...(headless ? ['--headless=new', screenInfo] : []),
+    ...(process.platform === 'linux' && process.env.AGENT_ORCH_BROWSER_SANDBOX !== '1' ? ['--no-sandbox'] : []), homeUrl()];
   const child = spawn(executable, args, { stdio: ['ignore', 'ignore', 'pipe'] });
   let stderr = '', exited = null;
   child.stderr.on('data', (d) => { stderr = (stderr + d).slice(-2000); });
@@ -184,10 +219,11 @@ export function listProfiles(home = liveHome()) {
 }
 
 // One node's live views. Each profile has at most one view (the head fans it out to every viewer): start(identity,
-// {url, onFrame, onState}) → the view, input/nav/stop by identity. A Chromium the manager started itself is closed once
-// no view and no task has used it for idleMs.
+// {url, size, onFrame, onState}) → the view, input/nav/resize/stop by identity. A Chromium the manager started itself is
+// closed once no view and no task has used it for idleMs. The last viewer size of a profile is kept for its next view,
+// except that a view opened while a task uses the profile (a task drawer's thumbnail) stays desktop.
 export function createLiveBrowsers({ home = liveHome(), executable, headless, fps = FPS, idleMs = 60_000, log = () => {} } = {}) {
-  const views = new Map(), chromes = new Map(), idle = new Map();
+  const views = new Map(), chromes = new Map(), idle = new Map(), sizes = new Map(), phone = new Map(); // phone: the page was last laid out for a phone
   // Nothing may be taken over at boot: the viewer that set a flag is gone.
   try { for (const f of fs.readdirSync(controlDir(home))) if (f.endsWith('.takeover')) fs.rmSync(path.join(controlDir(home), f), { force: true }); } catch {}
 
@@ -219,58 +255,114 @@ export function createLiveBrowsers({ home = liveHome(), executable, headless, fp
     idle.set(identity, t);
   }
 
-  async function start(identity, { url, onFrame, onState } = {}) {
+  async function start(identity, { url, size, onFrame, onState } = {}) {
     identity = normIdentity(identity);
     let v = views.get(identity);
     if (v) {
       Object.assign(v, { onFrame: onFrame || v.onFrame, onState: onState || v.onState });
       await v.ready;
+      if (viewSize(size)) await resize(identity, size);
       if (url) await nav(identity, { action: 'go', url });
       v.emitState();
       return v.public;
     }
-    v = { identity, onFrame, onState, seq: 0, url: '', title: '', session: null, target: null, cdp: null, closed: false, lastAck: 0 };
+    const metrics = viewSize(size) ? viewMetrics(size) : !activeRun(identity, home) && sizes.get(identity) || viewMetrics(null);
+    if (viewSize(size)) sizes.set(identity, metrics);
+    v = { identity, onFrame, onState, seq: 0, url: '', title: '', session: null, target: null, cdp: null, closed: false, lastAck: 0, metrics, quality: 60, ua: '' };
     views.set(identity, v);
     v.emitState = (extra = {}) => v.onState?.({ identity, url: v.url, title: v.title, active: !!activeRun(identity, home), takeover: takenOver(identity, home), ...extra });
-    v.public = { identity, input: (evs) => input(identity, evs), nav: (a) => nav(identity, a), stop: () => stop(identity) };
+    v.public = { identity, input: (evs) => input(identity, evs), nav: (a) => nav(identity, a), resize: (z) => resize(identity, z), stop: () => stop(identity) };
     v.ready = (async () => {
       const ep = await chromeFor(identity);
       v.cdp = await cdpConnect(ep.ws);
       v.cdp.closed.then(() => { if (!v.closed) { stop(identity); v.onState?.({ identity, closed: true, error: 'the browser closed' }); } });
       v.cdp.on((m) => onEvent(v, m));
+      v.ua = (await v.cdp.send('Browser.getVersion').catch(() => ({}))).userAgent || '';
       await v.cdp.send('Target.setDiscoverTargets', { discover: true });
       const { targetInfos } = await v.cdp.send('Target.getTargets');
       const pages = targetInfos.filter((t) => t.type === 'page' && !t.url.startsWith('devtools://'));
       const target = pages.at(-1)?.targetId || (await v.cdp.send('Target.createTarget', { url: 'about:blank' })).targetId;
-      await attach(v, target);
+      await attach(v, target, { blank: !url });
     })();
     try { await v.ready; } catch (e) { stop(identity); throw e; }
     if (url) await nav(identity, { action: 'go', url });
     v.emitState();
     return v.public;
   }
-  async function attach(v, targetId) {
+  // blank: an empty page (about:blank, a new tab) goes to homeUrl(), unless a task is using the profile.
+  async function attach(v, targetId, { blank = false } = {}) {
     const old = v.session;
     v.target = targetId;
     const { sessionId } = await v.cdp.send('Target.attachToTarget', { targetId, flatten: true });
     v.session = sessionId;
+    v.applied = null; v.casting = false;
     if (old) v.cdp.send('Target.detachFromTarget', { sessionId: old }).catch(() => {});
     const s = (m, p) => v.cdp.send(m, p, sessionId);
     await s('Page.enable');
-    // Headless Chromium has no window to size the page; pin a desktop viewport so frames and clicks agree.
-    await s('Emulation.setDeviceMetricsOverride', { ...VIEWPORT, deviceScaleFactor: 1, mobile: false }).catch(() => {});
     // A background headless page never has focus, so typed keys would go nowhere.
     await s('Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => {});
     const { entries, currentIndex } = await s('Page.getNavigationHistory').catch(() => ({ entries: [] }));
     const cur = entries?.[currentIndex];
     if (cur) Object.assign(v, { url: cur.url, title: cur.title });
-    await s('Page.startScreencast', { format: 'jpeg', quality: 60, maxWidth: VIEWPORT.width, maxHeight: VIEWPORT.height });
+    const goHome = blank && isBlank(v.url) && !activeRun(v.identity, home);
+    await applyMetrics(v, { reload: !goHome });
+    if (goHome) { v.url = homeUrl(); await s('Page.navigate', { url: v.url }).catch(() => {}); }
     v.emitState();
+  }
+  // The view's metrics on its page: the viewport (headless Chromium has no window to size it, so frames and clicks agree
+  // only through this), touch and the user agent for a phone, and a screencast sized to match. Serialised per view. A
+  // page that switches between phone and desktop reloads (sites pick their layout from the user agent) unless a task
+  // uses the profile.
+  function applyMetrics(v, { reload = true } = {}) {
+    v.mq = (v.mq || Promise.resolve()).then(async () => {
+      const session = v.session, m = v.metrics;
+      if (!session || v.closed) return;
+      const s = (method, p) => v.cdp.send(method, p, session);
+      await s('Emulation.setDeviceMetricsOverride', { width: m.width, height: m.height, deviceScaleFactor: m.deviceScaleFactor, mobile: m.mobile,
+        screenWidth: m.width, screenHeight: m.height }).catch(() => {});
+      await s('Emulation.setTouchEmulationEnabled', m.mobile ? { enabled: true, maxTouchPoints: 5 } : { enabled: false }).catch(() => {});
+      if (v.ua) await s('Emulation.setUserAgentOverride', { userAgent: userAgent(v.ua, m.mobile), ...(m.mobile && { platform: 'Linux armv8l' }) }).catch(() => {});
+      const flipped = (v.applied?.mobile ?? phone.get(v.identity) ?? false) !== m.mobile;
+      v.applied = m;
+      phone.set(v.identity, m.mobile);
+      await cast(v, session);
+      if (reload && flipped && /^https?:/.test(v.url) && !activeRun(v.identity, home)) await s('Page.reload').catch(() => {});
+    }).catch(() => {});
+    return v.mq;
+  }
+  // (Re)starts the screencast at the metrics' size. A page that doesn't repaint sends no frame, so without one soon the
+  // viewer gets a screenshot instead.
+  async function cast(v, session) {
+    const s = (method, p) => v.cdp.send(method, p, session);
+    if (v.casting) await s('Page.stopScreencast').catch(() => {});
+    await s('Page.startScreencast', { format: 'jpeg', quality: v.quality, ...castSize(v.metrics) });
+    v.casting = true;
+    const seq = v.seq, m = v.metrics;
+    setTimeout(async () => {
+      if (v.closed || v.session !== session || v.seq !== seq) return;
+      const { data } = await s('Page.captureScreenshot', { format: 'jpeg', quality: v.quality }).catch(() => ({}));
+      if (data && data.length <= MAX_FRAME_B64 && !v.closed && v.session === session && v.seq === seq) v.onFrame?.({ identity: v.identity, n: ++v.seq, data, w: m.width, h: m.height });
+    }, 800).unref?.();
+  }
+  // A viewer's new size (its canvas, CSS px, and dpr). Kept for the profile's next view.
+  async function resize(identity, size) {
+    identity = normIdentity(identity);
+    if (!viewSize(size)) return false;
+    const m = viewMetrics(size);
+    sizes.set(identity, m);
+    const v = views.get(identity);
+    if (!v) return false;
+    await v.ready;
+    if (['width', 'height', 'deviceScaleFactor', 'mobile'].every((k) => v.metrics[k] === m[k])) return true;
+    v.metrics = m;
+    await applyMetrics(v);
+    return true;
   }
   function onEvent(v, m) {
     if (m.method === 'Page.screencastFrame' && m.sessionId === v.session) {
       const { data, metadata, sessionId: frameId } = m.params, session = v.session;
       if (data.length <= MAX_FRAME_B64) v.onFrame?.({ identity: v.identity, n: ++v.seq, data, w: Math.round(metadata.deviceWidth), h: Math.round(metadata.deviceHeight) });
+      else if (v.quality > 30) { v.quality -= 15; v.mq = (v.mq || Promise.resolve()).then(() => cast(v, session)).catch(() => {}); } // too big for the wire: a coarser JPEG
       // The ack asks Chromium for the next frame: at most fps a second.
       const wait = Math.max(0, v.lastAck + 1000 / fps - Date.now());
       setTimeout(() => { v.lastAck = Date.now(); if (!v.closed && v.session === session) v.cdp.send('Page.screencastFrameAck', { sessionId: frameId }, session).catch(() => {}); }, wait);
@@ -281,14 +373,17 @@ export function createLiveBrowsers({ home = liveHome(), executable, headless, fp
       Object.assign(v, { url: m.params.targetInfo.url, title: m.params.targetInfo.title });
       v.emitState();
     } else if (m.method === 'Target.targetCreated' && m.params.targetInfo.type === 'page' && v.session) {
-      // A new tab (the task's or a pop-up): follow it.
-      attach(v, m.params.targetInfo.targetId).catch(() => {});
+      // A new tab (the task's or a pop-up): follow it. An empty tab the owner opened goes to the home page.
+      attach(v, m.params.targetInfo.targetId, { blank: !m.params.targetInfo.openerId }).catch(() => {});
     } else if (m.method === 'Target.targetDestroyed' && m.params.targetId === v.target) {
       v.session = null;
       v.cdp.send('Target.getTargets').then(({ targetInfos }) => {
         const next = targetInfos.filter((t) => t.type === 'page').at(-1);
         if (next) return attach(v, next.targetId);
-        if (!v.closed) v.onState?.({ identity: v.identity, url: '', title: '', note: 'no open page' });
+        if (v.closed) return;
+        // The last tab closed: a new one on the home page, unless a task is using the profile.
+        if (!activeRun(v.identity, home)) return v.cdp.send('Target.createTarget', { url: 'about:blank' }).then(({ targetId }) => attach(v, targetId, { blank: true }));
+        v.onState?.({ identity: v.identity, url: '', title: '', note: 'no open page' });
       }).catch(() => {});
     }
   }
@@ -375,15 +470,16 @@ export function createLiveBrowsers({ home = liveHome(), executable, headless, fp
     await Promise.all([...chromes.values()].map((c) => closeChrome(c).catch(() => {})));
     chromes.clear();
   }
-  return { start, stop, input, nav, sites, clear, profiles, takeover, release, close, has: (id) => views.has(normIdentity(id)), home };
+  return { start, stop, input, nav, resize, sites, clear, profiles, takeover, release, close, has: (id) => views.has(normIdentity(id)), home };
 }
 
 // One screen.req (cluster-protocol.mjs) against a node's manager → its result object. The head runs the same ops on its
 // own manager, so a profile on the controller and one on a worker behave alike.
-export async function screenOp(m, { op, identity, url, action, on }, { onFrame, onState } = {}) {
+export async function screenOp(m, { op, identity, url, action, on, size }, { onFrame, onState } = {}) {
   switch (op) {
     case 'profiles': return { profiles: await m.profiles() };
-    case 'open': await m.start(identity, { url: url || undefined, onFrame, onState }); return { ok: true };
+    case 'open': await m.start(identity, { url: url || undefined, size, onFrame, onState }); return { ok: true };
+    case 'size': return { ok: await m.resize(identity, size) };
     case 'stop': return { ok: m.stop(identity) };
     case 'nav': return { ok: await m.nav(identity, { action, url }) };
     case 'takeover': return { takeover: m.takeover(identity, on) };

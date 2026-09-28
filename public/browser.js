@@ -2,7 +2,9 @@
 // ---------- Browser: profiles per machine and the live view (server: browser-view.mjs, /api/browser*, bv_* on /ws) ----------
 // The header's Browser tab (#browserView, bx*) shows the live view in place: a profile picker, the URL bar, Back, Reload
 // and Take over / Hand back, then the page on a canvas that fits the width (pinch, double-tap or ctrl+wheel zooms it), the owner's mouse, touch, keys and paste sent
-// back. Below it a prompt box sends an agent to work on that profile (POST /api/browser/task) and an activity panel
+// back. The page is laid out for the canvas's area: its CSS size and devicePixelRatio go with bv_open and, debounced, as
+// bv_size after a resize or rotation, so on a phone it fills the tab with a phone layout. Below it a prompt box sends an
+// agent to work on that profile (POST /api/browser/task) and an activity panel
 // follows its running or last task (GET /api/browser/tasks, refreshed on otask/olane): status, steps, screenshots,
 // approvals, the result and Stop. The same viewer code also mounts in #bvModal, opened from a task drawer's live
 // thumbnail (bvTaskThumb). The toolbar's Profiles button opens the Browser sheet (#browserModal): each machine that can
@@ -28,9 +30,31 @@ const bvTabOn = () => $('app').dataset.view === 'browser';
 function bvSync(node, identity) {
   const k = bvKey(node, identity), w = BV.want.get(k);
   if (!w || (!w.view && !w.thumb)) { BV.want.delete(k); return send({ t: 'bv_close', node, identity }); }
-  send({ t: 'bv_open', node, identity, thumb: !w.view, ...(w.url && { url: w.url }) });
+  send({ t: 'bv_open', node, identity, thumb: !w.view, ...(w.url && { url: w.url }), ...bvSizeFor(w) });
   delete w.url;
 }
+// The area the page's canvas may fill in the mount (its stage, less padding and the canvas's border), CSS px, or null.
+function bvArea(m) {
+  const st = m.canvas.parentElement, cs = getComputedStyle(st);
+  const width = Math.floor(st.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) - 2);
+  const height = Math.floor(st.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom) - 2);
+  return width >= 120 && height >= 120 ? { width, height, dpr: Math.round((devicePixelRatio || 1) * 100) / 100 } : null;
+}
+const bvSizeFor = (w) => { const z = w.view && BV.view && bvKey(BV.view.node, BV.view.identity) === bvKey(w.node, w.identity) && bvArea(BV.view.m); return z ? { size: z } : {}; };
+// On a resize or rotation (150 ms after the last), the page follows the canvas's new area.
+let bvSizeTimer = 0;
+function bvResized() {
+  clearTimeout(bvSizeTimer);
+  bvSizeTimer = setTimeout(() => {
+    const z = BV.view && bvArea(BV.view.m);
+    if (!z || JSON.stringify(z) === BV.sized) return;
+    BV.sized = JSON.stringify(z);
+    bvSay({ t: 'bv_size', size: z });
+  }, 150);
+}
+addEventListener('resize', bvResized);
+addEventListener('orientationchange', bvResized);
+if (window.ResizeObserver) { const ro = new ResizeObserver(bvResized); ro.observe($('bvStage')); ro.observe($('bxStage')); }
 function bvWant(node, identity, part, on, url) {
   const k = bvKey(node, identity), w = BV.want.get(k) || { node, identity, view: false, thumb: false };
   w[part] = on;
@@ -38,7 +62,7 @@ function bvWant(node, identity, part, on, url) {
   BV.want.set(k, w);
   bvSync(node, identity);
 }
-function bvResume() { for (const w of BV.want.values()) send({ t: 'bv_open', node: w.node, identity: w.identity, thumb: !w.view }); }
+function bvResume() { for (const w of BV.want.values()) send({ t: 'bv_open', node: w.node, identity: w.identity, thumb: !w.view, ...bvSizeFor(w) }); }
 
 // ----- server messages
 function bvOnServer(msg) {
@@ -196,6 +220,7 @@ function bvOpen(node, identity, name, { take = false, inline = false } = {}) {
   m.canvas.width = 0; m.canvas.height = 0;
   m.root.hidden = false;
   bvRenderState();
+  BV.sized = JSON.stringify(bvArea(m));
   bvWant(node, identity, 'view', true);
   if (!inline) m.canvas.focus({ preventScroll: true });
 }
@@ -484,9 +509,9 @@ function bxSelect(node, identity, name) {
   BX.sel = { node, identity, name: name || node };
   store.set('cw.bx', bvKey(node, identity));
   if (!same) { BX.tasks = []; BX.pin = null; BX.err = ''; BX.more = false; }
+  bxRenderActivity(); // first, so the view opens with the stage's final size
   bxRenderPicker();
   bxOpenSel();
-  bxRenderActivity();
   bxLoadTasks();
 }
 function bxRenderPicker() {
@@ -742,3 +767,5 @@ function bvThumbState(s) {
   const th = BV.thumb;
   th.line.textContent = s.closed ? `${th.profile} · ${s.error || 'closed'}` : `${th.profile}${s.url && s.url !== 'about:blank' ? ` · ${s.url}` : ''}${s.takeover ? ' · taken over' : ''}`;
 }
+// The app opened on the Browser tab: app.js chose it before this script loaded.
+if (bvTabOn()) bxShow();

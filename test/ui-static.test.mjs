@@ -106,21 +106,26 @@ test('the orchestrator bar is a status word plus Queue and Pause only', () => {
   assert.match(appCss, /\.ob-pause \{ color: var\(--accent\); border-color: var\(--accent\); background: transparent;/);
 });
 
-test('the sidebar gear opens Settings: sound + MP3 upload, parallel tasks (what can run, a cap), per-project reflection', () => {
+test('the sidebar gear opens Settings: a sound switch, parallel tasks (what can run, a cap), per-project reflection', () => {
   const side = indexHtml.slice(indexHtml.indexOf('id="sidebar"'), indexHtml.indexOf('</aside>'));
   assert.match(side, /id="settingsBtn"[^>]*aria-label="Settings"/);
   const sheet = indexHtml.slice(indexHtml.indexOf('id="settingsModal"'), indexHtml.indexOf('id="fbModal"'));
   const sections = [...sheet.matchAll(/class="st-sec"[^>]*>([^<]+)</g)].map((m) => m[1]);
-  assert.deepEqual(sections, ['Sound', 'Notifications', 'Tasks', 'Agents', 'This project', 'About']);
+  assert.deepEqual(sections, ['Alerts', 'Tasks', 'Agents', 'This project']);
+  // Every heading has a one-line hint right under it (#481).
+  assert.equal((sheet.slice(0, sheet.indexOf('id="extModal"')).match(/class="st-sec"[^>]*>[^<]+<\/h3>\s*<p class="st-hint">[^<]+<\/p>/g) || []).length, 4);
   // Skills & tools is one row (a summary line) that opens the sheet, whose tabs hold the four kinds.
   assert.deepEqual([...sheet.matchAll(/data-ext-open="(\w+)"/g)].map((m) => m[1]), ['skills']);
   assert.match(sheet, /id="stExtSummary"/);
   assert.match(sheet, /<div class="modal sheet" id="extModal" hidden>[\s\S]*role="tablist"[\s\S]*id="extBody" role="tabpanel"/);
-  assert.match(sheet, /id="stSoundUpload"[\s\S]*id="stSoundFile" accept="audio\/mpeg,\.mp3"[\s\S]*id="stSound"[\s\S]*id="stParallel"[\s\S]*id="stReflectModel"[\s\S]*id="stReflectBtn"[\s\S]*id="stDirection"/);
-  // Sound is one row: the switch, the current file, Test and Upload together.
-  const sound = sheet.slice(sheet.indexOf('class="st-row st-sound"'), sheet.indexOf('class="st-sec">Notifications'));
-  for (const id of ['stSound"', 'stSoundName', 'stSoundTest', 'stSoundUpload']) assert.ok(sound.includes(`id="${id}`), id);
-  assert.equal((sound.match(/class="st-row/g) || []).length, 1);
+  assert.match(sheet, /id="stSound"[\s\S]*id="stParallel"[\s\S]*id="stReflectModel"[\s\S]*id="stReflectBtn"[\s\S]*id="stDirection"/);
+  // Sound is one switch; each machine's sound (and custom sounds) are picked in Machines (#481).
+  const alerts = sheet.slice(sheet.indexOf('class="st-sec">Alerts'), sheet.indexOf('class="st-sec">Tasks'));
+  assert.match(alerts, /<strong>Play a sound when a task finishes<\/strong><small id="stSoundHint">Choose each machine's sound in Machines<\/small>/);
+  assert.match(alerts, /<input type="checkbox" class="st-switch" id="stSound" role="switch"/);
+  for (const gone of ['stSoundTest', 'stSoundUpload', 'stSoundFile', 'stSoundReset', 'stSoundName', 'stSoundList', 'stSoundAdd', 'type="range"', 'type="file"']) assert.ok(!sheet.includes(gone), gone);
+  // No About section: the version (and its details, in the tooltip) sits under the logo.
+  for (const gone of ['stAbout', 'abRunning', 'abRestart', 'abPending']) assert.ok(!indexHtml.includes(gone) && !appJs.includes(gone), gone);
   // Keep improving is back per project: a switch in This project, saved through the project POST as `perpetual`.
   assert.match(sheet.slice(sheet.indexOf('id="stProject"')), /<strong>Keep improving<\/strong>[\s\S]*<input type="checkbox" class="st-switch" id="stPerpetual"/);
   assert.match(appJs, /\$\('stPerpetual'\)\.checked = !!p\.perpetual/);
@@ -142,7 +147,6 @@ test('the sidebar gear opens Settings: sound + MP3 upload, parallel tasks (what 
   assert.match(appJs, /toast\(`Updated to v\$\{s\.updated\.version\}`/);
   assert.doesNotMatch(sheet, /stRank|stRoutes|Project priority|Routes/, 'no priority or routes rows in project settings');
   assert.match(appJs, /openFallbacks\(reflectFallbacks\(\), /);
-  assert.match(appJs, /fetch\('\/api\/settings\/sound', \{ method: 'POST'/);
   assert.match(appJs, /sound\?\.custom \? `\/api\/settings\/sound\?v=\$\{sound\.at\}` : DEFAULT_TASK_SOUND/);
 });
 

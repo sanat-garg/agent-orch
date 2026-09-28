@@ -1,7 +1,7 @@
-// Settings → About in a real browser: server.mjs (no orchestrator, temp data dir) serves the app, GET /api/version is
-// mocked and the ws 'version' frame is rewritten to build 419 (v4.19). Checks the About lines (running build, restart time and
-// uptime, the build waiting on disk and its Restart button or "restarts when idle"), the version under the sidebar logo opening
-// About, the "Updated to v4.19" toast for a browser that last saw an older build, and a worker's build and
+// The version under the sidebar logo in a real browser: server.mjs (no orchestrator, temp data dir) serves the app, GET
+// /api/version is mocked and the ws 'version' frame is rewritten to build 419 (v4.19). Checks its tooltip (the About lines:
+// running build, restart time and uptime, the build waiting on disk; Settings has no About section since #481), the
+// "Updated to v4.19" toast for a browser that last saw an older build, and a worker's build and
 // 'outdated' tag in the Machines view. The About text (aboutLines, pulled out of app.js's source like model-status.test)
 // is also checked without a browser; the browser part skips when Playwright's Chromium can't launch.
 import { test, before, after } from 'node:test';
@@ -89,7 +89,7 @@ test('About lines from a mocked GET /api/version', () => {
   assert.match(aboutLines({ running, disk: null }, now + 3 * 86400e3).restarted, /^Restarted 3d ago \(\w{3} .+\) · up 74h 14m$/);
 });
 
-test('Settings → About renders the running build, restart time and the pending build', { skip: noBrowser }, async () => {
+test('the version tooltip under the logo shows the running build, restart time and the pending build', { skip: noBrowser }, async () => {
   const [name, value] = cookie.split('=');
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
   await ctx.addCookies([{ name, value, url: base }]);
@@ -100,10 +100,8 @@ test('Settings → About renders the running build, restart time and the pending
 
   const startedAt = Date.now() - (2 * 3600 + 14 * 60) * 1000;
   const running = { build: 419, sha: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678', subject: 'Show the running build', committedAt: startedAt - 60e3, startedAt, serviceStartedAt: null };
-  let restart = { pending: false, reason: null, auto: false };
-  let restartCalls = 0;
+  const restart = { pending: false, reason: null, auto: false };
   await page.route('**/api/version', (route) => route.fulfill({ json: { running, disk: { build: 426, sha: 'f'.repeat(40), subject: 'Newer', ahead: 7 }, restart } }));
-  await page.route('**/api/restart-when-idle', (route) => { restartCalls++; restart = { pending: true, reason: 'draining', auto: false }; return route.fulfill({ status: 202, json: { draining: true } }); });
   await page.routeWebSocket(/\/ws$/, (ws) => {
     const server = ws.connectToServer();
     server.onMessage((m) => { try { const f = JSON.parse(m); if (f.t === 'version') return ws.send(JSON.stringify({ t: 'version', running })); } catch {} ws.send(m); });
@@ -115,30 +113,17 @@ test('Settings → About renders the running build, restart time and the pending
   await page.locator('#sideVer', { hasText: 'v4.19' }).waitFor();
   assert.equal(await page.evaluate(() => localStorage.getItem('cw.build')), '419');
 
-  await page.click('#sideVer');
-  await page.locator('#settingsModal:not([hidden])').waitFor();
-  await page.locator('#abRunning', { hasText: 'Running v4.19' }).waitFor();
-  assert.equal(await page.textContent('#abRunning'), 'Running v4.19 (a1b2c3d) · "Show the running build"');
-  const restarted = await page.textContent('#abRestarted');
   const local = await page.evaluate((t) => fmtWhen(t), startedAt);
-  assert.equal(restarted, `Restarted 2h ago (${local}) · up 2h 14m`);
-  assert.equal(await page.textContent('#abPendingText'), 'v4.26 ready (7 newer)');
-  assert.ok(await page.isVisible('#abRestart'));
-  assert.ok(await page.evaluate(() => { const r = document.getElementById('stAboutTitle').getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight; }), 'About scrolled into view');
-
-  await page.click('#abRestart');
-  await page.locator('#abPendingText', { hasText: 'v4.26 ready (7 newer) · restarts when idle' }).waitFor();
-  assert.equal(restartCalls, 1);
-  assert.ok(await page.isHidden('#abRestart'));
+  const tip = ['Running v4.19 (a1b2c3d) · "Show the running build"', `Restarted 2h ago (${local}) · up 2h 14m`, 'v4.26 ready (7 newer)'].join('\n');
+  await page.waitForFunction((t) => document.getElementById('sideVer').title === t, tip);
+  assert.equal(await page.locator('#settingsModal #abRunning, #stAboutTitle').count(), 0, 'no About section');
 
   // Nothing newer on disk: no pending line. A reload with the same build doesn't toast again.
   await page.unroute('**/api/version');
   await page.route('**/api/version', (route) => route.fulfill({ json: { running, disk: { build: 419, sha: running.sha, subject: running.subject, ahead: 0 }, restart: { pending: false, reason: null, auto: false } } }));
   await page.reload();
   await page.locator('#sideVer', { hasText: 'v4.19' }).waitFor();
-  await page.click('#settingsBtn');
-  await page.locator('#abRunning', { hasText: 'Running v4.19' }).waitFor();
-  assert.ok(await page.isHidden('#abPending'));
+  await page.waitForFunction(() => /^Running v4\.19/.test(document.getElementById('sideVer').title) && !/ready/.test(document.getElementById('sideVer').title));
   assert.equal(await page.locator('.toast', { hasText: 'Updated to v' }).count(), 0);
   assert.deepEqual(errors.filter((e) => !/renderMetrics|load/i.test(e)), []);
   await ctx.close();

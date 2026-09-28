@@ -94,7 +94,8 @@ test('version under the logo, none in the footer; Sign out in Connections asks f
   await page.locator('.side-head #sideVer', { hasText: 'v3.52' }).waitFor({ timeout: 10000 });
   assert.equal((await ver.textContent()).trim(), 'v3.52');
   const clock = await page.evaluate((t) => new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }), startedAt);
-  assert.equal(await ver.getAttribute('title'), `v3.52 · a1b2c3d · restarted ${clock}`);
+  // Its tooltip holds what Settings → About used to show (#481).
+  assert.match(await ver.getAttribute('title'), new RegExp(`^Running v3\\.52 \\(a1b2c3d\\) · "Sidebar"\\nRestarted .+ \\(${clock}\\) · up `));
   const m = await page.evaluate(() => {
     const t = document.querySelector('.side-title').getBoundingClientRect(), v = document.querySelector('#sideVer').getBoundingClientRect(), cs = getComputedStyle(document.querySelector('#sideVer'));
     return { below: v.top >= t.bottom - 1, size: parseFloat(cs.fontSize), nums: cs.fontVariantNumeric, head: document.querySelector('.side-head').getBoundingClientRect().height };
@@ -114,12 +115,10 @@ test('version under the logo, none in the footer; Sign out in Connections asks f
   client.send(JSON.stringify({ t: 'version', running: { ...running, build: 353 } }));
   await page.locator('#sideVer', { hasText: 'v3.53' }).waitFor();
 
-  // Tapping it opens Settings → About.
+  // Tapping it shows its details (the old About lines) as a toast; Settings has no About section (#481).
   await ver.click();
-  await page.locator('#settingsModal:not([hidden])').waitFor();
-  await page.locator('#abRunning', { hasText: 'Running v3.52' }).waitFor();
-  await page.keyboard.press('Escape');
-  await page.locator('#settingsModal').waitFor({ state: 'hidden' });
+  await page.locator('.toast', { hasText: /^Running v3\.5\d|Running version unknown/ }).waitFor();
+  assert.ok(await page.locator('#settingsModal').isHidden());
 
   // Connections: the agent-orch account row with Sign out, below the agents.
   await page.click('#connFoot');

@@ -2991,7 +2991,7 @@ taskSound.volume = 0.6;
 // custom: the owner's own sounds (GET /api/sounds) and the one for all machines; buffers: id → a promise of the decoded
 // AudioBuffer (fetched once the page has its audio unlock, or on first play); unlocked: that unlock happened.
 const completionSound = { synced: false, statuses: new Map(), done: new Set(), window: -Infinity, heard: new Set(), queue: [], draining: false,
-  busyUntil: -Infinity, unlocking: null, ctx: null, nodes: [], custom: { sounds: [], def: null }, buffers: new Map(), unlocked: false };
+  busyUntil: -Infinity, unlocking: null, ctx: null, mp3: false, nodes: [], custom: { sounds: [], def: null }, buffers: new Map(), unlocked: false };
 // Each machine's finish sound, so the owner can tell by ear where a task finished. 'chime' is the MP3 above (the controller's
 // default); the others are synthesized with Web Audio: notes [Hz, start s, length s, peak gain, glide-to Hz].
 const MACHINE_SOUNDS = {
@@ -3153,34 +3153,14 @@ document.addEventListener('pointerdown', unlockTaskSound);
 document.addEventListener('keydown', unlockTaskSound);
 $('stSound').checked = store.get('cw.taskSound') !== 'off';
 $('stSound').addEventListener('change', (e) => store.set('cw.taskSound', e.target.checked ? 'on' : 'off'));
-$('stSoundTest').addEventListener('click', playTaskSound);
-// An uploaded MP3 (GET /api/settings/sound) replaces the default chime for every browser.
+// An uploaded MP3 (GET /api/settings/sound) replaces the default chime for every browser. Settings has only the on/off
+// switch (#481): each machine's sound, and the owner's custom sounds, are chosen in its Machines settings.
 function setSoundInfo(sound) {
   taskSound.src = sound?.custom ? `/api/settings/sound?v=${sound.at}` : DEFAULT_TASK_SOUND;
-  $('stSoundName').textContent = sound?.custom ? 'Your MP3' : 'Default chime';
-  $('stSoundReset').hidden = !sound?.custom;
+  completionSound.mp3 = !!sound?.custom;
 }
 api('/api/settings').then((d) => setSoundInfo(d.sound)).catch(() => {});
 api('/api/cluster/nodes').then((d) => setMachineSounds(d.nodes)).catch(() => {}); // each machine's sound (Machines refreshes it)
-$('stSoundUpload').addEventListener('click', () => $('stSoundFile').click());
-$('stSoundFile').addEventListener('change', async (e) => {
-  const f = e.target.files[0];
-  e.target.value = '';
-  if (!f) return;
-  if (f.size > 2 * 1024 * 1024) return toast('That file is over 2 MB. Pick a shorter MP3.', { kind: 'error' });
-  try {
-    const r = await fetch('/api/settings/sound', { method: 'POST', headers: { 'Content-Type': 'audio/mpeg' }, body: f });
-    const d = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(d.error || `Upload failed (${r.status})`);
-    setSoundInfo(d.sound);
-    toast('Sound updated');
-    playTaskSound();
-  } catch (err) { toast(err.message, { kind: 'error' }); }
-});
-$('stSoundReset').addEventListener('click', async () => {
-  try { setSoundInfo((await api('/api/settings/sound', 'DELETE')).sound); }
-  catch (err) { toast(err.message, { kind: 'error' }); }
-});
 
 function syncCompletionSound(tasks) {
   if (!completionSound.synced) completionSound.statuses.clear();
@@ -3265,7 +3245,6 @@ function onServer(msg) {
   if (msg.t === 'models') return api('/api/agents').then((d) => { AGENT_LIST = d.agents || []; renderAgentPicker(); }).catch(() => {});
   if (msg.t === 'status') {
     if (msg.alert) toast(msg.alert, { kind: 'error' });
-    if (!$('settingsModal').hidden) loadAbout();
     return applyUpdateStatus(msg);
   }
   if (msg.t === 'version') return onVersion(msg.running);
@@ -3334,13 +3313,12 @@ function onServer(msg) {
   }
 }
 
-// ---------- custom sounds (sounds.mjs): Settings → Sound's list and the add form, shared with each machine's picker ----------
+// ---------- custom sounds (sounds.mjs): the add form under each machine's sound picker ----------
 const SOUND_LIMIT = { bytes: 1024 * 1024, secs: 10 };
 const SOUND_EXT_RE = /\.(mp3|m4a|aac|wav|ogg|oga)$/i;
 const SOUND_ACCEPT = 'audio/mpeg,audio/mp4,audio/x-m4a,audio/aac,audio/wav,audio/x-wav,audio/ogg,.mp3,.m4a,.aac,.wav,.ogg';
 function applyCustomSounds(d) {
   setCustomSounds(d);
-  renderSoundList();
   if (MC.nodes.length) renderMachines();
 }
 const loadCustomSounds = () => api('/api/sounds').then(applyCustomSounds).catch(() => {});
@@ -3399,51 +3377,6 @@ function soundAddForm(onAdded, onCancel) {
   box.append(pickBtn, file, el('span', 'snd-or', 'or'), url, imp, cancel, el('small', 'snd-hint', 'mp3, m4a/aac, wav or ogg · up to 1 MB and 10 s'));
   return box;
 }
-// One row per custom sound: its name (edit in place), length · size, ▶, its volume, Use for all machines, Delete.
-const SND = { adding: false };
-function renderSoundList() {
-  const list = $('stSoundList'), { sounds, def } = completionSound.custom;
-  list.replaceChildren(...sounds.map((c) => {
-    const li = el('li', 'snd-item'), name = el('input', 'snd-name'), meta = el('small', 'snd-meta', `${c.duration != null ? `${c.duration.toFixed(1)} s · ` : ''}${fmtBytes(c.size)}`);
-    name.value = c.name; name.maxLength = 60; name.setAttribute('aria-label', 'Sound name');
-    name.addEventListener('change', async () => {
-      try { await api(`/api/sounds/${c.id}`, 'PATCH', { name: name.value }); } catch (e) { toast(e.message, { kind: 'error' }); }
-      loadCustomSounds();
-    });
-    const play = el('button', 'btn small', '▶'), vol = el('input', 'snd-vol'), all = el('button', 'btn small', def === c.id ? 'For all machines ✓' : 'Use for all machines');
-    const del = el('button', 'btn small danger', 'Delete');
-    for (const b of [play, all, del]) b.type = 'button';
-    play.setAttribute('aria-label', `Preview ${c.name}`);
-    play.addEventListener('click', () => playSound(c.key));
-    vol.type = 'range'; vol.min = 0; vol.max = 100; vol.step = 5; vol.value = c.volume;
-    vol.setAttribute('aria-label', `${c.name} volume`);
-    vol.title = `Volume ${c.volume}%`;
-    vol.addEventListener('input', () => { c.volume = Number(vol.value); vol.title = `Volume ${c.volume}%`; });
-    vol.addEventListener('change', async () => {
-      try { await api(`/api/sounds/${c.id}`, 'PATCH', { volume: c.volume }); playSound(c.key); } catch (e) { toast(e.message, { kind: 'error' }); }
-    });
-    all.setAttribute('aria-pressed', String(def === c.id));
-    all.title = def === c.id ? 'Every machine without its own pick plays this. Press to go back to their own defaults.' : 'Play this on every machine without its own pick';
-    all.addEventListener('click', async () => {
-      try { applyCustomSounds({ sounds, ...(await api('/api/sounds/default', 'PUT', { id: def === c.id ? null : c.id })) }); } catch (e) { toast(e.message, { kind: 'error' }); }
-    });
-    del.addEventListener('click', async () => {
-      const name = (id) => MC.nodes.find((m) => m.id === id)?.name || (id === HEAD_NODE ? 'this server' : 'a machine');
-      const using = [...completionSound.nodes.filter((n) => n.sound === c.key).map((n) => name(n.id)), ...(def === c.id ? ['every machine without its own pick'] : [])];
-      if (using.length && !confirm(`Delete ${c.name}? It is in use: ${using.join(', ')} will play the built-in default instead.`)) return;
-      try { await api(`/api/sounds/${c.id}`, 'DELETE'); } catch (e) { toast(e.message, { kind: 'error' }); }
-      await loadCustomSounds();
-      loadMachines();
-    });
-    li.append(name, meta, play, vol, all, del);
-    return li;
-  }));
-  const add = $('stSoundAdd');
-  add.hidden = SND.adding;
-  add.nextElementSibling?.classList.contains('snd-add') && add.nextElementSibling.remove();
-  if (SND.adding) add.after(soundAddForm(() => { SND.adding = false; renderSoundList(); }, () => { SND.adding = false; renderSoundList(); $('stSoundAdd').focus(); }));
-}
-$('stSoundAdd').addEventListener('click', () => { SND.adding = true; renderSoundList(); $('stSounds').querySelector('.snd-add input[type=url]')?.focus(); });
 loadCustomSounds();
 
 // ---------- status / boot ----------
@@ -4992,7 +4925,7 @@ function machineSoundPicker(n) {
   sel.dataset.act = 'sound';
   sel.setAttribute('aria-label', `Finish sound for ${n.name}`);
   const opt = (k, label) => { const o = el('option', '', `${label}${k === def ? ' (default)' : ''}`); o.value = k; return o; };
-  for (const [k, s] of Object.entries(MACHINE_SOUNDS)) sel.append(opt(k, k === 'chime' && $('stSoundName').textContent === 'Your MP3' ? 'Your MP3' : s.label));
+  for (const [k, s] of Object.entries(MACHINE_SOUNDS)) sel.append(opt(k, k === 'chime' && completionSound.mp3 ? 'Your MP3' : s.label));
   if (completionSound.custom.sounds.length) {
     const g = el('optgroup');
     g.label = 'Your sounds';
@@ -7169,7 +7102,6 @@ function openSettings() {
   $('settingsModal').hidden = false;
   renderSettings();
   loadGatePatterns();
-  loadAbout();
   $('settingsModal').querySelector('.icon-btn[data-close]').focus();
 }
 function closeSettings() {
@@ -7180,9 +7112,9 @@ const ST = { lastFocus: null };
 $('settingsBtn').addEventListener('click', openSettings);
 $('settingsModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeSettings(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('settingsModal').hidden && $('fbModal').hidden) { e.stopImmediatePropagation(); closeSettings(); } }, true);
-// ----- About (Settings): the build this server runs and since when (ws 'version' on connect), and the newer one on
-// disk (GET /api/version). A build newer than the one this tab (or, on a fresh load, this browser) last saw toasts.
-const VER = { running: null, seq: 0 };
+// ----- Version (under the sidebar logo): the build this server runs and since when (ws 'version' on connect), and the
+// newer one on disk (GET /api/version), in its tooltip; there is no About section in Settings (#481). A build newer than the one this tab (or, on a fresh load, this browser) last saw toasts.
+const VER = { running: null, seq: 0, about: null };
 // Build N (git rev-list --count) → 'v<N/100>.<N%100, two digits>', like version.mjs formatVersion: 352 → 'v3.52'.
 function fmtVersion(n) { return Number.isInteger(n) && n >= 0 ? `v${Math.floor(n / 100)}.${String(n % 100).padStart(2, '0')}` : null; }
 function onVersion(running) {
@@ -7194,21 +7126,27 @@ function onVersion(running) {
     store.set('cw.build', String(b));
   }
   renderSideVer(running);
-  if (!$('settingsModal').hidden) loadAbout();
+  loadAbout();
 }
-// The version line under the sidebar logo: 'v3.52', with 'v3.52 · a1b2c3d · restarted 13:05' as its tooltip.
+// The version line under the sidebar logo: 'v3.52'. Its tooltip is the old About section's lines (aboutLines) once GET
+// /api/version answers, else 'v3.52 · a1b2c3d · restarted 13:05'. A tap (no hover on phones) shows them as a toast.
 function sideVerTip(r) { return [fmtVersion(r?.build), r?.sha?.slice(0, 7), r?.startedAt && `restarted ${fmtWhen(r.startedAt)}`].filter(Boolean).join(' · '); }
 function renderSideVer(r) {
-  const v = fmtVersion(r?.build);
+  const v = fmtVersion(r?.build), a = VER.about;
   $('sideVer').hidden = !v;
   $('sideVer').textContent = v || '';
-  $('sideVer').title = v ? sideVerTip(r) : '';
+  $('sideVer').title = !v ? '' : a ? [a.running, a.restarted, a.pending].filter(Boolean).join('\n') : sideVerTip(r);
 }
 async function loadAbout() {
   const seq = ++VER.seq;
-  try { const d = await api('/api/version'); if (seq === VER.seq) renderAbout(d); } catch { if (seq === VER.seq) $('abRunning').textContent = "Couldn't read the running build"; }
+  try {
+    const d = await api('/api/version');
+    if (seq !== VER.seq) return;
+    VER.about = aboutLines(d);
+    renderSideVer(VER.running || d?.running);
+  } catch {}
 }
-// The About lines for a GET /api/version answer, in the browser's timezone (pure: test/version-ui.test.mjs).
+// The About text for a GET /api/version answer, in the browser's timezone (pure: test/version-ui.test.mjs).
 function aboutLines(d, now = Date.now()) {
   const r = d?.running || {}, disk = d?.disk, rs = d?.restart || {}, waits = !!(rs.pending || rs.auto);
   return {
@@ -7220,24 +7158,12 @@ function aboutLines(d, now = Date.now()) {
     restartButton: disk?.ahead > 0 && !waits,
   };
 }
-function renderAbout(d) {
-  const a = aboutLines(d);
-  $('abRunning').textContent = a.running;
-  $('abRunning').title = a.runningTip;
-  $('abRestarted').textContent = a.restarted;
-  $('abRestarted').title = a.restartedTip;
-  $('abPending').hidden = !a.pending;
-  $('abPendingText').textContent = a.pending || '';
-  $('abRestart').hidden = !a.restartButton;
-  $('abRestart').disabled = false;
-}
-$('abRestart').addEventListener('click', async () => {
-  $('abRestart').disabled = true;
-  try { await api('/api/restart-when-idle', 'POST'); upd.pending = true; renderUpdateBanner(); } catch (e) { toast(e.message, { kind: 'error' }); }
-  loadAbout();
+$('sideVer').addEventListener('pointerenter', loadAbout);
+$('sideVer').addEventListener('click', async () => {
+  await loadAbout();
+  toast($('sideVer').title.replace(/\n/g, ' · '), { duration: 8000 });
 });
-$('sideVer').addEventListener('click', () => { openSettings(); $('stAboutTitle').scrollIntoView({ block: 'start' }); });
-api('/api/version').then((d) => { if (d?.running && !VER.running) renderSideVer(d.running); }, () => {});
+loadAbout();
 function renderSettings() {
   if ($('settingsModal').hidden) return;
   const s = O.state || {}, p = O.project;

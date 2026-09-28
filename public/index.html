@@ -32,7 +32,7 @@
       <img src="/logo.png" width="24" height="24" alt="">
       <span class="side-name">
         <span class="side-title">agent-orch</span>
-        <button type="button" class="side-ver" id="sideVer" aria-haspopup="dialog" hidden></button>
+        <button type="button" class="side-ver" id="sideVer" hidden></button>
       </span>
       <button class="icon-btn only-mobile" id="closeSidebar" aria-label="Close sidebar">
         <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
@@ -472,25 +472,18 @@
       </button>
     </div>
     <div class="m-body">
-      <h3 class="st-sec">Sound</h3>
-      <div class="st-row st-sound">
-        <label class="st-text" for="stSound"><strong>Sound when a task finishes</strong><small>Plays whether this tab is open or in the background · <span id="stSoundName">Default chime</span></small></label>
-        <button type="button" class="btn small" id="stSoundTest">Test</button>
-        <button type="button" class="btn small" id="stSoundUpload">Upload MP3</button>
-        <button type="button" class="btn small" id="stSoundReset" hidden>Reset</button>
-        <input type="file" id="stSoundFile" accept="audio/mpeg,.mp3" hidden>
-        <input type="checkbox" class="st-switch" id="stSound" role="switch" checked>
-      </div>
-      <div class="st-sounds" id="stSounds">
-        <ul class="snd-list" id="stSoundList" aria-label="Your sounds"></ul>
-        <button type="button" class="btn small" id="stSoundAdd">+ Add custom sound</button>
-      </div>
-      <h3 class="st-sec">Notifications</h3>
+      <h3 class="st-sec">Alerts</h3>
+      <p class="st-hint">How agent-orch gets your attention</p>
+      <label class="st-row">
+        <span class="st-text"><strong>Play a sound when a task finishes</strong><small id="stSoundHint">Choose each machine's sound in Machines</small></span>
+        <input type="checkbox" class="st-switch" id="stSound" role="switch" aria-describedby="stSoundHint" checked>
+      </label>
       <label class="st-row">
         <span class="st-text"><strong>Notify this device</strong><small id="stPushHint">A notification when a task needs you, even with agent-orch closed</small></span>
         <input type="checkbox" class="st-switch" id="stPush" role="switch" aria-describedby="stPushHint">
       </label>
       <h3 class="st-sec">Tasks</h3>
+      <p class="st-hint">How much runs at once, and what waits for you</p>
       <label class="st-row">
         <span class="st-text"><strong>Parallel tasks</strong><small id="stParHint">Checking what can run…</small></span>
         <select id="stParallel" aria-describedby="stParHint"></select>
@@ -516,9 +509,11 @@
         <textarea id="stGatePatterns" rows="2" maxlength="4000" placeholder="e.g. Approve invoice" aria-describedby="stGateHint"></textarea>
       </div>
       <h3 class="st-sec">Agents</h3>
+      <p class="st-hint">What your agents know and can use</p>
       <button type="button" class="st-row st-link" data-ext-open="skills"><span class="st-text"><strong>Skills &amp; tools</strong><small id="stExtSummary">Skills, MCP servers, subagents and personas</small></span><svg class="st-chev" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>
       <div id="stProject" hidden>
         <h3 class="st-sec" id="stProjectTitle">This project</h3>
+        <p class="st-hint">Only for the open project</p>
         <label class="st-row">
           <span class="st-text"><strong>Keep improving</strong><small id="stPerpetualHint">When the queue runs low, look at the project and queue the next most valuable steps</small></span>
           <input type="checkbox" class="st-switch" id="stPerpetual" name="perpetual" role="switch" aria-describedby="stPerpetualHint">
@@ -539,15 +534,6 @@
             <button type="button" class="chip" data-dir="Make it faster and lighter: slow pages and queries, bundle size and memory use.">Performance</button>
           </div>
           <small class="st-saved" id="stDirSaved" aria-live="polite"></small>
-        </div>
-      </div>
-      <h3 class="st-sec" id="stAboutTitle">About</h3>
-      <div class="st-about" id="stAbout" aria-live="polite">
-        <p class="ab-line" id="abRunning">Checking the running version…</p>
-        <p class="ab-line ab-sub" id="abRestarted"></p>
-        <div class="st-row ab-pending" id="abPending" hidden>
-          <span class="st-text" id="abPendingText"></span>
-          <button type="button" class="btn small" id="abRestart">Restart when idle</button>
         </div>
       </div>
     </div>

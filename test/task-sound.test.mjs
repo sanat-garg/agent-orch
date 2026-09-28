@@ -64,7 +64,7 @@ test('sound preference, manual test and one-time muted unlock', async () => {
   f.run('syncCompletionSound([])');
   await f.event(1, 'running'); await f.event(1, 'done'); assert.equal(f.plays, 0);
   f.listeners.get('pointerdown')();
-  await f.elements.stSoundTest.click();
+  await f.context.playTaskSound();
   assert.equal(f.plays, 1, 'manual test works even with preference off');
   assert.equal(f.listeners.size, 0);
   assert.equal(f.run('taskSound.muted'), false);
@@ -74,16 +74,14 @@ test('sound preference, manual test and one-time muted unlock', async () => {
   await f.context.playTaskSound();
 });
 
-test('an uploaded MP3 replaces the default chime; Reset brings it back', async () => {
+test('an uploaded MP3 replaces the default chime; removing it brings it back', async () => {
   const f = fixture();
   await Promise.resolve(); await Promise.resolve();
   assert.equal(f.run('taskSound.src'), '/sounds/task-done.mp3');
-  assert.equal(f.elements.stSoundName.textContent, 'Default chime');
-  assert.equal(f.elements.stSoundReset.hidden, true);
+  assert.equal(f.run('completionSound.mp3'), false);
   f.run("setSoundInfo({ custom: true, at: 42 })");
   assert.equal(f.run('taskSound.src'), '/api/settings/sound?v=42');
-  assert.equal(f.elements.stSoundName.textContent, 'Your MP3');
-  assert.equal(f.elements.stSoundReset.hidden, false);
+  assert.equal(f.run('completionSound.mp3'), true);
   f.run("setSoundInfo({ custom: false, at: null })");
   assert.equal(f.run('taskSound.src'), '/sounds/task-done.mp3');
 });

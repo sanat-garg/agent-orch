@@ -1499,6 +1499,9 @@ Lightbox opens fitted; thumbnails contain; fit tests pass
 
 conflicts resolved; mobile Machines tests pass; ui-machines test 5 still fails
 
+## 2026-09-28 18:15 — #481 Simpler Settings: one sound switch, no About section [done (check passed)]
+
+Settings has one sound switch, no About, four hinted sections
 ## 2026-09-28 18:11 — #483 Files backend: upload files and folders [done (check passed)]
 
 Streamed, login-protected Files upload endpoint works; its tests pass
@@ -1508,3 +1511,7 @@ Usage bars show pace markers; usage charts show dashed pace diagonals
 ## 2026-09-28 18:15 — #480 Machines window: a wide modal titled 'Machines', head KPIs only on click [done (check passed)]
 
 Machines is a wide modal with four cards in one row
+
+## 2026-09-28 18:15 — #488 Integrate #481: Simpler Settings: one sound switch, no About section [done (check passed)]
+
+CONTEXT.md conflict resolved; settings and static tests pass

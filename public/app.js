@@ -2422,11 +2422,15 @@ function modelName(agent, model) {
 }
 const MOVED_SVG = '<svg viewBox="0 0 24 24" width="11" height="11" aria-hidden="true"><path d="M5 5v6a4 4 0 0 0 4 4h10m-4-4 4 4-4 4" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 // The model chip: modelStatus text, tinted when it is not the primary (delegated) or waiting on a limit.
+// Phones show a delegated chip short ('Astra · moved'); the full text stays in the tooltip and the drawer.
+const phoneMQ = matchMedia('(max-width: 800px)');
+phoneMQ.addEventListener('change', () => refreshAllCards());
 function modelChip(t, ms = modelStatus(t)) {
   const b = el('span', `tc-tag model ${ms.kind}`);
   if (ms.kind === 'delegated') b.innerHTML = MOVED_SVG;
-  b.append(document.createTextNode(ms.text));
-  b.title = [ms.tip, t.route_note].filter(Boolean).join(' — ');
+  const short = ms.kind === 'delegated' && phoneMQ.matches;
+  b.append(document.createTextNode(short ? `${ms.model} · moved` : ms.text));
+  b.title = [short && ms.text, ms.tip, t.route_note].filter(Boolean).join(' — ');
   return b;
 }
 

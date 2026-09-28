@@ -786,3 +786,7 @@ Worker now prunes stale deps caches and oversized npm-cache
 ## 2026-09-28 04:58 — #265 Cluster: auto-undrain a worker once the low disk that drained it has recovered [done (check passed)]
 
 Low-disk drains now lift themselves after three recovered frames
+
+## 2026-09-28 05:02 — #266 UI-REVIEW #3: task-card titles wrap on phones and the model chip drops under the title [done (check passed)]
+
+Phone task cards wrap titles to two lines; chip moved below

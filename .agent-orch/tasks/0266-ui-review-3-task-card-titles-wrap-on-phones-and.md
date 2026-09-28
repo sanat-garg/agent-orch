@@ -13,3 +13,7 @@ Mobile HIG finding #3 in .agent-orch/UI-REVIEW.md: in the chat's task cards (`.t
 ## Done when
 
 `node --test test/ui-mobile-cards.test.mjs` passes and `grep -n '^| 3 | high · \*\*fixed\*\*' .agent-orch/UI-REVIEW.md` prints a match
+
+## Result — done (check passed) (2026-09-28 05:02)
+
+AGENT-ORCH-STATUS: done — Phone task cards wrap titles to two lines; chip moved below

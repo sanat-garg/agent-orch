@@ -13,3 +13,7 @@ Reliability fix in retention.mjs (AUDIT #61 in .agent-orch/AUDIT.md; do NOT edit
 ## Done when
 
 `npm test -- test/retention.test.mjs` passes and `grep -q 'uploads' retention.mjs`
+
+## Result — done (check passed) (2026-09-28 13:00)
+
+AGENT-ORCH-STATUS: done — retention keeps referenced approval and review shots, prunes stale uploads

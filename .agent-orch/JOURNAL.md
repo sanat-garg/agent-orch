@@ -1045,3 +1045,7 @@ Stats has a tested Machines tab with per-machine rows and share bar
 ## 2026-09-28 12:55 — #370 taskrun.mjs: extractCheck tells a refused Done-when from one with no command (AUDIT #66 half two) [done (check passed)]
 
 extractCheck reports refused Done-when snippets; verify tests pass
+
+## 2026-09-28 13:00 — #369 retention.mjs AUDIT #61: keep approval screenshots and review shots, prune stale uploads [done (check passed)]
+
+retention keeps referenced approval and review shots, prunes stale uploads

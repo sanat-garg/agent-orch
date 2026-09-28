@@ -731,3 +731,10 @@ browser tasks get Playwright MCP; persistent-profile cookie test passes
 ## 2026-09-28 03:11 — #249 UI-REVIEW #1: top bar keeps its 56px content row below the iPhone safe-area inset [done (check passed)]
 
 Top bar height includes safe-area inset; static tests pass
+## 2026-09-28 03:10 — #257 Live browser view: sign in once, watch and take over from the app [done (check passed)]
+
+live browser view, take-over and sidebar Browser sheet pass tests
+
+## 2026-09-28 03:12 — #260 Integrate #257: Live browser view: sign in once, watch and take over from the app [done (check passed)]
+
+orchestrator.mjs conflicts resolved; browser-live and run-on tests pass

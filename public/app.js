@@ -2726,6 +2726,7 @@ function connect() {
     refreshConnections();
     if (!$('serverModal').hidden) send({ t: 'metrics_sub', on: true });
     if (O.drawer) { send({ t: 'owatch', taskId: O.drawer, on: true }); loadDetail(); }
+    window.bvResume?.();
   };
   ws.onclose = (e) => {
     resetCompletionSync();
@@ -2748,6 +2749,7 @@ function send(msg) {
 
 function onServer(msg) {
   if (msg.t === 'mtick' || msg.t === 'mhist' || msg.t === 'mdetail' || msg.t === 'usage') return onMetrics(msg);
+  if (msg.t?.startsWith('bv_')) return window.bvOnServer?.(msg); // the live browser view (browser.js)
   if (msg.t === 'oprojects') { applyProjectOrder(msg.order || []); renderConvoList(); return renderOrchBar(); }
   if (['otask', 'oproject', 'ostate', 'orun', 'oorder', 'olane'].includes(msg.t)) return onOrch(msg);
   if (msg.t === 'connections') return msg.node ? applyRemote(msg.node, msg.connections) : applyConnections(msg.connections);
@@ -5362,6 +5364,7 @@ function closeTask() {
   send({ t: 'owatch', taskId: O.drawer, on: false });
   O.drawer = null;
   O.detail = null;
+  window.bvThumbDrop?.();
   $('taskDrawer').hidden = true;
   $('drawerScrim').hidden = true;
   refreshAllCards();
@@ -5664,6 +5667,9 @@ function renderDrawer(fromLive = false) {
 
   // Model: the same text as the card's chip, the ordered fallbacks (current one marked) and every move.
   if (t.kind !== 'plan') body.append(modelSection(t));
+  // A running browser task: its live page, with Watch and Take over (browser.js).
+  const live = window.bvTaskThumb?.(t);
+  if (live) body.append(live);
   // A worker's steps for the latest run (runs.phases): where the time went, what it's doing now, what failed.
   const lastRun = d.runs.at(-1), tl = lastRun && timelineSection(lastRun, t.status === 'running' && !lastRun.outcome);
   if (tl) body.append(tl);

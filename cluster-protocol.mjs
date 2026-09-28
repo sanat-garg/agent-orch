@@ -38,6 +38,7 @@ export const MSG = {
   MODELS_REFRESH: 'models.refresh', MODELS: 'models', LIMITS_REFRESH: 'limits.refresh', LIMITS: 'limits',
   JOB_PHASE: 'job.phase', JOB_ERROR: 'job.error', NODE_ERROR: 'node.error', LOGS_TAIL: 'logs.tail', LOGS: 'logs', NODE_UPDATE: 'node.update',
   NODE_POLICY: 'node.policy',
+  SCREEN_REQ: 'screen.req', SCREEN_RES: 'screen.res', SCREEN_INPUT: 'screen.input', SCREEN_FRAME: 'screen.frame', SCREEN_STATE: 'screen.state',
 };
 
 // Who may send each type: 'w' worker → controller, 'c' controller → worker, 'both'. Only the controller originates jobs.
@@ -49,6 +50,7 @@ export const DIRECTION = {
   'login.start': C, 'login.state': W, 'login.code': C, 'login.cancel': C, 'login.logout': C,
   'models.refresh': C, models: W, 'limits.refresh': C, limits: W,
   'job.phase': W, 'job.error': W, 'node.error': W, 'logs.tail': C, logs: W, 'node.update': C, 'node.policy': C,
+  'screen.req': C, 'screen.res': W, 'screen.input': C, 'screen.frame': W, 'screen.state': W,
 };
 // Frame types a peer sends only when the other side lists the feature (hello.features: the worker's, welcome.features:
 // the controller's), so a worker updated ahead of the controller's running code (or the reverse) never sends a type the
@@ -56,18 +58,19 @@ export const DIRECTION = {
 // Feature 'policy' also covers the job.reject reason 'power'; feature 'cap' (no frame type of its own) is the job.reject
 // reason 'cap': the worker's local cap (cap.mjs) is full.
 export const FEATURES = { 'job.phase': 'phases', 'job.error': 'errors', 'node.error': 'errors', 'logs.tail': 'logs', logs: 'logs', 'node.update': 'update',
-  'node.policy': 'policy', 'agent.credential': 'creds' };
+  'node.policy': 'policy', 'agent.credential': 'creds',
+  'screen.req': 'screen', 'screen.res': 'screen', 'screen.input': 'screen', 'screen.frame': 'screen', 'screen.state': 'screen' };
 export const FEATURE_LIST = [...new Set([...Object.values(FEATURES), 'cap'])];
 // Compute-only workers (BRIEF goal 11): the only frames a worker acts on, all from the head it dialled. Connection
 // upkeep; jobs (job.*, plus git.credential for their pushes); remote sign-in driven from the head's Connections (login.*);
 // model and limit refreshes; its log tail; self-update; and the node's policy (max tasks, power), which like draining is
-// set on the head only. A worker rejects and logs any other type, even one added here later, and the head's hub never
+// set on the head only; and the owner's live view of a browser profile on it (screen.*). A worker rejects and logs any other type, even one added here later, and the head's hub never
 // sends one: there is no chat, prompt, planner, reflection or settings frame for a worker.
 export const WORKER_ACCEPTS = Object.freeze([
   MSG.WELCOME, MSG.HEARTBEAT, MSG.ACK, MSG.ERROR, MSG.BYE,
   MSG.JOB_OFFER, MSG.JOB_START, MSG.JOB_CANCEL, MSG.JOB_PAUSE, MSG.JOB_RESUME, MSG.JOB_ATTACH, MSG.GIT_CREDENTIAL, MSG.AGENT_CREDENTIAL,
   MSG.LOGIN_START, MSG.LOGIN_CODE, MSG.LOGIN_CANCEL, MSG.LOGIN_LOGOUT,
-  MSG.MODELS_REFRESH, MSG.LIMITS_REFRESH, MSG.LOGS_TAIL, MSG.NODE_UPDATE, MSG.NODE_POLICY,
+  MSG.MODELS_REFRESH, MSG.LIMITS_REFRESH, MSG.LOGS_TAIL, MSG.NODE_UPDATE, MSG.NODE_POLICY, MSG.SCREEN_REQ, MSG.SCREEN_INPUT,
 ]);
 
 export const AGENT_IDS = ['claude', 'codex'];
@@ -166,6 +169,15 @@ const S = {
   'node.update': { sha: 'sha?' },
   // The owner changed the node's power policy or max tasks (Machines view): the same shape as welcome.policy.
   'node.policy': { policy: 'obj' },
+  // The owner's live view of a browser profile on the node (browser-live.mjs; AGENTIC.md → Browser). screen.req ops:
+  // profiles, open (start streaming, url?), stop, nav (action go|back|forward|reload, url?), takeover (on: hold the
+  // profile's task actions), sites (cookie domains, never values), clear; answered by screen.res {req, result|error}.
+  // screen.input events (mouse, click, key, text) are never logged. screen.frame: one JPEG (base64) of w×h CSS px, n counts them.
+  'screen.req': { req: 'str', op: 'str', identity: 'str?', url: 'str?', action: 'str?', on: 'bool?' },
+  'screen.res': { req: 'str', result: 'obj?', error: 'str?' },
+  'screen.input': { identity: 'str', events: 'arr' },
+  'screen.frame': { identity: 'str', n: 'int', data: 'str', w: 'int', h: 'int' },
+  'screen.state': { identity: 'str', url: 'str?', title: 'str?', active: 'bool?', takeover: 'bool?', closed: 'bool?', error: 'str?', note: 'str?' },
 };
 export const SCHEMA = S;
 

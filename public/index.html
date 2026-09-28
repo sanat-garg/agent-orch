@@ -14,6 +14,7 @@
 <link rel="stylesheet" href="/files.css">
 <link rel="stylesheet" href="/stats.css">
 <link rel="stylesheet" href="/ext.css">
+<link rel="stylesheet" href="/browser.css">
 <link rel="preload" href="/mascot.png" as="image">
 </head>
 <body>
@@ -68,6 +69,9 @@
       <button type="button" class="side-foot" id="connFoot" aria-haspopup="dialog" title="Open connections">
         <span class="dot" id="connDot"></span>
         <span class="host" id="connText">Connecting…</span>
+      </button>
+      <button type="button" class="icon-btn side-browser" id="browserBtn" aria-haspopup="dialog" aria-label="Browser" title="Browser: sign in to sites, watch tasks">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3.5 12h17M12 3.5c2.4 2.5 3.4 5.3 3.4 8.5s-1 6-3.4 8.5c-2.4-2.5-3.4-5.3-3.4-8.5s1-6 3.4-8.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
       </button>
       <button type="button" class="icon-btn side-stats" id="statsBtn" aria-haspopup="dialog" aria-label="Stats" title="Stats">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M5 20V11M12 20V4M19 20v-6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
@@ -309,6 +313,51 @@
       <div class="cn-row cn-app" id="connsApp"></div>
       <div class="cn-bar"><span class="cn-checked" id="connsChecked"></span><button class="btn small" id="connsRefresh" type="button" title="Re-check every sign-in, model list and limit reading">Refresh</button></div>
       <div class="cn-list" id="connsList"></div>
+    </div>
+  </div>
+</div>
+
+<div class="modal sheet" id="browserModal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-panel bw" role="dialog" aria-modal="true" aria-labelledby="bwTitle">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <div class="m-head">
+      <div>
+        <h2 id="bwTitle">Browser</h2>
+        <p class="m-sub">Browser tasks use these profiles. Open one to sign in to a site once (Gmail, Canva…), or to watch a task's browser and take over.</p>
+      </div>
+      <button class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="m-body" id="bwBody"></div>
+  </div>
+</div>
+
+<div class="modal bv" id="bvModal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-panel bv-panel" role="dialog" aria-modal="true" aria-labelledby="bvTitle">
+    <div class="bv-head">
+      <div class="bv-titles">
+        <h2 id="bvTitle">Browser</h2>
+        <div class="bv-status" id="bvStatus" aria-live="polite"></div>
+      </div>
+      <button type="button" class="btn small" id="bvTake" hidden></button>
+      <button class="icon-btn" data-close aria-label="Close the browser">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <form class="bv-bar" id="bvBar" autocomplete="off">
+      <button type="button" class="icon-btn" id="bvBack" aria-label="Back" title="Back"><svg viewBox="0 0 24 24" width="18" height="18"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      <button type="button" class="icon-btn" id="bvReload" aria-label="Reload" title="Reload"><svg viewBox="0 0 24 24" width="17" height="17"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      <input id="bvUrl" type="url" inputmode="url" enterkeyhint="go" spellcheck="false" autocapitalize="off" aria-label="Address" placeholder="Search or enter an address">
+      <button type="button" class="btn small" id="bvPaste" title="Paste your clipboard into the page">Paste</button>
+      <button type="button" class="btn small" id="bvKbd" title="Show the keyboard and type into the page">Keyboard</button>
+    </form>
+    <div class="bv-stage" id="bvStage">
+      <canvas id="bvCanvas" tabindex="0" aria-label="Live browser page. Click to interact; type while it has focus."></canvas>
+      <div class="bv-wait" id="bvWait">Starting the browser…</div>
+      <input id="bvKeys" class="bv-keys" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="Type into the page" enterkeyhint="send">
     </div>
   </div>
 </div>
@@ -622,5 +671,6 @@
 <script src="/files.js"></script>
 <script src="/stats.js"></script>
 <script src="/ext.js"></script>
+<script src="/browser.js"></script>
 </body>
 </html>

@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { runHelper } from './helpers.mjs';
 
 export const CAPABILITIES = ['browser'];
@@ -78,14 +79,17 @@ export function playwrightMcpCommand() {
 }
 
 // The stdio MCP server record for one browser run. outputDir: where screenshots without an explicit name land (the run's
-// .agent-orch/shots/). The profile folder is created 0700 so the first run doesn't race Chromium creating it.
+// .agent-orch/shots/). The profile folder is created 0700 so the first run doesn't race Chromium creating it. The MCP runs
+// behind bin/browser-mcp.mjs, which attaches it to the profile's shared Chromium (the owner's live view, browser-live.mjs)
+// and holds its actions while the owner has taken over; the launch flags below are its fallback.
 export function browserServer({ identity, home = os.homedir(), outputDir, headed = hasDisplay(), executable = findBrowser() } = {}) {
   const profile = profileDir(identity, home);
   fs.mkdirSync(profile, { recursive: true, mode: 0o700 });
   const { command, args } = playwrightMcpCommand();
   return {
-    type: 'stdio', command,
-    args: [...args, '--user-data-dir', profile, ...(outputDir ? ['--output-dir', outputDir] : []),
+    type: 'stdio', command: process.execPath,
+    args: [fileURLToPath(new URL('./bin/browser-mcp.mjs', import.meta.url)), '--identity', normIdentity(identity), '--home', home, '--',
+      command, ...args, '--user-data-dir', profile, ...(outputDir ? ['--output-dir', outputDir] : []),
       ...(executable ? ['--executable-path', executable] : ['--browser', process.platform === 'darwin' ? 'chrome' : 'chromium']),
       ...(headed ? [] : ['--headless']),
       // Playwright's own default: Linux servers (Ubuntu's AppArmor userns rules) can't start Chromium's sandbox.

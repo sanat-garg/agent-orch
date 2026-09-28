@@ -88,6 +88,7 @@ Direction: C = controller → worker, W = worker → controller (`DIRECTION`; `v
 | `logs.tail` / `logs` | C / W | req, lines / req, lines[], error | the owner asked for the worker's log tail (feature `logs`) |
 | `node.update` | C | sha | update agent-orch and restart, sent only while the node is idle (feature `update`) |
 | `node.policy` | C | policy | the owner changed the node's power policy or max tasks (feature `policy`); older workers read it in the next `welcome` |
+| `screen.req` / `screen.res` / `screen.input` / `screen.frame` / `screen.state` | C / W / C / W / W | req, op, identity… / req, result, error / identity, events / identity, n, data, w, h / identity, url, title, active, takeover | the owner's live view of a browser profile on the worker (browser-live.mjs; feature `screen`); input is never logged |
 
 A task's life on a worker: `job.offer` → `job.accept` → `job.start` → `job.event`* (+ `job.wip`*) → (if ok and the
 task has a done-when) `job.check` → final commit + push (`job.wip`) → `job.done` → controller merges or answers with `job.resume` (continue /

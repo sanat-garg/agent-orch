@@ -401,7 +401,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
           changed();
           break;
         }
-        case MSG.LOGS: {
+        case MSG.LOGS: case MSG.SCREEN_RES: {
           const r = requests.get(msg.req);
           if (r?.node === id) r.done(msg);
           touch();
@@ -588,5 +588,5 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
   }
 
   return { listNodes, node, createPairing, pairing, revokePairing, claim, whoami, update, revoke, handleUpgrade, send, onMessage, isConnected: (id) => conns.has(id), version: () => version, close,
-    autoDrain, requestUpdate, logsTail, metrics: metricsOf, setBusy: (fn) => { busy = fn; }, setUpNext: (fn) => { upNext = fn; }, health };
+    autoDrain, requestUpdate, logsTail, request, metrics: metricsOf, setBusy: (fn) => { busy = fn; }, setUpNext: (fn) => { upNext = fn; }, health };
 }

@@ -28,6 +28,7 @@ import { createExtensions } from './extensions.mjs';
 import { createAgentShare, wireAgentShare, shareTargets } from './agent-share.mjs';
 import { saveUpload, readUpload, placeUploads, attachmentView, attachmentNote, claudeImageBlocks, MAX_UPLOAD_BYTES, MAX_ATTACHMENTS } from './uploads.mjs';
 import { headRefusal } from './role.mjs';
+import { createBrowserViews, LOCAL as BV_LOCAL } from './browser-view.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -795,6 +796,10 @@ if (cluster) {
     onChange: () => { const list = connList(); for (const ws of allClients) send(ws, { t: 'connections', connections: list }); } });
   wireAgentShare(cluster, agentShare, (m) => console.log(`[share] ${m}`));
 }
+// The owner's live browser views (Browser sheet, task drawers): profiles on this server or on workers (browser-view.mjs).
+const browserViews = createBrowserViews({ cluster: () => cluster || null, tasks: () => orch?.browserTasks() || [], send: (ws, m) => send(ws, m),
+  log: (m) => console.log(`[browser] ${m}`) });
+if (cluster) cluster.onMessage((id, msg) => browserViews.onCluster(id, msg));
 if (cluster) remoteLogins = createRemoteLogins({ cluster, local: () => connections.list(),
   onChange: (node) => { const list = remoteLogins.list(node); for (const ws of allClients) send(ws, { t: 'connections', node, connections: list }); } });
 
@@ -1414,7 +1419,7 @@ async function handleRequest(req, res) {
 
   if (VENDOR[p]) return serveFile(res, path.join(ROOT, VENDOR[p]));
   if (p === '/' || p === '/index.html') return serveFile(res, path.join(PUBLIC, 'index.html'));
-  if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css') return serveFile(res, path.join(PUBLIC, p));
+  if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css' || p === '/browser.js' || p === '/browser.css') return serveFile(res, path.join(PUBLIC, p));
   // The Files view: read-only listing and preview of one chat's project folder (files.mjs).
   if (handleFiles(req, res, url, { rootFor: (cid) => findConvo(cid)?.cwd || null, json })) return;
 
@@ -1512,6 +1517,14 @@ async function handleRequest(req, res) {
       broadcastConvos();
       return json(res, 200, c);
     }
+  }
+  // Browser profiles per machine, a profile's signed-in sites (cookie domains, never values) and clearing one.
+  if (p === '/api/browser' && req.method === 'GET') return json(res, 200, { nodes: await browserViews.list() });
+  if ((p === '/api/browser/sites' && req.method === 'GET') || (p === '/api/browser/clear' && req.method === 'POST')) {
+    const q = req.method === 'GET' ? Object.fromEntries(new URL(req.url, 'http://x').searchParams) : await readBody(req);
+    try {
+      return json(res, 200, p.endsWith('/sites') ? { sites: await browserViews.sites(String(q.node || BV_LOCAL), q.identity) } : { ok: await browserViews.clear(String(q.node || BV_LOCAL), q.identity) });
+    } catch (e) { return json(res, 409, { error: e.message }); }
   }
   if (p.startsWith('/api/cluster/') && !cluster) return json(res, 503, { error: 'cluster unavailable' });
   if (p === '/api/cluster/nodes' && req.method === 'GET') return json(res, 200, { nodes: orch.machines(cluster.listNodes()) });
@@ -1948,6 +1961,7 @@ wss.on('connection', (ws, req) => {
   });
 
   function handleMessage(msg) {
+    if (browserViews.handle(ws, msg)) return;
     if (msg.t === 'metrics_sub') {
       ws.metricsSub = !!msg.on;
       if (ws.metricsSub) metrics(Infinity).then((d) => send(ws, { t: 'mdetail', d })).catch(() => {});
@@ -2050,6 +2064,7 @@ wss.on('connection', (ws, req) => {
     clearInterval(alive);
     allClients.delete(ws);
     orch?.unwatch(ws);
+    browserViews.drop(ws);
     if (current) subscribers.get(current)?.delete(ws);
   });
 });

@@ -1,0 +1,53 @@
+/* Browser sheet (browser.js bw*) and the live view (bv*). */
+.modal-panel.bw { width: min(620px, 100%); }
+.bw-node { margin: 0 0 18px; }
+.bw-nhead { display: flex; align-items: center; gap: 8px; margin: 4px 4px 8px; }
+.bw-nhead h3 { margin: 0; font-size: 14px; font-weight: 600; color: var(--text); }
+.bw-note { font-size: 12px; color: var(--muted); margin-left: auto; text-align: right; }
+.bw-list { margin-top: 0; }
+.bw-row .cn-main { flex-wrap: wrap; row-gap: 6px; }
+.bw-row .cn-info { min-width: 140px; }
+.bw-row .cn-btn.btn.small { height: 32px; padding: 0 11px; font-size: 12.5px; }
+.bw-domains { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 12px; font: 12px/1.5 var(--mono); color: var(--text); }
+.bw-add { display: flex; gap: 8px; margin-top: 10px; }
+.bw-add input { flex: 1; min-width: 0; height: 36px; padding: 0 10px; border-radius: 9px; border: 1px solid var(--border-strong); background: var(--panel); color: var(--text); font: inherit; font-size: 16px; }
+.bw-add input:focus, .bv-bar input:focus { outline: 2px solid var(--focus); border-color: var(--accent); }
+
+/* The live view: a large window on desktop, the whole screen on a phone. */
+.bv { padding: 16px; }
+.bv-panel { width: min(1320px, 100%); height: calc(100dvh - 32px); max-height: none; overflow: hidden; }
+.bv-head { display: flex; align-items: center; gap: 10px; padding: 12px 12px 8px 18px; flex: none; }
+.bv-titles { flex: 1; min-width: 0; }
+.bv-head h2 { margin: 0; font-size: 18px; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bv-status { font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bv-bar { display: flex; align-items: center; gap: 6px; padding: 0 12px 10px; flex: none; }
+.bv-bar input { flex: 1; min-width: 0; height: 36px; padding: 0 12px; border-radius: 99px; border: 1px solid var(--border-strong); background: var(--panel); color: var(--text); font: inherit; font-size: 15px; }
+.bv-bar :disabled { opacity: .5; cursor: default; }
+.bv-stage { position: relative; flex: 1; min-height: 0; display: grid; place-items: center; padding: 0 12px 12px; }
+.bv-stage canvas { max-width: 100%; max-height: 100%; width: auto; height: auto; border-radius: 10px; border: 1px solid var(--border); background: var(--panel);
+  touch-action: none; cursor: default; box-shadow: 0 2px 12px rgba(0,0,0,.08); }
+.bv-stage canvas:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.bv.watching .bv-stage canvas { cursor: not-allowed; }
+.bv-wait[hidden] { display: none; }
+.bv-wait { position: absolute; inset: 0 12px 12px; display: grid; place-items: center; color: var(--muted); font-size: 14px; pointer-events: none; }
+/* Off-screen but focusable, 16px so iOS doesn't zoom in when it takes focus. */
+.bv-keys { position: absolute; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; font-size: 16px; border: 0; padding: 0; pointer-events: none; }
+#bvKbd { display: none; }
+@media (hover: none), (pointer: coarse) { #bvKbd { display: inline-block; } }
+@media (max-width: 800px) {
+  .bv { padding: 0; align-items: stretch; }
+  .bv-panel { width: 100%; height: 100dvh; border-radius: 0; border: 0;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  .bv-bar .icon-btn { width: 44px; height: 44px; }
+  .bv-bar .btn.small { height: 36px; padding: 0 10px; }
+  .bv-stage { padding: 0 6px 6px; align-items: start; }
+}
+@media (max-width: 480px) { #bvPaste { display: none; } }
+
+/* The task drawer's thumbnail. */
+.bv-tcanvas { display: grid; place-items: center; position: relative; width: 100%; aspect-ratio: 16 / 10; padding: 0; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--raised); overflow: hidden; cursor: zoom-in; }
+.bv-tcanvas:hover { border-color: var(--accent); }
+.bv-tcanvas canvas { width: 100%; height: 100%; object-fit: contain; display: block; }
+.bv-twait { position: absolute; font-size: 12.5px; color: var(--muted); }
+.bv-tline { margin: 6px 0 8px; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -3462,6 +3462,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       review: t.kind === 'review' && t.status === 'awaiting_review' ? (() => { try { return JSON.parse(t.result); } catch { return null; } })() : null,
       worktree: t.worktree ?? null, integrates: t.integrates ?? null,
       // Where it runs (or last ran): a worker's id and name; null/controller = this server.
+      // browser: the profile a browser task uses (the drawer's live view), else null.
+      browser: needsBrowser(t) ? identityOf(t) : null,
       node: t.node_id ?? null, node_name: t.node_id && t.node_id !== LOCAL_NODE ? nodeName(t.node_id) : null,
       run_on: t.run_on ?? null, run_on_name: t.run_on ? nodeName(t.run_on) : null, // the machine the owner pinned it to
       // A remote run whose node went away (within its grace period): 'Mac mini (Mac asleep)'.
@@ -3526,6 +3528,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (spareMem(n) - floorOf(n) < footprint('claude')) return `Auto fits no task: ${gb(spareMem(n))} free, and a task needs ${gb(footprint('claude'))} on top of the ${gb(floorOf(n))} kept free`;
     return 'Auto fits no task: its local cap (node worker.mjs limit, set on it) allows none';
   }
+  // Running browser tasks and the profile each uses (the live browser view, browser-view.mjs).
+  const browserTasks = () => qa("SELECT id, title, node_id, capabilities, browser_identity FROM tasks WHERE status='running' AND kind='work' AND capabilities IS NOT NULL")
+    .filter(needsBrowser).map((t) => ({ id: t.id, title: t.title, node: t.node_id || LOCAL_NODE, identity: identityOf(t) }));
   function pushTask(id) {
     const t = taskView(getTask(id));
     if (!t) return;
@@ -3632,7 +3637,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   return {
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
     planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, insertCheckpoint, approveCheckpoint, requestChanges, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setTaskRunOn, setReflectFallbacks, setReflectSettings, syncConvoModel, pauseTask, resumeTask, handoffTask, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
-    drain, undrain, chatPlanning, stateView, machines, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, reconcileClaudeLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
+    drain, undrain, chatPlanning, stateView, machines, browserTasks, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, reconcileClaudeLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     // A sidebar chat's project rank ({id, position, priority}), or null when its folder has no orchestrator project.
     projectRank: (cwd) => q1('SELECT id, position, priority FROM projects WHERE path=:p', { p: cwd }) ?? null,
     isRunning: (id) => running.has(Number(id)), logEvent, attachCluster,

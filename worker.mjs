@@ -50,6 +50,7 @@ import { FOOTPRINT, applyLimit, capRejection, capTasks, capText, fmtCores, fmtGB
 import { createJobUsage, createWrappers, heldBy, probeLimiter } from './worker-cap.mjs';
 import { request as statusRequest, serveStatus, statusCli } from './worker-status.mjs';
 import { ensureBrowser, needsBrowser, normIdentity } from './browser.mjs';
+import { createLiveBrowsers, screenOp } from './browser-live.mjs';
 import { createExtensions } from './extensions.mjs';
 
 const execFileP = promisify(execFile);
@@ -242,6 +243,19 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   // Playwright server: a worker has no MCP list of its own).
   let browser = null, browserAbort = null;
   const ext = createExtensions({ dataDir: home });
+  // The owner's live view of a browser profile here (browser-live.mjs), driven by the head's screen.* frames; frames are
+  // dropped while the socket is backed up. Created on first use.
+  let screens = null;
+  const screenOut = {
+    onFrame: (f) => { if ((ws?.bufferedAmount || 0) < 2 * MAX_FRAME) raw(MSG.SCREEN_FRAME, f); },
+    onState: (st) => raw(MSG.SCREEN_STATE, st),
+  };
+  async function screenReq(msg) {
+    screens ??= createLiveBrowsers({ log });
+    let out;
+    try { out = { result: await screenOp(screens, msg, screenOut) }; } catch (e) { out = { error: String(e.message || e).slice(0, 500) }; }
+    raw(MSG.SCREEN_RES, { req: msg.req, ...out });
+  }
 
   // Model lists (once a day per agent, cached) and plan limits (only on limits.refresh): nothing polls (BRIEF goal 7).
   const models = createModelStore({ file: path.join(home, 'models.json'), log, onChange: () => sendInventory() });
@@ -677,6 +691,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       ws = null; welcomed = false;
       clearInterval(beat); beat = null;
       for (const j of allJobs()) if (j.attached) { j.attached = false; j.detachedAt = Date.now(); }
+      screens?.release(); // nobody watches any more, and no take-over outlives its viewer
       if (connectedAt) { log(`disconnected (${code}${reason?.length ? ` ${reason}` : ''})`); downSince = Date.now(); connError ??= `disconnected (${code})`; }
       if (connectedAt && Date.now() - connectedAt > 60_000) attempt = 0;
       connectedAt = 0;
@@ -764,6 +779,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       case MSG.LOGS_TAIL: return raw(MSG.LOGS, { req: msg.req, lines: tailLines(logFile(home), Math.max(1, Math.min(2000, msg.lines))) });
       case MSG.NODE_UPDATE: return selfUpdate(msg);
       case MSG.NODE_POLICY: setPolicy(msg.policy); return sendResources(); // the controller sees the new intake at once
+      case MSG.SCREEN_REQ: return screenReq(msg);
+      case MSG.SCREEN_INPUT: return screens?.input(msg.identity, msg.events);
       default: return reject(msg.t); // allow-listed but not handled here: still never acted on
     }
   }
@@ -1183,6 +1200,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     raw(MSG.BYE, { reason });
     clearInterval(flusher); clearInterval(beat); clearInterval(clock); clearInterval(sampler); clearInterval(credWatch);
     models.stop(); limits.stop(); resources?.stop(); awake?.stop();
+    await screens?.close().catch(() => {});
     await status?.close().catch(() => {});
     // Let the bye and the close frame out before the process exits.
     const sock = ws;

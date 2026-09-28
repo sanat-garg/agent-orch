@@ -842,3 +842,10 @@ Settings switch saves autoRestart; the banner now says when a restart is automat
 ## 2026-09-28 06:03 — #282 removeWorktree always deletes the directory and ensureWorktree sweeps orphan task dirs [done (check passed)]
 
 worktree dirs always removed; boot sweep deletes orphans; stale dirs gone
+
+## 2026-09-28 — #283 Deleted dead local branches agent-orch/task-187 (deea086), -244 (dc375fd), -247 (f428bc5)
+187 was partial work for the removed Copilot agent; 244/247's macOS bash 3.2 installer fix and verifier `|` fix are on main via #254/#263 (only their bash-3.2 tweak to the Linux install-worker.sh never landed, unneeded: Linux ships bash ≥4.4).
+
+## 2026-09-28 06:04 — #283 Delete the dead local task branches 187, 244 and 247 [done (check passed)]
+
+Branches 187, 244 and 247 deleted, others kept, journal noted

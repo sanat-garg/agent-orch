@@ -19,3 +19,7 @@ Do, in the main checkout (the live app; only git ref operations, never touch the
 ## Done when
 
 `! git show-ref --verify --quiet refs/heads/agent-orch/task-187` && `! git show-ref --verify --quiet refs/heads/agent-orch/task-244` && `! git show-ref --verify --quiet refs/heads/agent-orch/task-247` && `git show-ref --verify --quiet refs/heads/agent-orch/task-209`
+
+## Result — done (check passed) (2026-09-28 06:04)
+
+AGENT-ORCH-STATUS: done — Branches 187, 244 and 247 deleted, others kept, journal noted

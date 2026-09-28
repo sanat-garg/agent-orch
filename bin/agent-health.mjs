@@ -5,7 +5,7 @@
 // (<DATA>/models.json, <DATA>/limits.json) instead. A failed live fetch shows the cache's last successful time.
 //   node bin/agent-health.mjs [--json] [--cached] [--agent claude,codex] [--data <dir>]
 // Exit 1 when an installed, signed-in agent has 0 models, or a limit window without a reset time although its source
-// reports resets.
+// reports resets. A model list kept after a failed rediscovery is printed as an error but exits 0 (a warning).
 
 import fs from 'node:fs';
 import path from 'node:path';

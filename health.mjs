@@ -10,16 +10,18 @@ export function agentAccount(id) {
   return a.account?.() || null;
 }
 
-// models: a model catalog entry {models, error, at}; limits: a fetchLimits/limit-store entry {source, exposed, windows,
+// models: a model catalog entry {models, error, at, failedAt?}; limits: a fetchLimits/limit-store entry {source, exposed, windows,
 // error, at}. `problems` fail the health check (0 models, or a window without a reset while the source provides resets);
-// `errors` are everything worth showing, problems included.
+// `errors` are everything worth showing, problems included. A list kept after a failed rediscovery (`failedAt`) still works,
+// so it is an error with both dates and `models.stale`, not a problem.
 export function healthRow(id, { installed, version = null, signedIn, account = null, models, limits }) {
-  const a = AGENTS[id], ms = models?.models || [];
+  const a = AGENTS[id], ms = models?.models || [], failedAt = models?.failedAt || null;
   const exposed = limits ? limits.exposed !== false : !!a.limitSource;
   const windows = exposed ? limits?.windows || [] : [];
   const row = {
     id, label: a.label, installed: !!installed, version, signedIn: !!(installed && signedIn), account: installed && signedIn ? account : null,
-    models: { count: ms.length, ids: ms.map((m) => m.id), error: models?.error || null, at: ms.length ? models.at ?? null : null },
+    models: { count: ms.length, ids: ms.map((m) => m.id), error: models?.error || null, at: ms.length ? models.at ?? null : null,
+      ...(failedAt ? { failedAt } : {}), ...(failedAt && ms.length ? { stale: true } : {}) },
     limits: { source: exposed ? limits?.source || a.limitSource : null, exposed, note: exposed ? null : LIMITS_NOT_EXPOSED,
       windows: windows.map((w) => ({ window: w.window, pct: w.pct, resetsAt: w.resetsAt ?? null })),
       error: exposed ? limits?.error || null : null, at: exposed ? limits?.at ?? null : null },
@@ -30,6 +32,10 @@ export function healthRow(id, { installed, version = null, signedIn, account = n
   const noReset = row.limits.windows.filter((w) => w.resetsAt == null).map((w) => w.window);
   if (noReset.length) row.problems.push(`no reset time for ${noReset.join(', ')}`);
   row.errors.push(...row.problems);
+  if (row.models.stale) {
+    const iso = (t) => new Date(t).toISOString();
+    row.errors.push(`models: rediscovery failed ${iso(failedAt)}${row.models.error ? ` (${row.models.error})` : ''}; showing the list from ${row.models.at ? iso(row.models.at) : 'an earlier check'}`);
+  }
   if (row.limits.error) row.errors.push(`limits: ${row.limits.error}`);
   else if (exposed && !row.limits.windows.length) row.errors.push('limits: no reading yet');
   return { ...row, ok: !row.problems.length };

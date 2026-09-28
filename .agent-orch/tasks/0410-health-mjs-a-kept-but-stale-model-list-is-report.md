@@ -13,3 +13,7 @@ Task #376 failed in its git setup (a transient ref lock), never in the work, so 
 ## Done when
 
 `npm test -- test/agent-health.test.mjs` passes and `grep -c 'failedAt' health.mjs` prints a number of at least 1
+
+## Result — done (check passed) (2026-09-28 14:02)
+
+AGENT-ORCH-STATUS: done — stale model list now shows as warning error with dates

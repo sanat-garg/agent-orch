@@ -1095,3 +1095,7 @@ Files copy/move/zip/unzip endpoints are live, safe and tested
 ## 2026-09-28 14:01 — #404 Files tab: open the project folder, browse folders, right-click copy/cut/paste/zip/unzip [done (check passed)]
 
 Files tab: folder navigation, multi-select, clipboard and ZIP menu (browser tests skip here)
+
+## 2026-09-28 14:02 — #410 health.mjs: a kept-but-stale model list is reported as an error with both dates, not as healthy (re-run of #376) [done (check passed)]
+
+stale model list now shows as warning error with dates

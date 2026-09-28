@@ -103,6 +103,28 @@ test('healthRow: one model is healthy; a failed limit check is shown but does no
   assert.deepEqual(none.problems, ['no models (not signed in)']);
 });
 
+test('healthRow: a list kept after a failed rediscovery is stale (an error with both dates), not a problem', () => {
+  const at = Date.UTC(2026, 8, 25, 8), failedAt = Date.UTC(2026, 8, 27, 9, 30), state = { installed: true, signedIn: true, limits: null };
+  const stale = healthRow('codex', { ...state, models: { models: [{ id: 'gpt-x', label: 'X' }], error: 'timed out', at, failedAt } });
+  assert.deepEqual([stale.ok, stale.problems, stale.models.count, stale.models.stale, stale.models.failedAt], [true, [], 1, true, failedAt]);
+  const lines = stale.errors.filter((e) => e.startsWith('models:'));
+  assert.deepEqual(lines, ['models: rediscovery failed 2026-09-27T09:30:00.000Z (timed out); showing the list from 2026-09-25T08:00:00.000Z']);
+  const fresh = healthRow('codex', { ...state, models: { models: [{ id: 'gpt-x', label: 'X' }], error: null, at } });
+  assert.deepEqual([fresh.ok, fresh.models.stale, fresh.models.failedAt, fresh.errors.filter((e) => e.startsWith('models:'))], [true, undefined, undefined, []]);
+  const empty = healthRow('codex', { ...state, models: { models: [], error: 'timed out', at: null, failedAt } });
+  assert.deepEqual([empty.ok, empty.problems, empty.models.stale], [false, ['no models (timed out)'], undefined]);
+});
+
+test('agent-health --cached prints a stale model list as an error and exits 0', () => {
+  const { env, home } = setup();
+  fs.mkdirSync(path.join(home, 'data'));
+  fs.writeFileSync(path.join(home, 'data/models.json'), JSON.stringify({ agents: { codex: { models: [{ id: 'gpt-x', label: 'X' }], error: 'timed out',
+    at: Date.UTC(2026, 8, 25, 8), failedAt: Date.UTC(2026, 8, 27, 9, 30) } } }));
+  const r = run(env, '--cached', '--agent', 'codex');
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /models: rediscovery failed 2026-09-27T09:30:00\.000Z \(timed out\); showing the list from 2026-09-25T08:00:00\.000Z/);
+});
+
 test('claudeWindows: SDK rate_limits become window points with epoch resets', () => {
   assert.deepEqual(claudeWindows({ five_hour: { utilization: 40, resets_at: '2026-09-26T19:30:00Z' }, seven_day: { utilization: 86, resets_at: 1790607600 },
     seven_day_opus: null, model_scoped: [{ display_name: 'Fable', utilization: 5, resets_at: 1790607600 }] }), [

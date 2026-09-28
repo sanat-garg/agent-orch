@@ -2791,8 +2791,10 @@ taskSound.preload = 'auto';
 taskSound.volume = 0.6;
 // window/heard: the current 3 s burst (its start and the machines already queued in it); busyUntil: when the sound playing
 // now ends (performance.now ms), so a burst plays each machine's sound in turn; nodes: the machines, oldest first (MC.nodes).
+// custom: the owner's own sounds (GET /api/sounds) and the one for all machines; buffers: id → a promise of the decoded
+// AudioBuffer (fetched once the page has its audio unlock, or on first play); unlocked: that unlock happened.
 const completionSound = { synced: false, statuses: new Map(), done: new Set(), window: -Infinity, heard: new Set(), queue: [], draining: false,
-  busyUntil: -Infinity, unlocking: null, ctx: null, nodes: [] };
+  busyUntil: -Infinity, unlocking: null, ctx: null, nodes: [], custom: { sounds: [], def: null }, buffers: new Map(), unlocked: false };
 // Each machine's finish sound, so the owner can tell by ear where a task finished. 'chime' is the MP3 above (the controller's
 // default); the others are synthesized with Web Audio: notes [Hz, start s, length s, peak gain, glide-to Hz].
 const MACHINE_SOUNDS = {
@@ -2825,14 +2827,29 @@ function defaultMachineSounds(ids) {
   }
   return out;
 }
-function setMachineSounds(nodes) { completionSound.nodes = (nodes || []).map((n) => ({ id: n.id, sound: n.sound ?? null })); }
+function setMachineSounds(nodes) {
+  completionSound.nodes = (nodes || []).map((n) => ({ id: n.id, sound: n.sound ?? null }));
+  preloadCustomSounds();
+}
+// Custom sounds are keyed 'custom:<id>' (node.sound, the pickers); a deleted one no longer resolves, so its machines fall back.
+const customSound = (key) => (String(key).startsWith('custom:') ? completionSound.custom.sounds.find((c) => c.key === key) : null);
+function setCustomSounds(d) {
+  const sounds = d?.sounds || [];
+  for (const id of completionSound.buffers.keys()) if (!sounds.some((c) => c.id === id)) completionSound.buffers.delete(id);
+  completionSound.custom = { sounds, def: d?.default ?? null };
+  preloadCustomSounds();
+}
+// What a machine without its own pick plays: the custom sound for all machines, else its built-in default.
+function machineFallback(id) {
+  return customSound(`custom:${completionSound.custom.def}`)?.key || machineDefaultSound(id);
+}
 function machineDefaultSound(id) {
   const ids = completionSound.nodes.map((n) => n.id);
   return defaultMachineSounds(ids.includes(id) ? ids : [...ids, id]).get(id); // a machine paired since: it is the newest
 }
 function machineSound(id) {
   const pick = completionSound.nodes.find((n) => n.id === id)?.sound;
-  return MACHINE_SOUNDS[pick] ? pick : machineDefaultSound(id);
+  return MACHINE_SOUNDS[pick] || customSound(pick) ? pick : machineFallback(id);
 }
 // The machine a task ran on: run.node_id (task.node). Integrations and the head's own tasks sound like the head.
 const taskSoundNode = (t) => (t.integrates || !t.node ? HEAD_NODE : t.node);
@@ -2843,6 +2860,8 @@ function audioCtx() {
 }
 // Starts one sound; returns how long it lasts (ms).
 function playSound(key) {
+  const c = customSound(key);
+  if (c) { void playCustomSound(c); return Math.min(c.duration || 2, 10) * 1000; }
   const s = MACHINE_SOUNDS[key] || MACHINE_SOUNDS.chime;
   if (!s.notes) { void playTaskSound(); return Math.min(Number.isFinite(taskSound.duration) ? taskSound.duration : 1.5, 3) * 1000; }
   void playNotes(s);
@@ -2867,6 +2886,34 @@ async function playNotes(s) {
       osc.stop(start + len + 0.05);
     }
   } catch {} // no audio device, or the browser still holds audio back
+}
+// A custom sound, whole and at its own volume, from its decoded buffer (so it starts at once); without Web Audio, an <audio>.
+async function playCustomSound(c) {
+  const ctx = audioCtx();
+  try {
+    if (!ctx?.decodeAudioData) { const a = new Audio(c.url); a.volume = c.volume / 100; await a.play(); return; }
+    if (ctx.state === 'suspended') await ctx.resume();
+    const src = ctx.createBufferSource(), gain = ctx.createGain();
+    src.buffer = await customBuffer(c);
+    gain.gain.value = c.volume / 100;
+    src.connect(gain).connect(ctx.destination);
+    src.start();
+  } catch {} // gone from the server, undecodable, or audio still held back
+}
+function customBuffer(c) {
+  let b = completionSound.buffers.get(c.id);
+  if (!b) {
+    b = fetch(c.url).then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(`${r.status}`)))).then((a) => audioCtx().decodeAudioData(a));
+    b.catch(() => { if (completionSound.buffers.get(c.id) === b) completionSound.buffers.delete(c.id); });
+    completionSound.buffers.set(c.id, b);
+  }
+  return b;
+}
+// After the audio unlock, the custom sounds some machine plays are fetched and decoded ahead of their first finish.
+function preloadCustomSounds() {
+  if (!completionSound.unlocked || !audioCtx()?.decodeAudioData) return;
+  const used = new Set([`custom:${completionSound.custom.def}`, ...completionSound.nodes.map((n) => n.sound)]);
+  for (const c of completionSound.custom.sounds) if (used.has(c.key)) customBuffer(c).catch(() => {});
 }
 // A burst's sounds play one after another, never over each other.
 async function drainMachineSounds() {
@@ -2902,6 +2949,8 @@ function unlockTaskSound() {
     taskSound.currentTime = 0;
     taskSound.muted = false;
   })();
+  completionSound.unlocked = true;
+  preloadCustomSounds();
 }
 document.addEventListener('pointerdown', unlockTaskSound);
 document.addEventListener('keydown', unlockTaskSound);
@@ -3083,6 +3132,118 @@ function onServer(msg) {
       renderEvent(msg, false);
   }
 }
+
+// ---------- custom sounds (sounds.mjs): Settings → Sound's list and the add form, shared with each machine's picker ----------
+const SOUND_LIMIT = { bytes: 1024 * 1024, secs: 10 };
+const SOUND_EXT_RE = /\.(mp3|m4a|aac|wav|ogg|oga)$/i;
+const SOUND_ACCEPT = 'audio/mpeg,audio/mp4,audio/x-m4a,audio/aac,audio/wav,audio/x-wav,audio/ogg,.mp3,.m4a,.aac,.wav,.ogg';
+function applyCustomSounds(d) {
+  setCustomSounds(d);
+  renderSoundList();
+  if (MC.nodes.length) renderMachines();
+}
+const loadCustomSounds = () => api('/api/sounds').then(applyCustomSounds).catch(() => {});
+// The length as this browser decodes it; a file it can't decode isn't a sound it could play.
+async function measureSound(blob) {
+  const ctx = audioCtx();
+  if (!ctx?.decodeAudioData) return null;
+  try { return (await ctx.decodeAudioData(await blob.arrayBuffer())).duration; } catch { throw new Error("That isn't audio this browser can play"); }
+}
+const tooLong = (secs) => new Error(`That sound lasts ${secs.toFixed(1)} s; the limit is ${SOUND_LIMIT.secs} s`);
+async function uploadSound(f) {
+  if (!SOUND_EXT_RE.test(f.name) && !/^audio\//.test(f.type)) throw new Error('Pick an mp3, m4a/aac, wav or ogg file');
+  if (f.size > SOUND_LIMIT.bytes) throw new Error('That file is over 1 MB');
+  const secs = await measureSound(f);
+  if (secs > SOUND_LIMIT.secs + 0.05) throw tooLong(secs);
+  const r = await fetch('/api/sounds', { method: 'POST', body: f, headers: { 'Content-Type': f.type || 'application/octet-stream',
+    'X-File-Name': encodeURIComponent(f.name), ...(secs != null && { 'X-Sound-Duration': secs.toFixed(2) }) } });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || `Upload failed (${r.status})`);
+  return d.sound;
+}
+// The head downloads the URL once; the stored copy is then measured here like an upload (too long: it goes again).
+async function importSound(url) {
+  const { sound } = await api('/api/sounds/import', 'POST', { url });
+  if (sound.duration != null) return sound;
+  let secs;
+  try { secs = await measureSound(await (await fetch(sound.url)).blob()); } catch (e) { await api(`/api/sounds/${sound.id}`, 'DELETE').catch(() => {}); throw e; }
+  if (secs == null) return sound;
+  if (secs > SOUND_LIMIT.secs + 0.05) { await api(`/api/sounds/${sound.id}`, 'DELETE').catch(() => {}); throw tooLong(secs); }
+  return (await api(`/api/sounds/${sound.id}`, 'PATCH', { duration: Math.round(secs * 100) / 100 })).sound;
+}
+// 'Choose file… or [https://…] Import': onAdded(sound) after the list is re-read; onCancel closes it.
+function soundAddForm(onAdded, onCancel) {
+  const box = el('div', 'snd-add'), file = el('input'), pickBtn = el('button', 'btn small', 'Choose file…');
+  const url = el('input'), imp = el('button', 'btn small', 'Import'), cancel = el('button', 'btn small', 'Cancel');
+  file.type = 'file'; file.accept = SOUND_ACCEPT; file.hidden = true;
+  url.type = 'url'; url.placeholder = 'https://…/sound.mp3'; url.setAttribute('aria-label', 'Sound URL (https)');
+  for (const b of [pickBtn, imp, cancel]) b.type = 'button';
+  const busy = async (run) => {
+    for (const b of [pickBtn, imp]) b.disabled = true;
+    try {
+      const c = await run();
+      await loadCustomSounds();
+      toast(`Added ${c.name}`);
+      onAdded(c);
+      void playSound(c.key);
+    } catch (e) { toast(e.message, { kind: 'error' }); } finally { for (const b of [pickBtn, imp]) b.disabled = false; }
+  };
+  pickBtn.addEventListener('click', () => file.click());
+  file.addEventListener('change', () => { const f = file.files[0]; file.value = ''; if (f) busy(() => uploadSound(f)); });
+  const go = () => { if (url.value.trim()) busy(() => importSound(url.value.trim())); };
+  imp.addEventListener('click', go);
+  url.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
+  url.addEventListener('blur', () => { if (MC.stale) setTimeout(renderMachines, 0); }); // a Machines render held while typing
+  cancel.addEventListener('click', onCancel);
+  box.append(pickBtn, file, el('span', 'snd-or', 'or'), url, imp, cancel, el('small', 'snd-hint', 'mp3, m4a/aac, wav or ogg · up to 1 MB and 10 s'));
+  return box;
+}
+// One row per custom sound: its name (edit in place), length · size, ▶, its volume, Use for all machines, Delete.
+const SND = { adding: false };
+function renderSoundList() {
+  const list = $('stSoundList'), { sounds, def } = completionSound.custom;
+  list.replaceChildren(...sounds.map((c) => {
+    const li = el('li', 'snd-item'), name = el('input', 'snd-name'), meta = el('small', 'snd-meta', `${c.duration != null ? `${c.duration.toFixed(1)} s · ` : ''}${fmtBytes(c.size)}`);
+    name.value = c.name; name.maxLength = 60; name.setAttribute('aria-label', 'Sound name');
+    name.addEventListener('change', async () => {
+      try { await api(`/api/sounds/${c.id}`, 'PATCH', { name: name.value }); } catch (e) { toast(e.message, { kind: 'error' }); }
+      loadCustomSounds();
+    });
+    const play = el('button', 'btn small', '▶'), vol = el('input', 'snd-vol'), all = el('button', 'btn small', def === c.id ? 'For all machines ✓' : 'Use for all machines');
+    const del = el('button', 'btn small danger', 'Delete');
+    for (const b of [play, all, del]) b.type = 'button';
+    play.setAttribute('aria-label', `Preview ${c.name}`);
+    play.addEventListener('click', () => playSound(c.key));
+    vol.type = 'range'; vol.min = 0; vol.max = 100; vol.step = 5; vol.value = c.volume;
+    vol.setAttribute('aria-label', `${c.name} volume`);
+    vol.title = `Volume ${c.volume}%`;
+    vol.addEventListener('input', () => { c.volume = Number(vol.value); vol.title = `Volume ${c.volume}%`; });
+    vol.addEventListener('change', async () => {
+      try { await api(`/api/sounds/${c.id}`, 'PATCH', { volume: c.volume }); playSound(c.key); } catch (e) { toast(e.message, { kind: 'error' }); }
+    });
+    all.setAttribute('aria-pressed', String(def === c.id));
+    all.title = def === c.id ? 'Every machine without its own pick plays this. Press to go back to their own defaults.' : 'Play this on every machine without its own pick';
+    all.addEventListener('click', async () => {
+      try { applyCustomSounds({ sounds, ...(await api('/api/sounds/default', 'PUT', { id: def === c.id ? null : c.id })) }); } catch (e) { toast(e.message, { kind: 'error' }); }
+    });
+    del.addEventListener('click', async () => {
+      const name = (id) => MC.nodes.find((m) => m.id === id)?.name || (id === HEAD_NODE ? 'this server' : 'a machine');
+      const using = [...completionSound.nodes.filter((n) => n.sound === c.key).map((n) => name(n.id)), ...(def === c.id ? ['every machine without its own pick'] : [])];
+      if (using.length && !confirm(`Delete ${c.name}? It is in use: ${using.join(', ')} will play the built-in default instead.`)) return;
+      try { await api(`/api/sounds/${c.id}`, 'DELETE'); } catch (e) { toast(e.message, { kind: 'error' }); }
+      await loadCustomSounds();
+      loadMachines();
+    });
+    li.append(name, meta, play, vol, all, del);
+    return li;
+  }));
+  const add = $('stSoundAdd');
+  add.hidden = SND.adding;
+  add.nextElementSibling?.classList.contains('snd-add') && add.nextElementSibling.remove();
+  if (SND.adding) add.after(soundAddForm(() => { SND.adding = false; renderSoundList(); }, () => { SND.adding = false; renderSoundList(); $('stSoundAdd').focus(); }));
+}
+$('stSoundAdd').addEventListener('click', () => { SND.adding = true; renderSoundList(); $('stSounds').querySelector('.snd-add input[type=url]')?.focus(); });
+loadCustomSounds();
 
 // ---------- status / boot ----------
 async function checkStatus() {
@@ -3759,7 +3920,8 @@ const AM = { code: null, expiresAt: 0, uses: 1, pairing: null, err: '', timer: n
 const AM_USES = [1, 2, 3, 4, 5, 6, 8, 10];
 // open: the cards whose Machine settings are open; stale: a render skipped while a finish sound menu was in use.
 // pings: node id → the owner's last Ping ({busy} | {r: the answer} | {error}), shown under the node (pingBox).
-const MC = { nodes: [], at: 0, timer: null, loading: false, open: new Set(), stale: false, pings: new Map() };
+// soundAdd: the node whose Finish sound row shows the add-a-custom-sound form.
+const MC = { nodes: [], at: 0, timer: null, loading: false, open: new Set(), stale: false, pings: new Map(), soundAdd: null };
 const fmtGB = (b) => `${((b || 0) / 2 ** 30).toFixed(1)} GB`;
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const NODE_ST = { online: 'Online', draining: 'Draining', disabled: 'Disabled', updating: 'Updating', paused: 'Paused' };
@@ -3804,8 +3966,8 @@ function machineSummary(nodes) {
 function renderMachines() {
   caSync(MC.nodes);
   if (ND.id) ndRender();
-  // A menu in use (a finish sound) isn't replaced under the owner's finger: the render waits until it loses focus.
-  if (document.activeElement?.matches?.('#mMachines select')) { MC.stale = true; return; }
+  // A menu in use (a finish sound, the add-a-sound URL) isn't replaced under the owner's finger: the render waits until it loses focus.
+  if (document.activeElement?.matches?.('#mMachines select, #mMachines .snd-add input')) { MC.stale = true; return; }
   MC.stale = false;
   const nodes = MC.nodes, sec = $('mcTitle').closest('.mc-sec'), head = sec.parentElement.firstElementChild, first = nodes.some((n) => !n.local);
   // With workers the cluster leads this server's details (under the device line, above its charts); alone it sits at the bottom.
@@ -4082,6 +4244,7 @@ function machineSettings(n) {
     if (name && name !== n.name) patchNode(n, { name });
   }));
   row(manage, 'Finish sound', 'Plays when a task finishes here', machineSoundPicker(n));
+  if (MC.soundAdd === n.id) manage.append(soundAddForm((c) => { MC.soundAdd = null; patchNode(n, { sound: c.key }); }, () => { MC.soundAdd = null; renderMachines(); }));
   if (!n.local) {
     const busy = !!MC.pings.get(n.id)?.busy, pb = button(busy ? 'Checking…' : 'Check', 'ping', () => pingNode(n));
     pb.disabled = busy;
@@ -4108,19 +4271,31 @@ function machineSettings(n) {
   return box;
 }
 // The Finish sound row's control, '[Bell ▾] ▶ Test': the sound its finished tasks play, saved on the head (node.sound)
-// for every device. Choosing its default again stores null, so it keeps following the default.
+// for every device. Choosing its default again stores null, so it keeps following the default. The owner's custom sounds
+// follow the built-ins; '+ Add custom sound…' opens the add form under the row (MC.soundAdd) and gives this machine the new sound.
 function machineSoundPicker(n) {
   const pick = el('span', 'mc-sound-pick'), sel = el('select');
-  const def = machineDefaultSound(n.id);
+  const def = machineFallback(n.id);
   sel.dataset.act = 'sound';
   sel.setAttribute('aria-label', `Finish sound for ${n.name}`);
-  for (const [k, s] of Object.entries(MACHINE_SOUNDS)) {
-    const o = el('option', '', `${k === 'chime' && $('stSoundName').textContent === 'Your MP3' ? 'Your MP3' : s.label}${k === def ? ' (default)' : ''}`);
-    o.value = k;
-    sel.append(o);
+  const opt = (k, label) => { const o = el('option', '', `${label}${k === def ? ' (default)' : ''}`); o.value = k; return o; };
+  for (const [k, s] of Object.entries(MACHINE_SOUNDS)) sel.append(opt(k, k === 'chime' && $('stSoundName').textContent === 'Your MP3' ? 'Your MP3' : s.label));
+  if (completionSound.custom.sounds.length) {
+    const g = el('optgroup');
+    g.label = 'Your sounds';
+    for (const c of completionSound.custom.sounds) g.append(opt(c.key, c.name));
+    sel.append(g);
   }
+  sel.append(opt('+add', '+ Add custom sound…'));
   sel.value = machineSound(n.id);
-  sel.addEventListener('change', () => patchNode(n, { sound: sel.value === def ? null : sel.value }));
+  sel.addEventListener('change', () => {
+    if (sel.value !== '+add') return patchNode(n, { sound: sel.value === def ? null : sel.value });
+    sel.value = machineSound(n.id);
+    MC.soundAdd = n.id;
+    sel.blur();
+    renderMachines();
+    $('mMachines').querySelector(`.mc-node[data-node="${CSS.escape(n.id)}"] .snd-add input[type=url]`)?.focus();
+  });
   sel.addEventListener('blur', () => { if (MC.stale) setTimeout(renderMachines, 0); });
   const test = el('button', 'btn small', '▶ Test');
   test.type = 'button';

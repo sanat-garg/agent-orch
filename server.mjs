@@ -33,6 +33,7 @@ import { saveUpload, readUpload, placeUploads, attachmentView, attachmentNote, c
 import { headRefusal } from './role.mjs';
 import { createBrowserViews, LOCAL as BV_LOCAL } from './browser-view.mjs';
 import { searchConvos } from './search.mjs';
+import { createSounds, MAX_SOUND_BYTES as MAX_CUSTOM_SOUND_BYTES } from './sounds.mjs';
 import { createVersion } from './version.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
@@ -1392,6 +1393,7 @@ function json(res, code, body, headers = {}) {
 // Settles on every path: an oversized, malformed or aborted body rejects with an HttpError the server wrapper answers.
 class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
 const SOUND_FILE = path.join(DATA, 'sounds', 'task-done.mp3'), MAX_SOUND_BYTES = 2 * 1024 * 1024;
+const sounds = createSounds(DATA);
 // ID3 tag, or an MPEG audio frame sync (11 set bits).
 const isMp3 = (b) => b.length > 3 && (b.subarray(0, 3).toString('latin1') === 'ID3' || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0));
 function readRaw(req, max) {
@@ -1774,6 +1776,49 @@ async function handleRequest(req, res) {
   if (p === '/api/settings/sound' && req.method === 'DELETE') {
     fs.rmSync(SOUND_FILE, { force: true });
     return json(res, 200, { ok: true, sound: { custom: false, at: null } });
+  }
+  // Custom finish sounds (sounds.mjs): POST the raw audio (X-File-Name: URI-encoded name, X-Sound-Duration: seconds the
+  // browser measured) or /import {url} (downloaded once, here); GET lists them, GET /:id serves one (content-addressed, so
+  // cached for good); PATCH {name, volume, duration}; DELETE also sends machines that chose it back to their default;
+  // PUT /default {id | null} is the sound for all machines without their own pick.
+  if (p === '/api/sounds' && req.method === 'GET') return json(res, 200, sounds.list());
+  if (p === '/api/sounds' && req.method === 'POST') {
+    const buf = await readRaw(req, MAX_CUSTOM_SOUND_BYTES); // a 413 goes out through the handler's HttpError path
+    let name = 'Sound';
+    try { name = decodeURIComponent(String(req.headers['x-file-name'] || 'Sound')); } catch {}
+    const r = sounds.add(buf, { name, type: req.headers['content-type'], duration: req.headers['x-sound-duration'] });
+    return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r);
+  }
+  if (p === '/api/sounds/import' && req.method === 'POST') {
+    const body = await readBody(req);
+    if (typeof body.url !== 'string') return json(res, 400, { error: 'Expected {url}' });
+    const r = await sounds.importUrl(body.url.trim(), { name: body.name });
+    return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r);
+  }
+  if (p === '/api/sounds/default' && req.method === 'PUT') {
+    const r = sounds.setDefault((await readBody(req)).id ?? null);
+    return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r);
+  }
+  const snd = p.match(/^\/api\/sounds\/([a-f0-9]{24})$/);
+  if (snd && req.method === 'GET') {
+    const s = sounds.get(snd[1]);
+    if (!s) return json(res, 404, { error: 'Not found' });
+    return fs.readFile(s.file, (err, buf) => {
+      if (err) return json(res, 404, { error: 'Not found' });
+      res.writeHead(200, { 'Content-Type': s.type, 'Content-Length': buf.length, 'X-Content-Type-Options': 'nosniff',
+        'Cache-Control': 'private, max-age=31536000, immutable', 'Content-Security-Policy': "default-src 'none'; sandbox" });
+      res.end(buf);
+    });
+  }
+  if (snd && req.method === 'PATCH') {
+    const r = sounds.update(snd[1], await readBody(req));
+    return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r);
+  }
+  if (snd && req.method === 'DELETE') {
+    const r = sounds.remove(snd[1]);
+    if (r.error) return json(res, r.status, { error: r.error });
+    for (const n of cluster?.listNodes() || []) if (n.sound === r.key) cluster.update(n.id, { sound: null });
+    return json(res, 200, r);
   }
   // Web Push: the VAPID key for the browser's applicationServerKey; POST a PushSubscription JSON, DELETE {endpoint}.
   if (p === '/api/push/key' && req.method === 'GET') return json(res, 200, { key: push.publicKey(), subscribed: push.count() });

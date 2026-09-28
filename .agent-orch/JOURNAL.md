@@ -1202,6 +1202,9 @@ Pushes now stream into git after the ref check; dropped clients kill git
 
 CONTEXT.md conflict resolved; ui-stats tests pass
 
+## 2026-09-28 14:35 — #432 Custom completion sounds: upload your own, per machine or for all [done (check passed)]
+
+custom sounds can be uploaded, imported from URLs, picked per machine, and tested
 ## 2026-09-28 14:32 — #414 Integrate #402: Machines: organise each machine's options with plain words [done (check passed)]
 
 Merge resolved; settings disclosure now includes main's finish sound
@@ -1276,3 +1279,7 @@ Conflicts resolved and staged; mini-rotate tests pass (7/7)
 ## 2026-09-28 14:34 — #414 Integrate #402: Machines: organise each machine's options with plain words [done (check passed)]
 
 Merged main again; Done-when and Machines browser tests pass
+
+## 2026-09-28 14:38 — #443 Integrate #432: Custom completion sounds: upload your own, per machine or for all [done (check passed)]
+
+merge conflicts resolved; custom-sound and machine-settings tests pass

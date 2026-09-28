@@ -34,14 +34,15 @@ function fixture() {
   const ctx = vm.createContext({
     document: { createElement: (t) => new Node(t) },
     el: (tag, cls, text) => { const n = new Node(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; },
-    MC: { open: new Set(), pings: new Map() },
+    MC: { open: new Set(), pings: new Map(), soundAdd: null },
     plural: (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`,
     api: async (url, method, body) => { calls.push([method, url, body]); return {}; },
     toast() {}, loadMachines() {}, pingNode: (n) => calls.push(['ping', n.id]),
     confirm: (msg) => { calls.push(['confirm', msg]); return answers.confirm; },
     prompt: () => answers.prompt,
     MACHINE_SOUNDS: { chime: { label: 'Chime' }, bell: { label: 'Bell' }, pop: { label: 'Pop' } },
-    machineDefaultSound: (id) => (id === 'controller' ? 'chime' : 'bell'), machineSound: (id) => (id === 'n1' ? 'pop' : id === 'controller' ? 'chime' : 'bell'),
+    machineDefaultSound: (id) => (id === 'controller' ? 'chime' : 'bell'), completionSound: { custom: { sounds: [] } },
+    machineFallback: (id) => (id === 'controller' ? 'chime' : 'bell'), machineSound: (id) => (id === 'n1' ? 'pop' : id === 'controller' ? 'chime' : 'bell'),
     $: () => ({ textContent: 'Default chime' }), playSound: (k) => calls.push(['play', k]),
   });
   vm.runInContext(section, ctx);
@@ -120,7 +121,7 @@ test('Finish sound: a picker marked with its default that saves the pick, or nul
   const box = render(mac), sel = box.act('sound');
   assert.equal(sel.tagName, 'SELECT');
   assert.equal(sel.getAttribute('aria-label'), 'Finish sound for MacBook Pro (Studio)');
-  assert.deepEqual(sel.children.map((o) => o.textContent), ['Chime', 'Bell (default)', 'Pop']);
+  assert.deepEqual(sel.children.map((o) => o.textContent), ['Chime', 'Bell (default)', 'Pop', '+ Add custom sound…']);
   assert.equal(sel.value, 'pop');
   sel.value = 'bell';
   sel.fire('change');

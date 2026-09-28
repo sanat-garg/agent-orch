@@ -27,7 +27,7 @@ import { createUsageLog } from './usage.mjs';
 import { DELEGATE_CFG, createDelegator, parseFallbacks } from './delegate.mjs';
 import { filesOverlap, parseFiles, spreadAssign, readMemInfo, taskSlots, MEM } from './parallel.mjs';
 import { registerPid, withOwner } from './resources.mjs';
-import { LOCAL_NODE, HEALTH } from './cluster.mjs';
+import { LOCAL_NODE, HEALTH, awayNote } from './cluster.mjs';
 import { MSG, graceMs, isRepoUrl } from './cluster-protocol.mjs';
 import { autoTasks, reserveBytes } from './power.mjs';
 import { CPU_PER_TASK, FOOTPRINT, GB, capSlots, localCap } from './cap.mjs';
@@ -2957,7 +2957,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         if (!up) job.attached = false;
         if (up && job.attached) { if (lostSince) { lostSince = 0; logEvent(`#${id}: ${name} is back; the job continues`, { taskId: id }); } return waiting(null); }
         lostSince ||= Date.now();
-        waiting(n.awayLabel === 'Mac asleep' ? `${name} (Mac asleep)` : name);
+        const why = awayNote(n);
+        waiting(why ? `${name} (${why})` : name);
         if (Date.now() - lostSince >= (n.graceMs ?? graceMs(n.os))) job.lost(`node ${name} disappeared`);
       }, 1000);
       if (attach) return;
@@ -3660,7 +3661,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       browser: needsBrowser(t) ? identityOf(t) : null,
       node: t.node_id ?? null, node_name: t.node_id && t.node_id !== LOCAL_NODE ? nodeName(t.node_id) : null,
       run_on: t.run_on ?? null, run_on_name: t.run_on ? nodeName(t.run_on) : null, // the machine the owner pinned it to
-      // A remote run whose node went away (within its grace period): 'Mac mini (Mac asleep)'.
+      // A remote run whose node went away (within its grace period): 'Mac mini (connection lost)'.
       waiting_for: running.get(t.id)?.waiting || null,
       // Held browser/connector calls waiting for the owner (the approval gate): the task shows 'Awaiting approval'.
       approvals: t.status === 'running' ? approvals.pending(t.id).map(({ args, ...a }) => a) : [],

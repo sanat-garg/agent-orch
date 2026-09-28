@@ -21,6 +21,9 @@ import { createNodeMetrics, RANGES } from './node-metrics.mjs';
 import { checkPolicy, effectivePolicy } from './power.mjs';
 
 export const LOCAL_NODE = 'controller';
+// Why a task waits for its node ('waiting for Mac mini (connection lost)'): a drop without a bye is 'connection lost' on
+// every OS; 'Mac asleep' only when that is known (a legacy away value: a sleep is otherwise learned on reconnect).
+export const awayNote = (n) => (!n || n.connected ? null : n.away === 'asleep' ? 'Mac asleep' : n.away === 'lost' ? 'connection lost' : null);
 const MAX_ERRORS = 5; // invalid frames per connection before the worker is disconnected
 // Auto-health: a worker is drained, and the owner told, when the disk holding its repos has under 2 GB free, when it lost
 // its connection 3 times in 30 min (missed heartbeats or a dropped socket, not a Mac's sleep), or when 3 different tasks
@@ -82,8 +85,20 @@ CREATE TABLE IF NOT EXISTS pairings (
   code_hash TEXT PRIMARY KEY, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, uses INTEGER NOT NULL DEFAULT 1,
   nodes TEXT NOT NULL DEFAULT '[]', revoked_at INTEGER
 )`;
+// Each connection a worker lost without a bye (the last DROP_KEEP_MS): at = when, back = when it said hello again (NULL
+// while away), reason = 'lost' until the worker explains on reconnect (hello.reconnect.reason, or a wake report):
+// 'asleep' | 'dns' | 'network'; error = its hello.reconnect.lastError.
+const NODE_DROPS = `
+CREATE TABLE IF NOT EXISTS node_drops (
+  id INTEGER PRIMARY KEY, node TEXT NOT NULL, at INTEGER NOT NULL, back INTEGER, reason TEXT NOT NULL, error TEXT
+);
+CREATE INDEX IF NOT EXISTS node_drops_node ON node_drops (node, at)`;
+const DROP_KEEP_MS = 24 * 3600e3;
+// hello.reconnect.reason → node_drops.reason. Older workers send no reconnect: their drops stay 'lost'.
+const DROP_REASONS = { sleep: 'asleep', dns: 'dns', network: 'network' };
 // Added later: grace_ms (the owner's per-node grace before its jobs are reassigned; NULL = graceMs(os)); away (why a
-// node is offline: 'bye' after a clean shutdown, 'asleep' when a Mac went silent, 'lost' otherwise); slept_at/slept_ms
+// node is offline: 'bye' after a clean shutdown, else 'lost', whatever its OS: a silent Mac may be asleep or off the
+// network, and only its worker can tell, on reconnect (node_drops); 'asleep' is a legacy value); slept_at/slept_ms
 // (the last sleep a worker reported on wake). max_slots 0 = Auto (the scheduler sizes it from cores and free RAM).
 // drain_reason/drained_at: why and when auto-health drained it (NULL when the owner did); drain_kind: which rule did
 // ('disk' | 'drops'; NULL for the owner and for task failures), so only a disk drain lifts itself; health_ack: when the owner last
@@ -111,6 +126,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
   db.exec('PRAGMA busy_timeout=5000');
   db.exec(SCHEMA);
   db.exec(PAIRINGS);
+  db.exec(NODE_DROPS);
   const cols = db.prepare('PRAGMA table_info(nodes)').all().map((c) => c.name);
   for (const [c, type] of COLUMNS) if (!cols.includes(c)) db.exec(`ALTER TABLE nodes ADD COLUMN ${c} ${type}`);
   const conns = new Map(); // node id -> { ws, send, lastFrame, hello, errors, connectedAt }
@@ -163,8 +179,16 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     if (metrics && info.resources && Date.now() - localAt >= heartbeatMs) { localAt = Date.now(); metrics.record(LOCAL_NODE, info.resources); }
   }
 
-  // A node that went away: why (row.away), and the owner-facing words for it ('Mac asleep').
-  const awayLabel = (row) => (row.away === 'asleep' ? 'Mac asleep' : row.away === 'bye' ? 'shut down' : 'offline');
+  // A node that went away: why (row.away), and the owner-facing words for it ('connection lost').
+  const awayLabel = (row) => (row.away === 'asleep' ? 'Mac asleep' : row.away === 'bye' ? 'shut down' : row.away === 'lost' ? 'connection lost' : 'offline');
+  // Its connection drops over the last 24 h: {total, by: {reason: n}, last: the latest {at, back, reason, error}}.
+  function dropsOf(id) {
+    const rows = db.prepare('SELECT at, back, reason, error FROM node_drops WHERE node=? AND at>? ORDER BY at').all(id, Date.now() - DROP_KEEP_MS);
+    const by = {};
+    for (const r of rows) by[r.reason] = (by[r.reason] || 0) + 1;
+    const l = rows.at(-1);
+    return { total: rows.length, by, last: l ? { at: l.at, back: l.back ?? null, reason: l.reason, error: l.error ?? null } : null };
+  }
   const nodeGrace = (row) => graceAll ?? row.grace_ms ?? graceMs(row.os);
 
   // The node's power policy and task cap as its worker enforces them (welcome.policy, node.policy; power.mjs).
@@ -182,7 +206,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
       id: row.id, name: row.name, os: row.os, arch: row.arch, local: isLocal, connected,
       status: updating ? 'updating' : paused ? 'paused' : row.status, createdAt: row.created_at, lastSeen: row.last_seen,
       away: connected ? null : row.away || 'lost', awayLabel: connected ? null : awayLabel(row),
-      graceMs: nodeGrace(row), sleptAt: row.slept_at ?? null, sleptMs: row.slept_ms ?? null,
+      graceMs: nodeGrace(row), sleptAt: row.slept_at ?? null, sleptMs: row.slept_ms ?? null, drops: isLocal ? null : dropsOf(row.id),
       enabled: !!row.enabled, draining: !!row.draining, maxSlots: row.max_slots || null, // null = Auto
       drainReason: row.draining ? row.drain_reason ?? null : null, drainedAt: row.draining ? row.drained_at ?? null : null, healthAck: row.health_ack ?? null,
       lastError: parse(row.last_error),
@@ -311,6 +335,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     if (id === LOCAL_NODE) return { status: 400, error: 'the controller node cannot be removed' };
     if (!get(id)) return { status: 404, error: 'no such node' };
     db.prepare('DELETE FROM nodes WHERE id=?').run(id);
+    db.prepare('DELETE FROM node_drops WHERE node=?').run(id);
     const c = conns.get(id);
     if (c) { conns.delete(id); c.ws.close(4003, 'revoked'); }
     metrics?.remove(id);
@@ -408,6 +433,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
           touch();
           setStatus(row, true);
           touch({ away: null });
+          reconnected(id, msg.reconnect);
           c.send(MSG.WELCOME, { node: id, protocol: PROTOCOL_VERSION, heartbeatMs, wipPushMs, graceMs: nodeGrace(row), features: FEATURE_LIST, policy: wirePolicy(row), ...queuedFor(id) });
           helloUpdate(id, row, c.hello.sha);
           if (row.enabled) sendExt(c);
@@ -435,6 +461,9 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
           // The connection this sleep cost isn't a failing heartbeat (a few minutes' slack for clock skew).
           const slack = 5 * 60_000;
           drops.set(id, (drops.get(id) || []).filter((x) => x < msg.sleptAt - slack || x > msg.sleptAt + msg.sleptMs + slack));
+          // So its drops in that window were the sleep (after the fact: the node was 'lost' meanwhile).
+          db.prepare("UPDATE node_drops SET reason='asleep' WHERE node=? AND reason='lost' AND at BETWEEN ? AND ?")
+            .run(id, Math.round(msg.sleptAt - slack), Math.round(msg.sleptAt + msg.sleptMs + slack));
           log(`node ${id} woke after ${Math.round(msg.sleptMs / 60_000)} min asleep`);
           changed();
           break;
@@ -469,12 +498,29 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     ws.on('error', () => {});
   }
 
-  // A node dropped: offline, and why. A Mac that goes silent without a bye is (almost always) asleep.
+  // A node dropped: offline, and why. Without a bye it is 'lost' on every OS: a silent Mac is as often off the network
+  // as asleep, and only its worker can say which, when it reconnects (reconnected).
   function gone(id, bye) {
     const row = get(id);
     if (!row) return;
-    db.prepare('UPDATE nodes SET away=? WHERE id=?').run(bye ? 'bye' : row.os === 'darwin' ? 'asleep' : 'lost', id);
+    db.prepare('UPDATE nodes SET away=? WHERE id=?').run(bye ? 'bye' : 'lost', id);
     setStatus(row, false);
+  }
+  // A worker said hello again: close its open drop with the reason it reports (hello.reconnect {reason, since, lastError};
+  // an older worker sends none and its drop stays 'lost'). A reason for a drop this head never saw (it restarted, or the
+  // socket still looked open) is recorded from `since`. A reported sleep isn't a failing connection (auto-health).
+  function reconnected(id, r) {
+    const t = Date.now(), open = db.prepare('SELECT id, at FROM node_drops WHERE node=? AND back IS NULL ORDER BY at DESC LIMIT 1').get(id);
+    const reason = r && typeof r === 'object' ? DROP_REASONS[r.reason] : undefined;
+    const error = typeof r?.lastError === 'string' && r.lastError ? clip(r.lastError, 300) : null;
+    const since = Number.isFinite(r?.since) && r.since < t && r.since > t - DROP_KEEP_MS ? Math.round(r.since) : null;
+    db.prepare('UPDATE node_drops SET back=? WHERE node=? AND back IS NULL').run(t, id);
+    if (!reason) return;
+    if (open) db.prepare('UPDATE node_drops SET reason=?, error=? WHERE id=?').run(reason, error, open.id);
+    else db.prepare('INSERT INTO node_drops (node, at, back, reason, error) VALUES (?, ?, ?, ?, ?)').run(id, since ?? t, t, reason, error);
+    const at = open?.at ?? since;
+    if (reason === 'asleep' && at != null) drops.set(id, (drops.get(id) || []).filter((x) => x < at - 5 * 60_000));
+    log(`node ${id} reconnected${at != null ? ` after ${Math.max(1, Math.round((t - at) / 60_000))} min` : ''}: ${reason}${error ? ` (${error})` : ''}`);
   }
 
   // Liveness: ping every interval (keeps Caddy's proxy connection open); no frame for HEARTBEAT_MISSES intervals → offline.
@@ -501,6 +547,8 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
   function dropped(id) {
     const t = Date.now();
     drops.set(id, [...(drops.get(id) || []).filter((x) => x > t - health.windowMs), t]);
+    db.prepare('DELETE FROM node_drops WHERE at<?').run(t - DROP_KEEP_MS);
+    db.prepare("INSERT INTO node_drops (node, at, reason) VALUES (?, ?, 'lost')").run(id, t);
   }
   // Drains a worker on its own, with a notice for the owner. False when it is already draining (or disabled). kind: the
   // rule ('disk' lifts itself once the disk recovers; anything else waits for the owner).

@@ -195,7 +195,7 @@ test('PATCH edits name, draining and max slots', async () => {
   c.ws.close();
 });
 
-test('a Mac that goes silent shows as asleep; its wake report and a per-node grace period are kept', async () => {
+test('a Mac that goes silent shows as connection lost (asleep only once it says so); its wake report and a per-node grace period are kept', async () => {
   const w = await pair('macbook', 'darwin');
   let c = await helloed(w);
   assert.equal(c.frames.find((f) => f.t === 'welcome').graceMs, 5 * 60_000, 'a Mac waits 5 min by default');
@@ -203,13 +203,14 @@ test('a Mac that goes silent shows as asleep; its wake report and a per-node gra
   assert.equal((await (await api(`/api/cluster/nodes/${w.node}`, { method: 'PATCH', body: { graceSec: 600 } })).json()).node.graceMs, 600_000);
   await closed(c.ws); // silent: no heartbeats
   let n = await nodeOf(w.node);
-  assert.deepEqual([n.status, n.away, n.awayLabel], ['offline', 'asleep', 'Mac asleep']);
+  assert.deepEqual([n.status, n.away, n.awayLabel], ['offline', 'lost', 'connection lost']);
   c = await helloed(w);
   assert.equal(c.frames.find((f) => f.t === 'welcome').graceMs, 600_000);
   c.send('wake', { sleptAt: Date.now() - 90_000, sleptMs: 90_000 });
   await waitFor(async () => (await nodeOf(w.node)).sleptMs === 90_000, { timeout: 5000 });
   n = await nodeOf(w.node);
   assert.deepEqual([n.status, n.away, n.awayLabel], ['online', null, null]);
+  assert.deepEqual([n.drops.total, n.drops.by], [1, { asleep: 1 }], 'the wake report makes the drop a sleep, after the fact');
   c.send('bye', { reason: 'shutdown' });
   await closed(c.ws);
   assert.deepEqual([(await nodeOf(w.node)).away, (await nodeOf(w.node)).awayLabel], ['bye', 'shut down']);

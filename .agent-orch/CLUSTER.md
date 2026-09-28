@@ -194,7 +194,9 @@ controller appends a project's persona to `job.start.systemAppend`.
   (`i`), so nothing is lost or duplicated, across a controller restart too. A finished job stays on the worker until
   its `job.done` is acked. The agent keeps running throughout.
 - **Worker disconnects mid-task** (sleep, Wi-Fi, crash): its jobs keep `running`; the task shows 'waiting for <node>'
-  ('(Mac asleep)' when a darwin node went silent without a `bye`: nodes.away). The controller waits the node's grace:
+  ('(connection lost)' for any node that went silent without a `bye`: nodes.away 'lost'). Why is learned on reconnect:
+  `hello.reconnect {reason: 'dns'|'network'|'sleep', since, lastError}` (or a `wake`) sets the reason of its row in
+  `node_drops` (24 h, counted per reason in the Machines view); older workers' drops stay 'lost'. The controller waits the node's grace:
   `nodes.grace_ms` (owner, PATCH `graceSec`), else `graceMs(os)`: 5 min for a Mac, 2 min for a VPS.
   - **Same node returns within grace**: `hello.jobs` lists what it still has; ours get `job.attach`, the rest
     `job.cancel {reason:'reassigned'}`. A job of ours it doesn't list (it rebooted) is lost at once.

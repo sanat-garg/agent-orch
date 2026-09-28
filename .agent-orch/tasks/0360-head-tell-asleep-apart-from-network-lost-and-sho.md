@@ -13,3 +13,7 @@ cluster.mjs (~line 476) labels every Mac that disconnects without a 'bye' as 'as
 ## Done when
 
 `node --test test/cluster-away*.test.mjs` passes (lost by default, sleep only when reported, dns counted), and `! grep -n "row.os === 'darwin' ? 'asleep'" cluster.mjs`
+
+## Result — done (check passed) (2026-09-28 12:43)
+
+AGENT-ORCH-STATUS: done — drops show 'connection lost'; reported reasons counted and shown per machine

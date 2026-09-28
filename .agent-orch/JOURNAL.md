@@ -1024,3 +1024,6 @@ AUDIT round 7 #53/#58/#62/#64/#65/#66 marked, verified against code
 ## 2026-09-28 12:41 — #357 gate-proxy.mjs: a forwarded tools/call times out after callMs with an audited tool error, late answers dropped [done (check passed)]
 
 forwarded calls now time out after callMs; late answers dropped
+## 2026-09-28 12:43 — #360 Head: tell 'asleep' apart from 'network lost' and show the real reason [done (check passed)]
+
+drops show 'connection lost'; reported reasons counted and shown per machine

@@ -3534,13 +3534,14 @@ function scheduleMachines(ms = 600) {
   if ($('serverModal').hidden || MC.timer) return;
   MC.timer = setTimeout(() => { MC.timer = null; if (!$('serverModal').hidden) loadMachines(); }, ms);
 }
-// Online / Draining / Disabled while connected; away: Asleep (a Mac that went silent), Shut down (bye), else Offline.
+// Online / Draining / Disabled while connected; away: Connection lost (silent, no bye), Shut down (bye), Asleep (a legacy
+// row: a sleep is only known after the fact, from the worker's reconnect), else Offline.
 // Updating: waiting to be idle for its self-update, or restarting into it. Paused: its power policy takes no new tasks
 // for now (on battery, running hot).
 function nodeState(n) {
   if (!n.enabled) return { dot: '', label: 'Disabled' };
   if (['pending', 'sent'].includes(n.update?.state) && !n.draining) return { dot: 'warn', label: 'Updating' };
-  if (!n.connected) return n.away === 'asleep' ? { dot: '', label: 'Asleep' } : n.away === 'bye' ? { dot: '', label: 'Shut down' } : { dot: 'off', label: 'Offline' };
+  if (!n.connected) return n.away === 'asleep' ? { dot: '', label: 'Asleep' } : n.away === 'bye' ? { dot: '', label: 'Shut down' } : { dot: 'off', label: cap(n.awayLabel || 'offline') };
   if (n.draining) return { dot: 'warn', label: 'Draining' };
   return n.status === 'paused' ? { dot: 'warn', label: 'Paused' } : { dot: 'on', label: 'Online' };
 }
@@ -3683,6 +3684,21 @@ function machineHealth(n) {
   if (th?.pressure === 'throttled' && paused !== 'thermal') line('warn', th.speedLimit != null ? `Running hot: CPU limited to ${th.speedLimit}%` : 'Running hot: the CPU is throttled');
   if (res.awake && n.connected) line('', 'Kept awake while its tasks run');
   if (res.net && !res.net.ok && n.connected) line('warn', `Can't reach ${res.net.host === 'github.com' ? 'GitHub' : res.net.host}${res.net.error ? ` (${res.net.error})` : ''}: it can't clone or push`);
+  for (const [cls, text, title] of dropLines(n)) line(cls, text, title);
+  return out;
+}
+// A worker's connection drops over the last 24 h (cluster.mjs node_drops): the latest reconnect and its reason, then
+// the count by reason ('Connection drops today: 4 (DNS 3, sleep 1)'). Returns [cls, text, title] lines.
+const DROP_WHY = { dns: 'DNS lookup of the head failed', network: 'the network was down', asleep: 'it was asleep', lost: 'no reason reported' };
+const DROP_NAME = { dns: 'DNS', network: 'network', asleep: 'sleep', lost: 'unexplained' };
+const fmtMin = (ms) => (ms < 60e3 ? `${Math.max(1, Math.round(ms / 1000))} s` : ms < 3600e3 ? `${Math.round(ms / 60e3)} min` : `${Math.floor(ms / 3600e3)} h ${Math.round((ms % 3600e3) / 60e3)} min`);
+function dropLines(n) {
+  const d = n.drops, l = d?.last;
+  if (!d?.total) return [];
+  const out = [];
+  if (l.back && l.reason !== 'lost') out.push(['', `Reconnected after ${fmtMin(l.back - l.at)}: ${l.reason === 'asleep' && n.os === 'darwin' ? 'the Mac was asleep' : DROP_WHY[l.reason] || l.reason}`, l.error || '']);
+  const order = Object.keys(DROP_NAME), by = Object.entries(d.by).sort((a, b) => b[1] - a[1] || order.indexOf(a[0]) - order.indexOf(b[0])).map(([r, c]) => `${DROP_NAME[r] || r} ${c}`);
+  out.push([d.total >= 3 ? 'warn' : '', `Connection drops today: ${d.total} (${by.join(', ')})`, 'Connections this machine lost without saying goodbye in the last 24 hours, by the reason its worker reported on reconnect.']);
   return out;
 }
 // Rename, max parallel tasks, Drain, Disable and Remove. The controller's own slots follow its free memory (the owner
@@ -5332,7 +5348,7 @@ function actionsSection(id) {
   return d;
 }
 
-// The machine a running task is on ('on vps-2', 'waiting for Mac mini (Mac asleep)'), or a queued one is pinned to
+// The machine a running task is on ('on vps-2', 'waiting for Mac mini (connection lost)'), or a queued one is pinned to
 // ('only on MacBook Air'); tasks on the controller say
 // 'on this server' only once the cluster has workers (MC.nodes, read when the Queue or Server details opens).
 function taskMachine(t) {

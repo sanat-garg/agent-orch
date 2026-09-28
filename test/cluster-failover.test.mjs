@@ -133,7 +133,7 @@ async function remoteTask(title, ticks, seen, file) {
 test('a disconnect within the grace period: the job keeps running and its stream resumes without duplicates', { timeout: 90_000 }, async () => {
   const id = await remoteTask('Reconnect', 24, 3, 'a.txt');
   proxy.block();
-  await until(async () => (await get(id)).task.view?.waiting_for === 'test-worker', 'waiting for test-worker');
+  await until(async () => (await get(id)).task.view?.waiting_for === 'test-worker (connection lost)', 'waiting for test-worker (connection lost)');
   await sleep(1500); // ticks keep coming on the worker meanwhile
   proxy.unblock();
   const r = await finished(id);
@@ -141,7 +141,7 @@ test('a disconnect within the grace period: the job keeps running and its stream
   assert.equal(r.task.node_id, nodeId);
   assert.equal(r.runs.length, 1, 'the same run continued');
   assert.deepEqual(ticksIn(r.runs[0]), [...Array(24).keys()], 'every tick exactly once, in order');
-  assert.ok(r.events.some((m) => m === `#${id} waiting for test-worker`));
+  assert.ok(r.events.some((m) => m === `#${id} waiting for test-worker (connection lost)`));
   assert.ok(r.events.some((m) => m.includes(`#${id}: test-worker is back`)));
   assert.equal(r.task.last_error, null);
 });

@@ -89,12 +89,14 @@ before(async () => {
   W.air = await fakeWorker('macbook-air', 'darwin');
   W.old = await fakeWorker('old-vps', 'linux', { connect: false });
   await call(`/api/cluster/nodes/${W.studio.node}`, 'PATCH', { draining: true });
-  W.air.ws.terminate(); // a Mac that goes silent without a bye is asleep
+  W.air.ws.terminate(); // a Mac that goes silent without a bye is 'lost' (see the moon below)
   // A few telemetry frames: build-vps's chart has a line to draw.
   for (let i = 0; i < 3; i++) { W.vps.res(); W.gpu.res(); await sleep(120); }
-  await waitFor(async () => (await call('/api/cluster/nodes')).nodes.find((n) => n.id === W.air.node)?.away === 'asleep', { timeout: 10000, message: 'macbook-air asleep' });
+  await waitFor(async () => (await call('/api/cluster/nodes')).nodes.find((n) => n.id === W.air.node)?.away === 'lost', { timeout: 10000, message: 'macbook-air lost' });
 
   const d = db();
+  // Asleep is only known after the fact now; a row an older head marked asleep still wears the moon.
+  d.prepare("UPDATE nodes SET away='asleep' WHERE id=?").run(W.air.node);
   pid = Number(d.prepare("INSERT INTO projects(path,name,status,created_at) VALUES(?,?,'active',0)").run(path.join(dataDir, 'proj'), 'Seeded').lastInsertRowid);
   d.close();
   T.vps = seed('Report worker phases', W.vps.node, 300);

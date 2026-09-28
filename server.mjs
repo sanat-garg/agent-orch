@@ -374,12 +374,22 @@ const RESTART_STATE = path.join(DATA, 'restart.json'), BOOT_AT = Date.now();
 const lastRestart = readRestartState(RESTART_STATE);
 const updatedTo = lastRestart.to && lastRestart.version && BOOT_AT - lastRestart.at < 10 * 60e3 ? { version: lastRestart.version, at: Math.round(lastRestart.at / 1000) } : null;
 const updateStatus = () => ({ restartPending, update: rolling.status(), updated: updatedTo && Date.now() - BOOT_AT < 10 * 60e3 ? updatedTo : null });
+// Server files (rolling.mjs serverFile) changed between the running code and `head`.
+async function serverChanges(head) {
+  return head === bootCommit || !bootCommit ? [] : (await git(['diff', '--name-only', `${bootCommit}..${head}`])).split('\n').filter(serverFile);
+}
+// Update all (#458): whether this head runs code older than its checkout's server files (it then restarts last), cached 30 s.
+let headBehindAt = 0, headBehindNow = false;
+async function headBehind() {
+  if (Date.now() - headBehindAt > 30e3) { headBehindAt = Date.now(); headBehindNow = (await serverChanges(await git(['rev-parse', 'HEAD']))).length > 0; }
+  return headBehindNow;
+}
 const envMs = (k) => (Number(process.env[k]) >= 0 && process.env[k] !== undefined && process.env[k] !== '' ? Number(process.env[k]) : undefined);
 const rolling = createRollingRestart({
   stateFile: RESTART_STATE,
   bootCommit: () => bootCommit,
   head: () => git(['rev-parse', 'HEAD']),
-  changed: async (head) => (head === bootCommit || !bootCommit ? [] : (await git(['diff', '--name-only', `${bootCommit}..${head}`])).split('\n').filter(serverFile)),
+  changed: (head) => serverChanges(head),
   version: async (head) => formatVersion(Number(await git(['rev-list', '--count', head])) || 0).slice(1), // '3.59': readers add the v
   preflight: () => restartPreflight().catch((e) => String(e?.message || e)),
   busy: () => (restartPending ? 'a restart-when-idle drain is in progress' : ''),
@@ -897,6 +907,8 @@ const cluster = orch && createCluster({
     orch?.logEvent(text, { level: level === 'warn' ? 'warn' : 'info' });
     if (level === 'warn') for (const ws of allClients) send(ws, { t: 'cluster', kind: 'notice', node, text });
   },
+  // Update all: the workers are done and the head is behind: a rolling restart now (preflight first, head runs paused).
+  onRolloutDone: () => { rolling.restartNow('update all'); },
 });
 // 'cluster' pushes: the UI re-reads GET /api/cluster/nodes. A worker's periodic CPU/RAM reading ({kind: 'resources'},
 // only the Machines view cares) goes out at most every 5 s.
@@ -1703,10 +1715,22 @@ async function handleRequest(req, res) {
   }
   if (p.startsWith('/api/cluster/') && !cluster) return json(res, 503, { error: 'cluster unavailable' });
   // build: the agent-orch build each machine runs (a worker's own report, else counted here from its sha); version: its v3.52.
-  if (p === '/api/cluster/nodes' && req.method === 'GET') return json(res, 200, { nodes: orch.machines(cluster.listNodes()).map((n) => {
-    const build = n.local ? version.running().build : n.inventory?.versions?.build ?? version.buildOf(n.sha || n.inventory?.versions?.sha);
-    return { ...n, build, version: formatVersion(build) };
-  }) });
+  // target: the version workers update to (origin/main); headBehind: this head restarts last in an Update all; rollout: its progress.
+  if (p === '/api/cluster/nodes' && req.method === 'GET') {
+    const sha = cluster.updateTarget(), build = version.buildOf(sha), hb = await headBehind();
+    return json(res, 200, { nodes: orch.machines(cluster.listNodes()).map((n) => {
+      const build = n.local ? version.running().build : n.inventory?.versions?.build ?? version.buildOf(n.sha || n.inventory?.versions?.sha);
+      return { ...n, build, version: formatVersion(build), ...(n.local ? { headBehind: hb } : {}) };
+    }), target: sha ? { sha, build, version: formatVersion(build) } : null, rollout: cluster.rollout() });
+  }
+  // Update all (#458): {nodes?: [ids], clis?: bool} → a rolling update of the workers behind origin/main (or those named),
+  // one at a time, then this head (a rolling restart) when it is behind. 409 'All up to date' when there is nothing to do.
+  if (p === '/api/cluster/update' && req.method === 'POST') {
+    const body = await readBody(req);
+    const r = cluster.updateAll({ nodes: body.nodes ?? null, clis: body.clis === true, head: await headBehind() });
+    return r.error ? json(res, r.status, { error: r.error }) : json(res, 200, r);
+  }
+  if (p === '/api/cluster/update' && req.method === 'GET') return json(res, 200, { rollout: cluster.rollout() });
   // "Add machine": a pairing code, {uses: N} for one code that pairs N machines (valid 1 h); DELETE revokes a code.
   if (p === PAIR_PATH && req.method === 'POST') { const r = cluster.createPairing(await readBody(req)); return r.error ? json(res, r.status, { error: r.error }) : json(res, 200, r); }
   const pcode = p.match(/^\/api\/cluster\/pair\/([\w-]{1,20})$/);

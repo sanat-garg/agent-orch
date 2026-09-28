@@ -1334,6 +1334,9 @@ assign API lists runnable tasks and starts them immediately
 
 card opens all-machines window, dots gone, tests pass
 
+## 2026-09-28 16:56 — #458 Machines: 'Update all' brings every machine to the latest version [done (check passed)]
+
+Update all rolls out machines one at a time; tests pass
 ## 2026-09-28 15:08 — #454 Ping result: restyled and fades away after 10 seconds [done (check passed)]
 
 Ping result chip group now auto-fades after 10 seconds
@@ -1386,3 +1389,7 @@ Restarts wait only for merges; integrators pause; friendly 404 retry
 ## 2026-09-28 16:59 — #460 Integrate #438: Files tab: go to parent folders and anywhere on the VPS, still opening on the project [done (check passed)]
 
 #438 merged with main; all Files UI tests pass
+
+## 2026-09-28 16:59 — #466 Integrate #458: Machines: 'Update all' brings every machine to the latest version [done (check passed)]
+
+Waiting for the test run to finish.

@@ -1189,7 +1189,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     if (!s || s.kind === 'timeout' || s.kind === 'cap') return false;
     if (s.kind === 'pause') {
       job.state = 'paused';
-      await pushWip(job).catch((e) => log(`job ${job.id} WIP push on pause failed: ${e.message}`, 'warn'));
+      job.wipPushed = pushWip(job).catch((e) => log(`job ${job.id} WIP push on pause failed: ${e.message}`, 'warn'));
+      await job.wipPushed;
       log(`job ${job.id} paused`);
       return true;
     }
@@ -1353,7 +1354,13 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
 
   async function resumeJob(msg) {
     let job = jobs.get(msg.job);
+    if (updating) return raw(MSG.ERROR, { message: `job ${msg.job} stays paused: this machine is updating itself`, job: msg.job });
     if (job && job.state !== 'paused') return raw(MSG.ERROR, { message: `job ${msg.job} is ${job.state}, not paused`, job: msg.job });
+    if (job?.restored) { // paused by an update before this process started: its worktree and session are still here
+      job.restored = false;
+      setPhase(job, 'queued');
+      if (!(await setup(job))) return;
+    }
     if (!job) {
       const spec = finished.get(msg.job);
       if (!spec) return raw(MSG.ERROR, { message: `job ${msg.job} is not on this worker`, job: msg.job });
@@ -1398,6 +1405,47 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   // this worker runs from, npm ci when the lockfile changed, and a trial import of the new worker.mjs; then a clean stop
   // and exit, and the service manager (systemd Restart=always, launchd KeepAlive) starts the new code. A busy worker
   // refuses; any failure rolls the checkout back and is reported (node.error kind update).
+  // mode 'now' (the owner's Update all, #458): busy or not. It takes no new jobs, pauses its jobs (WIP pushed), refuses a
+  // checkout with local changes, fetches and resets to the head's sha, and with clis updates the Claude Code and Codex
+  // CLIs; each step goes out as update.progress. The paused jobs are saved (pausedFile) and come back paused after the
+  // restart, for the head to resume; a failed update resumes them here at once.
+  const pausedFile = path.join(home, 'update-paused.json');
+  const progress = (stage, message) => { log(`update: ${stage}${message ? ` (${message})` : ''}`); raw(MSG.UPDATE_PROGRESS, { stage, ...(message ? { message } : {}) }); };
+  async function pauseForUpdate(timeoutMs = 120_000) {
+    const list = [...jobs.values()].filter((j) => j.state !== 'paused');
+    for (const j of list) { j.stop = { kind: 'pause' }; if (j.state === 'running' || j.state === 'checking') j.ac?.abort(); }
+    for (const end = Date.now() + timeoutMs; list.some((j) => jobs.has(j.id) && j.state !== 'paused') && Date.now() < end;) await new Promise((r) => setTimeout(r, 100));
+    const stuck = list.filter((j) => jobs.has(j.id) && j.state !== 'paused');
+    if (stuck.length) throw new Error(`job ${stuck.map((j) => j.id).join(', ')} did not pause within ${Math.round(timeoutMs / 1000)} s`);
+    await Promise.all(list.map((j) => j.wipPushed)); // their work is on the branch before the checkout changes
+  }
+  const pausedJobs = () => [...jobs.values()].filter((j) => j.state === 'paused');
+  function savePaused() {
+    const list = pausedJobs().map((j) => ({ spec: { ...j.spec, resume: j.sessionId || j.spec.resume || undefined }, next: evEnd(j), pushed: j.pushed }));
+    if (list.length) fs.writeFileSync(pausedFile, JSON.stringify(list), { mode: 0o600 });
+  }
+  // At start: the jobs an update paused, back as paused jobs (listed in hello; frames wait for the head's job.attach).
+  function restorePaused() {
+    let list;
+    try { list = JSON.parse(fs.readFileSync(pausedFile, 'utf8')); } catch { return; }
+    fs.rmSync(pausedFile, { force: true });
+    for (const p of Array.isArray(list) ? list : []) {
+      if (!Number.isSafeInteger(p?.spec?.job) || jobs.has(p.spec.job)) continue;
+      const job = Object.assign(newJob(p.spec), { state: 'paused', restored: true, attached: false, evBase: p.next || 0, sent: p.next || 0, pushed: p.pushed || null });
+      jobs.set(job.id, job);
+      log(`job ${job.id} is back, paused by the update; the head resumes it`);
+    }
+  }
+  // The CLIs installed here, each with its own updater (install commands: .agent-orch/AGENTS.md). Returns what failed.
+  async function updateClis() {
+    const bad = [];
+    for (const [id, name, cmd, argv] of [['claude', 'Claude Code', 'claude', ['update']], ['codex', 'Codex', 'npm', ['i', '-g', '@openai/codex@latest']]]) {
+      if (agentStatus(id) === 'not installed') continue;
+      try { await mustRun(`${name} update`, cmd, argv, { timeoutMs: 600_000 }); } catch (e) { bad.push(e.message); }
+    }
+    clearLoginCache();
+    return bad;
+  }
   const busyJobs = () => jobs.size + [...held.values()].filter((j) => !j.ctl.some((c) => c.t === MSG.JOB_DONE && c.seqSent)).length;
   // Runs a step of the update; its error names the step and the stderr line that says why (an Error line, npm's own).
   async function mustRun(step, cmd, argv, opts) {
@@ -1408,19 +1456,28 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     throw Object.assign(new Error(`${step} failed: ${why}`), { stderr: r.stderr });
   }
   async function selfUpdate(msg) {
-    const n = busyJobs();
-    if (updating || n) return nodeError('update', updating ? 'an update is already running' : `busy: ${n} job${n === 1 ? '' : 's'} on this machine`, { re: msg.seq });
+    const now = msg.mode === 'now', n = busyJobs();
+    if (updating || (n && !now)) return nodeError('update', updating ? 'an update is already running' : `busy: ${n} job${n === 1 ? '' : 's'} on this machine`, { re: msg.seq });
     updating = true;
     const lockFile = path.join(srcDir, 'package-lock.json');
     const lockHash = () => { try { return crypto.createHash('sha256').update(fs.readFileSync(lockFile)).digest('hex'); } catch { return null; } };
     try {
+      if (now) { progress('pausing'); await pauseForUpdate(); }
       const before = (await git(srcDir, ['rev-parse', 'HEAD'])).trim(), lockBefore = lockHash();
       log(`updating agent-orch in ${srcDir} from ${before.slice(0, 8)}${msg.sha ? ` (the controller is at ${msg.sha.slice(0, 8)})` : ''}`);
-      await git(srcDir, ['pull', '--ff-only', '-q'], { timeout: 300_000 });
+      if (now) {
+        progress('pulling');
+        const dirty = (await git(srcDir, ['status', '--porcelain', '--untracked-files=no'])).split('\n').filter(Boolean);
+        if (dirty.length) throw new Error(`its agent-orch checkout has local changes (${dirty.slice(0, 3).map((l) => l.slice(3)).join(', ')}${dirty.length > 3 ? '…' : ''}): commit or discard them, then retry`);
+        await git(srcDir, ['fetch', '-q', 'origin'], { timeout: 300_000 });
+        const to = msg.sha && (await gitOk(srcDir, ['cat-file', '-e', `${msg.sha}^{commit}`])) ? msg.sha : 'origin/main';
+        await git(srcDir, ['reset', '-q', '--hard', to]);
+      } else await git(srcDir, ['pull', '--ff-only', '-q'], { timeout: 300_000 });
       const after = (await git(srcDir, ['rev-parse', 'HEAD'])).trim();
       if (after === before) throw new Error('already up to date with its origin');
       const deps = lockHash() !== lockBefore;
       try {
+        if (deps && now) progress('installing');
         if (deps) await mustRun('npm ci', 'npm', ['ci', '--no-audit', '--no-fund'], { cwd: srcDir, timeoutMs: 900_000 });
         await mustRun('loading the new worker.mjs', process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(pathToFileURL(path.join(srcDir, 'worker.mjs')).href)})`],
           { cwd: srcDir, timeoutMs: 60_000 });
@@ -1429,6 +1486,12 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
         if (deps) await runHelper('npm', ['ci', '--no-audit', '--no-fund'], { cwd: srcDir, timeoutMs: 900_000 });
         throw e;
       }
+      if (now && msg.clis) {
+        progress('clis');
+        const bad = await updateClis();
+        if (bad.length) progress('clis', bad.join('; ').slice(0, 300)); // a CLI that didn't update doesn't stop agent-orch's
+      }
+      if (now) { savePaused(); progress('restarting'); }
       log(`updated ${before.slice(0, 8)} → ${after.slice(0, 8)}; restarting`);
       await (restart ? restart() : stop({ reason: 'update' }).then(() => process.exit(0)));
     } catch (e) {
@@ -1437,6 +1500,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       const why = (e.cmd && String(e.stderr || '').trim().split('\n').pop()) || firstLine(e);
       log(`update failed: ${why}`, 'error');
       nodeError('update', why, { stderr: e.stderr, re: msg.seq });
+      if (now) for (const j of pausedJobs()) resumeJob({ job: j.id }).catch((err) => log(`job ${j.id} resume failed: ${err.message}`, 'warn'));
     }
   }
 
@@ -1457,6 +1521,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     srcSha = await git(srcDir, ['rev-parse', 'HEAD']).then((s) => s.trim(), () => null);
     if (srcSha && !/^[0-9a-f]{40}$/.test(srcSha)) srcSha = null;
     if (srcSha) srcBuild = Number(await git(srcDir, ['rev-list', '--count', srcSha]).then((s) => s.trim(), () => '')) || null; // the head's Machines view
+    restorePaused(); // before the sweep, which leaves their worktrees alone
     await sweepLeftovers().catch((e) => log(`leftover sweep failed: ${e.message}`, 'warn'));
     await probePower();
     setPolicy(policy);

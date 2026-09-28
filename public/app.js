@@ -4057,7 +4057,8 @@ const AM_USES = [1, 2, 3, 4, 5, 6, 8, 10];
 // open: the cards whose Machine settings are open; stale: a render skipped while a finish sound menu was in use.
 // pings: node id → the owner's last Ping ({busy} | {r: the answer} | {error}), shown under the node until it fades (pingBox).
 // soundAdd: the node whose Finish sound row shows the add-a-custom-sound form.
-const MC = { nodes: [], at: 0, timer: null, loading: false, open: new Set(), stale: false, pings: new Map(), soundAdd: null };
+// target: the version workers update to ({sha, build, version}); rollout: the owner's Update all in progress (cluster.mjs).
+const MC = { nodes: [], at: 0, timer: null, loading: false, open: new Set(), stale: false, pings: new Map(), soundAdd: null, target: null, rollout: null };
 const fmtGB = (b) => `${((b || 0) / 2 ** 30).toFixed(1)} GB`;
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const NODE_ST = { online: 'Online', draining: 'Draining', disabled: 'Disabled', updating: 'Updating', paused: 'Paused' };
@@ -4069,7 +4070,12 @@ const OS_ICON = { // SF Symbols style: laptopcomputer (macOS) and server.rack (L
 async function loadMachines() {
   if (MC.loading) return;
   MC.loading = true;
-  try { MC.nodes = (await api('/api/cluster/nodes')).nodes || []; MC.at = Date.now(); } catch { return; } finally { MC.loading = false; }
+  const was = MC.rollout;
+  try {
+    const d = await api('/api/cluster/nodes');
+    Object.assign(MC, { nodes: d.nodes || [], target: d.target || null, rollout: d.rollout || null, at: Date.now() });
+  } catch { return; } finally { MC.loading = false; }
+  if (was && !was.doneAt && MC.rollout?.doneAt && MC.rollout.startedAt === was.startedAt) toast(rolloutSummary(MC.rollout), { duration: 8000 });
   setMachineSounds(MC.nodes);
   renderMachines();
   miniRender();
@@ -4111,6 +4117,11 @@ function renderMachines() {
   sec.classList.toggle('first', first);
   $('mcSum').textContent = nodes.length ? machineSummary(nodes) : '';
   $('pingAll').hidden = !first;
+  const ua = updateAllLabel(nodes, MC.target, MC.rollout);
+  $('updateAll').hidden = !first && !ua.count;
+  $('updateAll').textContent = ua.text;
+  $('updateAll').disabled = ua.disabled;
+  $('updateAll').title = ua.title;
   // Live re-renders keep keyboard focus on the same control of the same card.
   const f = document.activeElement, card = f?.closest?.('#mMachines .mc-node'), key = (b) => b.dataset.act || b.dataset.task || b.textContent;
   const was = card && f.matches('button, summary, input') && [card.dataset.node, key(f)];
@@ -4202,6 +4213,7 @@ function machineCard(n) {
   }
   if (tasks.length) run.append(list);
   run.append(renderAssignButton(n));
+  if (canUpdate(n)) run.append(updateButton(n));
   li.append(run);
   li.append(machineSettings(n));
   return li;
@@ -4229,8 +4241,9 @@ function machineHealth(n) {
   if (n.slotsWhy) line('warn', `${n.slotsWhy}. It takes tasks once more memory is free.`);
   const paused = n.status === 'paused' ? res.intake?.reason : null;
   if (paused) line('warn', `${res.intake.text}. Its running tasks go on.`);
-  const u = n.update;
-  if (u?.state === 'pending') line('', 'Updates itself once its running tasks finish; it takes no new ones meanwhile.');
+  const u = n.update, ro = n.rollout;
+  if (ro) out.push(rolloutLine(n, MC.target));
+  else if (u?.state === 'pending') line('', 'Updates itself once its running tasks finish; it takes no new ones meanwhile.');
   else if (u?.state === 'sent') line('', 'Updating: pulling the latest agent-orch and restarting…');
   else if (u?.state === 'failed') line('bad', `Update failed: ${u.error}`);
   else if (n.outdated) line('warn', `${plural(n.behind, 'commit')} behind this server's agent-orch`);
@@ -4554,6 +4567,123 @@ function assignKey(e) {
   }
 }
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && AS.layer) { e.preventDefault(); e.stopImmediatePropagation(); closeAssign(); } }, true);
+
+// ----- Update all (#458): the Machines header's 'Update all · 2 behind v3.60' ('All up to date', disabled, when none are)
+// and an 'Update' on each outdated machine open a confirm sheet (openUpdateAll): each machine with its version → the
+// target, 'Also update Claude Code and Codex CLIs' (off) and 'Update now' → POST /api/cluster/update {nodes, clis}. The
+// head updates the workers one at a time, then itself; each card shows its step (rolloutLine), Retry on a failure, and a
+// toast says when all are done (loadMachines).
+// Behind: a worker by its commit count against origin/main; this server when its running code is older than its checkout.
+const behindNow = (n) => n.enabled && (n.local ? !!n.headBehind : n.behind > 0);
+const rolloutActive = (r) => !!r && !r.doneAt;
+const canUpdate = (n) => behindNow(n) && !['queued', 'updating', 'restarting'].includes(n.rollout?.state);
+function updateAllLabel(nodes, target, rollout) {
+  const count = nodes.filter(behindNow).length, v = target?.version ? ` ${target.version}` : '';
+  if (rolloutActive(rollout)) {
+    const all = rollout.nodes.length, left = rollout.nodes.filter((e) => ['queued', 'updating'].includes(e.state)).length;
+    return { count, text: `Updating… ${all - left} of ${all}`, disabled: true, title: 'Machines update one at a time, so some keep running tasks throughout' };
+  }
+  if (!count) return { count, text: 'All up to date', disabled: true, title: `Every machine runs${v || ' the latest agent-orch'}` };
+  return { count, text: `Update all · ${count} behind${v}`, disabled: false, title: `Bring ${plural(count, 'machine')} to${v || ' the latest agent-orch'}, one at a time` };
+}
+// A machine's update step: 'Updating… pulling → installing → restarting' with the current step in bold; then '✓ v3.60',
+// a failure with Retry, or 'offline: will update when back online'.
+const UPDATE_STEPS = [['pausing', 'pausing tasks'], ['pulling', 'pulling'], ['installing', 'installing'], ['clis', 'updating CLIs'], ['restarting', 'restarting']];
+function rolloutText(r, target) {
+  const v = target?.version || 'the latest version';
+  if (r.state === 'queued') return { cls: '', text: 'Update queued: machines update one at a time' };
+  if (r.state === 'restarting') return { cls: '', text: 'Restarting into the new version (this server goes last)…' };
+  if (r.state === 'done') return { cls: 'ok', text: `Updated to ${v} ✓` };
+  if (r.state === 'failed') return { cls: 'bad', text: `Update failed: ${r.error || 'unknown error'}` };
+  if (r.state === 'offline') return { cls: 'warn', text: 'Offline: will update when back online' };
+  const steps = UPDATE_STEPS.filter(([k]) => k !== 'clis' || r.clis), at = steps.findIndex(([k]) => k === r.stage);
+  return { cls: '', text: 'Updating… ', steps: steps.map(([k, label], i) => ({ label, on: i === at, done: i < at })), note: r.note || '' };
+}
+function rolloutSummary(r) {
+  const n = (s) => r.nodes.filter((e) => e.state === s).length;
+  const parts = [n('done') && `${plural(n('done'), 'machine')} updated`, n('failed') && `${n('failed')} failed`, n('offline') && `${n('offline')} offline (they update when back)`,
+    n('restarting') && 'this server restarts now'].filter(Boolean);
+  return `Update all finished: ${parts.join(', ') || 'nothing to do'}`;
+}
+function rolloutLine(n, target) {
+  const r = n.rollout, t = rolloutText(r, target), p = el('p', `mc-health ua-line ${t.cls}`.trim(), t.text);
+  p.dataset.state = r.state;
+  if (t.steps) t.steps.forEach((s, i) => { if (i) p.append(document.createTextNode(' → ')); p.append(el(s.on ? 'b' : 'span', s.done ? 'ua-done' : '', s.label)); });
+  if (t.note) p.title = t.note;
+  if (r.state === 'failed') {
+    const b = el('button', 'btn small ua-retry', 'Retry');
+    b.type = 'button';
+    b.addEventListener('click', () => startUpdate([n.id], !!r.clis));
+    p.append(' ', b);
+  }
+  return p;
+}
+function updateButton(n) {
+  const b = el('button', 'btn small as-btn ua-btn', 'Update');
+  b.type = 'button';
+  b.dataset.act = 'update-now';
+  b.title = `Bring ${n.name} to ${MC.target?.version || 'the latest agent-orch'} now: its tasks pause and resume after`;
+  b.addEventListener('click', () => openUpdateAll([n.id]));
+  return b;
+}
+async function startUpdate(ids, clis) {
+  try {
+    const r = await api('/api/cluster/update', 'POST', { nodes: ids, clis });
+    const n = r.rollout?.nodes.filter((e) => ['queued', 'updating'].includes(e.state)).length || 0;
+    toast(n > 1 ? `Updating ${n} machines, one at a time` : 'Updating…');
+    closeUpdateAll();
+  } catch (e) { toast(e.message, { kind: 'error' }); }
+  loadMachines();
+}
+const UA = { layer: null };
+function openUpdateAll(ids = null) {
+  closeUpdateAll();
+  const list = MC.nodes.filter((n) => canUpdate(n) && (!ids || ids.includes(n.id)));
+  if (!list.length) return toast('All up to date');
+  // Workers first, then this server (it restarts last).
+  list.sort((a, b) => Number(a.local) - Number(b.local));
+  const layer = el('div', 'as-layer ua-layer'), scrim = el('div', 'as-scrim'), pop = el('div', 'as-pop ua-pop'), head = el('div', 'as-head'), grip = el('div', 'sheet-grip');
+  const h = el('h3', '', list.length === 1 && ids ? `Update ${list[0].name}` : 'Update all machines'), x = el('button', 'icon-btn as-x');
+  h.id = 'uaTitle';
+  pop.setAttribute('role', 'dialog');
+  pop.setAttribute('aria-modal', 'true');
+  pop.setAttribute('aria-labelledby', 'uaTitle');
+  pop.tabIndex = -1;
+  grip.setAttribute('aria-hidden', 'true');
+  x.type = 'button';
+  x.setAttribute('aria-label', 'Close');
+  x.innerHTML = CLOSE_SVG;
+  head.append(h, x);
+  const rows = el('ul', 'ua-list'), to = MC.target?.version || 'latest';
+  for (const n of list) {
+    const li = el('li', 'ua-row'), note = !n.local && !n.connected ? 'offline: will update when back online' : n.local ? 'restarts last' : n.used === 1 ? 'its task pauses and resumes' : n.used ? `its ${n.used} tasks pause and resume` : '';
+    li.append(el('span', 'ua-name', n.name), el('span', 'ua-ver', `${n.version || '?'} → ${to}`));
+    if (note) li.append(el('span', 'ua-note', note));
+    rows.append(li);
+  }
+  const hint = el('p', 'as-note', 'One machine at a time: each pauses its tasks (their work is pushed), updates, restarts and picks them up again.');
+  const cli = el('label', 'ua-cli'), box = el('input');
+  box.type = 'checkbox';
+  box.id = 'uaClis';
+  cli.append(box, document.createTextNode(' Also update Claude Code and Codex CLIs'));
+  const go = el('button', 'btn primary ua-go', 'Update now');
+  go.type = 'button';
+  go.addEventListener('click', () => { go.disabled = true; startUpdate(list.map((n) => n.id), box.checked); });
+  const foot = el('div', 'ua-foot');
+  foot.append(cli, go);
+  pop.append(grip, head, rows, hint, foot);
+  layer.append(scrim, pop);
+  scrim.addEventListener('click', closeUpdateAll);
+  x.addEventListener('click', closeUpdateAll);
+  layer.classList.toggle('sheet', phoneMQ.matches);
+  if (!phoneMQ.matches) Object.assign(pop.style, { left: '50%', top: '18%', transform: 'translateX(-50%)' });
+  UA.layer = layer;
+  document.body.append(layer);
+  go.focus({ preventScroll: true });
+}
+function closeUpdateAll() { UA.layer?.remove(); UA.layer = null; }
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && UA.layer) { e.preventDefault(); e.stopImmediatePropagation(); closeUpdateAll(); } }, true);
+$('updateAll').addEventListener('click', () => openUpdateAll());
 // ----- machine settings (the 'Machine settings' disclosure at the foot of each card) -----
 // Plain words in at most three sections, a row each (label, one-line hint, one control; a switch's row is its label):
 //   Work: parallel tasks (Auto or a cap; the controller's own follow its free memory, capped in Settings) and Run tasks
@@ -4642,13 +4772,10 @@ function machineSettings(n) {
     pb.disabled = busy;
     row(manage, 'Check connection', n.connected ? 'Tests its link to this server, DNS and GitHub' : 'Why it dropped, and a command to test from it', pb);
   }
-  // Update: a worker behind this server's agent-orch (outdated ones update on their own), or one whose update failed.
-  if (!n.local && n.connected && (n.update?.state === 'failed' || ((n.outdated || n.behind > 0) && !n.update))) {
-    row(manage, 'Update agent-orch', n.update?.state === 'failed' ? 'The last update failed: try again' : 'Gets the latest version once its running tasks finish',
-      button('Update', 'update', async () => {
-        try { await api(`/api/cluster/nodes/${encodeURIComponent(n.id)}/update`, 'POST'); toast(`${n.name} updates itself once its running tasks finish`); } catch (e) { toast(e.message, { kind: 'error' }); }
-        loadMachines();
-      }));
+  // Update: a machine behind this server's agent-orch, or one whose update failed: the Update all sheet for it alone.
+  if (canUpdate(n) || (!n.local && n.connected && n.update?.state === 'failed' && !n.rollout)) {
+    row(manage, 'Update agent-orch', n.update?.state === 'failed' ? 'The last update failed: try again' : 'Pauses its tasks, updates and restarts it; they resume after',
+      button('Update', 'update', () => openUpdateAll([n.id])));
   }
   if (!n.local) {
     const moving = n.used ? ` Its ${plural(n.used, 'running task')} go${n.used === 1 ? 'es' : ''} back to the queue now.` : '';

@@ -46,7 +46,7 @@ export const MSG = {
   JOB_PHASE: 'job.phase', JOB_ERROR: 'job.error', NODE_ERROR: 'node.error', LOGS_TAIL: 'logs.tail', LOGS: 'logs', NODE_UPDATE: 'node.update',
   NODE_POLICY: 'node.policy', JOB_APPROVAL: 'job.approval',
   SCREEN_REQ: 'screen.req', SCREEN_RES: 'screen.res', SCREEN_INPUT: 'screen.input', SCREEN_FRAME: 'screen.frame', SCREEN_STATE: 'screen.state',
-  EXT_SYNC: 'ext.sync', PING: 'ping', PONG: 'pong',
+  EXT_SYNC: 'ext.sync', PING: 'ping', PONG: 'pong', UPDATE_PROGRESS: 'update.progress',
 };
 
 // Who may send each type: 'w' worker → controller, 'c' controller → worker, 'both'. Only the controller originates jobs.
@@ -58,7 +58,7 @@ export const DIRECTION = {
   'login.start': C, 'login.state': W, 'login.code': C, 'login.cancel': C, 'login.logout': C,
   'models.refresh': C, models: W, 'limits.refresh': C, limits: W,
   'job.phase': W, 'job.error': W, 'node.error': W, 'logs.tail': C, logs: W, 'node.update': C, 'node.policy': C, 'job.approval': C,
-  'screen.req': C, 'screen.res': W, 'screen.input': C, 'screen.frame': W, 'screen.state': W, 'ext.sync': C, ping: C, pong: W,
+  'screen.req': C, 'screen.res': W, 'screen.input': C, 'screen.frame': W, 'screen.state': W, 'ext.sync': C, ping: C, pong: W, 'update.progress': W,
 };
 // Frame types a peer sends only when the other side lists the feature (hello.features: the worker's, welcome.features:
 // the controller's), so a worker updated ahead of the controller's running code (or the reverse) never sends a type the
@@ -68,7 +68,8 @@ export const DIRECTION = {
 export const FEATURES = { 'job.phase': 'phases', 'job.error': 'errors', 'node.error': 'errors', 'logs.tail': 'logs', logs: 'logs', 'node.update': 'update',
   'node.policy': 'policy', 'agent.credential': 'creds', 'job.approval': 'approvals',
   'screen.req': 'screen', 'screen.res': 'screen', 'screen.input': 'screen', 'screen.frame': 'screen', 'screen.state': 'screen', 'ext.sync': 'ext',
-  ping: 'ping', pong: 'ping' };
+  ping: 'ping', pong: 'ping', 'update.progress': 'update-now' };
+// Feature 'update-now' also means the worker honours node.update.mode 'now' (Update all, #458).
 // Feature 'git' (no frame type): the worker fetches and pushes through job.start.gitUrl, so it needs no GitHub access.
 // Feature 'integrate' (no frame type): the worker runs integrator jobs (job.start.integrate).
 export const FEATURE_LIST = [...new Set([...Object.values(FEATURES), 'cap', 'browser-task', 'git', 'integrate'])];
@@ -192,7 +193,12 @@ const S = {
   logs: { req: 'str', lines: 'arr', error: 'str?' },
   // Update agent-orch on the worker (git pull --ff-only, npm ci when the lockfile changed) and restart its service. Sent
   // only while the node is idle; a busy worker refuses (node.error kind update). sha: the controller's origin/main.
-  'node.update': { sha: 'sha?' },
+  // mode 'now' (the owner's Update all, feature 'update-now'): it takes no new jobs, pauses its running ones (WIP pushed,
+  // resumed by the head once it is back), fetches and resets to sha, runs npm ci when the lockfile changed, with clis
+  // also updates the Claude Code and Codex CLIs, then restarts; each step is reported as update.progress.
+  'node.update': { sha: 'sha?', mode: 'str?', clis: 'bool?' },
+  // A mode 'now' update's step: pausing | pulling | installing | clis | restarting; message: a detail (a CLI that failed).
+  'update.progress': { stage: 'str', message: 'str?' },
   // The owner changed the node's power policy or max tasks (Machines view): the same shape as welcome.policy.
   'node.policy': { policy: 'obj' },
   // The owner's answer to a held call of a job's approval gate (gate.mjs): decision approve | always | auto | deny | expired,

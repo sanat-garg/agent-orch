@@ -3216,12 +3216,15 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       // A (re)connecting worker lists the jobs it still holds: ours continue (job.attach: it replays the stream from
       // what we have), the rest are cancelled; 'reassigned' drops the worktree without pushing over the new run.
       // A job of ours it no longer has (it rebooted) moves on at once instead of waiting out the grace period.
+      // One it holds paused (it paused it for its Update all, #458, and restarted) is resumed: the head never keeps a
+      // remote job paused.
       const listed = new Set(msg.jobs.map((j) => j.job));
       for (const j of msg.jobs) {
         const mine = jobs.get(j.job);
         if (mine?.node === nodeId && mine.started) {
           mine.attached = true;
           cluster.send(nodeId, { t: MSG.JOB_ATTACH, job: j.job, from: mine.next });
+          if (j.state === 'paused') { cluster.send(nodeId, { t: MSG.JOB_RESUME, job: j.job }); logEvent(`#${j.job} resumes on ${nodeName(nodeId)}`, { taskId: j.job }); }
           approvals.resend(j.job, nodeId); // decisions sent while it was away
         } else cluster.send(nodeId, { t: MSG.JOB_CANCEL, job: j.job, reason: 'reassigned' });
       }

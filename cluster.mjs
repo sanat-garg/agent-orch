@@ -6,6 +6,7 @@
 // GET /api/cluster/nodes.
 // Health (CLUSTER.md, Health): each worker's telemetry as a 24 h series (node-metrics.mjs), its log tail on demand,
 // its last error, auto-drain, and the version check that updates an outdated worker once it is idle.
+// Update all (#458, updateAll): the owner's rolling update of every worker behind origin/main, one at a time.
 import os from 'node:os';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
@@ -181,9 +182,11 @@ const cleanName = (s) => (typeof s === 'string' ? s.replace(/[\u0000-\u001f]/g, 
 // health: HEALTH overrides (tests); logsTimeoutMs: how long a log tail may take. ext: extensions.mjs (syncInfo/syncBundle):
 // workers get its bundle (ext.sync, EXT_PATH); null = none is offered.
 // pingTimeoutMs: how long a Ping waits for its pong. headGit(): the head's git endpoint a Ping has workers try (null = none).
+// updateWaitMs: how long a sent node.update may take before it counts as failed. onRolloutDone(rollout): an Update all
+// finished its workers and lists the head as behind (server.mjs restarts it, last).
 export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTBEAT_MS, wipPushMs = WIP_PUSH_MS, graceMs: graceAll = null, log = () => {}, onChange = () => {},
   metricsDir = null, repoDir = null, outdatedAfter = OUTDATED_AFTER, autoUpdate = true, mainTtlMs, onNotice = () => {}, health: healthOpts = {}, logsTimeoutMs = 15_000, ext = null,
-  pingTimeoutMs = PING_TIMEOUT_MS, headGit = () => null }) {
+  pingTimeoutMs = PING_TIMEOUT_MS, headGit = () => null, updateWaitMs = UPDATE_WAIT_MS, onRolloutDone = () => {} }) {
   const health = { ...HEALTH, ...healthOpts };
   const db = new DatabaseSync(dbFile);
   db.exec('PRAGMA busy_timeout=5000');
@@ -201,6 +204,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
   const recovered = new Map(); // node id -> resources frames in a row with the disk back above the low-disk drain's mark
   const updates = new Map(); // node id -> { state: 'pending' | 'sent' | 'failed', target, from, by, at, error }
   const failedFor = new Map(); // node id -> the origin/main sha an automatic update failed for (not retried on its own)
+  let rollout = null; // the owner's Update all (updateAll)
   const requests = new Map(); // request id -> { node, done(frame) } (log tails, screen requests, pings)
   let busy = () => false; // setBusy: the scheduler's view (jobs placed or offered there) for the update's idle check
   // setUpNext: how many queued tasks the scheduler could give a worker next; it rides welcome and every heartbeat, for
@@ -287,6 +291,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
       protocol: c?.hello?.protocol ?? null, version: c?.hello?.version ?? null, features: c?.hello?.features ?? null,
       sha, behind, outdated: behind != null && behind > outdatedAfter,
       update: u ? { state: u.state, by: u.by, at: u.at, target: u.target ?? null, error: u.error ?? null } : null,
+      rollout: rolloutOf(row.id),
       policy: isLocal ? null : effectivePolicy(row.os, parse(row.policy)),
       sound: row.sound ?? null, // null = its default (the UI picks it)
     };
@@ -419,6 +424,8 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     if (c) { conns.delete(id); c.ws.close(4003, 'revoked'); }
     metrics?.remove(id);
     for (const m of [drops, recovered, updates, failedFor]) m.delete(id);
+    rolloutStep(id, 'failed', 'removed from the cluster');
+    rollout?.nodes.delete(id);
     log(`revoked node ${id}`);
     changed();
     return { ok: true };
@@ -515,6 +522,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
           reconnected(id, msg.reconnect);
           c.send(MSG.WELCOME, { node: id, protocol: PROTOCOL_VERSION, heartbeatMs, wipPushMs, graceMs: nodeGrace(row), features: FEATURE_LIST, policy: wirePolicy(row), ...queuedFor(id) });
           helloUpdate(id, row, c.hello.sha);
+          rolloutHello(id);
           if (row.enabled) sendExt(c);
           changed();
           break;
@@ -553,6 +561,13 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
           touch({ last_error: JSON.stringify(e) });
           log(`node ${id} error (${e.kind}): ${e.message}`);
           if (e.kind === 'update') updateFailed(id, e.message);
+          changed();
+          break;
+        }
+        case MSG.UPDATE_PROGRESS: {
+          const e = rollout?.nodes.get(id);
+          if (e?.state === 'updating') Object.assign(e, { stage: clip(msg.stage, 20), note: msg.message ? clip(msg.message, 300) : e.note });
+          touch();
           changed();
           break;
         }
@@ -618,7 +633,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
         checkUpdate(id);
       }
     }
-    for (const [id, u] of updates) if (u.state === 'sent' && t - u.at > UPDATE_WAIT_MS) updateFailed(id, 'it did not come back updated');
+    for (const [id, u] of updates) if (u.state === 'sent' && t - u.at > updateWaitMs) updateFailed(id, 'it did not come back updated');
   }, heartbeatMs);
   sweep.unref?.();
 
@@ -680,6 +695,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     if (u.target) failedFor.set(id, u.target);
     log(`node ${id} update failed: ${u.error}`);
     notice({ node: id, level: 'warn', text: `${get(id)?.name || id} could not update itself: ${u.error}` });
+    rolloutStep(id, 'failed', u.error);
     changed();
   }
   // A worker (re)connected on another sha: its update landed (or it was updated by hand). On the same sha a sent update
@@ -691,6 +707,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     failedFor.delete(id);
     log(`node ${id} updated to ${sha.slice(0, 8)}`);
     if (u.state === 'sent') notice({ node: id, level: 'info', text: `${row.name} updated itself to ${sha.slice(0, 8)}` });
+    rolloutStep(id, 'done');
   }
   // An outdated worker is marked for an update (status 'updating': no new jobs); once idle (its latest telemetry, sent on
   // this connection, lists no running job and the scheduler has nothing placed or offered there) it gets node.update.
@@ -728,6 +745,108 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     checkUpdate(id);
     changed();
     return { node: node(id) };
+  }
+
+  // ---- Update all (#458): the owner's rolling update (POST /api/cluster/update {nodes?, clis?}). Every enabled worker
+  // behind origin/main (or those named) is updated ONE AT A TIME, so capacity never drops to zero: node.update {mode:
+  // 'now', clis, sha} makes it pause its jobs (WIP pushed; the scheduler resumes them once it is back, orchestrator.mjs),
+  // fetch and reset to sha, npm ci, restart and say hello on the new sha ('done'). A node.error (or no hello within
+  // updateWaitMs) is 'failed' and the next one goes on. update.progress frames are its steps (stage). An offline one waits
+  // ('offline') and joins the queue when it says hello again. head: the head is behind too; it goes last (onRolloutDone).
+  // rollout: {target, startedAt, doneAt, current, queue, nodes: Map id -> {state, stage, note, error, from, clis, at}};
+  // state queued | updating | done | failed | offline | restarting (the head).
+  const rolloutOf = (id) => { const e = rollout?.nodes.get(id); return e ? { state: e.state, stage: e.stage, note: e.note, error: e.error, clis: e.clis } : null; };
+  const shaOf = (row) => conns.get(row.id)?.hello?.sha ?? parse(row.resources)?.sha ?? null;
+  function rolloutView() {
+    if (!rollout) return null;
+    const { target, startedAt, doneAt, current } = rollout;
+    return { target, startedAt, doneAt, current, nodes: [...rollout.nodes].map(([id, e]) => ({ id, name: get(id)?.name || id, ...rolloutOf(id), from: e.from })) };
+  }
+  function updateAll({ nodes: only = null, clis = false, head = false } = {}) {
+    const target = versions?.main() || null;
+    if (!versions) return { status: 409, error: 'the version check is off on this server' };
+    if (only != null && !(Array.isArray(only) && only.every((x) => typeof x === 'string'))) return { status: 400, error: 'nodes must be a list of node ids' };
+    const pick = only ? new Set(only) : null;
+    // Named ones are updated unless known to be current; otherwise only those known to be behind.
+    const behind = (row) => { const b = versions.behind(shaOf(row)); return pick ? b !== 0 : b > 0; };
+    const rows = db.prepare('SELECT * FROM nodes WHERE id!=? AND enabled=1 ORDER BY created_at').all(LOCAL_NODE).filter((r) => (!pick || pick.has(r.id)) && behind(r));
+    const withHead = !!head && (!pick || pick.has(LOCAL_NODE));
+    if (!target && rows.length) return { status: 409, error: "this server's origin/main isn't known yet: try again in a moment" };
+    if (!rows.length && !withHead) return { status: 409, error: 'All up to date' };
+    if (!rollout || rollout.doneAt) { // a new one; the offline ones of the last still update when they're back
+      const waiting = [...(rollout?.nodes || [])].filter(([, e]) => e.state === 'offline');
+      rollout = { target, startedAt: Date.now(), doneAt: null, current: null, queue: [], nodes: new Map(waiting) };
+    }
+    const r = rollout;
+    r.target = target || r.target;
+    for (const row of rows) {
+      const old = r.nodes.get(row.id), c = conns.get(row.id);
+      if (['queued', 'updating'].includes(old?.state)) continue;
+      const e = { state: 'queued', stage: null, note: null, error: null, from: shaOf(row), clis: !!clis, at: Date.now() };
+      if (!c?.hello) e.state = 'offline';
+      else if (!canUpdate(c)) Object.assign(e, { state: 'failed', error: 'its worker is too old to update itself: run its install command again' });
+      else r.queue.push(row.id);
+      r.nodes.set(row.id, e);
+    }
+    if (withHead && r.nodes.get(LOCAL_NODE)?.state !== 'restarting') r.nodes.set(LOCAL_NODE, { state: 'queued', stage: null, note: null, error: null, from: null, clis: false, at: Date.now() });
+    // A head queued behind workers goes after them: re-inserted last.
+    const hd = r.nodes.get(LOCAL_NODE);
+    if (hd) { r.nodes.delete(LOCAL_NODE); r.nodes.set(LOCAL_NODE, hd); }
+    log(`update all: ${rows.map((x) => x.id).join(', ') || 'no workers'}${withHead ? ' then the head' : ''}${clis ? ' (with the CLIs)' : ''}`);
+    pump();
+    changed();
+    return { rollout: rolloutView() };
+  }
+  // The next queued worker gets its node.update; with none left the head (if queued) restarts last and the rollout is done.
+  function pump() {
+    const r = rollout;
+    if (!r || r.current) return;
+    while (r.queue.length) {
+      const id = r.queue.shift(), e = r.nodes.get(id), c = conns.get(id);
+      if (e?.state !== 'queued') continue;
+      if (!c?.hello || !get(id)?.enabled) { e.state = 'offline'; continue; }
+      if (versions.behind(c.hello.sha) === 0 && !e.clis) { Object.assign(e, { state: 'done', at: Date.now() }); continue; } // updated meanwhile
+      const target = versions.main() || r.target;
+      if (!send(id, { t: MSG.NODE_UPDATE, mode: 'now', clis: e.clis, ...(target ? { sha: target } : {}) })) { e.state = 'offline'; continue; }
+      updates.set(id, { state: 'sent', target, from: c.hello.sha, by: 'owner', at: Date.now() });
+      failedFor.delete(id);
+      Object.assign(e, { state: 'updating', stage: 'starting', note: null, error: null, from: c.hello.sha, at: Date.now() });
+      r.current = id;
+      log(`update all: updating ${id}`);
+      changed();
+      return;
+    }
+    const hd = r.nodes.get(LOCAL_NODE);
+    if (hd?.state === 'queued') {
+      Object.assign(hd, { state: 'restarting', at: Date.now() });
+      try { onRolloutDone(rolloutView()); } catch (err) { log(`onRolloutDone failed: ${err.message}`); }
+    }
+    if (r.doneAt) return;
+    r.doneAt = Date.now();
+    const list = [...r.nodes.values()], n = (s) => list.filter((e) => e.state === s).length;
+    const parts = [`${n('done')} updated`, n('failed') && `${n('failed')} failed`, n('offline') && `${n('offline')} offline (they update when back)`].filter(Boolean);
+    log(`update all finished: ${parts.join(', ')}`);
+    notice({ level: 'info', text: `Update all finished: ${parts.join(', ')}` }); // the Machines view toasts it
+    changed();
+  }
+  // A worker's update ended (done: hello on a new sha; failed: its node.error, a timeout or removal): the next one goes.
+  function rolloutStep(id, state, error = null) {
+    const e = rollout?.nodes.get(id);
+    if (e?.state !== 'updating') return;
+    Object.assign(e, { state, error, at: Date.now() }, state === 'done' ? { stage: null } : {});
+    if (rollout.current === id) rollout.current = null;
+    pump();
+  }
+  // An offline worker of the rollout is back: queued now (or done, if it came back up to date).
+  function rolloutHello(id) {
+    const e = rollout?.nodes.get(id), c = conns.get(id);
+    if (e?.state !== 'offline' || !c?.hello) return;
+    if (versions?.behind(c.hello.sha) === 0) return void Object.assign(e, { state: 'done', at: Date.now() });
+    Object.assign(e, { state: 'queued', from: c.hello.sha, at: Date.now() });
+    rollout.queue.push(id);
+    rollout.doneAt = null;
+    log(`update all: ${id} is back online; it updates next`);
+    pump();
   }
 
   // ---- on-demand reads from a worker
@@ -813,6 +932,6 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
   }
 
   return { listNodes, node, createPairing, pairing, revokePairing, claim, whoami, update, revoke, handleUpgrade, send, onMessage, isConnected: (id) => conns.has(id), version: () => version, close,
-    autoDrain, requestUpdate, logsTail, request, ping, nodeEvents, metrics: metricsOf, setBusy: (fn) => { busy = fn; }, setUpNext: (fn) => { upNext = fn; }, health,
+    autoDrain, requestUpdate, updateAll, rollout: rolloutView, updateTarget: () => versions?.main() || null, logsTail, request, ping, nodeEvents, metrics: metricsOf, setBusy: (fn) => { busy = fn; }, setUpNext: (fn) => { upNext = fn; }, health,
     handleExt, syncExt, extHash: () => extInfo()?.hash || null, setLocalCapacity, tokenNode };
 }

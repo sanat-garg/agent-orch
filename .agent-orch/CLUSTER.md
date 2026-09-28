@@ -86,7 +86,8 @@ Direction: C = controller → worker, W = worker → controller (`DIRECTION`; `v
 | `job.phase` | W | job, phase, at, ms, progress{tools, files, last}, outcome | a job moved to `phase` at `at`; `ms` = how long the one before took; re-sent with `progress` while the agent runs (feature `phases`) |
 | `job.error` / `node.error` | W | job, kind, message, stack, stderr, at / kind, message, stack, stderr, re | a structured failure with its stack or stderr tail (feature `errors`) |
 | `logs.tail` / `logs` | C / W | req, lines / req, lines[], error | the owner asked for the worker's log tail (feature `logs`) |
-| `node.update` | C | sha | update agent-orch and restart, sent only while the node is idle (feature `update`) |
+| `node.update` | C | sha, mode, clis | update agent-orch and restart, sent only while the node is idle (feature `update`) ; `mode:'now'` (Update all, feature `update-now`) runs even while busy |
+| `update.progress` | W | stage, message | a `mode:'now'` update's step: pausing, pulling, installing, clis, restarting (feature `update-now`) |
 | `node.policy` | C | policy | the owner changed the node's power policy or max tasks (feature `policy`); older workers read it in the next `welcome` |
 | `ext.sync` | C | hash, bytes | the controller's skills, subagents or MCP servers are now bundle `hash` (sent after `welcome` and on every change); a worker holding another one GETs `EXT_PATH` (feature `ext`) |
 | `ping` / `pong` | C / W | id, sentAt, git / id, diag | the owner's Ping (feature `ping`): the worker answers with a parallel self-check (DNS of the head, the head's `/api/health`, `git ls-remote` of `git`, GitHub, its reconnect state); see Health |
@@ -297,6 +298,14 @@ Workers report richly; the controller keeps what the owner needs and acts on it.
   rolls back and is reported as `node.error {kind:'update'}`), then says `bye {reason:'update'}` and exits 0 for
   systemd (`Restart=always`) or launchd (`KeepAlive`) to start the new code. Its next hello on another sha ends the
   update; a failed one isn't retried on its own for the same target, and one that doesn't come back within 10 min fails.
+- **Update all** (#458, cluster.mjs `updateAll`, `POST /api/cluster/update {nodes?, clis?}`): every enabled worker behind
+  origin/main (or those named) updates ONE AT A TIME with `node.update {mode:'now', clis, sha}`: it takes no new jobs,
+  pauses its jobs (WIP pushed), refuses a checkout with local changes, `git fetch` + `git reset --hard sha`, `npm ci`
+  when the lockfile changed, optionally `claude update` / `npm i -g @openai/codex@latest`, saves the paused jobs to
+  `update-paused.json` and restarts. The new process restores them paused; its hello lists them and the scheduler sends
+  `job.attach` + `job.resume` (or reassigns them after the grace period). A failure resumes its jobs at once and the next
+  machine goes on. Offline ones update when they say hello again. The head goes last via the rolling restart
+  (`rolling.restartNow`) when its running code is older than its checkout's server files.
 
 ## Power policy (#230)
 

@@ -14,3 +14,7 @@ Goal: .agent-orch/CLUSTER.md's "Scheduling" section (and the head's-ceiling para
 ## Done when
 
 `grep -c "headTarget" .agent-orch/CLUSTER.md` prints at least 1 and `! grep -q "memAvailable - footprint(agent)" .agent-orch/CLUSTER.md`
+
+## Result — done (check passed) (2026-09-28 17:34)
+
+AGENT-ORCH-STATUS: done — CLUSTER.md Scheduling and head's-ceiling now match current placement code

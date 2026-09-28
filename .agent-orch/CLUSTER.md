@@ -182,23 +182,31 @@ controller appends a project's persona to `job.start.systemAppend`.
 - The controller keeps a node table (cluster.mjs `nodes`: id, name, os, arch, token_hash, created_at, last_seen, status
   online/offline/draining/disabled, inventory JSON, resources JSON, max_slots, enabled, draining). The local node is
   the row `controller`, fed from /proc directly. Revoking a node deletes its row.
-- `claimNext` claims and places a task on a connected, enabled node with the resolved agent installed and signed in,
-  a free slot, and no drain. CPU saturation is the only resource gate: Linux PSI `cpu some avg60 > 90%`, otherwise
-  the 1-minute load average `> 2.5 × cores`. RAM, battery, AC power, thermal state and legacy intake never gate placement.
-- Auto slots (`max_slots` 0, API `maxSlots: null`) follow cores, with a floor of 4 for LLM-waiting agents on small VPSs.
-  Owner-set task and CPU caps remain ceilings. New nodes start on Auto. RAM only triggers the existing emergency
-  pause of the newest running task; it never reduces slots or blocks offers.
-- Placement compares `(running tasks + 1) / effective cores` across eligible nodes, including the controller, with
-  round-robin ties. Effective cores have the same floor of 4, independently of owner caps. A resumable session prefers
-  its previous node; `run_on` pins a machine. Plan/reflect tasks and live local worktrees stay local. Integrators prefer
-  a reserved head slot, then a worker with `git` + `integrate`; workers with `git` clone through the head even without
-  a GitHub origin. The head keeps two reserved slots on top of its core-based work slots. The owner's
-  `controllerWork: false` setting still reserves the controller.
-- Every weighed node records `lastDecision: {at, ok, text, task}` in the orchestrator, exposed by GET
-  `/api/cluster/nodes` and shown on its Machines card. Before any placement, the API supplies its current eligibility.
-- The offer is a two-phase claim: the task stays `queued` with `offered_to` set until `job.accept`; a reject or 10 s
-  timeout clears it and tries the next node. `files`/`filesOverlap` and `task_deps` rules apply across nodes
-  unchanged, because they are checked on the controller before placement.
+- **Head slots** (#384, orchestrator `parallelSettings`/`headSlots`): work slots = kv `parallel_settings.parallelTasks`
+  (owner, 1-16), else parallel.mjs `headTarget(cores).work` = placement.mjs `slotTarget` (cores, at least 4). Cores and
+  RAM are re-detected at boot and every `CFG.hardwareMs` (10 min); the `controller` row's `max_slots` follows. On top sit
+  `CFG.reservedSlots` (2) controller-only slots for `reservedWork` (integrators and reflection; plan tasks hold no slot),
+  which skip pacing and per-agent limits and never count toward the owner cap (`headLoad`/`headFree`). `taskSlots`
+  lets pacing drop work slots.
+- **Memory is only an emergency brake** (BRIEF goal 9, parallel.mjs `MEM`): `memGuard` pauses the newest local task
+  after MemAvailable stays under `MEM.pauseBelow` for 30 s; under `MEM.reapBelow` the reaper runs before a claim. RAM
+  never sizes slots, gates a claim or blocks an offer.
+- **A worker's slots** (`nodeCap`): min(owner's max tasks `nodes.max_slots`, else Auto `slotTarget(cores)`; the worker's
+  own cap via cap.mjs `capSlots`: its `--max-tasks` and `--cpu` at `CFG.cpuPerTask` a task). The worker's RAM cap is
+  only its own guard. kv `parallel_settings.maxTasks` caps ordinary work across every node.
+- **Placement** (`claimNext` → `place`, BRIEF goal 9 PLACEMENT RULE): every online machine is weighed. Skips: disabled,
+  offline, draining, updating, agent not installed or signed out, declined this task < 60 s ago, full, or CPU saturated
+  (placement.mjs `cpuState`: PSI `cpu some avg60 > 90%`, else 1-min load `> 2.5 × cores`), the only resource gate; RAM,
+  battery, AC, thermal never count. Workers go first: the head skips a remote-capable work task some worker fits unless
+  `controllerWork` (default on). Among candidates, `pickNode` takes the node that last ran the task (its session),
+  else lowest `(running + 1) / slotTarget(cores)`, ties round-robin, so work spreads. `spreadAssign` spills a task to
+  its first fallback agent with a free slot. `run_on` pins a machine; plan/reflect tasks and live local worktrees stay
+  local; integrators take a free reserved head slot, else a worker with `git` + `integrate`. Browser tasks need a
+  `browserCapable` worker or `controllerBrowser`. `files`/`task_deps` are checked on the head first.
+- Every weighed node records `lastDecision: {at, ok, text, task}`, exposed by GET `/api/cluster/nodes` and shown on its
+  Machines card; unplaced tasks get a `why` for the stall diagnostics.
+- The offer is two-phase: `job.offer`, then the worker's `job.accept` → `job.start`; a `job.reject` (e.g. `cap`) or
+  no answer in `CFG.offerMs` (10 s) aborts the claim, skips that node for the task for 60 s, and requeues it.
 - Per-agent rate limits stay controller-global (`blockedUntilFor(agent)`): a `limit` event or `rate_limited` outcome
   from any node blocks that agent (and account) everywhere, since the quota is shared.
 
@@ -373,9 +381,10 @@ A worker's owner decides how much of the machine the cluster may use; everything
   it applies at once, and the daemon reports it in `inventory.cap` and every `resources.cap`, with what its jobs use
   (`jobsMem` bytes, `jobsCpu` cores: their process trees, from /proc or `ps`).
 - **The head's ceiling** (orchestrator `nodeCap`, cap.mjs `capSlots`, `localCap` = `resources.cap` over
-  `inventory.cap`): slots = min(the head's own setting (max tasks or Auto), the cap's max tasks, its CPU cap at
-  `CFG.cpuPerTask` cores a task (1 until measured)). RAM never sizes slots; legacy `--only-on-ac` is ignored.
-  The Machines card says "Pooled: 4 cores · 8 GB (set on this Mac)".
+  `inventory.cap`): slots = min(the head's max tasks for that worker, else Auto `slotTarget(cores)`; the cap's max
+  tasks; its CPU cap at `CFG.cpuPerTask` cores a task (1 until measured)). The per-agent footprint and RAM cap only
+  drive the worker's own memory watch, never the slot count; legacy `--only-on-ac` is ignored. The head's own slots
+  come from `headTarget` (Scheduling). The Machines card says "Pooled: 4 cores · 8 GB (set on this Mac)".
 - **The worker enforces it too** (worker.mjs, worker-cap.mjs): it declines a `job.offer` that exceeds a CPU/task ceiling (reason
   `cap`; `busy` to an older head); every agent CLI and done-when check runs through a wrapper in
   `<home>/run` that records its pid and execs it under the cap: on Linux a transient scope per job (`systemd-run --user

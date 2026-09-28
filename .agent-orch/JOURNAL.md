@@ -1463,3 +1463,7 @@ app.js conflicts resolved; stall text and full-screen queue both kept
 ## 2026-09-28 17:31 — #468 Integrate #344: Placement uses every machine: CPU-only gating, spread across nodes, explain skips [done (check passed)]
 
 merge resolved; placement, stall, rapid and machines tests pass
+
+## 2026-09-28 17:34 — #423 CLUSTER.md docs: Scheduling and Local cap describe the real head-capacity and placement rules [done (check passed)]
+
+CLUSTER.md Scheduling and head's-ceiling now match current placement code

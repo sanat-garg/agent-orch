@@ -1625,3 +1625,7 @@ Timeline bars now hidden on waiting tasks, shown once a run starts
 ## 2026-09-28 19:52 — #525 Make Chrome-runner tasks actually start: per-node profile lock, runner sign-in, live proof [done (check passed)]
 
 lock, slots, sign-in fixed+tested; live proof needs deploy
+
+## 2026-09-28 19:56 — #539 Review checkpoints only from the owner: planner and reflection never add them [done (check passed)]
+
+review checkpoints owner-only; planner/reflection entries dropped, tests pass

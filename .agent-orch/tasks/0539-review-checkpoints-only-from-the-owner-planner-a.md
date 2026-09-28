@@ -13,3 +13,7 @@ The owner's rule (now in .agent-orch/CONTEXT.md): NEVER queue review checkpoints
 ## Done when
 
 `node --test test/checkpoint*.test.mjs` passes (planner/reflection review entries dropped, owner endpoint still works), and `! grep -n 'Review breaks' orchestrator.mjs`
+
+## Result — done (check passed) (2026-09-28 19:56)
+
+AGENT-ORCH-STATUS: done — review checkpoints owner-only; planner/reflection entries dropped, tests pass

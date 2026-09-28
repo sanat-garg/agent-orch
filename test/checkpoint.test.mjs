@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { extractTasks } from '../orchestrator.mjs';
+import { extractTasks, TASKS_FORMAT, plannerTurnPrompt, reflectPrompt } from '../orchestrator.mjs';
 
 const ORCH = JSON.stringify(new URL('../orchestrator.mjs', import.meta.url).href);
 
@@ -149,8 +149,47 @@ describe('review checkpoints', { concurrency: true, timeout: 120000 }, () => {
     assert.equal(r.bStatus, 'queued');
   });
 
-  test('the tasks block accepts review breaks', () => {
-    const [, payload] = extractTasks('```agent-orch-tasks\n{"tasks": [{"title": "New schema", "prompt": "p"}, {"kind": "review", "title": "Check the schema", "after": 0}, {"title": "Use it", "prompt": "q", "after": 1}]}\n```');
-    assert.deepEqual(payload.tasks.map((t) => [t.kind || 'work', t.title, t.after]), [['work', 'New schema', null], ['review', 'Check the schema', 0], ['work', 'Use it', 1]]);
+  test('the tasks block drops review entries (owner-only); what waited for one waits for its prerequisites', () => {
+    const [, payload] = extractTasks('```agent-orch-tasks\n{"tasks": [{"title": "New schema", "prompt": "p"}, {"kind": "review", "title": "Check the schema", "after": 0}, ' +
+      '{"title": "Use it", "prompt": "q", "after": 1}, {"title": "Docs", "prompt": "d", "after": [2, "#7"]}, {"kind": "review", "title": "Loose", "after": 1}]}\n```');
+    assert.deepEqual(payload.tasks.map((t) => [t.kind || 'work', t.title, t.after]), [['work', 'New schema', null], ['work', 'Use it', [0]], ['work', 'Docs', [1, '#7']]]);
+    assert.deepEqual(payload.dropped, ["dropped 'Check the schema': review checkpoints are owner-only", "dropped 'Loose': review checkpoints are owner-only"]);
+  });
+
+  test('a planner reply with a review entry queues the work tasks and no review task', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-review-plan-')), proj = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-review-plan-p-'));
+    try {
+      const script = `import { createOrchestrator } from ${ORCH};
+        import { DatabaseSync } from 'node:sqlite';
+        import path from 'node:path';
+        const [dataDir, proj] = process.argv.slice(1);
+        const block = JSON.stringify({ tasks: [{ title: 'New schema', prompt: 'p' }, { kind: 'review', title: 'Check the schema', after: 0 }, { title: 'Use it', prompt: 'q', after: 1 }] });
+        const query = ({ prompt }) => (async function* () {
+          const reply = /PLAN-IT/.test(prompt) ? 'Queued.\\n\`\`\`agent-orch-tasks\\n' + block + '\\n\`\`\`' : 'AGENT-ORCH-STATUS: done — ok';
+          yield { type: 'result', subtype: 'success', result: reply, session_id: 's', num_turns: 1 };
+        })();
+        const o = createOrchestrator({ config: { pollMs: 100, worktrees: false }, query, dataDir, claudeEnv: { PATH: process.env.PATH, HOME: process.env.HOME }, getLimits: () => [], onSubscription: () => true,
+          broadcast() {}, emitChat() {}, convoExists: () => true });
+        await o.planTurn({ id: 'c1', cwd: proj }, 'PLAN-IT');
+        const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
+        const tasks = db.prepare("SELECT id, kind, title, depends_on FROM tasks WHERE kind!='plan' ORDER BY id").all();
+        const events = db.prepare("SELECT message FROM events WHERE message LIKE '%owner-only%'").all().map((e) => e.message);
+        console.log(JSON.stringify({ tasks, events }));
+        process.exit(0);`;
+      const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script, dataDir, proj], { encoding: 'utf8', timeout: 90000 });
+      const r = JSON.parse(stdout.trim().split('\n').pop());
+      assert.deepEqual(r.tasks.map((t) => [t.kind, t.title]), [['work', 'New schema'], ['work', 'Use it']]);
+      assert.equal(r.tasks[1].depends_on, r.tasks[0].id);
+      assert.deepEqual(r.events, ["planner dropped 'Check the schema': review checkpoints are owner-only"]);
+    } finally {
+      fs.rmSync(dataDir, { recursive: true, force: true });
+      fs.rmSync(proj, { recursive: true, force: true });
+    }
+  });
+
+  test('the planner and reflection prompts never ask for review checkpoints', () => {
+    const project = { id: 1, name: 'p', path: '/tmp/p', priority: 50, mode: 'build', reflect_direction: null };
+    const texts = [TASKS_FORMAT, plannerTurnPrompt(project, [], 'hi', 'env'), reflectPrompt(project, [], '', false, [], null, [], { done: 0, failed: 0 }, 'env')];
+    for (const t of texts) assert.doesNotMatch(t, /review break|checkpoint|"kind": "review"|kind:\s*['"]review/i);
   });
 });

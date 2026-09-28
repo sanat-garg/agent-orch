@@ -183,13 +183,7 @@ project), optional \`note\`. A new route with the same match and scope replaces 
 deletes one. A \`plan\` route may only pick a Claude model. Unavailable agents fall back to Claude.
 While a task's agent is at its usage limit, it moves down the owner's fallback list for that chat (or, for
 reflection tasks, the project's list); with an empty list it waits for the reset.
-A block may contain only \`routes\` (with \`"tasks": []\`).
-
-**Review breaks.** \`{"kind": "review", "title": "Review the new data model", "after": 2}\` is a checkpoint, not work: no agent
-runs it. Once the task(s) in its \`after\` finish, it waits for the owner to approve them (or request changes, which
-queues a fix first), and every task that needed them waits too; later tasks in the block can also list it in \`after\`.
-Add one after important, risky or direction-setting tasks (a new architecture, a UI redesign, a data migration), where
-going on in the wrong direction would waste the work after it. Don't add them after routine steps.`;
+A block may contain only \`routes\` (with \`"tasks": []\`).`;
 
 const PLANNER_SYSTEM = `You are the planning mind of an agent orchestrator (agent-orch) running on the owner's server.
 You talk with the owner, understand exactly what they want, and turn it into small, well-specified steps
@@ -573,13 +567,19 @@ export function extractTasks(text) {
     dropped.push(`${what}: dropped model ${model} (belongs to ${fam}) for agent ${agent}`);
     return null;
   };
-  for (const t of payload.tasks || []) {
+  // Review checkpoints (kind 'review') come only from the owner ('+ Review break'): a model's are dropped here, so no
+  // planner or reflection output can queue one. `kept` maps block index → index in `tasks`; a dropped checkpoint keeps
+  // its own `after` so that what waited for it waits for its prerequisites instead.
+  const entries = payload.tasks || [], kept = new Map(), droppedAfter = new Map();
+  for (const [i, t] of entries.entries()) {
     if (t && typeof t === 'object' && String(t.kind || '').toLowerCase() === 'review') {
-      tasks.push({ kind: 'review', title: String(t.title || 'Review').slice(0, 200), after: t.after ?? null });
+      dropped.push(`dropped '${String(t.title || 'Review').slice(0, 200)}': review checkpoints are owner-only`);
+      droppedAfter.set(i, t.after ?? null);
       continue;
     }
     if (!t || typeof t !== 'object' || !t.title || !t.prompt) continue;
     const u = String(t.urgency || 'normal').toLowerCase();
+    kept.set(i, tasks.length);
     tasks.push({
       title: String(t.title).slice(0, 200),
       prompt: String(t.prompt),
@@ -596,6 +596,20 @@ export function extractTasks(text) {
     });
     const last = tasks[tasks.length - 1];
     last.model = fitModel(last.agent, last.model, `task '${last.title}'`);
+  }
+  if (kept.size !== entries.length) { // something was dropped: block-index refs follow the kept tasks
+    const remap = (after, seen) => {
+      const out = [];
+      for (const a of after == null ? [] : Array.isArray(after) ? after : [after]) {
+        if (a == null) continue;
+        const str = String(a).trim(), n = parseInt(str, 10);
+        if (str.startsWith('#') || !Number.isFinite(n) || n < 0 || n >= entries.length) { out.push(a); continue; } // not a block index
+        if (kept.has(n)) out.push(kept.get(n));
+        else if (droppedAfter.has(n) && !seen.has(n)) out.push(...remap(droppedAfter.get(n), new Set([...seen, n])));
+      }
+      return [...new Set(out)];
+    };
+    for (const t of tasks) { const a = remap(t.after, new Set()); t.after = a.length ? a : null; }
   }
   const routes = [];
   for (const r of Array.isArray(payload.routes) ? payload.routes : []) {
@@ -2624,17 +2638,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     }
     for (const d of payload.dropped || []) logEvent(`${source} ${d}`, { level: 'warn', projectId: project.id });
     for (const r of payload.routes || []) applyRoute(project, r);
-    const ids = [], batch = [], checkpoints = [];
+    // Review checkpoints are owner-only (insertCheckpoint); extractTasks already dropped any the model emitted.
+    const ids = [], batch = [];
     for (const t of payload.tasks) {
-      if (t.kind === 'review') { // a checkpoint: what needed its prerequisites now waits for the owner's review too
-        const deps = resolveAfter(t.after, batch).filter((d) => getTask(d));
-        if (!deps.length) { logEvent(`${source} review break '${t.title}' has no \`after\`; skipped`, { level: 'warn', projectId: project.id }); batch.push(null); continue; }
-        const id = addCheckpoint(project.id, deps, { title: t.title, source, origin: origin.origin ?? null, relinkNow: false });
-        checkpoints.push([id, deps]);
-        ids.push(id);
-        batch.push(id);
-        continue;
-      }
       const dup = findDuplicate(project.id, t.title);
       if (dup) { logEvent(`skipped duplicate: ${t.title} (already #${dup.id})`, { projectId: project.id }); batch.push(dup.id); continue; }
       const dependsOn = resolveAfter(t.after, batch).filter((d) => getTask(d));
@@ -2644,7 +2650,6 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       ids.push(id);
       batch.push(id);
     }
-    for (const [cp, deps] of checkpoints) relinkTo(cp, deps); // once the whole block exists
     if (ids.length) logEvent(`${source} queued ${ids.length} task(s): ${ids.map((i) => `#${i}`).join(', ')}`, { projectId: project.id });
     return ids;
   }
@@ -3972,6 +3977,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // ---- review checkpoints (kind 'review'): never run an agent. A checkpoint stays queued until its prerequisites are
   // done, then waits in 'awaiting_review' (tasks.result: JSON review context) until the owner approves it (→ done, which
   // releases its dependents) or requests changes (a fix task goes ahead of it and it re-arms once the fix is done).
+  // Only the owner creates one (POST /api/orch/tasks/:id/checkpoint → insertCheckpoint); no planner, reflection or
+  // follow-up path may, and extractTasks drops any a model emits.
   const followersOf = (id) => qa("SELECT DISTINCT x.task_id AS id FROM all_deps x JOIN tasks t ON t.id=x.task_id WHERE x.depends_on=:id AND t.status='queued'", { id }).map((r) => r.id);
   // Task `t` stops waiting for `from` and waits for `to` (an id or ids) instead.
   function relink(t, from, to) {
@@ -3982,21 +3989,20 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     pushTask(t);
   }
   // A checkpoint after `deps`; the queued tasks that needed any of them now wait for the checkpoint instead.
-  function addCheckpoint(projectId, deps, { title, source = 'user', origin = null, relinkNow = true } = {}) {
-    const id = addTask(projectId, { title, prompt: '(review checkpoint)', kind: 'review', source, origin, dependsOn: deps, position: insertPosition(projectId, Infinity, deps) });
-    if (relinkNow) relinkTo(id, deps);
+  function addCheckpoint(projectId, deps, title) {
+    const id = addTask(projectId, { title, prompt: '(review checkpoint)', kind: 'review', source: 'user', dependsOn: deps, position: insertPosition(projectId, Infinity, deps) });
+    for (const d of deps) for (const f of followersOf(d)) if (f !== id) relink(f, d, id);
     return id;
   }
-  const relinkTo = (cp, deps) => { for (const d of deps) for (const f of followersOf(d)) if (f !== cp) relink(f, d, cp); };
   function insertCheckpoint(id) {
     const task = getTask(id);
     if (!task) return { error: 'No such task', status: 404 };
-    if (task.kind !== 'work' || !['queued', 'running'].includes(task.status)) return { error: 'Review breaks go after queued or running work tasks', status: 409 };
+    if (task.kind !== 'work' || !['queued', 'running'].includes(task.status)) return { error: 'A review break goes after a queued or running work task', status: 409 };
     const dup = qa("SELECT t.id FROM all_deps x JOIN tasks t ON t.id=x.task_id WHERE x.depends_on=:id AND t.kind='review' AND t.status IN ('queued','awaiting_review')", { id })[0];
     if (dup) return { error: `#${id} already has a review break (#${dup.id})`, status: 409 };
     db.exec('BEGIN IMMEDIATE'); // the checkpoint and its re-linked followers land together
     let cp;
-    try { cp = addCheckpoint(task.project_id, [id], { title: `Review: ${task.title}`.slice(0, 200) }); db.exec('COMMIT'); }
+    try { cp = addCheckpoint(task.project_id, [id], `Review: ${task.title}`.slice(0, 200)); db.exec('COMMIT'); }
     catch (e) { db.exec('ROLLBACK'); throw e; }
     logEvent(`⚑ review break #${cp} after #${id}`, { projectId: task.project_id, taskId: cp });
     return { ok: true, task: taskView(getTask(cp)) };

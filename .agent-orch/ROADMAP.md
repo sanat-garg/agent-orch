@@ -3,49 +3,50 @@
 _Maintained by the orchestrator's reflection loop._
 
 ## Assessment
-_2026-09-28 05:55 (reflect #279)._ All four steps from the last reflection landed (#275–#278). Main is clean, nothing
-is queued or unmerged, every module passes `node --check`, the six UI test files pass together (36/36), and the live
-journal since 03:40 has no errors. Goals 1–11 of the brief are met; goal 12 has its foundations and waits for the
-owner. AUDIT.md has no open items; UI-REVIEW.md has one open row (#9, an owner decision).
+_2026-09-28 06:10 (reflect #284)._ All four steps from the last reflection landed (#280–#283). Main is clean, nothing is
+queued or unmerged, every module passes `node --check`, and the live journal since 05:00 has no errors. A partial
+`npm run test:full` (stopped at the nine-minute cap this single core allows) passed TESTCOUNT subtests with no failure; every
+recent commit's own change-aware run passed. Goals 1–11 of the brief are met; goal 12 has its foundations and waits for
+the owner. AUDIT.md has no open items; UI-REVIEW.md has one open row (#9, an owner decision).
 
 Things the owner should know:
-- **The live server (started 03:40) still runs code from before the last 19 merges.** The `approvals` table, the
-  verifier `|` fix, disk auto-undrain and all the phone CSS are on disk but not live (CSS loads on refresh; server code
-  needs "Restart when idle"). Nothing in the product restarts on its own: that is the gap this round closes (opt-in).
-- The MacBook Air worker is drained: 1.4 GB free on its repo disk (was 2.3 GB at the last reflection) and falling. The
-  worker's cache pruning (#264) only helps once the worker self-updates; it lifts itself at 3 GB. Free space by hand.
+- **The live server (started 03:40) still runs code from before the last 23 merges.** Press "Restart when idle" once. That
+  brings live: the `approvals` table, the verifier `|` fix, the phone CSS server-side pieces, and the auto-restart setting
+  (off by default; turn it on in the gear's Settings sheet if you want future merges to restart the app by themselves).
+- **The disk auto-undrain (#265) is not live, and it cost real work today.** The MacBook Air's repo disk went from 2.2 GB
+  to 3.8 GB free at 05:52 (the worker self-updated and pruned its caches) and stayed above 3 GB for eight minutes, which
+  should have lifted its drain. The stale controller never saw it; the disk has since fallen back to about 2.2 GB.
+- **Something on the MacBook Air is hammering it while no job runs:** since 06:02 all eight cores sit at 100%, load
+  is 15–21, swap use jumped from 53% to 74% and free disk dropped 1.6 GB in ten minutes. That is not the worker
+  (`running: []`, not held awake). Check Activity Monitor; the worker will not take jobs until the disk holds ≥ 3 GB.
 - Task #96 ("Answer owner's message", project soham) waits because that project is paused. By design.
 
-Real problems found this round:
-- **Nothing brings merged server code live.** `commitsSinceBoot` only feeds the banner. When the owner is away, fixes
-  the orchestrator itself made (e.g. the verifier fix) stay dead for hours, and AUDIT-style "stale running code" confusion
-  recurs. An opt-in "restart automatically once idle after code changes" setting reuses the existing drain path.
-- **`removeWorktree` leaves a directory behind.** Seven `../.agent-orch-worktrees/agent-orch-task-*` dirs (216–219, 229,
-  231, 232) remain after `git worktree remove` succeeded, each holding only `node_modules/.cache`. The `rmSync` fallback
-  only runs when the remove fails, and nothing sweeps orphans git no longer lists.
-- Dead local task branches: `agent-orch/task-187` (Copilot, removed), `-244` and `-247` (landed via #254/#263) clutter
-  `git branch` and confuse integrators. `-197`, `-199`, `-209` hold unlanded partial work; ask the owner before deleting.
-- kv keeps rows for removed agents (`planner_session:2:antigravity`, `unknown_limit_streak:copilot`, …): harmless, cosmetic.
+Gaps found this round (none broken, all hardening):
+- **No security audit covers the surfaces added since round 5 (2026-09-26):** the cluster WSS protocol and pairing,
+  approvals and the audit log, browser live view, extension sync to workers, the restart and machines APIs. Round 6 is due.
+- **The mobile HIG review (round 1, #178) only saw 13 screens.** The Settings sheet as it is now, Machines, Stats,
+  Extensions, Files, Approvals and the live browser view were added or reworked since and were never reviewed.
+- Retention: `<DATA>/media` grows ~20 MB/day (461 files, 70 MB) and `data/orchestrator/runs` keeps every run log
+  forever (311 files, 20 MB). Deleted chats leave their images behind. Fine for months on 35 GB, but a GC is cheap now.
+- kv keeps rows for removed agents (`planner_session:2:antigravity`, `unknown_limit_streak:copilot`, …). Cosmetic.
 
 ## Next (queued)
-1. Auto-restart setting (backend): kv `restart_settings.auto`, exposed with the other orchestrator settings; when on and a
-   commit since boot touched server-side code, run the same drain-and-exit path as POST /api/restart-when-idle.
-2. Auto-restart setting (UI): a switch in the gear's Settings sheet and banner wording that says a restart is automatic.
-3. `removeWorktree` always deletes the directory; `ensureWorktree`'s prune sweeps orphan task dirs git no longer lists.
-4. Delete the dead local branches `agent-orch/task-187`, `-244`, `-247` after confirming their content is on main.
+1. AUDIT round 6: cluster protocol/pairing, approvals + audit log, browser live view, extension sync, restart/machines
+   APIs. Findings only, into AUDIT.md; fixes are queued from them next reflection.
+2. UI-REVIEW round 2: HIG review of the screens round 1 never saw (Settings sheet, Machines, Stats, Extensions, Files,
+   Approvals, live browser view) at 390 px. Findings only, into UI-REVIEW.md.
+3. Retention GC: delete run logs of tasks finished more than 30 days ago and media files no run log or chat log references,
+   at boot and daily.
+4. One-time kv migration that drops rows for removed agents (antigravity, opencode, kiro, copilot).
 
 ## Later
-- Media and run-log retention: `<DATA>/media` grows ~20 MB/day (455 files, 67 MB, all from the last 3 days) and
-  `data/orchestrator/runs` holds every run log forever (306 files, 20 MB). Fine for months on this disk; add a GC of
-  unreferenced media and old run logs before it matters.
-- UI-REVIEW #9: the fallback editor as an edge-to-edge sheet on phones (today it is a compact popover like the other
-  composer menus; decide with the owner whether a sheet is wanted).
+- Fix tasks from AUDIT round 6 and UI-REVIEW round 2, sized one finding (or two tiny ones) per task.
+- UI-REVIEW #9: the fallback editor as an edge-to-edge sheet on phones (owner's decision).
 - AGENTIC.md phase 1 (files-only `workspace` project type, statement ingestion, reconciliation report) when the owner
   asks for computer work again; connectors (Gmail etc.) only on the owner's say-so.
-- Once the Mac has room: run `bin/orch-e2e.mjs` against it, then revisit cluster max-parallel (goal 9) with measured
-  per-agent footprints (#209/#228 were cancelled, not done; local branch `agent-orch/task-209` holds the partial work).
+- Once the Mac has room and is quiet: run `bin/orch-e2e.mjs` against it, then revisit cluster max-parallel (goal 9)
+  with measured per-agent footprints (#209/#228 were cancelled; local branch `agent-orch/task-209` holds partial work).
 - Owner branches `claude/mode-menu`, `claude/processes-panel`, `claude/topbar-safe-area`,
-  `claude/heuristic-visvesvaraya-d78c0d` are snapshots far behind main: ask the owner before landing or deleting them.
-- Drop stale kv rows for removed agents in a one-time migration.
+  `claude/heuristic-visvesvaraya-d78c0d` and `agent-orch/task-197/-199/-209` are far behind main: ask before landing or deleting.
 - Split public/app.js (~7k lines) into native ESM modules, guarded by test/ui-static.test.mjs.
 - AUDIT #34's lasting fix is a hostname under a domain the owner controls (owner's decision).

@@ -111,3 +111,11 @@
   .ext-acts .btn.small, .ext-form-acts .btn.small, .ext-starters .chip { min-height: 44px; }
   .ext-back { min-height: 44px; }
 }
+/* Skills: the Add skill choices, a staged skill's preview, and the list as a drop target for .zip/.skill files */
+.ext-choices .ext-open { min-height: 60px; }
+.ext-preview { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 14px; margin: 0; font-size: 13.5px; }
+.ext-preview dt { color: var(--muted); font-weight: 600; }
+.ext-preview dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ext-preview dd.mono { font-family: var(--mono); font-size: 12.5px; max-height: 220px; overflow: auto; }
+.ext-note.ext-warn { color: var(--warn); }
+.ext-body.ext-drop { outline: 2px dashed var(--accent); outline-offset: -6px; border-radius: 12px; }

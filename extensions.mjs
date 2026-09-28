@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import { runHelper } from './helpers.mjs';
 import { fileURLToPath } from 'node:url';
 import { EXT_ENTRY_RE, EXT_MAX_BYTES, extBundleError, extHash } from './cluster-protocol.mjs';
@@ -148,9 +149,55 @@ export function parseGitHubUrl(url) {
   return { repo: `https://github.com/${owner}/${repo.replace(/\.git$/, '')}.git`, ref: ref || null, dir };
 }
 
+// A raw SKILL.md link: https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>/SKILL.md → { owner, repo, ref, dir, url };
+// null for any other host.
+export function parseRawGitHubUrl(url) {
+  let u;
+  try { u = new URL(String(url || '').trim()); } catch { return null; }
+  if (!/^raw\.githubusercontent\.com$/i.test(u.hostname)) return null;
+  if (u.protocol !== 'https:') throw new Error('Only https links can be imported');
+  const [owner, repo, ref, ...rest] = u.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+  if (!owner || !repo || !ref || ![owner, repo].every((s) => SEG_RE.test(s)) || !/^[\w.-]{1,200}$/.test(ref)) throw new Error('That is not a raw GitHub file link');
+  if (rest.at(-1) !== 'SKILL.md') throw new Error('Link the SKILL.md file or its folder');
+  if (rest.some((s) => s === '..' || s === '.')) throw new Error('That link has an unsupported path');
+  return { owner, repo, ref, dir: rest.slice(0, -1).join('/'), url: u.href };
+}
+
+// A zip archive's entries (no zip64 or encryption): [{ name, dir, symlink, exec, size, data() }]. data() inflates on demand,
+// capped at the size the central directory states.
+export function readZip(buf) {
+  const bad = (why) => new Error(`That is not a readable .zip or .skill file (${why})`);
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65_557); i--) if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  if (eocd < 0) throw bad('no zip directory');
+  const count = buf.readUInt16LE(eocd + 10);
+  let at = buf.readUInt32LE(eocd + 16);
+  if (count === 0xffff || at === 0xffffffff) throw bad('zip64 is not supported');
+  const out = [];
+  for (let n = 0; n < count; n++) {
+    if (at + 46 > buf.length || buf.readUInt32LE(at) !== 0x02014b50) throw bad('broken directory');
+    const flags = buf.readUInt16LE(at + 8), method = buf.readUInt16LE(at + 10), csize = buf.readUInt32LE(at + 20), size = buf.readUInt32LE(at + 24);
+    const nameLen = buf.readUInt16LE(at + 28), extraLen = buf.readUInt16LE(at + 30), commentLen = buf.readUInt16LE(at + 32);
+    const attrs = buf.readUInt32LE(at + 38) >>> 16, local = buf.readUInt32LE(at + 42);
+    const name = buf.toString('utf8', at + 46, at + 46 + nameLen);
+    at += 46 + nameLen + extraLen + commentLen;
+    if (flags & 1) throw bad('encrypted');
+    const fileType = attrs & 0o170000;
+    out.push({ name, size, dir: name.endsWith('/') || fileType === 0o040000, symlink: fileType === 0o120000, exec: !!(attrs & 0o100),
+      data: () => {
+        if (local + 30 > buf.length || buf.readUInt32LE(local) !== 0x04034b50) throw bad(`no data for ${name}`);
+        const start = local + 30 + buf.readUInt16LE(local + 26) + buf.readUInt16LE(local + 28), raw = buf.subarray(start, start + csize);
+        if (method === 0) return raw;
+        if (method === 8) return zlib.inflateRawSync(raw, { maxOutputLength: Math.max(1, size) });
+        throw bad(`compression method ${method}`);
+      } });
+  }
+  return out;
+}
+
 export const CODEX_PROFILE = 'agent-orch';
 
-export function createExtensions({ dataDir, home = os.homedir(), claudeDir, codexDir, gitBin = 'git', importTimeoutMs = 120_000 } = {}) {
+export function createExtensions({ dataDir, home = os.homedir(), claudeDir, codexDir, gitBin = 'git', importTimeoutMs = 120_000, fetch: fetchImpl = globalThis.fetch } = {}) {
   const claude = claudeDir || process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude'), codexHome = codexDir || path.join(home, '.codex');
   const roots = { claude: path.join(claude, 'skills'), codex: path.join(codexHome, 'skills') };
   const agentsDir = path.join(claude, 'agents');
@@ -161,6 +208,11 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
   const changed = (kind) => { for (const fn of listeners) { try { fn(kind); } catch (e) { console.error('[ext] listener failed', e); } } };
 
   // ---------- skills
+  // Skills the owner's Claude account syncs down (~/.claude/skills/synced/<bucket>/[<sub>/]<skill>/SKILL.md; dot entries
+  // like .bucket-* and .last-complete-round are the sync's own) are listed read-only: the next sync would undo an edit.
+  // Claude Code only, and they stay on this machine (syncInfo leaves them out): a worker signed in to the same account
+  // gets them from its own sync, and one on another account shouldn't get this account's skills.
+  const syncedRoot = path.join(roots.claude, 'synced');
   function readSkill(dir, folder) {
     const file = path.join(dir, 'SKILL.md');
     if (!isFile(file)) return null;
@@ -169,7 +221,22 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
     const { meta, body } = parseFrontmatter(raw);
     return { folder, name: meta.name || folder, description: meta.description || '', body, files: countFiles(dir).n };
   }
-  function listSkills() {
+  function listSynced() {
+    const out = [], seen = new Set();
+    const walk = (dir, rel, depth) => {
+      let entries = [];
+      try { entries = fs.readdirSync(dir).sort(); } catch { return; }
+      for (const e of entries) {
+        if (e.startsWith('.') || !SEG_RE.test(e)) continue;
+        const p = path.join(dir, e), s = readSkill(p, e);
+        if (s) { if (!seen.has(e)) { seen.add(e); out.push({ ...s, agents: ['claude'], source: 'synced', readOnly: true, path: `synced/${rel}${e}` }); } }
+        else if (depth < 2 && isDir(p)) walk(p, `${rel}${e}/`, depth + 1);
+      }
+    };
+    walk(syncedRoot, '', 0);
+    return out.sort((a, b) => (a.folder < b.folder ? -1 : 1));
+  }
+  function listLocal() {
     const by = new Map();
     for (const agent of SKILL_AGENTS) {
       let entries = [];
@@ -180,11 +247,20 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
         if (!s) continue;
         const cur = by.get(folder);
         if (cur) cur.agents.push(agent);
-        else by.set(folder, { ...s, agents: [agent] });
+        else by.set(folder, { ...s, agents: [agent], source: 'local' });
       }
     }
     return [...by.values()];
   }
+  const listSkills = () => [...listLocal(), ...listSynced()];
+  const readOnlyError = (folder) => new Error(`${folder} is synced from your Claude account, so it can't be changed or deleted here. Change it in Claude and it syncs back.`);
+  // The local skill named `folder`; a synced one of that name is refused.
+  function localSkill(folder) {
+    const s = listLocal().find((x) => x.folder === folder);
+    if (!s && listSynced().some((x) => x.folder === folder)) throw readOnlyError(folder);
+    return s || null;
+  }
+  const syncedName = (name) => listSynced().some((s) => s.folder === name);
   const skillDir = (agent, folder) => {
     if (!SEG_RE.test(folder)) throw new Error('Bad skill name');
     return path.join(roots[agent], folder);
@@ -198,6 +274,8 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
   // an agent added later gets a copy of the whole folder, one dropped loses its copy.
   function saveSkill(b = {}) {
     const prev = b.prev ? String(b.prev) : null;
+    const old = prev ? localSkill(prev) : null;
+    if (prev && !old) throw new Error('That skill no longer exists');
     const name = text(b.name, 64, 'Name').toLowerCase();
     if (!NAME_RE.test(name)) throw new Error('Name: lowercase letters, numbers and hyphens (max 64)');
     const description = text(b.description, 1024, 'Description').replace(/\s+/g, ' ');
@@ -205,10 +283,8 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
     const body = text(b.body, MAX_TEXT, 'Instructions');
     if (!body) throw new Error('Add the instructions');
     const agents = pickAgents(b.agents, SKILL_AGENTS);
-    const existing = listSkills();
-    const old = prev ? existing.find((s) => s.folder === prev) : null;
-    if (prev && !old) throw new Error('That skill no longer exists');
-    if (name !== prev && existing.some((s) => s.folder === name)) throw new Error(`A skill named ${name} already exists`);
+    if (name !== prev && listLocal().some((s) => s.folder === name)) throw new Error(`A skill named ${name} already exists`);
+    if (name !== prev && syncedName(name)) throw new Error(`A skill named ${name} is already synced from your Claude account`);
     // Kept copies move first (a rename), new ones copy a kept (or about-to-go) copy, dropped ones go last.
     const had = old?.agents || [], kept = agents.filter((a) => had.includes(a));
     for (const agent of kept) if (old.folder !== name) fs.renameSync(skillDir(agent, old.folder), skillDir(agent, name));
@@ -221,21 +297,81 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
     }
     for (const agent of had) if (!agents.includes(agent)) fs.rmSync(skillDir(agent, old.folder), { recursive: true, force: true });
     changed('skills');
-    return listSkills().find((s) => s.folder === name);
+    return listLocal().find((s) => s.folder === name);
   }
   function removeSkill(folder) {
-    const s = listSkills().find((x) => x.folder === folder);
+    const s = localSkill(folder);
     if (!s) throw new Error('No such skill');
     for (const agent of s.agents) fs.rmSync(skillDir(agent, folder), { recursive: true, force: true });
     changed('skills');
   }
-  // A skill folder from GitHub: a shallow, sparse clone of just that folder (private repos work through git's gh
-  // credentials), copied into each agent's skills folder. A link to a folder of skills lists them instead.
-  async function importSkill(b = {}) {
-    const src = parseGitHubUrl(b.url);
-    const agents = pickAgents(b.agents, SKILL_AGENTS);
-    const tmpRoot = path.join(extDir, 'tmp');
-    fs.mkdirSync(tmpRoot, { recursive: true, mode: 0o700 });
+
+  // ---------- adding a skill: previewSkill stages it (a GitHub link or a .zip/.skill upload) and says what it holds;
+  // installSkill({id, agents, replace}) copies the staged folder into each agent's skills folder. importSkill does both.
+  const tmpRoot = path.join(extDir, 'tmp');
+  const stageDir = (id) => {
+    if (!/^[0-9a-f]{16}$/.test(String(id || ''))) throw new Error('Bad preview id');
+    return path.join(tmpRoot, `stage-${id}`);
+  };
+  const tooBig = (n, bytes) => new Error(`That skill is too big (${n} files, ${Math.round(bytes / 1048576)} MB; max ${MAX_SKILL_FILES} files, ${MAX_SKILL_BYTES >> 20} MB)`);
+  // The one skill folder under `dir` (dir itself, or the only folder below it, up to 3 levels, with a SKILL.md).
+  function findSkillRoot(dir, what) {
+    if (isFile(path.join(dir, 'SKILL.md'))) return dir;
+    const found = [];
+    const walk = (d, depth) => {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        if (!e.isDirectory() || e.name.startsWith('.') || e.name === '__MACOSX') continue;
+        const p = path.join(d, e.name);
+        if (isFile(path.join(p, 'SKILL.md'))) found.push(p);
+        else if (depth < 2) walk(p, depth + 1);
+      }
+    };
+    walk(dir, 0);
+    const names = found.map((p) => path.basename(p)).sort();
+    if (found.length !== 1) throw new Error(found.length ? `That ${what} holds ${found.length} skills (${names.slice(0, 8).join(', ')}${found.length > 8 ? ', …' : ''}). ${what === 'upload' ? 'Upload' : 'Link'} one of them.` : `No SKILL.md in that ${what}`);
+    return found[0];
+  }
+  // GitHub's API (public repos, no git needed): the tree of `ref`, then each file of the skill folder from raw.githubusercontent.com.
+  // An API failure (private repo, rate limit, offline) is marked `fallback` so a github.com link tries git instead.
+  async function fetchGitHub({ owner, repo, ref, dir }, dest) {
+    const get = async (url, kind = 'json') => {
+      let r;
+      try { r = await fetchImpl(url, { headers: { accept: 'application/vnd.github+json', 'user-agent': 'agent-orch' }, signal: AbortSignal.timeout(importTimeoutMs) }); }
+      catch (e) { throw Object.assign(new Error(`GitHub didn't answer: ${e.message}`), { fallback: true }); }
+      if (!r.ok) throw Object.assign(new Error(`GitHub answered ${r.status}`), { fallback: true });
+      return kind === 'json' ? r.json() : Buffer.from(await r.arrayBuffer());
+    };
+    const api = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+    if (!ref) ref = (await get(api)).default_branch;
+    if (!ref || !/^[\w./-]{1,200}$/.test(ref)) throw Object.assign(new Error('No branch to read'), { fallback: true });
+    const tree = await get(`${api}/git/trees/${encodeURIComponent(ref)}?recursive=1`);
+    if (!Array.isArray(tree?.tree) || tree.truncated) throw Object.assign(new Error('That repository is too big to list'), { fallback: true });
+    const prefix = dir ? `${dir}/` : '';
+    const safe = (p) => p.split('/').every((s) => SEG_RE.test(s) && !s.startsWith('.git'));
+    const under = tree.tree.filter((e) => e.path.startsWith(prefix) && safe(e.path));
+    if (dir && !under.length) throw new Error(`No folder ${dir} in that repository`);
+    const blobs = under.filter((e) => e.type === 'blob' && e.mode !== '120000'); // not symlinks or submodules
+    let root;
+    if (blobs.some((e) => e.path === `${prefix}SKILL.md`)) root = dir;
+    else {
+      const found = blobs.filter((e) => /\/SKILL\.md$/.test(e.path) && !e.path.slice(prefix.length).split('/').some((s) => s.startsWith('.'))).map((e) => path.posix.dirname(e.path));
+      const names = found.map((p) => path.posix.basename(p)).sort();
+      if (found.length !== 1) throw new Error(found.length ? `That folder holds ${found.length} skills (${names.slice(0, 8).join(', ')}${found.length > 8 ? ', …' : ''}). Link one of them.` : 'No SKILL.md in that folder');
+      root = found[0];
+    }
+    const rootPrefix = root ? `${root}/` : '';
+    const files = blobs.filter((e) => e.path.startsWith(rootPrefix));
+    const bytes = files.reduce((n, e) => n + (e.size || 0), 0);
+    if (files.length > MAX_SKILL_FILES || bytes > MAX_SKILL_BYTES) throw tooBig(files.length, bytes);
+    for (const e of files) {
+      const buf = await get(`https://raw.githubusercontent.com/${[owner, repo, ...ref.split('/'), ...e.path.split('/')].map(encodeURIComponent).join('/')}`, 'buf');
+      const p = path.join(dest, ...e.path.slice(rootPrefix.length).split('/'));
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, buf, { mode: e.mode === '100755' ? 0o755 : 0o644 });
+    }
+  }
+  // A shallow, sparse git clone of just that folder (private repos work through git's gh credentials).
+  async function cloneGitHub(src, dest) {
     const tmp = fs.mkdtempSync(path.join(tmpRoot, 'import-'));
     const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'true' };
     const git = async (args) => {
@@ -247,29 +383,110 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
       await git(['clone', '--depth', '1', '--filter=blob:none', ...(src.dir ? ['--sparse'] : []), ...(src.ref ? ['--branch', src.ref] : []), '--', src.repo, 'repo']);
       const repo = path.join(tmp, 'repo');
       if (src.dir) await git(['-C', repo, 'sparse-checkout', 'set', '--', src.dir]);
-      let dir = path.join(repo, src.dir);
+      const dir = path.join(repo, src.dir);
       if (!isDir(dir)) throw new Error(`No folder ${src.dir} in that repository`);
-      if (!isFile(path.join(dir, 'SKILL.md'))) {
-        const found = fs.readdirSync(dir).filter((d) => isFile(path.join(dir, d, 'SKILL.md')));
-        if (found.length !== 1) throw new Error(found.length ? `That folder holds ${found.length} skills (${found.slice(0, 8).join(', ')}${found.length > 8 ? ', …' : ''}). Link one of them.` : 'No SKILL.md in that folder');
-        dir = path.join(dir, found[0]);
-      }
-      const { n, bytes } = countFiles(dir);
-      if (n > MAX_SKILL_FILES || bytes > MAX_SKILL_BYTES) throw new Error(`That skill is too big (${n} files, ${Math.round(bytes / 1048576)} MB; max ${MAX_SKILL_FILES} files, ${MAX_SKILL_BYTES >> 20} MB)`);
-      const s = readSkill(dir, path.basename(dir));
-      const name = String(s.name || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64);
-      if (!NAME_RE.test(name)) throw new Error('The skill has no usable name');
-      if (listSkills().some((x) => x.folder === name) && !b.replace) throw Object.assign(new Error(`A skill named ${name} already exists`), { exists: name });
-      for (const agent of SKILL_AGENTS) {
-        const dest = skillDir(agent, name);
-        if (b.replace || agents.includes(agent)) fs.rmSync(dest, { recursive: true, force: true });
-        if (agents.includes(agent)) copySkill(dir, dest);
-      }
-      changed('skills');
-      return listSkills().find((x) => x.folder === name);
+      const root = findSkillRoot(dir, 'folder');
+      const { n, bytes } = countFiles(root);
+      if (n > MAX_SKILL_FILES || bytes > MAX_SKILL_BYTES) throw tooBig(n, bytes);
+      copySkill(root, dest);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
+  }
+  // A .zip or .skill (a zip of one skill folder): stored and deflated entries; symlinks, dot-git and __MACOSX left out.
+  function unzipTo(buf, dest) {
+    let files = 0, bytes = 0;
+    for (const e of readZip(buf)) {
+      const parts = e.name.split('/').filter(Boolean);
+      if (e.dir || e.symlink || !parts.length || parts[0] === '__MACOSX' || parts.at(-1) === '.DS_Store' || parts.includes('.git')) continue;
+      if (e.name.startsWith('/') || e.name.includes('\\') || parts.some((s) => s === '..' || s === '.' || !SEG_RE.test(s))) throw new Error(`The archive has an unsafe path: ${e.name.slice(0, 80)}`);
+      if (++files > MAX_SKILL_FILES || (bytes += e.size) > MAX_SKILL_BYTES) throw tooBig(files, bytes);
+      const p = path.join(dest, ...parts);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, e.data(), { mode: e.exec ? 0o755 : 0o644 });
+    }
+    if (!files) throw new Error('That archive is empty');
+  }
+  // Staged skills older than an hour (a preview never installed) are swept.
+  function sweepStages(maxAgeMs = 3_600_000) {
+    let names = [];
+    try { names = fs.readdirSync(tmpRoot); } catch {}
+    for (const n of names) {
+      const p = path.join(tmpRoot, n);
+      try { if (/^stage-/.test(n) && Date.now() - fs.statSync(p).mtimeMs > maxAgeMs) fs.rmSync(p, { recursive: true, force: true }); } catch {}
+    }
+  }
+  // {url} (a GitHub repo, a folder in one, or a SKILL.md: github.com …/blob/… or raw.githubusercontent.com) or {zip} (a Buffer).
+  // → { id, folder, name, description, files: [paths], exists: 'local'|'synced'|null } for the owner to check before installing.
+  async function previewSkill(b = {}) {
+    sweepStages();
+    fs.mkdirSync(tmpRoot, { recursive: true, mode: 0o700 });
+    const id = crypto.randomBytes(8).toString('hex'), stage = stageDir(id), dest = path.join(stage, 'skill');
+    fs.mkdirSync(stage, { mode: 0o700 });
+    try {
+      let dir = dest;
+      if (b.zip) {
+        const tmp = path.join(stage, 'zip');
+        unzipTo(Buffer.isBuffer(b.zip) ? b.zip : Buffer.from(String(b.zip), 'base64'), tmp);
+        fs.renameSync(findSkillRoot(tmp, 'upload'), dest);
+      } else {
+        const raw = parseRawGitHubUrl(b.url);
+        if (raw) {
+          try { await fetchGitHub(raw, dest); } catch (e) {
+            if (!e.fallback) throw e;
+            // Just that file, when its folder can't be listed.
+            let r;
+            try { r = await fetchImpl(raw.url, { headers: { 'user-agent': 'agent-orch' }, signal: AbortSignal.timeout(importTimeoutMs) }); } catch (err) { throw new Error(`Could not fetch that file: ${err.message}`); }
+            if (!r.ok) throw new Error(`Could not fetch that file (${r.status})`);
+            fs.rmSync(dest, { recursive: true, force: true });
+            fs.mkdirSync(dest);
+            fs.writeFileSync(path.join(dest, 'SKILL.md'), Buffer.from(await r.arrayBuffer()), { mode: 0o644 });
+          }
+        } else {
+          const src = parseGitHubUrl(b.url);
+          const [, owner, repo] = /^https:\/\/github\.com\/([^/]+)\/(.+)\.git$/.exec(src.repo);
+          try { await fetchGitHub({ owner, repo, ref: src.ref, dir: src.dir }, dest); } catch (e) {
+            if (!e.fallback) throw e;
+            fs.rmSync(dest, { recursive: true, force: true });
+            await cloneGitHub(src, dest);
+          }
+        }
+      }
+      if (!isFile(path.join(dir, 'SKILL.md'))) throw new Error('No SKILL.md found');
+      const { meta } = parseFrontmatter(fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8'));
+      if (!String(meta.name || '').trim() || !String(meta.description || '').trim()) throw new Error('SKILL.md needs a name and a description in its frontmatter (--- name: … description: … ---)');
+      const folder = String(meta.name).toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64);
+      if (!NAME_RE.test(folder)) throw new Error('The skill has no usable name');
+      const files = skillFiles(dir).map((f) => f.path);
+      const exists = listLocal().some((s) => s.folder === folder) ? 'local' : syncedName(folder) ? 'synced' : null;
+      return { id, folder, name: meta.name, description: String(meta.description).replace(/\s+/g, ' ').trim(), files, exists };
+    } catch (e) {
+      fs.rmSync(stage, { recursive: true, force: true });
+      throw e;
+    }
+  }
+  function installSkill(b = {}) {
+    const stage = stageDir(b.id), dir = path.join(stage, 'skill');
+    if (!isDir(dir)) throw new Error('That preview has expired; add the skill again');
+    const agents = pickAgents(b.agents, SKILL_AGENTS);
+    const s = readSkill(dir, 'skill');
+    const name = String(s?.name || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64);
+    if (!NAME_RE.test(name)) throw new Error('The skill has no usable name');
+    if (syncedName(name)) throw new Error(`A skill named ${name} is already synced from your Claude account`);
+    if (listLocal().some((x) => x.folder === name) && !b.replace) throw Object.assign(new Error(`A skill named ${name} already exists`), { exists: name });
+    for (const agent of SKILL_AGENTS) {
+      const dest = skillDir(agent, name);
+      if (b.replace || agents.includes(agent)) fs.rmSync(dest, { recursive: true, force: true });
+      if (agents.includes(agent)) copySkill(dir, dest);
+    }
+    fs.rmSync(stage, { recursive: true, force: true });
+    changed('skills');
+    return listLocal().find((x) => x.folder === name);
+  }
+  async function importSkill(b = {}) {
+    const p = await previewSkill(b);
+    try { return installSkill({ ...b, id: p.id }); }
+    finally { fs.rmSync(stageDir(p.id), { recursive: true, force: true }); }
   }
 
   // ---------- subagents (Claude): ~/.claude/agents/<name>.md, frontmatter name/description/tools/model + the prompt
@@ -480,7 +697,7 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
   }
   let built = null; // { key, info, where: sha -> a file with that content }
   function syncInfo() {
-    const skills = listSkills().filter((s) => EXT_ENTRY_RE.test(s.folder)).flatMap((s) => s.agents.map((agent) => ({ agent, name: s.folder, files: skillFiles(skillDir(agent, s.folder)) })));
+    const skills = listLocal().filter((s) => EXT_ENTRY_RE.test(s.folder)).flatMap((s) => s.agents.map((agent) => ({ agent, name: s.folder, files: skillFiles(skillDir(agent, s.folder)) })));
     const agents = listAgents().filter((a) => EXT_ENTRY_RE.test(a.file)).map((a) => {
       const abs = path.join(agentsDir, `${a.file}.md`), st = fs.statSync(abs);
       return { name: a.file, abs, size: st.size, mtime: st.mtimeMs };
@@ -600,7 +817,7 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
   }
 
   return {
-    list, listSkills, saveSkill, removeSkill, importSkill, listAgents, saveAgent, removeAgent,
+    list, listSkills, saveSkill, removeSkill, importSkill, previewSkill, installSkill, listAgents, saveAgent, removeAgent,
     saveMcp, removeMcp, setMcpEnabled, mcpFor, mcpRun, savePersona, removePersona, persona, personaPrompt,
     syncInfo, syncBundle, applyBundle, synced,
     onChange: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },

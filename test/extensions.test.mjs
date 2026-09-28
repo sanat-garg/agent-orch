@@ -92,7 +92,8 @@ if (a[0] === 'clone') {
   try { fs.symlinkSync('/etc/hostname', path.join(repo, 'skills', 'pdf', 'leak')); } catch {}
 }
 `, { mode: 0o755 });
-  const { home, x } = setup({ gitBin: path.join(bin, 'git') });
+  // GitHub's API unreachable (a private repo, offline): the import falls back to git.
+  const { home, x } = setup({ gitBin: path.join(bin, 'git'), fetch: async () => { throw new Error('offline'); } });
   const s = await x.importSkill({ url: 'https://github.com/anthropics/skills/tree/main/skills/pdf', agents: ['claude', 'codex'] });
   assert.deepEqual([s.name, s.agents, s.files, s.description], ['pdf', ['claude', 'codex'], 2, 'The pdf skill']);
   assert.equal(read(home, '.codex/skills/pdf/scripts/run.py'), 'print(1)');

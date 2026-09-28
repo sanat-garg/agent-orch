@@ -7,8 +7,8 @@
 const EX = { data: null, err: '', tab: 'skills', edit: null, dirty: false, saving: false, lastFocus: null, fromSettings: false, seq: 0, personas: null, draft: store.get('cw.persona') || null };
 const EX_KINDS = {
   skills: { label: 'Skills', one: 'skill', key: (s) => s.folder,
-    sub: 'Instructions, and any files they need, that an agent loads when a task calls for them. Saved in ~/.claude/skills and ~/.codex/skills, so chats, tasks and the Terminal all use them.',
-    empty: 'No skills yet. Write one, or import a folder from GitHub (for example from github.com/anthropics/skills).' },
+    sub: 'Instructions, and any files they need, that an agent loads when a task calls for them. Saved in ~/.claude/skills and ~/.codex/skills, so chats, tasks and the Terminal all use them. Skills synced from your Claude account show here too.',
+    empty: 'No skills yet. Add one from GitHub or a .zip file (drop it here), or write your own.' },
   mcp: { label: 'MCP servers', one: 'server', key: (s) => s.name,
     sub: 'Servers that give agents extra tools: a browser, a database, docs, other apps. agent-orch starts the ones that are on for its chat turns and task runs on this server (not for the Terminal), so each uses some memory while they run.',
     empty: 'No MCP servers yet.' },
@@ -140,8 +140,7 @@ function exRender() {
   const frag = document.createDocumentFragment();
   frag.append(el('p', 'ext-sub', k.sub));
   const acts = el('div', 'ext-acts');
-  acts.append(exBtn(`New ${k.one}`, 'btn small primary', () => exEdit(null)));
-  if (EX.tab === 'skills') acts.append(exBtn('Import from GitHub', 'btn small', () => exEdit(null, 'import')));
+  acts.append(EX.tab === 'skills' ? exBtn('Add skill', 'btn small primary', () => exEdit(null, 'add')) : exBtn(`New ${k.one}`, 'btn small primary', () => exEdit(null)));
   frag.append(acts);
   const items = EX.data?.[EX.tab];
   if (!items) frag.append(el('p', 'ext-empty', EX.err ? `Couldn't load: ${EX.err}` : 'Loading…'));
@@ -202,7 +201,7 @@ function exRow(it) {
 }
 function exTags(it) {
   const agents = (list) => (list || []).map((a) => EX_AGENT_NAMES[a] || a);
-  if (EX.tab === 'skills') return [...agents(it.agents), ...(it.files > 1 ? [`${it.files} files`] : [])];
+  if (EX.tab === 'skills') return [...(it.source === 'synced' ? ['Synced'] : []), ...agents(it.agents), ...(it.files > 1 ? [`${it.files} files`] : [])];
   if (EX.tab === 'agents') return it.model ? [EX_MODELS.find(([v]) => v === it.model)?.[1] || it.model] : [];
   if (EX.tab === 'mcp') return [EX_MCP_TYPES.find(([v]) => v === it.type)?.[1] || it.type, ...agents(it.agents)];
   const n = state.convos.filter((c) => c.persona === it.id).length;
@@ -259,7 +258,8 @@ function exChips(label, items, onpick) {
   for (const it of items) row.append(exBtn(it.label || it.name, 'chip', () => onpick(it)));
   return row;
 }
-// One entry's editor (item null = new; mode 'import' = a skill from GitHub), in place of the list.
+// One entry's editor (item null = new), in place of the list. Skills also have modes: 'add' (GitHub link, upload or
+// from scratch), 'import' (the GitHub link), 'preview' (item = a staged skill to install); a synced skill is read-only.
 function exEdit(item, mode = null) {
   EX.edit = { item, mode, tab: EX.tab };
   EX.dirty = false;
@@ -271,7 +271,8 @@ function exEdit(item, mode = null) {
   back.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
   back.append(el('span', null, k.label));
   back.setAttribute('aria-label', `Back to ${k.label}`);
-  const title = mode === 'import' ? 'Import a skill from GitHub' : item ? item.name : `New ${k.one}`;
+  const title = { add: 'Add a skill', import: 'Add a skill from GitHub', preview: `Install ${item?.name}` }[mode] || (item ? item.name : `New ${k.one}`);
+  const readOnly = !!item?.readOnly || mode === 'add';
   head.append(back, el('h3', null, title));
   form.append(head);
   const fields = el('div', 'ext-fields');
@@ -281,18 +282,18 @@ function exEdit(item, mode = null) {
   err.setAttribute('role', 'alert');
   err.hidden = true;
   const acts = el('div', 'ext-form-acts');
-  if (item) acts.append(exBtn('Delete', 'btn small danger', () => exDelete(item)));
+  if (item && !mode && !readOnly) acts.append(exBtn('Delete', 'btn small danger', () => exDelete(item)));
   acts.append(el('span', 'ext-gap'));
-  acts.append(exBtn('Cancel', 'btn small', () => exBack()));
-  const save = el('button', 'btn small primary', mode === 'import' ? 'Import' : item ? 'Save' : 'Add');
+  acts.append(exBtn(readOnly && mode !== 'add' ? 'Done' : 'Cancel', 'btn small', () => exBack()));
+  const save = el('button', 'btn small primary', { import: 'Preview', preview: 'Install' }[mode] || (item ? 'Save' : 'Add'));
   save.type = 'submit';
-  acts.append(save);
+  if (!readOnly && !(mode === 'preview' && item.exists === 'synced')) acts.append(save);
   form.append(err, acts);
   form.addEventListener('input', () => { EX.dirty = true; });
-  form.addEventListener('submit', (e) => { e.preventDefault(); exSubmit(form, item, mode, save, err); });
+  form.addEventListener('submit', (e) => { e.preventDefault(); if (save.isConnected) exSubmit(form, item, mode, save, err); });
   body.replaceChildren(form);
   body.scrollTop = 0;
-  form.querySelector('input:not([type="checkbox"]):not([type="radio"]), textarea')?.focus({ preventScroll: true });
+  form.querySelector(readOnly ? '.ext-choice, .ext-back' : 'input:not([type="checkbox"]):not([type="radio"]), textarea')?.focus({ preventScroll: true });
 }
 function exBack() {
   if (!exDiscardOk()) return;
@@ -304,10 +305,44 @@ function exBack() {
   (row || $('extBody').querySelector('.ext-acts button'))?.focus();
 }
 function exSkillFields(f, s, mode) {
+  if (mode === 'add') {
+    const ul = el('ul', 'ext-list ext-choices');
+    ul.setAttribute('aria-label', 'Ways to add a skill');
+    const choice = (label, hint, onclick) => {
+      const li = el('li', 'ext-item no-switch'), b = exBtn('', 'ext-open ext-choice', onclick), main = el('span', 'ext-main');
+      main.append(el('strong', null, label), el('small', null, hint));
+      b.append(main);
+      b.insertAdjacentHTML('beforeend', '<svg class="ext-chev" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>');
+      li.append(b);
+      ul.append(li);
+    };
+    choice('From a GitHub link', 'A repository, a folder in one, or a SKILL.md. For example from github.com/anthropics/skills.', () => exEdit(null, 'import'));
+    choice('Upload a .zip or .skill file', 'A folder with a SKILL.md, zipped. You can also drop the file onto the skills list.', () => exPickFile());
+    choice('Create from scratch', 'Write the instructions yourself.', () => exEdit(null));
+    f.append(ul);
+    return;
+  }
   if (mode === 'import') {
     f.append(exField('GitHub link', exInput('url', '', { placeholder: 'https://github.com/anthropics/skills/tree/main/skills/pdf', type: 'url' }),
-      'A folder with a SKILL.md (or the SKILL.md itself), in any repository your GitHub sign-in can read. Its other files come along.'));
+      'A repository, a folder with a SKILL.md, or the SKILL.md itself (public, or private ones your GitHub sign-in can read). Its other files come along. You see what it holds before anything is installed.'));
+    return;
+  }
+  if (mode === 'preview') {
+    const dl = el('dl', 'ext-preview');
+    const files = s.files.length > 30 ? [...s.files.slice(0, 30), `…and ${s.files.length - 30} more`] : s.files;
+    for (const [k, v] of [['Name', s.name], ['When to use it', s.description], [`Files (${s.files.length})`, files.join('\n')]]) dl.append(el('dt', null, k), el('dd', k.startsWith('Files') ? 'mono' : null, v));
+    f.append(dl);
+    if (s.exists === 'synced') f.append(el('p', 'ext-note ext-warn', `A skill named ${s.folder} is already synced from your Claude account, so this one can't be installed next to it.`));
+    else if (s.exists) f.append(el('p', 'ext-note ext-warn', `A skill named ${s.folder} is already installed. Installing replaces it.`));
     f.append(exAgentsBox(['claude', 'codex']));
+    return;
+  }
+  if (s?.readOnly) {
+    f.append(el('p', 'ext-note', 'Synced from your Claude account. agent-orch can read it but not change or delete it: the next sync would undo that. Change it in Claude and it syncs back. Used by Claude Code on this machine only (workers get it from their own Claude sign-in).'));
+    const desc = exArea('description', s.description, { rows: 2 }), body = exArea('body', s.body, { rows: 12, mono: true });
+    desc.readOnly = body.readOnly = true;
+    f.append(exField('When to use it', desc), exField('Instructions', body));
+    if (s.files > 1) f.append(el('p', 'ext-note', `Plus ${s.files - 1} more file${s.files > 2 ? 's' : ''} in ~/.claude/skills/${s.path}.`));
     return;
   }
   f.append(exField('Name', exInput('name', s?.name ?? s?.folder, { placeholder: 'e.g. release-notes', maxLength: 64 }), 'Lowercase letters, numbers and hyphens. Also the folder name.'));
@@ -402,17 +437,24 @@ async function exSubmit(form, item, mode, save, err) {
   for (const [k, v] of fd.entries()) if (k !== 'agents' && k !== 'enabled') body[k] = v;
   if (form.querySelector('fieldset.ext-agents')) body.agents = fd.getAll('agents');
   if (EX.tab === 'mcp') body.enabled = !!form.elements.enabled?.checked;
-  if (item) { if (EX.tab === 'personas') body.id = item.id; else body.prev = EX_KINDS[EX.tab].key(item); }
-  const tab = EX.tab, url = mode === 'import' ? '/api/ext/import' : `/api/ext/${tab}`, label = save.textContent;
+  if (mode === 'import') body.preview = true;
+  else if (mode === 'preview') { body.id = item.id; if (item.exists === 'local') body.replace = true; }
+  else if (item) { if (EX.tab === 'personas') body.id = item.id; else body.prev = EX_KINDS[EX.tab].key(item); }
+  const tab = EX.tab, url = mode === 'import' || mode === 'preview' ? '/api/ext/import' : `/api/ext/${tab}`, label = save.textContent;
   EX.saving = true;
   save.disabled = true;
-  save.textContent = mode === 'import' ? 'Importing…' : 'Saving…';
+  save.textContent = { import: 'Fetching…', preview: 'Installing…' }[mode] || 'Saving…';
   err.hidden = true;
   try {
     let r;
+    if (mode === 'import') {
+      r = await api(url, 'POST', body);
+      if (EX.edit?.tab === tab) { EX.dirty = false; exEdit(r.preview, 'preview'); }
+      return;
+    }
     try { r = await api(url, 'POST', body); }
     catch (e) {
-      const m = mode === 'import' && /^A skill named (\S+) already exists$/.exec(e.message);
+      const m = mode === 'preview' && /^A skill named (\S+) already exists$/.exec(e.message);
       if (!m || !confirm(`${m[1]} is already installed. Replace it with this one?`)) throw e;
       r = await api(url, 'POST', { ...body, replace: true });
     }
@@ -422,7 +464,7 @@ async function exSubmit(form, item, mode, save, err) {
     EX.dirty = false;
     exRender();
     const name = r.item?.name || body.name || '';
-    toast(mode === 'import' ? `Imported ${name}` : item ? `Saved ${name}` : `Added ${name}`, { kind: 'success' });
+    toast(mode === 'preview' ? `Installed ${name}` : item ? `Saved ${name}` : `Added ${name}`, { kind: 'success' });
     const key = r.item && EX_KINDS[tab].key(r.item);
     (key != null && $('extBody').querySelector(`.ext-open[data-key="${CSS.escape(key)}"]`))?.focus();
   } catch (e) {
@@ -433,6 +475,41 @@ async function exSubmit(form, item, mode, save, err) {
     EX.saving = false;
     if (save.isConnected) { save.disabled = false; save.textContent = label; }
   }
+}
+// ----- skill uploads: a .zip or .skill file (the picker, or dropped onto the skills list) is staged and previewed.
+function exPickFile() {
+  const i = el('input');
+  Object.assign(i, { type: 'file', accept: '.zip,.skill,application/zip' });
+  i.onchange = () => { if (i.files[0]) exUpload(i.files[0]); };
+  i.click();
+}
+async function exUpload(file) {
+  if (!/\.(zip|skill)$/i.test(file.name)) return toast('Upload a .zip or .skill file', { kind: 'error' });
+  if (file.size > 25 << 20) return toast('That file is too big (max 25 MB)', { kind: 'error' });
+  toast(`Reading ${file.name}…`);
+  try {
+    const r = await fetch('/api/ext/import/upload', { method: 'POST', headers: { 'Content-Type': 'application/zip' }, body: file });
+    if (r.status === 401) { location.href = '/login'; return; }
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `Request failed (${r.status})`);
+    if ($('extModal').hidden || !exDiscardOk()) return;
+    EX.tab = 'skills';
+    exTabs();
+    exEdit(data.preview, 'preview');
+  } catch (e) { toast(`Couldn't read ${file.name}: ${e.message}`, { kind: 'error' }); }
+}
+{
+  const body = $('extBody'), files = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+  const on = (e) => EX.tab === 'skills' && !EX.edit && files(e);
+  body.addEventListener('dragover', (e) => { if (!on(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; body.classList.add('ext-drop'); });
+  body.addEventListener('dragleave', (e) => { if (!body.contains(e.relatedTarget)) body.classList.remove('ext-drop'); });
+  body.addEventListener('drop', (e) => {
+    body.classList.remove('ext-drop');
+    if (!on(e)) return;
+    e.preventDefault();
+    const f = e.dataTransfer.files[0];
+    if (f) exUpload(f);
+  });
 }
 async function exDelete(item) {
   const tab = EX.tab, name = item.name;

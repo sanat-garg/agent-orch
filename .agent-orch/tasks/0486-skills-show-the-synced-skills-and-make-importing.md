@@ -13,3 +13,7 @@ The owner imported skills, but Settings → Skills doesn't show them. The planne
 ## Done when
 
 `node --test test/skills-synced*.test.mjs test/skills-import*.test.mjs` passes (nested synced skills listed, dot entries ignored, zip and URL import, synced read-only)
+
+## Result — done (check passed) (2026-09-28 18:16)
+
+AGENT-ORCH-STATUS: done — synced skills shown read-only; one-step Add skill from GitHub/zip

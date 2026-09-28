@@ -75,7 +75,9 @@ test('add a skill, an MCP server and a persona, then pick the persona for the ch
   assert.match(await page.textContent('#extBody .ext-list'), /by-hand\s*Installed by hand, outside agent-orch\./);
   assert.equal(await page.locator('#personaChip').isHidden(), true, 'no chip before any persona exists');
 
-  await page.click('#extBody .ext-acts .btn.primary');
+  await page.click('#extBody .ext-acts .btn.primary'); // Add skill: GitHub link, upload, or from scratch
+  assert.equal(await page.locator('#extBody .ext-choice').count(), 3);
+  await page.click('#extBody .ext-choice >> text=Create from scratch');
   await page.fill('input[name="name"]', 'release-notes');
   await page.fill('textarea[name="description"]', 'Use when: writing release notes.');
   await page.fill('textarea[name="body"]', '# Release notes');

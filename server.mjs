@@ -1985,6 +1985,8 @@ async function handleRequest(req, res) {
   // Skills, MCP servers, subagents and personas (extensions.mjs). GET /api/ext lists all four (/api/ext/<kind> one); POST /api/ext/<kind>
   // saves one (body.prev = the name/id being edited), DELETE /api/ext/<kind>/<name> removes it, PATCH
   // /api/ext/mcp/<name> {enabled} switches a server, POST /api/ext/import {url, agents, replace} adds a skill from GitHub.
+  // Adding with a preview: POST /api/ext/import {url, preview: true} or POST /api/ext/import/upload (a raw .zip/.skill body)
+  // answers {preview: {id, name, description, files, exists}}; POST /api/ext/import {id, agents, replace} installs it.
   // Every write answers with the new lists; a rejected one is a 400 with the reason.
   if (p === '/api/ext' && req.method === 'GET') return json(res, 200, ext.list());
   const exm = p.match(/^\/api\/ext\/(skills|agents|mcp|personas|import)(?:\/([\w.-]{1,100}))?$/);
@@ -1993,7 +1995,12 @@ async function handleRequest(req, res) {
     if (req.method === 'GET' && !name && kind !== 'import') return json(res, 200, ext.list(kind)); // e.g. the persona chip's list
     try {
       let item;
-      if (kind === 'import' && !name && req.method === 'POST') item = await ext.importSkill(await readBody(req));
+      if (kind === 'import' && name === 'upload' && req.method === 'POST') return json(res, 200, { preview: await ext.previewSkill({ zip: await readRaw(req, 25 << 20) }) });
+      if (kind === 'import' && !name && req.method === 'POST') {
+        const b = await readBody(req);
+        if (b.preview) return json(res, 200, { preview: await ext.previewSkill({ url: b.url }) });
+        item = b.id ? ext.installSkill(b) : await ext.importSkill(b);
+      }
       else if (kind !== 'import' && !name && req.method === 'POST') {
         item = ({ skills: ext.saveSkill, agents: ext.saveAgent, mcp: ext.saveMcp, personas: ext.savePersona })[kind](await readBody(req));
       } else if (kind === 'mcp' && name && req.method === 'PATCH') item = ext.setMcpEnabled(name, (await readBody(req)).enabled);

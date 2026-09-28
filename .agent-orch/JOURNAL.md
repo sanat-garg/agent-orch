@@ -1522,3 +1522,6 @@ CONTEXT.md conflict resolved; settings and static tests pass
 ## 2026-09-28 18:15 — #487 Integrate #479: Task cards: a coloured phase progress strip along the bottom edge [done (check passed)]
 
 app.css conflict resolved, keeping phase and pace colours; tests pass
+## 2026-09-28 18:16 — #486 Skills: show the synced skills and make importing new ones simple [done (check passed)]
+
+synced skills shown read-only; one-step Add skill from GitHub/zip

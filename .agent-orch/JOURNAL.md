@@ -1111,3 +1111,7 @@ per-machine finish sounds work and tests pass; no screenshots (Chromium won't la
 ## 2026-09-28 14:03 — #411 push.mjs AUDIT #54: createNotifier coalesces pushes per tag, keeps the newest dropped one, and caps bursts with one summary [done (check passed)]
 
 push.mjs createNotifier holds messages per tag, caps bursts; tests pass
+
+## 2026-09-28 14:04 — #412 gate-proxy.mjs: a streamable-http upstream, so http connectors can be gated instead of withheld (AUDIT #69's lasting fix) [done (check passed)]
+
+gate-proxy gates streamable-http upstreams; both test files pass

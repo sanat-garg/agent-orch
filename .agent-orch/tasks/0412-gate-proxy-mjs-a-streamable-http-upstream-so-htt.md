@@ -13,3 +13,7 @@ gate-proxy.mjs (read its header) always spawns a stdio upstream (`cfg.upstream.c
 ## Done when
 
 `npm test -- test/gate-proxy-http.test.mjs test/gate-proxy.test.mjs` passes
+
+## Result — done (check passed) (2026-09-28 14:04)
+
+AGENT-ORCH-STATUS: done — gate-proxy gates streamable-http upstreams; both test files pass

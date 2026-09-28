@@ -71,14 +71,20 @@ test('the sidebar usage card opens the Usage modal with per-agent charts', () =>
   assert.match(appJs, /openConnections\(id\)/);
 });
 
-test('the model picker picks the primary model only; a Fallbacks button opens the shared sheet', () => {
+test('one model pill: it opens the shared fallback sheet with a Model section; no separate Fallbacks button', () => {
   const fn = appJs.slice(appJs.indexOf('function renderAgentPicker()'));
   const body = fn.slice(0, fn.indexOf('\n}\n'));
   assert.doesNotMatch(body, /AUTO_PICK|__auto/);
   assert.match(appJs, /send\(\{ t: 'send', cid: state\.cid, text, \.\.\.\(attachments\.length && \{ attachments \}\) \}\)/);
   assert.doesNotMatch(appJs, /autoDelegate|delegate\/preview|Forecast/);
-  assert.match(indexHtml, /class="chip fb-chip" id="fbChip"/);
-  assert.match(indexHtml, /class="modal fb-pop" id="fbModal"/);
+  for (const gone of ['fbChip', 'modelPop', 'model-menu', 'renderFbChip', 'fitPick']) {
+    const re = new RegExp(`(?<![\\w-])${gone}(?![\\w-])`);
+    assert.ok(![indexHtml, appJs, appCss].some((f) => re.test(f)), `${gone} removed`);
+  }
+  assert.match(indexHtml, /<button type="button" class="chip menu-chip" id="modelChip" aria-haspopup="dialog" aria-controls="fbModal" aria-expanded="false"[^>]*><span class="mc-prim" id="modelLabel">[^<]*<\/span><span class="mc-fb" id="modelFb" hidden><\/span>/);
+  assert.match(indexHtml, /class="modal fb-pop" id="fbModal"[\s\S]*?<section class="fb-models" id="fbModelSec"[^>]*hidden>[\s\S]*?id="fbModelTitle">Model<[\s\S]*?id="fbModelSearch"[\s\S]*?id="fbModels" role="listbox"[\s\S]*?id="fbTitle"[\s\S]*?id="fbBody"/);
+  assert.match(appJs, /\$\('modelChip'\)\.addEventListener\('click', \(\) => openFallbacks\(chatFallbacks\(\), \$\('modelChip'\)\)\)/);
+  assert.match(appCss, /#modelChip \.mc-fb \{[^}]*flex: 0 1000 auto; min-width: 0;/, 'the fallback part shrinks first');
   assert.match(appJs, /\/api\/convos\/\$\{cid\}\/fallbacks/);
   assert.match(appJs, /`If \$\{name\} hits its limit`/);
   assert.doesNotMatch(appJs, /Pinned:/);
@@ -142,7 +148,7 @@ test('the sidebar gear opens Settings: sound + MP3 upload, parallel tasks (what 
 
 test('the model picker has no Connections entry, opens upward on desktop, and the fallback chip names its models with usage dots', () => {
   assert.doesNotMatch(appJs, /CONNECT_PICK|'Connections…'|Sign in to more agents/);
-  assert.match(indexHtml, /id="modelChip"[^>]*aria-controls="modelPop"[\s\S]*?<select id="model"[^>]*hidden[\s\S]*?id="modelPop" role="listbox"/);
+  assert.match(indexHtml, /id="modelChip"[^>]*aria-controls="fbModal"[\s\S]*?<select id="model"[^>]*hidden/);
   assert.match(appCss, /\.pop-wrap \.popover|\.popover \{\s*position: absolute; bottom: calc\(100% \+ 6px\)/, 'popovers open upward');
   assert.match(appJs, /el\('span', 'fb-arrow', '→'\), dot, el\('span', 'fb-name', fbName\(r\)\)/);
   assert.match(appJs, /return Math\.max\(\.\.\.known\) >= 100 \? 'limited' : Math\.max\(\.\.\.known\) >= 80 \? 'high' : 'ok'/);
@@ -159,8 +165,8 @@ test('running and paused tasks: Pause/Resume on the card and in the drawer, Hand
   assert.match(appCss, /\.tc-glyph\.paused::before/);
 });
 
-test('composer menus: mode, model and effort chips open compact .cmenu listboxes (no native pickers)', () => {
-  for (const [chip, menu] of [['modeChip', 'modePop'], ['modelChip', 'modelPop'], ['effChip', 'effPop']]) {
+test('composer menus: mode and effort chips open compact .cmenu listboxes (no native pickers)', () => {
+  for (const [chip, menu] of [['modeChip', 'modePop'], ['effChip', 'effPop']]) {
     assert.match(indexHtml, new RegExp(`<button type="button" class="chip menu-chip[^"]*" id="${chip}" aria-haspopup="listbox" aria-controls="${menu}"`));
     assert.match(indexHtml, new RegExp(`<div class="cmenu[^"]*" id="${menu}" role="listbox"`));
     assert.match(appJs, new RegExp(`bindMenu\\(\\$\\('${chip}'\\), \\$\\('${menu}'\\)`));

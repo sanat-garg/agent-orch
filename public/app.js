@@ -1804,7 +1804,7 @@ $('messages').addEventListener('click', (e) => {
   if (r) chooseFolder(r.dataset.path);
 });
 
-// ---------- composer menus (mode, model, effort) ----------
+// ---------- composer menus (mode, effort; the model pill opens the fallback sheet) ----------
 // One compact listbox popover (.cmenu) in the app's menu style: it opens above its chip (the composer sits at the bottom;
 // below when there is more room there), options are .cm-opt buttons (role=option; aria-selected marks the current one),
 // arrows/Home/End move, Enter or a click picks, Esc, Tab or a click outside closes. Phones get the same menu.
@@ -1849,15 +1849,6 @@ function closeMenu(refocus = true) {
   o.menu.hidden = true;
   o.chip.setAttribute('aria-expanded', 'false');
   if (refocus) o.chip.focus();
-}
-// The open menu, rebuilt in place (its options changed underneath it, e.g. the agent list loaded).
-function refreshMenu(menu, build) {
-  if (CM.open?.menu !== menu) return;
-  const cur = document.activeElement?.closest?.('.cm-opt')?.dataset.value;
-  menu.replaceChildren();
-  build(menu);
-  placeMenu(menu, CM.open.chip);
-  if (cur != null) menu.querySelector(`.cm-opt[data-value="${CSS.escape(cur)}"]`)?.focus({ preventScroll: true });
 }
 function bindMenu(chip, menu, build, pick) {
   chip.addEventListener('click', () => (CM.open?.menu === menu ? closeMenu() : openMenu(chip, menu, build, pick)));
@@ -1914,20 +1905,12 @@ $('model').addEventListener('change', () => {
 let AGENT_LIST = [];
 // A model's display name as its CLI reports it (the id when the agent's list doesn't name it).
 const modelLabel = (agent, id) => AGENT_LIST.find((a) => a.id === agent)?.models.find((m) => m.id === id || m.resolved === id)?.label || id;
-// The model chip's label: 'Claude · Opus 5.5', or 'Claude · default' while it follows the agent's default model.
-function fitPick() {
-  const v = $('model').value, { agent, model } = parsePick(v || 'claude|');
-  const text = model ? `${shortLabel(agent)} · ${modelLabel(agent, model)}` : `${shortLabel(agent)} · default`;
-  $('modelLabel').textContent = text;
-  $('modelChip').title = `Agent and model: ${text}`;
-  $('modelChip').setAttribute('aria-label', `Agent and model: ${text}`);
-}
 // ---------- fallbacks (BRIEF goal 8) ----------
 // One sheet (#fbModal) edits an ordered fallback list: a chat's (the tasks its messages queue snapshot it and move down
-// it when their model hits its limit; empty = they wait) or a project's list for reflection tasks. It renders from what
-// is already loaded (convos, O.project, AGENT_LIST, O.state.blocks), never a fetch; every change saves at once (PUT).
-// The composer's button next to the model picker shows the chat's count; the picker itself only picks the primary model.
-function renderPickChip() { fitPick(); renderFbChip(); fbRender(); renderEff(); }
+// it when their model hits its limit; empty = they wait), a task's, or a project's list for reflection tasks. It renders
+// from what is already loaded (convos, O.project, AGENT_LIST, O.state.blocks), never a fetch; every change saves at once.
+// The chat's is the composer's one model pill ('Opus 5 → Astra +1'): its sheet adds the model list above the fallbacks.
+function renderPickChip() { renderModelPill(); fbRender(); renderEff(); }
 const FB = { host: null, fe: {}, lastFocus: null, local: null, pending: 0, chain: Promise.resolve(), seq: 0 };
 const apKey = (r) => `${r.agent}/${r.model}`;
 // The model a route runs: its own, else its agent's default.
@@ -1977,14 +1960,15 @@ function fbChipText(c, primary, list, what) {
 }
 // Hosts: primary {agent, model}; list() → [{agent, model}] | null; url: the PUT (null = the new-chat draft);
 // apply(list) stores it locally; confirmedOf(res) → the list the server saved.
+// models: the sheet also lists the models to pick the primary from (the primary follows the pick).
 function chatFallbacks() {
   const cid = state.cid, convo = () => state.convos.find((c) => c.id === cid);
-  return { what: 'queued tasks', primary: parsePick($('model').dataset.prev || 'claude|'),
+  return { what: 'queued tasks', models: true, get primary() { return parsePick($('model').dataset.prev || 'claude|'); },
     list: () => (cid ? convo()?.fallbacks : state.draftFallbacks) ?? null,
     url: cid ? `/api/convos/${cid}/fallbacks` : null,
     apply: (list) => {
       if (cid) { const c = convo(); if (c) c.fallbacks = list; } else { state.draftFallbacks = list; store.set('cw.fallbacks', JSON.stringify(list || [])); }
-      renderFbChip();
+      renderModelPill();
     },
     confirmedOf: (c) => c.fallbacks ?? null };
 }
@@ -2028,11 +2012,24 @@ function taskFallbacks(id) {
     // The drawer re-renders on every save, so focus returns to the fresh chip.
     focusBack: () => $('drBody').querySelector('.dr-model .dr-chip-btn') };
 }
-function renderFbChip() {
-  const h = chatFallbacks();
-  fbChipText($('fbChip'), h.primary, h.list(), h.what);
-  // Non-Claude usage windows (the dots) come with the usage history; load them once if nothing has yet.
-  if (h.list()?.some((r) => r.agent !== 'claude') && !usageSlides.at && !usageSlides.loading) loadSidebarUsage();
+// The composer's pill: the primary model's name, then '→ ● first fallback' and '+N' for the rest. The fallback part
+// shrinks first (app.css); the whole chain is in the title and aria-label ('Model Opus 5, then Astra, then Sol').
+function renderModelPill() {
+  const h = chatFallbacks(), list = h.list() || [], name = fbName(h.primary), fb = $('modelFb');
+  $('modelLabel').textContent = name;
+  fb.replaceChildren();
+  fb.hidden = !list.length;
+  if (list.length) {
+    const dot = el('span', `fb-dot ${modelHealth(list[0])}`);
+    dot.setAttribute('aria-hidden', 'true');
+    fb.append(el('span', 'fb-arrow', '→'), dot, el('span', 'fb-name', fbName(list[0])));
+    if (list.length > 1) fb.append(el('span', 'fb-more', `+${list.length - 1}`));
+  }
+  const text = `Model ${[name, ...list.map(fbName)].join(', then ')}`;
+  $('modelChip').title = text;
+  $('modelChip').setAttribute('aria-label', text);
+  // Non-Claude usage windows (the dot) come with the usage history; load them once if nothing has yet.
+  if (list[0] && list[0].agent !== 'claude' && !usageSlides.at && !usageSlides.loading) loadSidebarUsage();
 }
 function renderReflectBtn() {
   const h = reflectFallbacks();
@@ -2057,26 +2054,64 @@ function fbSave(list) {
   fbRender();
 }
 function openFallbacks(host, anchor) {
-  const m = $('fbModal');
+  const m = $('fbModal'), panel = m.querySelector('.modal-panel');
   if (m.hidden) FB.lastFocus = anchor;
   FB.host = host;
   host.confirmed = host.list();
   FB.fe = { refresh: fbRender };
+  FB.q = '';
+  $('fbModelSearch').value = '';
   m.hidden = false;
+  if (host.models) $('modelChip').setAttribute('aria-expanded', 'true');
   fbRender();
-  // A composer-style menu next to its button, on phones too (placeMenu); Esc or a click outside closes it.
-  placeMenu(m.querySelector('.modal-panel'), anchor);
-  (m.querySelector('#fbBody .fe-row') || m.querySelector('#fbBody .fe-add-btn'))?.focus();
+  // A composer-style menu next to its button (placeMenu); the model pill's sheet is a bottom sheet on phones (app.css).
+  // Esc or a click outside closes it.
+  if (host.models && phoneMQ.matches) Object.assign(panel.style, { left: '', top: '', bottom: '', maxHeight: '' });
+  else placeMenu(panel, anchor);
+  if (host.models) {
+    const cur = $('fbModels').querySelector('.cm-opt[aria-selected="true"]');
+    cur?.scrollIntoView({ block: 'nearest' });
+    if (!coarse) (cur || $('fbModelSearch')).focus({ preventScroll: true }); // a touch tap would paint a focus ring
+  } else (m.querySelector('#fbBody .fe-row') || m.querySelector('#fbBody .fe-add-btn'))?.focus();
 }
 function closeFallbacks() {
   $('fbModal').hidden = true;
+  $('modelChip').setAttribute('aria-expanded', 'false');
   const back = FB.lastFocus?.isConnected ? FB.lastFocus : FB.host?.focusBack?.();
   FB.host = null;
   FB.fe = {};
   back?.focus?.();
 }
-$('fbChip').addEventListener('click', () => openFallbacks(chatFallbacks(), $('fbChip')));
+$('modelChip').addEventListener('click', () => openFallbacks(chatFallbacks(), $('modelChip')));
+$('modelChip').addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); openFallbacks(chatFallbacks(), $('modelChip')); }
+});
 $('fbModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeFallbacks(); });
+// The model section (the chat's pill only): a pick sets the primary and keeps the sheet open; 'Sign in' opens Connections.
+$('fbModels').addEventListener('click', (e) => {
+  const signin = e.target.closest('[data-signin]');
+  if (signin) { closeFallbacks(); return openConnections(signin.dataset.signin); }
+  const b = e.target.closest('.cm-opt');
+  if (b && !b.disabled) fbPickModel(b.dataset.value);
+});
+$('fbModels').addEventListener('keydown', (e) => {
+  const opts = [...$('fbModels').querySelectorAll('.cm-opt:not(:disabled)')], i = opts.indexOf(document.activeElement);
+  if (i < 0 || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
+  e.preventDefault();
+  const j = e.key === 'Home' ? 0 : e.key === 'End' ? opts.length - 1 : i + (e.key === 'ArrowDown' ? 1 : -1);
+  if (j < 0 && e.key === 'ArrowUp') return $('fbModelSearch').focus();
+  opts[Math.max(0, Math.min(opts.length - 1, j))]?.focus();
+});
+$('fbModelSearch').addEventListener('input', () => { FB.q = $('fbModelSearch').value; buildModelMenu($('fbModels'), FB.q); });
+$('fbModelSearch').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); $('fbModels').querySelector('.cm-opt:not(:disabled)')?.click(); }
+  else if (e.key === 'ArrowDown') { e.preventDefault(); $('fbModels').querySelector('.cm-opt:not(:disabled)')?.focus(); }
+});
+function fbPickModel(v) {
+  const sel = $('model');
+  if (v !== sel.value) { sel.value = v; sel.dispatchEvent(new Event('change', { bubbles: true })); } // re-renders the sheet (fbRender)
+  $('fbModels').querySelector(`.cm-opt[data-value="${CSS.escape(v)}"]`)?.focus({ preventScroll: true });
+}
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('fbModal').hidden && !e.target.closest?.('.fe-add')) { e.stopImmediatePropagation(); closeFallbacks(); } }, true);
 
 // ---------- reasoning effort (Claude and Codex only: agents that list `efforts` in /api/agents) ----------
@@ -2247,6 +2282,13 @@ function fbRender() {
   const focused = document.activeElement?.closest?.('#fbBody .fe-row')?.dataset.key;
   if (focused && !FB.fe.focusKey) FB.fe.focusKey = focused;
   const list = (FB.local?.url === h.url ? FB.local.list : h.list()) || [], name = fbName(h.primary);
+  $('fbModal').classList.toggle('combo', !!h.models);
+  $('fbModelSec').hidden = !h.models;
+  if (h.models) {
+    const cur = document.activeElement?.closest?.('#fbModels .cm-opt')?.dataset.value;
+    buildModelMenu($('fbModels'), FB.q || '');
+    if (cur != null) $('fbModels').querySelector(`.cm-opt[data-value="${CSS.escape(cur)}"]`)?.focus({ preventScroll: true });
+  }
   $('fbTitle').textContent = `If ${name} hits its limit`;
   $('fbSub').textContent = h.sub || ''; // the title says it; a sub only for what's specific (a running task, a custom list)
   // A task's own list that differs from its chat's can go back to the chat's.
@@ -2471,6 +2513,8 @@ function renderAgentPicker() {
     const g = document.createElement('optgroup');
     g.label = !a.available ? `${a.label} (not installed)` : a.loggedIn === false ? `${a.label} (signed out)` : a.label;
     g.disabled = !(a.available && a.loggedIn !== false);
+    g.dataset.agent = a.id;
+    if (a.available && a.loggedIn === false) g.dataset.signin = '1';
     const def = el('option', '', `${a.label} · default model`);
     def.value = pickVal({ agent: a.id });
     g.append(def);
@@ -2492,30 +2536,40 @@ function renderAgentPicker() {
     sel.append(g);
   }
   setPick(keep);
-  refreshMenu($('modelPop'), buildModelMenu);
 }
-// The model menu: one group per usable agent (its Default, then its models), unusable agents last as faint headers.
-// The <select> stays the source of truth: a pick sets its value and fires its change event.
-function buildModelMenu(menu) {
-  const sel = $('model');
+// The pill sheet's model list (#fbModels): one group per usable agent (its Default, then its models), filtered by the
+// search q; unusable agents last as faint headers, a signed-out one with 'Sign in'. The <select> stays the source of
+// truth: a pick sets its value and fires its change event (fbPickModel).
+function buildModelMenu(menu, q = '') {
+  const sel = $('model'), words = q.toLowerCase().trim();
   const groups = [...sel.children].filter((g) => g.tagName === 'OPTGROUP').sort((a, b) => a.disabled - b.disabled);
+  menu.replaceChildren();
   for (const g of groups) {
-    menu.append(el('div', 'cm-head' + (g.disabled ? ' off' : ''), g.label));
-    if (g.disabled) continue; // signed out / not installed: the header says so
+    const head = el('div', 'cm-head' + (g.disabled ? ' off' : ''), g.label);
+    if (g.disabled) { // signed out / not installed: the header says so
+      if (words && !g.label.toLowerCase().includes(words)) continue;
+      if (g.dataset.signin) {
+        const b = el('button', 'link-btn inline', 'Sign in');
+        b.type = 'button';
+        b.dataset.signin = g.dataset.agent;
+        head.append(' · ', b);
+      }
+      menu.append(head);
+      continue;
+    }
     const def = [...g.children].find((o) => / \(default\)$/.test(o.textContent));
+    const opts = [];
     for (const o of g.children) {
       const isDef = o.value.endsWith('|');
       const label = isDef ? 'Default' : o.textContent.replace(/^[^·]+ · /, '').replace(/ \(default\)$/, '');
       const hint = isDef && def ? def.textContent.replace(/^[^·]+ · /, '').replace(/ \(default\)$/, '') : '';
-      menu.append(menuOpt(label, { value: o.value, selected: o.value === sel.value, hint, title: o.title, disabled: o.disabled }));
+      if (words && !`${g.label} ${label} ${hint} ${o.value}`.toLowerCase().includes(words)) continue;
+      opts.push(menuOpt(label, { value: o.value, selected: o.value === sel.value, hint, title: o.title, disabled: o.disabled }));
     }
+    if (opts.length) menu.append(head, ...opts);
   }
+  if (!menu.children.length) menu.append(el('p', 'fe-hint', 'No models match.'));
 }
-bindMenu($('modelChip'), $('modelPop'), buildModelMenu, (v) => {
-  const sel = $('model');
-  sel.value = v;
-  sel.dispatchEvent(new Event('change', { bubbles: true }));
-});
 api('/api/agents').then((d) => { AGENT_LIST = d.agents || []; renderAgentPicker(); }).catch(() => {});
 // Which model a task is on and what happens at a limit: the one vocabulary for cards, the drawer and the chat.
 //   normal:    'Opus'                     (running, done, or queued with no fallbacks)
@@ -3138,7 +3192,7 @@ function onServer(msg) {
     updateFolderChip();
     updateHeader();
     migrateAutoDelegate();
-    renderFbChip();
+    renderModelPill();
     fbRender();
     renderEff();
     window.Ext?.renderChip(); // the persona chip follows the chat's persona
@@ -3792,7 +3846,7 @@ function claudeCardWindows(u) {
   return rows;
 }
 function renderUsage(fresh = false) {
-  renderFbChip(); // its usage dots follow the same readings
+  renderModelPill(); // its usage dot follows the same readings
   renderReflectBtn();
   const ids = runningUsageAgents();
   usageSlides.ids = ids;

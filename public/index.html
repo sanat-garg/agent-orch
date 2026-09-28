@@ -199,7 +199,7 @@
                 <svg class="caret" viewBox="0 0 24 24" width="12" height="12"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
               </button>
               -->
-              <!-- Mode, model and effort chips open .cmenu listboxes (app.js composer menus); the hidden selects hold the values. -->
+              <!-- Mode and effort chips open .cmenu listboxes (app.js composer menus); the hidden selects hold the values. -->
               <button type="button" class="chip menu-chip" id="modeChip" aria-haspopup="listbox" aria-controls="modePop" aria-expanded="false" aria-label="Permission mode" title="Permission mode (Shift+Tab to cycle)"><span id="modeLabel">Full access</span><svg class="caret" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></button>
               <select id="mode" aria-label="Permission mode" hidden tabindex="-1">
                 <option value="bypassPermissions">Full access</option>
@@ -208,12 +208,12 @@
                 <option value="plan">Plan mode</option>
                 <option value="orchestrator">Orchestrator Mode</option>
               </select>
-              <button type="button" class="chip menu-chip" id="modelChip" aria-haspopup="listbox" aria-controls="modelPop" aria-expanded="false" title="Agent and model"><span id="modelLabel">Claude Code</span><svg class="caret" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></button>
+              <!-- One pill for the model and its fallbacks ('Opus 5 → Astra +1'): it opens #fbModal with both sections. -->
+              <button type="button" class="chip menu-chip" id="modelChip" aria-haspopup="dialog" aria-controls="fbModal" aria-expanded="false" title="Model"><span class="mc-prim" id="modelLabel">Claude Code</span><span class="mc-fb" id="modelFb" hidden></span><svg class="caret" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></button>
               <select id="model" aria-label="Agent and model" hidden tabindex="-1">
                 <option value="claude|">Claude Code</option>
               </select>
               <button type="button" class="chip menu-chip eff-chip" id="effChip" aria-haspopup="listbox" aria-controls="effPop" aria-expanded="false" hidden><span class="eff-k">Effort: </span><span id="effVal">default</span><svg class="caret" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></button>
-              <button type="button" class="chip fb-chip" id="fbChip" aria-haspopup="dialog" aria-controls="fbModal">No fallbacks</button>
               <!-- Shown once a persona exists (or the chat has one): ext.js. -->
               <button type="button" class="chip menu-chip persona-chip" id="personaChip" aria-haspopup="listbox" aria-controls="personaPop" aria-expanded="false" hidden><svg class="pc-ico" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><circle cx="12" cy="8" r="3.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span id="personaLabel">Persona</span><svg class="caret" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></button>
             </div>
@@ -572,12 +572,18 @@
 
 <!-- Composer menus: compact listbox popovers above their chips (app.js openMenu). -->
 <div class="cmenu" id="modePop" role="listbox" aria-label="Permission mode" hidden></div>
-<div class="cmenu model-menu" id="modelPop" role="listbox" aria-label="Agent and model" hidden></div>
 <div class="cmenu" id="effPop" role="listbox" aria-label="Effort" hidden></div>
 <div class="cmenu" id="personaPop" role="listbox" aria-label="Persona" hidden></div>
 <div class="modal fb-pop" id="fbModal" hidden>
   <div class="modal-backdrop" data-close></div>
   <div class="modal-panel fb" role="dialog" aria-modal="true" aria-labelledby="fbTitle">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <!-- The chat's pill (#modelChip) adds its model list above the fallbacks; task and reflection lists show only the fallbacks. -->
+    <section class="fb-models" id="fbModelSec" aria-labelledby="fbModelTitle" hidden>
+      <div class="m-head"><h2 id="fbModelTitle">Model</h2></div>
+      <input type="search" class="fb-search" id="fbModelSearch" placeholder="Search models" aria-label="Search models" autocomplete="off">
+      <div class="fb-model-list" id="fbModels" role="listbox" aria-labelledby="fbModelTitle"></div>
+    </section>
     <div class="m-head">
       <div>
         <h2 id="fbTitle">Fallbacks</h2>

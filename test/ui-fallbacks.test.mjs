@@ -1,5 +1,5 @@
 // The fallback sheet in a real browser: boots server.mjs (stub codex CLI with a wide catalog, CW_NO_ORCHESTRATOR=1, temp data dir) on a
-// spare port. Chat: the composer's Fallbacks button opens it, and remove, undo, reorder (Alt+↑ and drag) and add each
+// spare port. Chat: the composer's model pill opens it, and remove, undo, reorder (Alt+↑ and drag) and add each
 // persist through PUT /api/convos/:id/fallbacks. Reflection: the Settings sheet opens the same sheet at once, without
 // any request, and saves via PUT /api/orch/projects/:id/reflect-settings. Skips when Playwright's Chromium can't launch.
 import { test, before, after } from 'node:test';
@@ -12,6 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isolatedPath } from './helpers/isolated-path.mjs';
+import { macChromiumEnv } from './helpers/mac-chromium.mjs';
 import { chromium } from 'playwright-core';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -23,7 +24,8 @@ const START = [
   { agent: 'codex', model: 'gpt-6-nova' },
 ];
 let browser, skip = false;
-try { browser = await chromium.launch(); } catch (e) { skip = `cached Chromium unavailable: ${e.message.split('\n')[0]}`; }
+const macEnv = macChromiumEnv(); // Chromium on the MacBook worker's LaunchDaemon needs a shim (helpers/mac-chromium.mjs)
+try { browser = await chromium.launch({ env: { ...process.env, ...macEnv }, ...(macEnv.AGENT_ORCH_BROWSER_PATH && { executablePath: macEnv.AGENT_ORCH_BROWSER_PATH }) }); } catch (e) { skip = `cached Chromium unavailable: ${e.message.split('\n')[0]}`; }
 let child, base, dataDir, home, cookie, db, pid;
 const PROJECT = () => path.join(dataDir, 'no-such-project');
 
@@ -105,8 +107,8 @@ test('chat fallbacks: the picker has no Auto Delegate; the sheet removes, undoes
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto(`${base}/#${CID}`);
-  const chip = page.locator('#fbChip');
-  await page.waitForFunction(() => ((document.querySelector('#fbChip')?.getAttribute('aria-label') || '').match(/^Fallbacks: /) ? document.querySelector('#fbChip').getAttribute('aria-label').split(', then ').length : 0) === 3);
+  const chip = page.locator('#modelChip');
+  await page.waitForFunction(() => document.querySelector('#modelChip')?.getAttribute('aria-label') === 'Model GPT-5.5, then GPT-6-Sol, then GPT-6-Astra, then GPT-6-Nova');
   assert.equal(await page.evaluate(() => [...document.querySelectorAll('#model option')].some((o) => /auto/i.test(o.value + o.textContent))), false);
   assert.equal(await page.evaluate((cid) => localStorage.getItem(`cw.auto.${cid}`), CID), null);
   await chip.click();
@@ -121,12 +123,11 @@ test('chat fallbacks: the picker has no Auto Delegate; the sheet removes, undoes
   assert.deepEqual(await rows.evaluateAll((els) => els.map((e) => !!e.querySelector('.fe-lim'))), [true, true, true]);
   assert.equal(await page.locator('#fbModal .fe-reset').count(), 0);
 
-  // Remove the second model: saved at once, the composer button follows.
+  // Remove the second model: saved at once, the composer's model pill follows.
   await rows.nth(1).locator('.fe-rm').click();
   await until(['gpt-6-sol', 'gpt-6-nova'], 'remove persisted');
   assert.deepEqual(await names(), ['GPT-6-Sol', 'GPT-6-Nova']);
-  assert.equal(await page.evaluate(() => document.querySelectorAll('#fbChip .fb-name').length), 2);
-  assert.match(await chip.getAttribute('aria-label'), /^Fallbacks: .+ \(.+\), then .+ \(.+\)$/, 'named, with usage status');
+  assert.equal(await chip.getAttribute('aria-label'), 'Model GPT-5.5, then GPT-6-Sol, then GPT-6-Nova');
   // Undo from the toast puts it back in place.
   await page.locator('#toasts .toast-act').click();
   await until(['gpt-6-sol', 'gpt-6-astra', 'gpt-6-nova'], 'undo persisted');
@@ -161,7 +162,8 @@ test('chat fallbacks: the picker has no Auto Delegate; the sheet removes, undoes
   for (let i = 0; i < 3; i++) await rows.nth(0).locator('.fe-rm').click();
   await until([], 'empty list persisted');
   await page.locator('#fbModal .fe-hint', { hasText: 'No fallbacks' }).waitFor();
-  assert.equal(await chip.innerText(), 'No fallbacks');
+  assert.equal(await chip.getAttribute('aria-label'), 'Model GPT-5.5');
+  assert.equal(await page.locator('#modelFb').isHidden(), true);
   assert.deepEqual(errors, []);
   await ctx.close();
 });
@@ -348,7 +350,10 @@ test('fallback sheets name the model they back up: the chat\'s new model at once
     await page.keyboard.press('Escape');
     await page.keyboard.press('Escape');
     // The chat's own sheet and a queued task's sheet name the chat's new model too.
-    assert.match(await page.locator('#fbChip').getAttribute('title'), /^If claude-fable-5-1 hits its limit, queued tasks/);
+    assert.match(await page.locator('#modelChip').getAttribute('title'), /^Model claude-fable-5-1, then /);
+    await page.locator('#modelChip').click();
+    assert.equal(await page.locator('#fbTitle').innerText(), 'If claude-fable-5-1 hits its limit');
+    await page.keyboard.press('Escape');
     await page.evaluate((id) => openFallbacks(taskFallbacks(id), document.body), queued);
     assert.equal(await page.locator('#fbTitle').innerText(), 'If claude-fable-5-1 hits its limit');
     assert.deepEqual(errors, []);

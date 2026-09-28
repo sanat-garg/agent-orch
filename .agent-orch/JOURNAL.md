@@ -1318,6 +1318,9 @@ rename/new/delete endpoints added to files.mjs; files-ops tests pass
 
 Assign task picker on every machine card and detail panel
 
+## 2026-09-28 15:07 — #449 Prompt bar: one combined model + fallbacks control [done (check passed)]
+
+one model pill with fallbacks sheet; tests pass
 ## 2026-09-28 14:57 — #457 Integrate #407: Version format: v<major>.<minor> from the commit count (352 → v3.52) [done (check passed)]
 
 Conflict resolved; version tests and UI static tests pass
@@ -1345,6 +1348,13 @@ phone header: one 44pt row, title menu switches views; tests pass
 
 Sign out moved to Connections; version shows under logo
 
+## 2026-09-28 15:14 — #461 Integrate #449: Prompt bar: one combined model + fallbacks control [done (check passed)]
+
+CONTEXT.md merged; model-fallbacks and static UI tests pass
+
+## 2026-09-28 15:14 — #461 Integrate #449: Prompt bar: one combined model + fallbacks control [verify failed (1)]
+
+Command: merge main again
 ## 2026-09-28 15:14 — #452 Orchestrator bar status: 'Running X · Queue Y' [done (check passed)]
 
 orchestrator bar shows Running X · Queue Y; tests pass
@@ -1353,6 +1363,17 @@ orchestrator bar shows Running X · Queue Y; tests pass
 
 CONTEXT.md conflict resolved; worker-integration tests pass 5/5
 
+## 2026-09-28 16:53 — #461 Integrate #449: Prompt bar: one combined model + fallbacks control [done (check passed)]
+
+CONTEXT.md conflict re-resolved; model-fallbacks, ui-static and orchbar tests pass
+
+## 2026-09-28 16:53 — #461 Integrate #449: Prompt bar: one combined model + fallbacks control [verify failed (2)]
+
+Command: merge main again
 ## 2026-09-28 16:53 — #462 Integrate #454: Ping result: restyled and fades away after 10 seconds [done (check passed)]
 
 CONTEXT.md conflict resolved; ping-result tests pass
+
+## 2026-09-28 16:53 — #461 Integrate #449: Prompt bar: one combined model + fallbacks control [done (check passed)]
+
+CONTEXT.md conflict resolved again; Done-when tests pass (23/23)

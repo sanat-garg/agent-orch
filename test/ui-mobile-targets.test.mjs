@@ -107,7 +107,7 @@ test('390×844 touch: chat-screen controls are at least 44×44', { skip, timeout
   const { ctx, page, errors } = await open({ width: 390, height: 844 });
   const found = await boxes(page, '#send, .send, .icon-btn, .chip, .orch-bar .chip, .btn.small');
   const ids = found.map((b) => b.id);
-  for (const id of ['send', 'openSidebar', 'modeChip', 'modelChip', 'fbChip']) assert.ok(ids.includes(id), `${id} visible: ${ids}`);
+  for (const id of ['send', 'openSidebar', 'modeChip', 'modelChip']) assert.ok(ids.includes(id), `${id} visible: ${ids}`);
   for (const b of found) assert.ok(b.h >= 44, `${b.id} is ${b.w}×${b.h}`);
   for (const b of found.filter((b) => /^(send|openSidebar)$/.test(b.id))) assert.ok(b.w >= 44, `${b.id} is ${b.w}×${b.h}`);
 

@@ -142,7 +142,7 @@ test('a Mac card: Paused with its reason, and a Power panel that saves the polic
   await waitFor(() => frames.filter((f) => f.t === 'node.policy').at(-1).policy.keepAwake === 'always', { timeout: 10000, message: 'keepAwake' });
   // The worker, now within its policy, reports intake again: the card is Online, the panel still open.
   tx('resources', { memAvailable: 9 * GB, load: [1, 1, 1], running: [], battery: { pct: 42, charging: false, source: 'battery' }, intake: { ok: true }, awake: false });
-  await page.locator('body').click({ position: { x: 5, y: 5 } }); // leave the menu: a render waits while it has focus
+  await page.locator('#ndTitle').click(); // leave the menu: a render waits while it has focus
   await card.locator('.mc-st', { hasText: 'Online' }).waitFor({ timeout: 15000 });
   assert.equal(await card.locator('.mc-power').count(), 1);
   const fits = await page.evaluate(() => [...document.querySelectorAll('.mc-node')].every((c) => c.scrollWidth <= c.clientWidth + 1)

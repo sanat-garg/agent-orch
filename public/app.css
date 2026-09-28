@@ -647,10 +647,14 @@ code, pre, kbd { font-family: var(--mono); }
 @media (prefers-reduced-motion: reduce) { .ca-plate, .ca-gauge, .ca-drain, .ca-moon, .ca-cd { transition: none; } }
 /* a machine's detail (tap it in the diagram) */
 .modal-panel.nd { width: min(760px, 100%); }
-.nd-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: 12px; margin: 0 0 20px; }
-.nd-grid .sline { height: 72px; }
+.modal-panel.nd.wide { width: min(1120px, 100%); } /* this server's details */
+.nd-back { margin-left: -8px; }
+.sd-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 12px; }
+.sd-head .m-sub { margin: 0; flex: 1; min-width: 0; }
+#sdRun:not(:empty) { margin-top: 20px; }
+.sd > .m-top { margin: 0 0 20px; }
+.nd-grid { margin: 0 0 20px; }
 .nd-grid.loading .sline svg { opacity: .45; }
-.nd-val { font-size: 20px; font-weight: 600; color: var(--text); }
 .nd-task + .nd-task { margin-top: 10px; }
 .nd-task .dr-sec { margin: 8px 2px 0; }
 .nd-task .dr-sec > h3 { display: none; }
@@ -1267,13 +1271,12 @@ details.dr-more[open] > summary { margin-bottom: 12px; }
 @keyframes fade { from { opacity: 0; } }
 @keyframes rise { from { opacity: 0; transform: translateY(8px) scale(.99); } }
 .m-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
-/* Top processes: two cards wide in the metric grid; its list scrolls inside the row the cards set (contain: size keeps
-   it from stretching them). One column on narrow screens, where it takes the full width at its natural height. */
-.m-top { display: flex; flex-direction: column; grid-column: 1 / -1; }
+/* Top processes: after Running here in this server's details; on desktop its list scrolls inside a capped height.
+   On narrow screens it takes its natural height. */
+.m-top { display: flex; flex-direction: column; }
 .m-top .m-table td { padding: 5px 0; }
 @media (min-width: 801px) {
-  .m-grid > .m-top { grid-column: span 2; }
-  .m-top-scroll { flex: 1; min-height: 150px; overflow-y: auto; overscroll-behavior: contain; contain: size; }
+  .m-top-scroll { max-height: 320px; overflow-y: auto; overscroll-behavior: contain; }
   .m-top-scroll thead th { position: sticky; top: 0; background: var(--panel); }
 }
 .m-card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px; position: relative; min-width: 0; }
@@ -1361,6 +1364,8 @@ details.dr-more[open] > summary { margin-bottom: 12px; }
   .modal-panel { width: 100%; height: 100dvh; max-height: 100dvh; border-radius: 0; border: 0; padding-top: env(safe-area-inset-top); }
   .m-head { padding: 12px 8px 10px 14px; flex-wrap: wrap; }
   .m-head > div { flex-basis: calc(100% - 56px); }
+  .modal-panel.nd .m-head { flex-wrap: nowrap; }
+  .modal-panel.nd .m-head > div { flex-basis: auto; }
   .live-pill { order: 3; }
   .m-body { padding: 0 12px max(16px, env(safe-area-inset-bottom)); }
   .m-cols { grid-template-columns: 1fr; }

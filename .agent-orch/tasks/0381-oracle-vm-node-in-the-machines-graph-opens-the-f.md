@@ -13,3 +13,7 @@ In the Machines view's cluster diagram (public/app.js, from #223/#231), clicking
 ## Done when
 
 `node --test test/ui-static.test.mjs test/ui-machines*.test.mjs` passes, and a UI test shows that clicking the oracle-vm node renders the server CPU/RAM charts in the node detail
+
+## Result — done (check passed) (2026-09-28 13:16)
+
+AGENT-ORCH-STATUS: done — oracle-vm opens the node detail, which now shows the full server details

@@ -177,11 +177,17 @@ test('composer menus: mode, model and effort chips open compact .cmenu listboxes
   assert.match(appCss, /\.cm-opt\[aria-selected="true"\]::after \{ background: var\(--accent\);/);
 });
 
-test('server details: Top processes sits in the metric grid right after the six cards, two cards wide on desktop', () => {
-  assert.match(appJs, /tile\('load', 'Load average'\),\n\s*\$\('mTopCard'\),/);
-  assert.match(indexHtml, /id="mTopCard"[\s\S]*?class="m-top-scroll"><table class="m-table" id="mTop">/);
-  assert.match(appCss, /@media \(min-width: 801px\) \{\n\s*\.m-grid > \.m-top \{ grid-column: span 2; \}/);
-  assert.match(appCss, /\.m-top-scroll \{[^}]*contain: size;/, 'the list scrolls inside the row instead of stretching it');
+test('server details live in the controller node detail: charts, Running here, Top processes, Machines; no separate modal', () => {
+  assert.ok(!indexHtml.includes('serverModal') && !appJs.includes('serverModal') && !appJs.includes('closeServer'), 'the old Server details modal is gone');
+  assert.match(indexHtml, /<div id="sdStash" hidden>\s*<div class="sd" id="serverDetails">\s*<div class="sd-head">[\s\S]*?id="rangePicker"[\s\S]*?id="mGrid"><\/div>\s*<div id="sdRun"><\/div>\s*<div class="m-card m-top" id="mTopCard">[\s\S]*?class="m-top-scroll"><table class="m-table" id="mTop">[\s\S]*?id="mcTitle"[\s\S]*?id="caWrap"[\s\S]*?id="mMachines"/);
+  assert.match(indexHtml, /id="nodeModal"[\s\S]*?id="ndBack"[\s\S]*?id="ndBody"[\s\S]*?id="machineModal"/, 'Add machine stacks above the node detail');
+  assert.match(appJs, /function renderServerDetails\(container\) \{/);
+  assert.match(appJs, /tile\('load', 'Load average'\),\n\s*\);/);
+  assert.match(appJs, /\$\('miniStats'\)\.addEventListener\('click', openServer\);/);
+  assert.match(appJs, /function openServer\(\) \{\n\s*closeSidebar\(\);\n\s*openNode\(/);
+  assert.deepEqual([...appJs.matchAll(/^  \['(\w+)', '[^']+', \(s/gm)].map((m) => m[1]), ['cpu', 'mem', 'disk', 'net', 'load'], "a worker's tiles in the head's order");
+  assert.match(appCss, /\.m-top-scroll \{ max-height: 320px; overflow-y: auto;/, 'the list scrolls inside a capped height');
+  assert.match(appCss, /\.modal-panel\.nd\.wide \{ width: min\(1120px, 100%\); \}/);
 });
 
 test('top bar keeps its 56px content row below the iPhone safe-area inset (UI-REVIEW #1)', () => {

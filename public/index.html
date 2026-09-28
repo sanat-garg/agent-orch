@@ -589,40 +589,53 @@
   </div>
 </div>
 
-<div class="modal" id="serverModal" hidden>
-  <div class="modal-backdrop" data-close></div>
-  <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="mDevice">
-    <div class="m-head">
-      <div>
-        <h2 id="mDevice">Oracle VM</h2>
-        <p class="m-sub" id="mSub">Loading…</p>
-      </div>
+<!-- Server details: renderServerDetails() mounts this in the controller's node detail (#nodeModal); parked here otherwise. -->
+<div id="sdStash" hidden>
+  <div class="sd" id="serverDetails">
+    <div class="sd-head">
+      <p class="m-sub" id="mSub">Loading…</p>
       <span class="live-pill" id="livePill" role="status" aria-live="off">
         <span class="live-dot"></span><span id="liveText">Connecting…</span>
       </span>
+    </div>
+    <div class="range-row">
+      <span>Charts show</span>
+      <div class="range-picker" id="rangePicker" role="group" aria-label="Chart time range">
+        <button data-range="15m">15m</button><button data-range="1h">1h</button><button data-range="6h">6h</button><button data-range="24h">24h</button><button data-range="7d">7d</button><button data-range="all">All</button>
+      </div>
+    </div>
+    <div class="m-grid" id="mGrid"></div>
+    <div id="sdRun"></div>
+    <div class="m-card m-top" id="mTopCard">
+      <h3>Top processes</h3>
+      <div class="m-top-scroll"><table class="m-table" id="mTop"><thead><tr><th>Process</th><th class="num">CPU</th><th class="num">Memory</th></tr></thead><tbody></tbody></table></div>
+    </div>
+    <section class="mc-sec" aria-labelledby="mcTitle">
+      <div class="mc-head"><h3 id="mcTitle">Machines</h3><span class="mc-acts"><button class="btn small" id="pingAll" type="button" hidden>Ping all</button><button class="btn small" id="addMachine" type="button">Add machine</button></span></div>
+      <p class="mc-sum" id="mcSum"></p>
+      <div class="ca-wrap" id="caWrap" hidden></div>
+      <ul class="mc-grid" id="mMachines"></ul>
+    </section>
+  </div>
+</div>
+
+<div class="modal sheet" id="nodeModal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-panel nd" role="dialog" aria-modal="true" aria-labelledby="ndTitle">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <div class="m-head">
+      <button class="icon-btn nd-back" id="ndBack" type="button" aria-label="Back to this server" hidden>
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+      <div>
+        <h2 id="ndTitle">Machine</h2>
+        <p class="m-sub" id="ndSub"></p>
+      </div>
       <button class="icon-btn" data-close aria-label="Close">
         <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
       </button>
     </div>
-    <div class="m-body">
-      <div class="range-row">
-        <span>Charts show</span>
-        <div class="range-picker" id="rangePicker" role="group" aria-label="Chart time range">
-          <button data-range="15m">15m</button><button data-range="1h">1h</button><button data-range="6h">6h</button><button data-range="24h">24h</button><button data-range="7d">7d</button><button data-range="all">All</button>
-        </div>
-      </div>
-      <div class="m-grid" id="mGrid"></div>
-      <div class="m-card m-top" id="mTopCard">
-        <h3>Top processes</h3>
-        <div class="m-top-scroll"><table class="m-table" id="mTop"><thead><tr><th>Process</th><th class="num">CPU</th><th class="num">Memory</th></tr></thead><tbody></tbody></table></div>
-      </div>
-      <section class="mc-sec" aria-labelledby="mcTitle">
-        <div class="mc-head"><h3 id="mcTitle">Machines</h3><span class="mc-acts"><button class="btn small" id="pingAll" type="button" hidden>Ping all</button><button class="btn small" id="addMachine" type="button">Add machine</button></span></div>
-        <p class="mc-sum" id="mcSum"></p>
-        <div class="ca-wrap" id="caWrap" hidden></div>
-        <ul class="mc-grid" id="mMachines"></ul>
-      </section>
-    </div>
+    <div class="m-body nd-body" id="ndBody"></div>
   </div>
 </div>
 
@@ -639,23 +652,6 @@
       </button>
     </div>
     <div class="cn-body am-body" id="amBody"></div>
-  </div>
-</div>
-
-<div class="modal sheet" id="nodeModal" hidden>
-  <div class="modal-backdrop" data-close></div>
-  <div class="modal-panel nd" role="dialog" aria-modal="true" aria-labelledby="ndTitle">
-    <div class="sheet-grip" aria-hidden="true"></div>
-    <div class="m-head">
-      <div>
-        <h2 id="ndTitle">Machine</h2>
-        <p class="m-sub" id="ndSub"></p>
-      </div>
-      <button class="icon-btn" data-close aria-label="Close">
-        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-      </button>
-    </div>
-    <div class="m-body nd-body" id="ndBody"></div>
   </div>
 </div>
 

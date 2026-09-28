@@ -1073,6 +1073,9 @@ Keep improving switch is back; off blocks every reflection path
 
 expiry notes show each row's own window; overdue rows expire at boot
 
+## 2026-09-28 13:16 — #381 oracle-vm node in the Machines graph opens the full server details [done (check passed)]
+
+oracle-vm opens the node detail, which now shows the full server details
 ## 2026-09-28 13:08 — #368 Ping button for worker machines: round-trip plus an on-Mac network self-check [done (check passed)]
 
 Ping per worker card and Ping all work; ping tests pass
@@ -1182,6 +1185,14 @@ Pushes now stream into git after the ref check; dropped clients kill git
 ## 2026-09-28 14:25 — #416 Integrate #392: Stats ui: a Why tasks failed card on Overview with a count per reason and the last tasks of each [done (check passed)]
 
 CONTEXT.md conflict resolved; ui-stats tests pass
+
+## 2026-09-28 14:28 — #398 Integrate #381: oracle-vm node in the Machines graph opens the full server details [done (check passed)]
+
+Merge resolved, Ping all kept, machines UI tests pass
+
+## 2026-09-28 14:28 — #398 Integrate #381: oracle-vm node in the Machines graph opens the full server details [verify failed (1)]
+
+Command: merge main again
 ## 2026-09-28 14:27 — #427 One push to main at a time: queue and retry the head's GitHub pushes, never crash a task [done (check passed)]
 
 main and task-branch pushes queue, retry, never force or crash
@@ -1197,3 +1208,7 @@ gate classifies uploads, xy clicks, code URLs outbound; Enter keyed
 ## 2026-09-28 14:27 — #436 Rapid top-up fills every machine's free slots with work it can actually run [done (check passed)]
 
 Rapid top-up now counts worker slots, excluding head-only integrators
+
+## 2026-09-28 14:29 — #398 Integrate #381: oracle-vm node in the Machines graph opens the full server details [done (check passed)]
+
+CONTEXT.md conflict resolved; UI and Machines tests pass

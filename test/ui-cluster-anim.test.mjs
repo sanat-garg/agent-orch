@@ -394,12 +394,11 @@ test('tapping a node opens its detail: telemetry charts, the phase timeline and 
   assert.equal(await page.locator('#ndLogs').textContent(), 'Refresh');
   const fits = await page.evaluate(() => { const p = document.querySelector('#nodeModal .modal-panel'), b = p.getBoundingClientRect(); return b.left >= 0 && b.right <= innerWidth && p.scrollWidth <= p.clientWidth + 1; });
   assert.ok(fits, 'the sheet fits 390px');
-  // Escape closes only the detail; this server's own detail explains where its log lives.
+  // Escape goes back to this server's details, whose log lives in the journal.
   await page.keyboard.press('Escape');
-  assert.equal(await page.locator('#nodeModal').isHidden(), true);
-  assert.equal(await page.locator('#serverModal').isVisible(), true);
+  assert.equal(await page.locator('#nodeModal').isVisible(), true);
+  await page.locator('#ndBody #serverDetails').waitFor();
   await page.locator('#caWrap .ca-node[data-node="controller"] .ca-name').tap();
-  await page.locator('#nodeModal:not([hidden])').waitFor();
   assert.match(await page.locator('#ndLog').textContent(), /journalctl -u agent-orch/);
   assert.match(await page.locator('#ndRun').textContent(), /Plan the next push/);
   await ctx.close();

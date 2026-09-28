@@ -2925,7 +2925,7 @@ function connect() {
     send({ t: 'open', cid: state.cid });
     pollUpdates();
     refreshConnections();
-    if (!$('serverModal').hidden) send({ t: 'metrics_sub', on: true });
+    if (serverOpen()) send({ t: 'metrics_sub', on: true });
     if (O.drawer) { send({ t: 'owatch', taskId: O.drawer, on: true }); loadDetail(); }
     window.bvResume?.();
   };
@@ -3239,7 +3239,6 @@ function buildMetrics() {
     tile('net', 'Network', { pair: [['rx', 'Download'], ['tx', 'Upload']], spark: [(h) => h.rx + h.tx, fmtRate] }),
     tile('io', 'Disk activity', { pair: [['dr', 'Read'], ['dw', 'Write']], spark: [(h) => h.dr + h.dw, fmtRate] }),
     tile('load', 'Load average'),
-    $('mTopCard'), // two cards wide, in the grid right after the six metric cards
   );
   let resizeTimer;
   addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => M.draws.forEach((d) => d()), 100); });
@@ -3301,8 +3300,8 @@ function renderMetrics() {
   if (!d) { M.draws.forEach((fn) => fn()); return; }
   const now = M.latest || {};
   const inst = d.instance;
-  $('mDevice').textContent = d.device;
   $('mSub').textContent = [
+    d.device,
     inst ? `${inst.shape} · ${inst.ocpus} OCPU · ${inst.memoryGB} GB RAM` : null,
     inst ? `${REGION_NAMES[inst.region] || inst.region} (${inst.region})` : null,
     `${d.os} · ${d.arch}`,
@@ -3333,18 +3332,18 @@ function renderMetrics() {
     detail: `Since boot on ${d.net.iface}: ↓ <b>${fmtBytes(d.net.rxTotal)}</b> · ↑ <b>${fmtBytes(d.net.txTotal)}</b>${inst?.bandwidthGbps ? ` · ${inst.bandwidthGbps} Gbps link` : ''}`,
   });
   setTile('io', { pair: { dr: [now.dr || 0, fmtRate], dw: [now.dw || 0, fmtRate] }, status: ['', ''], detail: 'Reads and writes on the boot volume' });
-  const loadPct = (d.cpu.load[0] / d.cpu.cores) * 100;
+  const load = d.cpu.load.map((v) => v || 0), loadPct = (load[0] / d.cpu.cores) * 100; // no /proc/loadavg (a macOS head): null
   setTile('load', {
-    num: [d.cpu.load[0], (v) => v.toFixed(2)],
+    num: [load[0], (v) => v.toFixed(2)],
     status: level(loadPct, 80, 150),
-    detail: `5 min <b>${d.cpu.load[1].toFixed(2)}</b> · 15 min <b>${d.cpu.load[2].toFixed(2)}</b><br>${d.cpu.cores} vCPU, so 1.00 means fully busy · ${d.procs.total} processes`,
+    detail: `5 min <b>${load[1].toFixed(2)}</b> · 15 min <b>${load[2].toFixed(2)}</b><br>${d.cpu.cores} vCPU, so 1.00 means fully busy · ${d.procs.total} processes`,
   });
 
   const tb = $('mTop').querySelector('tbody');
   tb.textContent = '';
   for (const p of d.top) {
     const tr = el('tr');
-    tr.append(el('td', '', p.name), el('td', 'num', `${p.cpu.toFixed(1)}%`), el('td', 'num', fmtBytes(p.rss)));
+    tr.append(el('td', '', p.name), el('td', 'num', `${(p.cpu || 0).toFixed(1)}%`), el('td', 'num', fmtBytes(p.rss)));
     tb.append(tr);
   }
 
@@ -3533,7 +3532,7 @@ function onMetrics(msg) {
     return;
   }
   renderMini();
-  if (!$('serverModal').hidden) renderMetrics();
+  if (serverOpen()) renderMetrics();
   updateLive();
 }
 function beat() {
@@ -3553,20 +3552,23 @@ function updateLive() {
     d.classList.remove('on', 'stale', 'off');
     d.classList.add(cls);
   });
-  if ($('serverModal').hidden) return;
+  if (!serverOpen()) return;
   // The pulsing dot shows each update; the label only names the state.
   const text = !connected ? 'Reconnecting…' : late ? 'Waiting for data…' : 'Live';
   if ($('liveText').textContent !== text) $('liveText').textContent = text;
 }
 setInterval(updateLive, 1000);
 
-// ----- server window -----
-let lastFocus = null;
-function openServer() {
-  closeSidebar();
-  lastFocus = document.activeElement;
+// ----- server details (this server's own window: the controller's node detail) -----
+// One block (index.html #serverDetails: device line, charts, running tasks, top processes, Machines) that
+// renderServerDetails(container) mounts in the controller's node detail; parked in #sdStash otherwise, so its charts and
+// listeners live on. Live refresh (metrics_sub) runs only while it's shown.
+const serverOpen = () => !$('nodeModal').hidden && !$('sdStash').contains($('serverDetails'));
+function renderServerDetails(container) {
+  const was = serverOpen();
+  container.append($('serverDetails'));
+  if (was) return;
   buildMetrics();
-  $('serverModal').hidden = false;
   send({ t: 'metrics_sub', on: true });
   renderUsage();
   renderRangePicker();
@@ -3575,7 +3577,18 @@ function openServer() {
   updateLive();
   CA.ready = false; // the cluster diagram's first snapshot is drawn as it is, not replayed
   loadMachines();
-  $('serverModal').querySelector('[data-close].icon-btn').focus();
+}
+function parkServerDetails() {
+  if ($('sdStash').contains($('serverDetails'))) return;
+  const was = serverOpen();
+  $('sdRun').replaceChildren(); // its Running here belongs to that open
+  $('sdStash').append($('serverDetails'));
+  if (was) { send({ t: 'metrics_sub', on: false }); caFlush(); }
+}
+// The sidebar card (and anything else that shows "this server") opens the controller's node detail.
+function openServer() {
+  closeSidebar();
+  openNode(MC.nodes.find((n) => n.local)?.id || 'controller');
 }
 function renderRangePicker() {
   document.querySelectorAll('#rangePicker button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.range === M.range)));
@@ -3588,21 +3601,12 @@ $('rangePicker').addEventListener('click', (e) => {
   renderRangePicker();
   loadHistory(true);
 });
-function closeServer() {
-  $('serverModal').hidden = true;
-  send({ t: 'metrics_sub', on: false });
-  lastFocus?.focus?.();
-}
 $('miniStats').addEventListener('click', openServer);
-$('serverModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeServer(); });
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !$('serverModal').hidden && $('machineModal').hidden && $('nodeModal').hidden) { e.stopImmediatePropagation(); closeServer(); }
-}, true);
 setInterval(() => { if (M.usage) renderUsage(); }, 30e3); // keep the "in 2h 9m" countdowns current
 
 // ----- machines (cluster nodes) and the "Add machine" wizard -----
 // One card per node from GET /api/cluster/nodes (cluster.mjs view + orchestrator `machines`: running tasks, work slots in
-// use and the node's slot count). While Server details is open it re-reads on 'cluster' pushes (node changes, worker
+// use and the node's slot count). While a node detail is open it re-reads on 'cluster' pushes (node changes, worker
 // CPU/RAM readings), task changes and, for the controller's own numbers, its metric ticks (at most every 10 s).
 // "Add machine": POST /api/cluster/pair → a one-time code, or {uses: N} → one code for N machines (valid 1 h), embedded in
 // a one-line install command per OS (bin/install-worker*.sh, served at /install/…). GET /api/cluster/pair/:code then
@@ -3627,10 +3631,10 @@ async function loadMachines() {
   setMachineSounds(MC.nodes);
   renderMachines();
 }
-// Coalesces bursts (task updates, pushes) into one read while Server details is open.
+// Coalesces bursts (task updates, pushes) into one read while a node detail is open.
 function scheduleMachines(ms = 600) {
-  if ($('serverModal').hidden || MC.timer) return;
-  MC.timer = setTimeout(() => { MC.timer = null; if (!$('serverModal').hidden) loadMachines(); }, ms);
+  if ($('nodeModal').hidden || MC.timer) return;
+  MC.timer = setTimeout(() => { MC.timer = null; if (!$('nodeModal').hidden) loadMachines(); }, ms);
 }
 // Online / Draining / Disabled while connected; away: Connection lost (silent, no bye), Shut down (bye), Asleep (a legacy
 // row: a sleep is only known after the fact, from the worker's reconnect), else Offline.
@@ -3657,9 +3661,9 @@ function renderMachines() {
   // A power menu in use isn't replaced under the owner's finger: the render waits until it loses focus.
   if (document.activeElement?.matches?.('#mMachines select')) { MC.stale = true; return; }
   MC.stale = false;
-  const nodes = MC.nodes, sec = $('mcTitle').closest('.mc-sec'), body = sec.parentElement, first = nodes.some((n) => !n.local);
-  // With workers the cluster leads Server details (above this server's charts); alone it sits at the bottom.
-  if (first !== (body.firstElementChild === sec)) { if (first) body.prepend(sec); else body.append(sec); }
+  const nodes = MC.nodes, sec = $('mcTitle').closest('.mc-sec'), head = sec.parentElement.firstElementChild, first = nodes.some((n) => !n.local);
+  // With workers the cluster leads this server's details (under the device line, above its charts); alone it sits at the bottom.
+  if (first !== (head.nextElementSibling === sec)) { if (first) head.after(sec); else sec.parentElement.append(sec); }
   sec.classList.toggle('first', first);
   $('mcSum').textContent = nodes.length ? machineSummary(nodes) : '';
   $('pingAll').hidden = !first;
@@ -3749,7 +3753,7 @@ function machineCard(n) {
     const e = el('span', t.waiting_for ? 'e wait' : 'e', t.waiting_for ? 'waiting' : fmtDur(Date.now() / 1000 - t.started_at));
     e.title = t.waiting_for ? `Waiting for ${t.waiting_for} to come back` : 'Running for';
     b.append(main, e);
-    b.addEventListener('click', () => { closeServer(); openTask(t.id); });
+    b.addEventListener('click', () => { closeNode(true); openTask(t.id); });
     list.append(b);
   }
   if (tasks.length) run.append(list);
@@ -3981,7 +3985,7 @@ function powerPanel(n) {
   return box;
 }
 
-// ----- cluster diagram (Server details → Machines, above the cards) -----
+// ----- cluster diagram (this server's details → Machines, above the cards) -----
 // One SVG drawn by one requestAnimationFrame loop: the head (this server) in the middle and the workers around it (a
 // vertical list under 640px), each with CPU (outer) and RAM (inner) ring gauges, its OS icon and its running tasks as
 // chips. It moves on data the page already gets: a worker's newer reading (resources.at, sent every heartbeat) pulses it
@@ -3989,7 +3993,7 @@ function powerPanel(n) {
 // most 6 a second per link; a task that shows up on a machine travels there from the head as a chip, and one that leaves
 // returns and merges into the head (a check when it finished, a cross when it failed). Phase changes cross-fade on the
 // chip. Offline machines turn grey with a dashed link, asleep Macs wear a moon and draining ones an amber ring. The loop
-// runs only while something moves, Server details is open, the diagram in view and the page visible (at most 60 fps),
+// runs only while something moves, this server's details are open, the diagram in view and the page visible (at most 60 fps),
 // and never reads layout; with reduced motion every change is a static swap. Colours are theme variables (app.css .ca-*).
 const SVGNS = 'http://www.w3.org/2000/svg';
 const sv = (tag, attrs, parent) => {
@@ -4004,7 +4008,7 @@ const CA_PHASE = { queued: 'starting', cloning: 'cloning', fetching: 'fetching',
 const CA_TONE = { running: 'run', checking: 'check', committing: 'check', finishing: 'check', pushing: 'push', waiting: 'wait' };
 // nodes: id → view (its group, place, link); chips: task id → chip; anims: what moves now; seen: node id → its newest
 // reading's time; status: task id → its last pushed status; emit: node id → particle throttle; ready: the first
-// snapshot since Server details opened is drawn (later changes animate).
+// snapshot since this server's details opened is drawn (later changes animate).
 const CA = { wrap: null, svg: null, g: {}, w: 0, h: 0, list: false, key: '', head: null, nodes: new Map(), chips: new Map(), anims: new Set(),
   seen: new Map(), status: new Map(), emit: new Map(), raf: 0, last: 0, ready: false, inView: true, asked: 0, mark: null, markPath: null, markAnim: null, markTimer: 0 };
 
@@ -4021,12 +4025,12 @@ function caBuild() {
     const w = Math.round(e.contentRect.width);
     if (w && w !== CA.w) { CA.w = w; caLayout(); }
   }).observe(CA.wrap);
-  // Scrolled out of view (Server details scrolls): nothing moves until it's back.
+  // Scrolled out of view (the details scroll): nothing moves until it's back.
   new IntersectionObserver(([e]) => { CA.inView = e.isIntersecting; if (!CA.inView) caFlush(); }).observe(CA.wrap);
   // A chip opens its task's drawer; a machine its detail.
   CA.svg.addEventListener('click', (e) => {
     const chip = e.target.closest('.ca-chip'), node = e.target.closest('.ca-node');
-    if (chip) { closeServer(); openTask(Number(chip.dataset.task)); } else if (node) openNode(node.dataset.node);
+    if (chip) { closeNode(true); openTask(Number(chip.dataset.task)); } else if (node) openNode(node.dataset.node);
   });
   CA.svg.addEventListener('keydown', (e) => {
     if ((e.key === 'Enter' || e.key === ' ') && e.target.classList?.contains('ca-node')) { e.preventDefault(); openNode(e.target.dataset.node); }
@@ -4041,7 +4045,7 @@ function caClear() {
 }
 // A new snapshot of GET /api/cluster/nodes (renderMachines): the machines, their readings and running tasks.
 function caSync(nodes) {
-  if ($('serverModal').hidden) return; // drawn only while Server details is open; the next open starts fresh
+  if (!serverOpen()) return; // drawn only while this server's details are open; the next open starts fresh
   const head = nodes.find((n) => n.local);
   if (!head || !nodes.some((n) => !n.local)) { if (CA.wrap) { CA.wrap.hidden = true; caClear(); } return; } // alone: just its card
   caBuild();
@@ -4245,7 +4249,7 @@ const caRoute = (v, out) => (v.poly ? (out ? v.poly.pts.slice(1, -1).reverse() :
 // ---- the loop: time-based animations {dur, step(u), done()}; nothing runs (or queues) unseen
 const caEase = (u) => (u < 0.5 ? 4 * u * u * u : 1 - (-2 * u + 2) ** 3 / 2);
 const caBack = (u) => 1 + 2.70158 * (u - 1) ** 3 + 1.70158 * (u - 1) ** 2; // overshoots, then settles
-const caCanMove = () => !!CA.svg && CA.inView && !CA.wrap.hidden && !reduceMotion.matches && !document.hidden && !$('serverModal').hidden;
+const caCanMove = () => !!CA.svg && CA.inView && !CA.wrap.hidden && !reduceMotion.matches && !document.hidden && serverOpen();
 function caAnim(a) {
   a.t0 = performance.now();
   if (!caCanMove()) { a.step(1); a.done?.(); return null; } // a static change: straight to the end state
@@ -4468,43 +4472,85 @@ function caTask(t) {
   if (CA.status.size > 500) CA.status.delete(CA.status.keys().next().value);
 }
 
-// ----- a machine's detail (tap it in the diagram) -----
-// Its telemetry as charts (GET /api/cluster/nodes/:id/metrics?range=: CPU, memory, load, disk; a hover readout), what
-// runs there with each remote run's phase timeline (the task's latest run, as in its drawer), and its log tail on
-// demand (GET /api/cluster/nodes/:id/logs?tail=200, fetched over the worker's socket).
+// ----- a machine's detail (tap it in the diagram, or this server's sidebar card) -----
+// One window for every node, sections in the same order: charts (CPU, memory, disk, network, load), what runs there
+// with each remote run's phase timeline (the task's latest run, as in its drawer), processes where known, and the log.
+// The controller's is this server's full details (renderServerDetails: live charts from the metrics stream, top
+// processes, the Machines section); a worker's charts come from GET /api/cluster/nodes/:id/metrics?range= and its log
+// tail on demand (GET /api/cluster/nodes/:id/logs?tail=200, fetched over the worker's socket). A worker opened from the
+// controller's detail goes back to it on Escape or the back button.
 const ND_RANGES = ['15m', '1h', '6h', '24h'];
-// els: the sheet's parts (charts grid, running list, log section, log button), built per open.
+// els: the sheet's parts (charts grid, running list, log section, log button), built per open; back: the node to return to.
 const ND = { id: null, range: ND_RANGES.includes(store.get('cw.nd.range')) ? store.get('cw.nd.range') : '1h', samples: null, err: '', at: 0, seq: 0,
-  runs: new Map(), taskKey: '', log: null, lastFocus: null, draws: [], els: {} };
-// [key, title, value of a sample, format, top of the scale]
+  runs: new Map(), taskKey: '', log: null, lastFocus: null, draws: [], els: {}, back: null };
+// A worker's tiles, styled as this server's: [key, title, value of a sample, format, top of the scale, status, detail,
+// optional (hidden while no sample has it)].
 const ND_CHARTS = [
-  ['cpu', 'CPU', (s) => s.cpu, fmtPct, () => 100],
-  ['mem', 'Memory used', (s, n) => (n.inventory?.mem && s.mem != null ? Math.max(0, (1 - s.mem / n.inventory.mem) * 100) : null), fmtPct, () => 100],
-  ['load', 'Load (1 min)', (s) => s.load, (v) => v.toFixed(2), (n, vals) => Math.max(n.inventory?.cores || 1, ...vals) * 1.15],
-  ['disk', 'Disk free', (s) => s.disk, (v) => fmtBytes(v), (n, vals) => Math.max(n.resources?.disk?.total || 0, ...vals) * 1.05],
+  ['cpu', 'CPU', (s) => s.cpu, fmtPct, () => 100, (v) => level(v), (n) => (n.inventory?.cores ? `${plural(n.inventory.cores, 'core')}${n.resources?.load ? ` · load <b>${n.resources.load[0].toFixed(2)}</b>` : ''}` : '')],
+  ['mem', 'Memory', (s, n) => (n.inventory?.mem && s.mem != null ? Math.max(0, (1 - s.mem / n.inventory.mem) * 100) : null), fmtPct, () => 100, (v) => level(v),
+    (n) => (n.inventory?.mem && n.resources?.memAvailable != null ? `Available <b>${fmtGB(n.resources.memAvailable)}</b> of ${fmtGB(n.inventory.mem)}` : '')],
+  ['disk', 'Disk free', (s) => s.disk, (v) => fmtBytes(v), (n, vals) => Math.max(n.resources?.disk?.total || 0, ...vals) * 1.05,
+    (v, n) => (n.resources?.disk?.total ? level((1 - v / n.resources.disk.total) * 100, 80, 92) : null), (n) => (n.resources?.disk?.total ? `of ${fmtGB(n.resources.disk.total)} on the disk that holds its repos` : '')],
+  ['net', 'Network', (s) => s.netMs, (v) => `${Math.round(v)} ms`, (n, vals) => Math.max(50, ...vals) * 1.2, null, () => 'Round trip to this server', true],
+  ['load', 'Load average', (s) => s.load, (v) => v.toFixed(2), (n, vals) => Math.max(n.inventory?.cores || 1, ...vals) * 1.15,
+    (v, n) => level((v / (n.inventory?.cores || 1)) * 100, 80, 150), (n) => (n.inventory?.cores ? `${plural(n.inventory.cores, 'core')}, so ${n.inventory.cores}.00 means fully busy` : '')],
 ];
-const ndNode = () => MC.nodes.find((n) => n.id === ND.id);
+// The controller before GET /api/cluster/nodes has answered: its details need no node row.
+const ndNode = () => MC.nodes.find((n) => n.id === ND.id)
+  || (ND.id === 'controller' ? { id: 'controller', local: true, name: $('hostName').textContent, connected: true, enabled: true, tasks: [] } : undefined);
 function openNode(id) {
-  if (!MC.nodes.some((n) => n.id === id)) return;
-  Object.assign(ND, { id, samples: null, err: '', at: 0, runs: new Map(), taskKey: '', log: null, lastFocus: document.activeElement });
+  const open = !$('nodeModal').hidden;
+  if (!MC.nodes.some((n) => n.id === id) && id !== 'controller') return;
+  if (open && id === ND.id) return;
+  const back = open && ndNode()?.local ? ND.id : null; // a worker opened from this server's details
+  Object.assign(ND, { id, back, samples: null, err: '', at: 0, runs: new Map(), taskKey: '', log: null, lastFocus: open ? ND.lastFocus : document.activeElement });
   $('nodeModal').hidden = false;
   ndBuild();
   ndRender();
   ndMetrics();
-  $('nodeModal').querySelector('[data-close].icon-btn').focus();
+  $('ndBody').scrollTop = 0;
+  (back ? $('ndBack') : $('nodeModal').querySelector('[data-close].icon-btn')).focus();
 }
-function closeNode() {
+// Back to this server's details when a worker was opened from them; `all` closes the window.
+function closeNode(all) {
   if ($('nodeModal').hidden) return;
+  if (!all && ND.back) {
+    const to = ND.back, focus = ND.lastFocus;
+    ND.back = null;
+    $('nodeModal').hidden = true;
+    openNode(to);
+    ND.lastFocus = focus;
+    return;
+  }
   $('nodeModal').hidden = true;
-  ND.id = null;
+  parkServerDetails();
+  ND.id = ND.back = null;
   ND.lastFocus?.focus?.({ preventScroll: true });
 }
-$('nodeModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeNode(); });
+$('nodeModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeNode(true); });
+$('ndBack').addEventListener('click', () => closeNode());
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !$('nodeModal').hidden) { e.stopImmediatePropagation(); closeNode(); }
+  if (e.key === 'Escape' && !$('nodeModal').hidden && $('machineModal').hidden) { e.stopImmediatePropagation(); closeNode(); }
 }, true);
 function ndBuild() {
-  const body = $('ndBody'), row = el('div', 'range-row'), pick = el('div', 'range-picker');
+  const n = ndNode(), body = $('ndBody'), run = section('Running here'), log = section('Log');
+  run.id = 'ndRun';
+  log.id = 'ndLog';
+  ND.els = { run, log };
+  $('ndBack').hidden = !ND.back;
+  $('nodeModal').querySelector('.modal-panel').classList.toggle('wide', !!n.local);
+  if (n.local) {
+    // This server: its details (charts, then Running here in its slot, top processes, Machines), then the log.
+    ND.draws = [];
+    for (const c of [...body.children]) if (c.id !== 'serverDetails') c.remove();
+    $('sdRun').replaceChildren(run);
+    renderServerDetails(body);
+    body.append(log);
+    ndLogRender();
+    return;
+  }
+  parkServerDetails();
+  const row = el('div', 'range-row'), pick = el('div', 'range-picker');
   pick.setAttribute('role', 'group');
   pick.setAttribute('aria-label', 'Chart time range');
   for (const r of ND_RANGES) {
@@ -4522,26 +4568,30 @@ function ndBuild() {
     pick.append(b);
   }
   row.append(el('span', '', 'Charts show'), pick);
-  const grid = el('div', 'nd-grid');
+  const grid = el('div', 'm-grid nd-grid');
   grid.id = 'ndCharts';
-  ND.draws = ND_CHARTS.map(([key, title, get, fmt, top]) => {
-    const card = el('div', 'm-card nd-chart'), headRow = el('div', 'tile-top'), host = el('div'), val = el('span', 'nd-val', '–');
+  ND.draws = ND_CHARTS.map(([key, title, get, fmt, top, status, detail, optional]) => {
+    const card = el('div', 'm-card nd-chart'), headRow = el('div', 'tile-top'), st = el('span', 'status'), big = el('div', 'big nd-val', '–'), info = el('div', 'detail'), host = el('div');
     card.dataset.chart = key;
-    headRow.append(el('h3', '', title), val);
-    card.append(headRow, host);
+    headRow.append(el('h3', '', title), st);
+    card.append(headRow, big, info, host);
     grid.append(card);
-    return ndChart(host, val, get, fmt, top);
+    return ndChart(host, get, fmt, top, (last, node, has) => {
+      big.textContent = last != null ? fmt(last) : '–';
+      const [cls, word] = (last != null && status?.(last, node)) || ['', ''];
+      st.className = 'status' + (cls ? ' ' + cls : '');
+      st.textContent = word;
+      info.innerHTML = detail(node);
+      card.hidden = !!optional && !has && !!ND.samples;
+    });
   });
-  const run = section('Running here'), log = section('Log');
-  run.id = 'ndRun';
-  log.id = 'ndLog';
-  ND.els = { charts: grid, run, log };
+  ND.els.charts = grid;
   body.replaceChildren(row, grid, run, log);
   ndLogRender();
 }
 function ndRender() {
   const n = ndNode();
-  if (!n) return closeNode(); // removed meanwhile
+  if (!n) return closeNode(true); // removed meanwhile
   const st = nodeState(n);
   $('ndTitle').textContent = n.name;
   $('ndSub').textContent = [n.local ? 'This server · the head' : null, OS_NAME[n.os] || n.os, n.arch, st.label,
@@ -4563,7 +4613,7 @@ function ndRender() {
     const e = el('span', t.waiting_for ? 'e wait' : 'e', t.waiting_for ? 'waiting' : fmtDur(Date.now() / 1000 - t.started_at));
     if (!t.waiting_for) e.dataset.started = t.started_at;
     b.append(main, e);
-    b.addEventListener('click', () => { closeNode(); closeServer(); openTask(t.id); });
+    b.addEventListener('click', () => { closeNode(true); openTask(t.id); });
     wrap.append(b);
     const tl = ND.runs.get(t.id) && timelineSection(ND.runs.get(t.id), true);
     if (tl) wrap.append(tl);
@@ -4581,6 +4631,7 @@ async function ndLoadRun(id) {
 }
 async function ndMetrics() {
   const id = ND.id, seq = ++ND.seq, grid = ND.els.charts;
+  if (!grid) return; // this server's charts follow the metrics stream instead
   grid?.classList.add('loading'); // the charts keep their frame while the new range loads
   try {
     const d = await api(`/api/cluster/nodes/${encodeURIComponent(id)}/metrics?range=${ND.range}`);
@@ -4596,7 +4647,8 @@ async function ndMetrics() {
   ND.draws.forEach((draw) => draw());
 }
 // A single-series chart of the node's samples across the chosen range: line, a faint area, and a crosshair readout.
-function ndChart(host, val, get, fmt, top) {
+// onValue(latest value, node, any value in range) fills the tile around it.
+function ndChart(host, get, fmt, top, onValue) {
   host.className = 'sline';
   host.innerHTML = '<svg aria-hidden="true"><line class="base"/><path class="area"/><path class="line"/><line class="cross" hidden/><circle class="pt" r="4" hidden/></svg><div class="tip" hidden></div>';
   const svg = host.querySelector('svg'), [base, area, line, cross, pt] = svg.children, tip = host.querySelector('.tip');
@@ -4606,13 +4658,13 @@ function ndChart(host, val, get, fmt, top) {
   let hoverX = null, pts = [];
   function draw() {
     const n = ndNode(), w = host.clientWidth, h = host.clientHeight, end = Date.now(), start = end - RANGE_MS[ND.range], span = end - start;
-    if (!n || !w) return;
+    if (!n) return;
+    pts = (ND.samples || []).map((s) => [s.t, get(s, n)]).filter(([t, v]) => v != null && Number.isFinite(v) && t >= start);
+    onValue(pts.at(-1)?.[1], n, pts.length > 0);
+    if (!w) return;
     lFrom.textContent = RANGE_AGO[ND.range];
     svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
     for (const [k, v] of [['x1', 0], ['x2', w], ['y1', h - 0.5], ['y2', h - 0.5]]) base.setAttribute(k, v);
-    pts = (ND.samples || []).map((s) => [s.t, get(s, n)]).filter(([t, v]) => v != null && Number.isFinite(v) && t >= start);
-    const last = pts.at(-1)?.[1];
-    val.textContent = last != null ? fmt(last) : '–';
     if (pts.length < 2) {
       line.setAttribute('d', '');
       area.setAttribute('d', '');
@@ -4835,7 +4887,7 @@ function openAddMachine() {
 function closeAddMachine() {
   $('machineModal').hidden = true;
   clearInterval(AM.timer);
-  if (!$('serverModal').hidden) loadMachines();
+  if (!$('nodeModal').hidden) loadMachines();
   AM.lastFocus?.focus?.();
 }
 $('addMachine').addEventListener('click', openAddMachine);
@@ -5528,7 +5580,7 @@ function actionsSection(id) {
 
 // The machine a running task is on ('on vps-2', 'waiting for Mac mini (connection lost)'), or a queued one is pinned to
 // ('only on MacBook Air'); tasks on the controller say
-// 'on this server' only once the cluster has workers (MC.nodes, read when the Queue or Server details opens).
+// 'on this server' only once the cluster has workers (MC.nodes, read when the Queue or a node detail opens).
 function taskMachine(t) {
   if (t.status === 'queued' && t.run_on_name) return `only on ${t.run_on_name}`; // pinned by the owner (Run on)
   if (t.status !== 'running' || t.kind === 'plan') return '';
@@ -5880,7 +5932,7 @@ function closeTask() {
 $('drClose').addEventListener('click', closeTask);
 $('drawerScrim').addEventListener('click', closeTask);
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && O.drawer && $('settingsModal').hidden && $('pickerModal').hidden && $('serverModal').hidden && $('connsModal').hidden && $('usageModal').hidden && $('queueModal').hidden && !e.target.closest?.('.dr-due')) {
+  if (e.key === 'Escape' && O.drawer && $('settingsModal').hidden && $('pickerModal').hidden && $('nodeModal').hidden && $('connsModal').hidden && $('usageModal').hidden && $('queueModal').hidden && !e.target.closest?.('.dr-due')) {
     e.stopImmediatePropagation();
     closeTask();
   }

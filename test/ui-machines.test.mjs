@@ -118,7 +118,7 @@ test('UI: Add machine shows a command per OS with a fresh code, then the machine
   assert.equal(await cmds.count(), 0);
   await page.keyboard.press('Escape');
   assert.equal(await page.locator('#machineModal').isHidden(), true);
-  assert.equal(await page.locator('#serverModal').isVisible(), true, 'Escape closes only the wizard');
+  assert.equal(await page.locator('#nodeModal').isVisible(), true, 'Escape closes only the wizard');
   await page.locator('#mMachines li', { hasText: 'mac-mini' }).waitFor();
   await ctx.close();
   assert.deepEqual(errors, []);
@@ -197,8 +197,8 @@ test('Machines view: one card per node with its state, capacity, running tasks a
   assert.equal(await cards.count(), nodes.length, 'one card per node');
   assert.deepEqual(await cards.evaluateAll((els) => els.map((e) => e.dataset.node)), nodes.map((n) => n.id));
   for (let i = 0; i < nodes.length; i++) assert.equal(await cards.nth(i).locator('button[data-act="drain"]').count(), 1, `${nodes[i].name} has a Drain control`);
-  // With workers the section leads Server details, and the summary counts the connected machines.
-  assert.equal(await page.evaluate(() => document.querySelector('#serverModal .m-body').firstElementChild.id || document.querySelector('#serverModal .m-body').firstElementChild.className), 'mc-sec first');
+  // With workers the section leads this server's details (under the device line), and the summary counts the connected machines.
+  assert.equal(await page.evaluate(() => document.querySelector('#ndBody #serverDetails .sd-head').nextElementSibling.className), 'mc-sec first');
   assert.match(await page.locator('#mcSum').textContent(), /^Cluster: 3 machines · \d+ cores · [\d.]+ GB free · 2 of \d+ slots running · 2 offline$/);
 
   const card = page.locator('.mc-node', { hasText: 'build-vps' });
@@ -227,7 +227,7 @@ test('Machines view: one card per node with its state, capacity, running tasks a
   await page.locator('.mc-node', { hasText: 'build-vps-2' }).locator('.mc-meter', { hasText: '20.0 GB free' }).waitFor({ timeout: 15000 });
 
   const fits = await page.evaluate(() => {
-    const p = document.querySelector('#serverModal .modal-panel');
+    const p = document.querySelector('#nodeModal .modal-panel');
     return document.documentElement.scrollWidth <= innerWidth && p.scrollWidth <= p.clientWidth + 1
       && [...document.querySelectorAll('.mc-node')].every((c) => c.scrollWidth <= c.clientWidth + 1);
   });
@@ -235,8 +235,50 @@ test('Machines view: one card per node with its state, capacity, running tasks a
   // Tapping a running task opens its drawer.
   await page.locator('.mc-task', { hasText: 'Build the machines view' }).click();
   await page.locator('#taskDrawer:not([hidden])').waitFor();
-  assert.equal(await page.locator('#serverModal').isHidden(), true);
+  assert.equal(await page.locator('#nodeModal').isHidden(), true);
   assert.equal(await page.evaluate(() => O.drawer), t1);
+  await ctx.close();
+  assert.deepEqual(errors, []);
+});
+
+test('the controller node opens this server’s details in the node detail: its CPU/RAM charts, then a worker’s tiles in the same order', { skip: noBrowser, timeout: 60000 }, async () => {
+  const [name, value] = cookie.split('=');
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  await ctx.addCookies([{ name, value, url: base }]);
+  const page = await ctx.newPage();
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  await page.goto(`${base}/`);
+  // The old entry point, the sidebar card, opens the controller's node detail.
+  await page.locator('#miniStats').click();
+  await page.locator('#nodeModal:not([hidden]) #ndBody #serverDetails').waitFor();
+  assert.equal(await page.locator('.modal:not([hidden])').count(), 1, 'one window, no separate Server details');
+  assert.match(await page.locator('#ndSub').textContent(), /^This server · the head/);
+  const charts = async () => page.evaluate(() => ['cpu', 'mem'].map((k) => document.querySelector(`#ndBody #t-${k} .sline path.line`)?.getAttribute('d') || ''));
+  for (const k of ['cpu', 'mem', 'disk', 'net']) assert.equal(await page.locator(`#ndBody #t-${k}`).isVisible(), true, `the ${k} tile`);
+  await page.waitForFunction(() => ['cpu', 'mem'].every((k) => document.querySelector(`#ndBody #t-${k} .sline path.line`)?.getAttribute('d')?.startsWith('M')), null, { timeout: 20000 });
+  assert.match(await page.locator('#ndBody #t-cpu .big').textContent(), /^\d+%$/, 'the live CPU reading');
+  // Sections in order: charts, Running here, Top processes, then the log.
+  const order = await page.evaluate(() => [...document.querySelectorAll('#ndBody #mGrid, #ndBody #ndRun, #ndBody #mTopCard, #ndBody #ndLog')].map((e) => e.id));
+  assert.deepEqual(order, ['mGrid', 'ndRun', 'mTopCard', 'ndLog']);
+  await page.locator('#mTop tbody tr').first().waitFor();
+  // A worker from the diagram: its tiles in the same order and style, then back to this server.
+  const vps = (await call('/api/cluster/nodes')).body.nodes.find((n) => n.connected && !n.local);
+  await page.locator(`#caWrap .ca-node[data-node="${vps.id}"] .ca-name`).click();
+  await page.locator('#ndTitle', { hasText: vps.name }).waitFor();
+  assert.equal(await page.locator('#ndBody #serverDetails').count(), 0, "this server's details are parked");
+  assert.deepEqual(await page.locator('#ndCharts .m-card').evaluateAll((els) => els.map((e) => e.dataset.chart)), ['cpu', 'mem', 'disk', 'net', 'load']);
+  assert.equal(await page.locator('#ndCharts [data-chart="cpu"] .big').count(), 1);
+  assert.equal(await page.locator('#ndBack').isVisible(), true);
+  await page.locator('#ndBack').click();
+  await page.locator('#ndBody #serverDetails').waitFor();
+  // Clicking the controller node keeps its charts in the node detail.
+  await page.locator('#caWrap .ca-node[data-node="controller"] .ca-name').click();
+  assert.equal(await page.locator('#ndBack').isHidden(), true);
+  assert.ok((await charts()).every((d) => d.startsWith('M')), 'the CPU and RAM charts are drawn');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('#nodeModal').isHidden(), true);
+  assert.equal(await page.evaluate(() => document.querySelector('#sdStash').contains(document.querySelector('#serverDetails'))), true);
   await ctx.close();
   assert.deepEqual(errors, []);
 });

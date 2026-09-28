@@ -1,5 +1,5 @@
 // The head's side of the approval gate (gate.mjs): approval records (table `approvals`), the owner's decisions, the
-// 24 h expiry, "always allow this action for this task", and the audit log <DATA>/audit/<task>.jsonl (hash-chained).
+// expiry (each row's own window, the settings TTL capped by the request's), "always allow this action for this task", and the audit log <DATA>/audit/<task>.jsonl (hash-chained).
 // A local run's gate dir is hosted here (host()); a worker relays its requests as job events and gets each decision
 // back as job.approval (deliver). Statuses: pending → approved | always | denied | expired | cancelled (the run ended);
 // auto = allowed without asking because the owner chose "always" for that action earlier in the task.
@@ -87,16 +87,17 @@ export function createApprovals({ db, dataDir, boot = true, settings = () => ({}
     clearTimeout(timer);
     const next = q1("SELECT MIN(expires_at) AS at FROM approvals WHERE status='pending'")?.at;
     if (next == null) return;
-    timer = setTimeout(expire, Math.max(0, Math.min(next - now(), 2 ** 31 - 1)));
+    timer = setTimeout(() => expire(), Math.max(0, Math.min(next - now(), 2 ** 31 - 1)));
     timer.unref?.();
   }
-  function expire() {
-    for (const r of qa("SELECT id FROM approvals WHERE status='pending' AND expires_at<=:t", { t: now() })) {
-      run("UPDATE approvals SET status='expired', note=:n, decided_at=:t, decided_by='timeout' WHERE id=:id", { n: `No answer within ${Math.round(ttlMs() / 3600_000)} h`, t: now(), id: r.id });
-      const row = get(r.id);
-      send(row, answerOf(row));
-      onChange(row, 'decided');
-    }
+  // later: record the expiries now but answer on the next tick (at boot the caller's deliver/onChange aren't wired yet).
+  function expire({ later = false } = {}) {
+    const rows = qa("SELECT id, created_at, expires_at FROM approvals WHERE status='pending' AND expires_at<=:t", { t: now() }).map((r) => {
+      run("UPDATE approvals SET status='expired', note=:n, decided_at=:t, decided_by='timeout' WHERE id=:id", { n: `No answer within ${fmtWindow(r.expires_at - r.created_at)}`, t: now(), id: r.id });
+      return get(r.id);
+    });
+    const tell = () => { for (const row of rows) { send(row, answerOf(row)); onChange(row, 'decided'); } };
+    if (later) setImmediate(tell); else tell();
     armExpiry();
   }
   // A run ended (or the head restarted under a local run): what it was waiting for can't be answered any more.
@@ -148,11 +149,14 @@ export function createApprovals({ db, dataDir, boot = true, settings = () => ({}
     });
   }
   // At boot: local runs died with the old process; remote ones may still be waiting (their worker keeps the call held).
+  // Rows that ran out while the process was down expire now, before anyone can see them as pending.
   if (boot) {
     run("UPDATE approvals SET status='cancelled', decided_at=:t WHERE status='pending' AND node='controller'", { t: now() });
-    armExpiry();
+    expire({ later: true }); // re-arms the timer for the rest
   }
 
   return { request, decide, resend, endRun, pending, forTask, get, heldMs, audit, actions, host, expire, stop: () => clearTimeout(timer) };
 }
+// A row's window as the owner reads it: '45 min', '1 h', '1.5 h'.
+const fmtWindow = (ms) => (ms < 3600_000 ? `${Math.max(1, Math.round(ms / 60_000))} min` : `${+(ms / 3600_000).toFixed(1)} h`);
 const str = (v, n) => (v == null ? null : String(v).slice(0, n));

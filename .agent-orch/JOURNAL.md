@@ -1059,3 +1059,6 @@ Ask in chat inserts path[:line] from Files, tested
 ## 2026-09-28 13:03 — #383 Bring back 'Keep improving' per project; off means no reflection at all [done (check passed)]
 
 Keep improving switch is back; off blocks every reflection path
+## 2026-09-28 13:04 — #377 approvals.mjs: the expiry note states the row's real TTL and overdue rows expire at boot [done (check passed)]
+
+expiry notes show each row's own window; overdue rows expire at boot

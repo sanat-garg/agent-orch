@@ -13,3 +13,7 @@ Reliability in approvals.mjs (the head's side of the approval gate; do not edit 
 ## Done when
 
 `npm test -- test/approval-gate.test.mjs` passes and ! grep -q 'ttlMs() / 3600_000' approvals.mjs
+
+## Result — done (check passed) (2026-09-28 13:04)
+
+AGENT-ORCH-STATUS: done — expiry notes show each row's own window; overdue rows expire at boot

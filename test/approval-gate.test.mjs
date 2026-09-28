@@ -238,3 +238,44 @@ test('approvals: past 20 pending requests in one run, the next is denied at once
     assert.equal(ap.request({ approval: { id: 'other-run', action: 'Click "Send"' }, taskId: 1, runId: 8, node: 'w' }).status, 'pending', 'another run is not capped');
   } finally { ap.stop(); db.close(); }
 });
+
+test('approvals: the expiry note states the row\'s own window, not the current setting', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const { createApprovals } = await import('../approvals.mjs');
+  let t = 1_000_000;
+  const db = new DatabaseSync(':memory:');
+  const ap = createApprovals({ db, dataDir: path.join(tmp, 'ttl'), now: () => t });
+  try {
+    ap.request({ approval: { id: 'ttl-1h', action: 'Click "Send"', ttlMs: 3_600_000 }, taskId: 1, runId: 7, node: 'w' });
+    ap.request({ approval: { id: 'ttl-45m', action: 'Click "Send"', ttlMs: 2_700_000 }, taskId: 1, runId: 7, node: 'w' });
+    t += 3_600_000;
+    ap.expire();
+    assert.equal(ap.get('ttl-1h').status, 'expired');
+    assert.equal(ap.get('ttl-1h').note, 'No answer within 1 h');
+    assert.equal(ap.get('ttl-45m').note, 'No answer within 45 min');
+  } finally { ap.stop(); db.close(); }
+});
+
+test('approvals: at boot a remote row that ran out while the head was down is expired before createApprovals returns', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const { createApprovals } = await import('../approvals.mjs');
+  const file = path.join(tmp, 'boot-expiry.db');
+  let t = 1_000_000;
+  let db = new DatabaseSync(file);
+  const first = createApprovals({ db, dataDir: path.join(tmp, 'boot'), now: () => t });
+  first.request({ approval: { id: 'remote-old', action: 'Click "Send"', ttlMs: 3_600_000 }, taskId: 1, runId: 7, node: 'w' });
+  first.request({ approval: { id: 'remote-new', action: 'Click "Send"' }, taskId: 1, runId: 7, node: 'w' });
+  first.stop(); db.close();
+  t += 2 * 3_600_000;
+  db = new DatabaseSync(file);
+  const sent = [];
+  const ap = createApprovals({ db, dataDir: path.join(tmp, 'boot'), boot: true, now: () => t, deliver: (row, ans) => { sent.push([row.id, ans.decision]); return true; } });
+  try {
+    assert.equal(ap.get('remote-old').status, 'expired');
+    assert.equal(ap.get('remote-old').note, 'No answer within 1 h');
+    assert.equal(ap.get('remote-new').status, 'pending', 'a row still inside its window waits');
+    assert.deepEqual(sent, [], 'the answer goes out once the caller has finished wiring up');
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(sent, [['remote-old', 'expired']]);
+  } finally { ap.stop(); db.close(); }
+});

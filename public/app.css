@@ -172,7 +172,8 @@ code, pre, kbd { font-family: var(--mono); }
 .side-foot { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 5px 6px; border: 1px solid transparent; border-radius: 8px; background: none; color: var(--muted); font-size: 13px; cursor: pointer; text-align: left; }
 .side-foot:hover { background: var(--raised); color: var(--text); }
 .side-foot.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-soft); }
-.side-foot .host { flex: 1; font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side-foot .host { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (pointer: coarse) { .side-foot, #logout { min-height: 44px; } } /* UI-REVIEW #14 */
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
 .dot.on { background: var(--ok); }
 .dot.off { background: var(--danger); }
@@ -217,7 +218,7 @@ code, pre, kbd { font-family: var(--mono); }
 @media (max-width: 800px) { .banner.update { margin: 8px 10px 0; gap: 8px; font-size: 13.5px; } }
 .btn { border: 1px solid var(--border-strong); background: var(--panel); border-radius: 9px; padding: 0 14px; height: 36px; cursor: pointer; font-weight: 550; }
 .btn:hover { border-color: var(--accent); }
-.btn.small { height: 32px; font-size: 13.5px; }
+.btn.small { display: inline-flex; align-items: center; justify-content: center; height: 32px; font-size: 13.5px; }
 .btn.primary { background: var(--accent-strong); border-color: var(--accent-strong); color: var(--accent-text); }
 .btn.primary:hover { background: var(--accent-strong-hover); border-color: var(--accent-strong-hover); }
 .btn.danger { color: var(--danger); }

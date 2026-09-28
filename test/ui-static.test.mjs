@@ -242,3 +242,10 @@ test('top-level function names are unique across the classic public/*.js scripts
   assert.match(appJs, /^function qDragMove\(\)/m);
   assert.match(appJs, /return qDragMove\(\);/);
 });
+
+test('sidebar footer in the body font at 44pt on touch; .btn.small centres its label (UI-REVIEW #13, #14)', () => {
+  const host = appCss.match(/\.side-foot \.host \{[^}]*\}/)[0];
+  assert.doesNotMatch(host, /--mono/);
+  assert.match(appCss, /\.btn\.small \{[^}]*display: inline-flex; align-items: center; justify-content: center/);
+  assert.match(appCss, /@media \(pointer: coarse\) \{ \.side-foot, #logout \{ min-height: 44px; \} \}/);
+});

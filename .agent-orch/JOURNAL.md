@@ -826,3 +826,7 @@ integrator merges delete owner's origin branch; task-258 removed
 ## 2026-09-28 05:49 — #277 UI-REVIEW #7: 16px body text and 12px-minimum metadata on phones [done (check passed)]
 
 Phones now get 16px body text and 12px-minimum metadata
+
+## 2026-09-28 05:49 — #278 UI-REVIEW #13 and #14: sidebar footer in the body font at 44pt, centred small buttons; record rows 4, 8, 13 status [done (check passed)]
+
+Sidebar footer uses body font, 44pt on touch; rows marked fixed

@@ -13,3 +13,7 @@ Two small mobile HIG polish items from .agent-orch/UI-REVIEW.md plus bookkeeping
 ## Done when
 
 `npm test -- test/ui-static.test.mjs` passes and `grep -q '| 14 | low · \*\*fixed\*\*' .agent-orch/UI-REVIEW.md` and `! grep -E 'side-foot \.host \{[^}]*--mono' public/app.css`
+
+## Result — done (check passed) (2026-09-28 05:49)
+
+AGENT-ORCH-STATUS: done — Sidebar footer uses body font, 44pt on touch; rows marked fixed

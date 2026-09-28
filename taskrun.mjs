@@ -1,6 +1,6 @@
 // What running one task needs on any node, shared by the controller's orchestrator (orchestrator.mjs) and a worker
 // (worker.mjs), so a worker never loads the orchestrator (planner, reflection, scheduler): the done-when check
-// (extractCommand → runCheck) and a tool call in one line (toolLine). No deps beyond node built-ins.
+// (extractCheck / extractCommand → runCheck) and a tool call in one line (toolLine). No deps beyond node built-ins.
 import { spawn } from 'node:child_process';
 
 // "Edit · src/app.js": a tool call in one line (lane activity, handoff prompts, a worker's progress hints).
@@ -33,30 +33,33 @@ const unquoted = (s) => s.replace(/'[^']*'|"(?:\\.|[^"\\])*"|\\./g, (m) => '_'.r
 const expandable = (s) => s.replace(/'[^']*'|\\.|"((?:\\.|[^"\\])*)"/g, (m, dq) => (dq === undefined ? '_' : dq.replace(/\\./g, '_')));
 // Commands that must all pass, as one: a part holding `;` (the grep rewrite) is grouped so && covers it whole.
 const joinAll = (cmds) => (cmds.length === 1 ? cmds[0] : cmds.map((c) => (/;/.test(c) ? `{ ${c}; }` : c)).join(' && '));
-export function extractCommand(doneWhen) {
-  if (!doneWhen) return null;
+// { command, refused }: command is the check to run (null if none); refused lists, verbatim and in order, every
+// command-like snippet or fenced-block line that checkCommand rejected, so a refused check isn't mistaken for none.
+export function extractCheck(doneWhen) {
+  const none = { command: null, refused: [] };
+  if (!doneWhen) return none;
+  // Every candidate must pass; one refused leaves no command, since dropping it silently would weaken the check.
+  const judge = (cands) => {
+    const cmds = cands.map((c) => checkCommand(c, doneWhen));
+    const refused = cands.filter((c, i) => !cmds[i]);
+    return { command: cmds.length && !refused.length ? joinAll(cmds) : null, refused };
+  };
   const triple = doneWhen.match(/```(?:\w+\n)?([\s\S]*?)```/);
   if (triple) {
     // bash -c on the whole block would let only its last line decide, so every line must pass (AUDIT #64).
-    const lines = triple[1].replace(/\\\n/g, ' ').split('\n').map((l) => l.trim().replace(/^\$\s+/, '')).filter((l) => l && !l.startsWith('#'));
-    const cmds = lines.map((l) => checkCommand(l, doneWhen));
-    return cmds.length && cmds.every(Boolean) ? joinAll(cmds) : null;
+    return judge(triple[1].replace(/\\\n/g, ' ').split('\n').map((l) => l.trim().replace(/^\$\s+/, '')).filter((l) => l && !l.startsWith('#')));
   }
   // A backslash-escaped backtick (\`) stays inside the snippet: it's a literal backtick for the shell.
   const singles = [...doneWhen.matchAll(/`((?:\\.|[^`\\\n])+)`/g)].map((m) => m[1].trim().replace(/^\$\s+/, '')).filter(looksLikeCommand);
-  if (singles.length) {
-    // Every command-like snippet must be safe; dropping one silently would weaken the check.
-    const cmds = singles.map((c) => checkCommand(c, doneWhen));
-    if (cmds.some((c) => !c)) return null;
-    return joinAll(cmds);
-  }
-  if (/`/.test(doneWhen)) return null;
+  if (singles.length) return judge(singles);
+  if (/`/.test(doneWhen)) return none;
   for (let line of doneWhen.split('\n')) {
     line = line.trim().replace(/^\$\s+/, '');
-    if (RUNNER.test(line)) return checkCommand(line, doneWhen);
+    if (RUNNER.test(line)) return judge([line]);
   }
-  return null;
+  return none;
 }
+export function extractCommand(doneWhen) { return extractCheck(doneWhen).command; }
 
 function checkCommand(cand, doneWhen) {
   cand = cand.trim().replace(/^\$\s+/, '');

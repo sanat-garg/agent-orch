@@ -2,6 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { extractCommand } from '../orchestrator.mjs';
+import { extractCheck } from '../taskrun.mjs';
 
 test('extractCommand joins every command snippet with &&', () => {
   assert.equal(extractCommand('`! grep -q foo x.mjs` and `npm test` passes'), '! grep -q foo x.mjs && npm test');
@@ -132,4 +133,13 @@ test('extractCommand: every line of a fenced block and every ;-part of a snippet
   // The grep "prints nothing" rewrite is unchanged, and a rewritten line is grouped in a block.
   assert.equal(extractCommand('`grep -q foo file` prints nothing'), 'grep -q foo file; test $? -eq 1');
   assert.equal(extractCommand('```\nnpm test\ngrep -q foo file\n``` prints nothing'), 'npm test && { grep -q foo file; test $? -eq 1; }');
+});
+
+test('extractCheck lists refused snippets, so a refused check is not mistaken for no check', () => {
+  assert.deepEqual(extractCheck('`npm test > out.txt` passes'), { command: null, refused: ['npm test > out.txt'] });
+  assert.deepEqual(extractCheck('The page shows the new button'), { command: null, refused: [] });
+  assert.deepEqual(extractCheck('`server.mjs` exports `loggedIn`'), { command: null, refused: [] });
+  assert.deepEqual(extractCheck('```\nnpm test\nrm -rf dist\n```'), { command: null, refused: ['rm -rf dist'] });
+  assert.deepEqual(extractCheck('`grep -q x f` and `curl -s http://x`'), { command: null, refused: ['curl -s http://x'] });
+  assert.deepEqual(extractCheck('`npm test` passes'), { command: 'npm test', refused: [] });
 });

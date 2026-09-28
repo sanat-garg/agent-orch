@@ -1042,3 +1042,6 @@ Failed model rediscovery keeps last good list, retries hourly
 ## 2026-09-28 12:54 — #365 Stats ui: a Machines tab with one row per machine: tasks done and failed, check pass rate, busy time, tokens and last active [done (check passed)]
 
 Stats has a tested Machines tab with per-machine rows and share bar
+## 2026-09-28 12:55 — #370 taskrun.mjs: extractCheck tells a refused Done-when from one with no command (AUDIT #66 half two) [done (check passed)]
+
+extractCheck reports refused Done-when snippets; verify tests pass

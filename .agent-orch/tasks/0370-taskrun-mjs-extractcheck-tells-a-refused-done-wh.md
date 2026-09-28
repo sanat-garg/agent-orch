@@ -13,3 +13,7 @@ Reliability in taskrun.mjs (AUDIT #66 in .agent-orch/AUDIT.md; do not edit AUDIT
 ## Done when
 
 `npm test -- test/verify.test.mjs` passes and `grep -q 'export function extractCheck' taskrun.mjs`
+
+## Result — done (check passed) (2026-09-28 12:55)
+
+AGENT-ORCH-STATUS: done — extractCheck reports refused Done-when snippets; verify tests pass

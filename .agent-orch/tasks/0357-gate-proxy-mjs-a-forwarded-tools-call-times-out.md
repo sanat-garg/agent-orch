@@ -22,3 +22,7 @@ Constraints: no new dependencies; match the terse style; do not touch gate.mjs (
 ## Done when
 
 `node --test test/gate-proxy.test.mjs` passes and `grep -n "callMs" gate-proxy.mjs` prints at least one line
+
+## Result — done (check passed) (2026-09-28 12:41)
+
+AGENT-ORCH-STATUS: done — forwarded calls now time out after callMs; late answers dropped

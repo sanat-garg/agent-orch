@@ -5,7 +5,8 @@
 // with a screenshot) until the host answers, and a denial goes back to the agent as a tool error, the call never made.
 // Calls run one at a time, in order, so nothing slips past a held one. Every call is appended to <dir>/audit.jsonl.
 // Config (JSON, 0600, written by extensions.mjs mcpFor): {dir, server, kind: 'browser'|'connector', upstream: {command,
-// args, env}, patterns, connector: {outbound, read, draft}, ttlMs, task, hook (serve the Claude hook's checks/), snapshotMs}.
+// args, env}, patterns, connector: {outbound, read, draft}, ttlMs, task, hook (serve the Claude hook's checks/), snapshotMs,
+// callMs (a forwarded call unanswered this long becomes a tool error, its late answer dropped; default 5 min, at least 2 s)}.
 // A page that can't be read (the snapshot errors or times out) makes element tools, key presses and dialogs outbound.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -17,6 +18,7 @@ import { APPROVAL_TTL_MS, DEFAULT_PATTERNS, appendAudit, ask, callKey, classify,
 const cfg = JSON.parse(fs.readFileSync(process.argv[process.argv.indexOf('--config') + 1], 'utf8'));
 const { dir, server = 'mcp', kind = 'browser', task = null } = cfg;
 const patterns = cfg.patterns?.length ? cfg.patterns : DEFAULT_PATTERNS, ttlMs = cfg.ttlMs || APPROVAL_TTL_MS, snapshotMs = cfg.snapshotMs || 60_000;
+const callMs = Math.max(2_000, cfg.callMs || 5 * 60_000);
 const auditFile = path.join(dir, 'audit.jsonl');
 
 const up = spawn(cfg.upstream.command, cfg.upstream.args || [], { env: { ...process.env, ...(cfg.upstream.env || {}) }, stdio: ['pipe', 'pipe', 'inherit'] });
@@ -43,7 +45,8 @@ const toClient = (m) => process.stdout.write(`${JSON.stringify(m)}\n`);
 const toUp = (m) => up.stdin.write(`${JSON.stringify(m)}\n`);
 
 // Upstream responses: to the proxy's own calls (snapshot, screenshot), to forwarded tools/calls, or anything else.
-const own = new Map(), waiting = new Map();
+// A forwarded call that timed out leaves its id in lateIds (the last 200), so its late answer is dropped, not sent twice.
+const own = new Map(), waiting = new Map(), lateIds = new Set();
 let seq = 0;
 function callUp(name, args = {}, ms = 60_000) {
   const id = `agent-orch-gate-${++seq}`;
@@ -57,6 +60,7 @@ lines(up.stdout, (m) => {
   if (m.id != null && m.method == null) {
     if (own.has(m.id)) { const f = own.get(m.id); own.delete(m.id); return f(m); }
     if (waiting.has(m.id)) { const f = waiting.get(m.id); waiting.delete(m.id); return f(m); }
+    if (lateIds.delete(m.id)) return;
   }
   toClient(m);
 });
@@ -139,7 +143,20 @@ async function handle(m) {
     audit(r, tool, { ok: false, result: 'not performed', ms: Date.now() - t0 });
     return toClient({ jsonrpc: '2.0', id: m.id, result: { content: [{ type: 'text', text: denied(r) }], isError: true } });
   }
-  const resp = await new Promise((resolve) => { waiting.set(m.id, resolve); toUp(m); });
+  let timer;
+  const resp = await new Promise((resolve) => {
+    timer = setTimeout(() => { waiting.delete(m.id); resolve(null); }, callMs);
+    waiting.set(m.id, (x) => { clearTimeout(timer); resolve(x); });
+    toUp(m);
+  });
+  if (!resp) {
+    lateIds.add(m.id);
+    if (lateIds.size > 200) lateIds.delete(lateIds.values().next().value);
+    const s = Math.round(callMs / 1000);
+    audit(r, tool, { ok: false, result: `timed out: ${server} did not answer within ${s} s`, ms: Date.now() - t0 });
+    return toClient({ jsonrpc: '2.0', id: m.id, result: { content: [{ type: 'text',
+      text: `gate: ${server} did not answer within ${s} s; the page may be stuck, take a snapshot before retrying` }], isError: true } });
+  }
   const shot = r.shot || saveImage(imageOf(resp.result));
   const text = resp.error ? resp.error.message : resultText(resp.result);
   audit({ ...r, shot }, tool, { ok: !resp.error && !resp.result?.isError, result: String(text || '').replace(/\s+/g, ' ').slice(0, 300), ms: Date.now() - t0 });

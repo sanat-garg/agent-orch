@@ -1020,3 +1020,7 @@ Files tab can now search inside files in Contents mode
 ## 2026-09-28 12:40 — #355 AUDIT ledger: mark round 7 #53, #58, #62, #64, #65 and #66 with what landed and what still waits [done (check passed)]
 
 AUDIT round 7 #53/#58/#62/#64/#65/#66 marked, verified against code
+
+## 2026-09-28 12:41 — #357 gate-proxy.mjs: a forwarded tools/call times out after callMs with an audited tool error, late answers dropped [done (check passed)]
+
+forwarded calls now time out after callMs; late answers dropped

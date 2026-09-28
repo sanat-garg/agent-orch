@@ -3,9 +3,10 @@
 // fields and Send / Save draft buttons. Clicking Send marks the page sent. It doubles as a mail connector (search_messages,
 // send_email). Every executed tools/call is appended to $FAKE_MCP_LOG (one JSON line), so a test can tell a held or
 // denied call never ran. FAKE_MCP_SNAPSHOT=error makes browser_snapshot fail (isError); =hang makes it never answer.
+// FAKE_MCP_HANG=<tool> makes a tools/call for that tool logged (hung: true) but never answered.
 import fs from 'node:fs';
 
-const logFile = process.env.FAKE_MCP_LOG, snapMode = process.env.FAKE_MCP_SNAPSHOT || '';
+const logFile = process.env.FAKE_MCP_LOG, snapMode = process.env.FAKE_MCP_SNAPSHOT || '', hangTool = process.env.FAKE_MCP_HANG || '';
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 let page = null;
 const reset = (url) => { page = { url, to: 'bob@example.com', subject: '', password: '', status: 'Not sent' }; };
@@ -67,6 +68,9 @@ process.stdin.on('data', (d) => {
     else if (m.method === 'tools/list') result = { tools: TOOLS.map((name) => ({ name, inputSchema: { type: 'object' } })) };
     else if (m.method === 'tools/call' && m.params?.name === 'browser_snapshot' && snapMode === 'hang') {
       if (logFile) fs.appendFileSync(logFile, `${JSON.stringify({ name: 'browser_snapshot', args: {}, hung: true })}\n`);
+      continue;
+    } else if (m.method === 'tools/call' && hangTool && m.params?.name === hangTool) {
+      if (logFile) fs.appendFileSync(logFile, `${JSON.stringify({ name: hangTool, args: m.params?.arguments || {}, hung: true })}\n`);
       continue;
     } else if (m.method === 'tools/call') result = call(m.params?.name, m.params?.arguments || {});
     else { process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: m.id, error: { code: -32601, message: 'no such method' } })}\n`); continue; }

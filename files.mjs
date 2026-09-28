@@ -1,26 +1,35 @@
-// File browsing (and the context menu's copy/move/zip/unzip) for the Files view: one chat's project folder, never anything outside it. Paths from the
-// client are relative to the project; each is resolved through realpath (so symlinks count by where they point) and
-// must stay inside the project's own real path. Listing gives names, sizes and dates; `raw` serves one file: images
-// as themselves, everything else as plain text (capped), under a sandbox CSP so nothing served can run as a page.
-//   GET /api/files/list?cid=<chat>&path=<rel>  → {name, path, crumbs, entries: [{name, dir, type, size, mtime, hidden, isSymlink}], truncated}
-//       (`dir=` works as well as `path=`; type is 'dir' or 'file', of what a link points to)
-//   GET /api/files/raw?cid=<chat>&path=<rel>   → the file (images), or text/plain (first TEXT_MAX bytes; 415 for binary)
-//   GET /api/files/find?cid=<chat>&q=<text>    → {q, entries: [{name, path, dir, size, mtime}], truncated} (q: 2+ chars)
-//   GET /api/files/grep?cid=<chat>&q=<text>    → {q, hits: [{path, line, text}], files, truncated} (q: 2–200 chars; text files ≤ 1 MB)
+// File browsing (and the context menu's copy/move/zip/unzip) for the Files view: the whole disk, opening on one chat's
+// project folder. A path from the client is ABSOLUTE ('/home/ubuntu/x': anywhere, as the server's user) or relative to
+// the project (then it must stay inside the project's own real path, links out of it are 403 and left out of listings).
+// Either is resolved through realpath (symlinks count by where they point). Guardrails: PROTECTED secrets are listed
+// but never served, searched, copied, zipped or moved (403), and every write (copy/move/zip/unzip) lands only under
+// the project, the home dir or /tmp (writeRoots; elsewhere 403 'Read-only location'). `raw` serves one file: images as
+// themselves, everything else as plain text (capped), under a sandbox CSP so nothing served can run as a page.
+//   GET /api/files/list?cid=<chat>&dir=<abs|rel> → {dir, parent (null at '/'), entries: [{name, path, type, size, mtime,
+//       isSymlink, readable, writable, protected, dir, hidden}], places: [{label, path}], truncated, name, path, crumbs}
+//       (`path=` works as well as `dir=`; dir/parent/entry paths are absolute real paths; the top-level `path` and crumbs
+//       are project-relative for a relative request, absolute otherwise; type is 'dir' or 'file', of what a link points to;
+//       at most LIST_MAX entries; an entry it can't stat is kept with readable: false)
+//   GET /api/files/raw?cid=<chat>&path=<abs|rel> → the file (images), or text/plain (first TEXT_MAX bytes; 415 for binary)
+//   GET /api/files/find?cid=<chat>&q=<text>[&dir=] → {q, entries: [{name, path, dir, size, mtime}], truncated} (q: 2+ chars)
+//   GET /api/files/grep?cid=<chat>&q=<text>[&dir=] → {q, hits: [{path, line, text}], files, truncated} (q: 2–200 chars; text files ≤ 1 MB)
+//       (find/grep search under dir, default the project; paths are absolute when dir is, else project-relative)
 //   GET /api/files/changed?cid=<chat>          → {branch, entries: [{path, status, add, del, binary, from?}], truncated}, status
 //       M/A/D/R/? against HEAD (R: path is the new name, from the old); {branch: null, entries: [], notGit: true} outside git
 //   GET /api/files/diff?cid=<chat>&path=<rel>  → text/plain unified diff of one changed file against HEAD (first DIFF_MAX bytes)
-//   POST /api/files/copy  {cid, paths, dest}        → {created: [rel]}
+//   POST /api/files/copy  {cid, paths, dest}        → {created: [rel]}   (any path may be absolute; then results are too)
 //   POST /api/files/move  {cid, paths, dest}        → {moved: [{from, to}]}
 //   POST /api/files/zip   {cid, paths, dest?, name?} → {zip: rel}
 //   POST /api/files/unzip {cid, path, dest?}        → {extracted: rel, skipped}
 //   (the rules for these four are above copyPaths; errors are {error} with 400/403/404/409/413)
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
 
 export const TEXT_MAX = 1024 * 1024;
@@ -36,6 +45,47 @@ export const IMAGE_TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg':
 const SANDBOX = "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'";
 
 class FileError extends Error { constructor(status, message) { super(message); this.status = status; } }
+const within = (p, dir) => p === dir || p.startsWith(dir === '/' ? '/' : dir + path.sep);
+const realOr = (p) => { try { return fs.realpathSync(p); } catch { return null; } };
+const denied = (e) => (e.code === 'EACCES' || e.code === 'EPERM' ? new FileError(403, 'Permission denied') : new FileError(404, 'Not found'));
+
+// Secrets: listed (protected: true) but never previewed, downloaded, searched, copied, zipped or moved. {data} is the
+// agent-orch data dir (CW_DATA_DIR, as in server.mjs), ~ the home dir; ** crosses folders, * doesn't. A path counts
+// when it or its realpath matches. The literal folder before a pattern's first * (data dir, ~/.ssh…) is never moved
+// or written into, nor is any folder holding one.
+export const PROTECTED = ['{data}/**/auth.json', '{data}/**/secrets*', '{data}/**/sessions*', '{data}/**/*.db', '{data}/**/*.db-*',
+  '{data}/**/push-vapid.json', '~/.ssh', '~/.ssh/**', '~/.claude/.credentials.json', '~/.claude.json', '~/.codex/auth.json',
+  '~/.config/gh/hosts.yml', '~/.git-credentials', '**/*.pem', '**/*.key'];
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const globRe = (g) => g.split(/(\*\*\/|\*\*|\*)/).map((p) => (p === '**/' ? '(?:.*/)?' : p === '**' ? '.*' : p === '*' ? '[^/]*' : esc(p))).join('');
+let rules = { key: null };
+function protectRules() {
+  const home = os.homedir(), data = process.env.CW_DATA_DIR ? path.resolve(process.env.CW_DATA_DIR) : path.join(HERE, 'data');
+  const bases = { '{data}': [...new Set([data, realOr(data) || data])], '~': [...new Set([home, realOr(home) || home])], '': [''] };
+  const key = JSON.stringify(bases);
+  if (rules.key === key) return rules;
+  rules = { key, res: [], anchors: [] };
+  for (const g of PROTECTED) {
+    const pre = g.startsWith('{data}') ? '{data}' : g.startsWith('~') ? '~' : '', rest = g.slice(pre.length), star = rest.indexOf('*');
+    for (const base of bases[pre]) {
+      rules.res.push(new RegExp(`^${esc(base)}${globRe(rest)}$`, 'i'));
+      if (pre) rules.anchors.push(base + (star < 0 ? rest : rest.slice(0, rest.lastIndexOf('/', star))));
+    }
+  }
+  return rules;
+}
+export const isSecret = (...paths) => paths.some((p) => p && protectRules().res.some((r) => r.test(p)));
+// A folder a secret's fixed location sits in (or is): never moved, never written into.
+const holdsSecret = (real) => protectRules().anchors.some((a) => within(a, real) || within(real, a));
+
+// Where writes may land: the project, the home dir and /tmp (os.tmpdir() too), by real path.
+export function writeRoots(root) {
+  return [...new Set([root, os.homedir(), '/tmp', os.tmpdir()].filter(Boolean).map(realOr).filter(Boolean))];
+}
+function assertWritable(root, real) {
+  if (!writeRoots(root).some((r) => within(real, r))) throw new FileError(403, 'Read-only location');
+}
 
 // The project's real root and the real path of `rel` inside it; throws 403/404 when it leaves the root or is missing.
 export function resolveInside(rootDir, rel = '') {
@@ -49,27 +99,56 @@ export function resolveInside(rootDir, rel = '') {
   return { root, real, rel: parts.join('/') };
 }
 
-export function listDir(rootDir, rel) {
-  const { root, real, rel: clean } = resolveInside(rootDir, rel);
-  if (!fs.statSync(real).isDirectory()) throw new FileError(400, 'Not a folder');
-  const names = fs.readdirSync(real);
-  const entries = [];
-  for (const name of names.slice(0, LIST_MAX)) {
-    let st, target, link;
-    try { link = fs.lstatSync(path.join(real, name)).isSymbolicLink(); target = fs.realpathSync(path.join(real, name)); st = fs.statSync(target); } catch { continue; } // broken link
-    if (target !== root && !target.startsWith(root + path.sep)) continue; // a link out of the project
-    if (!st.isDirectory() && !st.isFile()) continue; // sockets, fifos, devices
-    entries.push({ name, dir: st.isDirectory(), type: st.isDirectory() ? 'dir' : 'file', size: st.isFile() ? st.size : null, mtime: Math.round(st.mtimeMs),
-      hidden: name.startsWith('.'), isSymlink: link });
-  }
-  const crumbs = [{ name: path.basename(root), path: '' }];
-  clean.split('/').filter(Boolean).forEach((s, i, a) => crumbs.push({ name: s, path: a.slice(0, i + 1).join('/') }));
-  return { name: crumbs.at(-1).name, path: clean, crumbs, entries, truncated: names.length > LIST_MAX };
+// A client path: absolute → anywhere (realpath; `at` is the path as asked), else resolveInside the project. root: the
+// project's real path (null if it's gone and the path is absolute).
+export function resolvePath(rootDir, p = '') {
+  const s = String(p ?? '');
+  if (!s.startsWith('/')) { const r = resolveInside(rootDir, s); return { ...r, at: path.join(r.root, r.rel), abs: false }; }
+  if (s.includes('\0')) throw new FileError(400, 'Invalid path');
+  const at = path.resolve(s);
+  let real;
+  try { real = fs.realpathSync(at); } catch (e) { throw denied(e); }
+  return { root: realOr(rootDir), real, rel: real, at, abs: true };
 }
 
-// Breadth-first walk of the project, shared by find and grep, so shallow entries come first. Skips FIND_SKIP and hidden
-// folders (unless `dotted`), never descends a symlink (no loops or duplicates) and leaves out links that point outside
-// the project. Yields {name, path, abs, st} for files and folders; after FIND_VISIT_MAX entries it sets state.truncated.
+export function listDir(rootDir, p) {
+  const { root, real, rel, abs } = resolvePath(rootDir, p);
+  if (!fs.statSync(real).isDirectory()) throw new FileError(400, 'Not a folder');
+  const names = [];
+  let truncated = false;
+  const d = fs.opendirSync(real); // read only up to the cap, however big the folder
+  try { for (let e; (e = d.readSync());) { if (names.length >= LIST_MAX) { truncated = true; break; } names.push(e.name); } }
+  finally { d.closeSync(); }
+  const roots = writeRoots(root), can = (p, mode) => { try { fs.accessSync(p, mode); return true; } catch { return false; } };
+  const entries = [];
+  for (const name of names) {
+    const at = path.join(real, name);
+    let lst, st, target;
+    try { lst = fs.lstatSync(at); } catch { // a folder we may list but not search
+      entries.push({ name, path: at, dir: false, type: 'file', size: null, mtime: null, hidden: name.startsWith('.'), isSymlink: false,
+        readable: false, writable: false, protected: isSecret(at) });
+      continue;
+    }
+    const link = lst.isSymbolicLink();
+    try { target = link ? fs.realpathSync(at) : at; st = link ? fs.statSync(target) : lst; } catch { continue; } // broken link
+    if (!abs && !within(target, root)) continue; // a link out of the project
+    if (!st.isDirectory() && !st.isFile()) continue; // sockets, fifos, devices
+    const isDir = st.isDirectory(), secret = isSecret(at, target);
+    entries.push({ name, path: at, dir: isDir, type: isDir ? 'dir' : 'file', size: st.isFile() ? st.size : null, mtime: Math.round(st.mtimeMs),
+      hidden: name.startsWith('.'), isSymlink: link, readable: can(target, isDir ? fs.constants.R_OK | fs.constants.X_OK : fs.constants.R_OK),
+      writable: !secret && roots.some((r) => within(target, r)) && can(target, fs.constants.W_OK), protected: secret });
+  }
+  const crumbs = abs ? [{ name: '/', path: '/' }] : [{ name: path.basename(root), path: '' }];
+  const segs = rel.split('/').filter(Boolean);
+  segs.forEach((s, i) => crumbs.push({ name: s, path: (abs ? '/' : '') + segs.slice(0, i + 1).join('/') }));
+  const places = [{ label: 'Project', path: root || path.resolve(rootDir) }, { label: 'Home', path: os.homedir() }, { label: '/', path: '/' }, { label: '/tmp', path: '/tmp' }];
+  return { dir: real, parent: real === '/' ? null : path.dirname(real), entries, places, truncated, name: crumbs.at(-1).name, path: rel, crumbs };
+}
+
+// Breadth-first walk of a folder (the project, or find/grep's dir), shared by find and grep, so shallow entries come
+// first. Skips FIND_SKIP and hidden folders (unless `dotted`), never descends a symlink (no loops or duplicates) and
+// leaves out links that point outside that folder. Yields {name, path (relative to root), abs, real, st} for files and
+// folders; after FIND_VISIT_MAX entries it sets state.truncated.
 function* walkProject(root, dotted, state) {
   const queue = [''];
   let visited = 0;
@@ -80,47 +159,55 @@ function* walkProject(root, dotted, state) {
     for (const name of names) {
       if (++visited > FIND_VISIT_MAX) { state.truncated = true; return; }
       const abs = path.join(root, rel, name), relPath = rel ? `${rel}/${name}` : name;
-      let st, link = false;
+      let st, link = false, real = abs;
       try {
         st = fs.lstatSync(abs);
         if (st.isSymbolicLink()) {
           link = true;
-          const target = fs.realpathSync(abs);
-          if (target !== root && !target.startsWith(root + path.sep)) continue; // a link out of the project
-          st = fs.statSync(target);
+          real = fs.realpathSync(abs);
+          if (!within(real, root)) continue; // a link out of the folder
+          st = fs.statSync(real);
         }
       } catch { continue; } // broken link, or gone mid-walk
       if (!st.isDirectory() && !st.isFile()) continue;
       if (st.isDirectory() && (FIND_SKIP.has(name) || (name.startsWith('.') && !dotted))) continue;
-      yield { name, path: relPath, abs, st };
+      yield { name, path: relPath, abs, real, st };
       if (st.isDirectory() && !link) queue.push(relPath);
     }
   }
 }
 
-// Project-wide find by name (case-insensitive substring) over walkProject. Stops after `max` hits or FIND_VISIT_MAX
+// Where find/grep look: `dir` (default the project) and how a found path is shown: absolute when dir is, else
+// relative to the project.
+function searchBase(rootDir, dir) {
+  const { root, real, abs } = resolvePath(rootDir, dir || '');
+  if (!fs.statSync(real).isDirectory()) throw new FileError(400, 'Not a folder');
+  return { base: real, show: (rel) => (abs ? path.join(real, rel) : relOf(root, path.join(real, rel))) };
+}
+
+// Find by name (case-insensitive substring) over walkProject. Stops after `max` hits or FIND_VISIT_MAX
 // entries looked at (truncated: true).
-export function findFiles(rootDir, q, { max = 200 } = {}) {
-  const { root } = resolveInside(rootDir, '');
+export function findFiles(rootDir, q, { max = 200, dir } = {}) {
+  const { base, show } = searchBase(rootDir, dir);
   const needle = String(q || '').toLowerCase(), state = { truncated: false }, entries = [];
-  for (const { name, path: relPath, st } of walkProject(root, needle.startsWith('.'), state)) {
+  for (const { name, path: relPath, st } of walkProject(base, needle.startsWith('.'), state)) {
     if (!name.toLowerCase().includes(needle)) continue;
     if (entries.length >= max) { state.truncated = true; break; }
-    entries.push({ name, path: relPath, dir: st.isDirectory(), size: st.isFile() ? st.size : null, mtime: Math.round(st.mtimeMs) });
+    entries.push({ name, path: show(relPath), dir: st.isDirectory(), size: st.isFile() ? st.size : null, mtime: Math.round(st.mtimeMs) });
   }
   return { q: String(q || ''), entries, truncated: state.truncated };
 }
 
-// Project-wide search inside files (case-insensitive substring) over walkProject: one hit per matching line, `line`
+// Search inside files (case-insensitive substring) over walkProject: one hit per matching line, `line`
 // 1-based, `text` the line trimmed to GREP_TEXT characters around the match. Reads only regular files up to `fileMax`
-// bytes and skips binary ones (a NUL in the first 8 KB). `files` counts the files searched. Stops after `max` hits or
+// bytes and skips binary and PROTECTED ones (a NUL in the first 8 KB). `files` counts the files searched. Stops after `max` hits or
 // FIND_VISIT_MAX entries (truncated: true); yields to the event loop every 50 files so a big project can't stall the server.
-export async function grepFiles(rootDir, q, { max = 200, fileMax = 1024 * 1024 } = {}) {
-  const { root } = resolveInside(rootDir, '');
+export async function grepFiles(rootDir, q, { max = 200, fileMax = 1024 * 1024, dir } = {}) {
+  const { base, show } = searchBase(rootDir, dir);
   const needle = String(q || '').toLowerCase(), state = { truncated: false }, hits = [];
   let files = 0, seen = 0;
-  walk: for (const { path: relPath, abs, st } of walkProject(root, needle.startsWith('.'), state)) {
-    if (!st.isFile()) continue;
+  walk: for (const { path: relPath, abs, real, st } of walkProject(base, needle.startsWith('.'), state)) {
+    if (!st.isFile() || isSecret(abs, real)) continue;
     if (++seen % 50 === 0) await new Promise((r) => setImmediate(r));
     if (st.size > fileMax) continue;
     let buf;
@@ -134,7 +221,7 @@ export async function grepFiles(rootDir, q, { max = 200, fileMax = 1024 * 1024 }
       const at = lowers[i].indexOf(needle);
       if (at < 0) continue;
       if (hits.length >= max) { state.truncated = true; break walk; }
-      hits.push({ path: relPath, line: i + 1, text: grepSnippet(lines[i].replace(/\r$/, ''), at, needle.length) });
+      hits.push({ path: show(relPath), line: i + 1, text: grepSnippet(lines[i].replace(/\r$/, ''), at, needle.length) });
     }
   }
   return { q: String(q || ''), hits, files, truncated: state.truncated };
@@ -148,7 +235,8 @@ function grepSnippet(line, at, len) {
 // Serves one file. Images (by extension) as their type; anything else as UTF-8 text, first TEXT_MAX bytes, or 415 when
 // the start of it looks binary (a NUL byte).
 export function sendFile(req, res, rootDir, rel) {
-  const { real } = resolveInside(rootDir, rel);
+  const { real, at } = resolvePath(rootDir, rel);
+  if (isSecret(at, real)) throw new FileError(403, 'This file is protected');
   const st = fs.statSync(real);
   if (!st.isFile()) throw new FileError(400, 'Not a file');
   const lastModified = new Date(Math.floor(st.mtimeMs / 1000) * 1000).toUTCString();
@@ -241,6 +329,7 @@ export async function changedFiles(rootDir, { max = CHANGED_MAX } = {}) {
 export async function sendDiff(req, res, rootDir, rel) {
   const clean = String(rel || '').split('/').filter((s) => s && s !== '.').join('/');
   const { root } = resolveInside(rootDir, '');
+  if (isSecret(path.join(root, clean))) throw new FileError(403, 'This file is protected');
   const changed = await changedFiles(root, { max: Infinity });
   const entry = changed.entries.find((e) => e.path === clean);
   if (!entry) throw new FileError(404, changed.notGit ? 'Not a git repository' : 'No changes in this file');
@@ -256,11 +345,13 @@ export async function sendDiff(req, res, rootDir, rel) {
 }
 
 // ── Changing files: copy, move, zip, unzip ──────────────────────────────────────────────────────────────────────────
-// Every path is resolved like resolveInside (realpath, inside the project). A source is the entry itself, not what a
-// link points to: moving or copying a link moves or copies the link (it must still point inside the project), and a
-// folder's contents are copied with their links as they are. The project root is never a source. data/ (at the top)
-// and anything under a .git/ are read-only: never a destination, never moved, and no new item may land there; reading
-// them (copy out, zip) is fine. A clash with an existing name gets 'name copy', 'name copy 2'… (copy, move) or
+// Every path is resolved like resolvePath (realpath; a relative one inside the project). A source is the entry itself,
+// not what a link points to: moving or copying a link moves or copies the link (a relative one must still point inside
+// the project), and a folder's contents are copied with their links as they are. The project root and '/' are never a
+// source; a PROTECTED one is refused (403), and a copied or zipped folder leaves its secrets out. Writes land only in
+// writeRoots (a move's source too), by real path, so a link never carries one elsewhere: else 403 'Read-only location'.
+// In the project, data/ (at the top) and anything under a .git/ are read-only: never a destination, never moved, and
+// no new item may land there; reading them (copy out, zip) is fine. A clash with an existing name gets 'name copy', 'name copy 2'… (copy, move) or
 // 'name 2', 'name 3'… (zip, unzip). Zips are written and read in plain node (zlib, no zip/unzip binaries, no zip64):
 // the same code on the head and on macOS workers, and every archive entry is checked before anything is written.
 export const OPS_ENTRY_MAX = 20000;
@@ -268,21 +359,34 @@ export const ZIP_INPUT_MAX = 2 * 1024 ** 3;
 export const UNZIP_MAX = 500 * 1024 ** 2;
 
 const relOf = (root, abs) => path.relative(root, abs).split(path.sep).join('/');
-const isProtected = (rel) => { const s = rel.split('/'); return s[0] === 'data' || s.includes('.git'); };
-const within = (p, dir) => p === dir || p.startsWith(dir + path.sep);
+// Project-relative path of `abs`, or null outside the project.
+const projRel = (root, abs) => (root && within(abs, root) ? relOf(root, abs) : null);
+const isProtected = (rel) => { if (rel == null) return false; const s = rel.split('/'); return s[0] === 'data' || s.includes('.git'); };
 const lexists = (p) => { try { fs.lstatSync(p); return true; } catch { return false; } };
+// How results name paths: absolute when the request used any absolute path, else project-relative.
+const shower = (root, inputs) => (inputs.flat().some((p) => typeof p === 'string' && p.startsWith('/')) ? (a) => a : (a) => relOf(root, a));
 
 // One source the client named: {root, abs (the entry, in its real parent folder), real, rel, name, dir, link}.
-function sourceOf(rootDir, rel) {
-  const parts = String(rel ?? '').split('/').filter((s) => s && s !== '.');
-  if (parts.some((s) => s === '..' || s.includes('\0'))) throw new FileError(400, 'Invalid path');
-  if (!parts.length) throw new FileError(400, 'Pick a file or folder, not the project itself');
-  const { root, real: parent } = resolveInside(rootDir, parts.slice(0, -1).join('/'));
-  const abs = path.join(parent, parts.at(-1));
-  let lst;
-  try { lst = fs.lstatSync(abs); } catch { throw new FileError(404, `Not found: ${parts.join('/')}`); }
-  const { real } = resolveInside(root, relOf(root, abs));
-  return { root, abs, real, rel: relOf(root, abs), name: parts.at(-1), dir: fs.statSync(real).isDirectory(), link: lst.isSymbolicLink() };
+function sourceOf(rootDir, p) {
+  const s = String(p ?? '');
+  let parentPath, name;
+  if (s.startsWith('/')) {
+    const at = path.resolve(s);
+    if (at === '/') throw new FileError(400, 'Pick a file or folder, not /');
+    [parentPath, name] = [path.dirname(at), path.basename(at)];
+  } else {
+    const parts = s.split('/').filter((x) => x && x !== '.');
+    if (parts.some((x) => x === '..' || x.includes('\0'))) throw new FileError(400, 'Invalid path');
+    if (!parts.length) throw new FileError(400, 'Pick a file or folder, not the project itself');
+    [parentPath, name] = [parts.slice(0, -1).join('/'), parts.at(-1)];
+  }
+  const { root, real: parent } = resolvePath(rootDir, parentPath);
+  const abs = path.join(parent, name), shown = projRel(root, abs) ?? abs;
+  let lst, real;
+  try { lst = fs.lstatSync(abs); real = fs.realpathSync(abs); } catch (e) { throw e.code === 'EACCES' ? denied(e) : new FileError(404, `Not found: ${shown}`); }
+  if (!s.startsWith('/')) resolveInside(root, relOf(root, abs)); // a link out of the project
+  if (isSecret(abs, real)) throw new FileError(403, `${shown} is protected`);
+  return { root, abs, real, rel: projRel(root, abs), name, dir: fs.statSync(real).isDirectory(), link: lst.isSymbolicLink(), shown };
 }
 // The selection: distinct sources, leaving out any inside another selected folder (it comes along with it).
 function sourcesOf(rootDir, paths) {
@@ -291,51 +395,56 @@ function sourcesOf(rootDir, paths) {
   const all = [...new Map(paths.map((p) => sourceOf(rootDir, p)).map((s) => [s.abs, s])).values()];
   return all.filter((s) => !all.some((o) => o !== s && o.dir && !o.link && s.abs.startsWith(o.abs + path.sep)));
 }
-function destOf(rootDir, rel) {
-  if (typeof rel !== 'string') throw new FileError(400, 'Pick a destination folder');
-  const d = resolveInside(rootDir, rel);
+function destOf(rootDir, p) {
+  if (typeof p !== 'string') throw new FileError(400, 'Pick a destination folder');
+  const d = resolvePath(rootDir, p);
   if (!fs.statSync(d.real).isDirectory()) throw new FileError(400, 'The destination is not a folder');
-  if (isProtected(d.rel)) throw new FileError(403, `${d.rel} is read-only`);
-  return d;
+  assertWritable(d.root, d.real);
+  const rel = projRel(d.root, d.real);
+  if (isProtected(rel) || isSecret(d.real) || protectRules().anchors.some((a) => within(d.real, a))) throw new FileError(403, `${rel ?? d.real} is read-only`);
+  return { root: d.root, real: d.real, rel };
 }
 // A free name in `dir` for `name`; style 'copy' → 'a copy.txt', 'a copy 2.txt'; 'number' → 'a 2.zip', 'a 3.zip'.
 function freeName(root, dir, name, { isDir = false, style = 'copy' } = {}) {
   const ext = isDir ? '' : path.extname(name), stem = name.slice(0, name.length - ext.length);
   for (let n = 1; n <= 1000; n++) {
     const cand = n === 1 ? name : style === 'copy' ? `${stem} copy${n === 2 ? '' : ` ${n - 1}`}${ext}` : `${stem} ${n}${ext}`;
-    if (lexists(path.join(dir, cand))) continue;
-    if (isProtected(relOf(root, path.join(dir, cand)))) throw new FileError(403, `${relOf(root, path.join(dir, cand))} is read-only`);
-    return path.join(dir, cand);
+    const at = path.join(dir, cand);
+    if (lexists(at)) continue;
+    if (isProtected(projRel(root, at)) || isSecret(at)) throw new FileError(403, `${projRel(root, at) ?? at} is read-only`);
+    return at;
   }
   throw new FileError(409, `Too many items named like ${name}`);
 }
 function intoItself(s, dest, verb) {
-  if (s.dir && !s.link && within(dest.real, s.real)) throw new FileError(400, `Can't ${verb} ${s.rel} into itself`);
+  if (s.dir && !s.link && within(dest.real, s.real)) throw new FileError(400, `Can't ${verb} ${s.shown} into itself`);
 }
 
 // POST /api/files/copy {paths, dest} → {created: [rel]}
 export async function copyPaths(rootDir, paths, destRel) {
-  const dest = destOf(rootDir, destRel), srcs = sourcesOf(rootDir, paths);
+  const dest = destOf(rootDir, destRel), srcs = sourcesOf(rootDir, paths), show = shower(dest.root, [paths, destRel]);
   for (const s of srcs) intoItself(s, dest, 'copy');
   const created = [];
   for (const s of srcs) {
     const to = freeName(dest.root, dest.real, s.name, { isDir: s.dir && !s.link });
-    await fs.promises.cp(s.abs, to, { recursive: true, force: false, errorOnExist: true, verbatimSymlinks: true, preserveTimestamps: true });
-    created.push(relOf(dest.root, to));
+    await fs.promises.cp(s.abs, to, { recursive: true, force: false, errorOnExist: true, verbatimSymlinks: true, preserveTimestamps: true,
+      filter: (from) => !isSecret(from) });
+    created.push(show(to));
   }
   return { created };
 }
 
 // POST /api/files/move {paths, dest} → {moved: [{from, to}]}; an item already in dest stays put (from === to).
 export async function movePaths(rootDir, paths, destRel) {
-  const dest = destOf(rootDir, destRel), srcs = sourcesOf(rootDir, paths);
+  const dest = destOf(rootDir, destRel), srcs = sourcesOf(rootDir, paths), show = shower(dest.root, [paths, destRel]);
   for (const s of srcs) {
-    if (isProtected(s.rel)) throw new FileError(403, `${s.rel} is read-only`);
+    assertWritable(s.root, path.dirname(s.abs));
+    if (isProtected(s.rel) || (!s.link && holdsSecret(s.real))) throw new FileError(403, `${s.shown} is read-only`);
     intoItself(s, dest, 'move');
   }
   const moved = [];
   for (const s of srcs) {
-    if (path.dirname(s.abs) === dest.real) { moved.push({ from: s.rel, to: s.rel }); continue; }
+    if (path.dirname(s.abs) === dest.real) { moved.push({ from: show(s.abs), to: show(s.abs) }); continue; }
     const to = freeName(dest.root, dest.real, s.name, { isDir: s.dir && !s.link });
     try { await fs.promises.rename(s.abs, to); }
     catch (e) {
@@ -343,7 +452,7 @@ export async function movePaths(rootDir, paths, destRel) {
       await fs.promises.cp(s.abs, to, { recursive: true, force: false, errorOnExist: true, verbatimSymlinks: true, preserveTimestamps: true });
       await fs.promises.rm(s.abs, { recursive: true });
     }
-    moved.push({ from: s.rel, to: relOf(dest.root, to) });
+    moved.push({ from: show(s.abs), to: show(to) });
   }
   return { moved };
 }
@@ -360,10 +469,10 @@ function plainName(name) {
 // common parent folder, the name to '<item>.zip' for one item or 'Archive.zip' for several.
 export async function zipPaths(rootDir, paths, { dest: destRel, name } = {}) {
   const srcs = sourcesOf(rootDir, paths);
-  const { root } = srcs[0];
+  const { root } = srcs[0], show = shower(root, [paths, destRel ?? '']);
   let common = path.dirname(srcs[0].abs);
   for (const s of srcs) while (!within(path.dirname(s.abs), common)) common = path.dirname(common);
-  const dest = destOf(root, destRel ?? relOf(root, common));
+  const dest = destOf(rootDir, destRel ?? common);
   const seen = new Set();
   for (const s of srcs) {
     if (seen.has(s.name)) throw new FileError(409, `Two selected items are both named ${s.name}`);
@@ -384,6 +493,7 @@ export async function zipPaths(rootDir, paths, { dest: destRel, name } = {}) {
     const walk = (abs, prefix) => {
       for (const n of fs.readdirSync(abs).sort()) {
         const p = path.join(abs, n), l = fs.lstatSync(p);
+        if (isSecret(p)) continue;
         if (l.isDirectory()) { add({ name: `${prefix}${n}/`, dir: true, st: l }); walk(p, `${prefix}${n}/`); }
         else if (l.isFile()) add({ name: `${prefix}${n}`, abs: p, size: l.size, st: l });
       }
@@ -395,7 +505,7 @@ export async function zipPaths(rootDir, paths, { dest: destRel, name } = {}) {
     await writeZip(partial, entries);
     const to = freeName(root, dest.real, file, { style: 'number' });
     await fs.promises.rename(partial, to);
-    return { zip: relOf(root, to) };
+    return { zip: show(to) };
   } catch (e) { await fs.promises.rm(partial, { force: true }); throw e; }
 }
 
@@ -487,9 +597,9 @@ async function readZip(fh, fileSize) {
 // (default: the zip's own folder). It unpacks into a hidden staging folder first, renamed into place only when every
 // entry came out whole (size and CRC match), so a bad archive leaves nothing behind.
 export async function unzipPath(rootDir, rel, { dest: destRel } = {}) {
-  const src = sourceOf(rootDir, rel);
+  const src = sourceOf(rootDir, rel), show = shower(src.root, [rel, destRel ?? '']);
   if (src.dir) throw new FileError(400, 'Not a zip file');
-  const dest = destOf(src.root, destRel ?? relOf(src.root, path.dirname(src.abs)));
+  const dest = destOf(rootDir, destRel ?? path.dirname(src.abs));
   const folder = src.name.replace(/\.zip$/i, '') || 'Archive';
   const fh = await fs.promises.open(src.real, 'r');
   const staging = path.join(dest.real, `.${folder}.${process.pid}-${Date.now()}.unzip`);
@@ -526,7 +636,7 @@ export async function unzipPath(rootDir, rel, { dest: destRel } = {}) {
     }
     const to = freeName(src.root, dest.real, folder, { isDir: true, style: 'number' });
     await fs.promises.rename(staging, to);
-    return { extracted: relOf(src.root, to), skipped };
+    return { extracted: show(to), skipped };
   } catch (e) { await fs.promises.rm(staging, { recursive: true, force: true }); throw e; }
   finally { await fh.close(); }
 }
@@ -560,9 +670,10 @@ export function handleFiles(req, res, url, { rootFor, json, readBody }) {
     else if (m[1] === 'find' || m[1] === 'grep') {
       const q = (url.searchParams.get('q') || '').trim();
       if (q.length < 2) throw new FileError(400, 'Type at least 2 characters');
-      if (m[1] === 'find') json(res, 200, findFiles(root, q));
+      const dir = url.searchParams.get('dir') || '';
+      if (m[1] === 'find') json(res, 200, findFiles(root, q, { dir }));
       else if (q.length > 200) throw new FileError(400, 'Search for 200 characters at most');
-      else grepFiles(root, q).then((r) => json(res, 200, r), fail);
+      else grepFiles(root, q, { dir }).then((r) => json(res, 200, r), fail);
     }
     else if (m[1] === 'changed') changedFiles(root).then((r) => json(res, 200, r), fail);
     else if (m[1] === 'diff') sendDiff(req, res, root, url.searchParams.get('path')).catch(fail);

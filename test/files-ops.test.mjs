@@ -162,7 +162,8 @@ test('paths that leave the project are refused for every op', async () => {
     await assert.rejects(zipPaths(p.root, [bad], { dest: 'out' }), (e) => [400, 403].includes(e.status), bad);
     await assert.rejects(unzipPath(p.root, bad, { dest: 'out' }), (e) => [400, 403].includes(e.status), bad);
   }
-  for (const bad of ['..', '../secret', 'escape', '/tmp', p.outside]) {
+  // An absolute destination is the whole-disk scope (files-scope.test.mjs): /etc is a read-only location.
+  for (const bad of ['..', '../secret', 'escape', '/etc']) {
     await assert.rejects(copyPaths(p.root, ['a.txt'], bad), (e) => [400, 403, 404].includes(e.status), bad);
     await assert.rejects(movePaths(p.root, ['a.txt'], bad), (e) => [400, 403, 404].includes(e.status), bad);
     await assert.rejects(zipPaths(p.root, ['a.txt'], { dest: bad }), (e) => [400, 403, 404].includes(e.status), bad);

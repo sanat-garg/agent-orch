@@ -1189,6 +1189,9 @@ Pushes now stream into git after the ref check; dropped clients kill git
 
 CONTEXT.md conflict resolved; ui-stats tests pass
 
+## 2026-09-28 14:32 — #437 Files backend: browse the whole VPS, with guardrails for secrets and system folders [done (check passed)]
+
+Files API browses whole disk with secret and write guardrails
 ## 2026-09-28 14:28 — #398 Integrate #381: oracle-vm node in the Machines graph opens the full server details [done (check passed)]
 
 Merge resolved, Ping all kept, machines UI tests pass
@@ -1219,3 +1222,7 @@ CONTEXT.md conflict resolved; UI and Machines tests pass
 ## 2026-09-28 14:30 — #312 Integrate #305: Push notifications ui: service worker, Settings switch, #task deep link and app badge [done (check passed)]
 
 Merge conflicts resolved; push-ui, ui-static and security-headers tests pass
+
+## 2026-09-28 14:32 — #441 Integrate #437: Files backend: browse the whole VPS, with guardrails for secrets and system folders [done (check passed)]
+
+CONTEXT.md conflict resolved; files-scope tests pass

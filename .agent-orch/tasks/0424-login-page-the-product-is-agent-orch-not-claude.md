@@ -13,3 +13,7 @@ Goal: BRIEF.md goal 4 says no user-visible "Claude Web"/"Claude Code" branding s
 ## Done when
 
 `grep -c "Sign in to agent-orch on" public/login.html` prints 1 and `! grep -q "Claude Code" public/login.html` and `npm test -- test/security-headers.test.mjs`
+
+## Result — done (check passed) (2026-09-28 14:16)
+
+AGENT-ORCH-STATUS: done — Login subtitle now says "Sign in to agent-orch"; tests pass

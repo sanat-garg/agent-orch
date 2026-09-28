@@ -1136,3 +1136,7 @@ worktrees.mjs git calls retry lock races; conflicts never retried
 ## 2026-09-28 14:16 — #420 extensions.mjs AUDIT #69 lasting fix: http connectors with outbound tools run through the gate proxy instead of being withheld [done (check passed)]
 
 http connectors now run through the gate proxy; sse still withheld
+
+## 2026-09-28 14:16 — #424 login page: the product is agent-orch, not Claude Code (goal 4) [done (check passed)]
+
+Login subtitle now says "Sign in to agent-orch"; tests pass

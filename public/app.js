@@ -4034,8 +4034,8 @@ function updateLive() {
 setInterval(updateLive, 1000);
 
 // ----- server details (this server's own window: the controller's node detail) -----
-// One block (index.html #serverDetails: device line, charts, running tasks, top processes, Machines) that
-// renderServerDetails(container) mounts in the controller's node detail; parked in #sdStash otherwise, so its charts and
+// One block (index.html #serverDetails: device line, charts, running tasks, top processes) that renderServerDetails(container)
+// mounts in the controller's node detail (the Machines view's side panel); parked in #sdStash otherwise, so its charts and
 // listeners live on. Live refresh (metrics_sub) runs only while it's shown.
 const serverOpen = () => !$('nodeModal').hidden && !$('sdStash').contains($('serverDetails'));
 function renderServerDetails(container) {
@@ -4049,7 +4049,6 @@ function renderServerDetails(container) {
   renderMetrics();
   loadHistory();
   updateLive();
-  CA.ready = false; // the cluster diagram's first snapshot is drawn as it is, not replayed
   loadMachines();
 }
 function parkServerDetails() {
@@ -4057,17 +4056,12 @@ function parkServerDetails() {
   const was = serverOpen();
   $('sdRun').replaceChildren(); // its Running here belongs to that open
   $('sdStash').append($('serverDetails'));
-  if (was) { send({ t: 'metrics_sub', on: false }); caFlush(); }
+  if (was) send({ t: 'metrics_sub', on: false });
 }
-// Anything that shows "this server" opens the controller's node detail.
+// Anything that shows "this server" opens the Machines view on the controller's detail.
 function openServer() {
   closeSidebar();
   openNode(MC.nodes.find((n) => n.local)?.id || 'controller');
-}
-// The all-machines window: for now this server's window at its Machines section (every machine's card and usage).
-function openMachines() {
-  openServer();
-  $('mcTitle').closest('.mc-sec').scrollIntoView({ block: 'start' });
 }
 function renderRangePicker() {
   document.querySelectorAll('#rangePicker button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.range === M.range)));
@@ -4085,7 +4079,7 @@ setInterval(() => { if (M.usage) renderUsage(); }, 30e3); // keep the "in 2h 9m"
 
 // ----- machines (cluster nodes) and the "Add machine" wizard -----
 // One card per node from GET /api/cluster/nodes (cluster.mjs view + orchestrator `machines`: running tasks, work slots in
-// use and the node's slot count). While a node detail is open it re-reads on 'cluster' pushes (node changes, worker
+// use and the node's slot count). While the Machines view is open it re-reads on 'cluster' pushes (node changes, worker
 // CPU/RAM readings), task changes and, for the controller's own numbers, its metric ticks (at most every 10 s).
 // "Add machine": POST /api/cluster/pair → a one-time code, or {uses: N} → one code for N machines (valid 1 h), embedded in
 // a one-line install command per OS (bin/install-worker*.sh, served at /install/…). GET /api/cluster/pair/:code then
@@ -4118,11 +4112,11 @@ async function loadMachines() {
   renderMachines();
   miniRender();
 }
-// Coalesces bursts (task updates, pushes) into one read while a node detail is open.
+// Coalesces bursts (task updates, pushes) into one read while the Machines view is open.
 function scheduleMachines(ms = 600) {
-  if ($('nodeModal').hidden) return miniFetch();
+  if (!mxOpen()) return miniFetch();
   if (MC.timer) return;
-  MC.timer = setTimeout(() => { MC.timer = null; if (!$('nodeModal').hidden) loadMachines(); }, ms);
+  MC.timer = setTimeout(() => { MC.timer = null; if (mxOpen()) loadMachines(); }, ms);
 }
 // Online / Draining / Disabled while connected; away: Connection lost (silent, no bye), Shut down (bye), Asleep (a legacy
 // row: a sleep is only known after the fact, from the worker's reconnect), else Offline.
@@ -4146,17 +4140,16 @@ function machineSummary(nodes) {
 function renderMachines() {
   caSync(MC.nodes);
   if (ND.id) ndRender();
+  mxLanesRender();
   // A menu in use (a finish sound, the add-a-sound URL) isn't replaced under the owner's finger: the render waits until it loses focus.
   if (document.activeElement?.matches?.('#mMachines select, #mMachines .snd-add input')) { MC.stale = true; return; }
   MC.stale = false;
-  const nodes = MC.nodes, sec = $('mcTitle').closest('.mc-sec'), head = sec.parentElement.firstElementChild, first = nodes.some((n) => !n.local);
-  // With workers the cluster leads this server's details (under the device line, above its charts); alone it sits at the bottom.
-  if (first !== (head.nextElementSibling === sec)) { if (first) head.after(sec); else sec.parentElement.append(sec); }
-  sec.classList.toggle('first', first);
+  const nodes = MC.nodes;
   $('mcSum').textContent = nodes.length ? machineSummary(nodes) : '';
-  $('pingAll').hidden = !first;
+  const remote = nodes.some((n) => !n.local);
+  $('pingAll').hidden = !remote;
   const ua = updateAllLabel(nodes, MC.target, MC.rollout);
-  $('updateAll').hidden = !first && !ua.count;
+  $('updateAll').hidden = !remote && !ua.count;
   $('updateAll').textContent = ua.text;
   $('updateAll').disabled = ua.disabled;
   $('updateAll').title = ua.title;
@@ -4237,24 +4230,28 @@ function machineCard(n) {
   const tasks = n.tasks || [];
   if (!tasks.length) run.append(el('p', 'mc-idle', n.connected && n.enabled && !n.draining ? 'Idle' : 'Nothing running'));
   const list = el('div', 'mc-tasks');
-  for (const t of tasks) {
-    const b = el('button', 'mc-task'), main = el('span');
-    b.type = 'button';
-    b.dataset.task = t.id;
-    main.append(el('span', 't', displayTitle(t)), el('span', 's', [`#${t.id}`, t.project, `${shortLabel(t.agent)} · ${modelName(t.agent, t.model)}`,
-      t.phase && t.phase !== 'running' ? PHASE_DOING[t.phase] : ''].filter(Boolean).join(' · ')));
-    const e = el('span', t.waiting_for ? 'e wait' : 'e', t.waiting_for ? 'waiting' : fmtDur(Date.now() / 1000 - t.started_at));
-    e.title = t.waiting_for ? `Waiting for ${t.waiting_for} to come back` : 'Running for';
-    b.append(main, e);
-    b.addEventListener('click', () => { closeNode(true); openTask(t.id); });
-    list.append(b);
-  }
+  for (const t of tasks) list.append(mcTaskRow(t));
   if (tasks.length) run.append(list);
   run.append(renderAssignButton(n));
   if (canUpdate(n)) run.append(updateButton(n));
   li.append(run);
   li.append(machineSettings(n));
   return li;
+}
+// A running task's row (machine cards, a machine's detail, the queue's lanes): its title, '#id · project · agent · model
+// · step' and how long it has run (ticking while the Machines view is open). A tap opens its drawer over the view.
+function mcTaskRow(t) {
+  const b = el('button', 'mc-task'), main = el('span');
+  b.type = 'button';
+  b.dataset.task = t.id;
+  main.append(el('span', 't', displayTitle(t)), el('span', 's', [`#${t.id}`, t.project, `${shortLabel(t.agent)} · ${modelName(t.agent, t.model)}`,
+    t.phase && t.phase !== 'running' ? PHASE_DOING[t.phase] : ''].filter(Boolean).join(' · ')));
+  const e = el('span', t.waiting_for ? 'e wait' : 'e', t.waiting_for ? 'waiting' : fmtDur(Date.now() / 1000 - t.started_at));
+  e.title = t.waiting_for ? `Waiting for ${t.waiting_for} to come back` : 'Running for';
+  if (!t.waiting_for) e.dataset.started = t.started_at;
+  b.append(main, e);
+  b.addEventListener('click', () => openTask(t.id));
+  return b;
 }
 // A worker's local cap (`node worker.mjs limit` on that machine, cap.mjs; the scheduler never gives it more), from its
 // latest reading: 'Pooled: 4 cores · 8 GB (set on this Mac)'. Parts it doesn't cap show the machine's whole.
@@ -4867,7 +4864,7 @@ async function patchNode(n, body) {
   loadMachines();
 }
 
-// ----- cluster diagram (this server's details → Machines, above the cards) -----
+// ----- cluster diagram (the Machines view, above the cards) -----
 // One SVG drawn by one requestAnimationFrame loop: the head (this server) in the middle and the workers around it (a
 // vertical list under 640px), each with CPU (outer) and RAM (inner) ring gauges, its OS icon and its running tasks as
 // chips. It moves on data the page already gets: a worker's newer reading (resources.at, sent every heartbeat) pulses it
@@ -4875,7 +4872,7 @@ async function patchNode(n, body) {
 // most 6 a second per link; a task that shows up on a machine travels there from the head as a chip, and one that leaves
 // returns and merges into the head (a check when it finished, a cross when it failed). Phase changes cross-fade on the
 // chip. Offline machines turn grey with a dashed link, asleep Macs wear a moon and draining ones an amber ring. The loop
-// runs only while something moves, this server's details are open, the diagram in view and the page visible (at most 60 fps),
+// runs only while something moves, the Machines view is open, the diagram in view and the page visible (at most 60 fps),
 // and never reads layout; with reduced motion every change is a static swap. Colours are theme variables (app.css .ca-*).
 const SVGNS = 'http://www.w3.org/2000/svg';
 const sv = (tag, attrs, parent) => {
@@ -4890,7 +4887,7 @@ const CA_PHASE = { queued: 'starting', cloning: 'cloning', fetching: 'fetching',
 const CA_TONE = { running: 'run', checking: 'check', committing: 'check', finishing: 'check', pushing: 'push', waiting: 'wait' };
 // nodes: id → view (its group, place, link); chips: task id → chip; anims: what moves now; seen: node id → its newest
 // reading's time; status: task id → its last pushed status; emit: node id → particle throttle; ready: the first
-// snapshot since this server's details opened is drawn (later changes animate).
+// snapshot since the Machines view opened is drawn (later changes animate).
 const CA = { wrap: null, svg: null, g: {}, w: 0, h: 0, list: false, key: '', head: null, nodes: new Map(), chips: new Map(), anims: new Set(),
   seen: new Map(), status: new Map(), emit: new Map(), raf: 0, last: 0, ready: false, inView: true, asked: 0, mark: null, markPath: null, markAnim: null, markTimer: 0 };
 
@@ -4907,12 +4904,12 @@ function caBuild() {
     const w = Math.round(e.contentRect.width);
     if (w && w !== CA.w) { CA.w = w; caLayout(); }
   }).observe(CA.wrap);
-  // Scrolled out of view (the details scroll): nothing moves until it's back.
+  // Scrolled out of view (or the Queue tab on a phone): nothing moves until it's back.
   new IntersectionObserver(([e]) => { CA.inView = e.isIntersecting; if (!CA.inView) caFlush(); }).observe(CA.wrap);
   // A chip opens its task's drawer; a machine its detail.
   CA.svg.addEventListener('click', (e) => {
     const chip = e.target.closest('.ca-chip'), node = e.target.closest('.ca-node');
-    if (chip) { closeNode(true); openTask(Number(chip.dataset.task)); } else if (node) openNode(node.dataset.node);
+    if (chip) openTask(Number(chip.dataset.task)); else if (node) openNode(node.dataset.node);
   });
   CA.svg.addEventListener('keydown', (e) => {
     if ((e.key === 'Enter' || e.key === ' ') && e.target.classList?.contains('ca-node')) { e.preventDefault(); openNode(e.target.dataset.node); }
@@ -4927,7 +4924,7 @@ function caClear() {
 }
 // A new snapshot of GET /api/cluster/nodes (renderMachines): the machines, their readings and running tasks.
 function caSync(nodes) {
-  if (!serverOpen()) return; // drawn only while this server's details are open; the next open starts fresh
+  if (!mxOpen()) return; // drawn only while the Machines view is open; the next open starts fresh
   const head = nodes.find((n) => n.local);
   if (!head || !nodes.some((n) => !n.local)) { if (CA.wrap) { CA.wrap.hidden = true; caClear(); } return; } // alone: just its card
   caBuild();
@@ -5131,7 +5128,7 @@ const caRoute = (v, out) => (v.poly ? (out ? v.poly.pts.slice(1, -1).reverse() :
 // ---- the loop: time-based animations {dur, step(u), done()}; nothing runs (or queues) unseen
 const caEase = (u) => (u < 0.5 ? 4 * u * u * u : 1 - (-2 * u + 2) ** 3 / 2);
 const caBack = (u) => 1 + 2.70158 * (u - 1) ** 3 + 1.70158 * (u - 1) ** 2; // overshoots, then settles
-const caCanMove = () => !!CA.svg && CA.inView && !CA.wrap.hidden && !reduceMotion.matches && !document.hidden && serverOpen();
+const caCanMove = () => !!CA.svg && CA.inView && !CA.wrap.hidden && !reduceMotion.matches && !document.hidden && mxOpen();
 function caAnim(a) {
   a.t0 = performance.now();
   if (!caCanMove()) { a.step(1); a.done?.(); return null; } // a static change: straight to the end state
@@ -5354,13 +5351,112 @@ function caTask(t) {
   if (CA.status.size > 500) CA.status.delete(CA.status.keys().next().value);
 }
 
-// ----- a machine's detail (tap it in the diagram, or this server's sidebar card) -----
-// One window for every node, sections in the same order: charts (CPU, memory, disk, network, load), what runs there
+// ----- Machines: the full-screen view (sidebar 'Machines' button, or the machine card: focused on that machine) -----
+// Fills the viewport over the app (a full-height sheet on phones): the cluster summary, the diagram and the machine
+// cards on the left; the queue on the right (a tab of its own on phones): 'Running 5 · Queued 12 · 11 free slots', the
+// running tasks lane by lane per machine (cluster-wide, from GET /api/cluster/nodes), then the Queue sheet's own list
+// (#qBody is borrowed while this is open, so taskCard, the dependency tree and drag-to-reorder come along; queued tasks
+// are the open project's, in scheduler order). A machine's detail is its side panel (#nodeModal, below). It sits under
+// the task drawer (z-index), so a tapped task opens over it; Escape closes the drawer, then the panel, then the view.
+const MX = { lastFocus: null };
+function mxOpen() { return !$('mxModal').hidden; }
+function openMachines(id) {
+  if (!mxOpen()) {
+    MX.lastFocus = document.activeElement;
+    closeSidebar();
+    if (!$('queueModal').hidden) closeQueue(false);
+    $('mxModal').hidden = false;
+    $('mxQueue').append($('qBody'));
+    CA.ready = false; // the cluster diagram's first snapshot is drawn as it is, not replayed
+    mxTab('machines');
+    loadMachines();
+    renderQueue();
+    if (!id) $('mxModal').querySelector('.mx-head [data-close]').focus();
+  }
+  if (id) openNode(id);
+}
+function closeMachines() {
+  if (!mxOpen()) return;
+  if (Q.drag) endDrag(false);
+  ND.lastFocus = null;
+  closeNode(true);
+  $('mxModal').hidden = true;
+  $('queueModal').querySelector('.modal-panel').append($('qBody'));
+  caFlush();
+  MX.lastFocus?.focus?.({ preventScroll: true });
+}
+// Phones show one side at a time: the machines or the queue.
+function mxTab(tab) {
+  $('mxModal').dataset.tab = tab;
+  for (const b of $('mxModal').querySelectorAll('.mx-tabs [role="tab"]')) {
+    const on = b.dataset.tab === tab;
+    b.setAttribute('aria-selected', String(on));
+    b.tabIndex = on ? 0 : -1;
+  }
+  if (tab === 'queue') qLines(); // the tree's connectors measure the cards, which were hidden
+}
+$('mxModal').querySelector('.mx-tabs').addEventListener('click', (e) => {
+  const b = e.target.closest('[role="tab"]');
+  if (b) mxTab(b.dataset.tab);
+});
+$('mxModal').querySelector('.mx-tabs').addEventListener('keydown', (e) => {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  const tab = $('mxModal').dataset.tab === 'queue' ? 'machines' : 'queue';
+  mxTab(tab);
+  $('mxModal').querySelector(`.mx-tabs [data-tab="${tab}"]`).focus();
+});
+$('mxModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]') && !$('nodeModal').contains(e.target)) closeMachines(); });
+$('machinesBtn').addEventListener('click', () => openMachines());
+// 'Running 5 · Queued 12 · 11 free slots': tasks running on every machine, the open project's queue, and the slots free
+// on the machines taking work (connected, enabled, not draining or paused).
+function mxCounts(nodes, queued) {
+  const running = nodes.reduce((a, n) => a + (n.tasks?.length || 0), 0);
+  const free = nodes.filter((n) => n.connected && n.enabled && !n.draining && n.status !== 'paused').reduce((a, n) => a + Math.max(0, (n.slots || 0) - (n.used || 0)), 0);
+  return `Running ${running} · Queued ${queued} · ${plural(free, 'free slot')}`;
+}
+// The running lanes, a group per machine that runs something or takes work: '<machine> · 2 of 4 slots', its tasks.
+function mxLanes() {
+  const box = el('div', 'mx-lanes'), h = el('h3', 'dg-group', 'Running');
+  box.id = 'mxLanes';
+  // Rapid mode: the files running work declared, with how many tasks may edit each at once (the per-file cap).
+  const hot = (O.state?.hot_files || []).filter((x) => x.project_id === O.project?.id);
+  if (hot.length) h.append(el('span', 'q-hot', `hot files: ${hot.map((x) => `${x.file} ×${x.cap}`).join(' · ')}`));
+  box.append(h);
+  const nodes = MC.nodes.filter((n) => n.tasks?.length || (n.connected && n.enabled));
+  if (!MC.at) box.append(el('p', 'muted', 'Loading machines…'));
+  for (const n of nodes) {
+    const lane = el('div', 'mx-lane'), head = el('div', 'mx-lane-h'), st = nodeState(n), tasks = n.tasks || [];
+    lane.dataset.node = n.id;
+    head.append(el('span', `dot ${st.dot}`), el('span', 'mx-lane-n', n.name), el('span', 'mx-lane-s',
+      st.label !== 'Online' ? st.label : `${n.used ?? tasks.length} of ${plural(n.slots ?? 0, 'slot')}`));
+    lane.append(head);
+    if (!tasks.length) lane.append(el('p', 'mc-idle', 'Idle'));
+    for (const t of tasks) lane.append(mcTaskRow(t));
+    box.append(lane);
+  }
+  return box;
+}
+// Fresh machines: the lanes and the counts follow without re-rendering the queue under a drag or the owner's focus.
+function mxLanesRender() {
+  if (!mxOpen()) return;
+  const f = document.activeElement?.closest?.('#mxLanes .mc-task')?.dataset.task, lanes = $('qBody').querySelector('#mxLanes');
+  if (lanes) lanes.replaceWith(mxLanes()); // the queue's first render puts them in
+  if (f) $('qBody').querySelector(`#mxLanes .mc-task[data-task="${f}"]`)?.focus({ preventScroll: true });
+  mxCountsRender();
+}
+function mxCountsRender() {
+  const q = queuedTasks().length;
+  $('mxCounts').textContent = mxCounts(MC.nodes, q);
+  $('mxTabN').textContent = q ? ` ${q}` : '';
+}
+
+// ----- a machine's detail (tap it in the diagram, or its sidebar card): the Machines view's side panel -----
+// One panel for every node, sections in the same order: charts (CPU, memory, disk, network, load), what runs there
 // with each remote run's phase timeline (the task's latest run, as in its drawer), processes where known, and the log.
 // The controller's is this server's full details (renderServerDetails: live charts from the metrics stream, top
-// processes, the Machines section); a worker's charts come from GET /api/cluster/nodes/:id/metrics?range= and its log
-// tail on demand (GET /api/cluster/nodes/:id/logs?tail=200, fetched over the worker's socket). A worker opened from the
-// controller's detail goes back to it on Escape or the back button.
+// processes); a worker's charts come from GET /api/cluster/nodes/:id/metrics?range= and its log tail on demand
+// (GET /api/cluster/nodes/:id/logs?tail=200, fetched over the worker's socket). A worker opened from the controller's
+// detail goes back to it on Escape or the back button.
 const ND_RANGES = ['15m', '1h', '6h', '24h'];
 // els: the sheet's parts (charts grid, running list, log section, log button), built per open; back: the node to return to.
 const ND = { id: null, range: ND_RANGES.includes(store.get('cw.nd.range')) ? store.get('cw.nd.range') : '1h', samples: null, err: '', at: 0, seq: 0,
@@ -5381,8 +5477,9 @@ const ND_CHARTS = [
 const ndNode = () => MC.nodes.find((n) => n.id === ND.id)
   || (ND.id === 'controller' ? { id: 'controller', local: true, name: MINI.host || $('hostName').textContent, connected: true, enabled: true, tasks: [] } : undefined);
 function openNode(id) {
-  const open = !$('nodeModal').hidden;
   if (!MC.nodes.some((n) => n.id === id) && id !== 'controller') return;
+  if (!mxOpen()) openMachines();
+  const open = !$('nodeModal').hidden;
   if (open && id === ND.id) return;
   const back = open && ndNode()?.local ? ND.id : null; // a worker opened from this server's details
   Object.assign(ND, { id, back, samples: null, err: '', at: 0, runs: new Map(), taskKey: '', log: null, lastFocus: open ? ND.lastFocus : document.activeElement });
@@ -5393,7 +5490,7 @@ function openNode(id) {
   $('ndBody').scrollTop = 0;
   (back ? $('ndBack') : $('nodeModal').querySelector('[data-close].icon-btn')).focus();
 }
-// Back to this server's details when a worker was opened from them; `all` closes the window.
+// Back to this server's details when a worker was opened from them; `all` closes the panel.
 function closeNode(all) {
   if ($('nodeModal').hidden) return;
   if (!all && ND.back) {
@@ -5411,8 +5508,14 @@ function closeNode(all) {
 }
 $('nodeModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeNode(true); });
 $('ndBack').addEventListener('click', () => closeNode());
+// Escape: a drag is dropped back, then the panel closes (or goes back to this server), then the view. The task drawer
+// and Add machine sit above and take it first.
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !$('nodeModal').hidden && $('machineModal').hidden) { e.stopImmediatePropagation(); closeNode(); }
+  if (e.key !== 'Escape' || !mxOpen() || !$('machineModal').hidden || O.drawer) return;
+  e.stopImmediatePropagation();
+  if (Q.drag) endDrag(false);
+  else if (!$('nodeModal').hidden) closeNode();
+  else closeMachines();
 }, true);
 function ndBuild() {
   const n = ndNode(), body = $('ndBody'), run = section('Running here'), log = section('Log');
@@ -5420,9 +5523,8 @@ function ndBuild() {
   log.id = 'ndLog';
   ND.els = { run, log };
   $('ndBack').hidden = !ND.back;
-  $('nodeModal').querySelector('.modal-panel').classList.toggle('wide', !!n.local);
   if (n.local) {
-    // This server: its details (charts, then Running here in its slot, top processes, Machines), then the log.
+    // This server: its details (charts, then Running here in its slot, top processes), then the log.
     ND.draws = [];
     for (const c of [...body.children]) if (c.id !== 'serverDetails') c.remove();
     $('sdRun').replaceChildren(run);
@@ -5488,15 +5590,8 @@ function ndRender() {
   box.replaceChildren(box.firstElementChild);
   if (!tasks.length) box.append(el('p', 'nd-note', n.connected && n.enabled && !n.draining ? 'Idle: nothing running here.' : 'Nothing running here.'));
   for (const t of tasks) {
-    const wrap = el('div', 'nd-task'), b = el('button', 'mc-task'), main = el('span');
-    b.type = 'button';
-    main.append(el('span', 't', displayTitle(t)), el('span', 's', [`#${t.id}`, t.project, `${shortLabel(t.agent)} · ${modelName(t.agent, t.model)}`,
-      t.phase && t.phase !== 'running' ? PHASE_DOING[t.phase] : ''].filter(Boolean).join(' · ')));
-    const e = el('span', t.waiting_for ? 'e wait' : 'e', t.waiting_for ? 'waiting' : fmtDur(Date.now() / 1000 - t.started_at));
-    if (!t.waiting_for) e.dataset.started = t.started_at;
-    b.append(main, e);
-    b.addEventListener('click', () => { closeNode(true); openTask(t.id); });
-    wrap.append(b);
+    const wrap = el('div', 'nd-task');
+    wrap.append(mcTaskRow(t));
     const tl = ND.runs.get(t.id) && timelineSection(ND.runs.get(t.id), true);
     if (tl) wrap.append(tl);
     box.append(wrap);
@@ -5631,10 +5726,10 @@ async function ndLogs() {
   ndLogRender();
   ND.els.logBtn?.focus({ preventScroll: true });
 }
-// Live times while the detail is open: elapsed per task and the running step of each timeline.
+// Live times while the Machines view is open: elapsed per task (cards, lanes, the detail) and the running step of each timeline.
 setInterval(() => {
-  if (!ND.id) return;
-  for (const n of document.querySelectorAll('#ndBody .mc-task .e[data-started]')) n.textContent = fmtDur(Date.now() / 1000 - Number(n.dataset.started));
+  if (!mxOpen()) return;
+  for (const n of document.querySelectorAll('#mxModal .mc-task .e[data-started]')) n.textContent = fmtDur(Date.now() / 1000 - Number(n.dataset.started));
   for (const n of document.querySelectorAll('#ndBody .tl-bar i[data-since]')) n.style.flexGrow = String(Math.max(1, Date.now() - Number(n.dataset.since)));
   for (const n of document.querySelectorAll('#ndBody .tl-steps [data-since]')) n.textContent = `${fmtDur((Date.now() - Number(n.dataset.since)) / 1000)}…`;
 }, 1000);
@@ -5770,7 +5865,7 @@ function openAddMachine() {
 function closeAddMachine() {
   $('machineModal').hidden = true;
   clearInterval(AM.timer);
-  if (!$('nodeModal').hidden) loadMachines();
+  if (mxOpen()) loadMachines();
   AM.lastFocus?.focus?.();
 }
 $('addMachine').addEventListener('click', openAddMachine);
@@ -6833,7 +6928,7 @@ function closeTask() {
 $('drClose').addEventListener('click', closeTask);
 $('drawerScrim').addEventListener('click', closeTask);
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && O.drawer && $('settingsModal').hidden && $('pickerModal').hidden && $('nodeModal').hidden && $('connsModal').hidden && $('usageModal').hidden && $('queueModal').hidden && !e.target.closest?.('.dr-due')) {
+  if (e.key === 'Escape' && O.drawer && $('settingsModal').hidden && $('pickerModal').hidden && $('connsModal').hidden && $('usageModal').hidden && $('queueModal').hidden && !e.target.closest?.('.dr-due')) {
     e.stopImmediatePropagation();
     closeTask();
   }
@@ -7453,7 +7548,7 @@ async function pickDelegate(r) {
 // ----- the queue sheet: the project's running and queued tasks, queued ones in manual order. A queued card drags
 // with Pointer Events (mouse: after a 5 px move; touch: a ~350 ms long-press, so a swipe still scrolls) or moves with
 // Alt+↑/↓. Its queued dependents move with it as one block: POST /api/orch/tasks/:id/move, 409 if it would go ahead
-// of a prerequisite (the UI also greys those slots out).
+// of a prerequisite (the UI also greys those slots out). The Machines view borrows #qBody while it's open (qShown).
 const Q = { press: null, drag: null, busy: false, lastFocus: null, noClick: false, timer: 0 };
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
 const queuedTasks = () => [...O.tasks.values()].filter((t) => t.status === 'queued' && t.project_id === O.project?.id)
@@ -7607,6 +7702,7 @@ function scheduleQueue() { clearTimeout(Q.timer); Q.timer = setTimeout(renderQue
 function queueStallText(stall, queued) {
   return stall?.reason && queued > 0 ? `Waiting: ${stall.reason}` : '';
 }
+const qShown = () => !$('queueModal').hidden || mxOpen();
 // ----- refill status
 // The Queue's refill line (#436, plain words in #455): how many tasks are ready for how many open slots, and whether
 // agent-orch is asking the planner for more. refillStatus is pure (state + project → texts); the ⓘ opens a short
@@ -7660,11 +7756,12 @@ function closeRefillPop() {
 // ----- end refill status
 document.addEventListener('click', (e) => { if (RF.open && !e.target.closest?.('.rf')) closeRefillPop(); });
 function renderQueue() {
-  if ($('queueModal').hidden || Q.drag || Q.busy) return;
-  const body = $('qBody');
+  if (!qShown() || Q.drag || Q.busy) return;
+  const body = $('qBody'), mx = mxOpen();
   const focused = document.activeElement?.closest?.('#qBody .tcard')?.dataset.task; // keeps keyboard focus across re-renders
   body.textContent = '';
-  const running = [...O.tasks.values()].filter((t) => t.status === 'running' && t.project_id === O.project?.id);
+  if (mx) { body.append(mxLanes()); mxCountsRender(); } // every machine's running tasks, in place of this project's
+  const running = mx ? [] : [...O.tasks.values()].filter((t) => t.status === 'running' && t.project_id === O.project?.id);
   const queued = queuedTasks();
   const reviews = [...O.tasks.values()].filter((t) => t.status === 'awaiting_review' && t.project_id === O.project?.id);
   if (reviews.length) {
@@ -7692,10 +7789,10 @@ function renderQueue() {
   }
   const refill = renderRefillStatus(O.state?.rapid, O.project);
   if (refill) body.append(refill);
-  body.append(el('h3', 'dg-group', `Up next · ${queued.length}`));
+  body.append(el('h3', 'dg-group', `Up next · ${queued.length}${mx && O.project ? ` · ${O.project.name}` : ''}`));
   const stall = queueStallText(O.state?.stall, queued.length);
   if (stall) body.append(el('p', 'muted q-stall', stall));
-  if (!queued.length) body.append(el('p', 'muted', 'Nothing queued.'));
+  if (!queued.length) body.append(el('p', 'muted', mx && !O.project ? 'Open a project to see its queue.' : 'Nothing queued.'));
   const list = el('div', 'q-list');
   list.id = 'qList';
   for (const { t, depth, parent } of queueTree(queued)) {
@@ -7714,7 +7811,7 @@ function renderQueue() {
 // Each dependent's connector reaches up to its parent card's bottom edge (titles wrap, so measure).
 function qLines() {
   const list = $('qList');
-  if (!list || $('queueModal').hidden) return;
+  if (!list || !qShown()) return;
   for (const c of list.querySelectorAll('.q-child')) {
     const p = list.querySelector(`.tcard[data-task="${c.dataset.parent}"]`);
     if (p) c.style.setProperty('--q-up', `${c.offsetTop - (p.offsetTop + p.offsetHeight)}px`);
@@ -7733,7 +7830,7 @@ function queueCard(id, movable) {
 }
 // 'after #N': jump to the prerequisite's card in the open queue, else open it in the drawer.
 function showTask(id) {
-  const card = !$('queueModal').hidden && $('qBody').querySelector(`.tcard[data-task="${id}"]`);
+  const card = qShown() && $('qBody').querySelector(`.tcard[data-task="${id}"]`);
   if (!card) return openTask(id);
   card.scrollIntoView({ block: 'nearest', behavior: reducedMotion.matches ? 'auto' : 'smooth' });
   card.classList.remove('q-flash');

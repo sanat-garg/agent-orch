@@ -183,20 +183,23 @@ test('composer menus: mode and effort chips open compact .cmenu listboxes (no na
   assert.match(appCss, /\.cm-opt\[aria-selected="true"\]::after \{ background: var\(--accent\);/);
 });
 
-test('server details live in the controller node detail: charts, Running here, Top processes, Machines; no separate modal', () => {
+test('server details live in the controller node detail, the Machines view\'s side panel; no separate modal', () => {
   assert.ok(!indexHtml.includes('serverModal') && !appJs.includes('serverModal') && !appJs.includes('closeServer'), 'the old Server details modal is gone');
-  assert.match(indexHtml, /<div id="sdStash" hidden>\s*<div class="sd" id="serverDetails">\s*<div class="sd-head">[\s\S]*?id="rangePicker"[\s\S]*?id="mGrid"><\/div>\s*<div id="sdRun"><\/div>\s*<div class="m-card m-top" id="mTopCard">[\s\S]*?class="m-top-scroll"><table class="m-table" id="mTop">[\s\S]*?id="mcTitle"[\s\S]*?id="caWrap"[\s\S]*?id="mMachines"/);
-  assert.match(indexHtml, /id="nodeModal"[\s\S]*?id="ndBack"[\s\S]*?id="ndBody"[\s\S]*?id="machineModal"/, 'Add machine stacks above the node detail');
+  assert.match(indexHtml, /<div id="sdStash" hidden>\s*<div class="sd" id="serverDetails">\s*<div class="sd-head">[\s\S]*?id="rangePicker"[\s\S]*?id="mGrid"><\/div>\s*<div id="sdRun"><\/div>\s*<div class="m-card m-top" id="mTopCard">[\s\S]*?class="m-top-scroll"><table class="m-table" id="mTop">[\s\S]*?<\/table><\/div>\s*<\/div>\s*<\/div>\s*<\/div>/);
+  // The full-screen Machines view: summary, tabs (phones), the diagram and cards, the queue, then the node detail as its side panel.
+  assert.match(indexHtml, /id="mxModal"[\s\S]*?id="mcSum"[\s\S]*?id="mxTabMachines"[\s\S]*?id="mxTabQueue"[\s\S]*?id="mxMain"[\s\S]*?id="caWrap"[\s\S]*?id="mMachines"[\s\S]*?id="mxQueue"[\s\S]*?id="mxCounts"[\s\S]*?<div class="mx-side" id="nodeModal" hidden>[\s\S]*?id="ndBack"[\s\S]*?id="ndBody"[\s\S]*?id="machineModal"/, 'Add machine stacks above the view');
+  assert.match(indexHtml, /id="machinesBtn"[^>]*aria-label="Machines"/);
   assert.match(appJs, /function renderServerDetails\(container\) \{/);
   assert.match(appJs, /tile\('load', 'Load average'\),\n\s*\);/);
-  // The sidebar card opens the all-machines window, not the machine it shows (#447).
+  // The sidebar card opens the full-screen Machines view, not the machine it shows (#447).
   assert.match(appJs, /\$\('miniStats'\)\.addEventListener\('click', miniClick\);/);
   assert.match(appJs, /function miniClick\(\) \{\n\s*openMachines\(\);\n\}/);
-  assert.match(appJs, /function openMachines\(\) \{\n\s*openServer\(\);/);
+  assert.match(appJs, /function openMachines\(id\) \{/);
   assert.match(appJs, /function openServer\(\) \{\n\s*closeSidebar\(\);\n\s*openNode\(/);
+  assert.match(appJs, /function openNode\(id\) \{\n[^\n]*\n\s*if \(!mxOpen\(\)\) openMachines\(\);/);
   assert.deepEqual([...appJs.matchAll(/^  \['(\w+)', '[^']+', \(s/gm)].map((m) => m[1]), ['cpu', 'mem', 'disk', 'net', 'load'], "a worker's tiles in the head's order");
   assert.match(appCss, /\.m-top-scroll \{ max-height: 320px; overflow-y: auto;/, 'the list scrolls inside a capped height');
-  assert.match(appCss, /\.modal-panel\.nd\.wide \{ width: min\(1120px, 100%\); \}/);
+  assert.match(appCss, /\.modal\.mx \{ z-index: 42;/, 'under the task drawer (45)');
 });
 
 test('top bar keeps its content row below the iPhone safe-area inset: 56px, 44px on phones (UI-REVIEW #1, #450)', () => {

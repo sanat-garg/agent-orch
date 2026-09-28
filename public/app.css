@@ -527,15 +527,59 @@ code, pre, kbd { font-family: var(--mono); }
 .term-bar .link-btn { color: #bdb9ae; }
 .term-bar .link-btn:hover { background: #262522; color: #fff; }
 
-/* server details: machines, and the "Add machine" wizard */
-.mc-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
-.mc-head h3 { margin: 0; }
-/* Machines (Server details): a cluster summary, then one card per node */
-.mc-sec { margin-top: 18px; }
-.mc-sec.first { margin: 0 0 18px; }
-.mc-sec > .mc-head h3 { font-size: 15px; color: var(--text); }
-.mc-sum { margin: -2px 0 10px; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.mc-sum b { color: var(--text); font-weight: 600; }
+/* Machines (app.js MX): full screen over the app; the cluster summary in its head, the diagram and one card per node on
+   the left, the queue on the right (a tab on phones), a machine's detail as a side panel. Under the task drawer (45). */
+.modal.mx { z-index: 42; padding: 0; }
+.modal-panel.mx-panel { width: 100%; height: 100dvh; max-height: none; border: 0; border-radius: 0; box-shadow: none; padding-top: env(safe-area-inset-top); }
+.mx-head .mc-acts { flex: none; }
+.mc-sum { font-variant-numeric: tabular-nums; }
+.mx-tabs { display: none; }
+.mx-body { position: relative; flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, 30%); grid-template-rows: minmax(0, 1fr); border-top: 1px solid var(--border); }
+.mx-main { grid-area: 1 / 1; min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 16px 20px max(24px, env(safe-area-inset-bottom)); }
+.mx-queue { grid-area: 1 / 2; min-width: 0; min-height: 0; display: flex; flex-direction: column; border-left: 1px solid var(--border); background: var(--panel); }
+.mx-qhead { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; padding: 14px 16px 2px; flex: none; }
+.mx-qhead h3 { margin: 0; font-size: 15px; }
+.mx-counts { margin: 0; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.mx-queue #qBody { padding: 0 16px max(20px, env(safe-area-inset-bottom)); }
+.mx-queue .dg-group { margin-top: 14px; }
+.mx-queue .tcard { background: var(--bg); }
+.mx-queue .tc-title { white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }
+/* a narrow column: the tags get their own row under the title (indented past the grip and glyph), the chevron stays top-right */
+.mx-queue .tcard { flex-wrap: wrap; row-gap: 6px; }
+.mx-queue .tcard .chev { order: 1; }
+.mx-queue .tc-tags { order: 2; flex: 1 0 calc(100% - 44px); margin-left: 44px; max-width: none; }
+.mx-queue .tcard:not(.q-card) .tc-tags { flex-basis: calc(100% - 34px); margin-left: 34px; }
+.mx-queue .tc-tags:empty { display: none; }
+.mx-lanes { margin: 0 0 4px; }
+.mx-lane { display: flex; flex-direction: column; gap: 4px; margin: 0 0 10px; }
+.mx-lane-h { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12.5px; color: var(--muted); }
+.mx-lane-n { flex: 1; min-width: 0; color: var(--text); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mx-lane-s { flex: none; font-variant-numeric: tabular-nums; }
+.mx-lane .mc-idle { padding-left: 16px; }
+.mx-n { margin-left: 2px; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* a machine's detail: a side panel in the queue's column, widened while it's open (the diagram re-lays itself out beside it) */
+.mx-side { grid-area: 1 / 2; z-index: 3; min-width: 0; min-height: 0; display: flex; }
+.mx-body:has(> .mx-side:not([hidden])) { grid-template-columns: minmax(0, 1fr) min(600px, 45%); }
+.mx-side > .modal-panel.nd { width: 100%; height: 100%; max-height: none; border-width: 0 0 0 1px; border-radius: 0; box-shadow: -18px 0 50px rgba(0,0,0,.18); animation: slide-in .2s ease; }
+@media (max-width: 800px) {
+  .modal-panel.mx-panel { animation: sheet-up .22s ease; }
+  .mx .sheet-grip { display: block; }
+  .mx-head .mc-acts { order: 3; } /* under the title, the close button beside it */
+  .mx-tabs { display: flex; margin: 0 12px 10px; flex: none; }
+  .mx-tabs button { flex: 1; justify-content: center; }
+  .mx-body { position: static; display: flex; flex-direction: column; }
+  .mx-main, .mx-queue { flex: 1; border: 0; }
+  .mx-main { padding: 12px 12px max(16px, env(safe-area-inset-bottom)); }
+  .mx-queue #qBody { padding: 0 12px max(16px, env(safe-area-inset-bottom)); }
+  .mx-qhead { padding: 4px 12px 0; }
+  .mx-qhead h3 { display: none; } /* the tab names it */
+  .mx[data-tab="machines"] .mx-queue, .mx[data-tab="queue"] .mx-main { display: none; }
+  .mx-queue .tcard { min-width: 0; max-width: 100%; gap: 8px; }
+  .mx-queue .tc-sub { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
+  .mx-side { position: absolute; inset: 0; z-index: 3; background: var(--bg); } /* over the whole sheet */
+  .mx-side > .modal-panel.nd { border: 0; box-shadow: none; }
+}
+@media (pointer: coarse) { .mx-tabs button { min-height: 44px; } }
 .mc-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 12px; }
 .mc-node { display: flex; flex-direction: column; gap: 10px; font-size: 13px; color: var(--muted); }
 .mc-node.away .mc-meter, .mc-node.away .mc-agents { opacity: .55; }
@@ -765,9 +809,7 @@ label.mc-row { cursor: pointer; }
 .ca-mark.bad circle { fill: var(--danger); }
 .ca-mark path { fill: none; stroke: var(--panel); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 @media (prefers-reduced-motion: reduce) { .ca-plate, .ca-gauge, .ca-drain, .ca-moon, .ca-cd { transition: none; } }
-/* a machine's detail (tap it in the diagram) */
-.modal-panel.nd { width: min(760px, 100%); }
-.modal-panel.nd.wide { width: min(1120px, 100%); } /* this server's details */
+/* a machine's detail (tap it in the diagram): the Machines view's side panel (.mx-side) */
 .nd-back { margin-left: -8px; }
 .sd-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; margin: 0 0 12px; }
 .sd-head .m-sub { margin: 0; flex: 1; min-width: 0; }
@@ -1058,7 +1100,7 @@ label.mc-row { cursor: pointer; }
 .chat:has(.orch-bar:not([hidden])) .jump { bottom: 196px; }
 
 /* Settings sheet (sidebar gear): grouped rows with one-line hints. */
-.side-settings { width: 32px; height: 32px; }
+.side-settings, .side-machines { width: 32px; height: 32px; }
 .modal-panel.st { width: min(520px, 100%); }
 .st-sec { margin: 22px 0 2px; font-size: 11.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
 .m-body > .st-sec:first-child { margin-top: 2px; }
@@ -1115,7 +1157,7 @@ label.st-row, label.st-text { cursor: pointer; }
 .st-switch:disabled { opacity: .5; cursor: default; }
 /* Phones: a row with a picker or buttons puts them under its text; switches stay beside it. */
 @media (max-width: 600px) { .st-row:has(select, .btn) { flex-wrap: wrap; } .st-row:has(select, .btn) .st-text { flex-basis: 100%; } .st-row select { max-width: 100%; flex: 1; } }
-@media (pointer: coarse) { .st-row select, .st-row .btn.small, .side-settings { height: 44px; } .side-settings { width: 44px; } }
+@media (pointer: coarse) { .st-row select, .st-row .btn.small, .side-settings, .side-machines { height: 44px; } .side-settings, .side-machines { width: 44px; } }
 @media (pointer: coarse) { .st-row select, .st-dir textarea, #stGatePatterns { font-size: 16px; } } /* UI-REVIEW #20: iOS zooms into smaller fields */
 
 /* task cards in the chat */

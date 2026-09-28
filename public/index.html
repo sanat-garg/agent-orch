@@ -83,6 +83,9 @@
         <span class="dot" id="connDot"></span>
         <span class="host" id="connText">Connecting…</span>
       </button>
+      <button type="button" class="icon-btn side-machines" id="machinesBtn" aria-haspopup="dialog" aria-controls="mxModal" aria-label="Machines" title="Machines and queue">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/><rect x="4" y="13" width="16" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8 7.5h.01M8 16.5h.01" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>
+      </button>
       <button type="button" class="icon-btn side-stats" id="statsBtn" aria-haspopup="dialog" aria-label="Stats" title="Stats">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M5 20V11M12 20V4M19 20v-6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
       </button>
@@ -666,7 +669,7 @@
   </div>
 </div>
 
-<!-- Server details: renderServerDetails() mounts this in the controller's node detail (#nodeModal); parked here otherwise. -->
+<!-- Server details: renderServerDetails() mounts this in the controller's node detail (#nodeModal, the Machines view's side panel); parked here otherwise. -->
 <div id="sdStash" hidden>
   <div class="sd" id="serverDetails">
     <div class="sd-head">
@@ -687,32 +690,55 @@
       <h3>Top processes</h3>
       <div class="m-top-scroll"><table class="m-table" id="mTop"><thead><tr><th>Process</th><th class="num">CPU</th><th class="num">Memory</th></tr></thead><tbody></tbody></table></div>
     </div>
-    <section class="mc-sec" aria-labelledby="mcTitle">
-      <div class="mc-head"><h3 id="mcTitle">Machines</h3><span class="mc-acts"><button class="btn small" id="updateAll" type="button" hidden>Update all</button><button class="btn small" id="pingAll" type="button" hidden>Ping all</button><button class="btn small" id="addMachine" type="button">Add machine</button></span></div>
-      <p class="mc-sum" id="mcSum"></p>
-      <div class="ca-wrap" id="caWrap" hidden></div>
-      <ul class="mc-grid" id="mMachines"></ul>
-    </section>
   </div>
 </div>
 
-<div class="modal sheet" id="nodeModal" hidden>
-  <div class="modal-backdrop" data-close></div>
-  <div class="modal-panel nd" role="dialog" aria-modal="true" aria-labelledby="ndTitle">
+<!-- Machines (app.js MX): full screen over the app (a full-height sheet on phones). The cluster summary, diagram and
+     machine cards on the left; the queue (#qBody, borrowed from the Queue sheet while this is open) on the right, a tab
+     of its own on phones; a machine's detail (#nodeModal) slides in as a side panel. -->
+<div class="modal mx" id="mxModal" data-tab="machines" hidden>
+  <div class="modal-panel mx-panel" role="dialog" aria-modal="true" aria-labelledby="mxTitle">
     <div class="sheet-grip" aria-hidden="true"></div>
-    <div class="m-head">
-      <button class="icon-btn nd-back" id="ndBack" type="button" aria-label="Back to this server" hidden>
-        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-      </button>
+    <div class="m-head mx-head">
       <div>
-        <h2 id="ndTitle">Machine</h2>
-        <p class="m-sub" id="ndSub"></p>
+        <h2 id="mxTitle">Machines</h2>
+        <p class="m-sub mc-sum" id="mcSum"></p>
       </div>
+      <span class="mc-acts"><button class="btn small" id="updateAll" type="button" hidden>Update all</button><button class="btn small" id="pingAll" type="button" hidden>Ping all</button><button class="btn small" id="addMachine" type="button">Add machine</button></span>
       <button class="icon-btn" data-close aria-label="Close">
         <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
       </button>
     </div>
-    <div class="m-body nd-body" id="ndBody"></div>
+    <div class="seg mx-tabs" role="tablist" aria-label="Show">
+      <button type="button" role="tab" id="mxTabMachines" data-tab="machines" aria-controls="mxMain" aria-selected="true">Machines</button>
+      <button type="button" role="tab" id="mxTabQueue" data-tab="queue" aria-controls="mxQueue" aria-selected="false">Queue<span class="mx-n" id="mxTabN"></span></button>
+    </div>
+    <div class="mx-body">
+      <section class="mx-main" id="mxMain" role="tabpanel" aria-labelledby="mxTabMachines">
+        <div class="ca-wrap" id="caWrap" hidden></div>
+        <ul class="mc-grid" id="mMachines"></ul>
+      </section>
+      <section class="mx-queue" id="mxQueue" role="tabpanel" aria-labelledby="mxTabQueue">
+        <div class="mx-qhead"><h3 id="mxQTitle">Queue</h3><p class="mx-counts" id="mxCounts" role="status"></p></div>
+      </section>
+      <div class="mx-side" id="nodeModal" hidden>
+        <div class="modal-panel nd" role="dialog" aria-labelledby="ndTitle">
+          <div class="m-head">
+            <button class="icon-btn nd-back" id="ndBack" type="button" aria-label="Back to this server" hidden>
+              <svg viewBox="0 0 24 24" width="20" height="20"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            </button>
+            <div>
+              <h2 id="ndTitle">Machine</h2>
+              <p class="m-sub" id="ndSub"></p>
+            </div>
+            <button class="icon-btn" data-close aria-label="Close machine details">
+              <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            </button>
+          </div>
+          <div class="m-body nd-body" id="ndBody"></div>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 

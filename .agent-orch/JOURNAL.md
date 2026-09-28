@@ -1438,3 +1438,14 @@ settings rows fixed, 4 layout tests pass, shots saved
 ## 2026-09-28 17:05 — #470 Integrate #465: Machine settings rows: label and hint lay out cleanly next to their controls [done (check passed)]
 
 conflict resolved, 4 row-layout tests pass, before/after shots saved
+## 2026-09-28 17:02 — #382 Full-screen Machines window with the queue built in [done (check passed)]
+
+Full-screen Machines view with built-in queue, tabs, side panel
+
+## 2026-09-28 17:11 — #469 Integrate #382: Full-screen Machines window with the queue built in [done (check passed)]
+
+Merge resolved; the full-screen Machines view and main's changes both kept, tests pass
+
+## 2026-09-28 17:15 — #472 Integrate #382: Full-screen Machines window with the queue built in [done (check passed)]
+
+app.js conflicts resolved; stall text and full-screen queue both kept

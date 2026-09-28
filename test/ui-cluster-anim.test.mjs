@@ -115,7 +115,7 @@ after(async () => {
   if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
-// Server details open with the diagram drawn. `push(msg)` sends a frame down the page's socket, as the server would.
+// The Machines view open with the diagram drawn. `push(msg)` sends a frame down the page's socket, as the server would.
 async function openDiagram(ctxOpts) {
   const [name, value] = cookie.split('=');
   const ctx = await browser.newContext(ctxOpts);
@@ -126,12 +126,15 @@ async function openDiagram(ctxOpts) {
   let sock;
   await page.routeWebSocket(/\/ws$/, (ws) => { ws.connectToServer(); sock = ws; });
   await page.route('**/api/cluster/nodes', async (route) => {
-    const res = await route.fetch(), body = await res.json();
+    const res = await route.fetch().catch(() => null); // a live re-read still in flight when the test closes its page
+    if (!res) return;
+    const body = await res.json().catch(() => null);
+    if (!body) return;
     for (const n of body.nodes) for (const t of n.tasks) if (phases.has(t.id)) t.phase = phases.get(t.id);
-    await route.fulfill({ response: res, json: body });
+    await route.fulfill({ response: res, json: body }).catch(() => {});
   });
   await page.goto(`${base}/`);
-  await page.locator('#miniStats').dispatchEvent('click'); // the sidebar is off-canvas on a phone
+  await page.locator('#machinesBtn').dispatchEvent('click'); // the Machines view; the sidebar is off-canvas on a phone
   const count = (await call('/api/cluster/nodes')).nodes.length;
   await waitFor(() => page.locator('#caWrap .ca-node').count().then((n) => n === count), { timeout: 15000, message: 'the diagram draws every node' });
   await waitFor(() => sock, { message: 'the page socket is routed' });
@@ -394,11 +397,12 @@ test('tapping a node opens its detail: telemetry charts, the phase timeline and 
   assert.equal(await page.locator('#ndLogs').textContent(), 'Refresh');
   const fits = await page.evaluate(() => { const p = document.querySelector('#nodeModal .modal-panel'), b = p.getBoundingClientRect(); return b.left >= 0 && b.right <= innerWidth && p.scrollWidth <= p.clientWidth + 1; });
   assert.ok(fits, 'the sheet fits 390px');
-  // Escape goes back to this server's details, whose log lives in the journal.
+  // Escape closes the panel (it covers the sheet on a phone); the head's detail is this server's, whose log lives in the journal.
   await page.keyboard.press('Escape');
-  assert.equal(await page.locator('#nodeModal').isVisible(), true);
-  await page.locator('#ndBody #serverDetails').waitFor();
+  assert.equal(await page.locator('#nodeModal').isHidden(), true);
+  assert.equal(await page.locator('#mxModal').isVisible(), true);
   await page.locator('#caWrap .ca-node[data-node="controller"] .ca-name').tap();
+  await page.locator('#ndBody #serverDetails').waitFor();
   assert.match(await page.locator('#ndLog').textContent(), /journalctl -u agent-orch/);
   assert.match(await page.locator('#ndRun').textContent(), /Plan the next push/);
   await ctx.close();

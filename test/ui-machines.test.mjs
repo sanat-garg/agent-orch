@@ -118,7 +118,7 @@ test('UI: Add machine shows a command per OS with a fresh code, then the machine
   assert.equal(await cmds.count(), 0);
   await page.keyboard.press('Escape');
   assert.equal(await page.locator('#machineModal').isHidden(), true);
-  assert.equal(await page.locator('#nodeModal').isVisible(), true, 'Escape closes only the wizard');
+  assert.equal(await page.locator('#mxModal').isVisible(), true, 'Escape closes only the wizard');
   await page.locator('#mMachines li', { hasText: 'mac-mini' }).waitFor();
   await ctx.close();
   assert.deepEqual(errors, []);
@@ -197,8 +197,8 @@ test('Machines view: one card per node with its state, capacity, running tasks a
   assert.equal(await cards.count(), nodes.length, 'one card per node');
   assert.deepEqual(await cards.evaluateAll((els) => els.map((e) => e.dataset.node)), nodes.map((n) => n.id));
   for (let i = 0; i < nodes.length; i++) assert.equal(await cards.nth(i).locator('details.mc-set:not([open]) input[data-act="accept"]').count(), 1, `${nodes[i].name} has a closed Machine settings with Run tasks on this machine`);
-  // With workers the section leads this server's details (under the device line), and the summary counts the connected machines.
-  assert.equal(await page.evaluate(() => document.querySelector('#ndBody #serverDetails .sd-head').nextElementSibling.className), 'mc-sec first');
+  // The cards sit in the full-screen Machines view (the sidebar card opens all of them), and the summary counts the connected machines.
+  assert.equal(await page.evaluate(() => document.querySelector('#mxMain').contains(document.querySelector('#mMachines'))), true);
   assert.match(await page.locator('#mcSum').textContent(), /^Cluster: 3 machines · \d+ cores · [\d.]+ GB free · 2 of \d+ slots running · 2 offline$/);
 
   const card = page.locator('.mc-node', { hasText: 'build-vps' });
@@ -231,17 +231,17 @@ test('Machines view: one card per node with its state, capacity, running tasks a
   await page.locator('.mc-node', { hasText: 'build-vps-2' }).locator('.mc-meter', { hasText: '20.0 GB free' }).waitFor({ timeout: 15000 });
 
   const fits = await page.evaluate(() => {
-    const p = document.querySelector('#nodeModal .modal-panel');
+    const p = document.querySelector('#mxModal .mx-panel');
     return document.documentElement.scrollWidth <= innerWidth && p.scrollWidth <= p.clientWidth + 1
       && [...document.querySelectorAll('.mc-node')].every((c) => c.scrollWidth <= c.clientWidth + 1);
   });
   assert.ok(fits, 'the Machines view fits 390px');
   const small = await page.evaluate(() => [...document.querySelectorAll('.mc-set[open] :is(summary, button)')].filter((b) => b.getBoundingClientRect().height < 44).length);
   assert.equal(small, 0, 'every settings control is a 44pt target on a phone');
-  // Tapping a running task opens its drawer.
-  await page.locator('.mc-task', { hasText: 'Build the machines view' }).click();
+  // Tapping a running task opens its drawer over the view.
+  await page.locator('#mMachines .mc-task', { hasText: 'Build the machines view' }).click();
   await page.locator('#taskDrawer:not([hidden])').waitFor();
-  assert.equal(await page.locator('#nodeModal').isHidden(), true);
+  assert.equal(await page.locator('#mxModal').isVisible(), true);
   assert.equal(await page.evaluate(() => O.drawer), t1);
   await ctx.close();
   assert.deepEqual(errors, []);
@@ -255,10 +255,11 @@ test('the controller node opens this server’s details in the node detail: its 
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto(`${base}/`);
-  // The old entry point, the sidebar card, opens the controller's node detail.
+  // The sidebar card opens the Machines view; the diagram's head opens the controller's node detail.
   await page.locator('#miniStats').click();
+  await page.locator('#mxModal:not([hidden]) #caWrap:not([hidden]) .ca-node.head .ca-name').click();
   await page.locator('#nodeModal:not([hidden]) #ndBody #serverDetails').waitFor();
-  assert.equal(await page.locator('.modal:not([hidden])').count(), 1, 'one window, no separate Server details');
+  assert.equal(await page.locator('.modal:not([hidden])').count(), 1, 'one window (the Machines view), no separate Server details');
   assert.match(await page.locator('#ndSub').textContent(), /^This server · the head/);
   const charts = async () => page.evaluate(() => ['cpu', 'mem'].map((k) => document.querySelector(`#ndBody #t-${k} .sline path.line`)?.getAttribute('d') || ''));
   for (const k of ['cpu', 'mem', 'disk', 'net']) assert.equal(await page.locator(`#ndBody #t-${k}`).isVisible(), true, `the ${k} tile`);

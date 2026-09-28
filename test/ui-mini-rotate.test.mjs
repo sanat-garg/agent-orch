@@ -205,23 +205,19 @@ test('UI: the card rotates head → workers without dots, keeps its size, holds 
   await page.waitForTimeout(6500);
   assert.equal(await shown(page), 'build-vps', 'held while hovered');
 
-  // The click opens the all-machines window (this server's window at its Machines section), not build-vps's detail.
+  // The click opens the full-screen Machines view (every machine), not build-vps's detail.
   await page.locator('#miniStats').click();
-  await page.locator('#nodeModal:not([hidden]) #ndBody #serverDetails').waitFor();
-  assert.notEqual(await page.locator('#ndTitle').textContent(), 'build-vps');
+  await page.locator('#mxModal:not([hidden])').waitFor();
   await page.locator('#mMachines .mc-node').nth(4).waitFor({ timeout: 10000 });
   assert.equal(await page.locator('#mMachines .mc-node').count(), NODES.length, 'every machine listed');
-  await page.waitForFunction(() => { // scrolled to the Machines section
-    const s = document.getElementById('mcTitle').getBoundingClientRect(), b = document.getElementById('ndBody').getBoundingClientRect();
-    return s.top >= b.top - 1 && s.top < b.top + 120;
-  });
+  assert.equal(await page.locator('#nodeModal').isHidden(), true, 'no single machine opened');
   await page.keyboard.press('Escape');
-  await page.locator('#nodeModal').waitFor({ state: 'hidden' });
+  await page.locator('#mxModal').waitFor({ state: 'hidden' });
 
   // Enter on the focused card opens it too.
   await page.locator('#miniStats').focus();
   await page.keyboard.press('Enter');
-  await page.locator('#nodeModal:not([hidden]) #ndBody #serverDetails').waitFor();
+  await page.locator('#mxModal:not([hidden])').waitFor();
   await ctx.close();
   assert.deepEqual(errors, []);
 });

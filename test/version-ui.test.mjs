@@ -157,7 +157,7 @@ test('the Machines view shows each machine\'s build and tags an outdated worker'
     return route.fulfill({ json: body });
   });
   await page.goto(base + '/');
-  await page.locator('#miniStats').click();
+  await page.locator('#machinesBtn').click();
   const card = (id) => page.locator(`#mMachines .mc-node[data-node="${id}"] .mc-name`);
   await card('w1').waitFor({ timeout: 10000 });
   assert.match(await card('w1').textContent(), /studio-mac.*v4\.10.*outdated/);

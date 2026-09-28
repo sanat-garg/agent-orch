@@ -1,9 +1,14 @@
 /* Skills & tools sheet (#extModal, ext.js) and the composer's persona chip. Uses app.css tokens. */
+/* The selected tab thumb: --panel on the --raised track is 1.05:1 in dark, so dark gets its own (UI-REVIEW #28). */
+:root { --seg-on: var(--panel); }
+@media (prefers-color-scheme: dark) {
+  :root { --seg-on: #45423c; }
+}
 .modal-panel.ext { width: min(620px, 100%); height: min(760px, calc(100dvh - 48px)); }
 .ext-tabs { display: flex; gap: 2px; margin: 0 20px 10px; padding: 2px; border: 1px solid var(--border); border-radius: 9px; background: var(--raised); flex: none; }
 .ext-tabs button { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--muted); height: 30px; padding: 0 8px; border-radius: 7px; cursor: pointer; font: inherit; font-size: 13px; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ext-tabs button:hover { color: var(--text); }
-.ext-tabs button[aria-selected="true"] { background: var(--panel); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+.ext-tabs button[aria-selected="true"] { background: var(--seg-on); color: var(--text); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.12); }
 .ext-tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .ext-body { --px: 20px; --pb: 20px; padding: 2px var(--px) var(--pb); }
 .ext-sub { margin: 0 0 12px; color: var(--muted); font-size: 13px; line-height: 1.45; }

@@ -81,3 +81,15 @@ test('filled buttons use --accent-strong, not --accent', () => {
   assert.match(rule('.btn.primary:hover'), /background:\s*var\(--accent-strong-hover\)/);
   assert.match(rule('.send'), /background:\s*var\(--accent-strong\)/);
 });
+
+test('dark theme: the Stats and Skills & tools selected tab has its own --seg-on thumb (UI-REVIEW #28)', () => {
+  for (const file of ['stats.css', 'ext.css']) {
+    const t = themes(fs.readFileSync(path.join(ROOT, 'public', file), 'utf8')).dark;
+    const segOn = t['--seg-on'];
+    assert.ok(segOn, `${file} defines --seg-on in its dark block`);
+    const track = contrast(segOn, dark['--raised']);
+    assert.ok(track >= 1.4, `${file} --seg-on ${segOn} on --raised ${dark['--raised']} is ${track.toFixed(2)}:1`);
+    const label = contrast(dark['--text'], segOn);
+    assert.ok(label >= 4.5, `--text ${dark['--text']} on ${file} --seg-on ${segOn} is ${label.toFixed(2)}:1`);
+  }
+});

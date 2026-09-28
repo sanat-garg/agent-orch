@@ -13,3 +13,7 @@ UI-REVIEW.md row #28: in dark mode the selected thumb of the segmented tab contr
 ## Done when
 
 `npm test -- test/ui-contrast.test.mjs` && `grep -q -- '--seg-on' public/stats.css` && `grep -q -- '--seg-on' public/ext.css`
+
+## Result — done (check passed) (2026-09-28 13:52)
+
+AGENT-ORCH-STATUS: done — Stats and Skills & tools selected tabs: --seg-on, weight 600

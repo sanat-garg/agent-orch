@@ -1073,3 +1073,6 @@ placeUploads now removes project attachment copies over 30 days old; tests pass
 ## 2026-09-28 13:52 — #371 taskrun.mjs: checkUnavailable accepts a 127 only for a missing first program (AUDIT #65 half two) [done (check passed)]
 
 checkUnavailable exported and tested; orchestrator.mjs wiring still pending
+## 2026-09-28 13:52 — #395 UI-REVIEW #28 (Stats and Skills & tools tabs): the selected segment gets its own --seg-on colour in dark mode and a 600 weight [done (check passed)]
+
+Stats and Skills & tools selected tabs: --seg-on, weight 600

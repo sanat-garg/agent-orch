@@ -64,7 +64,7 @@ export const DIRECTION = {
 export const FEATURES = { 'job.phase': 'phases', 'job.error': 'errors', 'node.error': 'errors', 'logs.tail': 'logs', logs: 'logs', 'node.update': 'update',
   'node.policy': 'policy', 'agent.credential': 'creds', 'job.approval': 'approvals',
   'screen.req': 'screen', 'screen.res': 'screen', 'screen.input': 'screen', 'screen.frame': 'screen', 'screen.state': 'screen', 'ext.sync': 'ext' };
-export const FEATURE_LIST = [...new Set([...Object.values(FEATURES), 'cap'])];
+export const FEATURE_LIST = [...new Set([...Object.values(FEATURES), 'cap', 'browser-task'])];
 // Compute-only workers (BRIEF goal 11): the only frames a worker acts on, all from the head it dialled. Connection
 // upkeep; jobs (job.*, plus git.credential for their pushes); remote sign-in driven from the head's Connections (login.*);
 // model and limit refreshes; its log tail; self-update; the node's policy (max tasks, power), which like draining is
@@ -129,7 +129,8 @@ const S = {
     // capabilities ["browser"] + identity: the run gets the Playwright MCP on that browser profile (browser.mjs).
     // ext: the controller's extension bundle hash; the worker fetches the bundle first unless it already has that one.
     job: 'int', title: 'str', prompt: 'str', systemAppend: 'str?', agent: 'agent', model: 'str?', effort: 'str?', account: 'str?',
-    repo: 'repo', baseSha: 'sha', branch: 'branch', doneWhen: 'str?', resume: 'str?',
+    // Feature browser-task: execution='browser' uses a plain workspace and omits the git fields.
+    execution: 'str?', repo: 'repo?', baseSha: 'sha?', branch: 'branch?', doneWhen: 'str?', resume: 'str?',
     timeouts: 'obj', autonomous: 'bool?', tools: 'arr?', install: 'arr?', capabilities: 'arr?', identity: 'str?', ext: 'hash?',
   },
   'job.event': { job: 'int', from: 'int', events: 'events' },
@@ -236,6 +237,12 @@ export function validate(msg, { from } = {}) {
     const opt = type.endsWith('?'), base = opt ? type.slice(0, -1) : type, v = msg[key];
     if (v == null) { if (opt) continue; return `${msg.t}: missing ${key}`; }
     if (!TYPES[base](v)) return `${msg.t}: bad ${key}`;
+  }
+  if (msg.t === MSG.JOB_START) {
+    if (msg.execution != null && msg.execution !== 'browser') return 'job.start: bad execution';
+    if (msg.execution === 'browser') {
+      if (!msg.capabilities?.includes('browser') || !msg.identity) return 'job.start: browser execution needs capability and identity';
+    } else if (!msg.repo || !msg.baseSha || !msg.branch) return 'job.start: git execution needs repo, baseSha and branch';
   }
   if (msg.t !== MSG.GIT_CREDENTIAL && msg.t !== MSG.AGENT_CREDENTIAL) {
     const bad = secretKeys({ ...msg, events: undefined });

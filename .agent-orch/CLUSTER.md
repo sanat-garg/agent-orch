@@ -70,7 +70,7 @@ Direction: C = controller → worker, W = worker → controller (`DIRECTION`; `v
 | `wake` | W | sleptAt, sleptMs | a time jump on the worker (a laptop's sleep), sent after the next `welcome` |
 | `job.offer` | C | job, agent, model, footprint | "can you take this?" |
 | `job.accept` / `job.reject` | W | job / job, reason (busy, low_memory, agent_missing, not_signed_in, draining, version, other, power, cap) | answer within 10 s or counts as reject; `power` only to a controller with feature `policy`, `cap` only with feature `cap` |
-| `job.start` | C | job, title, prompt, systemAppend, agent, model, effort, account, repo, baseSha, branch, doneWhen, resume, timeouts{taskSec, verifySec, installSec}, autonomous, tools, install[argv], capabilities["browser"], identity, ext | run it (a browser task gets the Playwright MCP on that profile, browser.mjs); `ext` = the controller's extension bundle hash, fetched first unless the worker has it |
+| `job.start` | C | job, title, prompt, systemAppend, agent, model, effort, account, repo, baseSha, branch, doneWhen, resume, timeouts{taskSec, verifySec, installSec}, autonomous, tools, install[argv], capabilities["browser"], identity, execution?, ext | run it (a browser task gets the Playwright MCP on that profile, browser.mjs); `ext` = the controller's extension bundle hash, fetched first unless the worker has it |
 | `job.event` | W | job, from, events[≤200 normalised agent events] | batched every ~1 s; `from` = index of the first event so resends dedupe |
 | `job.check` | W | job, command, output, pass, code | result of the done-when check, run on the worker in the task's worktree |
 | `job.wip` | W | job, sha, branch | a WIP commit was pushed to `agent-orch/task-<id>` |
@@ -90,6 +90,8 @@ Direction: C = controller → worker, W = worker → controller (`DIRECTION`; `v
 | `node.policy` | C | policy | the owner changed the node's power policy or max tasks (feature `policy`); older workers read it in the next `welcome` |
 | `ext.sync` | C | hash, bytes | the controller's skills, subagents or MCP servers are now bundle `hash` (sent after `welcome` and on every change); a worker holding another one GETs `EXT_PATH` (feature `ext`) |
 | `screen.req` / `screen.res` / `screen.input` / `screen.frame` / `screen.state` | C / W / C / W / W | req, op, identity… / req, result, error / identity, events / identity, n, data, w, h / identity, url, title, active, takeover | the owner's live view of a browser profile on the worker (browser-live.mjs; feature `screen`); input is never logged |
+
+Screen prompts use `job.start.execution='browser'` (feature `browser-task`): `repo`, `baseSha` and `branch` are omitted, and the worker uses a plain per-task workspace, skipping clone/worktree, install, done-when and commit/push. Other work still requires all three git fields.
 
 A task's life on a worker: `job.offer` → `job.accept` → `job.start` → `job.event`* (+ `job.wip`*) → (if ok and the
 task has a done-when) `job.check` → final commit + push (`job.wip`) → `job.done` → controller merges or answers with `job.resume` (continue /

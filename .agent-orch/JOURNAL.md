@@ -896,3 +896,7 @@ Web Push backend and /api/push routes built; both test files pass
 ## 2026-09-28 11:06 — #300 Rapid mode: keep every free slot fed with parallel, file-disjoint work [done (check passed)]
 
 Rapid mode tops up parallel work with verified quota guards.
+
+## 2026-09-28 11:17 — #308 Browser prompt backend: POST /api/browser/task runs an agent on the live screen now [done (check passed)]
+
+Browser task API verified; pinned agents run without git lifecycle.

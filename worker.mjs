@@ -49,6 +49,7 @@ import { helperOut, runHelper } from './helpers.mjs';
 import { autoTasks, createKeepAwake, effectivePolicy, intake as intakeOf, readPower, reserveBytes, wantsAwake } from './power.mjs';
 import { MEM } from './parallel.mjs';
 import { GIT_ID, commitAll, taskBranch } from './worktrees.mjs';
+import { isBrowserTask } from './browser-task.mjs';
 import { extractCommand, runCheck, toolLine } from './taskrun.mjs';
 import { JOB_ENV, workerHome } from './role.mjs';
 import { FOOTPRINT, applyLimit, capRejection, capTasks, capText, fmtCores, fmtGB, resolveCap } from './cap.mjs';
@@ -901,8 +902,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     id: spec.job, spec, state: 'setup', ac: null, ev: [], evBase: 0, sent: 0, ctl: [], ctlSent: 0, attached: true, detachedAt: 0,
     startedAt: Date.now(), activity: null, activityAt: 0,
     phase: null, progress: { tools: 0, files: new Set(), last: '' }, progressSig: '', progressAt: 0,
-    cache: null, env: gitAuthEnv(spec.repo),
-    dir: path.join(dirs.worktrees, `${cacheName(spec.repo).split('__').pop()}-task-${spec.job}`),
+    cache: null, env: isBrowserTask(spec) ? {} : gitAuthEnv(spec.repo),
+    dir: isBrowserTask(spec) ? path.join(home, 'browser-tasks', String(spec.job)) : path.join(dirs.worktrees, `${cacheName(spec.repo).split('__').pop()}-task-${spec.job}`),
     sessionId: spec.resume || null, pushed: null, remoteStart: null, stop: null, lock: Promise.resolve(),
   });
 
@@ -927,6 +928,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     job.state = 'setup';
     try {
       await syncExt(spec.ext).catch((e) => { throw new Error(`could not get the controller's skills and MCP servers: ${e.message}`); });
+      if (isBrowserTask(spec)) { fs.mkdirSync(job.dir, { recursive: true }); return true; }
       setPhase(job, fs.existsSync(path.join(cacheDir(spec.repo), 'HEAD')) ? 'fetching' : 'cloning');
       job.cache = await ensureCache(spec.repo);
       const remote = `refs/remotes/origin/${branch}`;
@@ -1097,7 +1099,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
 
   async function finish(job, res) {
     const { spec } = job;
-    const command = res.outcome === 'ok' ? extractCommand(spec.doneWhen) : null;
+    const command = !isBrowserTask(spec) && res.outcome === 'ok' ? extractCommand(spec.doneWhen) : null;
     if (command) {
       job.state = 'checking';
       setPhase(job, 'checking');
@@ -1138,6 +1140,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   // Serialised per job. A final push retries until it lands (or the job is cancelled); a WIP push tries 3 times.
   // Past the grace period without the controller, a WIP push is skipped and a final one waits for job.attach.
   function pushWip(job, message = `agent-orch #${job.id} (wip)`, { final = false } = {}) {
+    if (isBrowserTask(job.spec)) return Promise.resolve(null);
     const run = job.lock.then(async () => {
       if (!fs.existsSync(job.dir)) return job.pushed;
       if (pastGrace(job)) {

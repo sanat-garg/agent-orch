@@ -13,3 +13,7 @@ Backend for 'get work done on the browser screen by an AI agent'. Contract (the 
 ## Done when
 
 `node --test test/browser-task*.test.mjs` passes (create/front-of-queue/pinning, step mapping, stop, no worktree)
+
+## Result — done (check passed) (2026-09-28 11:17)
+
+AGENT-ORCH-STATUS: done — Browser task API verified; pinned agents run without git lifecycle.

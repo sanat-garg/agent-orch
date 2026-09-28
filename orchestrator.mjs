@@ -20,6 +20,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { AGENTS, isAgent, agentEfforts, agentStatus, clampEffort, codexExhausted, codexLatestSnapshot, isMissingSession, limitScope, limitScopes, modelCatalog, modelNames, runAgentCli, toolInputSummary, windowLabel } from './agents.mjs';
 import { SHOTS_DIR, mediaCollector } from './media.mjs';
 import { BROWSER_SYSTEM, needsBrowser, normIdentity, parseCapabilities } from './browser.mjs';
+import { BROWSER_TASK_SYSTEM, browserTaskStatus, browserSteps, isBrowserTask } from './browser-task.mjs';
 import { APPROVAL_TTL_MS, DEFAULT_PATTERNS, patternsWith } from './gate.mjs';
 import { createApprovals } from './approvals.mjs';
 import { createUsageLog } from './usage.mjs';
@@ -932,6 +933,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     // tasks.handoff: JSON {agent, model, reason} of the session the owner moved the task off (POST .../handoff); its next
     // fresh session starts with ownerHandoffPrompt. Cleared once the new agent has a session of its own.
     ['tasks', 'handoff'],
+    // execution='browser': a screen prompt, with no repository, worktree, shell verification or merge.
+    ['tasks', 'execution'],
     // A remote run's timeline and failures from its worker: runs.phases JSON [{phase, at, w, ms, progress, outcome}] (at: our
     // clock, w: the worker's; ms: how long it took) and runs.errors JSON [{at, w, kind, message, stack, stderr, count, seen}]
     // (count/seen: repeats of the same error and their worker timestamps).
@@ -1132,10 +1135,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     // fill with disjoint work first; with CFG.overlapWaits it waits instead. Overlapping edits meet at merge time
     // (mergeBack; a conflict queues an integrator).
     if (exclusive) {
-      const busy = qa("SELECT id, project_id, kind, integrates, files FROM tasks WHERE status='running'");
+      const busy = qa("SELECT id, project_id, kind, integrates, files FROM tasks WHERE status='running' AND execution IS NOT 'browser'");
       const rapid = parallelSettings().rapidDevelopment;
       const blocked = new Set(), later = [];
       rows = rows.filter((r) => {
+        if (isBrowserTask(r)) return true;
         if (blocked.has(r.project_id)) return false;
         let others = busy.filter((b) => b.project_id === r.project_id);
         if (!others.length) return true;
@@ -1472,7 +1476,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // Work tasks may run remotely (remoteWork); plan/reflect tasks, integrators and tasks with a live worktree here (a
   // verify-failed or interrupted run keeps it) stay on the controller.
   const remoteCapable = (task, project) => !!cluster && remoteWork(task) && !task.worktree
-    && worktreeCapable(project) && !!remoteRepo(project);
+    && (isBrowserTask(task) || (worktreeCapable(project) && !!remoteRepo(project)));
   // The scheduler's assertion: anything but a work task bound for a worker is a bug. It throws before the claim is
   // recorded (the tick logs it and the task stays queued) and before runRemote sends a single frame.
   function assertPlacement(task, nodeId) {
@@ -1490,12 +1494,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (task.kind === 'plan') return localOk ? LOCAL_NODE : null;
     if (workEverywhere() >= cap) return null;
     const browser = needsBrowser(task);
+    if (isBrowserTask(task) && browserHeld(task.run_on, identityOf(task))) return null;
     if (browser && profileBusy(task)) return null;
     const remote = remoteCapable(task, getProject(task.project_id));
     // Pinned by the owner (run_on): only that machine, waiting for it. A worker pin only binds a task that can run remotely.
-    const pin = task.kind === 'work' && task.run_on && (task.run_on === LOCAL_NODE || remote) ? task.run_on : null;
+    const pin = task.kind === 'work' && task.run_on && (task.run_on === LOCAL_NODE || remote || isBrowserTask(task)) ? task.run_on : null;
     if (remote && pin !== LOCAL_NODE) {
-      const free = freeWorkers(agent, task.id).filter((n) => (!browser || browserWorker(n)) && (!pin || n.id === pin))
+      const free = freeWorkers(agent, task.id).filter((n) => (!browser || browserWorker(n)) && (!isBrowserTask(task) || n.features?.includes('browser-task')) && (!pin || n.id === pin))
         .sort((a, b) => (b.id === task.node_id) - (a.id === task.node_id) || headroom(b, agent) - headroom(a, agent));
       if (free.length) return free[0].id;
     }
@@ -1521,7 +1526,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     // A waiting task that may be delegated moves to the owner's first fallback with usage left (delegate.mjs) and runs now.
     // Agent spreading (parallel.mjs spreadAssign): each task takes its own route while that agent has a free slot
     // (CFG.agentSlots here, plus free worker slots); one that would otherwise wait spills to its first fallback with a free slot and usage left.
-    let rows = runnable(allowed, true, 25).filter((r) => !(r.kind === 'plan' && planningProjects.has(r.project_id)) && projectReady(getProject(r.project_id)?.path));
+    let rows = runnable(allowed, true, 25).filter((r) => !(r.kind === 'plan' && planningProjects.has(r.project_id)) && (isBrowserTask(r) || projectReady(getProject(r.project_id)?.path)));
     for (const r of rows) if (waitsForLimit(r)) delegate(r);
     rows = rows.map((r) => getTask(r.id));
     const ready = rows.filter((r) => !waitsForLimit(r)).map((r) => {
@@ -1777,6 +1782,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   function runLog(taskId, runId, logPath) {
     const log = logPath ? fs.createWriteStream(logPath, { flags: 'a' }) : null;
     const writeEntry = (e) => {
+      e = { at: now(), ...e };
       log?.write(JSON.stringify(e) + '\n');
       if (e.k === 'tool' && taskId) {
         const activity = toolLine(e);
@@ -2510,7 +2516,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const project = getProject(task.project_id);
     // A remote task always has its own checkout, so it shares its project like a worktree task.
     running.set(task.id, { abort, kind: task.kind, projectId: task.project_id, startedAt: now(), node, prevNode, adopt,
-      wt: task.kind === 'work' && (node !== LOCAL_NODE || worktreeCapable(project)), agent: adopt?.agent || routeNow(task, project).agent });
+      wt: task.kind === 'work' && !isBrowserTask(task) && (node !== LOCAL_NODE || worktreeCapable(project)), agent: adopt?.agent || routeNow(task, project).agent });
     pushState();
     execute(task, abort.signal)
       .catch((e) => console.error('[orchestrator] task crashed', e))
@@ -2675,7 +2681,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   async function runTask(task, project, signal) {
     if (nodeOf(task.id) !== LOCAL_NODE) return runRemote(task, project, signal);
     const prev = running.get(task.id)?.prevNode;
-    if (prev && prev !== LOCAL_NODE && task.kind === 'work' && worktreeCapable(project)) await adoptRemoteBranch(task, project);
+    if (!isBrowserTask(task) && prev && prev !== LOCAL_NODE && task.kind === 'work' && worktreeCapable(project)) await adoptRemoteBranch(task, project);
     let wt = null;
     if (running.get(task.id)?.wt) {
       wt = await taskWorktree(task, project);
@@ -2688,13 +2694,15 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         if (qa("SELECT id FROM tasks WHERE status='running' AND project_id=:p AND id!=:id", { p: project.id, id: task.id }).length) throw new Error('no worktree while other tasks run in this project');
       }
     }
-    const cwd = wt?.cwd || project.path;
-    initProject(cwd);
-    writeTaskSpec(cwd, task);
+    const cwd = isBrowserTask(task) ? path.join(dir, 'browser-tasks', String(task.id)) : wt?.cwd || project.path;
+    if (isBrowserTask(task)) fs.mkdirSync(cwd, { recursive: true });
+    else { initProject(cwd); writeTaskSpec(cwd, task); }
     const route = routeFor(task, project);
     // A session id only resumes on the agent that created it.
     let resume = task.session_id && lastRunAgent(task.id) === route.agent && lastRunNode(task.id) === LOCAL_NODE ? task.session_id : null, reused = false, body, system, tools, autonomous;
-    if (task.kind === 'reflect') {
+    if (isBrowserTask(task)) {
+      body = task.prompt; system = BROWSER_TASK_SYSTEM; autonomous = true;
+    } else if (task.kind === 'reflect') {
       const failures = qa("SELECT * FROM tasks WHERE project_id=:p AND status IN ('failed') AND finished_at>=:s ORDER BY finished_at DESC LIMIT 8",
         { p: project.id, s: now() - 7 * 86400 });
       const oc = q1(`SELECT SUM(status='done') AS done, SUM(status='failed') AS failed FROM tasks WHERE project_id=:p AND source='reflection' AND kind='work' AND finished_at>=:s`,
@@ -2714,7 +2722,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       tools = CFG.safeTools;
       autonomous = !!project.autonomous;
     }
-    const prompt = resume && !reused ? resumePrompt(task) : body;
+    const prompt = resume && !reused && !isBrowserTask(task) ? resumePrompt(task) : body;
     const effort = taskEffort(task, project, route);
     const { runId, logPath } = startRun(task.id, task.kind, route.agent, LOCAL_NODE, effort);
     updateTask(task.id, { ran_agent: route.agent, ran_model: route.model || null, route_note: routeNote(route), node_id: LOCAL_NODE });
@@ -2738,7 +2746,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       res.outcome = 'aborted';
       res.sessionId = null; // CLI adapters echo `resume` back; don't let the requeue restore it
     }
-    if (task.kind === 'work' && route.agent === 'claude') recordSessionUse(res, project.id, task.id);
+    if (!isBrowserTask(task) && task.kind === 'work' && route.agent === 'claude') recordSessionUse(res, project.id, task.id);
     return res;
   }
 
@@ -2762,15 +2770,15 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       checkNodeFailures(nodeId, res);
       return res;
     }
-    const repo = remoteRepo(project);
-    if (!repo) throw new Error(`${project.name} has no GitHub remote for a worker to clone`);
+    const repo = isBrowserTask(task) ? null : remoteRepo(project);
+    if (!repo && !isBrowserTask(task)) throw new Error(`${project.name} has no GitHub remote for a worker to clone`);
     const route = routeFor(task, project);
-    const baseSha = await remoteBase(task, project, running.get(task.id)?.prevNode);
+    const baseSha = isBrowserTask(task) ? null : await remoteBase(task, project, running.get(task.id)?.prevNode);
     const resume = task.session_id && lastRunAgent(task.id) === route.agent && lastRunNode(task.id) === nodeId ? task.session_id : null;
     const where = `a checkout of ${repo} on the worker machine ${name}`;
     const env = `Environment (cluster worker ${name}, ${n?.os || 'unknown'}/${n?.arch || 'unknown'}): a machine that runs agent-orch tasks; ` +
       `install whatever the task needs.\nYou are in ${where}, on branch ${taskBranch(task.id)}. The orchestrator pushes and merges it when you finish.`;
-    const prompt = resume ? resumePrompt(task) : lostHandoff(task) ? handoffPrompt({ ...project, path: where }, task, env, await handoffInfo(task, project))
+    const prompt = isBrowserTask(task) ? task.prompt : resume ? resumePrompt(task) : lostHandoff(task) ? handoffPrompt({ ...project, path: where }, task, env, await handoffInfo(task, project))
       : workerTaskPrompt({ ...project, path: where }, task, env);
     const effort = taskEffort(task, project, route);
     const { runId, logPath } = startRun(task.id, task.kind, route.agent, nodeId, effort);
@@ -2780,10 +2788,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     pushState();
     logEvent(`#${task.id} runs on ${name}`, { projectId: project.id, taskId: task.id });
     const res = await remoteJob(task.id, nodeId, name, { runId, logPath }, {
-      title: task.title, prompt, systemAppend: withBrowser(task, resume ? null : withPersona(WORKER_SYSTEM, project)) || undefined, agent: route.agent, model: route.model || undefined, effort: effort || undefined,
+      title: task.title, prompt, systemAppend: withBrowser(task, isBrowserTask(task) ? BROWSER_TASK_SYSTEM : resume ? null : withPersona(WORKER_SYSTEM, project)) || undefined, agent: route.agent, model: route.model || undefined, effort: effort || undefined,
       ...(needsBrowser(task) && { capabilities: ['browser'], identity: identityOf(task), gate: (({ patterns, ttlMs }) => ({ patterns, ttlMs }))(gateSettings()) }),
-      repo, baseSha, branch: taskBranch(task.id), doneWhen: task.done_when || undefined, resume: resume || undefined,
-      timeouts: { taskSec: CFG.taskTimeoutSec, verifySec: CFG.verifyTimeoutSec, installSec: 900 }, autonomous: !!project.autonomous,
+      ...(isBrowserTask(task) ? { execution: 'browser' } : { repo, baseSha, branch: taskBranch(task.id), doneWhen: task.done_when || undefined }), resume: resume || undefined,
+      timeouts: { taskSec: CFG.taskTimeoutSec, verifySec: CFG.verifyTimeoutSec, installSec: 900 }, autonomous: isBrowserTask(task) || !!project.autonomous,
       ext: cluster.extHash?.() || undefined, // the worker fetches this extension bundle first unless it has it
     }, signal);
     finishRun(runId, res);
@@ -3174,6 +3182,12 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
 
   async function finishWork(task, project, res, signal) {
+    if (isBrowserTask(task)) {
+      const status = browserTaskStatus(res.text);
+      updateTask(task.id, { status, finished_at: now(), result: res.text || '', session_id: res.sessionId || null }, true);
+      logEvent(`#${task.id} ${status}: ${task.title}`, { projectId: project.id, taskId: task.id });
+      return;
+    }
     const tid = task.id, remote = res.remote || null;
     let wt = taskWts.get(tid), dir = wt?.cwd || project.path;
     const [status, note] = parseStatus(res.text);
@@ -3272,7 +3286,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   async function fail(task, project, outcome, detail) {
     const tid = task.id;
     if (!updateTask(tid, { status: 'failed', attempts: task.attempts + 1, finished_at: now(), result: detail }, true)) return;
-    if (task.kind === 'work' && (taskWts.get(tid) || nodeOf(tid) === LOCAL_NODE)) { // a remote run's partial work stays on its pushed branch
+    if (!isBrowserTask(task) && task.kind === 'work' && (taskWts.get(tid) || nodeOf(tid) === LOCAL_NODE)) { // a remote run's partial work stays on its pushed branch
       const wt = taskWts.get(tid);
       recordResult(wt?.cwd || project.path, task, `failed (${outcome})`, detail);
       if (!wt) await gitCommit(project.path, `agent-orch #${tid} failed: ${task.title} (partial work)`); // else execute() parks the worktree
@@ -3688,6 +3702,44 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (spareMem(n) - floorOf(n) < footprint('claude')) return `Auto fits no task: ${gb(spareMem(n))} free, and a task needs ${gb(footprint('claude'))} on top of the ${gb(floorOf(n))} kept free`;
     return 'Auto fits no task: its local cap (node worker.mjs limit, set on it) allows none';
   }
+  let browserHeld = () => false;
+  const attachBrowserViews = (views) => { browserHeld = (node, identity) => views.isTakenOver(node, identity); };
+  // The browser contract has no chat/project id; use a non-reflecting Browser project on demand.
+  // Profile existence is checked on its owning node by server.mjs before creation.
+  function createBrowserTask({ prompt, identity, node }) {
+    if (typeof prompt !== 'string' || !prompt.trim()) return { error: 'prompt is required' };
+    const cwd = path.join(dir, 'browser');
+    let project = q1('SELECT * FROM projects WHERE path=:p', { p: cwd });
+    if (!project) {
+      fs.mkdirSync(cwd, { recursive: true });
+      const id = Number(run(`INSERT INTO projects(path,name,perpetual,autonomous,position,created_at)
+        VALUES(:p,'Browser',0,1,(SELECT COALESCE(MAX(position),0)+1 FROM projects),:t)`, { p: cwd, t: now() }).lastInsertRowid);
+      project = getProject(id);
+    }
+    const taskId = addTask(project.id, { title: prompt.trim().replace(/\s+/g, ' ').slice(0, 60), prompt: prompt.trim(),
+      capabilities: ['browser'], identity, urgency: 'urgent', files: [] });
+    updateTask(taskId, { execution: 'browser', run_on: node });
+    taskAction(taskId, 'next');
+    return { taskId };
+  }
+  function listBrowserTasks({ identity, node }) {
+    return qa(`SELECT * FROM tasks WHERE execution='browser' AND browser_identity=:i AND run_on=:n
+      ORDER BY CASE WHEN status IN ('queued','running','paused') THEN 0 ELSE 1 END, id DESC LIMIT 100`, { i: identity, n: node }).map((t) => {
+      const entries = [];
+      for (const r of qa('SELECT log_path, started_at FROM runs WHERE task_id=:id ORDER BY id', { id: t.id })) {
+        try { entries.push(...parseJsonl(fs.readFileSync(r.log_path, 'utf8')).map((e) => ({ at: r.started_at, ...e }))); } catch {}
+      }
+      for (const a of approvals.forTask(t.id)) entries.push({ k: 'approval', at: a.at / 1000,
+        label: `${a.action} (${a.status})`, mediaId: a.screenshot });
+      entries.sort((a, b) => a.at - b.at);
+      return { id: t.id, title: t.title, status: t.status, startedAt: t.started_at, finishedAt: t.finished_at,
+        resultText: t.result, steps: browserSteps(entries) };
+    });
+  }
+  function stopBrowserTask(id) {
+    if (!isBrowserTask(getTask(id))) return { error: 'No such browser task', status: 404 };
+    return taskAction(id, 'cancel');
+  }
   // Running browser tasks and the profile each uses (the live browser view, browser-view.mjs).
   const browserTasks = () => qa("SELECT id, title, node_id, capabilities, browser_identity FROM tasks WHERE status='running' AND kind='work' AND capabilities IS NOT NULL")
     .filter(needsBrowser).map((t) => ({ id: t.id, title: t.title, node: t.node_id || LOCAL_NODE, identity: identityOf(t) }));
@@ -3805,6 +3857,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
 
   return {
+    createBrowserTask, listBrowserTasks, stopBrowserTask, attachBrowserViews,
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
     planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, insertCheckpoint, approveCheckpoint, requestChanges, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setTaskRunOn, setReflectFallbacks, setReflectSettings, syncConvoModel, pauseTask, resumeTask, handoffTask, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
     drain, undrain, chatPlanning, autoRestart: () => parallelSettings().autoRestart, stateView, machines, browserTasks, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, reconcileClaudeLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),

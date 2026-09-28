@@ -882,6 +882,7 @@ if (cluster) {
 // The owner's live browser views (Browser sheet, task drawers): profiles on this server or on workers (browser-view.mjs).
 const browserViews = createBrowserViews({ cluster: () => cluster || null, tasks: () => orch?.browserTasks() || [], send: (ws, m) => send(ws, m),
   log: (m) => console.log(`[browser] ${m}`) });
+orch?.attachBrowserViews(browserViews);
 if (cluster) cluster.onMessage((id, msg) => browserViews.onCluster(id, msg));
 if (cluster) remoteLogins = createRemoteLogins({ cluster, local: () => connections.list(),
   onChange: (node) => { const list = remoteLogins.list(node); for (const ws of allClients) send(ws, { t: 'connections', node, connections: list }); } });
@@ -1596,6 +1597,23 @@ async function handleRequest(req, res) {
     }
   }
   // Browser profiles per machine, a profile's signed-in sites (cookie domains, never values) and clearing one.
+  if (p === '/api/browser/task' && req.method === 'POST') {
+    const body = await readBody(req);
+    if (typeof body.prompt !== 'string' || !body.prompt.trim()) return json(res, 400, { error: 'prompt is required' });
+    try {
+      const profile = await browserViews.profile(body.node, body.identity);
+      const r = orch.createBrowserTask({ prompt: body.prompt, ...profile });
+      return json(res, r.error ? 400 : 201, r);
+    } catch (e) { return json(res, 400, { error: e.message }); }
+  }
+  if (p === '/api/browser/tasks' && req.method === 'GET') {
+    return json(res, 200, orch.listBrowserTasks({ identity: url.searchParams.get('identity') || '', node: url.searchParams.get('node') || '' }));
+  }
+  const browserStop = p.match(/^\/api\/browser\/task\/(\d+)\/stop$/);
+  if (browserStop && req.method === 'POST') {
+    const r = orch.stopBrowserTask(Number(browserStop[1]));
+    return json(res, r.error ? r.status || 400 : 200, r);
+  }
   if (p === '/api/browser' && req.method === 'GET') return json(res, 200, { nodes: await browserViews.list() });
   if ((p === '/api/browser/sites' && req.method === 'GET') || (p === '/api/browser/clear' && req.method === 'POST')) {
     const q = req.method === 'GET' ? Object.fromEntries(new URL(req.url, 'http://x').searchParams) : await readBody(req);

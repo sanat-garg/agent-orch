@@ -6,8 +6,8 @@
 //   UI → server: bv_open {node, identity, url?, thumb?}, bv_close, bv_input {events}, bv_nav {action, url?}, bv_take, bv_handback
 //   server → UI: bv_frame {node, identity, n, data, w, h}, bv_state {node, identity, url, title, active, takeover, role, task, closed?, error?}
 import { MSG } from './cluster-protocol.mjs';
-import { createLiveBrowsers, screenOp, activeRun } from './browser-live.mjs';
-import { findBrowser, normIdentity } from './browser.mjs';
+import { createLiveBrowsers, screenOp, activeRun, takenOver } from './browser-live.mjs';
+import { findBrowser, normIdentity, IDENTITY_RE } from './browser.mjs';
 
 export const LOCAL = 'controller';
 const BACKLOG = 1024 * 1024; // a viewer this far behind skips frames
@@ -185,6 +185,15 @@ export function createBrowserViews({ cluster = () => null, tasks = () => [], sen
       } catch (e) { return { ...base, profiles: [], note: e.message }; }
     }));
   }
+  async function profile(node, identity) {
+    if (typeof identity !== 'string' || !IDENTITY_RE.test(identity)) throw new Error('Unknown browser identity');
+    if (typeof node !== 'string' || (node !== LOCAL && !nodeOf(node))) throw new Error('Unknown browser node');
+    const { profiles } = await op(node, { op: 'profiles' });
+    if (!profiles?.some((p) => p.identity === identity)) throw new Error('Unknown browser identity');
+    return { node, identity };
+  }
+  const isTakenOver = (node, identity) => !!sessions.get(keyOf(node, identity))?.state.takeover
+    || (node === LOCAL && takenOver(identity, localMgr().home));
   const sites = async (node, identity) => (await op(node || LOCAL, { op: 'sites', identity: normIdentity(identity) })).sites || [];
   async function clear(node, identity) {
     node ||= LOCAL; identity = normIdentity(identity);
@@ -195,5 +204,5 @@ export function createBrowserViews({ cluster = () => null, tasks = () => [], sen
   }
   async function closeAll() { clearInterval(tick); sessions.clear(); await mgr?.close(); }
 
-  return { handle, drop, onCluster, list, sites, clear, close: closeAll, sessions };
+  return { handle, drop, onCluster, list, profile, isTakenOver, sites, clear, close: closeAll, sessions };
 }

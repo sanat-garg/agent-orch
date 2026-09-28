@@ -165,7 +165,9 @@ code, pre, kbd { font-family: var(--mono); }
 }
 .convo:hover .more, .convo.active .more, .convo .more:focus-visible { opacity: 1; }
 .convo .more:hover { background: var(--border); }
-/* Sidebar drag order (By priority): a lifted card follows the pointer; a line marks where it will land. */
+/* Sidebar drag order (Priority order): a lifted card follows the pointer; a line marks where it will land. */
+.rank-label { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.rank-hint { font-weight: 400; text-transform: none; letter-spacing: 0; opacity: .8; }
 .convo.rankable { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 .convo-list.sorting .convo { cursor: grabbing; }
 .convo-list.sorting .convo:not(.lifted):hover { background: transparent; }

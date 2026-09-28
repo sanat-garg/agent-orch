@@ -13,3 +13,7 @@ Make project priority settable by dragging projects in the sidebar project list 
 ## Done when
 
 `node --test test/project-order*.test.mjs` passes (drag posts order, endpoint sets priority from position, scheduler honours it, keyboard reorder)
+
+## Result — done (check passed) (2026-09-28 19:12)
+
+AGENT-ORCH-STATUS: done — project drag/keyboard priority order tested; header hint added

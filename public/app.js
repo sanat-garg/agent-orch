@@ -597,7 +597,8 @@ function renderConvoList() {
   }
   const ranked = rankedConvos();
   if (ranked.length) {
-    const label = el('div', 'group-label', 'By priority');
+    const label = el('div', 'group-label rank-label', 'Priority order');
+    label.append(el('span', 'rank-hint', 'Drag to set priority'));
     label.title = 'Drag projects to set priority (Alt+↑/↓ with the keyboard): the top one runs first';
     nav.append(label);
     for (const c of ranked) nav.append(convoItem(c, true));

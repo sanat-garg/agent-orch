@@ -1603,3 +1603,6 @@ Original #229 .tl-bar restored in drawer; cards use .tl-bar.compact
 ## 2026-09-28 19:10 — #509 Machines star graph: head (oracle-vm) card above its node, workers around the rest [done (check passed)]
 
 Head card sits above its node; workers ring the rest
+## 2026-09-28 19:12 — #510 Sidebar projects: drag and drop to set project priority [done (check passed)]
+
+project drag/keyboard priority order tested; header hint added

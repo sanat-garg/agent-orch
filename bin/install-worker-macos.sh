@@ -20,6 +20,7 @@
 #   --service daemon|login  --user NAME (dedicated user, default agentorch)
 #   --no-dedicated-user (run as yourself from your own LaunchAgent, without sudo; not advised)
 #   --status-window (also open the live status view, worker.mjs status, in a Terminal window at every login)
+#   --repair (pair again as a new machine even though the head still knows this one; re-runs keep the pairing)
 #   --dry-run (print what would run, change nothing)  --uninstall [--purge] (also delete the worker home)
 set -euo pipefail
 
@@ -33,7 +34,7 @@ DAEMON_PLIST=/Library/LaunchDaemons/$LABEL.plist
 STATUS_LABEL=$LABEL.status
 STATUS_BIN=/usr/local/bin/agent-orch-worker-status
 STATUS_SUDOERS=/etc/sudoers.d/agent-orch-worker-status
-CONTROLLER='' CODE='' NAME='' AGENTS='' WUSER=agentorch SERVICE='' SELF=0 DRY=0 UNINSTALL=0 PURGE=0 STATUS_WINDOW=0 STATUS_NOTE=''
+CONTROLLER='' CODE='' NAME='' AGENTS='' WUSER=agentorch SERVICE='' SELF=0 DRY=0 UNINSTALL=0 PURGE=0 STATUS_WINDOW=0 STATUS_NOTE='' REPAIR=0
 
 say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1mwarning:\033[0m %s\n' "$*" >&2; }
@@ -76,6 +77,7 @@ parse() {
       --no-dedicated-user) SELF=1 ;;
       --status-window) STATUS_WINDOW=1 ;;
       --dry-run) DRY=1 ;;
+      --repair) REPAIR=1 ;;
       --uninstall) UNINSTALL=1 ;;
       --purge) PURGE=1 ;;
       -h|--help) usage; exit 0 ;;
@@ -106,6 +108,8 @@ EOF
 # can parse back ("syntax error near unexpected token `|'"): so nothing in this file pipes a here-document; feed it
 # straight in (`cmd <<EOF`). test/install-scripts.test.mjs checks both.
 WORKER_FUNCS=(say warn die run tty_run node_major ensure_node ensure_gh ensure_checkout install_agents pair worker_stage node_path)
+# …and the settings they read (declare -p; under set -u a missing one stops the stage).
+WORKER_VARS=(REPO LABEL CONTROLLER CODE NAME AGENTS DRY REPAIR)
 # Everything here uses $HOME, so the same functions serve the dedicated user (via sudo -u … -H) and --no-dedicated-user.
 
 node_major() { command -v node >/dev/null && node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0; }
@@ -167,7 +171,14 @@ install_agents() {
     say "Installing $a into ~/.local/bin"
     ok=1
     case "$a" in
-      claude) if ((DRY)); then echo "+ curl -fsSL https://claude.ai/install.sh | bash"; else curl -fsSL https://claude.ai/install.sh | bash </dev/null || ok=0; fi ;;
+      # Claude's own installer first; if it fails (or leaves no ~/.local/bin/claude), the npm package into ~/.local,
+      # whose `claude` is the same native binary.
+      claude)
+        if ((DRY)); then echo "+ curl -fsSL https://claude.ai/install.sh | bash   (if that fails: npm i -g --prefix ~/.local @anthropic-ai/claude-code)"
+        elif ! { curl -fsSL https://claude.ai/install.sh | bash </dev/null && [[ -x "$HOME/.local/bin/claude" ]]; }; then
+          warn "Claude's installer didn't finish (its output is above); installing the npm package into ~/.local instead"
+          npm i -g --prefix "$HOME/.local" @anthropic-ai/claude-code </dev/null && [[ -x "$HOME/.local/bin/claude" ]] || ok=0
+        fi ;;
       codex) run npm i -g --prefix "$HOME/.local" @openai/codex || ok=0 ;;
     esac
     ((ok)) || warn "couldn't install $a; the worker still pairs without it. Install it later as $(id -un) (the same command) and re-run this installer."
@@ -180,7 +191,21 @@ pair() {
   local cfg="${AGENT_ORCH_WORKER_HOME:-$HOME/.agent-orch-worker}/config.json"
   if [[ -n "$CODE" ]]; then
     [[ -n "$CONTROLLER" ]] || ((DRY)) || die "--code needs --controller (the head's URL, as in its \"Add machine\" line)"
-    [[ -f "$cfg" ]] && say "Already paired; pairing again as a new machine (remove the old one in the head's UI)"
+    # A re-run keeps a pairing the head still knows (pairing again would add this Mac twice); it pairs again when the
+    # head removed this machine, it was paired with another head, or --repair says so.
+    if [[ -f "$cfg" ]] && ((!REPAIR)); then
+      if ((DRY)); then echo "+ node $HOME/agent-orch-worker/worker.mjs check --controller ${CONTROLLER:-https://<controller>}   (keeps the pairing when the head still knows this Mac)"
+      else
+        local st=0 said
+        said="$(node "$HOME/agent-orch-worker/worker.mjs" check --controller "$CONTROLLER" </dev/null 2>&1)" || st=$?
+        case "$st" in
+          0) say "Already paired with the head (${said#paired as }): keeping it, the code isn't needed. --repair pairs this Mac again as a new machine."; return ;;
+          3) say "Pairing again: ${said#not paired: }" ;;
+          *) say "Couldn't ask the head about this Mac's pairing (${said#couldn*t check the pairing: }): keeping it. --repair pairs again."; return ;;
+        esac
+      fi
+    fi
+    ((REPAIR)) && [[ -f "$cfg" ]] && say "Pairing again as a new machine (--repair; remove the old one in the head's Machines view)"
     if [[ -n "$NAME" ]]; then say "Pairing as \"$NAME\""
     else say "Pairing: this Mac names itself \"<model> (<host name>)\" (rename it in the head's Machines view)"; fi
     local args=(pair --controller "${CONTROLLER:-https://<controller>}" --code "$CODE")
@@ -238,10 +263,25 @@ env_keys() { # env_keys HOME PATH [USER]
 worker_path() { echo "$(dirname "$1"):$2/.local/bin:$2/.local/node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"; }
 
 # A LaunchAgent lives in a GUI login session: it runs while that user is logged in.
+# relaunch DOMAIN LABEL PLIST: (re)load a launchd job. `launchctl bootout` returns before launchd has let the old job go
+# (the worker stops gracefully, pausing its tasks first), and bootstrapping the same label meanwhile fails with
+# "Bootstrap failed: 5: Input/output error". So: unload, wait until the label is gone, then load, retrying briefly.
+relaunch() {
+  if ((DRY)); then printf '+ launchctl bootout %s/%s\n+ launchctl enable %s/%s\n+ launchctl bootstrap %s %s\n' "$1" "$2" "$1" "$2" "$1" "$3"; return; fi
+  plutil -lint "$3" >/dev/null || die "$3 is not a valid plist (plutil -lint $3)"
+  launchctl bootout "$1/$2" </dev/null 2>/dev/null || true
+  local i
+  for i in $(seq 1 60); do launchctl print "$1/$2" </dev/null >/dev/null 2>&1 || break; sleep 1; done
+  launchctl enable "$1/$2" </dev/null 2>/dev/null || true
+  for i in 1 2 3 4 5; do
+    if launchctl bootstrap "$1" "$3" </dev/null; then return 0; fi
+    sleep 2
+  done
+  die "launchd couldn't load $3 ($1/$2). Check it with: sudo launchctl print $1/$2"
+}
 load_agent() { # load_agent USER PLIST [LABEL]
   local uid; uid="$(id -u "$1")"
-  run launchctl bootout "gui/$uid/${3:-$LABEL}" 2>/dev/null || true
-  run launchctl bootstrap "gui/$uid" "$2"
+  relaunch "gui/$uid" "${3:-$LABEL}" "$2"
 }
 
 # --service daemon: launchd starts the worker at boot as $WUSER, whether or not anyone is logged in.
@@ -253,9 +293,7 @@ install_daemon() { # install_daemon OWNER NODE WORKER-HOME
   KEYS="$(printf '  <key>UserName</key><string>%s</string>\n  <key>GroupName</key><string>staff</string>\n  <key>InitGroups</key><true/>\n  <key>WorkingDirectory</key><string>%s</string>\n' "$WUSER" "$3/agent-orch-worker")
 $(env_keys "$3" "$(worker_path "$2" "$3")" "$WUSER")
 " plist "$2" "$3/agent-orch-worker/worker.mjs" run | write_root "$DAEMON_PLIST" 0644
-  run launchctl bootout "system/$LABEL" 2>/dev/null || true
-  run launchctl enable "system/$LABEL"
-  run launchctl bootstrap system "$DAEMON_PLIST"
+  relaunch system "$LABEL" "$DAEMON_PLIST"
   FINISH="Done. The worker runs as $WUSER from boot (LaunchDaemon $LABEL), whether or not anyone is logged in; launchd restarts it if it stops. Log: $LOG"
 }
 
@@ -426,7 +464,7 @@ $(env_keys "$HOME" "$(worker_path "$node_bin" "$HOME")")
 
   say "Setting up the worker as '$WUSER'"
   local vars node_bin
-  vars="$(declare -p REPO LABEL CONTROLLER CODE NAME AGENTS DRY)"
+  vars="$(declare -p "${WORKER_VARS[@]}")"
   if ((DRY)); then
     echo "+ sudo -u $WUSER -H bash -c '<worker stage>'   (as $WUSER, HOME=$whome):"
     HOME="$whome" worker_stage

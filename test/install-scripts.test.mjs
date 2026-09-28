@@ -47,7 +47,7 @@ test('macos: the worker stage survives the declare -f hand-over (bash 3.2 on mac
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-install-'));
     try {
       const script = `${body}\nREPO=sanat-garg/agent-orch CONTROLLER=https://head.example CODE=ABCD-2345 NAME=box AGENTS=claude DRY=1\n` +
-        `vars="$(declare -p REPO LABEL CONTROLLER CODE NAME AGENTS DRY)"\n` +
+        `vars="$(declare -p "\${WORKER_VARS[@]}")"\n` +
         `exec ${sh} -c "set -euo pipefail; $vars; $(declare -f "\${WORKER_FUNCS[@]}"); cd; worker_stage; node_path"`;
       const r = spawnSync(sh, ['-c', script], { encoding: 'utf8', env: { ...process.env, HOME: home, NVM_DIR: path.join(home, 'nvm') } });
       assert.equal(r.status, 0, `${sh}: ${r.stderr}`);
@@ -74,6 +74,54 @@ test('macos --dry-run: codex installs into the worker account\'s ~/.local, never
       assert.doesNotMatch(r.stdout, /npm i -g @openai\/codex/);
     } finally { fs.rmSync(home, { recursive: true, force: true }); }
   } finally { fs.rmSync(bin, { recursive: true, force: true }); }
+});
+
+// Re-running the installer on a paired Mac keeps the pairing the head still knows (a real Mac got "… 2" each time);
+// --repair pairs it again.
+test('macos --dry-run on a paired Mac: checks the pairing instead of adding the Mac again; --repair pairs again', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-install-'));
+  try {
+    fs.mkdirSync(path.join(home, '.agent-orch-worker'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.agent-orch-worker', 'config.json'), '{}');
+    const run = (extra) => spawnSync('bash', [MAC, ...ARGS, '--no-dedicated-user', '--service', 'login', ...extra],
+      { encoding: 'utf8', env: { ...process.env, HOME: home, NVM_DIR: path.join(home, 'nvm') } });
+    const kept = run([]);
+    assert.equal(kept.status, 0, kept.stderr);
+    assert.match(kept.stdout, /\+ node \S+\/worker\.mjs check --controller https:\/\/head\.example/);
+    const again = run(['--repair']);
+    assert.equal(again.status, 0, again.stderr);
+    assert.doesNotMatch(again.stdout, /worker\.mjs check/);
+    assert.match(again.stdout, /Pairing again as a new machine \(--repair/);
+    assert.match(again.stdout, /worker\.mjs pair --controller https:\/\/head\.example --code ABCD-2345/);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+// launchd: bootout returns before the old worker is gone, and a bootstrap then fails with "5: Input/output error" (a
+// real Mac on a re-run). relaunch waits for the label to go and retries; here launchctl/plutil/sleep are stand-ins.
+test('macos relaunch: waits for the old job to leave, then loads it, retrying a failed bootstrap', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-launchd-'));
+  try {
+    const bin = path.join(dir, 'bin'), log = path.join(dir, 'calls');
+    fs.mkdirSync(bin);
+    // `print` succeeds twice (still loaded), then fails (gone); the first bootstrap fails with launchd's error 5.
+    fs.writeFileSync(path.join(bin, 'launchctl'), `#!/bin/sh
+echo "$*" >> "${log}"
+case "$1" in
+  print) n=$(grep -c '^print' "${log}"); [ "$n" -le 2 ] && exit 0; exit 113 ;;
+  bootstrap) n=$(grep -c '^bootstrap' "${log}"); if [ "$n" -eq 1 ]; then echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; fi ;;
+esac
+exit 0
+`, { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, 'plutil'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, 'sleep'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const body = fs.readFileSync(MAC, 'utf8').replace(/\nmain "\$@"\s*$/, '\n');
+    const r = spawnSync('bash', ['-c', `${body}\nDRY=0; relaunch system com.agent-orch.worker /Library/LaunchDaemons/w.plist; echo loaded`],
+      { encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /loaded/);
+    const calls = fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => l.split(' ')[0]);
+    assert.deepEqual(calls, ['bootout', 'print', 'print', 'print', 'enable', 'bootstrap', 'bootstrap']);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('linux --dry-run: clones, pairs and writes a systemd unit with Restart=always and MemoryHigh', () => {

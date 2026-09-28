@@ -13,6 +13,7 @@
 // the worker enforces itself (worker-cap.mjs); the one local UI is a terminal status view, fed over a unix socket in its
 // home (worker-status.mjs). These are its only commands (the installers add --uninstall):
 //   node worker.mjs pair --controller https://<host> --code ABCD-1234 [--name mac]   one time: stores the node token
+//   node worker.mjs check [--controller https://<host>]                              is the pairing still good (installers)
 //   node worker.mjs run                                                              the daemon (systemd / launchd)
 //   node worker.mjs status [--once]                                                  the live status view (q quits)
 //   node worker.mjs limit --cpu <cores|N%> --mem <GB|N%> [--max-tasks N] [--only-on-ac] | --show | --reset
@@ -29,7 +30,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import WebSocket from 'ws';
 import {
-  PROTOCOL_VERSION, WS_PATH, CLAIM_PATH, HEARTBEAT_MS, HEARTBEAT_MISSES, WIP_PUSH_MS, SLEEP_JUMP_MS, MAX_FRAME, MAX_BATCH, MSG, OUTCOMES,
+  PROTOCOL_VERSION, WS_PATH, CLAIM_PATH, WHOAMI_PATH, HEARTBEAT_MS, HEARTBEAT_MISSES, WIP_PUSH_MS, SLEEP_JUMP_MS, MAX_FRAME, MAX_BATCH, MSG, OUTCOMES,
   EVENT_KINDS, OS_KINDS, GRACE_MS, FEATURES, FEATURE_LIST, WORKER_ACCEPTS, backoffMs, createSender, decode,
 } from './cluster-protocol.mjs';
 import { AGENTS, agentStatus, clearLoginCache, fetchLimits, modelCatalog, readVersion, runAgentCli } from './agents.mjs';
@@ -170,6 +171,22 @@ export async function pair({ controller, code, name, home = workerHome() }) {
   if (!r.ok || !j.token) throw new Error(`pairing failed (HTTP ${r.status}): ${j.error || 'no token'}`);
   writeConfig(home, { controller: base.origin, node: j.node, name: j.name || name, token: j.token, pairedAt: Date.now() });
   return { node: j.node, name: j.name || name };
+}
+
+// Is this machine still paired with the head (`controller`: the one the installer names; another head = not paired)?
+// 'ok' {name}: the head still knows it. 'unpaired': no pairing here, one for another head, or the head removed it.
+// 'unknown': the head couldn't be asked (offline, or a head too old to answer); the installer then keeps the pairing.
+export async function checkPairing({ controller = null, home = workerHome() } = {}) {
+  const c = readConfig(home);
+  if (!c?.token || !c?.controller) return { state: 'unpaired', why: 'not paired' };
+  if (controller && new URL(controller).origin !== c.controller) return { state: 'unpaired', why: `paired with ${c.controller}` };
+  try {
+    const r = await fetch(new URL(WHOAMI_PATH, c.controller), { headers: { authorization: `Bearer ${c.token}` }, signal: AbortSignal.timeout(15_000) });
+    const j = await r.json().catch(() => ({}));
+    if (r.ok && j.node === c.node) return { state: 'ok', name: j.name || c.name };
+    if (r.status === 401) return { state: 'unpaired', why: 'the head removed this machine' };
+    return { state: 'unknown', why: `HTTP ${r.status}` };
+  } catch (e) { return { state: 'unknown', why: e.message }; }
 }
 
 // ---------------------------------------------------------------- git
@@ -1232,6 +1249,11 @@ async function main() {
     if (!controller || !code) throw new Error('usage: node worker.mjs pair --controller https://<host> --code <code> [--name <name>]');
     const r = await pair({ controller, code, name: a.name });
     console.log(`paired as ${r.name} (${r.node}); token saved in ${configFile(workerHome())}. Start it with: node worker.mjs run`);
+  } else if (cmd === 'check') {
+    // exit 0: paired and known to the head; 3: not paired (with that head); 2: couldn't tell.
+    const r = await checkPairing({ controller: a.controller || null });
+    console.log(r.state === 'ok' ? `paired as ${r.name}` : r.state === 'unpaired' ? `not paired: ${r.why}` : `couldn't check the pairing: ${r.why}`);
+    process.exitCode = r.state === 'ok' ? 0 : r.state === 'unpaired' ? 3 : 2;
   } else if (cmd === 'run') {
     const w = createWorker();
     for (const sig of ['SIGINT', 'SIGTERM']) process.once(sig, () => { w.stop().finally(() => process.exit(0)); });

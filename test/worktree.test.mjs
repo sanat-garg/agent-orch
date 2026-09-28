@@ -54,7 +54,7 @@ async function scenario(repo, body, pre = '') {
         }
         yield { type: 'result', subtype: 'success', result: 'AGENT-ORCH-STATUS: done — ok', session_id: 's-' + Math.random(), num_turns: 1 };
       })();
-      const opts = { config: { parallelTasks: 2, agentSlots: 2, meminfo: ${JSON.stringify(new URL('./fixtures/meminfo-ample', import.meta.url).pathname)} }, query, dataDir, claudeEnv: {}, getLimits: () => [], onSubscription: () => true, broadcast() {}, emitChat() {}, convoExists: () => false };
+      const opts = { config: { parallelTasks: 2, agentSlots: 2, conflictRetryMs: 200, meminfo: ${JSON.stringify(new URL('./fixtures/meminfo-ample', import.meta.url).pathname)} }, query, dataDir, claudeEnv: {}, getLimits: () => [], onSubscription: () => true, broadcast() {}, emitChat() {}, convoExists: () => false };
       createOrchestrator({ ...opts, disabled: true });
       const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
       const pid = Number(db.prepare("INSERT INTO projects(path,name,priority,status,perpetual,created_at) VALUES(?,?,50,'active',0,0)").run(repo, 'proj').lastInsertRowid);

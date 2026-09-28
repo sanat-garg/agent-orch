@@ -18,7 +18,7 @@ _What the code doesn't say. History: JOURNAL.md. Bugs: AUDIT.md. Mobile HIG rows
 
 ## Conventions
 - ESM `.mjs`, no build step, no framework, minimal deps. Match the terse style and comment density.
-- Tests: `npm test` runs only the test files the diff from main can reach; `npm test -- test/x.test.mjs` runs named files; `npm run test:full` is for reflection only. Verify with the files you touched; the orchestrator runs Done-when itself. Copy a neighbouring test's setup (server tests spawn server.mjs on a free port with a temp `CW_DATA_DIR`; scheduler tests use `createOrchestrator` with a fake `query`; UI tests use playwright-core).
+- Tests: `npm test` runs only the test files the diff from main can reach; `npm test -- test/x.test.mjs` runs named files; `npm run test:full` is for reflection only. Verify with the files you touched; the orchestrator runs Done-when itself. Copy a neighbouring test's setup (server tests spawn server.mjs on a free port with a temp `CW_DATA_DIR`; scheduler tests use `createOrchestrator` with a fake `query`; UI tests use playwright-core). The VPS has no `init.defaultBranch`: a bare test origin's HEAD is `master`, so clone it with `-b main`.
 - Times: events carry `until` (epoch s); app.js `withUntil` formats in the browser. Never format times on the server except in logs.
 - AUDIT.md items get `**Fixed**` + a one-line note; UI-REVIEW.md rows are marked fixed in place.
 - Mobile: Apple HIG (apple-design skill). Modals need `grid-template-columns: minmax(0, 100%)`. 44px touch targets and 16px fields go in `@media (pointer: coarse)` blocks after the base rule; phone type sizes in the `max-width: 600px` block at the end of app.css. Filled buttons use `--accent-strong` (test/ui-contrast.test.mjs asserts ≥ 4.5:1 in both themes).
@@ -27,7 +27,7 @@ _What the code doesn't say. History: JOURNAL.md. Bugs: AUDIT.md. Mobile HIG rows
 ## Decisions (beyond BRIEF.md)
 - Subscriptions only: API_ENV stripping in server.mjs is what enforces it. Never weaken that.
 - Local branch `backup/pre-agent-orch` must never be pushed. Local `claude/*` branches and `agent-orch/task-197/-199/-209` are the owner's unlanded work: never land or delete them unasked.
-- `after` is for TRUE prerequisites only (cancelling cascades). Use `files` to keep parallel work apart. Rapid top-up (`rapidQueue`) targets free worker slots + 2 minus worker-ready work; head-only work (integrators, tasks kept on the head) and chained tasks never count.
+- `after` is for TRUE prerequisites only (cancelling cascades). Use `files` to keep parallel work apart. Rapid top-up (`rapidQueue`) targets free worker slots + 2 minus worker-ready work; head-only work (integrators, tasks kept on the head) and chained tasks never count. In Rapid mode file overlap never blocks a free slot (only the per-file cap does: kv `file_caps`, tuned from kv `file_merge_outcomes`); Rapid off = strict overlap gate. A merge conflict is retried once (CFG.conflictRetryMs) before an integrator. Overlap never requeues a running task; a running task going back to `queued` is a worker reject/loss, crash, limit or owner stop.
 - System font stack only. No benchmark ranking of models, ever.
 - Computer work follows AGENTIC.md's rollout (files-only workspace first). Connectors (Gmail etc.) only when the owner asks.
 

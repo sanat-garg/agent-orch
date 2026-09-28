@@ -6780,7 +6780,11 @@ function renderQueue() {
     body.append(box);
   }
   if (running.length) {
-    body.append(el('h3', 'dg-group', 'Running'));
+    const head = el('h3', 'dg-group', 'Running');
+    // Rapid mode: the files running work declared, with how many tasks may edit each at once (the per-file cap).
+    const hot = (O.state?.hot_files || []).filter((h) => h.project_id === O.project?.id);
+    if (hot.length) head.append(el('span', 'q-hot', `hot files: ${hot.map((h) => `${h.file} ×${h.cap}`).join(' · ')}`));
+    body.append(head);
     const box = el('div', 'q-list');
     for (const t of running) box.append(queueCard(t.id, false));
     body.append(box);

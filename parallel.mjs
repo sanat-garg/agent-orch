@@ -1,7 +1,8 @@
 // Parallel planning (BRIEF goal 9): which queued work tasks may run at the same time in one project, and which
 // agent/model each runs on when several are ready.
-//   A task declares the files it will modify (`tasks.files`: JSON [path or glob]). Two tasks may run together only
-//   if no path can match both declarations. No declaration means "everything": the task runs alone.
+//   A task declares the files it will modify (`tasks.files`: JSON [path or glob]). With Rapid development mode off, two
+//   tasks may run together only if no path can match both declarations; no declaration means "everything": the task
+//   runs alone. In Rapid mode overlap is only a preference (see FILE_CAP): edits meet at merge time.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -58,6 +59,37 @@ export function filesOverlap(a, b) {
   if (!a || !b) return true;
   const ea = a.flatMap((p) => expandBraces(p)), eb = b.flatMap((p) => expandBraces(p));
   return ea.some((x) => eb.some((y) => pathsMeet(x, y)));
+}
+
+// Per-file concurrency caps (Rapid development mode). In Rapid mode file overlap is a preference, not a gate: a ready task
+// whose declared files overlap running work goes after disjoint work, but takes a free slot when nothing else is ready.
+// What still holds it back is a cap on how many running tasks may touch one declared file at once (FILE_CAP.default),
+// tuned per file from the last 24 h of merge outcomes: a rebase-conflict rate above `lowerAbove` lowers the cap by one
+// (min 1); one below `raiseBelow` raises it by one (max 6). An undeclared task (null = everything) is never capped.
+export const FILE_CAP = { default: 3, min: 1, max: 6, windowSec: 24 * 3600, lowerAbove: 0.3, raiseBelow: 0.1 };
+
+// The next cap for a file after its recorded outcomes ({ conflicts, total } within the window). No outcomes: unchanged.
+export function nextFileCap(cap, { conflicts = 0, total = 0 } = {}) {
+  cap = Number.isInteger(cap) ? Math.min(FILE_CAP.max, Math.max(FILE_CAP.min, cap)) : FILE_CAP.default;
+  if (!total) return cap;
+  const rate = conflicts / total;
+  if (rate > FILE_CAP.lowerAbove) return Math.max(FILE_CAP.min, cap - 1);
+  if (rate < FILE_CAP.raiseBelow) return Math.min(FILE_CAP.max, cap + 1);
+  return cap;
+}
+
+// How many of the running declarations (each a `files` value; null ones are skipped: undeclared never hard-blocks) touch `file`.
+export function fileConcurrency(file, runningDecls) {
+  return runningDecls.filter((d) => parseFiles(d) && filesOverlap([file], d)).length;
+}
+
+// Rapid mode's hard check for a ready task: null when it may start, else the first declared file whose cap is full
+// (`capOf(file)` → its cap). Undeclared files never block.
+export function fileCapFull(files, runningDecls, capOf) {
+  const list = parseFiles(files);
+  if (!list) return null;
+  for (const f of list) if (fileConcurrency(f, runningDecls) >= capOf(f)) return f;
+  return null;
 }
 
 // Agent spreading: `ready` work tasks (in queue order) each with `options` = [{agent, model}], its primary first, then

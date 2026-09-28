@@ -1595,6 +1595,7 @@ pre.copy-cmd:hover::after { opacity: .7; }
 .modal-panel.dg { width: min(640px, 100%); }
 .sheet-grip { display: none; }
 .dg-group { margin: 18px 0 8px; font-size: 12px; font-weight: 600; color: var(--faint); text-transform: uppercase; letter-spacing: .04em; }
+.dg-group .q-hot { margin-left: 10px; font-weight: 400; text-transform: none; letter-spacing: 0; overflow-wrap: anywhere; }
 .dg-row { display: block; width: 100%; text-align: left; font: inherit; color: inherit; margin: 0 0 10px; padding: 12px 14px; min-height: 44px;
   border: 1px solid var(--border); border-radius: 12px; background: var(--panel); cursor: pointer; }
 button.dg-row:hover { border-color: var(--accent); }

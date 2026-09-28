@@ -60,7 +60,7 @@ async function scenario(body, { config = {}, origin = false } = {}) {
       })();
       const convo = { id: 'c1', cwd: repo };
       const o = createOrchestrator({ query, dataDir, claudeEnv: { PATH: process.env.PATH, HOME: process.env.HOME }, getLimits: () => [], onSubscription: () => true,
-        broadcast() {}, emitChat() {}, convoExists: () => true, config: ${JSON.stringify({ pollMs: 100, ...config })} });
+        broadcast() {}, emitChat() {}, convoExists: () => true, config: ${JSON.stringify({ pollMs: 100, conflictRetryMs: 200, ...config })} });
       const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
       const all = () => db.prepare("SELECT * FROM tasks WHERE kind='work' ORDER BY id").all();
       const byTitle = (t) => all().find((r) => r.title === t);

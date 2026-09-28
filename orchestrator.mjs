@@ -25,7 +25,7 @@ import { APPROVAL_TTL_MS, DEFAULT_PATTERNS, patternsWith } from './gate.mjs';
 import { createApprovals } from './approvals.mjs';
 import { createUsageLog } from './usage.mjs';
 import { DELEGATE_CFG, createDelegator, parseFallbacks } from './delegate.mjs';
-import { filesOverlap, headTarget, parseFiles, spreadAssign, readMemInfo, taskSlots, MEM } from './parallel.mjs';
+import { filesOverlap, headTarget, parseFiles, spreadAssign, readMemInfo, taskSlots, MEM, FILE_CAP, fileCapFull, nextFileCap } from './parallel.mjs';
 import { registerPid, withOwner } from './resources.mjs';
 import { LOCAL_NODE, HEALTH, awayNote } from './cluster.mjs';
 import { MSG, gitPath, graceMs, isRepoUrl } from './cluster-protocol.mjs';
@@ -34,7 +34,7 @@ import { CPU_PER_TASK, FOOTPRINT, GB, capSlots, capTasks, localCap } from './cap
 import { extractCommand, runCheck, toolLine } from './taskrun.mjs';
 import { gcRetention } from './retention.mjs';
 import { pushBranch, pushedBase } from './github.mjs';
-import { commitAll, ensureWorktree, isMerged, listWorktrees, mergeBack, parkWorktree, pruneOrphanWorktrees, removeWorktree, repoInfo, startIntegration, taskBranch, unresolvedFiles, worktreesRoot } from './worktrees.mjs';
+import { commitAll, ensureWorktree, fetchMain, isMerged, listWorktrees, mergeBack, parkWorktree, pruneOrphanWorktrees, removeWorktree, repoInfo, startIntegration, taskBranch, unresolvedFiles, worktreesRoot } from './worktrees.mjs';
 
 // ---------------------------------------------------------------- config
 
@@ -75,9 +75,12 @@ const CFG = {
   footprint: { ...FOOTPRINT },
   cpuPerTask: {},
   controllerWork: false,
-  // overlapWaits: a work task whose declared files overlap a running task in its project waits for it (default: no, it
-  // runs once disjoint work has taken the free slots, and the two meet at merge time).
+  // overlapWaits: a work task whose declared files overlap a running task in its project waits for it. That is the rule
+  // whenever Rapid development mode is off; in Rapid mode (default) overlap is only a preference (parallel.mjs FILE_CAP):
+  // disjoint work takes free slots first, overlapping work still starts, and the two meet at merge time. true forces
+  // the strict rule in Rapid mode too.
   overlapWaits: false,
+  conflictRetryMs: 30_000,      // a rebase conflict at merge time is retried once after this long before an integrator is queued
   // controllerBrowser: whether browser tasks (capabilities ["browser"]) may run on the controller at all (default: no,
   // they wait for a browserCapable worker); the owner's kv parallel_settings overrides it.
   controllerBrowser: false,
@@ -301,6 +304,13 @@ function formatQueue(rows) {
   }).join('\n');
 }
 
+// Rapid mode's hot files (files running work declared, with how many tasks may edit each at once) for the planner and
+// the reflector: new tasks touching one keep those edits small.
+const hotFilesText = (rapid) => (rapid?.hotFiles?.length
+  ? `Hot files (declared by running work; ×N = how many tasks may edit that file at once): ${rapid.hotFiles.map((h) => `${h.file} ×${h.cap}`).join(', ')}. ` +
+    'A new task that must touch a hot file keeps those edits small and localised (different hunks merge cleanly; the same hunk conflicts).\n'
+  : '');
+
 export function plannerTurnPrompt(project, rows, text, environment, rapid = null) {
   return `[agent-orch context] Project: ${project.name} at ${project.path}\n` +
     `Project priority: ${project.priority}/100 · mode: ${project.mode}\n` +
@@ -308,7 +318,7 @@ export function plannerTurnPrompt(project, rows, text, environment, rapid = null
     `${environment}\n` +
     (rapid && rapid.free > 0 ? `Rapid development mode: ${rapid.slots} slots, ${rapid.running} running, ${rapid.free} free.\n` +
       'When the owner asks for a feature, decompose it into small parallel parts by default. Declare disjoint `files` for each part, including tests. ' +
-      'Use one deliverable and one check per task; add an integrator with true prerequisites only where the parts must combine. Stay within the requested feature.\n' : '') +
+      'Use one deliverable and one check per task; add an integrator with true prerequisites only where the parts must combine. Stay within the requested feature.\n' + hotFilesText(rapid) : '') +
     `Current queue:\n${formatQueue(rows)}\n\n[Owner says]\n${text}`;
 }
 
@@ -398,7 +408,7 @@ export function reflectPrompt(project, rows, journalTail, overage, limits, reaso
       'The target is free worker slots plus a two-task buffer. Return this many independent tasks with declared `files`, split into small file-disjoint pieces (including their tests). ' +
       'No chains: a task with `after` waits for its prerequisites, so it does not count as ready and leaves a slot empty. ' +
       'Spread them across bugs from AUDIT.md, UI-REVIEW.md items, tests for untested modules, ROADMAP.md next items, and BRIEF.md goals still open. ' +
-      'Avoid files already assigned to queued or running work. Add integrator tasks only where parts must combine, with `after` for those true prerequisites.\n');
+      'Avoid files already assigned to queued or running work. Add integrator tasks only where parts must combine, with `after` for those true prerequisites.\n' + hotFilesText(rapid));
   }
   if (lines.length && !rapid) {
     sections.push(`Capacity right now:\n${lines.join('\n')}\nSize your queue to this: if much of the 5h window will expire ` +
@@ -1162,12 +1172,15 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     // Two tasks share a project only if both are work tasks in their own worktrees; anything else would race on the same
     // checkout or its commits (Rapid reflection can share isolated work). A waiting plan/reflect task otherwise stops
     // more work from starting in its project. Work whose
-    // declared files overlap a running task's (parallel.mjs; undeclared = everything) goes after the rest, so free slots
-    // fill with disjoint work first; with CFG.overlapWaits it waits instead. Overlapping edits meet at merge time
-    // (mergeBack; a conflict queues an integrator).
+    // declared files overlap a running task's (parallel.mjs; undeclared = everything): with Rapid development mode off
+    // (or CFG.overlapWaits) it waits; in Rapid mode it goes after the rest, so free slots fill with disjoint work first,
+    // and only a full per-file cap (FILE_CAP, tuned by recordMergeOutcomes) holds it back. Overlapping edits meet at
+    // merge time (mergeBack; a conflict is retried once, then queues an integrator). Nothing here ever touches a
+    // running task: overlap never preempts or requeues.
     if (exclusive) {
       const busy = qa("SELECT id, project_id, kind, integrates, files FROM tasks WHERE status='running' AND execution IS NOT 'browser'");
-      const rapid = parallelSettings().rapidDevelopment;
+      const rapid = parallelSettings().rapidDevelopment, strict = !rapid || CFG.overlapWaits;
+      const caps = strict ? null : fileCaps();
       const blocked = new Set(), later = [];
       rows = rows.filter((r) => {
         if (isBrowserTask(r)) return true;
@@ -1185,7 +1198,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
           return false;
         }
         if (!others.some((b) => filesOverlap(filesOf(r), filesOf(b)))) return true;
-        if (!CFG.overlapWaits) later.push(r);
+        if (strict) return false;
+        if (fileCapFull(filesOf(r), others.map(filesOf), (f) => caps[capKey(r.project_id, f)] ?? FILE_CAP.default)) return false;
+        later.push(r);
         return false;
       });
       rows = [...rows, ...later];
@@ -1235,6 +1250,50 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     ORDER BY x.depends_on IS NOT t.depends_on, x.depends_on`, { id }).map((r) => r.d);
   // Declared files of a task row: null = everything. An integrator touches what the task it integrates declared.
   const filesOf = (t) => parseFiles(t.files) ?? (t.integrates ? parseFiles(getTask(t.integrates)?.files) : null);
+  // ---- per-file concurrency caps (Rapid mode; parallel.mjs FILE_CAP). kv file_caps {"<project id>:<file>": cap} holds
+  // only caps tuned away from the default; kv file_merge_outcomes [{t, p, f, c}] is the last 24 h of merge outcomes per
+  // declared file (c: 1 = its rebase conflicted) that tunes them. A cap moves by at most one per recorded outcome and
+  // stays put until that file's next merge.
+  const capKey = (projectId, file) => `${projectId}:${file}`;
+  function fileCaps() {
+    try { const v = JSON.parse(kvGet('file_caps') || '{}'); return v && typeof v === 'object' ? v : {}; } catch { return {}; }
+  }
+  const fileCapOf = (projectId, file) => fileCaps()[capKey(projectId, file)] ?? FILE_CAP.default;
+  // A merged (or finally conflicted) task: one outcome per declared file (conflicted when a conflicting path falls under
+  // it), plus one per conflicting path nobody declared; then each touched file's cap is re-tuned from its window.
+  function recordMergeOutcomes(project, task, conflicted = []) {
+    const declared = parseFiles(task.files) || [], hit = conflicted.filter((f) => !/^\(/.test(f)); // '(rebase failed: …)' isn't a path
+    const files = new Map(declared.map((d) => [d, hit.some((p) => filesOverlap([d], [p]))]));
+    for (const p of hit) if (!files.has(p)) files.set(p, true);
+    if (!files.size) return;
+    const t = now(), cutoff = t - FILE_CAP.windowSec;
+    let log = [];
+    try { log = JSON.parse(kvGet('file_merge_outcomes') || '[]'); } catch {}
+    log = (Array.isArray(log) ? log : []).filter((o) => o.t > cutoff);
+    for (const [f, c] of files) log.push({ t, p: project.id, f, c: c ? 1 : 0 });
+    log = log.slice(-5000);
+    kvSet('file_merge_outcomes', JSON.stringify(log));
+    const caps = fileCaps(), changed = [];
+    for (const f of files.keys()) {
+      const key = capKey(project.id, f), mine = log.filter((o) => o.p === project.id && o.f === f), conflicts = mine.filter((o) => o.c).length;
+      const cap = caps[key] ?? FILE_CAP.default, next = nextFileCap(cap, { conflicts, total: mine.length });
+      if (next === cap) continue;
+      if (next === FILE_CAP.default) delete caps[key]; else caps[key] = next;
+      changed.push(`${f} ×${next} (${Math.round((100 * conflicts) / mine.length)}% of ${mine.length} merges conflicted in 24 h)`);
+    }
+    kvSet('file_caps', JSON.stringify(caps));
+    if (changed.length) logEvent(`hot file caps: ${changed.join('; ')}`, { projectId: project.id, taskId: task.id });
+  }
+  // The files running work in a project declared, most shared first, with each one's cap: [{file, running, cap}].
+  function hotFiles(projectId, limit = 12) {
+    const count = new Map();
+    for (const b of qa("SELECT id, files, integrates FROM tasks WHERE status='running' AND kind='work' AND project_id=:p", { p: projectId })) {
+      for (const f of filesOf(b) || []) count.set(f, (count.get(f) || 0) + 1);
+    }
+    const caps = fileCaps();
+    return [...count].map(([file, running]) => ({ file, running, cap: caps[capKey(projectId, file)] ?? FILE_CAP.default }))
+      .sort((a, b) => b.running - a.running || a.cap - b.cap || a.file.localeCompare(b.file)).slice(0, limit);
+  }
   // The prerequisite graph upward from `ids` (a task id or array, inclusive) that hasn't finished yet: what must finish first.
   function prereqIds(ids) {
     const out = [], seen = new Set(), todo = (Array.isArray(ids) ? ids : [ids]).filter((i) => i != null);
@@ -2034,6 +2093,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return serialGit(project.path, async () => {
       await commitNow(project.path, `agent-orch: uncommitted changes before merging #${task.id}`);
       const info = (await repoInfo(project.path)) || wt.info;
+      if (await fetchMain(info)) logEvent(`${info.branch} fast-forwarded to origin before merging #${task.id}`, { projectId: project.id, taskId: task.id });
       const r = await mergeBack(info, wt.owner, message);
       if (r.conflict) return r;
       if (r.sha) onCommit(project.path, r.sha, message);
@@ -2504,7 +2564,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   const setPlannerSession = (project, agent, id) => (agent === 'claude' ? updateProject(project.id, { chat_session_id: id }) : kvSet(`planner_session:${project.id}:${agent}`, id || ''));
 
   async function plannerRun(project, text, convoId, signal, fromChat = false, { agent = 'claude', model = null, origin = { origin: 'chat' } } = {}) {
-    const prompt = plannerTurnPrompt(project, listTasks(project.id, 25), text, `${ENVIRONMENT}\n${routesText(project.id)}\nOwner fallback list (used when a model hits its limit): ${JSON.stringify(origin.fallbacks || [])}`, parallelSettings().rapidDevelopment ? rapidQueue() : null);
+    const prompt = plannerTurnPrompt(project, listTasks(project.id, 25), text, `${ENVIRONMENT}\n${routesText(project.id)}\nOwner fallback list (used when a model hits its limit): ${JSON.stringify(origin.fallbacks || [])}`, parallelSettings().rapidDevelopment ? rapidQueue(project) : null);
     // Claude streams SDK messages into the chat, so a 'plan' route can only change the Claude planner's model.
     // Other agents show their tool calls as they happen and the reply at the end.
     const route = resolveRoute({ kind: 'plan', title: '' }, project, listRoutes(project.id), () => true);
@@ -2628,16 +2688,19 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // Rapid top-up demand per node class (#436). Worker slots: every node taking ordinary work (online workers at their
   // target, the controller's work slots when it takes work) less the ordinary work running. Worker-ready: queued work
   // that can go there (prerequisites met, no review hold, not an integrator or a task kept on the controller). Head: its
-  // reserved slots vs ready integrators, reported only: reflection never tops up head-only work.
-  function rapidQueue() {
+  // reserved slots vs ready integrators, reported only: reflection never tops up head-only work. With a project, its
+  // hot files (declared by running work, with their caps) go along so the planner keeps edits to them small.
+  function rapidQueue(project = null) {
     const c = capacityView();
     const rows = qa(RUNNABLE + " AND t.kind='work'", { now: now() }).filter((r) => projectReady(getProject(r.project_id).path));
     const headOnly = (r) => controllerOnly(r) || (!c.controller && (!!r.worktree || r.run_on === LOCAL_NODE));
     const running = q1("SELECT COUNT(*) AS n FROM tasks WHERE status='running' AND kind='work' AND integrates IS NULL").n;
     const ready = rows.filter((r) => !headOnly(r)).length, hs = headSlots(), only = headLoad().only;
-    return { ...rapidQueueTarget(Math.min(c.max, c.cap ?? Infinity), running, ready),
+    return { ...rapidQueueTarget(Math.min(c.max, c.cap ?? Infinity), running, ready), hotFiles: project ? hotFiles(project.id) : [],
       head: { slots: hs.reserved, running: only, free: Math.max(0, hs.reserved - only), ready: rows.length - ready } };
   }
+  // Every project's hot files (stateView; the Queue modal shows the open project's in its Running header).
+  const hotFilesAll = () => qa("SELECT DISTINCT project_id FROM tasks WHERE status='running' AND kind='work'").flatMap((r) => hotFiles(r.project_id).map((h) => ({ project_id: r.project_id, ...h })));
   function rapidLimitReason(p) {
     const primary = intendedRoute({ kind: 'reflect', title: 'Reflect: what else should be done?', prompt: '', ...reflectFor(p) }, p);
     const fallbacks = reflectFallbacksFor(p);
@@ -2818,7 +2881,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       const oc = q1(`SELECT SUM(status='done') AS done, SUM(status='failed') AS failed FROM tasks WHERE project_id=:p AND source='reflection' AND kind='work' AND finished_at>=:s`,
         { p: project.id, s: now() - 7 * 86400 }) || {};
       body = reflectPrompt(project, qa('SELECT * FROM tasks WHERE project_id=:p ORDER BY id DESC LIMIT 50', { p: project.id }).map((r) => ({ ...r, deps: depsOf(r.id) })), recentJournal(project.path), contextOverage(project.path),
-        limitsRows(), decision().reason, failures, { done: oc.done || 0, failed: oc.failed || 0 }, `${ENVIRONMENT}\nOwner fallback list (used when a model hits its limit): ${JSON.stringify(reflectFallbacksFor(project) || [])}`, parallelSettings().rapidDevelopment ? rapidQueue() : null);
+        limitsRows(), decision().reason, failures, { done: oc.done || 0, failed: oc.failed || 0 }, `${ENVIRONMENT}\nOwner fallback list (used when a model hits its limit): ${JSON.stringify(reflectFallbacksFor(project) || [])}`, parallelSettings().rapidDevelopment ? rapidQueue(project) : null);
       system = REFLECT_SYSTEM;
       tools = [...PLANNER_TOOLS, ...CFG.safeTools.filter((t) => t.startsWith('Bash('))];
       autonomous = false;
@@ -3362,7 +3425,18 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     recordResult(dir, task, `done${checked}`, res.text);
     let sha;
     if (wt) {
-      const merged = await mergeTask(task, project, wt, `agent-orch #${tid}: ${task.title}`);
+      const message = `agent-orch #${tid}: ${task.title}`;
+      let merged = await mergeTask(task, project, wt, message);
+      if (merged.conflict && !task.integrates) {
+        // Rapid-mode overlaps meet here. The other task's merge may just have landed (or be landing: merges are
+        // serialised), so the rebase gets one automatic retry before an integrator is queued.
+        const first = merged.conflict;
+        logEvent(`⚠ #${tid} conflicts with ${wt.info.branch} in ${first.join(', ')}; retrying the rebase in ${Math.round(CFG.conflictRetryMs / 1000)} s`, { level: 'warn', projectId: project.id, taskId: tid });
+        await new Promise((r) => setTimeout(r, CFG.conflictRetryMs));
+        if (getTask(tid)?.status !== 'running') return;
+        merged = await mergeTask(task, project, wt, message);
+        recordMergeOutcomes(project, task, merged.conflict ? [...new Set([...first, ...merged.conflict])] : first);
+      } else if (!task.integrates) recordMergeOutcomes(project, task, []);
       if (merged.conflict) {
         // An integrator whose base moved on again just goes another round in the same worktree.
         if (task.integrates) return verifyFailed(task, project, res, `merge ${wt.info.branch} again`, `${wt.info.branch} changed meanwhile; conflicts in: ${merged.conflict.join(', ')}`);
@@ -3822,7 +3896,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         activity: r.activity || null, started_at: r.startedAt, elapsed: Math.max(0, now() - r.startedAt), node: r.node, node_name: r.node === LOCAL_NODE ? null : nodeName(r.node), waiting_for: r.waiting || null };
     });
     return { activeUsage, blocks, blockedUntil: blockedUntil(), blockedReason: kvGet('blocked_reason'),
-      pacing: d?.reason || kvGet('budget_reason'), slots: slotCount(d, mem), parallel, lanes, capacity: capacityView(d, mem), rapid: rapidStatus(),
+      pacing: d?.reason || kvGet('budget_reason'), slots: slotCount(d, mem), parallel, lanes, hot_files: hotFilesAll(), capacity: capacityView(d, mem), rapid: rapidStatus(),
       running: running.size, workRunning: workRunning(), remoteRunning: workEverywhere() - workRunning(), draining, subscription: onSubscription(), head: headView(d) };
   }
   // The head's slots as the Machines view splits them ('Integrating 2 · Work 1/4'): its hardware and target, the reserved

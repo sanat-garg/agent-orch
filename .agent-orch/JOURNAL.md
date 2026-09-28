@@ -1052,6 +1052,9 @@ Code tools have no always key; local navigation now held
 
 Failed model rediscovery keeps last good list, retries hourly
 
+## 2026-09-28 14:09 — #378 Rapid mode: file overlap never blocks a free slot; merges handle it [done (check passed)]
+
+rapid overlap soft, per-file caps tuned, merge retry, tests pass
 ## 2026-09-28 12:54 — #365 Stats ui: a Machines tab with one row per machine: tasks done and failed, check pass rate, busy time, tokens and last active [done (check passed)]
 
 Stats has a tested Machines tab with per-machine rows and share bar
@@ -1200,6 +1203,11 @@ Files API browses whole disk with secret and write guardrails
 merge resolved; browser e2e tests and phone screenshot verified
 
 ## 2026-09-28 14:30 — #399 Integrate #347: Fix the live browser: working stream, google.com by default, viewport follows the screen [verify failed (1)]
+## 2026-09-28 14:32 — #417 Integrate #378: Rapid mode: file overlap never blocks a free slot; merges handle it [done (check passed)]
+
+orchestrator.mjs conflicts resolved, rapid-overlap tests pass, merge uncommitted
+
+## 2026-09-28 14:32 — #417 Integrate #378: Rapid mode: file overlap never blocks a free slot; merges handle it [verify failed (1)]
 
 Command: merge main again
 ## 2026-09-28 14:28 — #398 Integrate #381: oracle-vm node in the Machines graph opens the full server details [done (check passed)]
@@ -1239,3 +1247,6 @@ CONTEXT.md conflict resolved; files-scope tests pass
 ## 2026-09-28 14:32 — #399 Integrate #347: Fix the live browser: working stream, google.com by default, viewport follows the screen [done (check passed)]
 
 CONTEXT conflict resolved; e2e passes; phone screenshot saved
+## 2026-09-28 14:33 — #417 Integrate #378: Rapid mode: file overlap never blocks a free slot; merges handle it [done (check passed)]
+
+merge conflicts resolved again, rapid-overlap tests pass

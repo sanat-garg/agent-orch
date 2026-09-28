@@ -152,6 +152,16 @@ export async function startIntegration(info, dir) {
 // Land task `id`'s worktree on the main tree's branch: commit what's left, squash to one commit, rebase onto the
 // branch and fast-forward the main tree. Returns { sha } ('' when the task changed nothing) or { conflict: [files] }
 // (the rebase is aborted and the worktree kept as it was). The caller holds the merge lock.
+// Bring the main tree's branch up to date with origin before a merge (a commit the owner pushed from elsewhere, or a
+// worker's merge that landed on GitHub first): fetch it and fast-forward; anything else (no origin, diverged) is left
+// alone for the owner's protocol. Returns whether the branch moved.
+export async function fetchMain(info) {
+  if (!(await ok(info.top, ['fetch', '-q', 'origin', info.branch]))) return false;
+  const before = (await git(info.top, ['rev-parse', 'HEAD'])).trim();
+  if (!(await ok(info.top, ['merge', '-q', '--ff-only', `origin/${info.branch}`]))) return false;
+  return (await git(info.top, ['rev-parse', 'HEAD'])).trim() !== before;
+}
+
 export async function mergeBack(info, id, message) {
   const dir = worktreePath(info.top, id);
   await commitAll(dir, message);

@@ -119,6 +119,10 @@ verify-failed prompt, same as the local flow) or `job.cancel`. The controller ke
   today; the integrator is just another job and may run on any node, starting from the pushed branch. After the
   merge, the controller deletes the remote branch and sends nothing further; the worker removes its worktree when it
   gets the `ack` for its final `job.done`, and prunes cached repos unused for 14 days.
+- **Disk hygiene** (worker.mjs `pruneCaches`, at start and after every job's worktree is removed): an `npm ci` result
+  is kept as `~/.agent-orch-worker/deps/<lockfile+node hash>/node_modules` and symlinked into worktrees (its mtime is
+  touched on each reuse); one no worktree links to and unused for 3 days is deleted. `~/.agent-orch-worker/npm-cache/`
+  is removed whole once its files sum to over 300 MB (never while a job is installing; npm recreates it).
 - Controller-side worktrees are unchanged for local-node tasks.
 
 ## Extensions (skills, subagents, MCP servers)

@@ -13,3 +13,7 @@ worker.mjs keeps one `deps/<lockfile-hash>/node_modules` per lockfile+node versi
 ## Done when
 
 `node --test test/worker.test.mjs` passes and `grep -n 'pruneCaches' worker.mjs` prints a match
+
+## Result — done (check passed) (2026-09-28 04:56)
+
+AGENT-ORCH-STATUS: done — Worker now prunes stale deps caches and oversized npm-cache

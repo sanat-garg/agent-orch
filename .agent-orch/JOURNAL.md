@@ -778,3 +778,7 @@ main re-merged with ext sync kept; npm test passes 478/478
 ## 2026-09-28 04:54 — #263 Verifier: a | inside a quoted grep pattern is regex, not a pipe (land the task-244 taskrun fix) [done (check passed)]
 
 Verifier treats | in quoted grep patterns as regex
+
+## 2026-09-28 04:56 — #264 Worker disk hygiene: prune unreferenced deps caches and the npm cache [done (check passed)]
+
+Worker now prunes stale deps caches and oversized npm-cache

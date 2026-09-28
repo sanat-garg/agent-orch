@@ -19,8 +19,11 @@
 //   node worker.mjs limit --cpu <cores|N%> --mem <GB|N%> [--max-tasks N] [--only-on-ac] | --show | --reset
 // Everything lives in ~/.agent-orch-worker (AGENT_ORCH_WORKER_HOME overrides): config.json (0600: the pairing and the
 // cap), worker.sock (the status socket, 0600), repos/ (bare cache clones), worktrees/, deps/ (node_modules by lockfile
-// hash), run/ (each job's wrapper scripts and pids), logs/, extensions/ (the head's MCP servers, 0600, and synced.json:
+// hash), npm-cache/, run/ (each job's wrapper scripts and pids), logs/, extensions/ (the head's MCP servers, 0600, and synced.json:
 // the skills and subagents it wrote into ~/.claude and ~/.codex). git and gh use the machine's own login.
+// Disk hygiene (pruneCaches, at start and after every job's worktree is removed): a deps/<hash> no worktree's
+// node_modules links to and unused for DEPS_TTL_MS (3 days) is deleted, npm-cache/ goes whole once over 300 MB, and
+// repos/ caches go after 14 idle days.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -69,6 +72,8 @@ const SLEEP_MS = Number(process.env.AGENT_ORCH_WORKER_SLEEP_JUMP_MS) || SLEEP_JU
 export const sleptFor = (gap, interval, jump = SLEEP_JUMP_MS) => (gap > interval + jump ? gap - interval : 0);
 const BATCH_BYTES = 512 * 1024;
 const CACHE_TTL_MS = 14 * 86400e3; // cached repos unused this long are pruned
+const DEPS_TTL_MS = 3 * 86400e3; // a deps/<hash> no worktree links to and unused this long is pruned
+const NPM_CACHE_MAX = 300 * 1024 ** 2; // npm-cache/ over this is removed whole (npm recreates it)
 const LOG_MAX = 10 * 1024 ** 2;
 const PROGRESS_MS = 5000; // a running job's progress hints go out at most this often (when they changed)
 // Telemetry probes, cached between heartbeats: GitHub's reachability (a TCP connect; host:port, 'off' in tests) once a
@@ -208,6 +213,21 @@ const gitOk = (cwd, args, opts) => git(cwd, args, opts).then(() => true, () => f
 export function cacheName(repo) {
   const parts = repo.replace(/\.git$/, '').split(/[/:]/).filter(Boolean);
   return parts.slice(-2).join('__').replace(/[^\w.-]/g, '_');
+}
+
+// The summed file sizes under dir (symlinks not followed); stops counting once past `stop`.
+async function dirSize(dir, stop = Infinity) {
+  let total = 0;
+  const walk = async (d) => {
+    for (const e of await fs.promises.readdir(d, { withFileTypes: true }).catch(() => [])) {
+      if (total > stop) return;
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) await walk(p);
+      else if (e.isFile()) total += (await fs.promises.stat(p).catch(() => null))?.size || 0;
+    }
+  };
+  await walk(dir);
+  return total;
 }
 
 // ---------------------------------------------------------------- the daemon
@@ -951,7 +971,12 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     const cacheable = argv[0] === 'npm' && argv[1] === 'ci' && fs.existsSync(lock);
     const key = cacheable && crypto.createHash('sha256').update(fs.readFileSync(lock)).update(process.version).digest('hex').slice(0, 16);
     const cached = key && path.join(dirs.deps, key, 'node_modules');
-    if (cached && fs.existsSync(cached) && !fs.existsSync(nm)) { fs.symlinkSync(cached, nm, 'dir'); return; }
+    if (cached && fs.existsSync(cached) && !fs.existsSync(nm)) {
+      const now = new Date();
+      fs.utimesSync(path.dirname(cached), now, now); // its mtime is its last use (pruneCaches)
+      fs.symlinkSync(cached, nm, 'dir');
+      return;
+    }
     const r = await runHelper(argv[0], argv.slice(1), {
       cwd: dir, timeoutMs: (spec.timeouts.installSec || 900) * 1000,
       env: { ...process.env, npm_config_cache: dirs.npmCache, npm_config_prefer_offline: 'true', npm_config_audit: 'false', npm_config_fund: 'false' },
@@ -1149,6 +1174,34 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     fs.rmSync(job.dir, { recursive: true, force: true });
     await gitOk(job.cache, ['worktree', 'prune']);
     await gitOk(job.cache, ['branch', '-D', taskBranch(job.id)]);
+    await pruneCaches().catch((e) => log(`cache prune failed: ${e.message}`, 'warn'));
+  }
+
+  // Disk hygiene: drop deps/<hash> installs no worktree's node_modules links to that are unused for DEPS_TTL_MS, and
+  // npm-cache/ once it outgrows NPM_CACHE_MAX (not while a job installs: its npm may be using it).
+  let pruning = null;
+  function pruneCaches() {
+    return (pruning ??= (async () => {
+      const used = new Set();
+      for (const name of await fs.promises.readdir(dirs.worktrees).catch(() => [])) {
+        const target = await fs.promises.readlink(path.join(dirs.worktrees, name, 'node_modules')).catch(() => null);
+        if (target) used.add(path.dirname(path.resolve(dirs.worktrees, name, target)));
+      }
+      for (const name of await fs.promises.readdir(dirs.deps)) {
+        const dir = path.join(dirs.deps, name);
+        const st = await fs.promises.stat(dir).catch(() => null);
+        if (!st || used.has(dir) || Date.now() - st.mtimeMs <= DEPS_TTL_MS) continue;
+        await fs.promises.rm(dir, { recursive: true, force: true });
+        log(`pruned unused dependency cache deps/${name}`);
+      }
+      if ([...jobs.values()].some((j) => j.phase?.name === 'installing')) return;
+      const size = await dirSize(dirs.npmCache, NPM_CACHE_MAX);
+      if (size > NPM_CACHE_MAX) {
+        await fs.promises.rm(dirs.npmCache, { recursive: true, force: true });
+        fs.mkdirSync(dirs.npmCache, { recursive: true });
+        log(`removed npm-cache/ (over ${fmtGB(NPM_CACHE_MAX)})`);
+      }
+    })().finally(() => { pruning = null; }));
   }
 
   async function stopJob(id, kind, reason) {
@@ -1201,6 +1254,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       await gitOk(dir, ['worktree', 'prune']);
       if (Date.now() - fs.statSync(dir).mtimeMs > CACHE_TTL_MS) { fs.rmSync(dir, { recursive: true, force: true }); log(`pruned unused cache ${name}`); }
     }
+    await pruneCaches();
   }
 
   // ---- self-update (node.update, sent by the controller while this machine is idle): git pull --ff-only in the checkout

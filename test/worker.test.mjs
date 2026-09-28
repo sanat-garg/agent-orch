@@ -107,7 +107,26 @@ test('pair stores the node token in config.json (0600)', async () => {
   assert.doesNotMatch(await workerCli('status'), /aon_/);
 });
 
+// Disk hygiene fixtures (pruneCaches): deps/<hash> installs, a fake worktree linking one, an oversized npm-cache/.
+const whome = () => path.join(home, '.agent-orch-worker');
+const OLD = new Date(Date.now() - 4 * 86400e3);
+function seedCaches(stale, linked) {
+  for (const h of [stale, linked].filter(Boolean)) {
+    fs.mkdirSync(path.join(whome(), 'deps', h, 'node_modules', 'pkg'), { recursive: true });
+    fs.utimesSync(path.join(whome(), 'deps', h), OLD, OLD);
+  }
+  if (linked) {
+    fs.mkdirSync(path.join(whome(), 'worktrees', 'demo-fake'), { recursive: true });
+    fs.symlinkSync(path.join(whome(), 'deps', linked, 'node_modules'), path.join(whome(), 'worktrees', 'demo-fake', 'node_modules'), 'dir');
+  }
+  fs.mkdirSync(path.join(whome(), 'npm-cache', '_cacache'), { recursive: true });
+  const fd = fs.openSync(path.join(whome(), 'npm-cache', '_cacache', 'blob'), 'w');
+  fs.ftruncateSync(fd, 301 * 1024 ** 2); // sparse: no real disk used
+  fs.closeSync(fd);
+}
+
 test('run: connects, reports inventory and resources', async () => {
+  seedCaches('stale0000000000a');
   worker = spawn(process.execPath, ['worker.mjs', 'run'], { cwd: ROOT, env: env(), stdio: ['ignore', 'pipe', 'pipe'] });
   worker.stdout.on('data', (d) => { workerOut += d; });
   worker.stderr.on('data', (d) => { workerOut += d; });
@@ -121,6 +140,9 @@ test('run: connects, reports inventory and resources', async () => {
   assert.ok(n.inventory.cores >= 1 && n.inventory.mem > 0);
   await waitFor(() => cluster.node(node).resources?.memAvailable > 0, { timeout: 5000 });
   assert.deepEqual(cluster.node(node).resources.running, []);
+  // At start: the unreferenced stale install and the oversized npm cache are gone.
+  assert.ok(!fs.existsSync(path.join(whome(), 'deps', 'stale0000000000a')), 'stale deps pruned at start');
+  assert.deepEqual(fs.readdirSync(path.join(whome(), 'npm-cache')), [], 'npm cache removed at start');
 });
 
 test('a job edits a file, passes its check and pushes its branch to origin', async () => {
@@ -163,6 +185,23 @@ test('a job whose base commit does not exist ends as setup_failed', async () => 
   const [done] = await waitFor(() => got('job.done', 8).length && got('job.done', 8), { timeout: 20000, message: `job.done 8\n${workerOut}` });
   assert.equal(done.outcome, 'setup_failed');
   assert.match(done.text, /setup failed/);
+});
+
+test('after a job: deps no worktree links to and unused for 3 days are pruned, a linked one stays, a big npm cache goes', async () => {
+  const { node } = JSON.parse(fs.readFileSync(path.join(whome(), 'config.json'), 'utf8'));
+  seedCaches('stale0000000000b', 'linked00000000c');
+  cluster.send(node, {
+    t: 'job.start', job: 12, title: 'Broken', prompt: 'x', agent: 'codex', repo: REPO, baseSha: 'e'.repeat(40),
+    branch: 'agent-orch/task-12', timeouts: { taskSec: 60 },
+  });
+  await waitFor(() => got('job.done', 12).length, { timeout: 20000, message: `job.done 12\n${workerOut}` });
+  await waitFor(() => !fs.existsSync(path.join(whome(), 'deps', 'stale0000000000b')), { timeout: 5000, message: `stale deps pruned\n${workerOut}` });
+  assert.ok(fs.existsSync(path.join(whome(), 'deps', 'linked00000000c', 'node_modules', 'pkg')), 'a linked install stays');
+  await waitFor(() => fs.readdirSync(path.join(whome(), 'npm-cache')).length === 0, { timeout: 5000, message: 'npm cache removed' });
+  const log = fs.readFileSync(path.join(whome(), 'logs', 'worker.log'), 'utf8');
+  assert.match(log, /pruned unused dependency cache deps\/stale0000000000b/);
+  assert.match(log, /removed npm-cache\/ \(over 300 MB\)/);
+  fs.rmSync(path.join(whome(), 'worktrees', 'demo-fake'), { recursive: true, force: true });
 });
 
 test('pause pushes WIP and keeps the worktree, resume finishes the job, cancel drops it', async () => {

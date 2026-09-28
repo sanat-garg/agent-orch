@@ -6,12 +6,21 @@
 // size on bv_open): the controller's, else the latest one's; thumbnails never size it.
 //   UI → server: bv_open {node, identity, url? (followed only when this socket may drive), thumb?, size?}, bv_close, bv_input {events},
 //   bv_nav {action, url?}, bv_take, bv_handback, bv_size {size: {width, height, dpr}}
-//   server → UI: bv_frame {node, identity, n, data, w, h}, bv_state {node, identity, url, title, active, takeover, role, task, closed?, error?, note?}
+//   server → UI: bv_frame {node, identity, n, data, w, h}, bv_state {node, identity, url, title, active, takeover, reconnecting, agentTab (the view
+//   follows the task's own tab), role, task, closed?, error?, note?}
+// Profiles live on a Mac worker by default (GET /api/browser marks the least-loaded online Mac `default`); the controller
+// is the default only while no Mac is online, and is marked `slow` (a 1-core VPS can't stream a browser well).
+import os from 'node:os';
 import { MSG } from './cluster-protocol.mjs';
 import { createLiveBrowsers, screenOp, activeRun, takenOver, viewSize } from './browser-live.mjs';
 import { findBrowser, normIdentity, IDENTITY_RE } from './browser.mjs';
 
 export const LOCAL = 'controller';
+// The machine a profile lives on by default: the least-loaded online Mac that can show a browser, else the controller.
+export function defaultNode(nodes) {
+  const macs = nodes.filter((n) => n.mac && n.online && n.capable).sort((a, b) => (a.load ?? 99) - (b.load ?? 99));
+  return macs[0] || nodes.find((n) => n.local && n.capable) || nodes.find((n) => n.online && n.capable) || null;
+}
 const BACKLOG = 1024 * 1024; // a viewer this far behind skips frames
 const THUMB_MS = 1000; // task-drawer thumbnails get a frame a second
 
@@ -42,7 +51,7 @@ export function createBrowserViews({ cluster = () => null, tasks = () => [], sen
   function stateFor(s, ws) {
     const task = taskFor(s), active = !!(s.state.active || task);
     return { t: 'bv_state', node: s.node, identity: s.identity, url: s.state.url || '', title: s.state.title || '', active, takeover: !!s.state.takeover,
-      role: s.controller === ws && (!active || s.state.takeover) ? 'control' : 'watch', task: task && { id: task.id, title: task.title },
+      reconnecting: !!s.state.reconnecting, agentTab: !!(active && s.state.agentTab), role: s.controller === ws && (!active || s.state.takeover) ? 'control' : 'watch', task: task && { id: task.id, title: task.title },
       ...(s.closed && { closed: true }), ...(s.error && { error: s.error }), ...(s.note && { note: s.note }) };
   }
   const pushState = (s) => { for (const ws of s.viewers.keys()) send(ws, stateFor(s, ws)); };
@@ -76,7 +85,7 @@ export function createBrowserViews({ cluster = () => null, tasks = () => [], sen
   function onState(s, st) {
     if (sessions.get(s.key) !== s) return;
     if (st.closed) { s.closed = true; s.error = st.error || 'the browser closed'; pushState(s); return end(s); }
-    s.state = { ...s.state, ...Object.fromEntries(Object.entries(st).filter(([k]) => ['url', 'title', 'active', 'takeover'].includes(k))) };
+    s.state = { ...s.state, ...Object.fromEntries(Object.entries(st).filter(([k]) => ['url', 'title', 'active', 'takeover', 'reconnecting', 'agentTab'].includes(k))) };
     s.note = st.note || null;
     assign(s);
     pushState(s);
@@ -196,18 +205,24 @@ export function createBrowserViews({ cluster = () => null, tasks = () => [], sen
   }, 2000);
   tick.unref?.();
 
-  // Machines that can show a browser, with their profiles (GET /api/browser).
+  // Machines that can show a browser, with their profiles (GET /api/browser). mac, load (1-min load per core), default:
+  // the machine the Browser tab opens on (the least-loaded online Mac, else the controller), slow: the controller isn't a Mac.
   async function list() {
-    const nodes = cluster()?.listNodes() || [{ id: LOCAL, name: 'This server', local: true, connected: true }];
+    const nodes = cluster()?.listNodes() || [{ id: LOCAL, name: 'This server', local: true, connected: true, os: process.platform }];
     const running = tasks();
-    return Promise.all(nodes.filter((n) => n.local || n.inventory?.browser).map(async (n) => {
-      const base = { id: n.id, name: n.local ? n.name || 'This server' : n.name, local: !!n.local, online: !!n.connected, capable: screenable(n) };
+    const out = await Promise.all(nodes.filter((n) => n.local || n.inventory?.browser).map(async (n) => {
+      const mac = (n.local ? n.os || process.platform : n.os) === 'darwin', cores = n.local ? os.cpus().length : n.inventory?.cores;
+      const load1 = n.local ? os.loadavg()[0] : n.resources?.load?.[0];
+      const base = { id: n.id, name: n.local ? n.name || 'This server' : n.name, local: !!n.local, online: !!n.connected, capable: screenable(n), mac,
+        load: Number.isFinite(load1) && cores > 0 ? Math.round((load1 / cores) * 100) / 100 : null, ...(n.local && !mac && { slow: true }) };
       if (!base.capable) return { ...base, profiles: [], note: n.local ? 'no Chromium or Chrome here' : !n.connected ? 'offline' : !n.features?.includes('screen') ? 'update its worker for the live view' : n.inventory?.browser?.error || 'no browser' };
       try {
         const { profiles } = await op(n.id, { op: 'profiles' });
         return { ...base, profiles: profiles.map((p) => ({ ...p, task: running.find((t) => (t.node || LOCAL) === n.id && normIdentity(t.identity) === p.identity) || null })) };
       } catch (e) { return { ...base, profiles: [], note: e.message }; }
     }));
+    const pick = defaultNode(out);
+    return out.map((n) => (n === pick ? { ...n, default: true } : n));
   }
   async function profile(node, identity) {
     if (typeof identity !== 'string' || !IDENTITY_RE.test(identity)) throw new Error('Unknown browser identity');

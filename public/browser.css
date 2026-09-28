@@ -36,6 +36,8 @@
 .bv.watching .bv-stage canvas { cursor: not-allowed; }
 .bv-wait[hidden] { display: none; }
 .bv-wait { position: absolute; inset: 0 12px 12px; display: grid; place-items: center; color: var(--muted); font-size: 14px; pointer-events: none; }
+/* Reconnecting…, or why the browser closed, over the last frame (never a frozen or black page without a word). */
+.bv-wait.over { background: color-mix(in srgb, var(--bg) 72%, transparent); color: var(--text); font-weight: 600; border-radius: 10px; }
 /* Off-screen but focusable, 16px so iOS doesn't zoom in when it takes focus. */
 .bv-keys { position: absolute; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; font-size: 16px; border: 0; padding: 0; pointer-events: none; }
 #bvKbd, #bxKbd { display: none; }

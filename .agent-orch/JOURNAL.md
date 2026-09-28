@@ -1316,6 +1316,9 @@ Command: merge main again
 
 merge conflicts resolved; rolling-restart, version, and UI tests pass
 
+## 2026-09-28 17:32 — #348 One shared browser per profile: agents attach to the live view, self-healing, run on a Mac [done (check passed)]
+
+Shared supervised Chromium per profile; viewer and MCP attach, self-healing
 ## 2026-09-28 15:07 — #438 Files tab: go to parent folders and anywhere on the VPS, still opening on the project [done (check passed)]
 
 Files tab browses the whole VPS; scope tests pass
@@ -1470,3 +1473,10 @@ CLUSTER.md Scheduling and head's-ceiling now match current placement code
 ## 2026-09-28 17:52 — #434 Machines graph: compact card beside each node, listing every running task [done (check passed)]
 
 Wide Machines view: compact cards beside each node, every running task listed
+## 2026-09-28 17:48 — #473 Integrate #348: One shared browser per profile: agents attach to the live view, self-healing, run on a Mac [verify failed (1)]
+
+Command: node --test test/browser-shared*.test.mjs
+
+## 2026-09-28 17:52 — #473 Integrate #348: One shared browser per profile: agents attach to the live view, self-healing, run on a Mac [done (check passed)]
+
+viewer follows agent's new tab after restart; tests pass

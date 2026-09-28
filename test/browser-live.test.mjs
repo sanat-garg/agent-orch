@@ -23,6 +23,7 @@ const PASSWORD = 'browser-live-password';
 const skip = !findBrowser() && 'no Chromium or Chrome on this machine';
 let child, base, tmp, browserHome, page, pageUrl, out = '';
 const typed = [];
+let lastLoad = 0; // when the page was last served (the browser opens it at launch, then the view navigates to it)
 
 const freePort = () => new Promise((resolve, reject) => {
   const s = net.createServer().listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); });
@@ -40,6 +41,7 @@ before(async () => {
   // The local page: an input at the top left that reports its value on Enter, and a cookie for "signed-in sites".
   page = http.createServer((req, res) => {
     if (req.url.startsWith('/typed')) { typed.push(new URL(req.url, 'http://x').searchParams.get('v')); res.end('ok'); return; }
+    lastLoad = Date.now();
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'set-cookie': 'session=secret-value; Max-Age=86400; Path=/' });
     res.end(`<!doctype html><title>Live test</title><body style="margin:0;background:#fff">
       <input id=q autocomplete=off style="position:absolute;left:0;top:0;width:400px;height:40px;font-size:20px"
@@ -168,6 +170,9 @@ test('frames stream over /ws, input reaches the page, and take-over holds the ta
   say({ t: 'bv_open', url: pageUrl });
   await waitFor(() => state().url === pageUrl && state().role === 'control', { timeout: 90000, message: `the view opens on the page: ${JSON.stringify(states.slice(-3))}\n${out}` });
   await waitFor(() => frames.length >= 1, { timeout: 30000, message: 'screencast frames arrive' }); // a static page paints once
+  // The view's first frame is a screenshot taken as it attaches, maybe before its own navigation reloaded the page: let
+  // that load settle before typing into it.
+  await waitFor(() => lastLoad && Date.now() - lastLoad > 1000, { timeout: 30000, message: 'the page has loaded' });
   const f = frames.at(-1);
   assert.equal(f.node, 'controller'); assert.equal(f.identity, 'live');
   assert.ok(Buffer.from(f.data, 'base64').subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff])), 'a JPEG');

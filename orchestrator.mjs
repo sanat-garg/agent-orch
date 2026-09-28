@@ -1647,7 +1647,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // could run a remote-capable work task it leaves that to the workers unless the owner's controllerWork setting says
   // otherwise. Every node it weighed gets its verdict recorded (lastDecision in the Machines view). null = not now.
   // A browser task (browser.mjs) goes only to a worker that reports browserCapable, or to the controller when the owner
-  // allows it (controllerBrowser), and never while another task uses the same profile (Chromium locks it).
+  // allows it (controllerBrowser), and never while another task uses the same profile (Chromium locks it). Profiles live
+  // on a Mac by default: while a Mac that can run it is online, an unpinned browser task waits for a Mac (the controller's
+  // 1 core can't drive a browser well).
   // why (optional): why it wasn't placed, for the stall diagnostics (claimNext's `why`); `hold`: a pending restart's reason.
   function place(task, agent, { localFree, localOk, cap, hold = null }, why = {}) {
     const no = (reason) => { why.reason = reason; return null; };
@@ -1662,9 +1664,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (isBrowserTask(task) && browserHeld(task.run_on, identityOf(task))) return no('its browser identity is busy');
     if (browser && profileBusy(task)) return no('its browser profile is in use');
     const project = getProject(task.project_id), remote = remoteCapable(task, project);
-    const fits = (n) => (!browser || browserWorker(n)) && canClone(n, task, project) && (!task.integrates || integrateWorker(n));
     // Pinned by the owner (run_on): only that machine, waiting for it. A worker pin only binds a task that can run remotely.
     const pin = task.kind === 'work' && task.run_on && (task.run_on === LOCAL_NODE || remote || isBrowserTask(task)) ? task.run_on : null;
+    const macOnly = browser && !pin && remote && workerNodes(agent).some((n) => n.os === 'darwin' && browserWorker(n) && canClone(n, task, project));
+    const fits = (n) => (!browser || browserWorker(n)) && (!macOnly || n.os === 'darwin') && canClone(n, task, project) && (!task.integrates || integrateWorker(n));
     const cands = [], skips = [];
     const weigh = (id, skip, slots, cores) => (skip ? (noteDecision(id, false, skip, task.id), skips.push(`${id === LOCAL_NODE ? 'this server' : nodeName(id)}: ${skip}`))
       : cands.push({ id, running: nodeLoad(id), slots, cores: slotTarget(cores) }));
@@ -1672,6 +1675,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       for (const n of nodesNow()) {
         if (n.local || (pin && n.id !== pin)) continue;
         weigh(n.id, workerSkip(n, agent, task.id) || (browser && !browserWorker(n) ? 'no browser for browser tasks'
+          : macOnly && n.os !== 'darwin' ? 'browser tasks run on a Mac while one is online'
           : !canClone(n, task, project) ? 'cannot clone this project'
             : task.integrates && !integrateWorker(n) ? 'its worker is too old for integration'
               : isBrowserTask(task) && !n.features?.includes('browser-task') ? 'its worker is too old for browser tasks' : null), nodeCap(n, agent), n.inventory?.cores);
@@ -1681,6 +1685,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       const settings = parallelSettings(), cpu = cpuOf(nodesNow().find((n) => n.local)), slots = slotCount(decisionCache?.d);
       weigh(LOCAL_NODE, !localOk ? hold || 'not claiming now' : localDraining() ? 'draining' : !localAgentOk(agent) ? `agent ${agent} signed out`
         : browser && !settings.controllerBrowser && pin !== LOCAL_NODE ? 'browser tasks run on workers (Settings)'
+          : browser && macOnly ? 'browser tasks run on a Mac while one is online'
           : remote && !pin && !settings.controllerWork && workerNodes(agent).some(fits) ? 'leaves work tasks to the workers (Settings)'
             : cpu?.saturated ? `CPU saturated (${cpu.text})`
               : !localFree ? `full (${nodeLoad(LOCAL_NODE)}/${slots} running)`

@@ -17,7 +17,7 @@ import { APPROVAL_TTL_MS, ask, isBrowserRead } from './gate.mjs';
 import { toEpochSec } from './usage.mjs';
 import { runHelper, runHelperSync, helperOut, claudeHelperSpawn, killGroup, singleFlight } from './helpers.mjs';
 import { MCP_SERVER, MCP_START_MS, MCP_START_FAILED, normIdentity } from './browser.mjs';
-import { warmBrowser, closeChrome, readMcpReady, liveHome } from './browser-live.mjs';
+import { warmBrowser, holdBrowser, readMcpReady, liveHome } from './browser-live.mjs';
 
 const HOME = os.homedir();
 
@@ -803,8 +803,8 @@ export function runAgentCli(opts) {
   return (opts.onSpawn ? spawnHook.run(opts.onSpawn, run) : run()).then((res) => finishEmpty(res, { agent: a, lastText, tools, onEvent }));
 }
 
-// A browser run (opts.browser {identity, home?}): the profile's Chromium is started or found first (browser-live.mjs
-// warmBrowser), so the Playwright MCP only has to attach, and its startup time (run start → the MCP's initialize
+// A browser run (opts.browser {identity, home?}): the profile's supervised Chromium is started or found first
+// (browser-live.mjs warmBrowser) and held for the run, so the Playwright MCP only has to attach, and its startup time (run start → the MCP's initialize
 // answer, from the shim's ready file) goes to onEvent as {k: 'mcp', ok, ms, warmMs, attempt}. A run whose MCP failed to
 // connect, before any browser call, restarts that Chromium and runs again up to BROWSER_RETRIES times, then ends with
 // MCP_START_FAILED instead of the agent's own words.
@@ -815,16 +815,14 @@ export const mcpStartFailed = (res) => res?.errorCode === 'mcp_connect_failed'
   || (!['aborted', 'rate_limited', 'auth_error'].includes(res?.outcome) && (MCP_FAIL_TEXT.test(res?.text || '') || MCP_FAIL_CODEX.test(res?.stderr || '')));
 async function browserRun(agent, opts, onEvent) {
   const identity = normIdentity(opts.browser.identity), home = opts.browser.home || liveHome();
-  let own = null;
+  const unhold = holdBrowser(identity, home);
   try {
     for (let attempt = 1; ; attempt++) {
       const t0 = Date.now();
       let warmMs = null, calls = 0, ms = null;
       try {
-        const w = await warmBrowser({ identity, home, restart: attempt > 1 });
-        if (w.own) own = w.own;
-        warmMs = w.ms;
-      } catch (e) { console.error(`[agents] browser ${identity}: pre-warm failed (${e.message}); its MCP starts Chromium itself`); }
+        warmMs = (await warmBrowser({ identity, home, restart: attempt > 1 })).ms;
+      } catch (e) { console.error(`[agents] browser ${identity}: pre-warm failed (${e.message}); its MCP shim tries again`); }
       const ready = () => {
         const r = ms == null && readMcpReady(identity, home);
         if (!r || r.readyAt < t0) return;
@@ -844,7 +842,7 @@ async function browserRun(agent, opts, onEvent) {
       try { onEvent({ k: 'mcp', server: MCP_SERVER, ok: false, warmMs, attempt, error: why }); } catch {}
       if (attempt > BROWSER_RETRIES) return { ...res, outcome: 'error', errorCode: 'mcp_connect_failed', text: MCP_START_FAILED, detail: res.text };
     }
-  } finally { if (own) await closeChrome(own).catch(() => {}); }
+  } finally { unhold(); }
 }
 export function finishEmpty(res, { agent, lastText, tools, onEvent }) {
   if (res?.outcome !== 'ok' || String(res.text || '').trim()) return res;

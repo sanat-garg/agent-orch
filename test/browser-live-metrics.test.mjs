@@ -1,7 +1,7 @@
 // The live view's page layout and home page (browser-live.mjs) against a fake Chromium that speaks just enough CDP: a
 // view opens on the home page with the viewer's metrics (a phone below 768 px: mobile metrics, touch and a phone user
 // agent, a screencast at up to 2× its size), a resize re-applies them and reloads on a phone/desktop switch, a static
-// page still gets a first frame, the last size is kept for the next view except while a task uses the profile, and the
+// page still gets a first frame, the last size is kept for the next view, a task's page is never re-laid out, and the
 // last tab closing opens a new one on the home page.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -49,7 +49,6 @@ before(async () => {
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   fs.mkdirSync(profileDir('default', home), { recursive: true });
-  fs.writeFileSync(path.join(profileDir('default', home), 'DevToolsActivePort'), `${server.address().port}\n/devtools/browser/fake`);
 });
 after(() => { wss?.close(); server?.close(); if (tmp) fs.rmSync(tmp, { recursive: true, force: true }); });
 
@@ -74,7 +73,7 @@ test('metrics, screencast size and user agent follow the viewer', () => {
 test('a view opens on the home page laid out for the viewer, and resizes follow it', { timeout: 30000 }, async () => {
   targets = ['T1']; url = 'about:blank';
   const frames = [], states = [];
-  const m = createLiveBrowsers({ home, idleMs: 60_000 });
+  const m = createLiveBrowsers({ home, browser: async () => ({ ws: `ws://127.0.0.1:${server.address().port}/devtools/browser/fake` }) });
   try {
     await m.start('default', { size: { width: 390, height: 700, dpr: 3 }, onFrame: (f) => frames.push(f), onState: (s) => states.push(s) });
     const o = last('Emulation.setDeviceMetricsOverride');
@@ -129,13 +128,15 @@ test('a view opens on the home page laid out for the viewer, and resizes follow 
     await m.start('default', {});
     assert.equal(last('Emulation.setDeviceMetricsOverride', next).width, 1200);
     m.stop('default');
-    // … unless a task is using the profile: then it stays desktop until the owner's viewer sends a size.
+    // … unless a task is using the profile: then its page keeps its own layout (the agent may be clicking it).
     const done = markActive('default', home);
     try {
       const busy = calls.length;
       await m.start('default', {});
-      const t = last('Emulation.setDeviceMetricsOverride', busy);
-      assert.deepEqual([t.width, t.height, t.mobile], [1280, 800, false]);
+      assert.equal(sent('Emulation.setDeviceMetricsOverride', busy).length, 0, 'the task\'s page is not re-laid out');
+      await m.resize('default', { width: 390, height: 700, dpr: 3 });
+      assert.equal(sent('Emulation.setDeviceMetricsOverride', busy).length, 0, 'not even for a viewer\'s new size');
+      await waitFor(() => sent('Page.startScreencast', busy).length > 0, { timeout: 5000, message: 'it still streams' });
       assert.equal(sent('Page.navigate', busy).length, 0, 'the task\'s page is left alone');
       m.stop('default');
     } finally { done(); }

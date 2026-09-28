@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import { runHelper } from './helpers.mjs';
 
 export const CAPABILITIES = ['browser'];
@@ -39,11 +40,17 @@ export function normIdentity(v) {
 }
 export const browserRoot = (home = os.homedir()) => path.join(home, '.agent-orch-browser');
 export const profileDir = (identity, home = os.homedir()) => path.join(browserRoot(home), 'profiles', normIdentity(identity));
-// Headed only where there is a screen to show it on (a Mac); AGENT_ORCH_BROWSER_HEADLESS=1|0 overrides.
+// Headed only where there is a screen to show it on: a Mac, except under a LaunchDaemon (launchd's System domain has no
+// window server); AGENT_ORCH_BROWSER_HEADLESS=1|0 overrides.
 export function hasDisplay(env = process.env, platform = process.platform) {
   if (env.AGENT_ORCH_BROWSER_HEADLESS === '1') return false;
   if (env.AGENT_ORCH_BROWSER_HEADLESS === '0') return true;
-  return platform === 'darwin';
+  return platform === 'darwin' && (platform !== process.platform || !macDaemon());
+}
+let daemon;
+function macDaemon() {
+  if (daemon === undefined) { try { daemon = execFileSync('launchctl', ['managername'], { encoding: 'utf8', timeout: 3000 }).trim() === 'System'; } catch { daemon = false; } }
+  return daemon;
 }
 
 const isExe = (p) => { try { fs.accessSync(p, fs.constants.X_OK); return fs.statSync(p).isFile(); } catch { return false; } };
@@ -103,23 +110,24 @@ export async function ensurePlaywrightMcp({ env = process.env, timeoutMs = 10 * 
 
 // The stdio MCP server record for one browser run. outputDir: where screenshots without an explicit name land (the run's
 // .agent-orch/shots/). The profile folder is created 0700 so the first run doesn't race Chromium creating it. The MCP runs
-// behind bin/browser-mcp.mjs, which attaches it to the profile's shared Chromium (the owner's live view, browser-live.mjs)
-// and holds its actions while the owner has taken over; the launch flags below are its fallback. startupSec: how long
-// the MCP client waits for it (codex's startup_timeout_sec; Claude gets MCP_TIMEOUT in its env, agents.mjs).
-export function browserServer({ identity, home = os.homedir(), outputDir, headed = hasDisplay(), executable = findBrowser() } = {}) {
-  const profile = profileDir(identity, home);
-  fs.mkdirSync(profile, { recursive: true, mode: 0o700 });
+// behind bin/browser-mcp.mjs, which attaches it with --cdp-endpoint to the profile's one supervised Chromium (the owner's
+// live view, browser-live.mjs) and holds its actions while the owner has taken over: it never gets --user-data-dir, so it
+// can't start a second Chromium on the profile. isolated: a throwaway in-memory profile of its own instead (no shim).
+// startupSec: how long the MCP client waits for it (codex's startup_timeout_sec; Claude gets MCP_TIMEOUT in its env, agents.mjs).
+export function browserServer({ identity, home = os.homedir(), outputDir, headed = hasDisplay(), executable = findBrowser(), isolated = false } = {}) {
   const mcp = playwrightMcpCommand();
   if (!mcp) throw new Error("the Playwright MCP (@playwright/mcp) isn't installed on this machine; run npm install in agent-orch's folder");
   const { command, args } = mcp;
+  const out = outputDir ? ['--output-dir', outputDir] : [];
+  if (isolated) {
+    return { type: 'stdio', command, startupSec: MCP_START_MS / 1000, args: [...args, '--isolated', ...out, ...(executable ? ['--executable-path', executable] : ['--browser', 'chromium']), ...(headed ? [] : ['--headless']),
+      ...(process.platform === 'linux' && process.env.AGENT_ORCH_BROWSER_SANDBOX !== '1' ? ['--no-sandbox'] : [])] };
+  }
+  fs.mkdirSync(profileDir(identity, home), { recursive: true, mode: 0o700 });
   return {
     type: 'stdio', command: process.execPath, startupSec: MCP_START_MS / 1000,
-    args: [fileURLToPath(new URL('./bin/browser-mcp.mjs', import.meta.url)), '--identity', normIdentity(identity), '--home', home, '--',
-      command, ...args, '--user-data-dir', profile, ...(outputDir ? ['--output-dir', outputDir] : []),
-      ...(executable ? ['--executable-path', executable] : ['--browser', process.platform === 'darwin' ? 'chrome' : 'chromium']),
-      ...(headed ? [] : ['--headless']),
-      // Playwright's own default: Linux servers (Ubuntu's AppArmor userns rules) can't start Chromium's sandbox.
-      ...(process.platform === 'linux' && process.env.AGENT_ORCH_BROWSER_SANDBOX !== '1' ? ['--no-sandbox'] : [])],
+    args: [fileURLToPath(new URL('./bin/browser-mcp.mjs', import.meta.url)), '--identity', normIdentity(identity), '--home', home,
+      ...(executable ? ['--executable', executable] : []), '--headless', headed ? '0' : '1', '--', command, ...args, ...out],
   };
 }
 

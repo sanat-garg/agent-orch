@@ -1,5 +1,5 @@
 // The browser capability (browser.mjs, AGENTIC.md → Browser): a task with "capabilities": ["browser"] gets the Playwright
-// MCP in its run's MCP config (Claude --mcp-config file, codex profile) on a persistent profile
+// MCP in its run's MCP config (Claude --mcp-config file, codex profile), attached to the persistent profile's shared Chromium
 // <home>/.agent-orch-browser/profiles/<identity>, screenshots into the run's .agent-orch/shots/, and the untrusted-content
 // rules in its system prompt; placement sends it only to browserCapable workers (the controller only when allowed), one
 // run per profile. The smoke test drives the real @playwright/mcp over stdio against a local page and proves a cookie
@@ -13,7 +13,8 @@ import http from 'node:http';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { BROWSER_SYSTEM, findBrowser, normIdentity, parseCapabilities, profileDir } from '../browser.mjs';
+import { BROWSER_SYSTEM, findBrowser, hasDisplay, normIdentity, parseCapabilities, profileDir } from '../browser.mjs';
+import { stopBrowser } from '../browser-live.mjs';
 import { createExtensions } from '../extensions.mjs';
 import { runAgentCli, setMcpSource } from '../agents.mjs';
 import { extractTasks } from '../orchestrator.mjs';
@@ -54,15 +55,18 @@ test('a browser run\'s MCP config (Claude and codex) adds Playwright on a persis
   const pw = mcpServers.playwright;
   assert.equal(pw.type, 'stdio');
   assert.ok(pw.args.some((a) => /@playwright[\\/]mcp/.test(a)), `runs @playwright/mcp: ${pw.args.join(' ')}`);
-  assert.equal(argAfter(pw.args, '--user-data-dir'), profile);
+  // Behind the shim (bin/browser-mcp.mjs), which attaches it to the profile's one supervised Chromium: never --user-data-dir.
+  assert.ok(/browser-mcp\.mjs$/.test(pw.args[0]) && !pw.args.includes('--user-data-dir'), pw.args.join(' '));
+  assert.deepEqual([argAfter(pw.args, '--identity'), argAfter(pw.args, '--home')], ['default', home]);
   assert.equal(argAfter(pw.args, '--output-dir'), outputDir);
-  assert.equal(pw.args.includes('--headless'), process.platform !== 'darwin', 'headless without a display, headed on a Mac');
+  assert.equal(argAfter(pw.args, '--headless'), hasDisplay() ? '0' : '1', 'headless without a display, headed on a Mac with a screen');
   assert.ok(fs.statSync(profile).isDirectory() && (fs.statSync(profile).mode & 0o777) === 0o700, 'the profile folder exists, 0700');
   assert.equal(ext.mcpRun('claude', { browser: { identity: 'default', outputDir } }), file, 'the same run config reuses its file');
 
   // A named identity is its own profile.
   const xero = JSON.parse(fs.readFileSync(ext.mcpRun('claude', { browser: { identity: 'xero', outputDir } }), 'utf8')).mcpServers.playwright;
-  assert.equal(argAfter(xero.args, '--user-data-dir'), path.join(home, '.agent-orch-browser', 'profiles', 'xero'));
+  assert.equal(argAfter(xero.args, '--identity'), 'xero');
+  assert.ok(fs.statSync(path.join(home, '.agent-orch-browser', 'profiles', 'xero')).isDirectory());
 
   // Codex: a per-run profile layered on config.toml.
   const profileName = ext.mcpRun('codex', { browser: { identity: 'default', outputDir } });
@@ -70,7 +74,7 @@ test('a browser run\'s MCP config (Claude and codex) adds Playwright on a persis
   const toml = fs.readFileSync(path.join(codexDir, `${profileName}.config.toml`), 'utf8');
   assert.match(toml, /\[mcp_servers\.docs\]/);
   assert.match(toml, /\[mcp_servers\.playwright\]/);
-  assert.ok(toml.includes(JSON.stringify(profile)) && toml.includes(JSON.stringify(outputDir)), toml);
+  assert.ok(toml.includes(JSON.stringify(home)) && toml.includes('browser-mcp.mjs') && toml.includes(JSON.stringify(outputDir)), toml);
 
   // The agent adapter hands a run's `browser` to the MCP source: Claude's --mcp-config is the browser run's file.
   setMcpSource((agent, run) => ext.mcpRun(agent, run));
@@ -209,5 +213,5 @@ test('Playwright MCP smoke: the persistent profile keeps a cookie across two run
     assert.match(second, /Cookie persisted: welcome back/, second);
     assert.ok(fs.readdirSync(path.join(home, '.agent-orch-browser', 'profiles', 'default')).length > 0, 'the profile folder holds the browser state');
     assert.ok(fs.readdirSync(outputDir).some((f) => /\.(png|jpe?g)$/.test(f)), `screenshots land in the run's shots dir: ${fs.readdirSync(outputDir)}`);
-  } finally { srv.close(); }
+  } finally { srv.close(); await stopBrowser('default', home); }
 });

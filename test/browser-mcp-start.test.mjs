@@ -15,7 +15,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import { browserServer, findBrowser, playwrightMcpCommand, MCP_START_MS, MCP_START_FAILED } from '../browser.mjs';
-import { warmBrowser, closeChrome, closeProfile, endpointFor, readMcpReady } from '../browser-live.mjs';
+import { warmBrowser, closeProfile, endpointFor, readMcpReady, browserState } from '../browser-live.mjs';
 import { runAgentCli, MCP_START_ENV, BROWSER_RETRIES, AGENTS } from '../agents.mjs';
 import { createExtensions } from '../extensions.mjs';
 
@@ -35,10 +35,10 @@ before(async () => {
   else {
     const home = homeOf('probe');
     try {
-      const w = await warmBrowser({ identity: 'default', home, headless: true });
+      await warmBrowser({ identity: 'default', home, headless: true });
       await new Promise((r) => setTimeout(r, 3000));
       if (!(await endpointFor('default', home))) noChromium = 'Chromium died right after starting';
-      await closeChrome(w.own).catch(() => {});
+      await closeProfile('default', home).catch(() => {});
     } catch (e) { noChromium = e.message.split('\n')[0].slice(0, 200); }
   }
   if (noChromium) process.env.AGENT_ORCH_BROWSER_PATH = fileURLToPath(new URL('./fixtures/fake-chromium.mjs', import.meta.url));
@@ -107,19 +107,17 @@ test('pre-warm: the profile\'s CDP endpoint answers /json/version before the age
   if (noChromium) t.diagnostic(`a real Chromium can't run here (${noChromium}): using fixtures/fake-chromium.mjs`);
   const home = homeOf('prewarm');
   const warm = await warmBrowser({ identity: 'default', home, headless: true });
-  let fresh;
   try {
-    assert.ok(warm.own, 'started here');
     assert.ok(warm.ms >= 0);
+    assert.equal(browserState('default', home)?.chromePid, warm.pid, 'the profile\'s supervisor owns it');
     const v = await (await fetch(`http://127.0.0.1:${warm.port}/json/version`)).json();
     assert.equal(v.webSocketDebuggerUrl, warm.ws);
     const again = await warmBrowser({ identity: 'default', home });
-    assert.equal(again.own, null, 'a running one is reused');
-    assert.equal(again.ws, warm.ws);
-    fresh = await warmBrowser({ identity: 'default', home, restart: true });
-    assert.ok(fresh.own && fresh.ws !== warm.ws, 'a restart closes the old one and starts another');
-    assert.ok(warm.own.child.exitCode != null || warm.own.child.signalCode, 'the old one is gone');
-  } finally { await closeChrome(warm.own); if (fresh) await closeChrome(fresh.own); }
+    assert.equal(again.ws, warm.ws, 'a running one is reused');
+    const fresh = await warmBrowser({ identity: 'default', home, restart: true });
+    assert.ok(fresh.ws !== warm.ws && fresh.pid !== warm.pid, 'a restart closes the old one and starts another');
+    assert.throws(() => process.kill(warm.pid, 0), 'the old one is gone');
+  } finally { await closeProfile('default', home); }
   assert.equal(await endpointFor('default', home), null);
 });
 
@@ -128,12 +126,10 @@ test('pre-warmed Chromium: the MCP attaches to it within the timeout, prints onl
   const home = homeOf('warm');
   const warm = await warmBrowser({ identity: 'default', home, headless: true });
   try {
-    assert.ok(warm.own, 'started here');
     const v = await (await fetch(`http://127.0.0.1:${warm.port}/json/version`)).json();
     assert.ok(v.webSocketDebuggerUrl, 'its CDP endpoint answers /json/version before the agent starts');
     const again = await warmBrowser({ identity: 'default', home });
-    assert.equal(again.own, null, 'a running one is reused');
-    assert.equal(again.port, warm.port);
+    assert.equal(again.port, warm.port, 'a running one is reused');
 
     const c = mcpClient(browserServer({ identity: 'default', home, headed: false }));
     try {
@@ -151,21 +147,21 @@ test('pre-warmed Chromium: the MCP attaches to it within the timeout, prints onl
       assert.ok(targets.some((t) => t.url === siteUrl), 'the page opened in the pre-warmed Chromium');
       assert.ok(allJson(c.lines), `stdout carried only JSON-RPC: ${c.lines.find((l) => { try { JSON.parse(l); return false; } catch { return true; } })}`);
     } finally { await c.close(); }
-    assert.ok(await endpointFor('default', home), 'the MCP leaves the pre-warmed Chromium running for its owner to close');
-  } finally { await closeChrome(warm.own); }
+    assert.ok(await endpointFor('default', home), 'the MCP leaves the supervised Chromium running');
+  } finally { await closeProfile('default', home); }
 });
 
 test('a 40 s slow start still connects within the raised timeout (and the real Claude CLI waits for it, where its default gives up)', { timeout: 240_000 }, async (t) => {
   const DELAY = 40_000, slow = { AGENT_ORCH_BROWSER_MCP_DELAY_MS: String(DELAY) };
   const direct = (async () => {
     const home = homeOf('slow');
-    const warm = await warmBrowser({ identity: 'default', home, headless: true });
+    await warmBrowser({ identity: 'default', home, headless: true });
     const c = mcpClient(browserServer({ identity: 'default', home, headed: false }), slow);
     try {
       const { ms } = await c.handshake(MCP_START_MS);
       assert.ok(ms >= DELAY && ms < MCP_START_MS, `connected after ${ms} ms`);
       assert.ok(allJson(c.lines), 'nothing but JSON-RPC on stdout, even while delayed');
-    } finally { await c.close(); await closeChrome(warm.own); }
+    } finally { await c.close(); await closeProfile('default', home); }
   })();
   // The Claude CLI itself: an idle query (no message, nothing billed) reports the server's connection status.
   const claudeBin = AGENTS.claude.bin, haveClaude = fs.existsSync(claudeBin);
@@ -228,7 +224,8 @@ test('a forced MCP failure restarts Chromium and retries twice, then says so in 
   }
   assert.deepEqual(events.filter((e) => e.k === 'mcp').map((e) => [e.ok, e.attempt]), [[false, 1], [false, 2], [false, 3]]);
   assert.ok(!events.some((e) => e.k === 'text' && /should never run/.test(e.text)), 'a failed MCP stops the run before the agent works without it');
-  assert.equal(await endpointFor('default', home), null, 'the pre-warmed Chromium is closed after the run');
+  assert.ok(await endpointFor('default', home), 'the supervised Chromium outlives the run (its supervisor idles it out)');
+  await closeProfile('default', home);
 });
 
 test('a run that failed on the MCP (the agent said so) retries, and the retry connects the real MCP with its startup time logged', { timeout: 180_000 }, async () => {
@@ -248,6 +245,7 @@ test('a run that failed on the MCP (the agent said so) retries, and the retry co
   assert.deepEqual(mcp.map((e) => [e.ok, e.attempt]), [[false, 1], [true, 2]]);
   assert.ok(mcp[1].ms > 0 && mcp[1].ms < MCP_START_MS, `startup time logged: ${mcp[1].ms} ms`);
   assert.ok(mcp[1].warmMs >= 0, 'with the pre-warm time');
+  await closeProfile('default', home);
 });
 
 test('a run whose browser tools worked is never retried, even if its reply mentions a connect failure', { timeout: 120_000 }, async () => {
@@ -258,4 +256,5 @@ test('a run whose browser tools worked is never retried, even if its reply menti
   const res = await runAgentCli({ agent: 'claude', prompt: 'x', cwd: home, query, mcp: null, env: {}, browser: { identity: 'default', home } });
   assert.equal(calls.length, 1);
   assert.equal(res.outcome, 'ok');
+  await closeProfile('default', home);
 });

@@ -25,6 +25,8 @@ const bvMount = (p) => ({ root: $(p === 'bv' ? 'bvModal' : 'browserView'), ...Ob
   ['Canvas', 'Wait', 'Status', 'Take', 'Url', 'Bar', 'Back', 'Reload', 'Paste', 'Kbd', 'Keys'].map((n) => [n.toLowerCase(), $(p + n)])) });
 const BVM = { modal: bvMount('bv'), tab: bvMount('bx') };
 const bvTabOn = () => $('app').dataset.view === 'browser';
+// The machine is the controller and not a Mac: a 1-core VPS streams a browser slowly (browser-view.mjs list).
+const bvSlow = (node) => !!(BV.data?.nodes || []).find((n) => n.id === node)?.slow;
 
 // ----- which views this tab wants (one server-side viewer per tab and profile)
 function bvSync(node, identity) {
@@ -212,6 +214,8 @@ function bvOpen(node, identity, name, { take = false, inline = false } = {}) {
   BV.st = null;
   BV.frame = { w: 0, h: 0 };
   BV.take = take;
+  BV.reconnecting = false;
+  m.wait.classList.remove('over');
   bvZoomClear(m);
   if (!inline) $('bvTitle').textContent = identity;
   m.url.value = '';
@@ -244,7 +248,7 @@ function bvRenderState() {
   const s = BV.st, v = BV.view;
   if (!v) return;
   const { m } = v, take = m.take;
-  let text = `${v.name}`;
+  let text = `${v.name}${bvSlow(v.node) ? ' (Running on the VPS (slow))' : ''}${s?.agentTab && !s.closed ? ' · Agent tab' : ''}`;
   take.hidden = true;
   take.classList.remove('primary');
   if (!s) text += ' · connecting…';
@@ -265,7 +269,11 @@ function bvRenderState() {
   m.root.classList.toggle('watching', !bvCanDrive());
   for (const x of [m.back, m.reload, m.paste, m.kbd, m.url]) x.disabled = !bvCanDrive();
   if (s && !s.closed && document.activeElement !== m.url) m.url.value = s.url === 'about:blank' ? '' : s.url || '';
+  // Never a silent black canvas: the reason it closed, or 'Reconnecting…' over the last frame while the browser restarts.
+  m.wait.classList.toggle('over', !!(s?.reconnecting || s?.closed) && !!m.canvas.width);
   if (s?.closed) { m.wait.hidden = false; m.wait.textContent = s.error || 'The browser closed.'; }
+  else if (s?.reconnecting) { m.wait.hidden = false; m.wait.textContent = 'Reconnecting…'; BV.reconnecting = true; }
+  else if (BV.reconnecting) { BV.reconnecting = false; m.wait.textContent = 'Reconnected: waiting for the page…'; }
   if (s && BV.take && s.active && !s.takeover && !s.closed) { BV.take = false; bvSay({ t: 'bv_take' }); }
   if (m === BVM.tab) bxRenderBusy();
 }
@@ -283,7 +291,7 @@ function bvDraw(f) {
       if (c.width !== img.naturalWidth || c.height !== img.naturalHeight) { c.width = img.naturalWidth; c.height = img.naturalHeight; }
       c.getContext('2d').drawImage(img, 0, 0);
       BV.frame = { w: f.w, h: f.h };
-      m.wait.hidden = true;
+      if (!BV.st?.reconnecting && !BV.st?.closed) { m.wait.hidden = true; m.wait.classList.remove('over'); }
     }
     BV.decoding = false;
     if (BV.pending !== f && BV.pending) bvDraw(BV.pending);
@@ -486,28 +494,32 @@ function bxShow() {
   bxOpenSel();
 }
 function bxHide() { if (BV.view?.m === BVM.tab) bvClose({ keepFocus: true }); }
-// The profile to show: the one picked last, else one a task is using, else the first.
+// The profile to show: the one the owner picked last (while its machine is online), else one a task is using, else the
+// default machine's (the least-loaded online Mac; the controller only while no Mac is online).
 function bxOpenSel() {
   if (!bvTabOn() || !$('bvModal').hidden) return;
   if (!BX.sel) {
-    const all = bxProfiles(), saved = store.get('cw.bx');
-    const hit = all.find(({ n, p }) => bvKey(n.id, p.identity) === saved) || all.find(({ p }) => p.task) || all[0];
+    const all = bxProfiles(), saved = store.get('cw.bxPick');
+    const def = all.filter(({ n }) => n.default);
+    const hit = all.find(({ n, p }) => bvKey(n.id, p.identity) === saved) || all.find(({ p }) => p.task)
+      || def.find(({ p }) => p.identity === 'default') || def[0] || all[0];
     if (!hit) {
       const w = BVM.tab.wait;
       w.hidden = false;
       w.textContent = BV.err || (BV.data ? 'No machine here can run a browser yet.' : 'Loading profiles…');
       return bxRenderActivity();
     }
-    return bxSelect(hit.n.id, hit.p.identity, hit.n.name);
+    return bxSelect(hit.n.id, hit.p.identity, hit.n.name, false);
   }
   const { node, identity, name } = BX.sel;
   if (BV.view?.m === BVM.tab && bvKey(BV.view.node, BV.view.identity) === bvKey(node, identity)) return;
   bvOpen(node, identity, name, { inline: true });
 }
-function bxSelect(node, identity, name) {
+// picked: the owner chose it (remembered), rather than the default.
+function bxSelect(node, identity, name, picked = true) {
   const same = BX.sel && bvKey(BX.sel.node, BX.sel.identity) === bvKey(node, identity);
   BX.sel = { node, identity, name: name || node };
-  store.set('cw.bx', bvKey(node, identity));
+  if (picked) store.set('cw.bxPick', bvKey(node, identity));
   if (!same) { BX.tasks = []; BX.pin = null; BX.err = ''; BX.more = false; }
   bxRenderActivity(); // first, so the view opens with the stage's final size
   bxRenderPicker();
@@ -697,7 +709,10 @@ function bxRenderEarlier(box, shown) {
 
 // The prompt box: Enter sends on a desktop (Shift+Enter is a new line); a phone's return key is a new line.
 const bxIn = $('bxInput');
-function bxSyncSend() { $('bxSend').disabled = BX.sending || !BX.sel || !bxIn.value.trim(); $('bxHint').textContent = BX.sel ? `On ${BX.sel.identity}${(BV.data?.nodes || []).length > 1 ? ` · ${BX.sel.name}` : ''}` : ''; }
+function bxSyncSend() {
+  $('bxSend').disabled = BX.sending || !BX.sel || !bxIn.value.trim();
+  $('bxHint').textContent = BX.sel ? `On ${BX.sel.identity}${(BV.data?.nodes || []).length > 1 ? ` · ${BX.sel.name}` : ''}${bvSlow(BX.sel.node) ? ' · Running on the VPS (slow)' : ''}` : '';
+}
 bxIn.addEventListener('input', () => {
   bxIn.style.height = 'auto';
   bxIn.style.height = Math.min(bxIn.scrollHeight, innerHeight * 0.3) + 'px';

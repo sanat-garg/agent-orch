@@ -5009,6 +5009,7 @@ const CA_TONE = { running: 'run', checking: 'check', committing: 'check', finish
 // reading's time; status: task id → its last pushed status; emit: node id → particle throttle; ready: the first
 // snapshot since the Machines view opened is drawn (later changes animate).
 const CC_W = 272, CC_GAP = 12; // a machine card's width and its distance from its machine
+const CA_TOP = 75 * Math.PI / 180; // the star's top sector (±75° from straight up) is the head's card's: no worker or link there
 CA_WIDE.addEventListener('change', () => { if (mxOpen()) renderMachines(); }); // cards ↔ the phone's list
 const CA = { wrap: null, svg: null, layer: null, cards: false, g: {}, w: 0, h: 0, list: false, key: '', head: null, nodes: new Map(), chips: new Map(), anims: new Set(),
   seen: new Map(), status: new Map(), emit: new Map(), raf: 0, last: 0, ready: false, inView: true, asked: 0, mark: null, markPath: null, markAnim: null, markTimer: 0 };
@@ -5164,11 +5165,12 @@ function caLayout() {
   caSeats(false); // resting chips move to their new seats at once; travelling ones land there
 }
 // The card layout's places. Narrow (< 820px): a list, the head on top, each card right of its machine and each row as
-// tall as its card. Otherwise a star (#498): the head in the centre and the workers evenly spaced on a circle around
-// it (odd counts start at the top, even ones straddle it), each card on its machine's outer side (beside one to the
-// left or right, growing away from the head's row; above or below one near the top or bottom; the head's toward its
-// widest gap), nudged further out until it clears the cards placed before it, every machine and every link. A circle
-// too wide for the view shrinks and tries again.
+// tall as its card. Otherwise a star (#498): the head in the centre wearing its card right above it (#509), and the
+// workers evenly spaced on a circle around it outside that top sector (from CA_TOP to 360° - CA_TOP clockwise from
+// the top, so no link crosses the head's card; one or two sit lower-right and lower-left), each card on its machine's
+// outer side (beside one to the left or right, growing away from the head's row; below one near the bottom), nudged
+// further out until it clears the head's card, the cards placed before it, every machine and every link. A circle too
+// wide for the view shrinks and tries again.
 function caCardLayout(W, head, workers) {
   const all = [head, ...workers], size = (v, w) => { v.card.style.width = `${w}px`; v.cw = w; v.ch = v.card.offsetHeight; };
   if (CA.list) {
@@ -5183,28 +5185,23 @@ function caCardLayout(W, head, workers) {
     for (const v of workers) v.poly = caPoly(caElbow(v, head, 28));
   } else {
     for (const v of all) size(v, CC_W);
-    const n = workers.length;
-    let rad = Math.max(120, Math.min((W / 2 - CC_W - 26 - CC_GAP - 12) / (n > 2 ? 0.72 : 1), n <= 1 ? 250 : 150 + 40 * n)), box;
+    const n = workers.length, low = Math.sin(CA_TOP), minRad = Math.ceil((CC_W / 2 + 26 + 8) / low); // a worker clears the head's card sideways
+    let rad = Math.max(minRad, Math.min((W / 2 - CC_W - 26 - CC_GAP - 12) / (n > 2 ? low : 0.72), n <= 1 ? 250 : 150 + 40 * n)), box;
     for (let tries = 0; tries < 8; tries++) {
-      const angles = [];
-      Object.assign(head, { r: 34, x: 0, y: 0 });
+      Object.assign(head, { r: 34, x: 0, y: 0, side: 'above', up: true });
       workers.forEach((v, i) => {
-        const a = n === 1 ? 0 : -Math.PI / 2 + (2 * Math.PI / n) * (i + (n % 2 ? 0 : 0.5)), c = Math.cos(a), s = Math.sin(a);
-        angles.push(a);
-        Object.assign(v, { r: 26, x: rad * c, y: rad * s, side: c > 0.3 ? 'right' : c < -0.3 ? 'left' : s < 0 ? 'above' : 'below', up: s < -0.05 });
+        // Clockwise from the top: evenly over [CA_TOP, 2π - CA_TOP]; one or two workers lower-right / lower-left.
+        const t = n <= 2 ? (3 + 2 * i) * Math.PI / 4 : CA_TOP + ((2 * Math.PI - 2 * CA_TOP) * i) / (n - 1), c = Math.sin(t), s = -Math.cos(t);
+        Object.assign(v, { r: 26, x: rad * c, y: rad * s, side: c > 0.3 ? 'right' : c < -0.3 ? 'left' : 'below', up: s < -0.05 });
       });
-      // The head's card: below, right, left or above, whichever is furthest from every link.
-      const gap = (a) => Math.min(Infinity, ...angles.map((b) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)))));
-      head.side = [['below', Math.PI / 2], ['right', 0], ['left', Math.PI], ['above', -Math.PI / 2]].reduce((best, s) => (gap(s[1]) > gap(best[1]) + 0.01 ? s : best))[0];
-      head.up = head.side === 'above';
       const placed = [];
-      for (const v of [...workers, head]) placed.push(caCardSpot(v, placed, all, head)); // the head's last: workers' stay by their machines
+      for (const v of [head, ...workers]) placed.push(caCardSpot(v, placed, all, head)); // the head's first: anchored above its node
       box = [Infinity, -Infinity, Infinity, -Infinity];
       for (const v of all) for (const [l, r, t, b] of [[v.x - v.r - 8, v.x + v.r + 8, v.y - v.r - 8, v.y + v.r + 8], [v.cl, v.cl + v.cw, v.ct, v.ct + v.ch]]) {
         box = [Math.min(box[0], l), Math.max(box[1], r), Math.min(box[2], t), Math.max(box[3], b)];
       }
-      if (box[1] - box[0] <= W - 16 || rad <= 120) break;
-      rad = Math.max(120, rad - (box[1] - box[0] - W + 16) / 2 - 4);
+      if (box[1] - box[0] <= W - 16 || rad <= minRad) break;
+      rad = Math.max(minRad, rad - (box[1] - box[0] - W + 16) / 2 - 4);
     }
     const dx = Math.round(W / 2 - (box[0] + box[1]) / 2), dy = Math.round(12 - box[2]);
     for (const v of all) { v.x += dx; v.y += dy; v.cl += dx; v.ct += dy; }

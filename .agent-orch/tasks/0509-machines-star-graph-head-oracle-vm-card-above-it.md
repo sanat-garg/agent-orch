@@ -13,3 +13,7 @@ In the desktop Machines star graph (#498; public/app.js, app.css), the head's (o
 ## Done when
 
 `node --test test/ui-machines-star*.test.mjs` passes with the head card above the centre node, workers outside the top sector, and no overlaps
+
+## Result — done (check passed) (2026-09-28 19:10)
+
+AGENT-ORCH-STATUS: done — Head card sits above its node; workers ring the rest

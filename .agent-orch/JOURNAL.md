@@ -1600,3 +1600,6 @@ CONTEXT.md conflict resolved; browser-failover tests pass
 ## 2026-09-28 19:09 — #507 Restore the original #229 Timeline bar exactly, drawer and cards [done (check passed)]
 
 Original #229 .tl-bar restored in drawer; cards use .tl-bar.compact
+## 2026-09-28 19:10 — #509 Machines star graph: head (oracle-vm) card above its node, workers around the rest [done (check passed)]
+
+Head card sits above its node; workers ring the rest

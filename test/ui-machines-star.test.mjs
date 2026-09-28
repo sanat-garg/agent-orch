@@ -1,8 +1,8 @@
-// The Machines window's graph on desktop (#498, app.js caCardLayout/caCard): a star, the head in the centre and every
-// machine evenly spaced on a circle around it, each wearing a 260-300px card on its outer side with its full name, build
+// The Machines window's graph on desktop (#498, app.js caCardLayout/caCard): a star, the head in the centre with its card
+// right above it (#509) and every machine evenly spaced on a circle around it outside that top sector, each wearing a 260-300px card on its outer side with its full name, build
 // and every running task as a mini card with a quiet progress strip; usage shows only as the node's rings (CPU its
 // border, RAM a thin inner ring, exact numbers in the tooltip). An isolated server (CW_NO_ORCHESTRATOR=1, temp data
-// dir) with four fake workers running 3-6 tasks each and the head an integrator and a work task, at 1440×900.
+// dir) with three, then four fake workers running 3-6 tasks each and the head an integrator and a work task, at 1440×900.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -57,6 +57,24 @@ async function fakeWorker(name, kind, { cores, mem, avail, load }) {
   return node;
 }
 
+// Running tasks on the given workers ([key, count]), alternating Claude and Codex; the project is created on first use.
+let pid, k = 0;
+function seed(counts, project) {
+  const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
+  db.exec('PRAGMA busy_timeout=5000');
+  pid ??= Number(db.prepare("INSERT INTO projects(path,name,status,convo_id,created_at) VALUES(?,?,'active',?,0)").run(project, 'Fleet', CID).lastInsertRowid);
+  const now = Math.floor(Date.now() / 1000);
+  const run = db.prepare("INSERT INTO tasks(project_id,kind,title,prompt,status,agent,ran_agent,ran_model,started_at,created_at,node_id,integrates) VALUES(?,'work',?,'seed','running',?,?,?,?,0,?,?)");
+  for (const [key, count] of counts) {
+    tasks[nodes[key]] = [];
+    for (let i = 0; i < count; i++, k++) {
+      const codex = k % 2;
+      tasks[nodes[key]].push(Number(run.run(pid, `${key} task ${i + 1}`, codex ? 'codex' : 'claude', codex ? 'codex' : 'claude', codex ? 'gpt-5.5' : 'opus', now - 60 * (k + 1), nodes[key], null).lastInsertRowid));
+    }
+  }
+  db.close();
+}
+
 before(async () => {
   if (skip) return;
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-mstar-'));
@@ -84,20 +102,10 @@ before(async () => {
   nodes.vps = await fakeWorker('build-vps', 'linux', { cores: 4, mem: 24 * GB, avail: 16 * GB, load: [1.5, 1, 1] });
   nodes.studio = await fakeWorker(LONG, 'darwin', { cores: 10, mem: 32 * GB, avail: 9 * GB, load: [8.2, 7, 6] });
   nodes.air = await fakeWorker('macbook-air', 'darwin', { cores: 8, mem: 16 * GB, avail: 10 * GB, load: [1, 1, 1] });
-  nodes.mini = await fakeWorker('mac-mini', 'darwin', { cores: 8, mem: 16 * GB, avail: 12 * GB, load: [0.4, 0.5, 0.5] });
+  seed([['vps', 3], ['studio', 6], ['air', 4]], project);
   const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
-  db.exec('PRAGMA busy_timeout=5000');
-  const pid = Number(db.prepare("INSERT INTO projects(path,name,status,convo_id,created_at) VALUES(?,?,'active',?,0)").run(project, 'Fleet', CID).lastInsertRowid);
-  const now = Math.floor(Date.now() / 1000);
   const run = db.prepare("INSERT INTO tasks(project_id,kind,title,prompt,status,agent,ran_agent,ran_model,started_at,created_at,node_id,integrates) VALUES(?,'work',?,'seed','running',?,?,?,?,0,?,?)");
-  let k = 0;
-  for (const [key, count] of [['vps', 3], ['studio', 6], ['air', 4], ['mini', 5]]) {
-    tasks[nodes[key]] = [];
-    for (let i = 0; i < count; i++, k++) {
-      const codex = k % 2;
-      tasks[nodes[key]].push(Number(run.run(pid, `${key} task ${i + 1}`, codex ? 'codex' : 'claude', codex ? 'codex' : 'claude', codex ? 'gpt-5.5' : 'opus', now - 60 * (k + 1), nodes[key], null).lastInsertRowid));
-    }
-  }
+  const now = Math.floor(Date.now() / 1000);
   const work = Number(run.run(pid, 'Head work task', 'claude', 'claude', 'opus', now - 90, 'controller', null).lastInsertRowid);
   const integ = Number(run.run(pid, `Integrate #${tasks[nodes.vps][0]}`, 'claude', 'claude', 'opus', now - 30, 'controller', tasks[nodes.vps][0]).lastInsertRowid);
   tasks.head = [integ, work];
@@ -145,19 +153,25 @@ const geometry = (page) => page.evaluate(() => {
 });
 const overlap = (a, b) => a.l < b.r && a.r > b.l && a.t < b.b && a.b > b.t;
 
-test('1440×900: a star of 4 machines around the head; big cards list every task with its progress strip; usage only on rings', { skip, timeout: 90000 }, async () => {
-  const { ctx, page, errors } = await open({ width: 1440, height: 900 });
-  await page.locator(`#caWrap .cc[data-node="${nodes.studio}"] .cc-task`).nth(5).waitFor();
-  await page.waitForFunction(() => document.querySelectorAll('#caWrap .cc').length === 5 && document.querySelectorAll('#caWrap .ca-node').length === 5);
+// The star at 1440×900 with `count` workers: the head's card right above its node, the workers evenly spaced on one
+// circle outside the top sector, every card outward of its machine, overlapping no card, machine or link.
+async function checkStar(page, count) {
+  await page.waitForFunction((n) => document.querySelectorAll('#caWrap .cc').length === n && document.querySelectorAll('#caWrap .ca-node').length === n, count + 1);
+  await page.waitForTimeout(100);
   const g = await geometry(page);
-  // Star: the head in the centre, the workers evenly around it on one circle.
   const head = g.plates.find((p) => p.head), workers = g.plates.filter((p) => !p.head);
-  assert.equal(workers.length, 4);
-  const polar = workers.map((p) => ({ a: (Math.atan2(p.cy - head.cy, p.cx - head.cx) * 180) / Math.PI, d: Math.hypot(p.cx - head.cx, p.cy - head.cy) }));
-  const angles = polar.map((p) => (p.a + 360) % 360).sort((a, b) => a - b);
-  for (let i = 0; i < angles.length; i++) {
-    const step = ((angles[(i + 1) % angles.length] - angles[i]) + 360) % 360;
-    assert.ok(Math.abs(step - 90) <= 5, `even angle spacing (±5°): ${JSON.stringify(angles)}`);
+  assert.equal(workers.length, count);
+  // The head's card: above its node, horizontally centred on it, a small gap between.
+  const hc = g.cards.find((c) => c.node === head.node);
+  assert.ok(hc.b <= head.t, `the head's card sits above its node: ${JSON.stringify({ hc, head })}`);
+  assert.ok(head.t - hc.b <= 24, `a small gap under the head's card: ${JSON.stringify({ hc, head })}`);
+  assert.ok(Math.abs((hc.l + hc.r) / 2 - head.cx) <= 2, `the head's card is centred on its node: ${JSON.stringify({ hc, head })}`);
+  // Workers: clockwise from the top, outside the top sector, evenly spaced on one circle.
+  const polar = workers.map((p) => ({ a: ((Math.atan2(p.cx - head.cx, head.cy - p.cy) * 180) / Math.PI + 360) % 360, d: Math.hypot(p.cx - head.cx, p.cy - head.cy) }));
+  const angles = polar.map((p) => p.a).sort((a, b) => a - b);
+  for (const a of angles) assert.ok(a >= 30 && a <= 330, `workers avoid the top sector: ${JSON.stringify(angles)}`);
+  for (let i = 1; i < angles.length - 1; i++) {
+    assert.ok(Math.abs(angles[i + 1] - 2 * angles[i] + angles[i - 1]) <= 5, `even angle spacing (±5°): ${JSON.stringify(angles)}`);
   }
   for (const p of polar) assert.ok(Math.abs(p.d - polar[0].d) <= 2, `one circle: ${JSON.stringify(polar)}`);
   assert.ok(polar[0].d > 60, 'workers sit away from the head');
@@ -173,6 +187,24 @@ test('1440×900: a star of 4 machines around the head; big cards list every task
       assert.ok(out[0] * mid[0] + out[1] * mid[1] > 0, `the card sits on its machine's outer side: ${JSON.stringify({ c, p })}`);
     }
   }
+  return g;
+}
+
+test('1440×900 with 3 workers: the head\'s card above its node, the workers around the rest', { skip, timeout: 90000 }, async () => {
+  const { ctx, page, errors } = await open({ width: 1440, height: 900 });
+  await page.locator(`#caWrap .cc[data-node="${nodes.studio}"] .cc-task`).nth(5).waitFor();
+  await checkStar(page, 3);
+  await ctx.close();
+  assert.deepEqual(errors, []);
+});
+
+test('1440×900: a star of 4 machines around the head; big cards list every task with its progress strip; usage only on rings', { skip, timeout: 90000 }, async () => {
+  nodes.mini = await fakeWorker('mac-mini', 'darwin', { cores: 8, mem: 16 * GB, avail: 12 * GB, load: [0.4, 0.5, 0.5] });
+  seed([['mini', 5]]);
+  const { ctx, page, errors } = await open({ width: 1440, height: 900 });
+  await page.locator(`#caWrap .cc[data-node="${nodes.studio}"] .cc-task`).nth(5).waitFor();
+  await page.locator(`#caWrap .cc[data-node="${nodes.mini}"] .cc-task`).nth(4).waitFor();
+  const g = await checkStar(page, 4);
   // The window holds the whole star: nothing spills sideways.
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   assert.equal(await page.evaluate(() => { const w = document.getElementById('caWrap'); return w.scrollWidth <= w.clientWidth + 1; }), true);

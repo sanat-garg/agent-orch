@@ -32,8 +32,8 @@
 .bv-wait { position: absolute; inset: 0 12px 12px; display: grid; place-items: center; color: var(--muted); font-size: 14px; pointer-events: none; }
 /* Off-screen but focusable, 16px so iOS doesn't zoom in when it takes focus. */
 .bv-keys { position: absolute; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; font-size: 16px; border: 0; padding: 0; pointer-events: none; }
-#bvKbd { display: none; }
-@media (hover: none), (pointer: coarse) { #bvKbd { display: inline-block; } }
+#bvKbd, #bxKbd { display: none; }
+@media (hover: none), (pointer: coarse) { #bvKbd, #bxKbd { display: inline-block; } }
 @media (pointer: coarse) {
   .bv-bar input { font-size: 16px; } /* UI-REVIEW #20 */
   .bv-bar input, .bw-add input { height: 44px; } /* UI-REVIEW #22 */
@@ -55,3 +55,66 @@
 .bv-tcanvas canvas { width: 100%; height: 100%; object-fit: contain; display: block; }
 .bv-twait { position: absolute; font-size: 12.5px; color: var(--muted); }
 .bv-tline { margin: 6px 0 8px; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* The Browser tab (browser.js bx*): toolbar, the live canvas fitting the width, the prompt box and the agent's activity.
+   The section scrolls; the prompt box sticks to its bottom, so with the keyboard up (app.css shrinks .app by --kb)
+   it sits right above the keyboard. */
+.bx { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; background: var(--bg); overscroll-behavior: contain; }
+.bx-bar { padding: 10px 16px 4px; flex-wrap: wrap; row-gap: 6px; }
+.bx-bar select { height: 36px; max-width: 220px; padding: 0 8px; border-radius: 9px; border: 1px solid var(--border-strong); background: var(--panel); color: var(--text); font: inherit; font-size: 14px; font-weight: 550; }
+.bx-bar select:focus-visible { outline: 2px solid var(--focus); border-color: var(--accent); }
+.bx-status { padding: 0 18px 6px; font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: none; }
+.bx-stage { flex: none; min-height: 220px; padding: 0 16px 8px; }
+.bx-stage canvas { max-height: max(260px, calc(100dvh - 330px)); }
+.bx-stage .bv-wait { inset: 0 16px 8px; }
+.bx.watching .bx-stage canvas { cursor: not-allowed; }
+/* An agent is driving: a soft accent ring round the page and a pill; the owner can still Take over. */
+.bx.agent-busy .bx-stage canvas { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft), 0 2px 12px rgba(0,0,0,.08); animation: bx-ring 2.4s ease-in-out infinite; }
+@keyframes bx-ring { 50% { box-shadow: 0 0 0 6px var(--accent-soft), 0 2px 12px rgba(0,0,0,.08); } }
+@media (prefers-reduced-motion: reduce) { .bx.agent-busy .bx-stage canvas { animation: none; } }
+.bx-busy { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px;
+  border-radius: 99px; background: var(--panel); border: 1px solid var(--accent); color: var(--text); font-size: 12.5px; font-weight: 550;
+  box-shadow: 0 2px 8px rgba(0,0,0,.12); pointer-events: none; }
+.bx-busy::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+.bx-busy[hidden] { display: none; }
+.bx-prompt { position: sticky; bottom: 0; z-index: 2; padding: 6px 16px 8px; background: linear-gradient(to bottom, transparent, var(--bg) 14px); }
+.bx-prompt .box { max-width: 900px; }
+.bx-prompt textarea { padding-top: 12px; }
+.bx-hint { font-size: 12.5px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bx-act { width: 100%; max-width: 932px; margin: 0 auto; padding: 4px 16px max(16px, env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 8px; font-size: 13.5px; }
+.bx-act:empty { display: none; }
+.bx-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.bx-st { display: inline-flex; align-items: center; gap: 6px; flex: none; font-weight: 600; color: var(--text); }
+.bx-st.failed { color: var(--danger); }
+.bx-st .dot { width: 8px; height: 8px; }
+.bx-title.link-btn { flex: 1; min-width: 0; text-align: left; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bx-head .btn.small { flex: none; height: 30px; }
+.bx-steps { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; border-left: 2px solid var(--border); }
+.bx-step { position: relative; padding: 2px 0 2px 14px; color: var(--text); overflow-wrap: anywhere; }
+.bx-step::before { content: ""; position: absolute; left: -5px; top: 9px; width: 8px; height: 8px; border-radius: 50%; background: var(--border-strong); }
+.bx-step.approval::before { background: var(--warn); }
+.bx-step:last-child::before { background: var(--accent); }
+.bx-act .shots { margin: 0; }
+.bx-result { padding: 10px 12px; border-radius: 10px; background: var(--raised); border: 1px solid var(--border); color: var(--text); overflow-wrap: anywhere; }
+.bx-result > :first-child { margin-top: 0; }
+.bx-result > :last-child { margin-bottom: 0; }
+.bx-empty { font-size: 13px; }
+@media (pointer: coarse) { .bx-bar select { height: 44px; font-size: 16px; } }
+@media (max-width: 800px) {
+  .bx-bar { padding: 8px 8px 4px; }
+  .bx-bar .icon-btn { width: 44px; height: 44px; }
+  .bx-bar .btn.small { height: 36px; padding: 0 10px; }
+  .bx-bar select { flex: 1; min-width: 96px; max-width: none; }
+  /* Row 2: the address and the keyboard button (the ::before is the line break). */
+  .bx-bar::before { content: ""; order: 9; flex-basis: 100%; height: 0; margin-bottom: -6px; }
+  .bx-bar input { order: 10; flex: 1 1 0; }
+  #bxKbd, #bxPaste { order: 11; }
+  .bx-status { padding: 0 10px 4px; }
+  .bx-stage { padding: 0 6px 6px; min-height: 180px; }
+  .bx-stage canvas { max-height: none; }
+  .bx-stage .bv-wait { inset: 0 6px 6px; }
+  .bx-prompt { padding: 6px 10px 8px; }
+  .bx-act { padding: 4px 12px max(12px, env(safe-area-inset-bottom)); }
+  html.kb-open .bx-act { display: none; } /* the prompt box sits on the keyboard */
+}
+@media (max-width: 480px) { #bxPaste { display: none; } }

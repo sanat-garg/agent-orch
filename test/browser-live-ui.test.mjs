@@ -1,6 +1,7 @@
-// The live browser view in the app (public/browser.js): the sidebar's Browser button opens the profiles sheet, Open shows
-// the live page on a canvas, and the owner's click and typing reach a local page, on a desktop (mouse, keyboard) and on
-// an iPhone-sized screen (tap, the on-screen keyboard field). Skips when Playwright's Chromium can't launch.
+// The live browser view in the app (public/browser.js): the header's Browser tab shows a profile's live page in place
+// (its Profiles button opens the profiles sheet), and the owner's click and typing reach a local page, on a desktop
+// (mouse, keyboard) and on an iPhone-sized screen (tap, the on-screen keyboard field); the same viewer also opens in the
+// modal a task drawer uses. Skips when Playwright's Chromium can't launch.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
@@ -79,31 +80,34 @@ async function app(opts) {
   return { ctx, p, errors };
 }
 // Whether the canvas shows a frame: its size and a pixel that isn't blank.
-const drawn = (p) => p.evaluate(() => {
-  const c = document.getElementById('bvCanvas');
-  return c.width > 0 && c.height > 0 && getComputedStyle(document.getElementById('bvWait')).display === 'none' ? [c.width, c.height] : null;
-});
+const drawn = (p, pre = 'bx') => p.evaluate((pre) => {
+  const c = document.getElementById(`${pre}Canvas`);
+  return c.width > 0 && c.height > 0 && getComputedStyle(document.getElementById(`${pre}Wait`)).display === 'none' ? [c.width, c.height] : null;
+}, pre);
+const inControl = (p, pre = 'bx') => p.evaluate((pre) => document.getElementById(`${pre}Status`).textContent.includes('You are in control'), pre);
 
-test('desktop: sidebar → Browser → Open shows the live page, and clicks and keys reach it', { skip, timeout: 180000 }, async () => {
+test('desktop: the Browser tab shows the live page in place, and clicks and keys reach it', { skip, timeout: 180000 }, async () => {
   const { ctx, p, errors } = await app({ viewport: { width: 1280, height: 860 } });
   try {
-    await p.locator('#browserBtn').click();
+    await p.locator('.seg [data-view="browser"]').click();
+    await p.locator('#bxManage').click();
     await p.locator('#browserModal:not([hidden])').waitFor();
     const row = p.locator('#bwBody .bw-row', { hasText: 'default' });
     await row.waitFor({ timeout: 20000 });
     await row.getByRole('button', { name: 'Signed-in sites' }).click();
     await p.locator('#bwBody .bw-sites', { hasText: /Not signed in anywhere yet|Sites with cookies/ }).waitFor({ timeout: 60000 });
-    await row.getByRole('button', { name: 'Open' }).click();
-    await p.locator('#bvModal:not([hidden])').waitFor();
-    await waitFor(() => p.evaluate(() => document.getElementById('bvStatus').textContent.includes('You are in control')), { timeout: 90000, message: `in control:\n${out}` });
+    await row.getByRole('button', { name: /Open|Watch/ }).click();
+    assert.ok(await p.locator('#browserModal').isHidden() && await p.locator('#bvModal').isHidden(), 'Open shows it in the tab');
+    assert.equal(await p.locator('#bxProfile').inputValue(), 'controller/default');
+    await waitFor(() => inControl(p), { timeout: 90000, message: `in control:\n${out}` });
     // Go to the local page from the URL bar.
-    await p.locator('#bvUrl').fill(pageUrl);
-    await p.locator('#bvUrl').press('Enter');
-    await waitFor(() => p.evaluate((u) => document.getElementById('bvUrl').value === u, pageUrl), { timeout: 30000, message: 'the URL bar follows the page' });
+    await p.locator('#bxUrl').fill(pageUrl);
+    await p.locator('#bxUrl').press('Enter');
+    await waitFor(() => p.evaluate((u) => document.getElementById('bxUrl').value === u, pageUrl), { timeout: 30000, message: 'the URL bar follows the page' });
     await waitFor(() => loads > 0, { timeout: 30000, message: 'the page loads' });
     await p.waitForTimeout(1500); // it renders
     await waitFor(() => drawn(p), { timeout: 30000, message: 'a frame is drawn' });
-    const box = await p.locator('#bvCanvas').boundingBox();
+    const box = await p.locator('#bxCanvas').boundingBox();
     const [w, h] = await drawn(p);
     assert.ok(box.width <= 1280 && box.height <= 860 && Math.abs(box.width / box.height - w / h) < 0.02, 'the canvas scales to fit, keeping its shape');
     // The field is the page's top-left 640×200 CSS px: click in it, then type.
@@ -111,8 +115,14 @@ test('desktop: sidebar → Browser → Open shows the live page, and clicks and 
     await p.keyboard.type('owner@example.com');
     await p.keyboard.press('Enter');
     await waitFor(() => typed.includes('owner@example.com'), { timeout: 20000, message: `typed text reaches the page: ${JSON.stringify(typed)}` });
+    // A task drawer's Watch opens the same viewer in the modal; closing it gives the view back to the tab.
+    await p.evaluate(() => bvOpen('controller', 'default', 'This server'));
+    await p.locator('#bvModal:not([hidden])').waitFor();
+    await waitFor(() => inControl(p, 'bv'), { timeout: 30000, message: 'in control in the modal' });
+    await waitFor(() => drawn(p, 'bv'), { timeout: 30000, message: 'a frame in the modal' });
     await p.locator('#bvModal .bv-head [data-close]').click();
     assert.ok(await p.locator('#bvModal').isHidden());
+    await waitFor(() => inControl(p), { timeout: 30000, message: 'back in the tab' });
     assert.deepEqual(errors, []);
   } finally { await ctx.close(); }
 });
@@ -120,19 +130,15 @@ test('desktop: sidebar → Browser → Open shows the live page, and clicks and 
 test('iPhone: a tap is a click and the keyboard field types into the page', { skip, timeout: 180000 }, async () => {
   const { ctx, p, errors } = await app({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
   try {
-    await p.locator('#openSidebar').tap();
-    await p.locator('#browserBtn').tap();
-    const row = p.locator('#bwBody .bw-row', { hasText: 'default' });
-    await row.waitFor({ timeout: 20000 });
-    await row.getByRole('button', { name: 'Open' }).tap();
-    await waitFor(() => p.evaluate(() => document.getElementById('bvStatus').textContent.includes('You are in control')), { timeout: 90000, message: 'in control' });
-    await waitFor(() => p.evaluate((u) => document.getElementById('bvUrl').value === u, pageUrl), { timeout: 30000, message: 'the same page' });
+    await p.locator('.seg [data-view="browser"]').tap();
+    await waitFor(() => inControl(p), { timeout: 90000, message: 'in control' });
+    await waitFor(() => p.evaluate((u) => document.getElementById('bxUrl').value === u, pageUrl), { timeout: 30000, message: 'the same page' });
     await waitFor(() => drawn(p), { timeout: 30000, message: 'a frame is drawn' });
-    const panel = await p.locator('#bvModal .modal-panel').boundingBox(), box = await p.locator('#bvCanvas').boundingBox();
-    assert.ok(panel.width <= 390 && box.x >= 0 && box.x + box.width <= 390.5, 'the viewer fits the phone');
-    assert.ok(await p.locator('#bvKbd').isVisible(), 'a Keyboard button on touch screens');
+    const box = await p.locator('#bxCanvas').boundingBox();
+    assert.ok(box.x >= 0 && box.x + box.width <= 390.5 && box.width > 340, 'the canvas fits the phone');
+    assert.ok(await p.locator('#bxKbd').isVisible(), 'a Keyboard button on touch screens');
     await p.touchscreen.tap(box.x + box.width * 0.1, box.y + box.height * 0.05);
-    await p.locator('#bvKbd').tap();
+    await p.locator('#bxKbd').tap();
     await p.keyboard.insertText('from the phone');
     await p.keyboard.press('Enter');
     await waitFor(() => typed.includes('from the phone'), { timeout: 20000, message: `typed on the phone: ${JSON.stringify(typed)}` });

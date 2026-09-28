@@ -1,36 +1,44 @@
 'use strict';
 // ---------- Browser: profiles per machine and the live view (server: browser-view.mjs, /api/browser*, bv_* on /ws) ----------
-// The sidebar's globe opens the Browser sheet (#browserModal): each machine that can run a browser, its profiles with
-// Open, the signed-in sites (cookie domains only) and Clear. Open shows the live view (#bvModal): screencast frames on a
-// canvas that scales to fit, the owner's mouse, touch, keys and paste sent back, a URL bar with Back and Reload. While a
-// task uses the profile the owner watches, and can take over (the task's browser actions wait) until they hand back.
-// A running browser task's drawer shows a small live thumbnail (bvTaskThumb). Loaded after app.js and uses its helpers
-// ($, el, api, toast, send, openTask).
+// The header's Browser tab (#browserView, bx*) shows the live view in place: a profile picker, the URL bar, Back, Reload
+// and Take over / Hand back, then the page on a canvas that fits the width, the owner's mouse, touch, keys and paste sent
+// back. Below it a prompt box sends an agent to work on that profile (POST /api/browser/task) and an activity panel
+// follows its running or last task (GET /api/browser/tasks, refreshed on otask/olane): status, steps, screenshots,
+// approvals, the result and Stop. The same viewer code also mounts in #bvModal, opened from a task drawer's live
+// thumbnail (bvTaskThumb). The toolbar's Profiles button opens the Browser sheet (#browserModal): each machine that can
+// run a browser, its profiles, the signed-in sites (cookie domains only) and Clear. While a task uses the profile the
+// owner watches, and can take over (the task's browser actions wait) until they hand back. Loaded after app.js and uses
+// its helpers ($, el, api, toast, send, store, md, shotGrid, approvalPanel, kbAware, showTask).
 const BV = {
   data: null, err: '', loading: false, lastFocus: null, sites: new Map(), // `${node}/${identity}` → {list, err, open}
-  view: null, // the open viewer: {node, identity, name}
+  view: null, // the open viewer: {node, identity, name, m} (m: the mount it shows in)
   st: null, frame: { w: 0, h: 0 }, decoding: false, pending: null,
-  want: new Map(), // key → {node, identity, modal, thumb}: what this tab watches (re-sent after a reconnect)
+  want: new Map(), // key → {node, identity, view, thumb}: what this tab watches (re-sent after a reconnect)
   thumb: null, // {key, el, canvas, node, identity, task}
 };
 const bvKey = (node, identity) => `${node}/${identity}`;
 const BV_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+// A viewer mount: the modal's elements (ids bv*) or the Browser tab's (bx*). Only one shows the view at a time.
+const bvMount = (p) => ({ root: $(p === 'bv' ? 'bvModal' : 'browserView'), ...Object.fromEntries(
+  ['Canvas', 'Wait', 'Status', 'Take', 'Url', 'Bar', 'Back', 'Reload', 'Paste', 'Kbd', 'Keys'].map((n) => [n.toLowerCase(), $(p + n)])) });
+const BVM = { modal: bvMount('bv'), tab: bvMount('bx') };
+const bvTabOn = () => $('app').dataset.view === 'browser';
 
 // ----- which views this tab wants (one server-side viewer per tab and profile)
 function bvSync(node, identity) {
   const k = bvKey(node, identity), w = BV.want.get(k);
-  if (!w || (!w.modal && !w.thumb)) { BV.want.delete(k); return send({ t: 'bv_close', node, identity }); }
-  send({ t: 'bv_open', node, identity, thumb: !w.modal, ...(w.url && { url: w.url }) });
+  if (!w || (!w.view && !w.thumb)) { BV.want.delete(k); return send({ t: 'bv_close', node, identity }); }
+  send({ t: 'bv_open', node, identity, thumb: !w.view, ...(w.url && { url: w.url }) });
   delete w.url;
 }
 function bvWant(node, identity, part, on, url) {
-  const k = bvKey(node, identity), w = BV.want.get(k) || { node, identity, modal: false, thumb: false };
+  const k = bvKey(node, identity), w = BV.want.get(k) || { node, identity, view: false, thumb: false };
   w[part] = on;
   if (url) w.url = url;
   BV.want.set(k, w);
   bvSync(node, identity);
 }
-function bvResume() { for (const w of BV.want.values()) send({ t: 'bv_open', node: w.node, identity: w.identity, thumb: !w.modal }); }
+function bvResume() { for (const w of BV.want.values()) send({ t: 'bv_open', node: w.node, identity: w.identity, thumb: !w.view }); }
 
 // ----- server messages
 function bvOnServer(msg) {
@@ -53,6 +61,7 @@ async function bwLoad() {
   try { BV.data = await api('/api/browser'); BV.err = ''; } catch (e) { BV.err = e.message; }
   BV.loading = false;
   bwRender();
+  bxRenderPicker();
 }
 function bwOpen() {
   const m = $('browserModal');
@@ -63,7 +72,7 @@ function bwOpen() {
 }
 function bwClose() {
   $('browserModal').hidden = true;
-  (BV.lastFocus?.isConnected ? BV.lastFocus : $('browserBtn')).focus?.();
+  (BV.lastFocus?.isConnected ? BV.lastFocus : $('bxManage')).focus?.();
 }
 function bwRender() {
   const body = $('bwBody');
@@ -98,7 +107,7 @@ function bwNode(n) {
     e.preventDefault();
     const id = inp.value.trim().toLowerCase();
     if (!BV_ID_RE.test(id)) { toast('Use lowercase letters, digits, - and _ (it is a folder name).', { kind: 'warn' }); return inp.focus(); }
-    bvOpen(n.id, id, n.name);
+    bwPick(n, id);
   };
   sec.append(add);
   return sec;
@@ -113,7 +122,7 @@ function bwProfile(n, p) {
     el('span', 'cn-st', p.task ? `Task #${p.task.id} is using it${p.takeover ? ' · taken over' : ''}` : p.open ? 'Open' : p.running ? 'Running' : 'Idle'));
   info.append(st);
   const open = el('button', 'btn small primary cn-btn', p.task ? 'Watch' : 'Open');
-  open.onclick = () => bvOpen(n.id, p.identity, n.name);
+  open.onclick = () => bwPick(n, p.identity);
   const sites = el('button', 'btn small cn-btn', 'Signed-in sites');
   sites.setAttribute('aria-expanded', String(!!BV.sites.get(k)?.open));
   sites.onclick = () => bwSites(n.id, p.identity);
@@ -158,47 +167,56 @@ async function bwClear(n, identity) {
   } catch (e) { toast(e.message, { kind: 'warn' }); }
   bwLoad();
 }
-$('browserBtn').addEventListener('click', bwOpen);
+// Open (or Create and open) shows the profile in the Browser tab.
+function bwPick(n, identity) {
+  bwClose();
+  if (!bvTabOn()) setView('browser');
+  bxSelect(n.id, identity, n.name);
+}
+$('bxManage').addEventListener('click', bwOpen);
 $('browserModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) bwClose(); });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !$('browserModal').hidden && $('bvModal').hidden) { e.stopImmediatePropagation(); bwClose(); }
 }, true);
 
-// ----- the live view
-function bvOpen(node, identity, name, { take = false } = {}) {
-  if (BV.view) bvClose({ keepFocus: true });
-  BV.lastViewFocus = document.activeElement;
-  BV.view = { node, identity, name: name || node };
+// ----- the live view, in the modal or the Browser tab
+function bvOpen(node, identity, name, { take = false, inline = false } = {}) {
+  if (BV.view) bvClose({ keepFocus: true, next: true });
+  const m = inline ? BVM.tab : BVM.modal;
+  if (!inline) BV.lastViewFocus = document.activeElement;
+  BV.view = { node, identity, name: name || node, m };
   BV.st = null;
   BV.frame = { w: 0, h: 0 };
   BV.take = take;
-  $('bvTitle').textContent = identity;
-  $('bvUrl').value = '';
-  $('bvWait').hidden = false;
-  $('bvWait').textContent = 'Starting the browser…';
-  const c = $('bvCanvas');
-  c.width = 0; c.height = 0;
-  $('bvModal').hidden = false;
+  if (!inline) $('bvTitle').textContent = identity;
+  m.url.value = '';
+  m.wait.hidden = false;
+  m.wait.textContent = 'Starting the browser…';
+  m.canvas.width = 0; m.canvas.height = 0;
+  m.root.hidden = false;
   bvRenderState();
-  bvWant(node, identity, 'modal', true);
-  c.focus({ preventScroll: true });
+  bvWant(node, identity, 'view', true);
+  if (!inline) m.canvas.focus({ preventScroll: true });
 }
-function bvClose({ keepFocus = false } = {}) {
+// next: another view opens right away (the Browser tab doesn't come back under it).
+function bvClose({ keepFocus = false, next = false } = {}) {
   if (!BV.view) return;
-  const { node, identity } = BV.view;
+  const { node, identity, m } = BV.view;
   BV.view = null;
   BV.st = null;
-  $('bvModal').hidden = true;
-  $('bvKeys').blur();
-  bvWant(node, identity, 'modal', false);
+  m.keys.blur();
+  bvWant(node, identity, 'view', false);
+  if (m === BVM.tab) { m.wait.hidden = false; m.wait.textContent = ''; m.status.textContent = ''; bxRenderBusy(); return; }
+  m.root.hidden = true;
   if (!$('browserModal').hidden) bwLoad();
-  if (!keepFocus) (BV.lastViewFocus?.isConnected ? BV.lastViewFocus : $('browserBtn')).focus?.();
+  if (!keepFocus) (BV.lastViewFocus?.isConnected ? BV.lastViewFocus : $('browserTab')).focus?.();
+  if (!next && bvTabOn()) bxOpenSel(); // the tab's view was lent to the modal
 }
 const bvCanDrive = () => BV.st?.role === 'control' && !BV.st.closed;
 function bvRenderState() {
   const s = BV.st, v = BV.view;
   if (!v) return;
-  const status = $('bvStatus'), take = $('bvTake');
+  const { m } = v, take = m.take;
   let text = `${v.name}`;
   take.hidden = true;
   take.classList.remove('primary');
@@ -216,19 +234,15 @@ function bvRenderState() {
     text += ' · Watching (another window has control)';
     Object.assign(take, { hidden: false, textContent: 'Take control' });
   }
-  status.textContent = text;
-  $('bvModal').classList.toggle('watching', !bvCanDrive());
-  for (const id of ['bvBack', 'bvReload', 'bvPaste', 'bvKbd', 'bvUrl']) $(id).disabled = !bvCanDrive();
-  if (s && !s.closed && document.activeElement !== $('bvUrl')) $('bvUrl').value = s.url === 'about:blank' ? '' : s.url || '';
-  if (s?.closed) { $('bvWait').hidden = false; $('bvWait').textContent = s.error || 'The browser closed.'; }
+  m.status.textContent = text;
+  m.root.classList.toggle('watching', !bvCanDrive());
+  for (const x of [m.back, m.reload, m.paste, m.kbd, m.url]) x.disabled = !bvCanDrive();
+  if (s && !s.closed && document.activeElement !== m.url) m.url.value = s.url === 'about:blank' ? '' : s.url || '';
+  if (s?.closed) { m.wait.hidden = false; m.wait.textContent = s.error || 'The browser closed.'; }
   if (s && BV.take && s.active && !s.takeover && !s.closed) { BV.take = false; bvSay({ t: 'bv_take' }); }
+  if (m === BVM.tab) bxRenderBusy();
 }
 const bvSay = (m) => BV.view && send({ node: BV.view.node, identity: BV.view.identity, ...m });
-$('bvTake').addEventListener('click', () => {
-  const s = BV.st;
-  if (!s) return;
-  bvSay({ t: s.takeover && s.role === 'control' ? 'bv_handback' : 'bv_take' });
-});
 
 // Frames: only the newest is decoded; one in flight at a time.
 function bvDraw(f) {
@@ -237,12 +251,12 @@ function bvDraw(f) {
   BV.decoding = true;
   const img = new Image();
   img.onload = img.onerror = () => {
-    const c = $('bvCanvas');
-    if (img.naturalWidth && BV.view) {
+    const m = BV.view?.m, c = m?.canvas;
+    if (img.naturalWidth && c) {
       if (c.width !== img.naturalWidth || c.height !== img.naturalHeight) { c.width = img.naturalWidth; c.height = img.naturalHeight; }
       c.getContext('2d').drawImage(img, 0, 0);
       BV.frame = { w: f.w, h: f.h };
-      $('bvWait').hidden = true;
+      m.wait.hidden = true;
     }
     BV.decoding = false;
     if (BV.pending !== f && BV.pending) bvDraw(BV.pending);
@@ -253,103 +267,299 @@ function bvDraw(f) {
 
 // ----- input: canvas pixels → page CSS px (the frame's w×h)
 function bvPoint(e) {
-  const r = $('bvCanvas').getBoundingClientRect();
-  if (!r.width || !BV.frame.w) return null;
+  const r = BV.view?.m.canvas.getBoundingClientRect();
+  if (!r?.width || !BV.frame.w) return null;
   return { x: Math.round(((e.clientX - r.left) / r.width) * BV.frame.w), y: Math.round(((e.clientY - r.top) / r.height) * BV.frame.h) };
 }
 const bvMods = (e) => ({ ...(e.altKey && { alt: true }), ...(e.ctrlKey && { ctrl: true }), ...(e.metaKey && { meta: true }), ...(e.shiftKey && { shift: true }) });
 const bvInput = (events) => { if (bvCanDrive() && events.length) bvSay({ t: 'bv_input', events }); };
 const BV_BTN = ['left', 'middle', 'right'];
 let bvTouch = null, bvMoveAt = 0;
-const bvCv = $('bvCanvas');
-bvCv.addEventListener('pointerdown', (e) => {
-  const p = bvPoint(e);
-  if (!p) return;
-  bvCv.focus({ preventScroll: true });
-  if (e.pointerType === 'mouse') { e.preventDefault(); bvCv.setPointerCapture(e.pointerId); bvInput([{ type: 'mouse', action: 'down', button: BV_BTN[e.button] || 'left', clickCount: e.detail || 1, ...p, ...bvMods(e) }]); }
-  else bvTouch = { id: e.pointerId, x: e.clientX, y: e.clientY, at: Date.now(), lastY: e.clientY, lastX: e.clientX, p, moved: false };
-});
-bvCv.addEventListener('pointermove', (e) => {
-  const p = bvPoint(e);
-  if (!p) return;
-  if (e.pointerType === 'mouse') {
-    const now = Date.now();
-    if (now - bvMoveAt < 50 && !e.buttons) return;
-    bvMoveAt = now;
-    return bvInput([{ type: 'mouse', action: 'move', buttons: e.buttons, button: e.buttons & 2 ? 'right' : 'left', ...p }]);
-  }
-  // Touch: a drag scrolls the page.
-  const t = bvTouch;
-  if (!t || t.id !== e.pointerId) return;
-  if (Math.hypot(e.clientX - t.x, e.clientY - t.y) > 8) t.moved = true;
-  if (!t.moved) return;
-  const r = bvCv.getBoundingClientRect(), k = BV.frame.w / (r.width || 1);
-  bvInput([{ type: 'mouse', action: 'wheel', ...t.p, dx: Math.round((t.lastX - e.clientX) * k), dy: Math.round((t.lastY - e.clientY) * k) }]);
-  t.lastX = e.clientX; t.lastY = e.clientY;
-});
-bvCv.addEventListener('pointerup', (e) => {
-  const p = bvPoint(e);
-  if (e.pointerType === 'mouse') { if (p) bvInput([{ type: 'mouse', action: 'up', button: BV_BTN[e.button] || 'left', clickCount: e.detail || 1, ...p, ...bvMods(e) }]); return; }
-  const t = bvTouch;
-  bvTouch = null;
-  if (t && t.id === e.pointerId && !t.moved && p) bvInput([{ type: 'click', ...p }]); // a tap is a click
-});
-bvCv.addEventListener('pointercancel', () => { bvTouch = null; });
-bvCv.addEventListener('contextmenu', (e) => e.preventDefault());
-bvCv.addEventListener('wheel', (e) => {
-  const p = bvPoint(e);
-  if (!p || !bvCanDrive()) return;
-  e.preventDefault();
-  const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;
-  bvInput([{ type: 'mouse', action: 'wheel', ...p, dx: Math.round(e.deltaX * k), dy: Math.round(e.deltaY * k) }]);
-}, { passive: false });
-// Keys while the canvas has focus go to the page (Escape too; the close button or a click outside closes).
-bvCv.addEventListener('keydown', (e) => {
-  if (!bvCanDrive()) return;
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') { e.preventDefault(); return bvPaste(); }
-  if (['Shift', 'Control', 'Alt', 'Meta', 'CapsLock'].includes(e.key)) return;
-  e.preventDefault();
-  e.stopPropagation();
-  bvInput([{ type: 'key', key: e.key, code: e.code, ...bvMods(e) }]);
-});
-// The on-screen keyboard (iPhone): a hidden field takes what is typed and forwards it; it always stays empty.
-const bvKeysEl = $('bvKeys');
-bvKeysEl.addEventListener('beforeinput', (e) => {
-  e.preventDefault();
-  if (e.inputType === 'insertText' || e.inputType === 'insertReplacementText' || e.inputType === 'insertFromPaste') { if (e.data) bvInput([{ type: 'text', text: e.data }]); }
-  else if (e.inputType === 'deleteContentBackward') bvInput([{ type: 'key', key: 'Backspace', code: 'Backspace' }]);
-  else if (e.inputType === 'insertLineBreak' || e.inputType === 'insertParagraph') bvInput([{ type: 'key', key: 'Enter', code: 'Enter' }]);
-});
-bvKeysEl.addEventListener('input', () => { bvKeysEl.value = ''; });
-bvKeysEl.addEventListener('keydown', (e) => {
-  if (['Enter', 'Tab', 'Backspace', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Escape'].includes(e.key) && !e.isComposing) {
-    e.preventDefault();
-    e.stopPropagation();
-    bvInput([{ type: 'key', key: e.key, code: e.code, ...bvMods(e) }]);
-  }
-});
-$('bvKbd').addEventListener('click', () => { bvKeysEl.value = ''; bvKeysEl.focus(); });
 async function bvPaste() {
   let text = '';
   try { text = await navigator.clipboard.readText(); } catch { text = prompt('Paste the text to type into the page') || ''; }
   if (text) bvInput([{ type: 'text', text }]);
 }
-$('bvPaste').addEventListener('click', bvPaste);
-$('bvBack').addEventListener('click', () => bvCanDrive() && bvSay({ t: 'bv_nav', action: 'back' }));
-$('bvReload').addEventListener('click', () => bvCanDrive() && bvSay({ t: 'bv_nav', action: 'reload' }));
-$('bvBar').addEventListener('submit', (e) => {
-  e.preventDefault();
-  const url = $('bvUrl').value.trim();
-  if (!url || !bvCanDrive()) return;
-  bvSay({ t: 'bv_nav', action: 'go', url });
-  bvCv.focus({ preventScroll: true });
-});
+// The same handlers on both mounts; each acts only while its mount shows the view.
+function bvWire(m) {
+  const on = () => BV.view?.m === m, cv = m.canvas, keys = m.keys;
+  cv.addEventListener('pointerdown', (e) => {
+    const p = on() && bvPoint(e);
+    if (!p) return;
+    cv.focus({ preventScroll: true });
+    if (e.pointerType === 'mouse') { e.preventDefault(); cv.setPointerCapture(e.pointerId); bvInput([{ type: 'mouse', action: 'down', button: BV_BTN[e.button] || 'left', clickCount: e.detail || 1, ...p, ...bvMods(e) }]); }
+    else bvTouch = { id: e.pointerId, x: e.clientX, y: e.clientY, at: Date.now(), lastY: e.clientY, lastX: e.clientX, p, moved: false };
+  });
+  cv.addEventListener('pointermove', (e) => {
+    const p = on() && bvPoint(e);
+    if (!p) return;
+    if (e.pointerType === 'mouse') {
+      const now = Date.now();
+      if (now - bvMoveAt < 50 && !e.buttons) return;
+      bvMoveAt = now;
+      return bvInput([{ type: 'mouse', action: 'move', buttons: e.buttons, button: e.buttons & 2 ? 'right' : 'left', ...p }]);
+    }
+    // Touch: a drag scrolls the page.
+    const t = bvTouch;
+    if (!t || t.id !== e.pointerId) return;
+    if (Math.hypot(e.clientX - t.x, e.clientY - t.y) > 8) t.moved = true;
+    if (!t.moved) return;
+    const r = cv.getBoundingClientRect(), k = BV.frame.w / (r.width || 1);
+    bvInput([{ type: 'mouse', action: 'wheel', ...t.p, dx: Math.round((t.lastX - e.clientX) * k), dy: Math.round((t.lastY - e.clientY) * k) }]);
+    t.lastX = e.clientX; t.lastY = e.clientY;
+  });
+  cv.addEventListener('pointerup', (e) => {
+    const p = on() && bvPoint(e);
+    if (e.pointerType === 'mouse') { if (p) bvInput([{ type: 'mouse', action: 'up', button: BV_BTN[e.button] || 'left', clickCount: e.detail || 1, ...p, ...bvMods(e) }]); return; }
+    const t = bvTouch;
+    bvTouch = null;
+    if (t && t.id === e.pointerId && !t.moved && p) bvInput([{ type: 'click', ...p }]); // a tap is a click
+  });
+  cv.addEventListener('pointercancel', () => { bvTouch = null; });
+  cv.addEventListener('contextmenu', (e) => e.preventDefault());
+  cv.addEventListener('wheel', (e) => {
+    const p = on() && bvPoint(e);
+    if (!p || !bvCanDrive()) return;
+    e.preventDefault();
+    const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;
+    bvInput([{ type: 'mouse', action: 'wheel', ...p, dx: Math.round(e.deltaX * k), dy: Math.round(e.deltaY * k) }]);
+  }, { passive: false });
+  // Keys while the canvas has focus go to the page (Escape too; the close button or a click outside closes).
+  cv.addEventListener('keydown', (e) => {
+    if (!on() || !bvCanDrive()) return;
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') { e.preventDefault(); return bvPaste(); }
+    if (['Shift', 'Control', 'Alt', 'Meta', 'CapsLock'].includes(e.key)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    bvInput([{ type: 'key', key: e.key, code: e.code, ...bvMods(e) }]);
+  });
+  // The on-screen keyboard (iPhone): a hidden field takes what is typed and forwards it; it always stays empty.
+  keys.addEventListener('beforeinput', (e) => {
+    e.preventDefault();
+    if (e.inputType === 'insertText' || e.inputType === 'insertReplacementText' || e.inputType === 'insertFromPaste') { if (e.data) bvInput([{ type: 'text', text: e.data }]); }
+    else if (e.inputType === 'deleteContentBackward') bvInput([{ type: 'key', key: 'Backspace', code: 'Backspace' }]);
+    else if (e.inputType === 'insertLineBreak' || e.inputType === 'insertParagraph') bvInput([{ type: 'key', key: 'Enter', code: 'Enter' }]);
+  });
+  keys.addEventListener('input', () => { keys.value = ''; });
+  keys.addEventListener('keydown', (e) => {
+    if (['Enter', 'Tab', 'Backspace', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Escape'].includes(e.key) && !e.isComposing) {
+      e.preventDefault();
+      e.stopPropagation();
+      bvInput([{ type: 'key', key: e.key, code: e.code, ...bvMods(e) }]);
+    }
+  });
+  m.kbd.addEventListener('click', () => { keys.value = ''; keys.focus(); });
+  m.paste.addEventListener('click', bvPaste);
+  m.back.addEventListener('click', () => on() && bvCanDrive() && bvSay({ t: 'bv_nav', action: 'back' }));
+  m.reload.addEventListener('click', () => on() && bvCanDrive() && bvSay({ t: 'bv_nav', action: 'reload' }));
+  m.bar.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const url = m.url.value.trim();
+    if (!url || !on() || !bvCanDrive()) return;
+    bvSay({ t: 'bv_nav', action: 'go', url });
+    cv.focus({ preventScroll: true });
+  });
+  m.take.addEventListener('click', () => {
+    const s = BV.st;
+    if (!s || !on()) return;
+    bvSay({ t: s.takeover && s.role === 'control' ? 'bv_handback' : 'bv_take' });
+  });
+}
+bvWire(BVM.modal);
+bvWire(BVM.tab);
 $('bvModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) bvClose(); });
 document.addEventListener('keydown', (e) => {
-  if (e.key !== 'Escape' || $('bvModal').hidden || e.target === bvCv || e.target === bvKeysEl) return;
+  if (e.key !== 'Escape' || $('bvModal').hidden || e.target === BVM.modal.canvas || e.target === BVM.modal.keys) return;
   e.stopImmediatePropagation();
   bvClose();
 }, true);
+
+// ----- the Browser tab: its profile, the prompt box and the agent's activity
+const BX = { sel: null, tasks: [], err: '', pin: null, ap: new Map(), sending: false, timer: 0 }; // ap: task id → held approvals
+const bxProfiles = () => (BV.data?.nodes || []).filter((n) => n.capable).flatMap((n) => n.profiles.map((p) => ({ n, p })));
+function bxShow() {
+  bwLoad(); // fresh profiles; bxRenderPicker opens the chosen one once they are in
+  bxOpenSel();
+}
+function bxHide() { if (BV.view?.m === BVM.tab) bvClose({ keepFocus: true }); }
+// The profile to show: the one picked last, else one a task is using, else the first.
+function bxOpenSel() {
+  if (!bvTabOn() || !$('bvModal').hidden) return;
+  if (!BX.sel) {
+    const all = bxProfiles(), saved = store.get('cw.bx');
+    const hit = all.find(({ n, p }) => bvKey(n.id, p.identity) === saved) || all.find(({ p }) => p.task) || all[0];
+    if (!hit) {
+      const w = BVM.tab.wait;
+      w.hidden = false;
+      w.textContent = BV.err || (BV.data ? 'No machine here can run a browser yet.' : 'Loading profiles…');
+      return bxRenderActivity();
+    }
+    return bxSelect(hit.n.id, hit.p.identity, hit.n.name);
+  }
+  const { node, identity, name } = BX.sel;
+  if (BV.view?.m === BVM.tab && bvKey(BV.view.node, BV.view.identity) === bvKey(node, identity)) return;
+  bvOpen(node, identity, name, { inline: true });
+}
+function bxSelect(node, identity, name) {
+  const same = BX.sel && bvKey(BX.sel.node, BX.sel.identity) === bvKey(node, identity);
+  BX.sel = { node, identity, name: name || node };
+  store.set('cw.bx', bvKey(node, identity));
+  if (!same) { BX.tasks = []; BX.pin = null; BX.err = ''; }
+  bxRenderPicker();
+  bxOpenSel();
+  bxRenderActivity();
+  bxLoadTasks();
+}
+function bxRenderPicker() {
+  const sel = $('bxProfile'), nodes = (BV.data?.nodes || []).filter((n) => n.capable), many = nodes.length > 1;
+  sel.textContent = '';
+  for (const n of nodes) {
+    const box = many ? el('optgroup') : sel;
+    if (many) { box.label = n.name; sel.append(box); }
+    const ids = n.profiles.map((p) => p.identity);
+    if (BX.sel?.node === n.id && !ids.includes(BX.sel.identity)) ids.push(BX.sel.identity); // just created
+    for (const id of ids) {
+      const p = n.profiles.find((x) => x.identity === id);
+      const o = el('option', '', `${id}${p?.task ? ' · task running' : ''}`);
+      o.value = bvKey(n.id, id);
+      box.append(o);
+    }
+  }
+  if (!sel.options.length) sel.append(el('option', '', BV.data ? 'No profiles' : 'Loading…'));
+  sel.disabled = !nodes.length;
+  if (BX.sel) sel.value = bvKey(BX.sel.node, BX.sel.identity);
+  if (bvTabOn()) bxOpenSel();
+  bxSyncSend();
+}
+$('bxProfile').addEventListener('change', (e) => {
+  const hit = bxProfiles().find(({ n, p }) => bvKey(n.id, p.identity) === e.target.value);
+  if (hit) bxSelect(hit.n.id, hit.p.identity, hit.n.name);
+});
+
+async function bxLoadTasks() {
+  const s = BX.sel;
+  if (!s) return;
+  const k = bvKey(s.node, s.identity), q = `identity=${encodeURIComponent(s.identity)}&node=${encodeURIComponent(s.node)}`;
+  try {
+    const r = await api(`/api/browser/tasks?${q}`);
+    if (!BX.sel || bvKey(BX.sel.node, BX.sel.identity) !== k) return;
+    BX.tasks = Array.isArray(r) ? r : r.tasks || [];
+    BX.err = '';
+    const t = bxShown();
+    if (t && t.status === 'running' && !O.tasks.get(t.id)) {
+      const a = await api('/api/orch/approvals').catch(() => null);
+      if (a) BX.ap.set(t.id, (a.approvals || []).filter((x) => x.task === t.id));
+    }
+  } catch (e) { BX.err = e.message; }
+  bxRenderActivity();
+}
+const bxSoon = () => { clearTimeout(BX.timer); BX.timer = setTimeout(bxLoadTasks, 500); };
+// Live updates: a status change (otask) or a new tool call (olane) of a task on this profile reloads the list.
+function bxOnOrch(msg) {
+  if (!BX.sel || !bvTabOn()) return;
+  const id = msg.t === 'otask' ? msg.task.id : msg.t === 'olane' ? msg.taskId : null;
+  if (id == null) return;
+  const mine = BX.tasks.some((t) => t.id === id) || (msg.t === 'otask' && msg.task.browser === BX.sel.identity && (msg.task.node || msg.task.run_on || 'controller') === BX.sel.node);
+  if (mine) bxSoon();
+}
+// The task the panel follows: the one just sent, else a running one, else a queued one, else the newest.
+function bxShown() {
+  const ts = BX.tasks;
+  return ts.find((t) => t.id === BX.pin) || ts.find((t) => t.status === 'running') || ts.find((t) => t.status === 'queued')
+    || ts.reduce((a, t) => (!a || t.id > a.id ? t : a), null);
+}
+const bxLive = (t) => t && ['running', 'queued'].includes(t.status);
+function bxRenderBusy() {
+  const s = BV.st, t = bxShown(), m = BVM.tab;
+  const busy = BV.view?.m === m && !s?.closed && !s?.takeover && (!!(s?.active && s.task) || t?.status === 'running');
+  m.root.classList.toggle('agent-busy', busy);
+  $('bxBusy').hidden = !busy;
+}
+const BX_STATUS = { queued: 'Waiting to start', running: 'Working…', done: 'Done', failed: 'Could not finish', cancelled: 'Stopped' };
+const BX_VERB = { nav: 'Opened', click: 'Clicked', type: 'Typed in', read: 'Read', shot: 'Took a screenshot of', approval: 'Asked you:' };
+const bxStep = (s) => `${BX_VERB[s.kind] || ''} ${s.label || ''}`.trim() || s.kind;
+function bxRenderActivity() {
+  const box = $('bxActivity');
+  box.textContent = '';
+  bxRenderBusy();
+  if (BX.err) box.append(el('div', 'cn-err', BX.err));
+  const t = bxShown();
+  if (!t) {
+    if (BX.sel) box.append(el('div', 'bx-empty muted', `No agent has worked on ${BX.sel.identity} yet. Say what to do above: it opens sites, clicks and types here, and asks you before anything outbound.`));
+    return;
+  }
+  const head = el('div', 'bx-head');
+  const st = el('span', `bx-st ${t.status}`);
+  st.append(el('span', `dot ${t.status === 'running' ? 'wait' : t.status === 'done' ? 'on' : t.status === 'failed' ? 'warn' : ''}`), el('span', '', BX_STATUS[t.status] || t.status));
+  const title = el('button', 'link-btn bx-title', `#${t.id} ${t.title || ''}`);
+  title.type = 'button';
+  title.title = 'Open the task';
+  title.onclick = () => showTask(t.id);
+  head.append(st, title);
+  if (bxLive(t)) {
+    const stop = el('button', 'btn small danger', 'Stop');
+    stop.type = 'button';
+    stop.id = 'bxStop';
+    stop.onclick = async () => {
+      stop.disabled = true;
+      try { await api(`/api/browser/task/${t.id}/stop`, 'POST'); toast(`Stopped #${t.id}`); } catch (e) { toast(e.message, { kind: 'error' }); }
+      bxLoadTasks();
+    };
+    head.append(stop);
+  }
+  box.append(head);
+  const aps = t.status === 'running' ? O.tasks.get(t.id)?.approvals || BX.ap.get(t.id) || [] : [];
+  for (const a of aps) box.append(approvalPanel(a));
+  const steps = t.steps || [];
+  if (steps.length) {
+    const ol = el('ol', 'bx-steps');
+    for (const s of steps) {
+      const li = el('li', `bx-step ${s.kind}`, bxStep(s));
+      ol.append(li);
+    }
+    box.append(ol);
+    ol.scrollTop = ol.scrollHeight;
+  } else if (bxLive(t)) box.append(el('div', 'bx-empty muted', t.status === 'queued' ? 'Starting soon…' : 'Getting started…'));
+  const shots = steps.filter((s) => s.mediaId).map((s) => ({ id: s.mediaId, name: bxStep(s) }));
+  if (shots.length) box.append(shotGrid(shots));
+  if (t.resultText) {
+    const r = el('div', 'bx-result');
+    r.innerHTML = md(t.resultText);
+    box.append(r);
+  }
+}
+
+// The prompt box: Enter sends on a desktop (Shift+Enter is a new line); a phone's return key is a new line.
+const bxIn = $('bxInput');
+function bxSyncSend() { $('bxSend').disabled = BX.sending || !BX.sel || !bxIn.value.trim(); $('bxHint').textContent = BX.sel ? `On ${BX.sel.identity}${(BV.data?.nodes || []).length > 1 ? ` · ${BX.sel.name}` : ''}` : ''; }
+bxIn.addEventListener('input', () => {
+  bxIn.style.height = 'auto';
+  bxIn.style.height = Math.min(bxIn.scrollHeight, innerHeight * 0.3) + 'px';
+  bxSyncSend();
+});
+bxIn.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !coarse) { e.preventDefault(); $('bxPrompt').requestSubmit(); }
+});
+kbAware(bxIn);
+$('bxPrompt').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const prompt = bxIn.value.trim(), s = BX.sel;
+  if (!prompt || !s || BX.sending) return;
+  BX.sending = true;
+  bxSyncSend();
+  try {
+    const r = await api('/api/browser/task', 'POST', { prompt, identity: s.identity, node: s.node });
+    bxIn.value = '';
+    bxIn.style.height = '';
+    if (r.taskId) {
+      BX.pin = r.taskId;
+      if (!BX.tasks.some((t) => t.id === r.taskId)) BX.tasks.unshift({ id: r.taskId, title: prompt.slice(0, 60), status: 'queued', steps: [] });
+    }
+    bxRenderActivity();
+    bxLoadTasks();
+  } catch (err) { toast(err.message, { kind: 'error' }); }
+  finally { BX.sending = false; bxSyncSend(); }
+});
 
 // ----- the task drawer's live thumbnail
 function bvTaskThumb(t) {

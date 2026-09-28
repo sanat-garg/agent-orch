@@ -285,3 +285,22 @@ test('touch screens get 16px fields and 44pt targets in Settings, Skills, Files,
   const filesCss = read('public/files.css');
   assert.ok(filesCss.indexOf('.fx-search input { flex: 1') < filesCss.indexOf('.fx-search input { font-size: 16px'));
 });
+
+test('the Browser is a header tab with the live view in place, a prompt box and an activity panel (not a sidebar button)', () => {
+  const browserJs = read('public/browser.js');
+  assert.doesNotMatch(indexHtml, /id="browserBtn"/, 'the sidebar Browser button is gone');
+  assert.match(indexHtml, /<div class="seg" role="tablist"[^]*?<button role="tab" data-view="browser"[^>]*>\s*<svg[^]*?<span>Browser<\/span>[^]*?<\/div>/, 'a 4th header tab with an icon');
+  const htmlIds = new Set([...indexHtml.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]));
+  for (const id of ['browserView', 'bxBar', 'bxProfile', 'bxManage', 'bxBack', 'bxReload', 'bxUrl', 'bxTake', 'bxStatus', 'bxStage', 'bxCanvas', 'bxWait', 'bxBusy', 'bxKeys',
+    'bxPrompt', 'bxInput', 'bxSend', 'bxActivity', 'bvModal', 'bvCanvas', 'browserModal']) assert.ok(htmlIds.has(id), `#${id} exists`);
+  // browser.js's lookups, including the mount's parts ($(p + name) for the bv* modal and the bx* tab)
+  const ids = new Set([...browserJs.matchAll(/(?<![\w$.])\$\(\s*'([^']+)'\s*\)/g)].map((m) => m[1]));
+  for (const p of ['bv', 'bx']) for (const n of ['Canvas', 'Wait', 'Status', 'Take', 'Url', 'Bar', 'Back', 'Reload', 'Paste', 'Kbd', 'Keys']) ids.add(p + n);
+  assert.deepEqual([...ids].filter((id) => !htmlIds.has(id)), []);
+  assert.match(indexHtml, /id="bxInput"[^>]*placeholder="Tell an agent what to do on this screen…"/);
+  assert.match(browserJs, /api\('\/api\/browser\/task', 'POST', \{ prompt, identity: s\.identity, node: s\.node \}\)/, 'the prompt box posts to /api/browser/task');
+  assert.match(appJs, /\['term', 'files', 'browser'\]\.includes\(view\)/, 'setView knows the browser view');
+  assert.match(appJs, /\$\('browserView'\)\.hidden = view !== 'browser'/);
+  assert.match(read('public/browser.css'), /\.bx-prompt \{ position: sticky; bottom: 0;/, 'the prompt box sticks above the keyboard');
+  assert.match(browserJs, /kbAware\(bxIn\)/, 'with the composer keyboard handling');
+});

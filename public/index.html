@@ -70,9 +70,6 @@
         <span class="dot" id="connDot"></span>
         <span class="host" id="connText">Connecting…</span>
       </button>
-      <button type="button" class="icon-btn side-browser" id="browserBtn" aria-haspopup="dialog" aria-label="Browser" title="Browser: sign in to sites, watch tasks">
-        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3.5 12h17M12 3.5c2.4 2.5 3.4 5.3 3.4 8.5s-1 6-3.4 8.5c-2.4-2.5-3.4-5.3-3.4-8.5s1-6 3.4-8.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
-      </button>
       <button type="button" class="icon-btn side-stats" id="statsBtn" aria-haspopup="dialog" aria-label="Stats" title="Stats">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M5 20V11M12 20V4M19 20v-6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
       </button>
@@ -109,6 +106,10 @@
         <button role="tab" data-view="term" aria-selected="false">
           <svg viewBox="0 0 24 24" width="16" height="16"><path d="M5 7l5 5-5 5M12 17h7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span>Terminal</span>
+        </button>
+        <button role="tab" data-view="browser" aria-selected="false" id="browserTab" title="Browser: watch and drive the live page, or tell an agent what to do on it">
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3.5 12h17M12 3.5c2.4 2.5 3.4 5.3 3.4 8.5s-1 6-3.4 8.5c-2.4-2.5-3.4-5.3-3.4-8.5s1-6 3.4-8.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+          <span>Browser</span>
         </button>
       </div>
     </header>
@@ -196,6 +197,39 @@
     </section>
 
     <section class="files" id="filesView" hidden aria-label="Project files"></section>
+
+    <!-- The Browser tab (browser.js bx*): the live view in place, a prompt box for an agent, and its activity. -->
+    <section class="bx" id="browserView" hidden aria-label="Browser">
+      <form class="bv-bar bx-bar" id="bxBar" autocomplete="off">
+        <select id="bxProfile" aria-label="Browser profile"><option>Loading…</option></select>
+        <button type="button" class="icon-btn" id="bxManage" aria-haspopup="dialog" aria-label="Profiles" title="Profiles: signed-in sites, a new profile, Clear"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="8" r="3.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+        <button type="button" class="icon-btn" id="bxBack" aria-label="Back" title="Back"><svg viewBox="0 0 24 24" width="18" height="18"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <button type="button" class="icon-btn" id="bxReload" aria-label="Reload" title="Reload"><svg viewBox="0 0 24 24" width="17" height="17"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <input id="bxUrl" type="url" inputmode="url" enterkeyhint="go" spellcheck="false" autocapitalize="off" aria-label="Address" placeholder="Search or enter an address">
+        <button type="button" class="btn small" id="bxPaste" title="Paste your clipboard into the page">Paste</button>
+        <button type="button" class="btn small" id="bxKbd" title="Show the keyboard and type into the page">Keyboard</button>
+        <button type="button" class="btn small" id="bxTake" hidden></button>
+      </form>
+      <div class="bx-status" id="bxStatus" aria-live="polite"></div>
+      <div class="bv-stage bx-stage" id="bxStage">
+        <canvas id="bxCanvas" tabindex="0" aria-label="Live browser page. Click to interact; type while it has focus."></canvas>
+        <div class="bv-wait" id="bxWait">Loading profiles…</div>
+        <span class="bx-busy" id="bxBusy" hidden>Agent is working</span>
+        <input id="bxKeys" class="bv-keys" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="Type into the page" enterkeyhint="send">
+      </div>
+      <form class="composer bx-prompt" id="bxPrompt">
+        <div class="box">
+          <textarea id="bxInput" rows="2" placeholder="Tell an agent what to do on this screen…" autocomplete="off" spellcheck="true" aria-label="Tell an agent what to do on this screen"></textarea>
+          <div class="controls">
+            <div class="left"><span class="bx-hint" id="bxHint"></span></div>
+            <button type="submit" class="send" id="bxSend" aria-label="Send" disabled>
+              <svg class="i-send" viewBox="0 0 24 24" width="18" height="18"><path d="M12 19V5M5 12l7-7 7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
+        </div>
+      </form>
+      <div class="bx-act" id="bxActivity" aria-live="polite"></div>
+    </section>
 
     <section class="term" id="termView" hidden>
       <div class="term-tabs" id="termTabs" role="tablist" aria-label="Terminals">

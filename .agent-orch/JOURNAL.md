@@ -897,6 +897,9 @@ Web Push backend and /api/push routes built; both test files pass
 
 Rapid mode tops up parallel work with verified quota guards.
 
+## 2026-09-28 11:26 — #309 Browser as a header tab with an in-place live view and an agent prompt box [done (check passed)]
+
+Browser header tab shows live view with a working agent prompt box
 ## 2026-09-28 11:17 — #308 Browser prompt backend: POST /api/browser/task runs an agent on the live screen now [done (check passed)]
 
 Browser task API verified; pinned agents run without git lifecycle.
@@ -907,3 +910,7 @@ Done-when passes; test runner uses a lock directory without flock
 ## 2026-09-28 11:27 — #306 Send pushes for what needs the owner: approvals, chat permission prompts, failed tasks, review checkpoints and waiting events [done (check passed)]
 
 Owner pushes wired for approvals, failures, reviews, waits, permissions
+
+## 2026-09-28 11:35 — #313 Integrate #309: Browser as a header tab with an in-place live view and an agent prompt box [done (check passed)]
+
+CONTEXT.md conflict resolved; UI tests pass against main's backend

@@ -89,19 +89,22 @@ const state = {
 // Saved chat messages still editable/retractable (see markPending): msgId -> { bubble, status, notice, editing, state }.
 const pendingMsgs = new Map();
 
-// ---------- view toggle (Vibecode chat / Files / Terminal) ----------
+// ---------- view toggle (Vibecode chat / Files / Terminal / Browser) ----------
 function setView(view) {
-  if (view !== 'term' && view !== 'files') view = 'chat';
+  if (!['term', 'files', 'browser'].includes(view)) view = 'chat';
   $('app').dataset.view = view;
   document.querySelectorAll('.seg button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.view === view)));
   $('chatView').hidden = view !== 'chat';
   $('filesView').hidden = view !== 'files';
   $('termView').hidden = view !== 'term';
-  $('title').textContent = view === 'term' ? 'Terminal' : currentTitle();
-  $('cwdLabel').textContent = view === 'term' ? '~/workspace · bash' : currentCwdLabel();
+  $('browserView').hidden = view !== 'browser';
+  $('title').textContent = view === 'term' ? 'Terminal' : view === 'browser' ? 'Browser' : currentTitle();
+  $('cwdLabel').textContent = view === 'term' ? '~/workspace · bash' : view === 'browser' ? '' : currentCwdLabel();
+  if (view === 'browser') window.bxShow?.(); // public/browser.js
+  else window.bxHide?.();
   if (view === 'term') openTerminals();
   else if (view === 'files') window.FilesView?.show(); // public/files.js
-  else $('input').focus({ preventScroll: true });
+  else if (view === 'chat') $('input').focus({ preventScroll: true });
   store.set('cw.view', view);
 }
 document.querySelectorAll('.seg button').forEach((b) => b.addEventListener('click', () => setView(b.dataset.view)));
@@ -700,7 +703,7 @@ function draftSlug() {
   return state.draft.type === 'new' ? slugify(state.draft.name) || slugify($('input').value, true) : '';
 }
 function updateHeader() {
-  if ($('app').dataset.view === 'term') { $('repoLink').hidden = true; return; }
+  if (['term', 'browser'].includes($('app').dataset.view)) { $('repoLink').hidden = true; return; }
   $('title').textContent = currentTitle();
   $('cwdLabel').textContent = currentCwdLabel();
   document.title = `${currentTitle()} · agent-orch`;
@@ -945,7 +948,7 @@ function shotGrid(imgs = []) {
 // Prev/next goes through every image of the chat, or of the whole task in the drawer.
 function openShot(fig) {
   let list;
-  const panel = fig.closest('.rv-panel, .act-list');
+  const panel = fig.closest('.rv-panel, .act-list, .bx-act');
   if (panel) list = [...panel.querySelectorAll('.shot')].map((f) => ({ id: f.dataset.id, name: f.dataset.name, w: +f.dataset.w || 0, h: +f.dataset.h || 0 }));
   else if (fig.closest('#drBody') && O.detail) list = O.detail.runs.flatMap((r) => r.entries.filter((e) => e.k === 'image'));
   else list = [...$('messages').querySelectorAll('.shot')].map((f) => ({ id: f.dataset.id, name: f.dataset.name, w: +f.dataset.w || 0, h: +f.dataset.h || 0 }));
@@ -1467,8 +1470,12 @@ function syncKeyboard() {
   root.classList.toggle('kb-open', kb > 0 || kbFocus);
 }
 if (window.visualViewport) for (const ev of ['resize', 'scroll']) visualViewport.addEventListener(ev, syncKeyboard);
-input.addEventListener('focus', () => { kbFocus = navigator.userActivation?.isActive ?? true; syncKeyboard(); });
-input.addEventListener('blur', () => { kbFocus = false; syncKeyboard(); });
+// Any field that brings up the keyboard (the chat composer, the Browser tab's prompt box).
+function kbAware(f) {
+  f.addEventListener('focus', () => { kbFocus = navigator.userActivation?.isActive ?? true; syncKeyboard(); });
+  f.addEventListener('blur', () => { kbFocus = false; syncKeyboard(); });
+}
+kbAware(input);
 function updateSendButton() {
   const has = !!input.value.trim() || ATT.list.length > 0;
   const stop = state.busy && !has;
@@ -5278,6 +5285,7 @@ function applyOrchSnapshot(s) {
 }
 
 function onOrch(msg) {
+  window.bxOnOrch?.(msg); // the Browser tab's activity panel (browser.js)
   if (msg.t === 'olane') return caEvent(msg.taskId); // live lane activity: particles on the cluster diagram (no lanes in the Queue)
   if (msg.t === 'otask' || msg.t === 'ostate') scheduleMachines(); // running tasks per machine
   if (msg.t === 'otask') {

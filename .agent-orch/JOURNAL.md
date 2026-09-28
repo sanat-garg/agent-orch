@@ -1377,3 +1377,6 @@ CONTEXT.md conflict resolved; ping-result tests pass
 ## 2026-09-28 16:53 — #461 Integrate #449: Prompt bar: one combined model + fallbacks control [done (check passed)]
 
 CONTEXT.md conflict resolved again; Done-when tests pass (23/23)
+## 2026-09-28 16:55 — #459 Rolling restart waits only for the git merge itself, not a whole integrator run [done (check passed)]
+
+Restarts wait only for merges; integrators pause; friendly 404 retry

@@ -1,6 +1,7 @@
 // Rolling restart scheduler (rolling.mjs, #426): new server code schedules a restart within 2 min whatever is running;
 // a run preflights, pauses, gives a chat turn its time and exits; a failing preflight blocks it (nothing paused, that
-// HEAD skipped); restarts coalesce into one per 10 min, also across the restart itself; an integrator mid-merge holds it.
+// HEAD skipped); restarts coalesce into one per 10 min, also across the restart itself; only a merge into main in flight
+// holds it (briefly, at most mergeWaitMs).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -146,23 +147,48 @@ test('restarts coalesce: at most one per 10 min, also across the restart itself'
   for (const x of [h, a, b]) fs.rmSync(x.dir, { recursive: true, force: true });
 });
 
-test('an integrator mid-merge holds the restart; a failed pause resumes the tasks and retries', async () => {
-  let busy = 'integrator #12 is merging';
+test('only a merge into main in flight holds the restart, polled briefly; a failed pause resumes the tasks and retries', async () => {
+  // A restart-when-idle drain (busy) reschedules; a merge (merging) is waited for in place and the run goes on at once.
+  let merging = 'integrator #12 is merging';
   const logs = [];
-  const h = harness({ busy: () => busy, log: (m) => logs.push(m) });
+  const h = harness({ merging: () => merging, log: (m) => logs.push(m), cfg: { busyRetryMs: 60e3 } });
   await h.r.check();
   await sleep(120);
-  assert.deepEqual(h.calls, [], 'nothing ran while the integrator merged');
-  assert.equal(h.r.status().phase, 'scheduled');
+  assert.deepEqual(h.calls, [], 'nothing ran while the merge was in flight');
+  assert.equal(h.r.status().phase, 'merging');
+  assert.equal(h.r.restartNow().phase, 'merging', 'restart now does not start a second run');
+  assert.equal(h.r.cancel(), false);
   assert.equal(logs.filter((m) => /waiting \(integrator #12 is merging\)/.test(m)).length, 1, 'logged once');
-  busy = '';
+  const t0 = Date.now();
+  merging = '';
   assert.ok(await until(() => h.st.exited === 0));
+  assert.ok(Date.now() - t0 < 1000, 'proceeds as soon as the merge finishes, not after busyRetryMs');
   assert.deepEqual(h.calls, ['preflight', 'prepare', 'exit 0']);
+
+  // A merge still going after mergeWaitMs (60 s by default) is logged and the restart goes on (prepare lets it finish).
+  assert.equal(ROLLING.mergeWaitMs, 60e3);
+  const slogs = [];
+  const s = harness({ merging: () => '#9 is merging', log: (m) => slogs.push(m), cfg: { mergeWaitMs: 150 } });
+  const t1 = Date.now();
+  s.r.restartNow();
+  assert.ok(await until(() => s.st.exited === 0));
+  assert.ok(Date.now() - t1 >= 150);
+  assert.ok(slogs.some((m) => /#9 is merging for over 0 s; restarting as soon as it finishes/.test(m)), slogs.join('\n'));
+  assert.deepEqual(s.calls, ['preflight', 'prepare', 'exit 0']);
+
+  // A restart-when-idle drain still reschedules.
+  let busy = 'a restart-when-idle drain is in progress';
+  const b = harness({ busy: () => busy });
+  b.r.restartNow();
+  await sleep(80);
+  assert.deepEqual(b.calls, []);
+  busy = '';
+  assert.ok(await until(() => b.st.exited === 0));
 
   let tries = 0;
   const p = harness({ prepare: async () => (++tries === 1 ? { ok: false, paused: [3], why: '#5 still running on this server' } : { ok: true, paused: [3] }) });
   p.r.restartNow();
   assert.ok(await until(() => p.st.exited === 0));
   assert.deepEqual(p.calls, ['preflight', 'resume 3', 'preflight', 'exit 0']);
-  for (const x of [h, p]) fs.rmSync(x.dir, { recursive: true, force: true });
+  for (const x of [h, s, b, p]) fs.rmSync(x.dir, { recursive: true, force: true });
 });

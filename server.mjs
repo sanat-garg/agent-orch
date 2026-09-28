@@ -382,7 +382,8 @@ const rolling = createRollingRestart({
   changed: async (head) => (head === bootCommit || !bootCommit ? [] : (await git(['diff', '--name-only', `${bootCommit}..${head}`])).split('\n').filter(serverFile)),
   version: async (head) => formatVersion(Number(await git(['rev-list', '--count', head])) || 0).slice(1), // '3.59': readers add the v
   preflight: () => restartPreflight().catch((e) => String(e?.message || e)),
-  busy: () => (restartPending ? 'a restart-when-idle drain is in progress' : orch?.restartBlocker() || ''),
+  busy: () => (restartPending ? 'a restart-when-idle drain is in progress' : ''),
+  merging: () => orch?.restartBlocker() || '',
   prepare: () => orch.prepareRestart(),
   resume: () => orch.resumeAfterRestart(),
   chatIdle: () => chatIdle({ runtimes, agentTurns, planning, chatPlanning: orch.chatPlanning }),

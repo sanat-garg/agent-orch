@@ -1,7 +1,10 @@
 // Rolling restarts (#426). In rapid mode the head is never idle, so "restart once idle" (#280/#293) never fires and merged
 // fixes don't go live. With Apply updates = 'auto', new server code merged since boot (serverFile) schedules a restart
 // within ROLLING.delayMs, at most one per ROLLING.windowMs (later commits coalesce into it; the window survives the
-// restart through the state file), and it waits while an integrator is mid-merge (busy). A run:
+// restart through the state file). A run:
+//   0. a merge into main in flight (merging(): the git critical section, seconds; never an agent session) is waited
+//      for, polling every pollMs; one still going after mergeWaitMs is logged and the run goes on (prepare() still lets
+//      it finish);
 //   1. preflight(): `node --check` every server module, then boot server.mjs in a temp CW_DATA_DIR with
 //      CW_NO_ORCHESTRATOR=1; a failure refuses the restart and alerts (that HEAD is skipped until a newer one lands);
 //   2. prepare(): the orchestrator pauses the head's own runs (session and worktree kept), lets in-flight merges finish
@@ -16,7 +19,7 @@ import path from 'node:path';
 import net from 'node:net';
 import { execFile, spawn } from 'node:child_process';
 
-export const ROLLING = { delayMs: 30e3, windowMs: 10 * 60e3, busyRetryMs: 30e3, failRetryMs: 2 * 60e3, chatWaitMs: 60e3, pollMs: 500 };
+export const ROLLING = { delayMs: 30e3, windowMs: 10 * 60e3, busyRetryMs: 30e3, failRetryMs: 2 * 60e3, chatWaitMs: 60e3, mergeWaitMs: 60e3, pollMs: 500 };
 export const APPLY_UPDATES = ['auto', 'idle', 'manual'];
 // Files whose change needs a restart: any *.mjs outside test/ and public/, and the dependency manifests.
 export const serverFile = (f) => (/\.mjs$/.test(f) && !/^(test|public)\//.test(f)) || f === 'package.json' || f === 'package-lock.json';
@@ -63,7 +66,8 @@ export async function preflight({ root, bootMs = 20e3 } = {}) {
 }
 
 // deps: stateFile; head() → the checkout's HEAD sha; changed(head) → server files changed since boot; version(head);
-// preflight() → '' | why; busy() → why a restart must wait now ('' = go); prepare() → {ok, paused, why};
+// preflight() → '' | why; busy() → why a restart must wait now ('' = go; retried every busyRetryMs); merging() → the
+// merge into main in flight ('' = none; waited for, at most mergeWaitMs); prepare() → {ok, paused, why};
 // resume(paused) undoes prepare; chatIdle(); exit(code); log(msg); alert(msg); onChange() (status() changed).
 export function createRollingRestart(deps) {
   const cfg = { ...ROLLING, ...Object.fromEntries(Object.entries(deps.cfg || {}).filter(([, v]) => v != null)) }, now = deps.now || Date.now;
@@ -112,6 +116,14 @@ export function createRollingRestart(deps) {
       return false;
     }
     busyNoted = '';
+    const merge = deps.merging?.() || '';
+    if (merge) {
+      plan.phase = 'merging'; onChange();
+      log(`rolling: waiting (${merge})`);
+      for (const end = now() + cfg.mergeWaitMs; deps.merging() && now() < end;) await sleep(cfg.pollMs);
+      const still = deps.merging();
+      if (still) log(`rolling: ${still} for over ${Math.round(cfg.mergeWaitMs / 1000)} s; restarting as soon as it finishes`);
+    }
     plan.phase = 'preflight'; onChange();
     let head = await deps.head();
     let bad = await deps.preflight();

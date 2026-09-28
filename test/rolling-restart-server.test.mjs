@@ -11,6 +11,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { formatVersion } from '../version.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PASSWORD = 'rolling-test-password';
@@ -66,7 +67,7 @@ test('by default new server code restarts the server on its own, and the next bo
   const head = git('rev-parse', 'HEAD');
   const rec = JSON.parse(fs.readFileSync(path.join(dir, 'restart.json'), 'utf8'));
   assert.equal(rec.to, head);
-  assert.equal(rec.version, `1.${git('rev-list', '--count', head).padStart(2, '0')}`);
+  assert.equal(rec.version, formatVersion(Number(git('rev-list', '--count', head))).slice(1));
 
   // The process systemd starts next: "Updated to vX.YY" for its clients, and nothing more to apply.
   const b = await boot(dir, { AGENT_ORCH_RESTART_POLL_MS: '200' });

@@ -799,7 +799,7 @@ function convoMenu(c, anchor) {
   setTimeout(() => document.addEventListener('click', () => m.remove(), { once: true }));
 }
 
-async function api(url, method = 'GET', body) {
+async function api(url, method = 'GET', body, retry = true) {
   const r = await fetch(url, {
     method,
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
@@ -807,8 +807,29 @@ async function api(url, method = 'GET', body) {
   });
   if (r.status === 401) { location.href = '/login'; throw new Error('signed out'); }
   const data = await r.json().catch(() => ({}));
+  if (r.status === 404 && !data.error && retry && String(url).startsWith('/api/')) return apiAfterUpdate(url, method, body);
   if (!r.ok) throw new Error(data.error || `Request failed (${r.status})`);
   return data;
+}
+// An /api/ route the server doesn't know (a bare 404, no JSON error): this page is newer than the server, which is
+// about to restart onto the new code (#459). The owner gets API_UPDATING instead of 'Request failed (404)', and the
+// call is retried once the ws 'version' frame (sent on every connect) reports a newer build, within API_WAIT.ms.
+const API_UPDATING = 'The server is updating, try again in a moment';
+const API_WAIT = { ms: 3 * 60e3, waiters: [], toastAt: 0 };
+async function apiAfterUpdate(url, method, body) {
+  if (Date.now() - API_WAIT.toastAt > 10e3) { API_WAIT.toastAt = Date.now(); toast(API_UPDATING); }
+  const from = VER.running?.build ?? null;
+  const newer = await new Promise((resolve) => {
+    const w = { from, resolve: (ok) => { clearTimeout(w.timer); API_WAIT.waiters = API_WAIT.waiters.filter((x) => x !== w); resolve(ok); } };
+    w.timer = setTimeout(() => w.resolve(false), API_WAIT.ms);
+    API_WAIT.waiters.push(w);
+  });
+  if (!newer) throw new Error(API_UPDATING);
+  return api(url, method, body, false);
+}
+// onVersion: a build newer than the one a waiting call saw (any build when it saw none) releases it.
+function apiServerVersion(build) {
+  for (const w of [...API_WAIT.waiters]) if (w.from == null || (build && build > w.from)) w.resolve(true);
 }
 
 // ---------- conversation state ----------
@@ -3396,7 +3417,7 @@ function applyUpdateStatus(s) {
   renderUpdateBanner();
 }
 async function pollUpdates() { try { applyUpdateStatus(await api('/api/status')); } catch {} }
-const UPDATE_PHASE = { preflight: 'Updating: checking that the new code starts…', pausing: 'Updating: pausing this server\'s tasks…', exiting: 'Updating: restarting…' };
+const UPDATE_PHASE = { preflight: 'Updating: checking that the new code starts…', merging: 'Updating: waiting for a merge to finish…', pausing: 'Updating: pausing this server\'s tasks…', exiting: 'Updating: restarting…' };
 function renderUpdateBanner() {
   const u = upd.update, draining = !u && (upd.pending || !!O.state?.draining), busy = draining || (u && u.phase !== 'scheduled');
   const reloadOnly = !u && !draining && upd.reload && (!upd.commits || upd.commits <= upd.dismissed);
@@ -6437,6 +6458,7 @@ function fmtVersion(n) { return Number.isInteger(n) && n >= 0 ? `v${Math.floor(n
 function onVersion(running) {
   const b = running?.build, prev = VER.running?.build || Number(store.get('cw.build')) || 0;
   VER.running = running || null;
+  apiServerVersion(b);
   if (b) {
     if (prev && b > prev) toast(`Updated to ${fmtVersion(b)}`, { kind: 'success', duration: 8000 });
     store.set('cw.build', String(b));

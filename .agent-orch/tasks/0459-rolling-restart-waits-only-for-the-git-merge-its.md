@@ -13,3 +13,7 @@ The rolling restart (#426/#446) stalls behind integrator tasks. The live log on 
 ## Done when
 
 `node --test test/rolling-restart*.test.mjs test/ui-api-404*.test.mjs` passes (restart not blocked by an integrator session, waits only for the git critical section, friendly 404 with retry)
+
+## Result — done (check passed) (2026-09-28 16:55)
+
+AGENT-ORCH-STATUS: done — Restarts wait only for merges; integrators pause; friendly 404 retry

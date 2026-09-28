@@ -2105,17 +2105,25 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // Land a finished worktree on the main branch: commit whatever sits in the main tree, squash + rebase + fast-forward,
   // push, then drop the worktree and its branch. { sha } or { conflict: [files] } (worktree kept).
   function mergeTask(task, project, wt, message) {
-    return serialGit(project.path, async () => {
+    return serialGit(project.path, () => landingWhile(task, async () => {
       await commitNow(project.path, `agent-orch: uncommitted changes before merging #${task.id}`);
       const info = (await repoInfo(project.path)) || wt.info;
       if (await fetchMain(info)) logEvent(`${info.branch} fast-forwarded to origin before merging #${task.id}`, { projectId: project.id, taskId: task.id });
       const r = await mergeBack(info, wt.owner, message);
       if (r.conflict) return r;
-      if (r.sha) onCommit(project.path, r.sha, message);
+      if (r.sha) landingWhile(task, () => onCommit(project.path, r.sha, message)).catch(() => {}); // the push of main
       await removeWorktree(info, wt.owner);
       run('UPDATE tasks SET worktree=NULL WHERE id=:id', { id: wt.owner });
       return r;
-    });
+    }));
+  }
+  // The git critical section of landing work on main (#459): mergeTask's fetch/rebase/fast-forward and the push of main
+  // after it. Only these hold a rolling restart (restartBlocker); they take seconds, an agent session never counts.
+  const landing = new Map(); // token -> { id, integrator, since }
+  function landingWhile(task, fn) {
+    const token = {};
+    landing.set(token, { id: task.id, integrator: !!task.integrates, since: Date.now() });
+    return Promise.resolve().then(fn).finally(() => landing.delete(token));
   }
   // A failed or cancelled task: its unfinished work is committed to its branch (kept for a retry) and the checkout removed.
   function parkTask(project, id, message) {
@@ -2705,15 +2713,17 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
   const chatPlanning = () => [...planningProjects.values()].includes('chat');
 
-  // ---- rolling restart (#426, rolling.mjs). restartBlocker: why a restart must wait right now (an integrator mid-merge).
+  // ---- rolling restart (#426, rolling.mjs). restartBlocker: why a restart must wait right now: a merge into main is in
+  // flight (landingWhile, seconds). A running integrator session is not one: prepareRestart pauses it like other work.
   const localRuns = () => [...running].filter(([, r]) => (r.node || LOCAL_NODE) === LOCAL_NODE);
   function restartBlocker() {
-    const id = localRuns().map(([id]) => id).find((id) => getTask(id)?.integrates);
-    return id ? `integrator #${id} is merging` : '';
+    const [l] = landing.values();
+    return l ? `${l.integrator ? 'integrator ' : ''}#${l.id} is merging` : '';
   }
-  // Stop claiming, then pause the head's own runs: work and reflection stop now (session and worktree kept), a planner
-  // turn gets planWaitMs first, an integrator finishes. A worker's job is left alone while it runs there (after the
-  // restart it is re-adopted, #220); one that has finished is waited for, since the head is merging it. Resolves
+  // Stop claiming, then pause the head's own runs: work, integrators and reflection stop now (session and worktree kept;
+  // a paused integrator re-runs its check and lands after the restart), a planner turn gets planWaitMs first. A worker's
+  // job is left alone while it runs there (after the restart it is re-adopted, #220); one that has finished is waited
+  // for, since the head is merging it. Resolves
   // {ok, paused} once only worker jobs run and no git operation is in flight (kv restart_paused lists the paused tasks
   // for resumeAfterRestart), else {ok: false, why, paused} after waitMs (resumeAfterRestart undoes it).
   async function prepareRestart({ waitMs = 5 * 60e3, planWaitMs = 60e3, pollMs = 250 } = {}) {
@@ -2722,7 +2732,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const headSide = () => [...running].filter(([id, r]) => (r.node || LOCAL_NODE) !== LOCAL_NODE && !jobs.has(id));
     for (;;) {
       for (const [id, r] of localRuns()) {
-        if (stopIntents.has(id) || (r.kind === 'plan' && Date.now() - start < planWaitMs) || getTask(id)?.integrates) continue;
+        if (stopIntents.has(id) || (r.kind === 'plan' && Date.now() - start < planWaitMs)) continue;
         stopIntents.set(id, { kind: 'restart' });
         stopped.add(id);
         r.abort.abort();

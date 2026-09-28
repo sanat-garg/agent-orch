@@ -1567,3 +1567,7 @@ Desktop Machines graph is a star with task-listing cards and usage rings
 ## 2026-09-28 18:52 — #496 Browser tasks via Claude in Chrome (claude --chrome) on a Mac [done (check passed)]
 
 browser tasks prefer a Claude in Chrome runner; tests pass, documented
+
+## 2026-09-28 18:54 — #501 Bring back the milestone-line Timeline bar; use it on task cards too [done (check passed)]
+
+Drawer and card phase bars share one renderer with milestone lines

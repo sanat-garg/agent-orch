@@ -13,3 +13,7 @@ The owner prefers the EARLIER drawer 'Timeline' bar design (the one with vertica
 ## Done when
 
 `node --test test/ui-phase-strip*.test.mjs` passes with milestone lines at proportional phase boundaries in both the drawer Timeline and the compact card strip
+
+## Result — done (check passed) (2026-09-28 18:54)
+
+AGENT-ORCH-STATUS: done — Drawer and card phase bars share one renderer with milestone lines

@@ -1,7 +1,8 @@
-// #479/#497: every task card carries a quiet phase strip along its bottom edge (app.js syncPhaseStrip), drawn by the same
-// phaseBar as the drawer's Timeline: one segment per step, as wide as the time it took (the queue wait, then the run's
-// phase_log), the live step with a gentle shimmer (none under reduced motion); a failed step in brick, a limit wait in ochre.
-// Colours are muted --ph-* vars tuned for light and dark; the strip is ≤ 2px and dimmed until the card is hovered.
+// #479/#497/#501: every task card carries a quiet phase strip along its bottom edge (app.js syncPhaseStrip), the compact form
+// of the drawer Timeline's phaseBar: one segment per step, as wide as the time it took (the queue wait, then the run's
+// phase_log), a vertical milestone line at each phase boundary (phases − 1 of them, where the time says), the live step
+// with a gentle shimmer (none under reduced motion); a failed step in brick, a limit wait in ochre. Colours are muted
+// --ph-* vars tuned for light and dark; on cards the track is ≤ 3px, milestones 1px hairlines, dimmed until hovered.
 // stripSegs is pulled out of app.js's source and checked on its own; the rendering is checked in Chromium on the real
 // index.html + app.css (no scripts) with the strip's functions injected, in light and dark. The browser part skips when
 // Chromium can't launch.
@@ -46,9 +47,9 @@ test('stripSegs: each step as long as it took, the live one last', () => {
   assert.equal(pure.stripDur(252), '4m 12s');
 });
 
-test('the drawer Timeline and the cards share one phaseBar', () => {
-  assert.match(src(/^function timelineSection\(.*?^}$/ms), /phaseBar\(el\('div', 'tl-bar'\)/);
-  assert.match(src(/^function syncPhaseStrip\(.*?^}$/ms), /phaseBar\(bar, stripSegs\(t, s\)\)/);
+test('the drawer Timeline and the cards share one phaseBar (cards in compact mode)', () => {
+  assert.match(src(/^function timelineSection\(.*?^}$/ms), /phaseBar\(el\('div', 'tl-bar'\), segs, \{ name: /);
+  assert.match(src(/^function syncPhaseStrip\(.*?^}$/ms), /phaseBar\(bar, stripSegs\(t, s\), \{ compact: true \}\)/);
   assert.equal(appJs.match(/classList\.add\('ph-bar'\)/g)?.length, 1);
 });
 
@@ -87,7 +88,7 @@ try { browser = await chromium.launch(); } catch {
 after(() => browser?.close());
 
 for (const scheme of ['light', 'dark']) {
-  test(`UI (${scheme}): proportional 2px strip in muted colours, shimmering live step, same bar as the drawer Timeline`, { skip: noBrowser }, async () => {
+  test(`UI (${scheme}): proportional compact strip with milestone hairlines, shimmering live step, same bar as the drawer Timeline`, { skip: noBrowser }, async () => {
     const page = await browser.newPage({ viewport: { width: 390, height: 844 }, colorScheme: scheme });
     await page.route('http://app.test/**', (r) => {
       const f = path.join(PUB, new URL(r.request().url()).pathname);
@@ -120,13 +121,22 @@ for (const scheme of ['light', 'dark']) {
       const tl = S.timelineSection({ phases: [{ phase: 'queued', at: started - 100_000, ms: 100_000 }, { phase: 'running', at: started, ms: 240_000 }, { phase: 'checking', at: now - 60_000 }] }, true);
       document.body.append(tl);
       const tlBar = tl.querySelector('.tl-bar');
-      const segs = (bar) => [...bar.children].map((i) => ({ phase: i.dataset.phase, w: i.getBoundingClientRect().width, bg: cs(i).backgroundColor, cls: i.className }));
+      const segs = (bar) => [...bar.querySelectorAll(':scope > i')].map((i) => ({ phase: i.dataset.phase, w: i.getBoundingClientRect().width, h: i.getBoundingClientRect().height,
+        bg: cs(i).backgroundColor, cls: i.className, radius: cs(i).borderRadius }));
+      // Milestone lines: where each stands along the bar (0..1), its drawn line's size, and its tooltip.
+      const ms = (bar) => { const b = bar.getBoundingClientRect(); return [...bar.querySelectorAll(':scope > b.ph-ms')].map((m) => {
+        const line = getComputedStyle(m, '::before'), at = m.getBoundingClientRect().left;
+        return { x: (at - b.left) / b.width, lineW: parseFloat(line.width), lineH: parseFloat(line.height), trackH: bar.querySelector('i').getBoundingClientRect().height,
+          phase: m.dataset.phase, cls: m.className, title: m.title, between: m.previousElementSibling?.tagName === 'I' && m.nextElementSibling?.tagName === 'I' };
+      }); };
       return {
-        card: segs(run), cardW: r.width, drawer: segs(tlBar), drawerW: tlBar.getBoundingClientRect().width, drawerRadius: cs(tlBar).borderRadius, cardRadius: cs(run).borderRadius,
+        card: segs(run), cardW: r.width, drawer: segs(tlBar), drawerW: tlBar.getBoundingClientRect().width, cardMs: ms(run), drawerMs: ms(tlBar),
+        compact: [run.classList.contains('ph-compact'), tlBar.classList.contains('ph-compact')],
+        dot: [cs(tlBar.querySelector('i.cur'), '::after').content, cs(run.querySelector('i.cur'), '::after').content],
         vars: Object.fromEntries(['queued', 'agent', 'check', 'failed'].map((k) => [k, rgb(root.getPropertyValue(`--ph-${k}`))])),
         failBg: cs(fail.lastElementChild).backgroundColor, failCls: fail.lastElementChild.className,
         curAnim: cs(run.querySelector('i.cur')).animationName, title: run.title,
-        height: r.height, inside: r.bottom < c.bottom && r.bottom > c.bottom - 6 && r.left > c.left && r.right < c.right,
+        height: run.querySelector('i').getBoundingClientRect().height, inside: r.bottom < c.bottom && r.bottom > c.bottom - 6 && r.left > c.left && r.right < c.right,
         dim: Number(cs(run).opacity), legend: legend ? [...legend.querySelectorAll('.lg')].map((l) => l.textContent) : null,
       };
     });
@@ -137,13 +147,32 @@ for (const scheme of ['light', 'dark']) {
     }
     assert.deepEqual(got.card.map((g) => g.bg), [got.vars.queued, got.vars.agent, got.vars.check], 'phase colours from the --ph-* vars');
     assert.deepEqual(got.drawer.map((g) => g.bg), got.card.map((g) => g.bg), 'the drawer Timeline looks the same');
-    assert.equal(got.drawerRadius, got.cardRadius);
+    assert.deepEqual(got.drawer.map((g) => g.radius), got.card.map((g) => g.radius), 'rounded track ends on both');
+    assert.deepEqual(got.compact, [true, false], 'cards use the compact mode, the drawer the full one');
+    // Milestones: phases − 1 lines, each between two segments, at the boundary the time puts it (100/400, 340/400).
+    const bounds = [100 / 400, 340 / 400];
+    for (const [name, lines] of [['card', got.cardMs], ['drawer', got.drawerMs]]) {
+      assert.equal(lines.length, 3 - 1, `${name}: one milestone per phase boundary`);
+      lines.forEach((m, n) => {
+        assert.ok(m.between, `${name}: milestone ${n} sits between two segments`);
+        assert.ok(Math.abs(m.x - bounds[n]) <= 0.02, `${name}: milestone ${n} at ${m.x.toFixed(3)}, want ${bounds[n].toFixed(3)} (±2%)`);
+        assert.ok(m.lineH > m.trackH, `${name}: the milestone line stands through the track (${m.lineH} > ${m.trackH})`);
+      });
+      assert.deepEqual(lines.map((m) => [m.phase, m.cls]), [['running', 'ph-ms'], ['checking', 'ph-ms cur']], 'the live phase\'s milestone is marked');
+    }
+    assert.deepEqual(got.cardMs.map((m) => m.lineW), [1, 1], 'hairlines on cards');
+    assert.ok(got.drawerMs.every((m) => m.lineW > 1 && m.lineH >= 10), 'full-size ticks in the drawer');
+    assert.equal(got.drawerMs[1].title, 'Check · from 5m 40s', 'the tooltip names the step and when it began');
+    assert.equal(got.cardMs[0].title, 'Agent · from 1m 40s');
+    assert.ok(got.drawer.every((g) => g.h >= 4) && got.card.every((g) => g.h <= 3), 'a thicker track in the drawer, 2-3px on cards');
+    assert.notEqual(got.dot[0], 'none', 'the drawer marks now with a dot');
+    assert.ok(['none', 'normal'].includes(got.dot[1]), 'no dot on cards');
     assert.deepEqual(got.card.map((g) => g.cls), ['', '', 'cur']);
     assert.equal(got.curAnim, 'ph-shimmer');
     assert.equal(got.failCls, 'bad');
     assert.equal(got.failBg, got.vars.failed);
     assert.equal(got.title, 'Queued 1m 40s · Agent 4m 0s · Checking 1m 0s');
-    assert.ok(got.height > 0 && got.height <= 2 && got.inside, JSON.stringify({ height: got.height, inside: got.inside }));
+    assert.ok(got.height > 0 && got.height <= 3 && got.inside, JSON.stringify({ height: got.height, inside: got.inside }));
     assert.ok(got.dim < 1, `dimmed when not hovered (${got.dim})`);
     await page.evaluate(() => document.getElementById('splash')?.remove()); // no app script runs to dismiss it
     await page.locator('.tcard').first().hover();

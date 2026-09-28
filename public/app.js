@@ -6752,7 +6752,7 @@ function fillCard(b, id) {
   if (b.isConnected) { syncReviewPanel(b, t); syncApprovalPanels(b, t); }
   else queueMicrotask(() => { if (b.isConnected) { syncReviewPanel(b, O.tasks.get(id)); syncApprovalPanels(b, O.tasks.get(id)); } });
 }
-// The phase strip along a card's bottom edge, drawn by phaseBar like the drawer's Timeline: one segment per step of the
+// The phase strip along a card's bottom edge, the compact phaseBar of the drawer's Timeline (hairline milestones, no dot): one segment per step of the
 // task's latest run, each as wide as the time it took (the queue wait, then the run's phase_log from the server), the step
 // in progress growing live; a failed task's last step in brick, a limit wait in ochre, a done task capped in green,
 // nothing drawn for steps still to come. Its hover title lists the steps with their times ('Agent 4m 12s · Checking 38s').
@@ -6792,19 +6792,31 @@ function stripSegs(t, s) {
   else if (t.status === 'done') segs.push({ phase: 'done', ms: 0 });
   return segs;
 }
-// One phase bar, the cards' strip and the drawer's Timeline alike: segs [{phase, ms, cls, since}] as segments sized by
-// time and coloured by phase (--ph-* via data-tone); a live one (since) keeps growing with the ticker below.
-function phaseBar(bar, segs, name = (p) => PHASE_LABEL[p] || p) {
+// One phase bar, the drawer's Timeline and (compact) the cards' strip alike: segs [{phase, ms, cls, since}] as a track of
+// segments sized by time and coloured by phase (--ph-* via data-tone), a thin vertical milestone line (b.ph-ms, zero-width,
+// so the segments keep their exact share) at each phase boundary with its step and start as the tooltip, the one before the
+// live step stronger; a live segment (since) keeps growing with the ticker below and ends in a 'now' dot (full size only).
+function phaseBar(bar, segs, { name = (p) => PHASE_LABEL[p] || p, compact = false } = {}) {
   const timed = segs.filter((g) => g.phase !== 'done'), dur = (g) => `${name(g.phase)} ${stripDur(g.ms / 1000)}`;
   bar.classList.add('ph-bar');
-  bar.replaceChildren(...segs.map((g) => {
+  bar.classList.toggle('ph-compact', compact);
+  let at = 0;
+  bar.replaceChildren(...segs.flatMap((g, n) => {
     const i = el('i', g.cls || '');
     i.dataset.phase = g.phase;
     i.dataset.tone = stripTone(g.phase);
     i.style.flexGrow = String(Math.max(1, g.ms));
     if (g.since != null) i.dataset.since = g.since;
     i.title = g.phase === 'done' ? 'Done' : dur(g);
-    return i;
+    const out = [i];
+    if (n) {
+      const m = el('b', g.cls === 'cur' || g.cls === 'limit' ? 'ph-ms cur' : 'ph-ms');
+      m.dataset.phase = g.phase;
+      m.title = `${name(g.phase)} · from ${stripDur(at / 1000)}`;
+      out.unshift(m);
+    }
+    at += g.ms;
+    return out;
   }));
   bar.title = timed.map(dur).join(' · ');
   bar.setAttribute('role', 'img');
@@ -6818,7 +6830,7 @@ function syncPhaseStrip(b, t, s) {
     bar = b.appendChild(el('span', 'tc-strip'));
     bar.addEventListener('pointerenter', () => bar._redo?.()); // the live step's time, fresh on hover
   }
-  bar._redo = () => phaseBar(bar, stripSegs(t, s));
+  bar._redo = () => phaseBar(bar, stripSegs(t, s), { compact: true });
   bar._redo();
 }
 // The legend of the strip's colours (the Queue sheet's header).
@@ -7556,8 +7568,8 @@ function section(title) {
   return s;
 }
 
-// A remote run's timeline (job.phase from its worker): one phaseBar (the cards' strip, a little taller) whose segments
-// take each step's share of the time in its phase colour (the step it failed in brick),
+// A remote run's timeline (job.phase from its worker): one full-size phaseBar (the cards' strip is its compact form) whose
+// segments take each step's share of the time in its phase colour, a milestone line at each boundary (the step it failed in brick),
 // then the same steps as text, which carries every value (the bar's hover titles only repeat it; a step cut short when
 // the run stopped says so), the latest progress hints while the agent runs, and the errors the worker reported with
 // their stderr or stack. The step in progress counts up live (the ticker below).
@@ -7582,7 +7594,7 @@ function timelineSection(run, live) {
       list.append(li);
     });
     if (end) list.append(el('li', end.outcome === 'ok' ? 'end' : 'end bad', end.outcome === 'ok' ? 'Done' : OUTCOME_TEXT[end.outcome] || end.outcome.replace(/_/g, ' ')));
-    c.append(phaseBar(el('div', 'tl-bar'), segs, (k) => PHASE_NAME[k] || k), list);
+    c.append(phaseBar(el('div', 'tl-bar'), segs, { name: (k) => PHASE_NAME[k] || k }), list);
   }
   const hint = steps.findLast((p) => p.progress)?.progress;
   if (hint && (live || hint.tools)) {

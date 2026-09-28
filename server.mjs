@@ -1430,8 +1430,9 @@ function readBody(req) {
   });
 }
 
-// The sign-in page, the manifest and the app icons (favicons, home-screen icons, the splash mascot) load without a session.
-const PUBLIC_PATHS = new Set(['/login', '/login.css', '/manifest.webmanifest', '/favicon.ico', '/favicon-16.png', '/favicon-32.png', '/apple-touch-icon.png',
+// The sign-in page, the manifest, the push-only service worker (nothing secret; the browser refetches it without the
+// cookie) and the app icons (favicons, home-screen icons, the splash mascot) load without a session.
+const PUBLIC_PATHS = new Set(['/login', '/login.css', '/manifest.webmanifest', '/sw.js', '/favicon.ico', '/favicon-16.png', '/favicon-32.png', '/apple-touch-icon.png',
   '/icon-192.png', '/icon-512.png', '/icon-maskable-512.png', '/logo.png', '/mascot.png']);
 
 // Last-resort guard: a throw in a handler must answer 500, not take the process down.
@@ -1535,6 +1536,7 @@ async function handleRequest(req, res) {
       if (isAuthed(req)) { res.writeHead(302, { Location: '/' }); return res.end(); }
       return serveFile(res, path.join(PUBLIC, 'login.html'));
     }
+    if (p === '/sw.js') return serveFile(res, path.join(PUBLIC, p), { 'Service-Worker-Allowed': '/', 'Cache-Control': 'no-cache' });
     return serveFile(res, path.join(PUBLIC, p));
   }
 

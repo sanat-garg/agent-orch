@@ -900,6 +900,9 @@ Web Push backend and /api/push routes built; both test files pass
 
 Rapid mode tops up parallel work with verified quota guards.
 
+## 2026-09-28 11:21 — #305 Push notifications ui: service worker, Settings switch, #task deep link and app badge [done (check passed)]
+
+Done-when check now passes on macOS without flock
 ## 2026-09-28 11:26 — #309 Browser as a header tab with an in-place live view and an agent prompt box [done (check passed)]
 
 Browser header tab shows live view with a working agent prompt box
@@ -1212,3 +1215,7 @@ Rapid top-up now counts worker slots, excluding head-only integrators
 ## 2026-09-28 14:29 — #398 Integrate #381: oracle-vm node in the Machines graph opens the full server details [done (check passed)]
 
 CONTEXT.md conflict resolved; UI and Machines tests pass
+
+## 2026-09-28 14:30 — #312 Integrate #305: Push notifications ui: service worker, Settings switch, #task deep link and app badge [done (check passed)]
+
+Merge conflicts resolved; push-ui, ui-static and security-headers tests pass

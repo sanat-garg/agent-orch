@@ -105,14 +105,14 @@ test('the sidebar gear opens Settings: sound + MP3 upload, parallel tasks (what 
   assert.match(side, /id="settingsBtn"[^>]*aria-label="Settings"/);
   const sheet = indexHtml.slice(indexHtml.indexOf('id="settingsModal"'), indexHtml.indexOf('id="fbModal"'));
   const sections = [...sheet.matchAll(/class="st-sec"[^>]*>([^<]+)</g)].map((m) => m[1]);
-  assert.deepEqual(sections, ['Sound', 'Tasks', 'Agents', 'This project', 'About']);
+  assert.deepEqual(sections, ['Sound', 'Notifications', 'Tasks', 'Agents', 'This project', 'About']);
   // Skills & tools is one row (a summary line) that opens the sheet, whose tabs hold the four kinds.
   assert.deepEqual([...sheet.matchAll(/data-ext-open="(\w+)"/g)].map((m) => m[1]), ['skills']);
   assert.match(sheet, /id="stExtSummary"/);
   assert.match(sheet, /<div class="modal sheet" id="extModal" hidden>[\s\S]*role="tablist"[\s\S]*id="extBody" role="tabpanel"/);
   assert.match(sheet, /id="stSoundUpload"[\s\S]*id="stSoundFile" accept="audio\/mpeg,\.mp3"[\s\S]*id="stSound"[\s\S]*id="stParallel"[\s\S]*id="stReflectModel"[\s\S]*id="stReflectBtn"[\s\S]*id="stDirection"/);
   // Sound is one row: the switch, the current file, Test and Upload together.
-  const sound = sheet.slice(sheet.indexOf('class="st-row st-sound"'), sheet.indexOf('class="st-sec">Tasks'));
+  const sound = sheet.slice(sheet.indexOf('class="st-row st-sound"'), sheet.indexOf('class="st-sec">Notifications'));
   for (const id of ['stSound"', 'stSoundName', 'stSoundTest', 'stSoundUpload']) assert.ok(sound.includes(`id="${id}`), id);
   assert.equal((sound.match(/class="st-row/g) || []).length, 1);
   // Keep improving is back per project: a switch in This project, saved through the project POST as `perpetual`.

@@ -2731,6 +2731,59 @@ function hideSplash() {
 $('splashSkip').addEventListener('click', hideSplash);
 splash.skipTimer = setTimeout(() => { if ($('splash')) $('splashSkip').hidden = false; }, 8000);
 
+// Web Push (push.mjs): the push-only /sw.js shows notifications while the app is closed; a tap posts {t: 'open', url}
+// back here (routeHash). iOS offers PushManager only to the Home Screen app.
+const swReg = 'serviceWorker' in navigator ? navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => null) : Promise.resolve(null);
+navigator.serviceWorker?.addEventListener('message', (e) => {
+  if (e.data?.t === 'open') routeHash(new URL(e.data.url, location.href).hash.slice(1));
+});
+const iosBrowser = (/iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1))
+  && !navigator.standalone && !matchMedia('(display-mode: standalone)').matches;
+const b64uBytes = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(s.length / 4) * 4, '=')), (c) => c.charCodeAt(0));
+(async function initPushSwitch() {
+  const sw = $('stPush');
+  if (!('PushManager' in window) || iosBrowser) {
+    sw.disabled = true;
+    $('stPushHint').textContent = 'Add agent-orch to your Home Screen to get notifications';
+    return;
+  }
+  const reg = await swReg;
+  sw.checked = !!(await reg?.pushManager.getSubscription().catch(() => null)) && Notification.permission === 'granted';
+})();
+$('stPush').addEventListener('change', async (e) => {
+  const sw = e.target, on = sw.checked;
+  sw.disabled = true;
+  try {
+    const reg = await swReg;
+    if (!reg) throw new Error("This browser couldn't set up notifications");
+    if (on) {
+      if (await Notification.requestPermission() !== 'granted') throw new Error('Notifications are blocked for agent-orch. Allow them in Settings, then try again.');
+      const { key } = await api('/api/push/key');
+      const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uBytes(key) });
+      await api('/api/push/subscribe', 'POST', sub.toJSON());
+      toast('Notifications on for this device');
+    } else {
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) {
+        await api('/api/push/subscribe', 'DELETE', { endpoint: sub.endpoint });
+        await sub.unsubscribe();
+      }
+      toast('Notifications off for this device');
+    }
+  } catch (err) {
+    sw.checked = !on;
+    toast(err.message, { kind: 'error' });
+  }
+  sw.disabled = false;
+});
+// The Home Screen icon's badge: held actions waiting for the owner, across every task this page knows.
+function syncAppBadge() {
+  if (!('setAppBadge' in navigator)) return;
+  let n = 0;
+  for (const t of O.tasks.values()) n += t.approvals?.length || 0;
+  (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {});
+}
+
 // ---------- task completion sound ----------
 const DEFAULT_TASK_SOUND = '/sounds/task-done.mp3';
 const taskSound = new Audio(DEFAULT_TASK_SOUND);
@@ -2882,6 +2935,7 @@ $('stSoundReset').addEventListener('click', async () => {
   try { setSoundInfo((await api('/api/settings/sound', 'DELETE')).sound); }
   catch (err) { toast(err.message, { kind: 'error' }); }
 });
+
 function syncCompletionSound(tasks) {
   if (!completionSound.synced) completionSound.statuses.clear();
   for (const t of tasks || []) {
@@ -2983,6 +3037,7 @@ function onServer(msg) {
     renderUsage();
     if (!state.cid) splash.need.delete('history'); // no chat open (or it was deleted): nothing more to wait for
     splashReady('convos');
+    if (!hashRoute.ready) { hashRoute.ready = true; if (hashRoute.task) showTask(hashRoute.task); hashRoute.task = null; }
     return;
   }
   if (msg.cid && msg.cid !== state.cid) return;
@@ -5596,6 +5651,7 @@ function applyOrchSnapshot(s) {
   O.project = s?.project || null;
   if (s?.state) O.state = s.state;
   for (const t of s?.tasks || []) O.tasks.set(t.id, t);
+  syncAppBadge();
   renderUsage();
   renderOrchBar();
   renderUpdateBanner();
@@ -5612,6 +5668,7 @@ function onOrch(msg) {
     observeTaskCompletion(msg.task);
     if (FB.local?.url === `/api/orch/tasks/${msg.task.id}/fallbacks`) msg.task.fallbacks = FB.local.list; // a save still in flight
     O.tasks.set(msg.task.id, msg.task);
+    syncAppBadge();
     syncSidebarRunning();
     renderUsage();
     refreshCards(msg.task.id);
@@ -5623,6 +5680,7 @@ function onOrch(msg) {
     const a = msg.approval, t = O.tasks.get(a.task);
     if (t) {
       t.approvals = msg.kind === 'new' ? [...(t.approvals || []).filter((x) => x.id !== a.id), a] : (t.approvals || []).filter((x) => x.id !== a.id);
+      syncAppBadge();
       refreshCards(t.id);
       if (O.drawer === t.id) { renderDrawerHead(); scheduleDetail(); }
     }
@@ -7450,10 +7508,26 @@ document.addEventListener('visibilitychange', () => {
 addEventListener('pagehide', markSeen);
 setInterval(() => { if (!document.hidden) markSeen(); }, 60e3);
 
+// '#task-<id>' (a notification's link) opens that task's drawer once the first state has arrived; '#<cid>' opens a chat.
+const hashRoute = { ready: false, task: null };
+function routeHash(hash) {
+  const m = /^task-(\d+)$/.exec(hash);
+  if (!m) {
+    if (hash && hash !== state.cid && state.convos.some((c) => c.id === hash)) { openConvo(hash); setView('chat'); }
+    return;
+  }
+  history.replaceState(null, '', state.cid ? `#${state.cid}` : '#');
+  if (hashRoute.ready) showTask(Number(m[1]));
+  else hashRoute.task = Number(m[1]);
+}
+addEventListener('hashchange', () => routeHash(location.hash.slice(1)));
+
 (async function boot() {
   await checkStatus();
-  const cid = location.hash.slice(1) || null;
+  const hash = location.hash.slice(1);
+  const cid = /^task-\d+$/.test(hash) ? null : hash || null;
   openConvo(cid);
+  if (!cid) routeHash(hash);
   if (state.cid) splash.need.add('history'); // the open chat's messages are part of the first screen
   connect();
   setView(store.get('cw.view') || 'chat');

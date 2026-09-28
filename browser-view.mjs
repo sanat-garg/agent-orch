@@ -3,8 +3,8 @@
 // the controller in-process, a worker through screen.* cluster frames. Exactly one viewer controls a session. While a
 // task uses the profile the owner watches, or takes over (the node's take-over flag holds the task's browser actions)
 // until they hand back; closing the view hands back too.
-//   UI → server: bv_open {node, identity, url?, thumb?}, bv_close, bv_input {events}, bv_nav {action, url?}, bv_take, bv_handback
-//   server → UI: bv_frame {node, identity, n, data, w, h}, bv_state {node, identity, url, title, active, takeover, role, task, closed?, error?}
+//   UI → server: bv_open {node, identity, url? (followed only when this socket may drive), thumb?}, bv_close, bv_input {events}, bv_nav {action, url?}, bv_take, bv_handback
+//   server → UI: bv_frame {node, identity, n, data, w, h}, bv_state {node, identity, url, title, active, takeover, role, task, closed?, error?, note?}
 import { MSG } from './cluster-protocol.mjs';
 import { createLiveBrowsers, screenOp, activeRun, takenOver } from './browser-live.mjs';
 import { findBrowser, normIdentity, IDENTITY_RE } from './browser.mjs';
@@ -85,11 +85,11 @@ export function createBrowserViews({ cluster = () => null, tasks = () => [], sen
       s = { key, node, identity, viewers: new Map(), controller: null, state: {}, frame: null, closed: false, error: null, note: null };
       sessions.set(key, s);
       s.viewers.set(ws, { thumb: !!thumb });
-      s.ready = op(node, { op: 'open', identity, url: url || undefined }, { onFrame: (f) => onFrame(s, f), onState: (st) => onState(s, st) });
+      // No url here: a worker's task state is known only once the view is open, so the url waits for canDrive below.
+      s.ready = op(node, { op: 'open', identity }, { onFrame: (f) => onFrame(s, f), onState: (st) => onState(s, st) });
     } else {
       s.viewers.set(ws, { thumb: !!thumb });
       if (s.frame) send(ws, { t: 'bv_frame', node, identity, n: s.frame.n, data: s.frame.data, w: s.frame.w, h: s.frame.h });
-      if (url && !thumb) s.ready.then(() => op(node, { op: 'nav', identity, action: 'go', url })).catch(() => {});
     }
     try { await s.ready; } catch (e) {
       s.closed = true; s.error = e.message;
@@ -99,6 +99,10 @@ export function createBrowserViews({ cluster = () => null, tasks = () => [], sen
     }
     assign(s);
     pushState(s);
+    // A url is followed only by a socket that may drive now, like bv_nav: never past a task without take-over.
+    if (!url || thumb || !s.viewers.has(ws)) return;
+    if (canDrive(s, ws)) await op(node, { op: 'nav', identity, action: 'go', url });
+    else send(ws, { ...stateFor(s, ws), note: s.state.active || taskFor(s) ? 'A task is using this profile: take over to navigate' : 'Another viewer is driving: take control to navigate' });
   }
   function close(ws, s) {
     if (!s?.viewers.delete(ws)) return;

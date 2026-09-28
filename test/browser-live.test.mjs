@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { findBrowser } from '../browser.mjs';
 import { inputCalls, normUrl } from '../browser-live.mjs';
+import { createBrowserViews } from '../browser-view.mjs';
 import { waitFor } from './helpers/wait.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -80,6 +81,46 @@ test('input events map to CDP calls; typed addresses open only http(s)', () => {
   assert.equal(normUrl('localhost:3000/x'), 'http://localhost:3000/x');
   assert.equal(normUrl('javascript:alert(1)'), null);
   assert.equal(normUrl('file:///etc/passwd'), null);
+});
+
+test('bv_open follows a url only when the socket may drive (AUDIT #50)', async () => {
+  // A stub manager on the controller records the screen ops; no Chromium needed.
+  const ops = [], sent = new Map(), running = [{ id: 7, title: 'Read mail', node: 'controller', identity: 'busy' }];
+  const local = { home: '/nonexistent', close() {},
+    async start(identity, { url, onState }) { ops.push({ op: 'open', identity, url }); onState({ identity, url: '', title: '', active: false, takeover: false }); },
+    async nav(identity, { action, url }) { ops.push({ op: 'nav', identity, action, url }); return true; },
+    takeover(identity, on) { ops.push({ op: 'takeover', identity, on }); return on; } };
+  const views = createBrowserViews({ local, tasks: () => running, send: (ws, m) => { if (!sent.has(ws)) sent.set(ws, []); sent.get(ws).push(m); } });
+  const last = (ws) => sent.get(ws)?.at(-1) || {};
+  const open = (ws, identity, url) => views.handle(ws, { t: 'bv_open', node: 'controller', identity, url });
+  const navs = (identity) => ops.filter((o) => o.op === 'nav' && o.identity === identity);
+  try {
+    // A task uses "busy": neither the first viewer nor one joining later navigates it.
+    const a = {}, b = {};
+    open(a, 'busy', 'https://example.com/a');
+    await waitFor(() => last(a).note, { timeout: 5000, message: `a note for the ignored url: ${JSON.stringify(sent.get(a))}` });
+    assert.equal(last(a).note, 'A task is using this profile: take over to navigate');
+    assert.equal(last(a).role, 'watch');
+    open(b, 'busy', 'https://example.com/b');
+    await waitFor(() => last(b).note, { timeout: 5000, message: 'the joining viewer gets the note too' });
+    assert.deepEqual(ops.filter((o) => o.op === 'open'), [{ op: 'open', identity: 'busy', url: undefined }], 'no url on the open op');
+    assert.deepEqual(navs('busy'), [], 'no nav while a task has the profile');
+
+    // After take-over the same bv_open navigates.
+    views.handle(a, { t: 'bv_take', node: 'controller', identity: 'busy' });
+    assert.equal(last(a).role, 'control');
+    open(a, 'busy', 'https://example.com/a');
+    await waitFor(() => navs('busy').length, { timeout: 5000, message: 'the taken-over viewer navigates' });
+    assert.deepEqual(navs('busy'), [{ op: 'nav', identity: 'busy', action: 'go', url: 'https://example.com/a' }]);
+
+    // With no task on the profile, the opener drives and its url is followed.
+    const c = {};
+    open(c, 'free', 'https://example.com/c');
+    await waitFor(() => navs('free').length, { timeout: 5000, message: 'the url is followed on a free profile' });
+    assert.deepEqual(navs('free'), [{ op: 'nav', identity: 'free', action: 'go', url: 'https://example.com/c' }]);
+    assert.equal(last(c).role, 'control');
+    assert.ok(!sent.get(c).some((m) => m.note), 'no note when the url was followed');
+  } finally { await views.close(); }
 });
 
 // A minimal MCP client for the shim.

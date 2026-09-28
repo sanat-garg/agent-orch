@@ -989,6 +989,9 @@ Worktrees under a symlinked root are reused and kept, tested
 
 Unusable VAPID key file now disables push instead of replacing it
 
+## 2026-09-28 12:44 — #315 AUDIT #50: bv_open honours a url only when the socket may drive [done (check passed)]
+
+bv_open's url is followed only when the socket may drive
 ## 2026-09-28 12:34 — #316 AUDIT #46: fromWorker keeps auth.json.prev, rejects a future last_refresh and checks the token's account [done (check passed)]
 
 fromWorker blocks future/mismatched-JWT refreshes and keeps auth.json.prev
@@ -1118,3 +1121,7 @@ gate-proxy gates streamable-http upstreams; both test files pass
 ## 2026-09-28 14:05 — #384 Head capacity from its real hardware; integration first on the head, work delegated to Macs [done (check passed)]
 
 head slots from hardware, integrators reserved, workers-first delegation tested
+
+## 2026-09-28 14:06 — #363 Integrate #315: AUDIT #50: bv_open honours a url only when the socket may drive [done (check passed)]
+
+Merge conflict resolved; browser-live tests pass; #50 marked Fixed

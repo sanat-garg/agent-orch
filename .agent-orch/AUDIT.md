@@ -676,6 +676,7 @@ the same origin. `run-on` accepts only a string or null naming a known node.
   `url`, so this is server-side trust in the client.
 - **Fix:** Honour `url` only when no task is active on the profile, or when this socket is the controller after
   take-over.
+- **Fixed** (task #315): `open` never passes `url` to the `open` op; after `s.ready` and `assign(s)` it runs `nav go` only when `canDrive(s, ws)`, else sends that socket a `bv_state` with a take-over note. test/browser-live.test.mjs covers it with a stub manager.
 
 ### 51. [low] The worker's gate reads `shots/<id>` for any id, including `../` paths (worker.mjs:1046-1052)
 - **What:** The worker's `openGate` `image(id)` reads `path.join(dir, 'shots', id)` for any id found in a question file

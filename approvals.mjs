@@ -3,12 +3,16 @@
 // A local run's gate dir is hosted here (host()); a worker relays its requests as job events and gets each decision
 // back as job.approval (deliver). Statuses: pending → approved | always | denied | expired | cancelled (the run ended);
 // auto = allowed without asking because the owner chose "always" for that action earlier in the task.
+// A run holds at most MAX_PENDING_PER_RUN pending approvals: a request past that is stored denied (decided_by 'cap') and
+// answered at once, so a looping or hostile run can't pile up rows and owner notices (AUDIT #42).
 import fs from 'node:fs';
 import path from 'node:path';
 import { APPROVAL_TTL_MS, appendAudit, hostGate, readAudit } from './gate.mjs';
 import { MEDIA_ID_RE, saveMedia } from './media.mjs';
 
 export const DECISIONS = { approve: 'approved', always: 'always', deny: 'denied' };
+export const MAX_PENDING_PER_RUN = 20;
+const CAP_NOTE = 'Too many held actions in one run: answer or stop the task';
 
 export function createApprovals({ db, dataDir, boot = true, settings = () => ({}), deliver = () => false, onChange = () => {}, now = () => Date.now() }) {
   db.exec(`CREATE TABLE IF NOT EXISTS approvals (id TEXT PRIMARY KEY, task_id INTEGER NOT NULL, run_id INTEGER, node TEXT,
@@ -45,17 +49,21 @@ export function createApprovals({ db, dataDir, boot = true, settings = () => ({}
     }
     const t = now();
     const always = a.key && q1("SELECT id FROM approvals WHERE task_id=:t AND key=:k AND status='always'", { t: taskId, k: String(a.key) });
+    const capped = !always && runId != null
+      && q1("SELECT COUNT(*) AS n FROM approvals WHERE run_id=:r AND status='pending'", { r: runId }).n >= MAX_PENDING_PER_RUN;
     run(`INSERT INTO approvals(id,task_id,run_id,node,created_at,expires_at,server,tool,action,reason_class,key,url,args,screenshot,status,decided_at,decided_by,note)
       VALUES(:id,:task,:run,:node,:at,:exp,:server,:tool,:action,:why,:key,:url,:args,:shot,:status,:dec,:by,:note)`, {
       id, task: taskId, run: runId, node, at: t, exp: t + Math.min(ttlMs(), Number(a.ttlMs) || Infinity), server: str(a.server, 80), tool: str(a.tool, 120),
       action: str(a.action, 2000), why: str(a.reason, 200), key: str(a.key, 500), url: str(a.url, 2000), args: JSON.stringify(a.args ?? null).slice(0, 20_000),
-      shot: MEDIA_ID_RE.test(a.screenshot || '') ? a.screenshot : null, status: always ? 'auto' : 'pending',
-      dec: always ? t : null, by: always ? 'always' : null, note: always ? `allowed by your earlier "always" (${always.id})` : null,
+      shot: MEDIA_ID_RE.test(a.screenshot || '') ? a.screenshot : null, status: always ? 'auto' : capped ? 'denied' : 'pending',
+      dec: always || capped ? t : null, by: always ? 'always' : capped ? 'cap' : null,
+      note: always ? `allowed by your earlier "always" (${always.id})` : capped ? CAP_NOTE : null,
     });
     const row = get(id);
     if (always) send(row, { decision: 'auto', by: 'always' });
+    else if (capped) send(row, answerOf(row)); // decided_by='cap'
     else armExpiry();
-    onChange(row, always ? 'auto' : 'new');
+    onChange(row, always ? 'auto' : capped ? 'decided' : 'new');
     return row;
   }
   const answerOf = (r) => ({ decision: { approved: 'approve', always: 'always', auto: 'auto', denied: 'deny', expired: 'expired' }[r.status] || 'deny', reason: r.note || undefined, by: r.by || undefined });

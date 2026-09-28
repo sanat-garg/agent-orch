@@ -918,3 +918,6 @@ CONTEXT.md conflict resolved; UI tests pass against main's backend
 ## 2026-09-28 11:43 — #327 Verifier loophole: extractCommand judges risk on the unquoted command so a quoted grep pattern never voids the check [done (check passed)]
 
 checkCommand now judges risk on the command with quoted text removed
+## 2026-09-28 11:45 — #318 AUDIT #42 outside cluster.mjs: sampleOf clips cpu to 256 cores, metrics read is bounded, pending approvals per run are capped [done (check passed)]
+
+Metrics cpu clipped, reads bounded to 8 MB, approvals capped per run

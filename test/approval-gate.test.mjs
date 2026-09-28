@@ -202,3 +202,20 @@ test('cluster frames: held calls and audit lines ride job.event; the answer is j
   const { MEDIA_ID_RE } = await import('../media.mjs');
   assert.ok(!MEDIA_ID_RE.test('../x') && !MEDIA_ID_RE.test(`../${'a'.repeat(64)}.png`));
 });
+
+test('approvals: past 20 pending requests in one run, the next is denied at once by the cap', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const { createApprovals } = await import('../approvals.mjs');
+  const db = new DatabaseSync(':memory:'), sent = [], changes = [];
+  const ap = createApprovals({ db, dataDir: path.join(tmp, 'cap'), deliver: (row, ans) => { sent.push([row.id, ans]); return true; }, onChange: (row, kind) => changes.push([row.id, kind]) });
+  try {
+    for (let i = 0; i < 20; i++) assert.equal(ap.request({ approval: { id: `held-${i}`, action: 'Click "Send"' }, taskId: 1, runId: 7, node: 'w' }).status, 'pending');
+    const r = ap.request({ approval: { id: 'held-20', action: 'Click "Send"' }, taskId: 1, runId: 7, node: 'w' });
+    assert.equal(r.status, 'denied');
+    assert.equal(r.by, 'cap');
+    assert.match(r.note, /Too many held actions in one run/);
+    assert.deepEqual(sent, [['held-20', { decision: 'deny', reason: r.note, by: 'cap' }]]);
+    assert.deepEqual(changes.at(-1), ['held-20', 'decided']);
+    assert.equal(ap.request({ approval: { id: 'other-run', action: 'Click "Send"' }, taskId: 1, runId: 8, node: 'w' }).status, 'pending', 'another run is not capped');
+  } finally { ap.stop(); db.close(); }
+});

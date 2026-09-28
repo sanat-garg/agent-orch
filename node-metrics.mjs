@@ -8,6 +8,8 @@ import path from 'node:path';
 export const METRICS = { keepMs: 24 * 3600e3, fullMs: 3600e3, bucketMs: 5 * 60e3, compactEveryMs: 10 * 60e3 };
 export const RANGES = { '15m': 15 * 60e3, '1h': 3600e3, '6h': 6 * 3600e3, '24h': 24 * 3600e3 };
 const SAFE_ID = /^[\w-]{1,64}$/;
+const MAX_CORES = 256; // a frame's cpu array beyond this is dropped: no real machine has more (AUDIT #42)
+export const MAX_READ = 8 * 1024 * 1024; // read() loads at most the newest 8 MB of a node's file
 const num = (v) => (Number.isFinite(v) ? v : undefined);
 const r1 = (v) => (v == null ? v : Math.round(v * 10) / 10);
 
@@ -15,7 +17,7 @@ const r1 = (v) => (v == null ? v : Math.round(v * 10) / 10);
 // (MemAvailable bytes), swap (% used), disk (free bytes), net (1 reachable, 0 not), netMs, jobs (running), bat (%),
 // chg (1 charging), therm (CPU speed limit %). Missing readings are left out.
 export function sampleOf(res = {}, t = Date.now()) {
-  const cores = Array.isArray(res.cpu) ? res.cpu.map((c) => r1(num(c) ?? 0)) : undefined;
+  const cores = Array.isArray(res.cpu) ? res.cpu.slice(0, MAX_CORES).map((c) => r1(Math.min(100, Math.max(0, num(Number(c)) ?? 0)))) : undefined;
   const s = {
     t, cpu: cores?.length ? r1(cores.reduce((a, c) => a + c, 0) / cores.length) : undefined, cores: cores?.length ? cores : undefined,
     load: r1(num(res.load?.[0])), mem: num(res.memAvailable), swap: r1(num(res.swapUsedPct)), disk: num(res.disk?.free),
@@ -64,11 +66,23 @@ export function compactSamples(samples, now = Date.now(), { keepMs, fullMs, buck
 // dir: <DATA>/metrics/nodes. record(id, frame) stores one telemetry frame; series(id, range) reads a range ('1h' or ms).
 export function createNodeMetrics({ dir, opts = METRICS, log = () => {} }) {
   const compacted = new Map(); // node id -> when its file was last compacted
+  const oversized = new Set(); // node ids whose oversized file was already logged
   const file = (id) => path.join(dir, `${id}.jsonl`);
+  // A file past MAX_READ is read from its tail only (the partial first line dropped), so a runaway file can't stall the loop.
   function read(id) {
     if (!SAFE_ID.test(id)) return [];
-    let text = '';
-    try { text = fs.readFileSync(file(id), 'utf8'); } catch { return []; }
+    let text = '', fd;
+    try {
+      fd = fs.openSync(file(id), 'r');
+      const { size } = fs.fstatSync(fd), len = Math.min(size, MAX_READ), buf = Buffer.alloc(len);
+      let got = 0;
+      while (got < len) { const n = fs.readSync(fd, buf, got, len - got, size - len + got); if (!n) break; got += n; }
+      text = buf.toString('utf8', 0, got);
+      if (size > MAX_READ) {
+        text = text.slice(text.indexOf('\n') + 1);
+        if (!oversized.has(id)) { oversized.add(id); log(`metrics for ${id}: file is ${size} bytes, reading only the newest ${MAX_READ}`); }
+      }
+    } catch { return []; } finally { if (fd != null) fs.closeSync(fd); }
     return text.split('\n').flatMap((l) => { try { return l ? [JSON.parse(l)] : []; } catch { return []; } });
   }
   function compact(id, now = Date.now()) {

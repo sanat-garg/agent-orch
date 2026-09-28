@@ -13,3 +13,7 @@ AUDIT.md finding #42 lists several ways a worker can bloat the controller; the f
 ## Done when
 
 `node --test test/node-metrics.test.mjs test/approval-gate.test.mjs` passes and `grep -n "decided_by='cap'\|'cap'" approvals.mjs` prints a line
+
+## Result — done (check passed) (2026-09-28 11:45)
+
+AGENT-ORCH-STATUS: done — Metrics cpu clipped, reads bounded to 8 MB, approvals capped per run

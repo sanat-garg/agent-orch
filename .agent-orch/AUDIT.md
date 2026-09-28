@@ -586,6 +586,10 @@ the same origin. `run-on` accepts only a string or null naming a known node.
 - **Fix:** Give each connection a frame budget (e.g. `resources`/`inventory` at most one per heartbeat/2, everything
   else ≤ 50/s, close on overrun). Clip `cpu` to ≤ 256 entries, take the version sha only from `hello`, cache the gzipped
   bundle by hash, and cap pending approvals per run.
+- **Partly fixed** (task #318): `sampleOf` keeps at most 256 `cpu` entries, each clamped to 0..100; `read()` loads only the
+  newest 8 MB of a node's metrics file (logged once per node); `approvals.request()` stores a run's 21st pending request as
+  `denied` by `cap` and answers it at once. Still open in cluster.mjs: the per-connection frame budget, taking the version
+  sha only from `hello`, and caching the gzipped `EXT_PATH` bundle by hash.
 
 ### 43. [med] autoRestart exits without checking that the new code boots; a boot crash leaves the app and the web terminal down (server.mjs:307-317, :318-330)
 - **What:** `startRestartDrain` goes to `process.exit(0)` without checking the new HEAD. With `autoRestart` on, any

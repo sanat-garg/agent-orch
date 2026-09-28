@@ -5,7 +5,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import net from 'node:net';
 import { WebSocketServer } from 'ws';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createOrchestrator, parseJsonl, SHOT_HINT } from './orchestrator.mjs';
@@ -309,11 +310,57 @@ function startRestartDrain(reason) {
   restartPending = true;
   const gen = ++restartGen;
   console.log(`[restart] ${reason}: waiting for running tasks and chat turns to finish`);
-  whenIdle({
-    drained: orch.drain(), cancelled: () => gen !== restartGen,
-    idle: () => chatIdle({ runtimes, agentTurns, planning, chatPlanning: orch.chatPlanning }),
-  }).then((ok) => { if (ok) { console.log('[restart] idle; exiting for restart'); process.exit(0); } });
+  const idle = () => chatIdle({ runtimes, agentTurns, planning, chatPlanning: orch.chatPlanning });
+  const cancelled = () => gen !== restartGen;
+  whenIdle({ drained: orch.drain(), cancelled, idle }).then(async (ok) => {
+    if (!ok) return;
+    const head = await git(['rev-parse', 'HEAD']);
+    console.log('[restart] idle; checking that the new code boots');
+    const why = await restartPreflight().catch((e) => String(e?.message || e));
+    if (cancelled()) return;
+    if (!why) {
+      if (await whenIdle({ drained: null, cancelled, idle })) { console.log('[restart] exiting for restart'); process.exit(0); }
+      return;
+    }
+    // Stay up on the old code: resume claiming like a cancel, and let the auto path wait for a newer HEAD.
+    console.error(`[restart] preflight failed: ${why}`);
+    restartPending = false; restartGen++; autoRestartSkipHead = head;
+    orch.undrain();
+    orch.logEvent(`Restart skipped: the code at ${head.slice(0, 8) || 'HEAD'} does not boot (${why.slice(0, 300)})`, { level: 'warn' });
+    for (const ws of allClients) send(ws, { t: 'status', restartPending });
+  });
   for (const ws of allClients) send(ws, { t: 'status', restartPending });
+}
+// Proves the code at HEAD boots before a restart: `node --check` every root and bin/ *.mjs, then start server.mjs
+// once on a spare port with no orchestrator (never on the live DB) and a throwaway data dir, and wait up to 20 s
+// for /auth/check to answer. Resolves '' when it booted, else why not.
+async function restartPreflight() {
+  const mjs = (dir) => fs.readdirSync(path.join(ROOT, dir)).filter((f) => f.endsWith('.mjs')).map((f) => path.join(dir, f));
+  for (const f of [...mjs('.'), ...mjs('bin')]) {
+    const err = await new Promise((resolve) => execFile(process.execPath, ['--check', f], { cwd: ROOT, timeout: 30e3 },
+      (e, _out, stderr) => resolve(e ? `${f}: ${String(stderr || e.message).trim().split('\n').slice(0, 5).join(' | ')}` : '')));
+    if (err) return err;
+  }
+  const port = await new Promise((resolve, reject) => {
+    const s = net.createServer().listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); }).on('error', reject);
+  });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-orch-preflight-'));
+  const child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, PORT: String(port), CW_DATA_DIR: dir, CW_NO_ORCHESTRATOR: '1' } });
+  let out = '', exited = null;
+  const tail = () => { const lines = out.trim().split('\n'); return lines.find((l) => /Error\b/.test(l))?.trim() || lines.slice(-3).join(' | '); };
+  child.stdout.on('data', (d) => { out = (out + d).slice(-4000); });
+  child.stderr.on('data', (d) => { out = (out + d).slice(-4000); });
+  child.on('exit', (code, sig) => { exited = code ?? sig; });
+  try {
+    for (const end = Date.now() + 20e3; Date.now() < end && exited == null; await new Promise((r) => setTimeout(r, 500))) {
+      try { await (await fetch(`http://127.0.0.1:${port}/auth/check`, { signal: AbortSignal.timeout(2000) })).body?.cancel(); return ''; } catch {}
+    }
+    return exited != null ? `server.mjs exited (${exited}) during boot: ${tail()}` : `server.mjs did not answer /auth/check within 20 s: ${tail()}`;
+  } finally {
+    try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 }
 // The owner's autoRestart setting: once merged commits since boot touch server-side code (root *.mjs, bin/,
 // package.json, package-lock.json), drain and restart by itself. A cancelled auto restart waits for a newer HEAD.

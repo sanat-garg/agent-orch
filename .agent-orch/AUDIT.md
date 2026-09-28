@@ -594,6 +594,9 @@ the same origin. `run-on` accepts only a string or null naming a known node.
 - **Fix:** Before exiting, run `node --check` on every root `*.mjs`, then boot the new code once on a spare port with a
   temp copy of the data dir (or `CW_NO_ORCHESTRATOR=1`) and require `/auth/check` to answer. If that fails, stay up, log
   it and skip that HEAD. Also add `StartLimitIntervalSec=0` (or a larger burst) to the unit.
+- **Fixed** (task #293): `startRestartDrain` runs `restartPreflight()` once idle (`node --check` on root and `bin/` `*.mjs`, then a
+  `CW_NO_ORCHESTRATOR=1` boot on a spare port and temp data dir until `/auth/check` answers); a failure stays up, undrains,
+  logs a warn event and skips that HEAD. README's units set `StartLimitIntervalSec=0`.
 
 ### 44. [med] A restart drain freezes the whole scheduler behind remote jobs and runs waiting for an approval (orchestrator.mjs:2488-2491, :1771-1772; server.mjs:312)
 - **What:** `drain()` stops all claiming until `running` is empty. That includes remote jobs, which survive a controller

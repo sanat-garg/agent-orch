@@ -1,8 +1,9 @@
-// POST /api/restart-when-idle: auth-gated, and with nothing running the server drains and exits 0.
+// POST /api/restart-when-idle: auth-gated, and with nothing running the server drains, preflights the new code and
+// exits 0; a checkout that doesn't boot keeps it up.
 // Runs its own server.mjs on a spare port and throwaway data dir; never the live one.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
@@ -62,7 +63,7 @@ test('restart-when-idle rejects unauthenticated calls, then drains and exits 0',
   const r = await fetch(base + '/api/restart-when-idle', { method: 'POST', headers: { cookie } });
   assert.equal(r.status, 202);
   assert.deepEqual(await r.json(), { draining: true });
-  const timer = setTimeout(() => child.kill('SIGKILL'), 10000);
+  const timer = setTimeout(() => child.kill('SIGKILL'), 45000);
   const code = await exited;
   clearTimeout(timer);
   assert.equal(code, 0, `server exited with ${code}:\n${out}`);
@@ -85,13 +86,13 @@ const bootBeforeServerChange = () => new Promise((resolve, reject) => {
   });
 });
 
-async function bootServer(extraEnv) {
+async function bootServer(extraEnv, cwd = ROOT) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-autorestart-'));
   const salt = crypto.randomBytes(16).toString('hex');
   fs.writeFileSync(path.join(dir, 'auth.json'), JSON.stringify({ salt, hash: crypto.scryptSync(PASSWORD, salt, 64).toString('hex') }));
   const port = await freePort();
   assert.notEqual(port, 3000);
-  const proc = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: { ...process.env, PORT: String(port), CW_DATA_DIR: dir, ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const proc = spawn(process.execPath, ['server.mjs'], { cwd, env: { ...process.env, PORT: String(port), CW_DATA_DIR: dir, ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe'] });
   const s = { proc, dir, base: `http://127.0.0.1:${port}`, out: '' };
   s.exited = new Promise((resolve) => proc.on('exit', (code) => resolve(code)));
   after(() => { proc.kill('SIGKILL'); fs.rmSync(dir, { recursive: true, force: true }); });
@@ -120,7 +121,7 @@ test('autoRestart drains and exits 0 after server code changed since boot; stays
   assert.equal(put.status, 200);
   assert.equal((await put.json()).state.parallel.autoRestart, true);
 
-  const timer = setTimeout(() => on.proc.kill('SIGKILL'), 10000);
+  const timer = setTimeout(() => on.proc.kill('SIGKILL'), 45000);
   const code = await on.exited;
   clearTimeout(timer);
   assert.equal(code, 0, `server exited with ${code}:\n${on.out}`);
@@ -131,4 +132,29 @@ test('autoRestart drains and exits 0 after server code changed since boot; stays
   assert.equal(st.restartPending, false);
   assert.equal(off.proc.exitCode, null);
   assert.doesNotMatch(off.out, /\[restart\]/);
+});
+
+// Preflight: a root module with a syntax error (one server.mjs never imports) fails `node --check`, so the drain
+// ends without exiting and claiming resumes. Runs from a throwaway copy of the checkout, never ROOT itself.
+test('a restart whose new code fails the preflight stays up and logs why', async () => {
+  const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-preflight-'));
+  after(() => fs.rmSync(copy, { recursive: true, force: true }));
+  for (const f of execFileSync('git', ['ls-files', '-z'], { cwd: ROOT, encoding: 'utf8' }).split('\0')) {
+    if (!f || /^(\.agent-orch|test)\//.test(f) || !fs.existsSync(path.join(ROOT, f))) continue;
+    fs.mkdirSync(path.dirname(path.join(copy, f)), { recursive: true });
+    fs.copyFileSync(path.join(ROOT, f), path.join(copy, f));
+  }
+  fs.symlinkSync(fs.realpathSync(path.join(ROOT, 'node_modules')), path.join(copy, 'node_modules'));
+  const s = await bootServer({}, copy);
+  fs.writeFileSync(path.join(copy, 'broken.mjs'), 'export const x = ;\n');
+
+  const r = await fetch(s.base + '/api/restart-when-idle', { method: 'POST', headers: { cookie: s.cookie } });
+  assert.equal(r.status, 202);
+  await r.arrayBuffer();
+  for (const end = Date.now() + 30000; !/preflight failed/.test(s.out) && Date.now() < end && s.proc.exitCode == null;) await new Promise((res) => setTimeout(res, 200));
+  assert.match(s.out, /\[restart\] preflight failed: broken\.mjs/);
+  await new Promise((res) => setTimeout(res, 500));
+  assert.equal(s.proc.exitCode, null, s.out);
+  const st = await (await fetch(s.base + '/api/status', { headers: { cookie: s.cookie } })).json();
+  assert.equal(st.restartPending, false);
 });

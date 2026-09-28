@@ -873,3 +873,7 @@ boot migration drops removed-agent kv rows; test passes
 ## 2026-09-28 08:46 — #292 AUDIT #37: server.mjs passes the run config to ext.mcpRun so controller runs get the gate and browser [done]
 
 Controller runs get gate/browser config; tests catch regressions
+
+## 2026-09-28 08:49 — #293 AUDIT #43: the restart drain preflights the new HEAD before exiting, and README adds StartLimitIntervalSec=0 [done (check passed)]
+
+restart preflights HEAD; failed boot stays up; README has StartLimitIntervalSec=0

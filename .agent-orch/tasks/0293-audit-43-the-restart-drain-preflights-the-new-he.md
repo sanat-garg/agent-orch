@@ -17,3 +17,7 @@ Extend test/restart.test.mjs (read how it spawns the server and fakes the git st
 ## Done when
 
 `npm test -- test/restart.test.mjs` passes and `grep -q 'StartLimitIntervalSec=0' README.md`
+
+## Result — done (check passed) (2026-09-28 08:49)
+
+AGENT-ORCH-STATUS: done — restart preflights HEAD; failed boot stays up; README has StartLimitIntervalSec=0

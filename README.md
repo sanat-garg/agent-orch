@@ -95,6 +95,8 @@ automatically.
 [Unit]
 Description=agent-orch (login + chat UI)
 After=network-online.target
+# Keep retrying after a crash loop; the default start limit (5 starts in 10 s) would leave the unit failed.
+StartLimitIntervalSec=0
 
 [Service]
 User=ubuntu
@@ -112,6 +114,10 @@ WantedBy=multi-user.target
 `/etc/systemd/system/agent-orch-shell.service`, a matching ttyd unit bound to loopback and serving under `/shell`:
 
 ```ini
+[Unit]
+# Keep retrying after a crash loop; the default start limit (5 starts in 10 s) would leave the unit failed.
+StartLimitIntervalSec=0
+
 [Service]
 User=ubuntu
 WorkingDirectory=/home/ubuntu/workspace
@@ -125,7 +131,9 @@ For terminals to survive restarts of the web app, also run a `tmux -D` server as
 `sudo systemctl daemon-reload && sudo systemctl enable --now agent-orch agent-orch-shell agent-orch-tmux caddy`. The metrics
 panel checks service status with `systemctl is-active agent-orch agent-orch-shell caddy`.
 
-The app restarts itself through `Restart=always`: "Restart when idle" (`POST /api/restart-when-idle`) drains tasks and chat turns, then exits 0.
+The app restarts itself through `Restart=always`: "Restart when idle" (`POST /api/restart-when-idle`) drains tasks and chat turns, then exits 0
+once the code at HEAD passes a preflight (`node --check` on every root and `bin/` `*.mjs`, then a throwaway boot of `server.mjs` on a spare port);
+a failed preflight keeps the old code running, logs `[restart] preflight failed` and skips that HEAD.
 With the `autoRestart` setting on (off by default; `PUT /api/orch/parallel {autoRestart: true}`), it does the same by itself once merged commits since boot touch server code (root `*.mjs`, `bin/`, `package*.json`).
 
 ### Moving an old `claude-web` install

@@ -121,6 +121,8 @@ export const TASKS_FORMAT = `Emit work as a fenced block exactly like this (stri
 - \`done_when\` must be checkable by a machine or by looking at one specific thing. No "works well".
   When a command proves it, put that command in backticks, e.g. \`npm test\`. Every command-like backticked
   snippet is run, joined with &&. Absence checks use \`! grep …\` (a bare grep exits 1 when nothing matches).
+  A task that only edits notes or docs is checked with \`grep\`, never the test suite. The orchestrator runs
+  \`done_when\` itself once the worker finishes, so don't tell the worker in its prompt to run the whole suite.
 - \`after\` is for TRUE prerequisites only: tasks whose output this task needs. It is one reference or an array
   of them: the 0-based index of an earlier task in THIS block, or "#12" for an existing task id. The task starts
   only once ALL of them have finished, and cancelling or failing one cancels everything after it. Never chain
@@ -195,8 +197,10 @@ Do exactly the one task you are given — not the next one, not a bigger version
 anything you notice but were not asked to do stays out of this change — the reflector picks up real gaps
 on its own; note it in .agent-orch/CONTEXT.md only if it's a durable fact worth remembering.
 
-Before you claim to be finished, actually verify it: run the command, the test, or the check named in
-"Done when". Do not assume it works because the code looks right.
+Before you claim to be finished, actually verify it: run the check named in "Done when", or, when that is
+a slow test suite, the tests that cover what you changed. Do not assume it works because the code looks right.
+The orchestrator runs the "Done when" command itself as soon as you finish and hands you its output if it
+fails, so never run a long full suite only to watch it pass first.
 
 If you learn something future sessions must know (architecture, conventions, gotchas), add at most a
 few lines of genuinely durable fact to .agent-orch/CONTEXT.md — not a running log. Prefer editing an existing

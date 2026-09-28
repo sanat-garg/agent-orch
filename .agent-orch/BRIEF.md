@@ -60,6 +60,14 @@ was retired when benchmark ranking was removed in #152/#153. Current work harden
    Caveat: the same subscription signed in on several machines shares ONE set of rate limits, so more machines
    add CPU/RAM, not quota.
 
+12. Computer-work agents (owner, 2026-09-28): beyond code, agent-orch should do real office work, the way an employee
+   such as an accountant would: read and triage email, edit Canva designs, fill spreadsheets, reconcile statements,
+   use web apps. Prefer official APIs and MCP connectors (Gmail/Google Workspace, Canva, accounting tools) and fall
+   back to a real browser (Playwright MCP with persistent, owner-logged-in profiles, run on a Mac worker because
+   the VPS has 1 core). Safety model: outbound or irreversible actions (sending email, payments, deleting,
+   publishing, sharing) require the owner's approval, and every action is logged with screenshots. Design doc:
+   .agent-orch/AGENTIC.md.
+
 ## Constraints & Preferences
 - Chat and agents must run on the Claude subscription, never on API credits (see API_ENV stripping in
   server.mjs). Never weaken that.

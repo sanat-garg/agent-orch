@@ -308,6 +308,13 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME });
   const deny = (socket, code, text) => { socket.write(`HTTP/1.1 ${code} ${text}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`); socket.destroy(); };
   // Bearer token only (no session cookie): unknown or revoked tokens are refused before any frame is read.
+  // WHOAMI_PATH: which machine a bearer token belongs to, without connecting (a check must not bump the live worker).
+  function whoami(headers) {
+    const token = bearerToken(headers);
+    const row = token && db.prepare('SELECT * FROM nodes WHERE token_hash=?').get(hashSecret(token));
+    if (!row || !secretMatches(token, row.token_hash)) return { status: 401, error: 'this machine is not paired with this head' };
+    return { node: row.id, name: row.name };
+  }
   function handleUpgrade(req, socket, head) {
     const token = bearerToken(req.headers);
     const row = token && db.prepare('SELECT * FROM nodes WHERE token_hash=?').get(hashSecret(token));
@@ -580,6 +587,6 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     db.close();
   }
 
-  return { listNodes, node, createPairing, pairing, revokePairing, claim, update, revoke, handleUpgrade, send, onMessage, isConnected: (id) => conns.has(id), version: () => version, close,
+  return { listNodes, node, createPairing, pairing, revokePairing, claim, whoami, update, revoke, handleUpgrade, send, onMessage, isConnected: (id) => conns.has(id), version: () => version, close,
     autoDrain, requestUpdate, logsTail, metrics: metricsOf, setBusy: (fn) => { busy = fn; }, setUpNext: (fn) => { upNext = fn; }, health };
 }

@@ -240,7 +240,10 @@ test('GET /api/connections lists coding agents and github; actions are login-pro
   const r = await get('/api/connections', { cookie });
   assert.equal(r.status, 200);
   const { connections } = await r.json();
-  assert.deepEqual(connections.map((c) => c.id), ['claude', 'codex', 'github']);
+  // claude-machines: the head's Claude, shared with worker machines (agent-share.mjs), right under Claude.
+  assert.deepEqual(connections.map((c) => c.id), ['claude', 'claude-machines', 'codex', 'github']);
+  const share = connections.find((c) => c.id === 'claude-machines');
+  assert.deepEqual([share.signedIn, share.ui.connect, share.ui.disconnect], [false, 'Share with machines', 'Stop sharing']);
   for (const c of connections) {
     assert.equal(typeof c.installed, 'boolean', `${c.id} reports installed`);
     assert.equal(typeof c.signedIn, 'boolean', `${c.id} reports signedIn`);

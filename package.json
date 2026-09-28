@@ -4,7 +4,8 @@
   "description": "agent-orch: self-hosted, login-protected web UI for Claude Code with an agent orchestrator",
   "main": "server.mjs",
   "scripts": {
-    "test": "node bin/test.mjs"
+    "test": "node bin/test.mjs",
+    "test:full": "node bin/test.mjs --all"
   },
   "keywords": [],
   "author": "",

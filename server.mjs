@@ -22,7 +22,7 @@ import { createStats } from './stats.mjs';
 import { healthRow } from './health.mjs';
 import { createResources, registerPid, withOwner, readSystem, cpuPercent } from './resources.mjs';
 import { createCluster } from './cluster.mjs';
-import { WS_PATH, PAIR_PATH, CLAIM_PATH } from './cluster-protocol.mjs';
+import { WS_PATH, PAIR_PATH, CLAIM_PATH, WHOAMI_PATH } from './cluster-protocol.mjs';
 import { createRemoteLogins } from './remote-login.mjs';
 import { createExtensions } from './extensions.mjs';
 import { createAgentShare, wireAgentShare, shareTargets } from './agent-share.mjs';
@@ -1346,6 +1346,15 @@ async function handleRequest(req, res) {
   if (inst && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'text/x-shellscript; charset=utf-8', 'Cache-Control': 'no-store' });
     return res.end(fs.readFileSync(path.join(ROOT, 'bin', inst)));
+  }
+  // A worker asks whether the head still knows it (its node token is the credential; a wrong one counts as a failure).
+  if (p === WHOAMI_PATH && req.method === 'GET') {
+    if (!cluster) return json(res, 503, { error: 'cluster unavailable' });
+    const ip = clientIp(req), wait = lockedFor(ip);
+    if (wait) return json(res, 429, { error: 'locked', retryInSec: Math.ceil(wait / 1000) });
+    const r = cluster.whoami(req.headers);
+    if (r.status === 401) recordFailure(ip);
+    return r.error ? json(res, r.status, { error: r.error }) : json(res, 200, r);
   }
   // A worker trades a one-time pairing code for its node token (no session: the code is the credential).
   if (p === CLAIM_PATH && req.method === 'POST') {

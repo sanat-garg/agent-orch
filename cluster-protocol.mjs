@@ -12,6 +12,9 @@ export const PROTOCOL_VERSION = 1;
 export const WS_PATH = '/api/cluster/ws';
 export const PAIR_PATH = '/api/cluster/pair'; // owner (signed in): POST {uses?} → a pairing code; DELETE …/:code revokes it
 export const CLAIM_PATH = '/api/cluster/claim'; // worker: POST {code, name, os, arch} → {node, token} once per machine
+// worker: GET with its bearer token → {node, name} while the head still knows this machine, 401 once it was removed.
+// The installer asks before pairing again, so re-running it never adds the same machine twice.
+export const WHOAMI_PATH = '/api/cluster/me';
 export const HEARTBEAT_MS = 10_000;
 export const HEARTBEAT_MISSES = 3; // no frame for 3 heartbeats = disconnected (the grace period starts then)
 export const GRACE_MS = { mac: 5 * 60_000, vps: 2 * 60_000 };

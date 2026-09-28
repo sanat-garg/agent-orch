@@ -21,3 +21,7 @@ Constraints: HIG sizes as in CONTEXT.md (44pt on touch is inherited from `.st-sw
 ## Done when
 
 `npm test -- test/ui-static.test.mjs` && `grep -q autoRestart public/app.js` && `grep -q autoRestart public/index.html`
+
+## Result — done (check passed) (2026-09-28 06:02)
+
+AGENT-ORCH-STATUS: done — Settings switch saves autoRestart; the banner now says when a restart is automatic

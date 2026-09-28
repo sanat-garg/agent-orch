@@ -2885,7 +2885,7 @@ async function pollUpdates() { try { applyUpdateStatus(await api('/api/status'))
 function renderUpdateBanner() {
   const draining = upd.pending || !!O.state?.draining;
   $('updateBanner').hidden = !draining && (!upd.commits || upd.commits <= upd.dismissed);
-  $('updateText').textContent = draining ? 'Restarting after running tasks finish…'
+  $('updateText').textContent = draining ? (O.state?.parallel?.autoRestart ? 'Restarting once idle (automatic)…' : 'Restarting after running tasks finish…')
     : `${upd.commits} new commit${upd.commits === 1 ? '' : 's'} since the server started`;
   $('updateRestart').hidden = draining;
   $('updateRestart').disabled = false;
@@ -5402,6 +5402,9 @@ function renderSettings() {
   if ($('settingsModal').hidden) return;
   const s = O.state || {}, p = O.project;
   renderParallel(s);
+  // Disabled until the orchestrator state arrives; not flipped under the owner's finger while a save is in flight.
+  $('stAutoRestart').disabled = !s.parallel;
+  if (document.activeElement !== $('stAutoRestart')) $('stAutoRestart').checked = !!s.parallel?.autoRestart;
   renderReflectModel();
   renderReflectBtn();
   $('stProject').hidden = !p;
@@ -5467,6 +5470,7 @@ $('stGatePatterns').addEventListener('change', async (e) => {
   catch (err) { toast(err.message, { kind: 'error' }); }
 });
 $('stParallel').addEventListener('change', (e) => { saveParallel({ maxTasks: e.target.value ? Number(e.target.value) : null }); e.target.blur(); });
+$('stAutoRestart').addEventListener('change', async (e) => { await saveParallel({ autoRestart: e.target.checked }); e.target.blur(); renderSettings(); });
 // Reflection direction (per project, optional): saved as you type (debounced) and on blur; blank = the reflector decides.
 const DIR = { timer: null, saving: false };
 // The box grows with its text (CSS caps it; past that it scrolls).

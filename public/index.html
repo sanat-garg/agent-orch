@@ -407,6 +407,10 @@
         <span class="st-text"><strong>Parallel tasks</strong><small id="stParHint">Checking what can run…</small></span>
         <select id="stParallel" aria-describedby="stParHint"></select>
       </label>
+      <label class="st-row">
+        <span class="st-text"><strong>Restart automatically once idle after server code changes</strong><small id="stAutoRestartHint">A restart waits for running tasks and chat turns to finish</small></span>
+        <input type="checkbox" class="st-switch" id="stAutoRestart" name="autoRestart" role="switch" aria-describedby="stAutoRestartHint">
+      </label>
       <div class="st-row st-dir">
         <label class="st-text" for="stGatePatterns"><strong>Ask me before</strong><small id="stGateHint">Browser tasks wait for your approval before clicking buttons or links named Send, Pay, Transfer, Submit order, Publish, Share, Delete, Confirm, Place order or Sign, or opening checkout pages. Add more names, one per line</small></label>
         <textarea id="stGatePatterns" rows="2" maxlength="4000" placeholder="e.g. Approve invoice" aria-describedby="stGateHint"></textarea>

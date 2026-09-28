@@ -834,3 +834,7 @@ Sidebar footer uses body font, 44pt on touch; rows marked fixed
 ## 2026-09-28 05:59 — #280 Auto-restart once idle after server code changes: backend setting and drain trigger [done (check passed)]
 
 Opt-in autoRestart setting drains and restarts after server-code merges; tests pass
+
+## 2026-09-28 06:02 — #281 Auto-restart setting in the Settings sheet ui and banner wording [done (check passed)]
+
+Settings switch saves autoRestart; the banner now says when a restart is automatic

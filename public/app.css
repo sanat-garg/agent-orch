@@ -935,6 +935,7 @@ label.st-row, label.st-text { cursor: pointer; }
 .st-switch:checked { background: var(--accent); }
 .st-switch:checked::after { transform: translateX(16px); }
 .st-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.st-switch:disabled { opacity: .5; cursor: default; }
 /* Phones: a row with a picker or buttons puts them under its text; switches stay beside it. */
 @media (max-width: 600px) { .st-row:has(select, .btn) { flex-wrap: wrap; } .st-row:has(select, .btn) .st-text { flex-basis: 100%; } .st-row select { max-width: 100%; flex: 1; } }
 @media (pointer: coarse) { .st-row select, .st-row .btn.small, .side-settings { height: 44px; } .side-settings { width: 44px; } }

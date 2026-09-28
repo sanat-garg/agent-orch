@@ -1576,7 +1576,7 @@ async function handleRequest(req, res) {
   if (VENDOR[p]) return serveFile(res, path.join(ROOT, VENDOR[p]));
   if (p === '/' || p === '/index.html') return serveFile(res, path.join(PUBLIC, 'index.html'));
   if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css' || p === '/browser.js' || p === '/browser.css') return serveFile(res, path.join(PUBLIC, p));
-  // The Files view: listing, preview, and copy/move/zip/unzip over the whole disk, opening on the chat's project (files.mjs).
+  // The Files view: listing, preview, upload, and copy/move/zip/unzip over the whole disk, opening on the chat's project (files.mjs).
   if (handleFiles(req, res, url, { rootFor: (cid) => findConvo(cid)?.cwd || null, json, readBody })) return;
 
   if (p === '/api/status') {
@@ -2195,6 +2195,8 @@ async function handleRequest(req, res) {
 
   res.writeHead(404); res.end('Not found');
 }
+// Files uploads (POST /api/files/upload, up to 2 GB) outlast node's 5-minute whole-request limit; headersTimeout still applies.
+server.requestTimeout = 0;
 
 // ---------- WebSocket ----------
 const wss = new WebSocketServer({ noServer: true });

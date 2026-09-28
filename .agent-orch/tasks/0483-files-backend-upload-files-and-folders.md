@@ -13,3 +13,7 @@ Add an upload endpoint for the Files tab (files.mjs + server.mjs, login-protecte
 ## Done when
 
 `node --test test/files-upload*.test.mjs` passes (subfolder upload, nested path mkdir, 409 without overwrite, disallowed root refused)
+
+## Result — done (check passed) (2026-09-28 18:11)
+
+AGENT-ORCH-STATUS: done — Streamed, login-protected Files upload endpoint works; its tests pass

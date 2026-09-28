@@ -24,6 +24,7 @@
 //   POST /api/files/rename {cid, path, name}        → {from, to}   (name: one path segment ≤ 255 bytes; 409 if taken)
 //   POST /api/files/new    {cid, dir, name, type}   → {created: rel}   (type 'file' (empty) or 'dir'; 404 if dir isn't a folder)
 //   POST /api/files/delete {cid, paths}             → {deleted: [rel], skipped: [{path, reason}]}   (recursive; missing = skipped)
+//   POST /api/files/upload?cid=&dir=<abs|rel>&path=<rel in upload>&overwrite=0|1, raw body → {saved} (409 {error: 'exists', path}; rules above uploadFile)
 //   (the rules for these seven are above copyPaths; errors are {error} with 400/403/404/409/413)
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
@@ -711,6 +712,53 @@ export async function deletePaths(rootDir, paths) {
   return { deleted, skipped };
 }
 
+// ── Upload: POST /api/files/upload?dir=&path=<relative path in the upload>&overwrite=0|1, raw body ─────────────────────
+// The body streams to a temp file beside the target (never buffered whole; at most UPLOAD_MAX bytes), then is renamed
+// into place. `path` is the file's place inside the upload ('folder/sub/a.txt'): plain segments only (no '..', no
+// absolute path, no NUL or backslash); missing folders are created. dir must be a writable folder (destOf's rules) and
+// every folder on the way and the file itself follow newEntry's (no data/, .git or secrets). An existing file is 409
+// {error: 'exists', path} unless overwrite; a protected one, a folder or a link is never replaced.
+export const UPLOAD_MAX = 2 * 1024 ** 3;
+export async function uploadFile(rootDir, dir, rel, body, { overwrite = false, size } = {}) {
+  const dest = destOf(rootDir, typeof dir === 'string' ? dir : '', 404), show = shower(dest.root, [dir ?? '']);
+  const s = typeof rel === 'string' ? rel : '';
+  if (!s || s.startsWith('/') || s.includes('\\') || s.includes('\0')) throw new FileError(400, 'Invalid path');
+  const parts = s.split('/').filter(Boolean).map(plainName);
+  if (!parts.length || parts.some((x) => Buffer.byteLength(x) > 255)) throw new FileError(400, 'Invalid path');
+  if (Number(size) > UPLOAD_MAX) throw new FileError(413, 'The file is too large (2 GB at most)');
+  const guard = (at) => {
+    const r = projRel(dest.root, at);
+    if (isProtected(r) || at.split(path.sep).includes('.git') || isSecret(at)) throw new FileError(403, `${r ?? at} is read-only`);
+  };
+  let cur = dest.real;
+  for (const seg of parts.slice(0, -1)) {
+    const at = path.join(cur, seg);
+    guard(at);
+    let st;
+    try { st = fs.lstatSync(at); } catch { await fs.promises.mkdir(at).catch((e) => { if (e.code !== 'EEXIST') throw e; }); st = fs.lstatSync(at); }
+    if (!st.isDirectory()) throw new FileError(409, `${show(at)} is not a folder`);
+    cur = at;
+  }
+  const at = path.join(cur, parts.at(-1));
+  guard(at);
+  const clash = () => {
+    let st;
+    try { st = fs.lstatSync(at); } catch { return; }
+    if (!st.isFile()) throw new FileError(409, `${show(at)} is not a file`);
+    if (!overwrite) throw Object.assign(new FileError(409, 'exists'), { body: { error: 'exists', path: show(at) } });
+  };
+  clash();
+  const tmp = path.join(cur, `.${parts.at(-1).slice(0, 200)}.upload-${process.pid}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`);
+  let n = 0;
+  const cap = new Transform({ transform(chunk, _, cb) { n += chunk.length; cb(n > UPLOAD_MAX ? new FileError(413, 'The file is too large (2 GB at most)') : null, chunk); } });
+  try {
+    await pipeline(body, cap, fs.createWriteStream(tmp, { flags: 'wx' }));
+    clash();
+    await fs.promises.rename(tmp, at);
+  } catch (e) { await fs.promises.rm(tmp, { force: true }); throw e; }
+  return { saved: show(at) };
+}
+
 // The route handler: rootFor(cid) → the chat's project folder, or null; readBody(req) → the parsed JSON body (POSTs).
 // Returns true (synchronously) when it answers; grep, changed, diff and the POSTs answer later, from their own promises.
 const OPS = { copy: (root, b) => copyPaths(root, b.paths, b.dest), move: (root, b) => movePaths(root, b.paths, b.dest),
@@ -720,10 +768,12 @@ const OPS = { copy: (root, b) => copyPaths(root, b.paths, b.dest), move: (root, 
 const FS_ERRORS = { EACCES: [403, 'Permission denied'], EPERM: [403, 'Permission denied'], EROFS: [403, 'The disk is read-only'],
   EEXIST: [409, 'Something with that name is already there'], ENOSPC: [507, 'The disk is full'], ENOENT: [404, 'Not found'] };
 export function handleFiles(req, res, url, { rootFor, json, readBody }) {
-  const m = url.pathname.match(/^\/api\/files\/(list|raw|find|grep|changed|diff|copy|move|zip|unzip|rename|new|delete)$/);
-  if (!m || req.method !== (OPS[m[1]] ? 'POST' : 'GET')) return false;
+  const m = url.pathname.match(/^\/api\/files\/(list|raw|find|grep|changed|diff|copy|move|zip|unzip|rename|new|delete|upload)$/);
+  if (!m || req.method !== (OPS[m[1]] || m[1] === 'upload' ? 'POST' : 'GET')) return false;
   const fail = (e) => {
     if (res.headersSent) return res.destroy();
+    if (m[1] === 'upload' && !req.readableEnded) { res.setHeader('Connection', 'close'); req.resume(); }
+    if (e.body) return json(res, e.status, e.body);
     const [status, error] = e.status ? [e.status, e.message] : FS_ERRORS[e.code] || [500, OPS[m[1]] ? `Could not ${m[1]} it` : 'Could not read it'];
     json(res, status, { error });
   };
@@ -738,7 +788,11 @@ export function handleFiles(req, res, url, { rootFor, json, readBody }) {
   const root = rootFor(url.searchParams.get('cid'));
   try {
     if (!root) throw new FileError(404, 'No project for this chat');
-    if (m[1] === 'list') json(res, 200, listDir(root, url.searchParams.get('path') ?? url.searchParams.get('dir')));
+    if (m[1] === 'upload') {
+      const q = url.searchParams;
+      uploadFile(root, q.get('dir') ?? '', q.get('path'), req, { overwrite: q.get('overwrite') === '1', size: req.headers['content-length'] }).then((r) => json(res, 200, r), fail);
+    }
+    else if (m[1] === 'list') json(res, 200, listDir(root, url.searchParams.get('path') ?? url.searchParams.get('dir')));
     else if (m[1] === 'find' || m[1] === 'grep') {
       const q = (url.searchParams.get('q') || '').trim();
       if (q.length < 2) throw new FileError(400, 'Type at least 2 characters');

@@ -1498,3 +1498,7 @@ Lightbox opens fitted; thumbnails contain; fit tests pass
 ## 2026-09-28 18:08 — #474 Integrate #433: Machines view on iPhone: a real mobile design, reviewed against Apple's HIG [done (check passed)]
 
 conflicts resolved; mobile Machines tests pass; ui-machines test 5 still fails
+
+## 2026-09-28 18:11 — #483 Files backend: upload files and folders [done (check passed)]
+
+Streamed, login-protected Files upload endpoint works; its tests pass

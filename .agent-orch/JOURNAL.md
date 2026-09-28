@@ -1316,3 +1316,7 @@ assign API lists runnable tasks and starts them immediately
 ## 2026-09-28 15:02 — #447 Sidebar usage card: tap opens the all-machines window; no page dots [done (check passed)]
 
 card opens all-machines window, dots gone, tests pass
+
+## 2026-09-28 15:05 — #455 Plain-language refill status instead of 'Workers: 19 free · 12 ready → topping up' [done (check passed)]
+
+Queue now shows plain-language refill status with an explanation popover

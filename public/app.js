@@ -7191,16 +7191,62 @@ $('queueModal').addEventListener('click', (e) => { if (e.target.closest('[data-c
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || $('queueModal').hidden) return;
   e.stopImmediatePropagation();
-  if (Q.drag) endDrag(false);
+  if (RF.open) closeRefillPop();
+  else if (Q.drag) endDrag(false);
   else closeQueue();
 }, true);
 function scheduleQueue() { clearTimeout(Q.timer); Q.timer = setTimeout(renderQueue, 120); }
-// Rapid top-up at a glance (#436): worker demand, then head-only backlog, e.g. 'Workers: 9 free · 3 ready → topping up'.
-function rapidSummary(r) {
-  if (!r) return '';
-  const head = r.head?.ready ? ` · Head: ${r.head.free} free · ${r.head.ready} ready` : '';
-  return `Workers: ${r.free} free · ${r.ready} ready${r.toppingUp ? ' → topping up' : ''}${head}`;
+// ----- refill status
+// The Queue's refill line (#436, plain words in #455): how many tasks are ready for how many open slots, and whether
+// agent-orch is asking the planner for more. refillStatus is pure (state + project → texts); the ⓘ opens a short
+// explanation that stays open across the Queue's re-renders (RF.open).
+const RF = { open: false };
+const RF_EXPLAIN = 'Each machine can run several tasks at once. When fewer tasks are ready than there are open slots, agent-orch asks the planner to queue more, so no machine sits idle. Turn this off with Keep improving in Settings.';
+function refillStatus(r, project) {
+  if (!r) return null;
+  if (project && !project.perpetual) return { state: 'off', text: 'Keep improving is off for this project', short: 'Keep improving is off' };
+  const blocked = r.blockedProjects || [];
+  if (project ? blocked.some((b) => b.id === project.id) : blocked.length) return { state: 'limit', text: 'Planning paused: usage limit near', short: 'Planning paused: usage limit near' };
+  const ready = plural(r.ready, 'task');
+  if (r.toppingUp) return { state: 'planning', text: `${ready} ready for ${plural(r.free, 'open slot')} · planning more work`, short: `${r.ready} ready · ${r.free} open` };
+  if (!r.free) return { state: 'busy', text: `All slots busy · ${ready} ready`, short: `All busy · ${r.ready} ready` };
+  return { state: 'balanced', text: `${plural(r.free, 'open slot')} · ${ready} ready`, short: `${r.ready} ready · ${r.free} open` };
 }
+// Counts go in <b> (semibold, tabular figures).
+function refillText(cls, text) {
+  const s = el('span', cls);
+  for (const part of String(text).split(/(\d+)/)) if (part) s.append(/^\d+$/.test(part) ? el('b', '', part) : part);
+  return s;
+}
+function renderRefillStatus(r, project) {
+  const st = refillStatus(r, project);
+  if (!st) return null;
+  const box = el('div', `rf rf-${st.state}`);
+  box.setAttribute('role', 'status');
+  if (st.state === 'planning') { const dot = el('span', 'rf-dot'); dot.setAttribute('aria-hidden', 'true'); box.append(dot); }
+  box.append(refillText('rf-full', st.text), refillText('rf-short', st.short));
+  const info = el('button', 'rf-info', 'ⓘ');
+  info.type = 'button';
+  info.setAttribute('aria-label', 'What is this?');
+  info.setAttribute('aria-expanded', String(RF.open));
+  const pop = el('p', 'rf-pop', RF_EXPLAIN);
+  pop.hidden = !RF.open;
+  info.addEventListener('click', (e) => {
+    e?.stopPropagation?.();
+    RF.open = !RF.open;
+    pop.hidden = !RF.open;
+    info.setAttribute('aria-expanded', String(RF.open));
+  });
+  box.append(info, pop);
+  return box;
+}
+function closeRefillPop() {
+  RF.open = false;
+  for (const p of document.querySelectorAll('.rf-pop')) p.hidden = true;
+  for (const b of document.querySelectorAll('.rf-info')) b.setAttribute('aria-expanded', 'false');
+}
+// ----- end refill status
+document.addEventListener('click', (e) => { if (RF.open && !e.target.closest?.('.rf')) closeRefillPop(); });
 function renderQueue() {
   if ($('queueModal').hidden || Q.drag || Q.busy) return;
   const body = $('qBody');
@@ -7232,8 +7278,8 @@ function renderQueue() {
     for (const t of paused) box.append(queueCard(t.id, false));
     body.append(box);
   }
-  const rapid = rapidSummary(O.state?.rapid);
-  if (rapid) body.append(el('p', 'muted q-rapid', rapid));
+  const refill = renderRefillStatus(O.state?.rapid, O.project);
+  if (refill) body.append(refill);
   body.append(el('h3', 'dg-group', `Up next · ${queued.length}`));
   if (!queued.length) body.append(el('p', 'muted', 'Nothing queued.'));
   const list = el('div', 'q-list');

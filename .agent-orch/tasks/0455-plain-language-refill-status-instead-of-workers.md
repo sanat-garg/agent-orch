@@ -13,3 +13,9 @@ The queue header / lanes status from #436 shows raw text like 'Workers: 19 free 
 ## Done when
 
 `node --test test/ui-refill-status*.test.mjs` passes (state texts, explanation popover), and `! grep -rn "topping up" public/app.js`
+
+## Result — done (check passed) (2026-09-28 15:05)
+
+The new status line passes its tests. There are no screenshots: the shot tool lives on the VPS, and the browser can't launch on this Mac.
+
+AGENT-ORCH-STATUS: done — Queue now shows plain-language refill status with an explanation popover

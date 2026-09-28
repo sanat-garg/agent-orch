@@ -2817,7 +2817,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       const id = addTask(p.id, { title: 'Reflect: what else should be done?', prompt: '(reflection)', kind: 'reflect', source: 'reflection', agent: rs.agent, model: rs.model,
         fallbacks: reflectFallbacksFor(p) });
       if (p.convo_id) emitChat(p.convo_id, { t: 'reflect', taskId: id, text: p.reflect_direction ? `${REFLECT_ASK} Direction: ${p.reflect_direction}` : REFLECT_ASK });
-      logEvent(`${rapid ? `workers: ${rapid.free} free · ${rapid.ready} ready → topping up with ${rapid.requested}` : 'queue empty → reflecting'} (task #${id})`, { projectId: p.id, taskId: id });
+      logEvent(`${rapid ? `${rapid.ready} ready for ${rapid.free} open slots: planning ${rapid.requested} more` : 'queue empty → reflecting'} (task #${id})`, { projectId: p.id, taskId: id });
       added = true;
     }
     return added;

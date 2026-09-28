@@ -109,6 +109,22 @@ test('download: protected files are 403; errors are JSON 400/403/404', async (t)
   assert.equal((await fetch(p.url('a.txt'), { method: 'POST' })).status, 404, 'GET only');
 });
 
+test('download check=1: ok with the name and kind, nothing streamed; errors are the same JSON with no attachment header', async (t) => {
+  const p = await serve(t);
+  const check = async (...paths) => { const r = await fetch(`${p.url(...paths)}&check=1`); return [r.status, r.headers.get('content-disposition'), await r.json()]; };
+  assert.deepEqual(await check('a.txt', 'dir/sub/y.txt'), [200, null, { ok: true, name: 'agent-orch-files.zip', kind: 'zip' }]);
+  assert.deepEqual(await check('dir'), [200, null, { ok: true, name: 'dir.zip', kind: 'zip' }]);
+  assert.deepEqual(await check('a.txt'), [200, null, { ok: true, name: 'a.txt', kind: 'file', size: Buffer.byteLength('hello é') }]);
+  assert.deepEqual(await check('a.txt', 'dir/id.pem'), [403, null, { error: 'dir/id.pem is protected' }]);
+  assert.deepEqual(await check('nope.txt'), [404, null, { error: 'Not found: nope.txt' }]);
+  for (const bad of [['dir/id.pem'], ['nope.txt'], ['../x'], []]) {
+    const r = await p.get(...bad);
+    assert.ok(r.status >= 400, bad.join());
+    assert.equal(r.headers.get('content-disposition'), null, `no attachment on the ${r.status} error`);
+    assert.match(r.headers.get('content-type'), /json/);
+  }
+});
+
 test('download: over 50k entries is 413 before anything is sent', async (t) => {
   const p = await serve(t);
   const many = path.join(p.root, 'many');
@@ -117,6 +133,9 @@ test('download: over 50k entries is 413 before anything is sent', async (t) => {
   const r = await p.get('many');
   assert.equal(r.status, 413);
   assert.match((await r.json()).error, /50000/);
+  const c = await fetch(`${p.url('many')}&check=1`);
+  assert.equal(c.status, 413, 'the preflight enforces the caps too');
+  assert.match((await c.json()).error, /50000/);
 });
 
 test('download: a client that disconnects stops the zip', async (t) => {

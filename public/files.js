@@ -1135,8 +1135,10 @@ function fxMenuOpen(r, x, y) {
   ];
   fxMenuShow(items, r ? r.e.name : fxFolderName(FX.path), x, y, ro ? `${FX_RO}.` : '');
 }
-// ----- download: the browser saves GET /api/files/download itself (a hidden <a download>, nothing is fetched into the page):
-// one file as itself; several paths (repeated path=) or a folder as one streamed zip. Protected files are left out with a toast.
+// ----- download: the browser saves GET /api/files/download itself (a hidden <a download>, the body isn't fetched into the
+// page): one file as itself; several paths (repeated path=) or a folder as one streamed zip. Protected files are left out
+// with a toast. First a cheap preflight (…&check=1, JSON, nothing streamed): if it fails the owner gets a toast and no
+// link is clicked, so an error body is never saved as a file (#780).
 const fxDlPath = (r) => fxAbs(r.file || r.rel); // a Contents hit's rel carries #L<line>
 const fxDownloadUrl = (paths) => `/api/files/download?cid=${encodeURIComponent(FX.cid)}${paths.map((p) => `&path=${encodeURIComponent(p)}`).join('')}`;
 function fxDlPaint() {
@@ -1146,15 +1148,30 @@ function fxDlPaint() {
   b.disabled = !FX.cid || !ok.length;
   b.title = !rows.length ? 'Select files or folders to download' : !ok.length ? `🔒 ${FX_PROT}: it can't be downloaded` : `Download ${ok.length > 1 || ok[0].e.dir ? 'as a zip ' : ''}(${FX_DL_KEYS})`;
 }
-function fxDownload(rows) {
+// The preflight → null when the download can go ahead, else the message to show.
+async function fxDlCheck(url) {
+  let r;
+  try { r = await fetch(`${url}&check=1`, { cache: 'no-store' }); } catch { return "Couldn't reach the server"; }
+  if (r.status === 401) { location.href = '/login'; return 'Signed out'; }
+  if (!/json/.test(r.headers.get('content-type') || '')) { // an older server that ignores check=1 streams the file itself
+    r.body?.cancel().catch(() => {});
+    return r.ok ? null : r.status === 404 ? API_UPDATING : `Request failed (${r.status})`;
+  }
+  const data = await r.json().catch(() => ({}));
+  if (r.ok && data.ok) return null;
+  return data.error || (r.status === 404 ? API_UPDATING : `Request failed (${r.status})`);
+}
+async function fxDownload(rows) {
   if (!FX.cid || !rows.length) return;
   const ok = rows.filter((r) => !r.e.protected), skipped = rows.length - ok.length;
   if (!ok.length) return toast(`${FX_PROT}: it can't be downloaded.`, { kind: 'error' });
-  const paths = [...new Set(ok.map(fxDlPath))];
+  const paths = [...new Set(ok.map(fxDlPath))], url = fxDownloadUrl(paths);
   if (skipped) toast(`Skipped ${skipped} protected file${skipped === 1 ? '' : 's'}`, { duration: 3000 });
+  const err = await fxDlCheck(url);
+  if (err) return toast(err === API_UPDATING ? err : `Download failed: ${err}`, { kind: 'error' });
   if (paths.length > 1 || ok[0].e.dir) toast(`Downloading ${paths.length > 1 ? `${paths.length} items` : `“${ok[0].e.name}”`} as a zip`, { duration: 2500 });
   const a = document.createElement('a');
-  a.href = fxDownloadUrl(paths); a.download = ''; a.hidden = true;
+  a.href = url; a.download = ''; a.hidden = true;
   document.body.append(a);
   a.click();
   a.remove();

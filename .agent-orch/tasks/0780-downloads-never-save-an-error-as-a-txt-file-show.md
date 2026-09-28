@@ -13,3 +13,7 @@ When GET /api/files/download fails (e.g. a 404 while the running server is older
 ## Done when
 
 `node --test test/files-download*.test.mjs test/ui-files-download*.test.mjs` passes (check endpoint ok/error, no download link on error, toast shown, valid selection downloads)
+
+## Result — done (check passed) (2026-09-28 23:22)
+
+AGENT-ORCH-STATUS: done — downloads preflight via check=1, failures toast instead of saving

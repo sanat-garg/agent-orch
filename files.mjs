@@ -25,6 +25,7 @@
 //   POST /api/files/new    {cid, dir, name, type}   → {created: rel}   (type 'file' (empty) or 'dir'; 404 if dir isn't a folder)
 //   POST /api/files/delete {cid, paths}             → {deleted: [rel], skipped: [{path, reason}]}   (recursive; missing = skipped)
 //   GET /api/files/download?cid=<chat>&path=<p>[&path=<p2>…] → one file as an attachment, else a zip streamed on the fly (rules above sendDownload)
+//                                     …&check=1 → {ok, name, kind, size?} or the same error, nothing streamed (the client's preflight)
 //   POST /api/files/upload?cid=&dir=<abs|rel>&path=<rel in upload>&overwrite=0|1, raw body → {saved} (409 {error: 'exists', path}; rules above uploadFile)
 //   (the rules for these seven are above copyPaths; errors are {error} with 400/403/404/409/413)
 import { execFile } from 'node:child_process';
@@ -730,7 +731,10 @@ const TYPES = { ...IMAGE_TYPES, '.txt': 'text/plain; charset=utf-8', '.md': 'tex
   '.tar': 'application/x-tar', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime' };
 const attachment = (name) => `attachment; filename*=UTF-8''${encodeURIComponent(name).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)}`;
 
-export async function sendDownload(req, res, rootDir, paths) {
+// check (…&check=1, the client's preflight): the same validation and caps, but nothing is streamed; it resolves to
+// {ok, name, kind: 'file'|'zip', size (file only)} for the handler to send as JSON (errors throw as usual, so they're JSON
+// too: no error ever carries an attachment header, and the browser never saves one as a file).
+export async function sendDownload(req, res, rootDir, paths, { check = false } = {}) {
   const srcs = sourcesOf(rootDir, paths);
   if (srcs.length === 1 && !srcs[0].dir) {
     const s = srcs[0];
@@ -738,6 +742,7 @@ export async function sendDownload(req, res, rootDir, paths) {
     try { fh = await fs.promises.open(s.real, 'r'); } catch (e) { throw denied(e); }
     const st = await fh.stat();
     if (!st.isFile()) { await fh.close(); throw new FileError(400, 'Not a file'); }
+    if (check) { await fh.close(); return { ok: true, name: s.name, kind: 'file', size: st.size }; }
     res.writeHead(200, { 'Content-Type': TYPES[path.extname(s.name).toLowerCase()] || 'application/octet-stream', 'Content-Length': st.size,
       'Content-Disposition': attachment(s.name), 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' });
     return pipeline(fh.createReadStream(), res).catch(() => {});
@@ -788,6 +793,7 @@ export async function sendDownload(req, res, rootDir, paths) {
     entries.unshift({ name: DOWNLOAD_NOTE, data: note, size: note.length, st: { mtimeMs: Date.now(), mode: 0o644 } });
   }
   const file = srcs.length === 1 ? `${srcs[0].name}.zip` : 'agent-orch-files.zip';
+  if (check) return { ok: true, name: file, kind: 'zip' };
   res.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Disposition': attachment(file), 'Cache-Control': 'private, no-store',
     'X-Content-Type-Options': 'nosniff', 'X-Skipped': String(skipped.length) });
   zipStats.active++;
@@ -929,7 +935,9 @@ export function handleFiles(req, res, url, { rootFor, json, readBody }) {
       else if (q.length > 200) throw new FileError(400, 'Search for 200 characters at most');
       else grepFiles(root, q, { dir }).then((r) => json(res, 200, r), fail);
     }
-    else if (m[1] === 'download') sendDownload(req, res, root, url.searchParams.getAll('path')).catch(fail);
+    else if (m[1] === 'download') {
+      sendDownload(req, res, root, url.searchParams.getAll('path'), { check: url.searchParams.get('check') === '1' }).then((r) => r && json(res, 200, r), fail);
+    }
     else if (m[1] === 'changed') changedFiles(root).then((r) => json(res, 200, r), fail);
     else if (m[1] === 'diff') sendDiff(req, res, root, url.searchParams.get('path')).catch(fail);
     else sendFile(req, res, root, url.searchParams.get('path'));

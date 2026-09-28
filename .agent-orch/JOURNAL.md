@@ -1640,3 +1640,7 @@ Files Download button, menu item, ⌘⇧D shortcut and tests added
 ## 2026-09-28 23:17 — #767 Integrate #761: Files backend: download a file, or a streamed zip of several [done (check passed)]
 
 CONTEXT.md conflict resolved; download backend and UI tests pass
+
+## 2026-09-28 23:22 — #780 Downloads never save an error as a .txt file; show the error instead [done (check passed)]
+
+downloads preflight via check=1, failures toast instead of saving

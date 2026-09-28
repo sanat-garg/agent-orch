@@ -5,7 +5,9 @@
 //   GET /api/files/list?cid=<chat>&path=<rel>  → {name, path, crumbs, entries: [{name, dir, size, mtime, hidden}], truncated}
 //   GET /api/files/raw?cid=<chat>&path=<rel>   → the file (images), or text/plain (first TEXT_MAX bytes; 415 for binary)
 //   GET /api/files/find?cid=<chat>&q=<text>    → {q, entries: [{name, path, dir, size, mtime}], truncated} (q: 2+ chars)
-//   GET /api/files/grep?cid=<chat>&q=<text>    → {q, hits: [{path, line, text}], files, truncated} (q: 2–200 chars; text files ≤ 1 MB)
+//   GET /api/files/grep?cid=<chat>&q=<text>[&cs=1][&w=1][&re=1] → {q, hits: [{path, line, text}], files, truncated}
+//       (q: 2–200 chars; text files ≤ 1 MB). cs=1 match case, w=1 whole word only, re=1 q is a JavaScript regular
+//       expression (400 {error: 'Invalid regular expression: …'} when it doesn't compile or nests quantifiers).
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -94,15 +96,16 @@ export function findFiles(rootDir, q, { max = 200 } = {}) {
   return { q: String(q || ''), entries, truncated: state.truncated };
 }
 
-// Project-wide search inside files (case-insensitive substring) over walkProject: one hit per matching line, `line`
-// 1-based, `text` the line trimmed to GREP_TEXT characters around the match. Reads only regular files up to `fileMax`
-// bytes and skips binary ones (a NUL in the first 8 KB). `files` counts the files searched. Stops after `max` hits or
-// FIND_VISIT_MAX entries (truncated: true); yields to the event loop every 50 files so a big project can't stall the server.
-export async function grepFiles(rootDir, q, { max = 200, fileMax = 1024 * 1024 } = {}) {
+// Project-wide search inside files over walkProject: one hit per matching line, `line` 1-based, `text` the line trimmed
+// to GREP_TEXT characters around the match. Case-insensitive substring unless opts say otherwise (see grepMatcher).
+// Reads only regular files up to `fileMax` bytes and skips binary ones (a NUL in the first 8 KB). `files` counts the
+// files searched. Stops after `max` hits or FIND_VISIT_MAX entries (truncated: true); yields to the event loop every 50
+// files so a big project can't stall the server.
+export async function grepFiles(rootDir, q, { max = 200, fileMax = 1024 * 1024, cs = false, w = false, re = false } = {}) {
   const { root } = resolveInside(rootDir, '');
-  const needle = String(q || '').toLowerCase(), state = { truncated: false }, hits = [];
+  const find = grepMatcher(String(q || ''), { cs, w, re }), state = { truncated: false }, hits = [];
   let files = 0, seen = 0;
-  walk: for (const { path: relPath, abs, st } of walkProject(root, needle.startsWith('.'), state)) {
+  walk: for (const { path: relPath, abs, st } of walkProject(root, !re && String(q || '').startsWith('.'), state)) {
     if (!st.isFile()) continue;
     if (++seen % 50 === 0) await new Promise((r) => setImmediate(r));
     if (st.size > fileMax) continue;
@@ -110,17 +113,45 @@ export async function grepFiles(rootDir, q, { max = 200, fileMax = 1024 * 1024 }
     try { buf = await fs.promises.readFile(abs); } catch { continue; }
     if (buf.subarray(0, 8192).includes(0)) continue; // binary
     files++;
-    const text = buf.toString('utf8'), lower = text.toLowerCase();
-    if (!lower.includes(needle)) continue;
-    const lines = text.split('\n'), lowers = lower.split('\n');
-    for (let i = 0; i < lowers.length; i++) {
-      const at = lowers[i].indexOf(needle);
+    const text = buf.toString('utf8');
+    if (find.literal != null && !(cs ? text : text.toLowerCase()).includes(find.literal)) continue; // cheap whole-file check
+    const lines = text.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].replace(/\r$/, ''), [at, len] = find(line);
       if (at < 0) continue;
       if (hits.length >= max) { state.truncated = true; break walk; }
-      hits.push({ path: relPath, line: i + 1, text: grepSnippet(lines[i].replace(/\r$/, ''), at, needle.length) });
+      hits.push({ path: relPath, line: i + 1, text: grepSnippet(line, at, len) });
     }
   }
   return { q: String(q || ''), hits, files, truncated: state.truncated };
+}
+// One matcher per search: line → [index of the first match or -1, its length]. Plain text is escaped; `w` (whole word)
+// wants each end of the match to be a word boundary: \b where the match starts/ends with a word character, nothing more
+// where it starts/ends with a non-word one (so `cat` misses `concat`, `(x)` still hits `concat(x)`). `re` compiles q as a JavaScript regex (flags g, plus i unless `cs`; no u), throwing a 400
+// FileError when it doesn't compile or nests quantifiers like (a+)+, which can backtrack for ever. `literal` (plain text
+// only) is what a file must contain, lower-cased unless `cs`.
+export function grepMatcher(q, { cs = false, w = false, re = false } = {}) {
+  let src = re ? q : q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (re && nestedQuantifier(q)) throw new FileError(400, 'Invalid regular expression: nested quantifiers like (a+)+ can take forever');
+  if (w) src = `(?:(?<!\\w)|(?!\\w))(?:${src})(?:(?!\\w)|(?<!\\w))`;
+  let rx;
+  try { rx = new RegExp(src, cs ? 'g' : 'gi'); } catch (e) {
+    throw new FileError(400, /^Invalid regular expression/.test(e.message) ? e.message : `Invalid regular expression: ${e.message}`);
+  }
+  const find = (line) => { rx.lastIndex = 0; const m = rx.exec(line); return m ? [m.index, m[0].length] : [-1, 0]; };
+  find.literal = re ? null : cs ? q : q.toLowerCase();
+  return find;
+}
+// True when a group that holds a quantifier is itself quantified: (a+)+, (\w*x)*, ((a+)b){2,}. Escapes and character
+// classes are blanked first so \( or [+] don't count; groups are folded innermost first.
+function nestedQuantifier(q) {
+  let s = q.replace(/\\./g, 'x').replace(/\[[^\]]*\]/g, 'x'), m;
+  while ((m = /\(([^()]*)\)/.exec(s))) {
+    const quantified = /[+*}\0]/.test(m[1]);
+    if (quantified && /^[+*{]/.test(s.slice(m.index + m[0].length))) return true;
+    s = s.slice(0, m.index) + (quantified ? '\0' : 'x') + s.slice(m.index + m[0].length);
+  }
+  return false;
 }
 function grepSnippet(line, at, len) {
   if (line.length <= GREP_TEXT) return line.trim();
@@ -172,7 +203,10 @@ export function handleFiles(req, res, url, { rootFor, json }) {
       if (q.length < 2) throw new FileError(400, 'Type at least 2 characters');
       if (m[1] === 'find') json(res, 200, findFiles(root, q));
       else if (q.length > 200) throw new FileError(400, 'Search for 200 characters at most');
-      else grepFiles(root, q).then((r) => json(res, 200, r), fail);
+      else {
+        const flag = (k) => url.searchParams.get(k) === '1';
+        grepFiles(root, q, { cs: flag('cs'), w: flag('w'), re: flag('re') }).then((r) => json(res, 200, r), fail);
+      }
     }
     else sendFile(req, res, root, url.searchParams.get('path'));
   } catch (e) { fail(e); }

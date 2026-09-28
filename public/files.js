@@ -9,6 +9,7 @@ const FX = {
   sort: (() => { try { const s = JSON.parse(store.get('cw.files.sort')); if (s?.key) return s; } catch {} return { key: 'name', dir: 1 }; })(),
   hidden: store.get('cw.files.hidden') === '1',
   mode: store.get('cw.files.mode') === 'contents' ? 'contents' : 'names', // what Search project looks at
+  grep: { cs: store.get('cw.files.grep.cs') === '1', w: store.get('cw.files.grep.w') === '1', re: store.get('cw.files.grep.re') === '1' }, // Contents options
   expanded: new Set(), kids: new Map(), built: false, ql: null,
 };
 const FX_THUMB_MAX = 3e6; // images up to this size show as their own thumbnail in the icon view
@@ -91,6 +92,9 @@ function fxBuild() {
           <div class="fx-mode seg-sm" role="group" aria-label="Search project by">
             <button type="button" data-fxmode="names" title="Find files by name">Names</button><button type="button" data-fxmode="contents" title="Find text inside files">Contents</button>
           </div>
+          <div class="fx-opts seg-sm" id="fxOpts" role="group" aria-label="Contents search options">
+            <button type="button" data-fxopt="cs" aria-label="Match case" title="Match case">Aa</button><button type="button" data-fxopt="w" aria-label="Whole word" title="Whole word">ab</button><button type="button" data-fxopt="re" aria-label="Regular expression" title="Regular expression">.*</button>
+          </div>
           <button type="button" class="btn small fx-find-btn" id="fxFindBtn">Search project</button>
         </div>
       </div>
@@ -103,6 +107,11 @@ function fxBuild() {
   v.querySelectorAll('[data-fxmode]').forEach((b) => b.addEventListener('click', () => {
     FX.mode = b.dataset.fxmode; store.set('cw.files.mode', FX.mode);
     if (FX.find) fxFind(FX.find.q); else fxRender();
+  }));
+  v.querySelectorAll('[data-fxopt]').forEach((b) => b.addEventListener('click', () => {
+    const k = b.dataset.fxopt;
+    FX.grep[k] = !FX.grep[k]; store.set('cw.files.grep.' + k, FX.grep[k] ? '1' : '0');
+    if (FX.find?.mode === 'contents') fxFind(FX.find.q); else fxRender();
   }));
   $('fxFindBtn').onclick = () => fxFind($('fxFilter').value.trim());
   $('fxHidden').onclick = () => fxToggleHidden();
@@ -189,10 +198,12 @@ function fxToggleHidden() {
 async function fxFind(q) {
   if (!FX.cid || q.length < 2) return;
   const seq = ++FX.fseq, cid = FX.cid, mode = FX.mode;
-  FX.find = { q, mode, data: null, err: '' }; FX.sel = null;
+  const opts = mode === 'contents' ? { ...FX.grep } : null;
+  FX.find = { q, mode, opts, data: null, err: '' }; FX.sel = null;
   fxRender();
   try {
-    const d = await api(`${mode === 'contents' ? '/api/files/grep' : '/api/files/find'}?cid=${encodeURIComponent(cid)}&q=${encodeURIComponent(q)}`);
+    const flags = opts ? Object.keys(opts).filter((k) => opts[k]).map((k) => `&${k}=1`).join('') : '';
+    const d = await api(`${mode === 'contents' ? '/api/files/grep' : '/api/files/find'}?cid=${encodeURIComponent(cid)}&q=${encodeURIComponent(q)}${flags}`);
     if (seq !== FX.fseq || cid !== FX.cid || !FX.find) return;
     FX.find.data = d;
   } catch (e) {
@@ -230,6 +241,8 @@ function fxRender() {
   $('fxHidden').setAttribute('aria-pressed', String(FX.hidden));
   $('filesView').querySelectorAll('[data-fxview]').forEach((b) => b.setAttribute('aria-checked', String(b.dataset.fxview === FX.view)));
   $('filesView').querySelectorAll('[data-fxmode]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.fxmode === FX.mode)));
+  $('fxOpts').hidden = FX.mode !== 'contents';
+  $('filesView').querySelectorAll('[data-fxopt]').forEach((b) => b.setAttribute('aria-pressed', String(FX.grep[b.dataset.fxopt])));
   $('fxTitle').textContent = d?.name || currentConvo()?.title || 'Files';
   main.textContent = '';
   main.className = `fx-main ${FX.view}`;
@@ -291,7 +304,7 @@ function fxFound(main) {
 // Contents results: a heading per file, then one row per matching line (`line · text`, the match in <mark>). A row's
 // rel is unique per line; `file` is what Quick Look opens.
 function fxFoundLines(main) {
-  const { q, data } = FX.find;
+  const { q, opts, data } = FX.find;
   FX.rows = data.hits.map((h) => ({ e: { name: h.path.split('/').pop(), dir: false, size: null, mtime: null }, rel: `${h.path}#L${h.line}`, file: h.path, hit: h, depth: 0 }));
   if (FX.sel && !FX.rows.some((r) => r.rel === FX.sel)) FX.sel = null;
   const nFiles = new Set(data.hits.map((h) => h.path)).size;
@@ -317,7 +330,7 @@ function fxFoundLines(main) {
       }
       const o = optionFor(r, i, 'fx-row fx-hit');
       o.title = `${r.file}:${r.hit.line}`;
-      o.append(el('span', 'fx-hl', String(r.hit.line)), fxMarked(el('span', 'fx-ht'), r.hit.text, q));
+      o.append(el('span', 'fx-hl', String(r.hit.line)), fxMarked(el('span', 'fx-ht'), r.hit.text, q, opts));
       group.append(o);
     });
     fxActive(t);
@@ -326,13 +339,18 @@ function fxFoundLines(main) {
   $('fxPath').append(el('span', 'fx-crumbs', `Searching inside the project's files for “${q}”`),
     el('span', 'fx-count', `${FX.rows.length} line${FX.rows.length === 1 ? '' : 's'} in ${nFiles} file${nFiles === 1 ? '' : 's'} · ${data.files} searched${data.truncated ? ' · stopped early' : ''}`));
 }
-// `text` into `node` with each case-insensitive occurrence of q in <mark> (text nodes only).
-function fxMarked(node, text, q) {
-  const low = text.toLowerCase(), needle = q.toLowerCase();
+// `text` into `node` with each match of q in <mark> (text nodes only), matched as the search did: case-insensitive
+// substring unless opts ({cs, w, re}, as sent to /api/files/grep) say otherwise.
+function fxMarked(node, text, q, opts = {}) {
+  let src = opts.re ? q : q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), rx;
+  if (opts.w) src = `(?:(?<!\\w)|(?!\\w))(?:${src})(?:(?!\\w)|(?<!\\w))`;
+  try { rx = new RegExp(src, opts.cs ? 'g' : 'gi'); } catch { rx = null; }
   let i = 0;
-  for (let at; needle && (at = low.indexOf(needle, i)) >= 0; i = at + needle.length) {
-    if (at > i) node.append(text.slice(i, at));
-    node.append(el('mark', null, text.slice(at, at + needle.length)));
+  for (let m; q && rx && (m = rx.exec(text)); ) {
+    if (!m[0]) { rx.lastIndex++; continue; } // an empty match marks nothing
+    if (m.index > i) node.append(text.slice(i, m.index));
+    node.append(el('mark', null, m[0]));
+    i = m.index + m[0].length;
   }
   if (i < text.length) node.append(text.slice(i));
   return node;

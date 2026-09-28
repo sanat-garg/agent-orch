@@ -173,6 +173,35 @@ test('grepFiles: finds lines at any depth, case-insensitive, skips binary and bi
   await assert.rejects(grepFiles(path.join(tmp, 'gone'), 'xx'), (e) => e.status === 404);
 });
 
+test('grepFiles options: match case, whole word, regular expression; nested quantifiers are refused', async () => {
+  const oroot = path.join(tmp, 'grepopts');
+  fs.mkdirSync(oroot);
+  fs.writeFileSync(path.join(oroot, 'a.txt'), 'const Cat = concat(x);\nthe cat sat\nfoor faar fuur\n');
+  const lines = async (q, opts) => (await grepFiles(oroot, q, opts)).hits.map((h) => h.line);
+  assert.deepEqual(await lines('cat'), [1, 2]);
+  assert.deepEqual(await lines('CAT', { cs: true }), [], 'case-sensitive miss');
+  assert.deepEqual(await lines('Cat', { cs: true }), [1], 'case-sensitive hit');
+  assert.deepEqual(await lines('concat', { w: true }), [1]);
+  assert.deepEqual(await lines('cat', { w: true, cs: true }), [2], '`cat` does not match `concat` (or `Cat` with cs)');
+  assert.deepEqual(await lines('cat', { w: true }), [1, 2], 'Cat is a whole word');
+  assert.deepEqual(await lines('(x)', { w: true }), [1], 'a needle with non-word edges');
+  assert.deepEqual(await lines('f(oo|aa)r', { re: true }), [3]);
+  assert.deepEqual(await lines('f(oo|aa)r'), [], 'without re it is plain text');
+  assert.deepEqual(await lines('^THE', { re: true }), [2]);
+  assert.deepEqual(await lines('^THE', { re: true, cs: true }), []);
+  assert.deepEqual(await lines('f..r', { re: true, w: true }), [3]);
+  const long = path.join(tmp, 'grepopts-long');
+  fs.mkdirSync(long);
+  fs.writeFileSync(path.join(long, 'l.txt'), 'y'.repeat(500) + 'foo' + 'o'.repeat(100) + 'r' + 'z'.repeat(500));
+  const [hit] = (await grepFiles(long, 'fo+r', { re: true })).hits;
+  assert.ok(hit.text.includes('foo' + 'o'.repeat(100) + 'r') && hit.text.startsWith('y') && hit.text.endsWith('z'), 'centred on the whole match');
+  for (const bad of ['f(oo', '(a+)+', '(\\w*x)*', '((a+)b){2,}', '(?:[a-z]+)*$']) {
+    await assert.rejects(grepFiles(oroot, bad, { re: true }), (e) => e.status === 400 && /^Invalid regular expression/.test(e.message), bad);
+  }
+  assert.deepEqual(await lines('(\\+)+', { re: true }), [], 'an escaped + is not a quantifier');
+  assert.deepEqual(await lines('(fo[+*]r)+', { re: true }), [], 'nor one in a character class');
+});
+
 test('GET /api/files/grep: 2+ characters, only for a known chat', async (t) => {
   const json = (res, status, body) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
   const server = http.createServer((req, res) => {
@@ -180,7 +209,7 @@ test('GET /api/files/grep: 2+ characters, only for a known chat', async (t) => {
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   t.after(() => server.close());
-  const grep = (q, cid = 'c1') => fetch(`http://127.0.0.1:${server.address().port}/api/files/grep?cid=${cid}&q=${encodeURIComponent(q)}`);
+  const grep = (q, cid = 'c1', flags = '') => fetch(`http://127.0.0.1:${server.address().port}/api/files/grep?cid=${cid}&q=${encodeURIComponent(q)}${flags}`);
   const ok = await grep('CONSOLE.log');
   assert.equal(ok.status, 200);
   const body = await ok.json();
@@ -189,6 +218,12 @@ test('GET /api/files/grep: 2+ characters, only for a known chat', async (t) => {
   assert.equal(body.truncated, false);
   const key = await grep('top secret');
   assert.deepEqual((await key.json()).hits, [], 'links out of the project are never read');
+  assert.deepEqual((await (await grep('CONSOLE', 'c1', '&cs=1')).json()).hits, []);
+  assert.deepEqual((await (await grep('console', 'c1', '&cs=1&w=1')).json()).hits.map((h) => h.path), ['src/app.js']);
+  assert.deepEqual((await (await grep('log\\(\\d\\)', 'c1', '&re=1')).json()).hits.map((h) => h.path), ['src/app.js']);
+  const invalid = await grep('log(', 'c1', '&re=1');
+  assert.equal(invalid.status, 400);
+  assert.match((await invalid.json()).error, /^Invalid regular expression: /);
   for (const [q, cid, status] of [['a', 'c1', 400], [' a ', 'c1', 400], ['x'.repeat(201), 'c1', 400], ['console', 'other', 404]]) {
     const r = await grep(q, cid);
     assert.equal(r.status, status, q);

@@ -33,6 +33,9 @@
 .fx-find { display: flex; align-items: center; gap: 6px; flex: none; }
 .fx-find[hidden] { display: none; }
 .fx-mode button { height: 24px; padding: 0 9px; font-size: 12.5px; }
+.fx-opts[hidden] { display: none; }
+.fx-opts button { height: 24px; min-width: 28px; padding: 0 6px; font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.fx-opts button[aria-pressed="true"] { color: var(--accent); }
 
 /* the folder */
 .fx-main { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
@@ -150,6 +153,7 @@
   .fx-bar .fx-search { height: 44px; } /* UI-REVIEW #22: .fx-bar beats the phone block's 36px below */
   .btn.small.fx-find-btn { height: 44px; }
   .fx-mode button { min-height: 44px; min-width: 44px; }
+  .fx-opts button { min-height: 44px; min-width: 44px; }
   .fx-search input { font-size: 16px; } /* UI-REVIEW #20 */
 }
 /* phones: the search takes its own row; the list is one column with size and date under the name (like Files on iOS) */
@@ -158,7 +162,7 @@
   .fx-title { order: 0; }
   .fx-tools { flex: 1 1 100%; flex-wrap: wrap; row-gap: 8px; }
   .fx-search { order: 3; flex: 1 1 60%; width: auto; height: 36px; } /* its own row, shared with Search project */
-  .fx-find { order: 4; flex: 1 1 100%; }
+  .fx-find { order: 4; flex: 1 1 100%; flex-wrap: wrap; row-gap: 8px; } /* the Contents options can push Search project down */
   .fx-find .fx-find-btn { margin-left: auto; }
   .fx-grid { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); padding: 14px 8px; }
   .fx-head, .fx-row, .fx-found .fx-row { grid-template-columns: minmax(0, 1fr); }

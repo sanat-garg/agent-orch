@@ -34,7 +34,7 @@ const calls = (log) => { try { return fs.readFileSync(log, 'utf8').trim().split(
 function proxy(name, { snapshot, snapshotMs, hook = false, hang, callMs } = {}) {
   const dir = path.join(tmp, name), log = path.join(tmp, `${name}.calls.jsonl`), cfg = path.join(dir, 'proxy-playwright.json');
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(cfg, JSON.stringify({ dir, server: 'playwright', kind: 'browser', task: null, patterns: undefined, ttlMs: 60_000, hook,
+  fs.writeFileSync(cfg, JSON.stringify({ dir, server: 'playwright', kind: 'browser', task: null, rules: ['send'], ttlMs: 60_000, hook,
     ...(snapshotMs && { snapshotMs }), ...(callMs && { callMs }),
     upstream: { command: process.execPath, args: [FAKE], env: { FAKE_MCP_LOG: log, ...(snapshot && { FAKE_MCP_SNAPSHOT: snapshot }), ...(hang && { FAKE_MCP_HANG: hang }) } } }));
   const c = mcp({ command: process.execPath, args: [path.join(root, 'gate-proxy.mjs'), '--config', cfg] });

@@ -487,12 +487,19 @@ document.addEventListener('keydown', (e) => {
 }, true);
 
 // ----- the Browser tab: its profile, the prompt box and the agent's activity
-const BX = { sel: null, tasks: [], err: '', pin: null, ap: new Map(), sending: false, timer: 0, more: false }; // ap: task id → held approvals; more: every earlier prompt shows
+const BX = { sel: null, tasks: [], err: '', pin: null, ap: new Map(), sending: false, timer: 0, more: false, rules: null }; // ap: task id → held approvals; more: every earlier prompt shows; rules: Settings → Browser → Don't allow
 const bxProfiles = () => (BV.data?.nodes || []).filter((n) => n.capable).flatMap((n) => n.profiles.map((p) => ({ n, p })));
 function bxShow() {
   bwLoad(); // fresh profiles; bxRenderPicker opens the chosen one once they are in
   bxOpenSel();
+  bxLoadRules();
 }
+async function bxLoadRules() {
+  try { BX.rules = (await api('/api/orch/gate')).rules || []; } catch { return; }
+  bxRenderActivity();
+}
+// The activity panel's line about the owner's "Don't allow" rules: what the agent asks before (everything else it just does).
+const bxRulesLine = (rules) => (rules.length ? `Asks before: ${rules.join(', ')}` : "Asks before: nothing (add rules in Settings → Browser → Don't allow)");
 function bxHide() { if (BV.view?.m === BVM.tab) bvClose({ keepFocus: true }); }
 // The profile to show: the one the owner picked last (while its machine is online), else one a task is using, else the
 // default machine's (the least-loaded online Mac; the controller only while no Mac is online).
@@ -600,9 +607,14 @@ function bxRenderActivity() {
   box.textContent = '';
   bxRenderBusy();
   if (BX.err) box.append(el('div', 'cn-err', BX.err));
+  if (BX.rules) {
+    const r = el('div', 'bx-rules muted', bxRulesLine(BX.rules));
+    r.id = 'bxRules';
+    box.append(r);
+  }
   const t = bxShown();
   if (!t) {
-    if (BX.sel) box.append(el('div', 'bx-empty muted', `No agent has worked on ${BX.sel.identity} yet. Say what to do above: it opens sites, clicks and types here, and asks you before anything outbound.`));
+    if (BX.sel) box.append(el('div', 'bx-empty muted', `No agent has worked on ${BX.sel.identity} yet. Say what to do above: it opens sites, clicks and types here, and asks you first only for what Settings → Browser doesn't allow.`));
     return;
   }
   const head = el('div', 'bx-head');

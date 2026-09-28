@@ -582,7 +582,7 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
   // run.browser ({identity, outputDir, home?, headed?}, a task with the browser capability) adds the Playwright MCP on
   // that identity's persistent profile (browser.mjs), replacing an owner server of the same name; codex waits its
   // startupSec for it (startup_timeout_sec). run.gate ({dir, task,
-  // patterns, ttlMs, hook}, a task run) puts that server and every connector (stdio or http servers with `outbound` tools)
+  // rules, ttlMs, hook}, a task run) puts that server and every connector (stdio or http servers with `outbound` tools)
   // behind the approval gate: gate-proxy.mjs runs or connects to them, from a 0600 config in the run's gate dir, and the run
   // gets a stdio entry for the proxy. gate-proxy.mjs doesn't speak sse, so a gated run leaves out an sse server with
   // `outbound` tools and tells run.onWithheld (or run.gate.onWithheld) (name, reason).
@@ -610,7 +610,7 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
   }
   function gated(s, g) {
     const file = path.join(g.dir, `proxy-${s.name}.json`);
-    writeAtomic(file, JSON.stringify({ dir: g.dir, server: s.name, kind: s.browser ? 'browser' : 'connector', task: g.task ?? null, patterns: g.patterns,
+    writeAtomic(file, JSON.stringify({ dir: g.dir, server: s.name, kind: s.browser ? 'browser' : 'connector', task: g.task ?? null, rules: g.rules || [],
       ttlMs: g.ttlMs, hook: !!g.hook, upstream: s.type === 'http' ? { url: s.url, headers: s.headers || {} } : { command: s.command, args: s.args || [], env: s.env || {} },
       ...(!s.browser && { connector: { outbound: s.outbound } }) }));
     // codex gives up on a tool call after 60 s by default: a held one waits for the owner (up to the approval TTL).

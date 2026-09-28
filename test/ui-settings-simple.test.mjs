@@ -29,11 +29,11 @@ test('no About section; the version under the logo keeps its details in the tool
   assert.match(appJs, /a \? \[a\.running, a\.restarted, a\.pending\]\.filter\(Boolean\)\.join\('\\n'\) : sideVerTip\(r\)/);
 });
 
-test('Settings groups its rows under at most 4 headings, each with a one-line hint', () => {
+test('Settings groups its rows under at most 5 headings, each with a one-line hint', () => {
   const heads = [...sheet.matchAll(/<h3 class="st-sec"[^>]*>([^<]+)<\/h3>\s*<p class="st-hint">([^<]+)<\/p>/g)];
   assert.equal(heads.length, (sheet.match(/class="st-sec"/g) || []).length, 'every heading has a hint');
-  assert.ok(heads.length <= 4, `${heads.length} headings`);
-  assert.deepEqual(heads.map((m) => m[1]), ['Alerts', 'Tasks', 'Agents', 'This project']);
+  assert.ok(heads.length <= 5, `${heads.length} headings`);
+  assert.deepEqual(heads.map((m) => m[1]), ['Alerts', 'Tasks', 'Browser', 'Agents', 'This project']);
 });
 
 function fixture(saved = null) {

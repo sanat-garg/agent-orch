@@ -118,12 +118,12 @@ test('classify: element names from the snapshot, checkout URLs, reads, custom pa
     { apiKey: '[redacted]', q: 'token [redacted]', fields: [{ name: 'Password', value: '[redacted]' }] });
 });
 
-// A client for the proxy, as the agent CLI would run it.
+// A client for the proxy, as the agent CLI would run it. The owner's rule 'send' holds a Send click.
 function startProxy(name, extra = {}) {
   const dir = path.join(tmp, name), log = path.join(tmp, `${name}.calls.jsonl`);
   fs.mkdirSync(dir, { recursive: true });
   const cfgFile = path.join(dir, 'proxy.json');
-  fs.writeFileSync(cfgFile, JSON.stringify({ dir, server: 'playwright', kind: 'browser', task: 7, upstream: { command: process.execPath, args: [FAKE], env: { FAKE_MCP_LOG: log } }, ...extra }));
+  fs.writeFileSync(cfgFile, JSON.stringify({ dir, server: 'playwright', kind: 'browser', task: 7, rules: ['send'], upstream: { command: process.execPath, args: [FAKE], env: { FAKE_MCP_LOG: log } }, ...extra }));
   const child = spawn(process.execPath, [path.join(root, 'gate-proxy.mjs'), '--config', cfgFile], { stdio: ['pipe', 'pipe', 'inherit'] });
   let buf = '', id = 0;
   const waits = new Map();
@@ -192,7 +192,7 @@ test('proxy: a click on Send is held until approved; deny returns the reason and
 });
 
 test('hostGate: the host sees each request and audit line once, and its answer releases the call', async () => {
-  const p = startProxy('host');
+  const p = startProxy('host', { rules: ['payments and checkout'] });
   const seen = [], audit = [];
   const stop = hostGate(p.dir, { onRequest: async (a) => { seen.push(a); return { decision: 'deny', reason: 'not today' }; }, onAudit: (e) => audit.push(e) });
   try {

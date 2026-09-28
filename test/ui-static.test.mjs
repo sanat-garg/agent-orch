@@ -111,9 +111,9 @@ test('the sidebar gear opens Settings: a sound switch, parallel tasks (what can 
   assert.match(side, /id="settingsBtn"[^>]*aria-label="Settings"/);
   const sheet = indexHtml.slice(indexHtml.indexOf('id="settingsModal"'), indexHtml.indexOf('id="fbModal"'));
   const sections = [...sheet.matchAll(/class="st-sec"[^>]*>([^<]+)</g)].map((m) => m[1]);
-  assert.deepEqual(sections, ['Alerts', 'Tasks', 'Agents', 'This project']);
+  assert.deepEqual(sections, ['Alerts', 'Tasks', 'Browser', 'Agents', 'This project']);
   // Every heading has a one-line hint right under it (#481).
-  assert.equal((sheet.slice(0, sheet.indexOf('id="extModal"')).match(/class="st-sec"[^>]*>[^<]+<\/h3>\s*<p class="st-hint">[^<]+<\/p>/g) || []).length, 4);
+  assert.equal((sheet.slice(0, sheet.indexOf('id="extModal"')).match(/class="st-sec"[^>]*>[^<]+<\/h3>\s*<p class="st-hint">[^<]+<\/p>/g) || []).length, 5);
   // Skills & tools is one row (a summary line) that opens the sheet, whose tabs hold the four kinds.
   assert.deepEqual([...sheet.matchAll(/data-ext-open="(\w+)"/g)].map((m) => m[1]), ['skills']);
   assert.match(sheet, /id="stExtSummary"/);

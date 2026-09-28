@@ -59,7 +59,7 @@ import { applyLimit, capRejection, capTasks, capText, fmtCores, fmtGB, resolveCa
 import { createJobUsage, createWrappers, heldBy, probeLimiter } from './worker-cap.mjs';
 import { request as statusRequest, serveStatus, statusCli } from './worker-status.mjs';
 import { ensureBrowser, needsBrowser, normIdentity } from './browser.mjs';
-import { APPROVAL_TTL_MS, hostGate, patternsWith } from './gate.mjs';
+import { APPROVAL_TTL_MS, hostGate } from './gate.mjs';
 import { MEDIA_ID_RE } from './media.mjs';
 import { createLiveBrowsers, screenOp } from './browser-live.mjs';
 
@@ -1159,7 +1159,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     });
     const ttlMs = Number(g.ttlMs) > 0 ? Number(g.ttlMs) : APPROVAL_TTL_MS;
     return {
-      spec: { dir, task: job.id, patterns: patternsWith(g.patterns), ttlMs, hook: false },
+      spec: { dir, task: job.id, rules: Array.isArray(g.rules) ? g.rules : [], ttlMs, hook: false },
       answer: (msg) => { const w = waiters.get(msg.id); if (!w) return; waiters.delete(msg.id); w({ decision: msg.decision, reason: msg.reason, by: msg.by }); },
       pending: () => waiters.size,
       heldMs: () => held,

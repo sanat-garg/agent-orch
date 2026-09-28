@@ -43,7 +43,7 @@ test("server.mjs hands each run's gate and browser config to the extensions MCP 
 test('Claude runs: the PreToolUse permission hook holds an outbound call before the CLI dispatches it', async () => {
   const dir = path.join(tmp, 'hook'), log = path.join(tmp, 'hook.calls.jsonl'), cfg = path.join(dir, 'proxy-playwright.json');
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(cfg, JSON.stringify({ dir, server: 'playwright', kind: 'browser', hook: true, upstream: { command: process.execPath, args: [FAKE], env: { FAKE_MCP_LOG: log } } }));
+  fs.writeFileSync(cfg, JSON.stringify({ dir, server: 'playwright', kind: 'browser', hook: true, rules: ['send email'], upstream: { command: process.execPath, args: [FAKE], env: { FAKE_MCP_LOG: log } } }));
   const c = mcp({ command: process.execPath, args: [path.join(root, 'gate-proxy.mjs'), '--config', cfg] });
   const pre = gateHooks({ dir, hook: true }).PreToolUse[0].hooks[0];
   const hook = (tool, args) => pre({ hook_event_name: 'PreToolUse', tool_name: `mcp__playwright__${tool}`, tool_input: args }, 'tu', { signal: new AbortController().signal });

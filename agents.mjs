@@ -185,7 +185,7 @@ function* claudeEvents(m) {
 // MCP servers every run gets (extensions.mjs mcpRun, set by the server): Claude → an --mcp-config file, codex → a config
 // profile layered on ~/.codex/config.toml (codex -p <name>); null for none. Files, so no secret is on a command line.
 // A run's own `mcp` option replaces it. A run's `browser` ({identity, outputDir}, browser.mjs) is handed to the source,
-// which adds the Playwright MCP on that identity's profile; its `gate` ({dir, task, patterns, ttlMs, hook}, gate.mjs) puts
+// which adds the Playwright MCP on that identity's profile; its `gate` ({dir, task, rules, ttlMs, hook}, gate.mjs) puts
 // that server and the connectors behind the approval gate's proxy.
 let mcpSource = () => null;
 export const setMcpSource = (fn) => { mcpSource = fn || (() => null); };

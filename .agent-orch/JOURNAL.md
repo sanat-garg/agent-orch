@@ -1499,6 +1499,9 @@ Lightbox opens fitted; thumbnails contain; fit tests pass
 
 conflicts resolved; mobile Machines tests pass; ui-machines test 5 still fails
 
+## 2026-09-28 18:31 — #476 Browser permissions: allow everything except the owner's deny list [done (check passed)]
+
+Browser actions run unless owner's Don't-allow rules match
 ## 2026-09-28 18:16 — #478 Restart banner: a Cancel button for 'Restarting once idle' [done (check passed)]
 
 Banner Cancel defers pending restarts; a new commit re-arms them
@@ -1550,3 +1553,7 @@ a re-armed restart clears the deferral at once; the restart-cancel tests pass
 ## 2026-09-28 18:21 — #485 Remove the Machines icon from the sidebar footer [done (check passed)]
 
 Sidebar footer has no Machines button; usage card opens Machines
+
+## 2026-09-28 18:37 — #495 Integrate #476: Browser permissions: allow everything except the owner's deny list [done (check passed)]
+
+conflicts resolved; Browser "Don't allow" section kept, allowlist tests pass

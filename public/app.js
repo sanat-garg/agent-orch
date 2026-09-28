@@ -7329,14 +7329,35 @@ function renderServerTasks(s, c) {
   if (sel.options.length !== 16) sel.replaceChildren(...Array.from({ length: 16 }, (_, i) => new Option(`${i + 1} ${i ? 'tasks' : 'task'}`, String(i + 1))));
   sel.value = String(c?.controllerMax || s.parallel?.parallelTasks || 4);
 }
-// The approval gate's extra outbound names (on top of its defaults), saved on blur.
+// The approval gate's "Don't allow" rules (one per line; everything else runs without asking), saved on change. The old
+// built-in outbound names show under the box as suggestions: a tap adds one as a rule.
 async function loadGatePatterns() {
-  try { const g = await api('/api/orch/gate'); if (document.activeElement !== $('stGatePatterns')) $('stGatePatterns').value = (g.patterns || []).join('\n'); } catch {}
+  try {
+    const g = await api('/api/orch/gate');
+    if (document.activeElement !== $('stGatePatterns')) $('stGatePatterns').value = (g.rules || []).join('\n');
+    renderGateSuggest(g);
+  } catch {}
 }
-$('stGatePatterns').addEventListener('change', async (e) => {
-  try { const r = await api('/api/orch/gate', 'PUT', { patterns: e.target.value }); e.target.value = r.settings.patterns.join('\n'); toast('Saved: these actions now wait for your approval', { kind: 'success' }); }
-  catch (err) { toast(err.message, { kind: 'error' }); }
-});
+function renderGateSuggest(g) {
+  const box = $('stGateSuggest'), have = new Set((g.rules || []).map((r) => r.toLowerCase()));
+  const left = (g.suggestions || []).filter((x) => !have.has(x.toLowerCase()));
+  box.replaceChildren(...(left.length ? [el('span', '', 'Suggestions:')] : []), ...left.map((x) => {
+    const b = el('button', '', x);
+    b.type = 'button';
+    b.onclick = () => { const t = $('stGatePatterns'); t.value = `${t.value.trim() ? `${t.value.trimEnd()}\n` : ''}${x}`; saveGateRules(t); };
+    return b;
+  }));
+}
+async function saveGateRules(t) {
+  try {
+    const r = await api('/api/orch/gate', 'PUT', { rules: t.value });
+    t.value = r.settings.rules.join('\n');
+    renderGateSuggest(r.settings);
+    toast(r.settings.rules.length ? 'Saved: matching actions now wait for your approval' : 'Saved: browser tasks now run every action without asking', { kind: 'success' });
+    if (typeof bxLoadRules === 'function') bxLoadRules();
+  } catch (err) { toast(err.message, { kind: 'error' }); }
+}
+$('stGatePatterns').addEventListener('change', (e) => saveGateRules(e.target));
 $('stParallel').addEventListener('change', (e) => { saveParallel({ maxTasks: e.target.value ? Number(e.target.value) : null }); e.target.blur(); });
 $('stServerTasks').addEventListener('change', (e) => { saveParallel({ parallelTasks: Number(e.target.value) }); e.target.blur(); });
 $('stRapid').addEventListener('change', async (e) => { await saveParallel({ rapidDevelopment: e.target.checked }); e.target.blur(); renderSettings(); });

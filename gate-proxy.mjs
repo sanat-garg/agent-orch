@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // The approval gate's MCP proxy (gate.mjs): `node gate-proxy.mjs --config <file>` speaks stdio MCP to the agent CLI and
-// runs the real server (the Playwright MCP, or a connector) as its child. Every tools/call is classified first (element
-// targets resolved in a fresh accessibility snapshot); an outbound one is held (approvals/<id>.json in the run's gate dir,
-// with a screenshot) until the host answers, and a denial goes back to the agent as a tool error, the call never made.
+// runs the real server (the Playwright MCP, or a connector) as its child. Every tools/call is judged first (gate.mjs judge:
+// element targets resolved in a fresh accessibility snapshot); one the owner's "Don't allow" rules match (or a connector
+// tool marked outbound) is held (approvals/<id>.json in the run's gate dir, with a screenshot) until the host answers,
+// and a denial goes back to the agent as a tool error, the call never made; everything else runs without asking.
 // Calls run one at a time, in order, so nothing slips past a held one. Every call is appended to <dir>/audit.jsonl.
 // Config (JSON, 0600, written by extensions.mjs mcpFor): {dir, server, kind: 'browser'|'connector', upstream: {command,
-// args, env} (a stdio child) or {url, headers} (MCP streamable http, below), patterns, connector: {outbound, read, draft},
+// args, env} (a stdio child) or {url, headers} (MCP streamable http, below), rules (the owner's lines), connector: {outbound, read, draft},
 // ttlMs, task, hook (serve the Claude hook's checks/), snapshotMs,
 // callMs (a forwarded call unanswered this long becomes a tool error, its late answer dropped; default 5 min, at least 2 s)}.
 // Over http every message is a POST (with Mcp-Session-Id once initialize returned one); the answer is a JSON body (one
@@ -14,19 +15,19 @@
 // a 404 to a POST that carried a session id: the server restarted and forgot it, so (once per stale session, behind `ready`
 // so parallel calls share it) the client's last initialize and notifications/initialized are sent again, their answers
 // swallowed, and the message is retried once with the new session id.
-// A page that can't be read (the snapshot errors or times out) makes element tools, key presses and dialogs outbound.
+// With rules, a page that can't be read (the snapshot errors or times out) holds element tools, key presses and dialogs.
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
 import https from 'node:https';
-import { APPROVAL_TTL_MS, DEFAULT_PATTERNS, appendAudit, ask, callKey, classify, denialText, isBrowserRead, newId, parseSnapshot,
+import { APPROVAL_TTL_MS, appendAudit, ask, callKey, denialText, isBrowserRead, judge, newId, parseRules, parseSnapshot,
   redactCall, resultText, serve, verdict } from './gate.mjs';
 
 const cfg = JSON.parse(fs.readFileSync(process.argv[process.argv.indexOf('--config') + 1], 'utf8'));
 const { dir, server = 'mcp', kind = 'browser', task = null } = cfg;
-const patterns = cfg.patterns?.length ? cfg.patterns : DEFAULT_PATTERNS, ttlMs = cfg.ttlMs || APPROVAL_TTL_MS, snapshotMs = cfg.snapshotMs || 60_000;
+const rules = parseRules(cfg.rules || []), ttlMs = cfg.ttlMs || APPROVAL_TTL_MS, snapshotMs = cfg.snapshotMs || 60_000;
 const callMs = Math.max(2_000, cfg.callMs || 5 * 60_000);
 const auditFile = path.join(dir, 'audit.jsonl');
 
@@ -195,7 +196,7 @@ const PAGE_TOOLS = new Set(['browser_click', 'browser_type', 'browser_select_opt
   'browser_press_key', 'browser_fill_form']);
 const needsPage = (tool) => PAGE_TOOLS.has(tool) || /^browser_mouse_\w+_xy$/.test(tool);
 
-// Classifies a call and, when outbound, holds it for the owner. → {allow, c (classify), args (redacted), approval?, v?, shot?}
+// Judges a call and, when a rule holds it, asks the owner. → {allow, c (judge), args (redacted), approval?, v?, shot?}
 async function check(tool, args) {
   let snap = null, readable = true;
   if (kind === 'browser' && !isBrowserRead(tool)) {
@@ -203,19 +204,20 @@ async function check(tool, args) {
     snap = parseSnapshot(r ? resultText(r.result) || r.error?.message || '' : '');
     readable = !!r && !r.error && !r.result?.isError && (!!snap.url || snap.refs.size > 0);
   }
-  let c = classify(tool, args, { server, kind, snapshot: snap, patterns, connector: cfg.connector });
-  if (!readable && needsPage(tool)) c = { ...c, cls: 'outbound', reason: 'the page could not be read before this action' };
+  let c = judge(tool, args, { server, kind, snapshot: snap, rules, connector: cfg.connector });
+  if (!readable && needsPage(tool) && rules.length && !c.hold) c = { ...c, cls: 'outbound', hold: true, reason: 'the page could not be read before this action' };
   const red = redactCall(tool, args, snap);
-  if (c.cls !== 'outbound') return { allow: true, c, args: red };
+  if (!c.hold) return { allow: true, c, args: red };
   const shot = kind === 'browser' ? await screenshot() : null;
   const approval = { id: newId(), task, server, tool, cls: c.cls, reason: c.reason, action: c.action, key: c.key, url: c.url || snap?.url || null,
-    ...(c.target && { target: c.target }), args: red, screenshot: shot, at: Date.now(), ttlMs };
+    ...(c.target && { target: c.target }), ...(c.rule && { rule: c.rule }), args: red, screenshot: shot, at: Date.now(), ttlMs };
   const v = verdict(await ask(dir, 'approvals', approval, { id: approval.id, timeoutMs: ttlMs + 5 * 60_000 }));
   return { allow: v.allow, c, args: red, approval, v, shot };
 }
 function audit(r, tool, extra) {
   try {
     appendAudit(auditFile, { ts: Date.now(), task, server, tool, class: r.c.cls, reason: r.c.reason, action: r.c.action, args: r.args,
+      ...(r.c.rule && { rule: r.c.rule }),
       ...(r.approval && { approval: r.approval.id, decision: r.v.decision, ...(r.v.by && { by: r.v.by }), ...(r.v.reason && { note: r.v.reason }) }),
       ...(r.shot && { screenshot: r.shot }), ...extra });
   } catch (e) { process.stderr.write(`[gate] audit write failed: ${e.message}\n`); }

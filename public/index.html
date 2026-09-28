@@ -503,9 +503,12 @@
           <option value="manual">Manually</option>
         </select>
       </label>
+      <h3 class="st-sec">Browser</h3>
+      <p class="st-hint">What browser and connector tasks ask you first</p>
       <div class="st-row st-dir">
-        <label class="st-text" for="stGatePatterns"><strong>Ask me before</strong><small id="stGateHint">Browser tasks wait for your approval before clicking buttons or links named Send, Pay, Transfer, Submit order, Publish, Share, Delete, Confirm, Place order or Sign, or opening checkout pages. Add more names, one per line</small></label>
-        <textarea id="stGatePatterns" rows="2" maxlength="4000" placeholder="e.g. Approve invoice" aria-describedby="stGateHint"></textarea>
+        <label class="st-text" for="stGatePatterns"><strong>Don't allow</strong><small id="stGateHint">Browser and connector tasks do everything without asking, except what matches a rule here: those wait for your approval. One rule per line: a site (bank.example.com), an action (send, pay, delete, publish, share, submit, upload, download, login) or words on a button or page</small></label>
+        <textarea id="stGatePatterns" rows="4" maxlength="4000" placeholder="payments and checkout&#10;send email&#10;delete&#10;bank.example.com&#10;post on social media" aria-describedby="stGateHint"></textarea>
+        <div class="st-suggest" id="stGateSuggest" aria-label="Suggestions"></div>
       </div>
       <h3 class="st-sec">Agents</h3>
       <p class="st-hint">What your agents know and can use</p>

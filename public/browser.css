@@ -106,6 +106,7 @@
 .bx-step:last-child::before { background: var(--accent); }
 .bx-act .shots { margin: 0; }
 .bx-mcp { font-size: 12px; }
+.bx-rules { font-size: 12px; overflow-wrap: anywhere; }
 .bx-result { padding: 10px 12px; border-radius: 10px; background: var(--raised); border: 1px solid var(--border); color: var(--text); overflow-wrap: anywhere; }
 .bx-result > :first-child { margin-top: 0; }
 .bx-result > :last-child { margin-bottom: 0; }

@@ -21,7 +21,7 @@ import { AGENTS, isAgent, agentEfforts, agentStatus, clampEffort, codexExhausted
 import { SHOTS_DIR, mediaCollector } from './media.mjs';
 import { BROWSER_SYSTEM, MCP_START_FAILED, needsBrowser, normIdentity, parseCapabilities } from './browser.mjs';
 import { BROWSER_TASK_SYSTEM, browserTaskStatus, browserSteps, isBrowserTask } from './browser-task.mjs';
-import { APPROVAL_TTL_MS, DEFAULT_PATTERNS, patternsWith } from './gate.mjs';
+import { APPROVAL_TTL_MS, DEFAULT_PATTERNS } from './gate.mjs';
 import { createApprovals } from './approvals.mjs';
 import { createUsageLog } from './usage.mjs';
 import { DELEGATE_CFG, createDelegator, parseFallbacks } from './delegate.mjs';
@@ -1452,21 +1452,23 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return headWorkUsed(load) < slots ? 'work' : null;
   }
 
-  // ---- the approval gate (gate.mjs, approvals.mjs): browser and connector calls of task runs are classified, outbound
-  // ones held for the owner, all audited. kv gate_settings {patterns: the owner's extra outbound names, ttlHours}.
+  // ---- the approval gate (gate.mjs, approvals.mjs): browser and connector calls of task runs run without asking unless
+  // one of the owner's "Don't allow" rules matches (then held for the owner); all audited. kv gate_settings {rules: lines,
+  // ttlHours}; an older {patterns} (extra outbound names) is read as rules. suggestions: the old built-in names.
   function gateSettings() {
     let s = {};
     try { s = JSON.parse(kvGet('gate_settings') || '{}') || {}; } catch {}
     const ttlHours = Number(s.ttlHours) > 0 && Number(s.ttlHours) <= 24 * 14 ? Number(s.ttlHours) : APPROVAL_TTL_MS / 3600_000;
-    return { patterns: Array.isArray(s.patterns) ? s.patterns.map(String) : [], defaults: DEFAULT_PATTERNS, ttlHours, ttlMs: ttlHours * 3600_000 };
+    const rules = Array.isArray(s.rules) ? s.rules : Array.isArray(s.patterns) ? s.patterns : [];
+    return { rules: rules.map(String), suggestions: DEFAULT_PATTERNS, ttlHours, ttlMs: ttlHours * 3600_000 };
   }
   function setGateSettings(v = {}) {
     const next = {};
-    if (v.patterns != null) {
-      const list = (Array.isArray(v.patterns) ? v.patterns : String(v.patterns).split(/\n|,/)).map((x) => String(x).trim()).filter(Boolean);
-      if (list.length > 100 || list.some((x) => x.length > 200)) return { error: 'At most 100 patterns of up to 200 characters' };
-      next.patterns = [...new Set(list)];
-    } else next.patterns = gateSettings().patterns;
+    if (v.rules != null) {
+      const list = (Array.isArray(v.rules) ? v.rules : String(v.rules).split('\n')).map((x) => String(x).trim()).filter(Boolean);
+      if (list.length > 100 || list.some((x) => x.length > 200)) return { error: 'At most 100 rules of up to 200 characters' };
+      next.rules = [...new Set(list)];
+    } else next.rules = gateSettings().rules;
     if (v.ttlHours != null) {
       const h = Number(v.ttlHours);
       if (!(h > 0 && h <= 24 * 14)) return { error: 'ttlHours must be between 0 and 336' };
@@ -2034,7 +2036,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     let gate = null;
     if (gated && taskId && runId) {
       const dir = path.join(dataDir, 'gate', `run-${runId}`), gs = gateSettings();
-      gate = { dir, task: taskId, patterns: patternsWith(gs.patterns), ttlMs: gs.ttlMs, hook: agent === 'claude' };
+      gate = { dir, task: taskId, rules: gs.rules, ttlMs: gs.ttlMs, hook: agent === 'claude' };
       gate.stop = approvals.host(dir, { taskId, runId });
     }
     const due = Date.now() + (timeoutSec || 0) * 1000;
@@ -2053,7 +2055,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     try {
       res = await runAgentCli({
         agent, model, prompt, cwd, resume, systemAppend: append, autonomous, effort, signal: ac.signal, ...(browser && { browser }),
-        ...(gate && { gate: { dir: gate.dir, task: gate.task, patterns: gate.patterns, ttlMs: gate.ttlMs, hook: gate.hook } }),
+        ...(gate && { gate: { dir: gate.dir, task: gate.task, rules: gate.rules, ttlMs: gate.ttlMs, hook: gate.hook } }),
         onEvent: taskId ? (e) => {
           onEvent?.(e);
           if (e.k === 'image') { const img = media.image(e); if (img) writeEntry({ k: 'image', ...img, tool: e.tool }); return; }
@@ -3170,7 +3172,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     logEvent(`#${task.id} runs on ${name}`, { projectId: project.id, taskId: task.id });
     const res = await remoteJob(task.id, nodeId, name, { runId, logPath }, {
       title: task.title, prompt, systemAppend: withBrowser(task, isBrowserTask(task) ? BROWSER_TASK_SYSTEM : resume ? null : withPersona(WORKER_SYSTEM, project)) || undefined, agent: route.agent, model: route.model || undefined, effort: effort || undefined,
-      ...(needsBrowser(task) && { capabilities: ['browser'], identity: identityOf(task), gate: (({ patterns, ttlMs }) => ({ patterns, ttlMs }))(gateSettings()) }),
+      ...(needsBrowser(task) && { capabilities: ['browser'], identity: identityOf(task), gate: (({ rules, ttlMs }) => ({ rules, ttlMs }))(gateSettings()) }),
       ...(isBrowserTask(task) ? { execution: 'browser' } : { repo: repo || undefined, gitUrl: viaHead ? gitPath(project.id) : undefined, baseSha, branch, doneWhen: task.done_when || undefined }), resume: resume || undefined,
       ...(task.integrates && { integrate: { branch: taskBranch(task.integrates), files: parseJsonList(task.conflicts) } }),
       timeouts: { taskSec: CFG.taskTimeoutSec, verifySec: CFG.verifyTimeoutSec, installSec: 900 }, autonomous: isBrowserTask(task) || !!project.autonomous,

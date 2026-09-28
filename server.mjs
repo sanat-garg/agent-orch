@@ -1925,7 +1925,7 @@ async function handleRequest(req, res) {
     return json(res, result.error ? 400 : 200, result);
   }
   // The approval gate (gate.mjs): held outbound calls, the owner's answer {decision: approve | always | deny, reason?},
-  // a task's Actions timeline (its audit log + approvals), and the settings {patterns, ttlHours}.
+  // a task's Actions timeline (its audit log + approvals), and the settings {rules (the owner's "Don't allow" lines), ttlHours}.
   if (p === '/api/orch/approvals' && req.method === 'GET') return json(res, 200, { approvals: orch.pendingApprovals() });
   const oap = p.match(/^\/api\/orch\/approvals\/([\w-]{6,64})$/);
   if (oap && req.method === 'POST') {

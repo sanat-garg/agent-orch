@@ -1,11 +1,13 @@
 // The approval gate (AGENTIC.md → Safety): every MCP tool call of a browser or connector run is classified read / draft /
-// outbound; outbound calls are held for the owner BEFORE they execute, and every call is audited. The enforcing piece is
+// outbound (for the audit log) and judged against the owner's "Don't allow" rules (judge below): everything runs without
+// asking except a call a rule matches (or a connector tool marked outbound), held for the owner BEFORE it executes; every
+// call is audited. The enforcing piece is
 // gate-proxy.mjs, a stdio MCP proxy wrapped around the Playwright MCP (and any MCP server marked as a connector); Claude
 // runs on the controller also ask it from a PreToolUse permission hook (agents.mjs), so a held call never reaches the CLI's
 // dispatcher. The proxy talks to its host (the orchestrator, or the worker that relays to the head) through files in a
 // per-run gate dir: approvals/<id>.json asked, approvals/<id>.answer.json answered; checks/ the same for the hook; and
 // audit.jsonl + shots/<sha256>.<ext> written by the proxy, tailed by the host. Files keep a worker free of listeners.
-// Browser steps that are always outbound: file uploads (any local file can reach the page; the "always" key hashes the
+// Browser steps classified outbound: file uploads (any local file can reach the page; the "always" key hashes the
 // paths), clicks and drags by coordinates (the target is unknown; no "always"), and navigating to javascript:/data:/blob:/
 // vbscript: (code in the page; no "always") or to file:/chrome: and local or private hosts. browser_press_key's "always"
 // key names the focused element, so one approved Enter doesn't cover Enter in every other field.
@@ -16,7 +18,8 @@ import crypto from 'node:crypto';
 
 export const CLASSES = ['read', 'draft', 'outbound'];
 export const APPROVAL_TTL_MS = 24 * 3600_000; // an unanswered approval is denied after this
-// Accessible names that make a browser step outbound (whole words, any case). The owner adds more (kv gate_settings).
+// Accessible names that make a browser step's class outbound (whole words, any case). They no longer hold anything by
+// themselves: Settings → Browser shows them as suggestions for "Don't allow" rules.
 export const DEFAULT_PATTERNS = ['Send', 'Pay', 'Transfer', 'Submit order', 'Publish', 'Share', 'Delete', 'Confirm', 'Place order', 'Sign',
   'Post', 'Reply', 'Submit', 'Buy', 'Order', 'Checkout', 'Tweet', 'Save & send'];
 // Everyday names the default verbs would otherwise catch ("Sign in" is not signing anything, "Order history" orders nothing).
@@ -60,7 +63,7 @@ export function matchPattern(text, patterns = DEFAULT_PATTERNS) {
   }
   return null;
 }
-// The owner's list (kv gate_settings.patterns: extra phrases) on top of the defaults, deduped.
+// Extra phrases on top of the defaults, deduped (classify's ctx.patterns).
 export const patternsWith = (extra) => [...new Set([...DEFAULT_PATTERNS, ...(Array.isArray(extra) ? extra : []).map((x) => String(x).trim()).filter(Boolean)])];
 
 const unq = (s) => { try { return JSON.parse(`"${s}"`); } catch { return s; } };
@@ -239,6 +242,123 @@ export function classify(tool, args = {}, ctx = {}) {
 }
 const pick = (e) => (e ? { role: e.role, name: e.name || e.selector || '', ...(e.ref && { ref: e.ref }) } : undefined);
 const safePath = (u) => { try { const x = new URL(u, 'http://x'); return `${x.pathname}${x.search}${x.hash}`; } catch { return String(u || ''); } };
+
+// ---- the owner's "Don't allow" rules (Settings → Browser, kv gate_settings.rules): everything runs without asking except
+// a call a rule matches, which is held for approval. One rule per line: a domain or URL (bank.example.com, *.shop.com,
+// example.com/admin: the target or page URL's host, and path prefix), a line naming action kinds ('payments and checkout',
+// 'send email': ACTION_KINDS below, as judge() infers them from the call), else a phrase matched case-insensitively in
+// the element's accessible name (or the agent's description of it), the page title or the URL (a connector: its tool name).
+export const ACTION_KINDS = ['send', 'pay', 'delete', 'publish', 'share', 'submit', 'upload', 'download', 'login'];
+// Words in a rule line → kinds.
+const RULE_KIND_RE = {
+  send: /\b(send|sending|sends|reply|replies|replying|forward|forwarding)\b/i,
+  pay: /\b(pay|pays|paying|payments?|checkouts?|check\s*out|purchases?|purchasing|buy|buying|orders?|ordering|transfers?|billing|money)\b/i,
+  delete: /\b(delete|deletes|deleting|deletion|remove|removing|trash|erase|erasing)\b/i,
+  publish: /\b(publish|publishing|post|posts|posting|tweet|tweets|tweeting|social\s+media)\b/i,
+  share: /\b(share|shares|sharing|invite|invites|inviting)\b/i,
+  submit: /\b(submit|submits|submitting|submissions?)\b/i,
+  upload: /\b(upload|uploads|uploading)\b/i,
+  download: /\b(download|downloads|downloading)\b/i,
+  login: /\b(login|logins|log\s*in|logging\s+in|sign\s*in|signing\s+in|credentials?|passwords?)\b/i,
+};
+// Words in an element's name (or a connector tool's) → the kinds of action it performs.
+const ACT_KIND_RE = {
+  send: /(?<![\p{L}\p{N}])(send|reply|reply all|forward)(?![\p{L}\p{N}])/iu,
+  pay: /(?<![\p{L}\p{N}])(pay|pay now|payment|checkout|check out|purchase|buy|buy now|place order|order now|submit order|complete order|transfer|subscribe|donate|charge)(?![\p{L}\p{N}])/iu,
+  delete: /(?<![\p{L}\p{N}])(delete|remove|trash|discard|erase|purge|destroy)(?![\p{L}\p{N}])/iu,
+  publish: /(?<![\p{L}\p{N}])(publish|post|tweet|repost|retweet|go live)(?![\p{L}\p{N}])/iu,
+  share: /(?<![\p{L}\p{N}])(share|invite|permissions?|grant access)(?![\p{L}\p{N}])/iu,
+  submit: /(?<![\p{L}\p{N}])(submit|confirm|place order|apply)(?![\p{L}\p{N}])/iu,
+  upload: /(?<![\p{L}\p{N}])(upload|attach)(?![\p{L}\p{N}])/iu,
+  download: /(?<![\p{L}\p{N}])(download|export)(?![\p{L}\p{N}])/iu,
+  login: /(?<![\p{L}\p{N}])(log ?in|sign ?in|login|signin|password|credentials?|authorize|authorise)(?![\p{L}\p{N}])/iu,
+};
+const kindsIn = (text, table) => { const t = String(text || '').replace(/[_.-]+/g, ' '); return ACTION_KINDS.filter((k) => table[k].test(t)); };
+const LOGIN_URL_RE = /(^|[/._?=&#-])(login|log-?in|sign-?in|signin|auth|oauth2?|sso)([/._?=&#-]|$)/i;
+const MESSAGE_FIELD_RE = /message|reply|compose|body|chat|comment|write|post/i;
+// One rule line → {text, type: 'url'|'kinds'|'phrase', host?, path?, glob?, kinds?, phrase?}, or null for a blank line.
+export function parseRule(line) {
+  const text = String(line || '').trim();
+  if (!text) return null;
+  if (!/\s/.test(text)) {
+    const u = /^(?:[a-z][a-z0-9+.-]*:\/\/)?((?:\*\.)?(?:[a-z0-9-]+\.)+(?:[a-z]{2,}|\d+)|localhost)(?::\d+)?(\/[^\s]*)?$/i.exec(text);
+    if (u && !u[2]?.includes('*')) return { text, type: 'url', host: u[1].toLowerCase().replace(/^\*\./, ''), path: u[2] && u[2] !== '/' ? u[2] : null };
+    if (/[/*]/.test(text)) return { text, type: 'url', glob: new RegExp(`^${text.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').split('*').map(esc).join('.*')}`, 'i') };
+  }
+  const kinds = kindsIn(text, RULE_KIND_RE);
+  if (kinds.length) return { text, type: 'kinds', kinds };
+  return { text, type: 'phrase', phrase: text.toLowerCase() };
+}
+export const parseRules = (lines) => (Array.isArray(lines) ? lines : String(lines || '').split('\n')).map((r) => (r && typeof r === 'object' ? r : parseRule(r))).filter(Boolean);
+const urlParts = (u) => { try { const x = new URL(String(u)); return { host: x.hostname.toLowerCase().replace(/\.$/, ''), path: x.pathname, bare: `${x.host}${x.pathname}${x.search}` }; } catch { return null; } };
+// The first rule the facts {kinds, urls, names, title, unknown} match, or null. unknown: the call's target can't be told
+// (a coordinate click, arbitrary code, an unreadable page), so any kind or phrase rule holds it.
+export function matchRule(rules, f) {
+  for (const r of parseRules(rules)) {
+    if (r.type === 'url') {
+      const hit = (f.urls || []).some((u) => {
+        const p = urlParts(u);
+        if (!p) return false;
+        if (r.glob) return r.glob.test(p.bare);
+        return (p.host === r.host || p.host.endsWith(`.${r.host}`)) && (!r.path || p.path.toLowerCase().startsWith(r.path.toLowerCase()));
+      });
+      if (hit) return r;
+    } else if (f.unknown) return r;
+    else if (r.type === 'kinds') { if (r.kinds.some((k) => f.kinds?.includes(k))) return r; }
+    else if ([...(f.names || []), f.title, ...(f.urls || [])].some((s) => s && String(s).toLowerCase().includes(r.phrase))) return r;
+  }
+  return null;
+}
+// What a call is, for the rules: {kinds, urls, names, title, unknown}. c is classify()'s verdict for it.
+export function factsOf(tool, args = {}, c = {}, ctx = {}) {
+  const snap = ctx.snapshot || { url: null, title: null, refs: new Map(), dialog: null };
+  if ((ctx.kind || 'browser') !== 'browser') {
+    const urls = Object.values(args || {}).filter((v) => typeof v === 'string' && /^https?:\/\//i.test(v));
+    return { kinds: kindsIn(tool, ACT_KIND_RE), urls, names: [tool, c.action] };
+  }
+  const page = snap.url ? [snap.url] : [], title = snap.title;
+  if (tool === 'browser_navigate') {
+    const to = String(args.url || '');
+    return { kinds: [...(CHECKOUT_URL_RE.test(safePath(to)) ? ['pay'] : []), ...(LOGIN_URL_RE.test(safePath(to)) ? ['login'] : [])], urls: [to], names: [] };
+  }
+  if (tool === 'browser_file_upload') return { kinds: ['upload'], urls: page, names: [], title };
+  if (XY_TOOLS.has(tool) || c.reason === 'unrecognised or arbitrary-code browser tool') return { kinds: [], urls: page, names: [], title, unknown: true };
+  if (tool === 'browser_handle_dialog') {
+    return { kinds: args.accept !== false ? kindsIn(snap.dialog, ACT_KIND_RE) : [], urls: page, names: [snap.dialog], title };
+  }
+  if (tool === 'browser_press_key') {
+    const focus = [...snap.refs.values()].find((e) => e.active);
+    const submits = SUBMIT_KEY_RE.test(String(args.key || '').replace(/\s+/g, '')) && (!focus || !isSearchField(focus));
+    const kinds = !submits ? [] : focus && !TEXT_FIELD_RE.test(focus.role) ? kindsIn(focus.name, ACT_KIND_RE)
+      : ['submit', ...(MESSAGE_FIELD_RE.test(focus?.name || '') ? ['send'] : [])];
+    return { kinds, urls: page, names: focus ? [focus.name] : [], title };
+  }
+  if (ELEMENT_TOOLS.has(tool) || tool === 'browser_fill_form') {
+    const targets = tool === 'browser_drag' ? [args.startTarget ?? args.startRef, args.endTarget ?? args.endRef]
+      : tool === 'browser_fill_form' ? (args.fields || []).map(targetOf) : [targetOf(args)];
+    const els = targets.filter((t) => t != null).map((t) => snap.refs.get(String(t)) || { name: '', selector: String(t) });
+    const names = [...els.flatMap((e) => [e.name, e.selector]), args.element, ...(tool === 'browser_fill_form' ? (args.fields || []).map((x) => x?.name) : [])].filter(Boolean);
+    const links = els.map((e) => e.url).filter(Boolean).map((u) => { try { return new URL(u, snap.url || undefined).href; } catch { return u; } });
+    const kinds = new Set();
+    const acts = tool === 'browser_click' || tool === 'browser_drag' || (tool === 'browser_type' && args.submit);
+    if (acts) for (const k of kindsIn(names.join(' · '), ACT_KIND_RE)) kinds.add(k);
+    if (tool === 'browser_click' && links.some((u) => CHECKOUT_URL_RE.test(safePath(u)))) kinds.add('pay');
+    if (tool === 'browser_type' && args.submit && !isSearchField(els[0])) { kinds.add('submit'); if (MESSAGE_FIELD_RE.test(els[0]?.name || '')) kinds.add('send'); }
+    if ((tool === 'browser_type' || tool === 'browser_fill_form') && els.some((e) => SENSITIVE_NAME_RE.test(e.name || ''))) kinds.add('login');
+    if (tool === 'browser_click' && els.some((e) => e.role === 'button' && !e.name && !e.selector && !e.url) && !args.element) return { kinds: [], urls: page, names, title, unknown: true };
+    return { kinds: [...kinds], urls: [...page, ...links], names, title };
+  }
+  return { kinds: [], urls: page, names: [], title };
+}
+// classify() plus the owner's rules (ctx.rules: lines or parseRules()): → {...classify, hold, rule?}. Reads never hold; a
+// connector tool the owner marked outbound always does; anything else only when a rule matches.
+export function judge(tool, args = {}, ctx = {}) {
+  const c = classify(tool, args, ctx);
+  if (c.cls === 'read') return { ...c, hold: false };
+  if (ctx.kind && ctx.kind !== 'browser' && c.reason === 'marked outbound') return { ...c, hold: true };
+  const rule = matchRule(ctx.rules || [], factsOf(tool, args, c, ctx));
+  return rule ? { ...c, hold: true, rule: rule.text, reason: `your rule "${rule.text}"` } : { ...c, hold: false };
+}
 
 // Redaction for the audit log and approval records: secret-looking keys, token shapes, and text typed into
 // password/code fields. Strings are clipped.

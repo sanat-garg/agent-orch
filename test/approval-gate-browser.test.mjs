@@ -1,5 +1,5 @@
 // The approval gate on a real browser: the pinned Playwright MCP behind gate-proxy.mjs, exactly as a gated task run gets
-// it (extensions.mjs mcpRun with a gate), on a local compose page. Clicking Send is held until the owner answers; a
+// it (extensions.mjs mcpRun with a gate, the owner's rule 'send email'), on a local compose page. Clicking Send is held until the owner answers; a
 // denial leaves the page unchanged; reads pass. Skipped on a machine without Chromium or Chrome.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -10,7 +10,7 @@ import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { createExtensions } from '../extensions.mjs';
 import { findBrowser } from '../browser.mjs';
-import { answer, patternsWith, readAudit } from '../gate.mjs';
+import { answer, readAudit } from '../gate.mjs';
 import { waitFor } from './helpers/wait.mjs';
 
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gate-browser-')));
@@ -28,7 +28,7 @@ test('real browser: Send is held until approved, a denial leaves the page unchan
   const dir = path.join(tmp, 'gate'), outputDir = path.join(tmp, 'wt', '.agent-orch', 'shots');
   fs.mkdirSync(outputDir, { recursive: true });
   const ext = createExtensions({ dataDir: path.join(tmp, 'data'), home: path.join(tmp, 'home'), claudeDir: path.join(tmp, 'claude'), codexDir: path.join(tmp, 'codex') });
-  const server = JSON.parse(fs.readFileSync(ext.mcpRun('claude', { browser: { identity: 'default', outputDir, headed: false }, gate: { dir, task: 1, patterns: patternsWith([]) } }), 'utf8')).mcpServers.playwright;
+  const server = JSON.parse(fs.readFileSync(ext.mcpRun('claude', { browser: { identity: 'default', outputDir, headed: false }, gate: { dir, task: 1, rules: ['send email'] } }), 'utf8')).mcpServers.playwright;
   assert.match(server.args.join(' '), /gate-proxy\.mjs --config /, 'the browser runs behind the gate');
   const child = spawn(server.command, server.args, { stdio: ['pipe', 'pipe', 'inherit'] });
   let buf = '', id = 0;
@@ -41,17 +41,11 @@ test('real browser: Send is held until approved, a denial leaves the page unchan
   const settled = (p) => Promise.race([p.then(() => true), new Promise((r) => setTimeout(() => r(false), 1500))]);
   try {
     await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } });
-    // The test page is on 127.0.0.1, so opening it is held too (AUDIT #41).
-    const nav = call('browser_navigate', { url });
-    await waitFor(() => asked().length === 1, { timeout: 30000 });
-    const n = JSON.parse(fs.readFileSync(path.join(dir, 'approvals', asked()[0]), 'utf8'));
-    assert.equal(n.reason, 'opens a local or private service');
-    answer(dir, 'approvals', n.id, { decision: 'approve' });
-    await nav;
+    await call('browser_navigate', { url });
     const snap = text(await call('browser_snapshot'));
     const ref = /button "Send" \[ref=(\w+)\]/.exec(snap)?.[1];
     assert.ok(ref, snap);
-    assert.equal(asked().length, 1, 'snapshots are not held');
+    assert.equal(asked().length, 0, 'opening the page and snapshots are not held');
     const seen = new Set(asked());
     const fresh = () => asked().filter((f) => !seen.has(f));
 

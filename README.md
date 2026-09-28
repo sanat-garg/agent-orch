@@ -270,17 +270,18 @@ passwords or one-time codes; when a site needs a sign-in it stops and asks you.
 
 **The approval gate** (`gate.mjs`, `gate-proxy.mjs`, `approvals.mjs`). In task runs, the Playwright MCP and every
 connector run behind `gate-proxy.mjs`, a stdio MCP proxy. A connector is an MCP server with **Outbound tools** filled
-in under Settings → Skills & tools. The proxy classifies each tool call before it runs:
+in under Settings → Skills & tools. Everything runs without asking **except** what you disallow under
+**Settings → Browser → Don't allow**, one rule per line:
 
-- **read**: looks at the page (snapshot, screenshot, wait, hover…). Runs.
-- **draft**: ordinary steps (open a page, click, type, fill a form, choose an option). Runs.
-- **outbound**: clicking a button or link whose accessible name matches Send, Pay, Transfer, Submit order, Publish,
-  Share, Delete, Confirm, Place order or Sign ("Sign in" and "Log out" don't count), submitting typed text to one,
-  accepting a dialog that says so, opening a checkout, payment or billing page, and any Playwright tool the gate
-  doesn't know. For connectors, the tools listed in Outbound tools and tools named like send, pay, delete, publish
-  or share.
+- a site or URL (`bank.example.com`, `*.shop.com`, `example.com/admin`): opening it, and acting on its pages;
+- an action (`send email`, `payments and checkout`, `delete`, `post on social media`): the words send, pay, delete,
+  publish, share, submit, upload, download and login map to the kinds of action the gate infers from the button,
+  link, key press or connector tool (a Send button, a checkout link, a password field, `send_email`…);
+- anything else: a phrase matched (any case) in the element's accessible name, the page title or the URL.
 
-An outbound call is held **before** it runs. Calls run one at a time, so nothing slips past a held one. The task's
+A connector's Outbound tools are always held. Each call is still classified read / draft / outbound for the log.
+
+A matching call is held **before** it runs. Calls run one at a time, so nothing slips past a held one. The task's
 card (in the chat and the Queue) and its drawer then show the exact action with a screenshot of the page, and you
 choose **Approve** once, **Always** (the same action is allowed without asking for the rest of this task) or
 **Deny** with a reason, which reaches the agent as a tool error; the call is never made. An approval nobody answers
@@ -288,9 +289,8 @@ is denied after 24 hours. Time spent held doesn't count toward the task's timeou
 files in the run's gate dir and the worker relays the request to the controller, so the flow is the same everywhere.
 
 Every call, whatever its class, is logged to `data/audit/<task>.jsonl` (hash-chained, secrets redacted), with
-screenshots saved as media. The task drawer's **Actions** section shows that log. **Settings → Ask me before** adds
-your own names, one per line, to the default list (a plain phrase matches whole words; `/regex/` is also accepted).
-`GET`/`PUT /api/orch/gate` reads and sets `{patterns, ttlHours}`, where `ttlHours` (up to 336) replaces the 24-hour
+screenshots saved as media. The task drawer's **Actions** section shows that log.
+`GET`/`PUT /api/orch/gate` reads and sets `{rules, ttlHours}`, where `ttlHours` (up to 336) replaces the 24-hour
 expiry.
 
 **The Browser tab** (`browser-live.mjs`, `browser-view.mjs`, `public/browser.js`). The header's **Browser** tab shows

@@ -31,6 +31,7 @@ import { MSG, graceMs, isRepoUrl } from './cluster-protocol.mjs';
 import { autoTasks, reserveBytes } from './power.mjs';
 import { CPU_PER_TASK, FOOTPRINT, GB, capSlots, localCap } from './cap.mjs';
 import { extractCommand, runCheck, toolLine } from './taskrun.mjs';
+import { gcRetention } from './retention.mjs';
 import { commitAll, ensureWorktree, isMerged, listWorktrees, mergeBack, parkWorktree, pruneOrphanWorktrees, removeWorktree, repoInfo, startIntegration, taskBranch, unresolvedFiles, worktreesRoot } from './worktrees.mjs';
 
 // ---------------------------------------------------------------- config
@@ -3680,6 +3681,14 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     runSubs.get(taskId).add(ws);
   }
 
+  // Old run logs and unreferenced media (retention.mjs); never throws into boot or the timer.
+  function retentionGc() {
+    try {
+      const r = gcRetention({ dataDir, runsDir, db });
+      if (r.runs || r.media) logEvent(`retention: removed ${r.runs} run logs and ${r.media} media files (${(r.bytes / 1048576).toFixed(1)} MB)`);
+    } catch (e) { console.error('[orchestrator] retention gc failed', e); }
+  }
+
   // ---- start (only the lock holder schedules; a second instance on the same data dir stays inert)
   if (disabled) {
     console.log('[orchestrator] disabled (CW_NO_ORCHESTRATOR=1): not requeueing or scheduling tasks');
@@ -3692,9 +3701,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       AND id NOT IN (SELECT MAX(id) FROM runs WHERE task_id IN (SELECT value FROM json_each(:k)) GROUP BY task_id)`, { t: now(), k: JSON.stringify(adoptable) });
     if (orphans) logEvent(`requeued ${orphans} interrupted task(s) after a restart`);
     cleanupWorktrees(); // per-project merge lock: a claim in the same project waits for it
+    retentionGc();
     reconcileCodexLimit();
     setInterval(tick, CFG.pollMs);
     setInterval(memGuard, CFG.memCheckMs);
+    setInterval(retentionGc, 86400e3);
     setTimeout(tick, 5000);
     // A limit that has passed: capacity is back, so refresh usage for pacing.
     setInterval(() => {

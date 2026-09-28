@@ -13,3 +13,7 @@ Add a small retention garbage collector. Today `data/orchestrator/runs/run-NNNNN
 ## Done when
 
 `node --check retention.mjs` and `npm test -- test/retention.test.mjs`
+
+## Result — done (check passed) (2026-09-28 08:40)
+
+AGENT-ORCH-STATUS: done — retention GC prunes old run logs and unreferenced media

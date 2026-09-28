@@ -861,3 +861,7 @@ AUDIT.md Round 6 added: 16 findings (#37–#52), two high
 ## 2026-09-28 08:39 — #288 UI-REVIEW round 2: HIG review of the Settings sheet, Machines, Stats, Extensions, Files, Approvals and the live browser view on a 390px phone [done (check passed)]
 
 Round 2 HIG review added: rows 18–35, 30 screenshots
+
+## 2026-09-28 08:40 — #289 Retention GC: prune old run logs and unreferenced media at boot and daily [done (check passed)]
+
+retention GC prunes old run logs and unreferenced media

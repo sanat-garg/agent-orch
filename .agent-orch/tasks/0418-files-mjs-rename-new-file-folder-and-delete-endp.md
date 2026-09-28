@@ -17,3 +17,7 @@ Document the three in the header comment next to the other endpoints. Export the
 ## Done when
 
 `npm test -- test/files-ops.test.mjs` passes and `grep -c "/api/files/delete" files.mjs` prints at least 1
+
+## Result — done (check passed) (2026-09-28 14:54)
+
+AGENT-ORCH-STATUS: done — rename/new/delete endpoints added to files.mjs; files-ops tests pass

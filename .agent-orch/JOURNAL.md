@@ -1297,3 +1297,6 @@ AUDIT.md has Round 8 (#68–#70), with #61 and #63 marked
 ## 2026-09-28 14:53 — #323 README docs: parallel tasks rewritten for goal 9, push notifications and the Browser tab [done (check passed)]
 
 README covers parallel slots, push notifications, Browser tab tasks
+## 2026-09-28 14:54 — #418 files.mjs: rename, new file/folder and delete endpoints with the copy/move path rules [done (check passed)]
+
+rename/new/delete endpoints added to files.mjs; files-ops tests pass

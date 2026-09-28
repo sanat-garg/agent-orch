@@ -1,5 +1,5 @@
-// files.mjs copy/move/zip/unzip (the Files tab's context menu): collisions, a folder into itself, zip round trips,
-// zip-slip, path escapes and the read-only data/ and .git/.
+// files.mjs copy/move/zip/unzip/rename/new/delete (the Files tab's context menu): collisions, a folder into itself, zip
+// round trips, zip-slip, path escapes and the read-only data/ and .git/.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
-import { copyPaths, handleFiles, listDir, movePaths, unzipPath, zipPaths } from '../files.mjs';
+import { copyPaths, deletePaths, handleFiles, listDir, movePaths, newEntry, renamePath, unzipPath, zipPaths } from '../files.mjs';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-fops-'));
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -201,7 +201,63 @@ test('data/ and .git/ are read-only: never moved, never a destination, and nothi
   assert.deepEqual(fs.readdirSync(path.join(p.root, '.git')), ['HEAD']);
 });
 
-test('HTTP: POST /api/files/{copy,move,zip,unzip} answer JSON with a clear status; list?dir= has type and isSymlink', async (t) => {
+test('rename: a file and a folder in place; `..`, a slash, .git, data/ and a taken name are refused', async () => {
+  const p = project();
+  assert.deepEqual(await renamePath(p.root, 'a.txt', 'b.txt'), { from: 'a.txt', to: 'b.txt' });
+  assert.equal(p.read('b.txt'), 'A');
+  assert.ok(!p.has('a.txt'));
+  assert.deepEqual(await renamePath(p.root, 'src/lib', 'library'), { from: 'src/lib', to: 'src/library' });
+  assert.equal(p.read('src/library/util.js'), 'util');
+  for (const name of ['..', '.', 'x/y', '', 'é'.repeat(128)]) await rejects(renamePath(p.root, 'b.txt', name), 400);
+  await rejects(renamePath(p.root, '../secret/key.txt', 'k.txt'), 400);
+  await rejects(renamePath(p.root, 'escape', 'e2'), 403);
+  await rejects(renamePath(p.root, '.git', 'git'), 403, /read-only/);
+  await rejects(renamePath(p.root, '.git/HEAD', 'HEAD2'), 403, /read-only/);
+  await rejects(renamePath(p.root, 'out', '.git'), 403, /read-only/);
+  await rejects(renamePath(p.root, 'data', 'data2'), 403, /read-only/);
+  await rejects(renamePath(p.root, 'out', 'data'), 403, /read-only/);
+  await rejects(renamePath(p.root, 'b.txt', 'src'), 409, /already exists/);
+  await rejects(renamePath(p.root, 'b.txt', 'b.txt'), 409);
+  await rejects(renamePath(p.root, '', 'x'), 400);
+  await rejects(renamePath(p.root, p.root, 'x'), 403, /project folder/);
+  await rejects(renamePath(p.root, 'nope.txt', 'x'), 404);
+  assert.ok(p.has('b.txt') && p.has('src') && p.has('.git/HEAD') && p.has('data/secret.json'));
+});
+
+test('new: an empty file or a folder; a taken name is 409, a dir that is not a folder 404', async () => {
+  const p = project();
+  assert.deepEqual(await newEntry(p.root, 'src', 'notes.md', 'file'), { created: 'src/notes.md' });
+  assert.equal(p.read('src/notes.md'), '');
+  assert.deepEqual(await newEntry(p.root, '', 'docs', 'dir'), { created: 'docs' });
+  assert.ok(fs.statSync(path.join(p.root, 'docs')).isDirectory());
+  await rejects(newEntry(p.root, 'src', 'notes.md', 'dir'), 409);
+  await rejects(newEntry(p.root, '', 'a.txt', 'file'), 409);
+  await rejects(newEntry(p.root, 'a.txt', 'x', 'file'), 404);
+  await rejects(newEntry(p.root, 'missing', 'x', 'file'), 404);
+  await rejects(newEntry(p.root, 'src', '../x', 'file'), 400);
+  await rejects(newEntry(p.root, 'src', 'x', 'link'), 400);
+  await rejects(newEntry(p.root, '.git', 'x', 'file'), 403, /read-only/);
+  await rejects(newEntry(p.root, '', '.git', 'dir'), 403, /read-only/);
+  await rejects(newEntry(p.root, 'escape', 'x', 'file'), 403);
+  assert.deepEqual(fs.readdirSync(p.outside), ['key.txt']);
+});
+
+test('delete: files and nested folders go; the root, .git, data/ and outside refuse the whole request; missing is skipped', async () => {
+  const p = project();
+  for (const bad of [[''], ['.'], [p.root], ['a.txt', '.git'], ['a.txt', '.git/HEAD'], ['a.txt', 'data'], ['a.txt', 'escape/key.txt'], ['a.txt', path.dirname(p.root)]]) {
+    await assert.rejects(deletePaths(p.root, bad), (e) => e.status === 403, JSON.stringify(bad));
+  }
+  await rejects(deletePaths(p.root, ['a.txt', '../secret']), 400);
+  await rejects(deletePaths(p.root, []), 400);
+  assert.ok(p.has('a.txt') && p.has('.git/HEAD') && p.has('data/secret.json'), 'nothing deleted when any path is refused');
+  assert.deepEqual(await deletePaths(p.root, ['src', 'src/lib/util.js', 'a.txt', 'gone.txt', 'nope/deeper']),
+    { deleted: ['src', 'a.txt'], skipped: [{ path: 'gone.txt', reason: 'Not found' }, { path: 'nope/deeper', reason: 'Not found' }] });
+  assert.ok(!p.has('src') && !p.has('a.txt'));
+  const abs = path.join(fs.realpathSync(p.root), 'out');
+  assert.deepEqual(await deletePaths(p.root, [abs]), { deleted: [abs], skipped: [] }, 'an absolute path answers absolute');
+});
+
+test('HTTP: POST /api/files/{copy,move,zip,unzip,rename,new,delete} answer JSON with a clear status; list?dir= has type and isSymlink', async (t) => {
   const p = project();
   const json = (res, status, body) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
   const readBody = (req) => new Promise((resolve, reject) => {
@@ -226,6 +282,16 @@ test('HTTP: POST /api/files/{copy,move,zip,unzip} answer JSON with a clear statu
   assert.equal((await post('copy', { paths: ['a.txt'] }))[0], 400, 'copy needs a destination');
   assert.equal((await post('copy', { cid: 'other', paths: ['a.txt'], dest: '' }))[0], 404);
   assert.equal((await fetch(`${base}/api/files/copy?cid=c1`)).status, 404, 'the ops are POST only');
+  assert.deepEqual(await post('new', { dir: 'out', name: 'n', type: 'dir' }), [200, { created: 'out/n' }]);
+  assert.deepEqual(await post('new', { dir: 'out', name: 'n', type: 'file' }), [409, { error: 'out/n already exists' }]);
+  assert.equal((await post('new', { dir: 'a.txt', name: 'x', type: 'file' }))[0], 404);
+  assert.deepEqual(await post('rename', { path: 'out/n', name: 'm' }), [200, { from: 'out/n', to: 'out/m' }]);
+  assert.deepEqual(await post('rename', { path: '.git', name: 'g' }), [403, { error: '.git is read-only' }]);
+  assert.deepEqual(await post('delete', { paths: ['out/m', 'out/zz'] }), [200, { deleted: ['out/m'], skipped: [{ path: 'out/zz', reason: 'Not found' }] }]);
+  assert.deepEqual(await post('delete', { paths: ['a.txt', ''] }), [403, { error: "Can't delete the project folder" }]);
+  assert.equal((await post('delete', { paths: Array(20001).fill('a.txt') }))[0], 413);
+  assert.ok(p.has('a.txt'));
+  assert.equal((await fetch(`${base}/api/files/delete?cid=c1`)).status, 404, 'delete is POST only');
   fs.chmodSync(path.join(p.root, 'out'), 0o555);
   t.after(() => fs.chmodSync(path.join(p.root, 'out'), 0o755));
   if (process.getuid?.() !== 0) assert.deepEqual(await post('copy', { paths: ['a.txt'], dest: 'out' }), [403, { error: 'Permission denied' }]);

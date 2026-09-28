@@ -21,7 +21,10 @@
 //   POST /api/files/move  {cid, paths, dest}        → {moved: [{from, to}]}
 //   POST /api/files/zip   {cid, paths, dest?, name?} → {zip: rel}
 //   POST /api/files/unzip {cid, path, dest?}        → {extracted: rel, skipped}
-//   (the rules for these four are above copyPaths; errors are {error} with 400/403/404/409/413)
+//   POST /api/files/rename {cid, path, name}        → {from, to}   (name: one path segment ≤ 255 bytes; 409 if taken)
+//   POST /api/files/new    {cid, dir, name, type}   → {created: rel}   (type 'file' (empty) or 'dir'; 404 if dir isn't a folder)
+//   POST /api/files/delete {cid, paths}             → {deleted: [rel], skipped: [{path, reason}]}   (recursive; missing = skipped)
+//   (the rules for these seven are above copyPaths; errors are {error} with 400/403/404/409/413)
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -344,7 +347,7 @@ export async function sendDiff(req, res, rootDir, rel) {
   res.end(out.subarray(0, DIFF_MAX));
 }
 
-// ── Changing files: copy, move, zip, unzip ──────────────────────────────────────────────────────────────────────────
+// ── Changing files: copy, move, zip, unzip, rename, new, delete ──────────────────────────────────────────────────────
 // Every path is resolved like resolvePath (realpath; a relative one inside the project). A source is the entry itself,
 // not what a link points to: moving or copying a link moves or copies the link (a relative one must still point inside
 // the project), and a folder's contents are copied with their links as they are. The project root and '/' are never a
@@ -354,6 +357,8 @@ export async function sendDiff(req, res, rootDir, rel) {
 // no new item may land there; reading them (copy out, zip) is fine. A clash with an existing name gets 'name copy', 'name copy 2'… (copy, move) or
 // 'name 2', 'name 3'… (zip, unzip). Zips are written and read in plain node (zlib, no zip/unzip binaries, no zip64):
 // the same code on the head and on macOS workers, and every archive entry is checked before anything is written.
+// Rename and delete change a source in place under move's rules, and never the project, ~ or /tmp (or a folder holding
+// one); rename and new never take an existing name (409). A delete checks every path before removing any.
 export const OPS_ENTRY_MAX = 20000;
 export const ZIP_INPUT_MAX = 2 * 1024 ** 3;
 export const UNZIP_MAX = 500 * 1024 ** 2;
@@ -395,10 +400,10 @@ function sourcesOf(rootDir, paths) {
   const all = [...new Map(paths.map((p) => sourceOf(rootDir, p)).map((s) => [s.abs, s])).values()];
   return all.filter((s) => !all.some((o) => o !== s && o.dir && !o.link && s.abs.startsWith(o.abs + path.sep)));
 }
-function destOf(rootDir, p) {
+function destOf(rootDir, p, notDir = 400) {
   if (typeof p !== 'string') throw new FileError(400, 'Pick a destination folder');
   const d = resolvePath(rootDir, p);
-  if (!fs.statSync(d.real).isDirectory()) throw new FileError(400, 'The destination is not a folder');
+  if (!fs.statSync(d.real).isDirectory()) throw new FileError(notDir, 'The destination is not a folder');
   assertWritable(d.root, d.real);
   const rel = projRel(d.root, d.real);
   if (isProtected(rel) || isSecret(d.real) || protectRules().anchors.some((a) => within(d.real, a))) throw new FileError(403, `${rel ?? d.real} is read-only`);
@@ -641,14 +646,81 @@ export async function unzipPath(rootDir, rel, { dest: destRel } = {}) {
   finally { await fh.close(); }
 }
 
+// A name typed for a rename or a new item: one plain path segment, at most 255 bytes.
+function entryName(name) {
+  if (typeof name !== 'string') throw new FileError(400, 'Type a name');
+  const n = plainName(name);
+  if (Buffer.byteLength(n) > 255) throw new FileError(400, 'The name is too long (255 bytes at most)');
+  return n;
+}
+// A source rename/delete may change: in a writable folder, not read-only (data/, anything in a .git), not a secret's
+// folder, and never the project, ~ or /tmp themselves or a folder holding one.
+function assertChangeable(s, verb) {
+  assertWritable(s.root, path.dirname(s.abs));
+  if (isProtected(s.rel) || s.abs.split(path.sep).includes('.git') || (!s.link && holdsSecret(s.real))) throw new FileError(403, `${s.shown} is read-only`);
+  if (!s.link && writeRoots(s.root).some((r) => within(r, s.real))) throw new FileError(403, `Can't ${verb} ${s.real === s.root ? 'the project folder' : s.shown}`);
+}
+// A new name in `dir`: 403 where nothing may land, 409 when taken (`self`: the entry being renamed, for a change of case).
+function freshAt(root, dir, name, self) {
+  const at = path.join(dir, name), rel = projRel(root, at);
+  if (isProtected(rel) || at.split(path.sep).includes('.git') || isSecret(at)) throw new FileError(403, `${rel ?? at} is read-only`);
+  let st;
+  try { st = fs.lstatSync(at); } catch { return at; }
+  if (!self || st.ino !== self.ino || st.dev !== self.dev || path.basename(self.abs) === name) throw new FileError(409, `${rel ?? at} already exists`);
+  return at;
+}
+
+// POST /api/files/rename {path, name} → {from, to}: renamed in place, never over an existing item.
+export async function renamePath(rootDir, p, name) {
+  const s = sourceOf(rootDir, p), show = shower(s.root, [p]);
+  assertChangeable(s, 'rename');
+  const to = freshAt(s.root, path.dirname(s.abs), entryName(name), { ...fs.lstatSync(s.abs), abs: s.abs });
+  await fs.promises.rename(s.abs, to);
+  return { from: show(s.abs), to: show(to) };
+}
+
+// POST /api/files/new {dir, name, type: 'file'|'dir'} → {created: rel}: an empty file or folder.
+export async function newEntry(rootDir, dir, name, type) {
+  if (type !== 'file' && type !== 'dir') throw new FileError(400, "type must be 'file' or 'dir'");
+  const dest = destOf(rootDir, dir, 404), show = shower(dest.root, [dir]);
+  const at = freshAt(dest.root, dest.real, entryName(name));
+  if (type === 'dir') await fs.promises.mkdir(at);
+  else await fs.promises.writeFile(at, '', { flag: 'wx' });
+  return { created: show(at) };
+}
+
+// POST /api/files/delete {paths} → {deleted: [rel], skipped: [{path, reason}]}. Every path is checked before anything
+// goes: one refused (read-only, the project, outside it) refuses the request; a missing one is skipped with a reason.
+export async function deletePaths(rootDir, paths) {
+  if (!Array.isArray(paths) || !paths.length) throw new FileError(400, 'Pick at least one file or folder');
+  if (paths.length > OPS_ENTRY_MAX) throw new FileError(413, 'Too many items');
+  const show = shower(realOr(rootDir), [paths]), skipped = [], found = new Map();
+  for (const p of paths) {
+    const str = String(p ?? '');
+    if (!str.startsWith('/') && !str.split('/').some((x) => x && x !== '.')) throw new FileError(403, "Can't delete the project folder");
+    let s;
+    try { s = sourceOf(rootDir, str); } catch (e) { if (e.status !== 404) throw e; skipped.push({ path: str, reason: 'Not found' }); continue; }
+    assertChangeable(s, 'delete');
+    found.set(s.abs, s);
+  }
+  const all = [...found.values()], deleted = [];
+  for (const s of all.filter((s) => !all.some((o) => o !== s && o.dir && !o.link && s.abs.startsWith(o.abs + path.sep)))) {
+    try { await fs.promises.rm(s.abs, { recursive: true, force: false }); deleted.push(show(s.abs)); }
+    catch (e) { skipped.push({ path: show(s.abs), reason: (FS_ERRORS[e.code] || [0, 'Could not delete it'])[1] }); }
+  }
+  return { deleted, skipped };
+}
+
 // The route handler: rootFor(cid) → the chat's project folder, or null; readBody(req) → the parsed JSON body (POSTs).
 // Returns true (synchronously) when it answers; grep, changed, diff and the POSTs answer later, from their own promises.
 const OPS = { copy: (root, b) => copyPaths(root, b.paths, b.dest), move: (root, b) => movePaths(root, b.paths, b.dest),
-  zip: (root, b) => zipPaths(root, b.paths, b), unzip: (root, b) => unzipPath(root, b.path, b) };
+  zip: (root, b) => zipPaths(root, b.paths, b), unzip: (root, b) => unzipPath(root, b.path, b),
+  rename: (root, b) => renamePath(root, b.path, b.name), new: (root, b) => newEntry(root, b.dir, b.name, b.type),
+  delete: (root, b) => deletePaths(root, b.paths) };
 const FS_ERRORS = { EACCES: [403, 'Permission denied'], EPERM: [403, 'Permission denied'], EROFS: [403, 'The disk is read-only'],
   EEXIST: [409, 'Something with that name is already there'], ENOSPC: [507, 'The disk is full'], ENOENT: [404, 'Not found'] };
 export function handleFiles(req, res, url, { rootFor, json, readBody }) {
-  const m = url.pathname.match(/^\/api\/files\/(list|raw|find|grep|changed|diff|copy|move|zip|unzip)$/);
+  const m = url.pathname.match(/^\/api\/files\/(list|raw|find|grep|changed|diff|copy|move|zip|unzip|rename|new|delete)$/);
   if (!m || req.method !== (OPS[m[1]] ? 'POST' : 'GET')) return false;
   const fail = (e) => {
     if (res.headersSent) return res.destroy();

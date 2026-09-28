@@ -13,3 +13,7 @@ New feature foundation (ROADMAP 'Chat search'): a module that finds conversation
 ## Done when
 
 `node --test test/search.test.mjs` passes and `grep -n 'export async function searchConvos\|export function searchConvos' search.mjs` prints a line
+
+## Result — done (check passed) (2026-09-28 11:49)
+
+AGENT-ORCH-STATUS: done — search.mjs searchConvos is implemented and its 3 tests pass

@@ -17,3 +17,7 @@ Mark #37 in .agent-orch/AUDIT.md as **Fixed** with a one-line note. Run `npm tes
 ## Done when
 
 `grep -q 'setMcpSource((agent, run) => ext.mcpRun(agent, run))' server.mjs` and `npm test -- test/approval-gate-run.test.mjs` passes
+
+## Result — done (2026-09-28 08:46)
+
+AGENT-ORCH-STATUS: done — Controller runs get gate/browser config; tests catch regressions

@@ -509,6 +509,7 @@ the same origin. `run-on` accepts only a string or null naming a known node.
   `playwright` server.
 - **Fix:** `setMcpSource((agent, run) => ext.mcpRun(agent, run))`. Add a regression test that boots server.mjs (or imports
   its wiring) and checks that a gated run's config names gate-proxy.mjs.
+- **Fixed** (task #292): server.mjs now installs `setMcpSource((agent, run) => ext.mcpRun(agent, run))`. test/approval-gate-run.test.mjs reads that line from server.mjs, asserts the two-argument form, and runs its orchestrator gate test through it.
 
 ### 38. [high] A gated run can approve its own held calls, or skip the gate: the gate and the agent share one Unix user and the agent has a shell (gate.mjs:237-253, :280-286; agents.mjs:236; browser-live.mjs:66)
 - **What:** Task runs use `bypassPermissions` (Codex: `--dangerously-bypass-approvals-and-sandbox`), so the agent has an

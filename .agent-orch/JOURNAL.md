@@ -869,3 +869,7 @@ retention GC prunes old run logs and unreferenced media
 ## 2026-09-28 08:41 — #290 One-time kv migration dropping rows for the removed agents antigravity, opencode, kiro and copilot [done (check passed)]
 
 boot migration drops removed-agent kv rows; test passes
+
+## 2026-09-28 08:46 — #292 AUDIT #37: server.mjs passes the run config to ext.mcpRun so controller runs get the gate and browser [done]
+
+Controller runs get gate/browser config; tests catch regressions

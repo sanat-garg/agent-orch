@@ -31,7 +31,14 @@ const CLIENT = `function mcp(s, env = process.env) {
 }`;
 const mcp = new Function('spawn', `${CLIENT}; return mcp;`)(spawn);
 const txt = (r) => (r?.content || []).map((c) => c.text || '').join('\n');
+// server.mjs's own MCP wiring, read as text (importing server.mjs boots the app): the orchestrator test below installs
+// exactly this line, so a lambda that drops the run config (AUDIT #37) fails it.
+const WIRING = fs.readFileSync(path.join(root, 'server.mjs'), 'utf8').match(/^setMcpSource\(.*?\);/m)?.[0];
 const executed = (log) => { try { return fs.readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l).name); } catch { return []; } };
+
+test("server.mjs hands each run's gate and browser config to the extensions MCP source", () => {
+  assert.equal(WIRING, 'setMcpSource((agent, run) => ext.mcpRun(agent, run));');
+});
 
 test('Claude runs: the PreToolUse permission hook holds an outbound call before the CLI dispatches it', async () => {
   const dir = path.join(tmp, 'hook'), log = path.join(tmp, 'hook.calls.jsonl'), cfg = path.join(dir, 'proxy-playwright.json');
@@ -88,7 +95,7 @@ test('orchestrator: a connector send is held (the run paused past its timeout), 
     setModelCatalog('claude', { models: [{ id: 'opus', default: true }], error: null, at: 1 });
     const ext = createExtensions({ dataDir, home, claudeDir: path.join(home, '.claude'), codexDir: path.join(home, '.codex') });
     ext.saveMcp({ name: 'mail', commandLine: process.execPath + ' ' + fake, env: 'FAKE_MCP_LOG=' + log, outbound: 'send_email' });
-    setMcpSource((agent, run) => ext.mcpRun(agent, run));
+    ${WIRING}
     const results = [], chat = [], pushed = [];
     let hooked = false;
     const query = ({ options }) => (async function* () {

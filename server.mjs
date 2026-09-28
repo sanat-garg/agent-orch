@@ -673,7 +673,7 @@ const allClients = new Set();
 
 // ---------- Skills, MCP servers, subagents and personas (extensions.mjs; Settings → Skills & tools) ----------
 const ext = createExtensions({ dataDir: DATA });
-setMcpSource((agent) => ext.mcpRun(agent)); // every runAgentCli run (tasks, planner, non-Claude chats) reads the list as it starts
+setMcpSource((agent, run) => ext.mcpRun(agent, run)); // every runAgentCli run (tasks, planner, non-Claude chats) reads the list as it starts
 ext.onChange((kind) => { for (const ws of allClients) send(ws, { t: 'ext', kind }); });
 // A chat's persona as its system-prompt block (null: none, or deleted), and the MCP servers Claude chats get.
 const personaOf = (convo) => ext.personaPrompt(convo.persona);

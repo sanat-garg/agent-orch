@@ -886,7 +886,7 @@ function takeLock(file) {
 
 export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLimits, onSubscription, emitChat, broadcast, convoExists, refreshUsage,
   convoFallbacks = () => null, convoEffort = () => null, convoPersona = () => null, onCommit = () => {}, projectReady = () => true, disabled = false, usageLog = createUsageLog(dataDir),
-  codexSnapshot = () => codexLatestSnapshot(), reap = null, config = {} }) {
+  notify = () => {}, codexSnapshot = () => codexLatestSnapshot(), reap = null, config = {} }) {
   Object.assign(CFG, config); // tests tune slots (concurrency, parallelTasks, agentSlots, meminfo)
   const dir = path.join(dataDir, 'orchestrator');
   const runsDir = path.join(dir, 'runs');
@@ -1051,10 +1051,23 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   const taskWts = new Map(); // task id -> its worktree while it runs: { dir, cwd, branch, info, owner }
   const runSubs = new Map(); // task id -> Set<ws> watching its live output
 
+  // Web Push to the owner (server.mjs: push.send, rate-limited per tag) for what needs them while the app is closed:
+  //   'Approval needed' (a new gate approval, tag approval-<task>), 'Task failed' / 'Needs integration' (a run ends so,
+  //   tag task-<id>), 'Review needed' (a checkpoint enters awaiting_review, tag task-<id>) and warn events starting
+  //   'waiting:' (sign-in needed, memory low; tag waiting). badge = pending approvals + checkpoints awaiting review.
+  function notifyOwner(n) {
+    let badge = 0;
+    try { badge = approvals.pending().length + (q1("SELECT COUNT(*) AS n FROM tasks WHERE status='awaiting_review'")?.n || 0); } catch {}
+    try { Promise.resolve(notify({ ...n, badge })).catch((e) => console.error('[orchestrator] notify failed', e)); }
+    catch (e) { console.error('[orchestrator] notify failed', e); }
+  }
+  const taskUrl = (id) => `/#task-${id}`;
+
   function logEvent(message, { level = 'info', projectId = null, taskId = null } = {}) {
     run('INSERT INTO events(ts,level,project_id,task_id,message) VALUES(:ts,:l,:p,:t,:m)',
       { ts: now(), l: level, p: projectId, t: taskId, m: message });
     console.log(`[orchestrator] ${message}`);
+    if (level === 'warn' && message.startsWith('waiting:')) notifyOwner({ title: 'agent-orch is waiting', body: message.slice(8).trim(), tag: 'waiting', url: '/' });
   }
 
   function updateProject(id, fields) {
@@ -1351,6 +1364,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     broadcast({ t: 'oapproval', approval: a, kind });
     pushTask(t.id);
     if (kind !== 'new') return;
+    notifyOwner({ title: 'Approval needed', body: `#${t.id} ${t.title}: ${a.action}`, tag: `approval-${t.id}`, url: taskUrl(t.id) });
     logEvent(`#${t.id} is waiting for your approval: ${a.action}`, { level: 'warn', projectId: t.project_id, taskId: t.id });
     const convoId = getProject(t.project_id)?.convo_id;
     if (convoId && convoExists(convoId)) emitChat(convoId, { t: 'approval', taskId: t.id, id: a.id, action: a.action, screenshot: a.screenshot || null });
@@ -3261,6 +3275,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const tid = task.id, branch = wt.info.branch;
     const note = `Its branch ${wt.branch} conflicts with ${branch} in: ${files.join(', ')}. The work is kept in ${wt.dir}.`;
     if (!updateTask(tid, { status: 'needs_integration', finished_at: now(), result: note, session_id: res.sessionId, verify_output: null }, true)) return;
+    notifyOwner({ title: 'Needs integration', body: `#${tid} ${task.title}: conflicts in ${files.join(', ')}`, tag: `task-${tid}`, url: taskUrl(tid) });
     const prompt = `Task #${tid} ("${task.title}") finished in its own git worktree, but its branch \`${wt.branch}\` conflicts with ` +
       `\`${branch}\`, which changed meanwhile (conflicting files: ${files.join(', ')}). You are in that worktree, and the orchestrator ` +
       `has started merging \`${branch}\` into it: the conflicted files contain <<<<<<< markers. Resolve every conflict so both ` +
@@ -3289,6 +3304,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   async function fail(task, project, outcome, detail) {
     const tid = task.id;
     if (!updateTask(tid, { status: 'failed', attempts: task.attempts + 1, finished_at: now(), result: detail }, true)) return;
+    notifyOwner({ title: 'Task failed', body: `#${tid} ${task.title} (${outcome}): ${String(detail).slice(0, 200)}`, tag: `task-${tid}`, url: taskUrl(tid) });
     if (!isBrowserTask(task) && task.kind === 'work' && (taskWts.get(tid) || nodeOf(tid) === LOCAL_NODE)) { // a remote run's partial work stays on its pushed branch
       const wt = taskWts.get(tid);
       recordResult(wt?.cwd || project.path, task, `failed (${outcome})`, detail);
@@ -3381,6 +3397,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         files: [], shots: taskShots(reviewed.id) } : null;
       if (!run("UPDATE tasks SET status='awaiting_review', started_at=:t, result=:r WHERE id=:id AND status='queued'", { t: now(), r: JSON.stringify(ctx), id: cp.id }).changes) continue;
       pushTask(cp.id);
+      notifyOwner({ title: 'Review needed', body: reviewed ? `#${reviewed.id} ${reviewed.title} is done: approve it to continue` : `#${cp.id} ${cp.title}`,
+        tag: `task-${cp.id}`, url: taskUrl(cp.id) });
       logEvent(`⚑ #${cp.id} waits for your review${reviewed ? ` of #${reviewed.id}` : ''}`, { projectId: cp.project_id, taskId: cp.id });
       if (project.convo_id && convoExists(project.convo_id)) {
         emitChat(project.convo_id, { t: 'notice', text: `Review break: ${reviewed ? `#${reviewed.id} ${reviewed.title} is done. ` : ''}Approve it to continue the queue, or request changes.` });

@@ -14,3 +14,7 @@ Wire push.mjs (`push.send({title, body, tag, url, badge})`, created in server.mj
 ## Done when
 
 `npm test -- test/push-events.test.mjs test/checkpoint.test.mjs test/approval-gate-run.test.mjs` passes and `grep -n 'notify' orchestrator.mjs` prints a line
+
+## Result — done (check passed) (2026-09-28 11:27)
+
+AGENT-ORCH-STATUS: done — Owner pushes wired for approvals, failures, reviews, waits, permissions

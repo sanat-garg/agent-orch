@@ -903,3 +903,7 @@ Browser task API verified; pinned agents run without git lifecycle.
 ## 2026-09-28 11:19 — #303 Goal 9 worker placement: an owner-set node cap is the limit; no headroom or spare-memory clipping for capped nodes [done (check passed)]
 
 Done-when passes; test runner uses a lock directory without flock
+
+## 2026-09-28 11:27 — #306 Send pushes for what needs the owner: approvals, chat permission prompts, failed tasks, review checkpoints and waiting events [done (check passed)]
+
+Owner pushes wired for approvals, failures, reviews, waits, permissions

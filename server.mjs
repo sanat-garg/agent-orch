@@ -727,6 +727,16 @@ ext.onChange((kind) => { for (const ws of allClients) send(ws, { t: 'ext', kind 
 const personaOf = (convo) => ext.personaPrompt(convo.persona);
 // Web Push to the owner's home-screen app (push.mjs): VAPID keys and subscribed devices under DATA.
 const push = createPush({ dataDir: DATA, log: (m) => console.log(`[push] ${m}`) });
+// At most one push per tag per minute, so a flapping event can't buzz the phone over and over.
+const PUSH_TAG_MS = 60_000, PERM_PUSH_MS = 15_000;
+const pushedAt = new Map(); // tag -> last send (ms)
+function notify(n) {
+  const t = Date.now(), key = n.tag || '';
+  if (t - (pushedAt.get(key) || 0) < PUSH_TAG_MS) return;
+  pushedAt.set(key, t);
+  for (const [k, at] of pushedAt) if (t - at >= PUSH_TAG_MS) pushedAt.delete(k);
+  return push.send(n);
+}
 const mcpSet = () => JSON.stringify(ext.mcpFor('claude'));
 
 function send(ws, msg) { if (ws.readyState === 1) ws.send(JSON.stringify(msg)); }
@@ -754,6 +764,8 @@ const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
   dataDir: DATA,
   // The usage card's /usage reading, in the shape pacing expects (fractions, epoch seconds).
   usageLog,
+  // Approvals, failed tasks, review checkpoints and waiting events reach the owner's phone (orchestrator.mjs notifyOwner).
+  notify: (n) => notify(n),
   getLimits: () => {
     if (!usage.available) return [];
     const observed = (usage.readAt || usage.updatedAt) / 1000;
@@ -1001,7 +1013,12 @@ function startRuntime(convo) {
     new Promise((resolve) => {
       const pid = crypto.randomUUID();
       const req = { pid, tool: toolName, input: toolInput, canAlways: !!suggestions?.length };
-      rt.pending.set(pid, { req, resolve, toolInput, suggestions });
+      // A push only if nobody answers within 15 s: an owner watching the chat gets no duplicate.
+      const pushTimer = setTimeout(() => {
+        if (rt.pending.has(pid)) notify({ title: 'Claude needs permission', body: `${convo.title}: ${toolName}`, tag: `perm-${convo.id}`, url: `/#${convo.id}` });
+      }, PERM_PUSH_MS);
+      pushTimer.unref?.();
+      rt.pending.set(pid, { req, resolve, toolInput, suggestions, pushTimer });
       broadcast(convo.id, { t: 'perm', ...req });
       signal?.addEventListener('abort', () => {
         if (rt.pending.delete(pid)) broadcast(convo.id, { t: 'perm_done', pid, decision: 'cancelled' });
@@ -1309,6 +1326,7 @@ function answerPermission(convo, msg) {
   const p = rt?.pending.get(msg.pid);
   if (!p) return;
   rt.pending.delete(msg.pid);
+  clearTimeout(p.pushTimer);
   const { toolInput, suggestions } = p;
   let decision = msg.decision;
   if (decision === 'deny') {

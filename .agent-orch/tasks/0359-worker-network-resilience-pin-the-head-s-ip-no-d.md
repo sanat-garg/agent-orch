@@ -1,0 +1,15 @@
+# Task #359: Worker network resilience: pin the head's IP (no DNS dependency), keep Macs awake, one-word status command
+
+- kind: work  
+- source: planner  
+- priority: 85 (urgent)  
+- created: 2026-09-28 12:36  
+- files: net-resolve.mjs, worker.mjs, bin/install-worker-macos.sh, test/net-resolve*.test.mjs
+
+## Prompt
+
+Macs intermittently drop off: the owner sees `curl: (6) Could not resolve host` in the worker terminal, and the head then marks the Mac 'asleep' and holds its tasks (e.g. #315-#317 at 12:28 on Soham's MacBook Air). The head's URL is https://129-154-229-134.sslip.io, a wildcard-DNS name whose resolution fails on some home routers/ISPs. Fix it on the worker side (worker.mjs and a new net-resolve.mjs): 1) Resolution without DNS: for hostnames of the form a-b-c-d.sslip.io / nip.io (and a configurable `headIp` in ~/.agent-orch-worker/config.json, saved automatically at pairing from the successful connection's remote address), resolve to the embedded or cached IP via a custom `lookup` for the WebSocket and every HTTPS request, keeping the hostname for TLS SNI and Host so the certificate still validates. Try system DNS first with a 3 s timeout, and fall back to the pinned IP; cache the last good address. 2) Git: the worker's cache clones (fetch/push to the head's git endpoint from #345, or GitHub) get `http.curloptResolve=<host>:443:<ip>` in their LOCAL repo config (supported in git ≥ 2.37; check `git --version` and fall back to an /etc/hosts-free approach, i.e. retries, if older), so git's curl never needs DNS for the head. 3) Reconnect: exponential backoff capped at 15 s with jitter, and on reconnect the hello includes {reconnect: {reason: 'dns'|'network'|'sleep', since, lastError}} (sleep = a detected wall-clock jump, as worker.mjs already logs at ~line 797). 4) Awake: while the worker is connected, keep the Mac from idle-sleeping (`caffeinate -i -w <worker pid>`) regardless of battery (BRIEF placement rule: battery never matters). Lid-close sleep can't be prevented, so document that. Make the default keepAwake 'always' for new and existing Macs unless the owner changed it on that node. 5) The installer (bin/install-worker-macos.sh) always installs /usr/local/bin/agent-orch-worker-status (not only with --status-window), which runs `node ~agentorch/agent-orch-worker/worker.mjs status "$@"` as the worker user with the right Node path, and prints 'Progress: agent-orch-worker-status' at the end. Keep it bash 3.2-safe (see CONTEXT.md). Tests: the sslip.io IP extraction; the custom lookup falling back to the pinned IP when DNS fails (a mock resolver) while TLS uses the hostname; the git config gets curloptResolve; the reconnect hello carries reason 'dns' after resolution failures. Run only the touched test files plus test/install-macos-bash32.test.mjs.
+
+## Done when
+
+`node --test test/net-resolve*.test.mjs test/install-macos-bash32.test.mjs` passes (DNS-failure fallback to the pinned IP, git curloptResolve, reconnect reason), and the installer dry-run output mentions agent-orch-worker-status

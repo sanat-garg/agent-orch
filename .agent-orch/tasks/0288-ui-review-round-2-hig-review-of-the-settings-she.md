@@ -13,3 +13,7 @@ Mobile Human Interface Guidelines review, findings only (no code changes). Read 
 ## Done when
 
 `grep -q '^## Round 2' .agent-orch/UI-REVIEW.md` and `ls .agent-orch/shots/ui-review2-*.png`
+
+## Result — done (check passed) (2026-09-28 08:39)
+
+AGENT-ORCH-STATUS: done — Round 2 HIG review added: rows 18–35, 30 screenshots

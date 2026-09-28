@@ -857,3 +857,7 @@ blockless reflections now warn and retry in 5 min, tested
 ## 2026-09-28 08:24 — #287 AUDIT round 6: cluster protocol and pairing, approvals and audit log, browser live view, extension sync, restart and machines APIs [done (check passed)]
 
 AUDIT.md Round 6 added: 16 findings (#37–#52), two high
+
+## 2026-09-28 08:39 — #288 UI-REVIEW round 2: HIG review of the Settings sheet, Machines, Stats, Extensions, Files, Approvals and the live browser view on a 390px phone [done (check passed)]
+
+Round 2 HIG review added: rows 18–35, 30 screenshots

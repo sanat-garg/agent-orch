@@ -38,8 +38,8 @@ function cachedLogin(a, check) {
 export const clearLoginCache = () => loginCache.clear();
 // true when the agent can run; otherwise why not ('not installed' | 'not logged in').
 export function agentStatus(id) {
+  if (!isAgent(id)) return 'unknown agent';
   const a = AGENTS[id];
-  if (!a) return 'unknown agent';
   if (!a.available()) return 'not installed';
   return a.loggedIn() ? true : 'not logged in';
 }
@@ -750,6 +750,8 @@ export const isMissingSession = (res) => res.outcome === 'error' &&
   (res.errorCode === 'no_session' || /no conversation found/i.test(`${res.text || ''}\n${res.stderr || ''}`));
 
 export const AGENTS = { claude: CLAUDE, codex: CODEX };
+// A registered agent id: client-supplied names must pass this, never a bare `AGENTS[x]` ('constructor' is truthy there).
+export const isAgent = (id) => typeof id === 'string' && Object.hasOwn(AGENTS, id);
 
 // ---------------------------------------------------------------- reasoning effort
 // Only agents that declare `efforts` take one (Claude and Codex); every other agent keeps its default and never sees it.

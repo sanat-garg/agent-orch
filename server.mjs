@@ -11,7 +11,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createOrchestrator, parseJsonl, SHOT_HINT } from './orchestrator.mjs';
 import { createGitHub } from './github.mjs';
 import { retireRuntime, chatIdle, whenIdle } from './runtimes.mjs';
-import { AGENTS, agentEfforts, clampEffort, runAgentCli, clearLoginCache, isMissingSession, modelCatalog, claudeWindows, fetchLimits, agentVersion, readVersion, windowLabel, setMcpSource } from './agents.mjs';
+import { AGENTS, isAgent, agentEfforts, clampEffort, runAgentCli, clearLoginCache, isMissingSession, modelCatalog, claudeWindows, fetchLimits, agentVersion, readVersion, windowLabel, setMcpSource } from './agents.mjs';
 import { createModelStore } from './models.mjs';
 import { runHelper, claudeHelperSpawn } from './helpers.mjs';
 import { createConnections, SPECS, codexAccount, onPath, tmuxRunnerFor, loginSocketFor } from './connections.mjs';
@@ -207,7 +207,7 @@ function checkFallbacks(v) {
   const list = [];
   for (const f of v) {
     const agent = f?.agent, model = f?.model;
-    if (typeof agent !== 'string' || !AGENTS[agent]) return { error: `Unknown agent: ${agent}` };
+    if (!isAgent(agent)) return { error: `Unknown agent: ${agent}` };
     if (typeof model !== 'string' || !(modelCatalog(agent).models || []).some((m) => m.id === model)) return { error: `Unknown ${agent} model: ${model}` };
     if (!list.some((x) => x.agent === agent && x.model === model)) list.push({ agent, model });
   }
@@ -220,7 +220,7 @@ function publicConvo(c) {
 }
 const planning = new Set(); // convo ids with an orchestrator planner turn in progress
 const agentTurns = new Map(); // convo id -> AbortController of a running non-Claude chat turn
-const chatAgent = (c) => (c.agent && c.agent !== 'claude' && AGENTS[c.agent] ? c.agent : 'claude');
+const chatAgent = (c) => (c.agent && c.agent !== 'claude' && isAgent(c.agent) ? c.agent : 'claude');
 const MODES = ['default', 'acceptEdits', 'plan', 'bypassPermissions', 'orchestrator'];
 // The chat's reasoning effort as its agent (and model) takes it: null = the agent's default (and for agents without efforts).
 const chatEffort = (c) => clampEffort(chatAgent(c), c.effort || null, c.model || null);
@@ -1240,7 +1240,7 @@ function answerPermission(convo, msg) {
     if (decision === 'always' && suggestions?.length) result.updatedPermissions = suggestions;
     p.resolve(result);
     if (p.req.tool === 'ExitPlanMode') {
-      const mode = msg.nextMode || 'acceptEdits';
+      const mode = MODES.includes(msg.nextMode) ? msg.nextMode : 'acceptEdits';
       convo.mode = mode;
       saveConvos();
       rt.q.setPermissionMode(mode).catch(() => {});
@@ -1490,7 +1490,7 @@ async function handleRequest(req, res) {
         return json(res, 409, { error: 'Link GitHub first: every project gets its own GitHub repo.', github: false });
       }
       fs.mkdirSync(cwd, { recursive: true });
-      const c = { id: crypto.randomUUID(), title: path.basename(cwd), cwd, mode: body.mode || 'bypassPermissions', model: '', createdAt: Date.now(), updatedAt: Date.now() };
+      const c = { id: crypto.randomUUID(), title: path.basename(cwd), cwd, mode: MODES.includes(body.mode) ? body.mode : 'bypassPermissions', model: '', createdAt: Date.now(), updatedAt: Date.now() };
       convos.unshift(c);
       saveConvos();
       broadcastConvos();
@@ -1879,7 +1879,7 @@ async function handleRequest(req, res) {
   // The usage card's refresh for one agent: its only limit check (at most one per agent per minute).
   const lr = p.match(/^\/api\/limits\/([\w-]+)\/refresh$/);
   if (lr && req.method === 'POST') {
-    if (!AGENTS[lr[1]]) return json(res, 404, { error: 'No such agent' });
+    if (!isAgent(lr[1])) return json(res, 404, { error: 'No such agent' });
     await limitStore.refresh([lr[1]]).catch(() => {});
     return json(res, 200, { limits: limitStore.get(lr[1]) });
   }
@@ -2063,7 +2063,9 @@ wss.on('connection', (ws, req) => {
         }
         break;
       case 'set_model': {
-        const agent = AGENTS[msg.agent] ? msg.agent : 'claude';
+        // No agent = Claude; an unknown one is refused and the chat keeps its agent.
+        if (msg.agent != null && !isAgent(msg.agent)) { send(ws, { cid: convo.id, t: 'error', text: `Unknown agent: ${String(msg.agent)}` }); break; }
+        const agent = msg.agent ?? 'claude';
         convo.model = typeof msg.model === 'string' ? msg.model : '';
         convo.agent = agent;
         // A new chat's draft effort rides along (one message, so it is checked against the agent it was picked for);

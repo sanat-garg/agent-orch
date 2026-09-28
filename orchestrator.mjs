@@ -17,7 +17,7 @@ import path from 'node:path';
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
-import { AGENTS, agentEfforts, agentStatus, clampEffort, codexExhausted, codexLatestSnapshot, isMissingSession, limitScope, limitScopes, modelCatalog, modelNames, runAgentCli, toolInputSummary, windowLabel } from './agents.mjs';
+import { AGENTS, isAgent, agentEfforts, agentStatus, clampEffort, codexExhausted, codexLatestSnapshot, isMissingSession, limitScope, limitScopes, modelCatalog, modelNames, runAgentCli, toolInputSummary, windowLabel } from './agents.mjs';
 import { SHOTS_DIR, mediaCollector } from './media.mjs';
 import { BROWSER_SYSTEM, needsBrowser, normIdentity, parseCapabilities } from './browser.mjs';
 import { APPROVAL_TTL_MS, DEFAULT_PATTERNS, patternsWith } from './gate.mjs';
@@ -558,7 +558,7 @@ const AGENT_ALIASES = { claude: 'claude', 'claude-code': 'claude', codex: 'codex
 // A known agent id (accepting aliases such as 'openai' → 'codex'), or null.
 export function normalizeAgent(name) {
   const id = AGENT_ALIASES[String(name || '').trim().toLowerCase()];
-  return id && AGENTS[id] ? id : null;
+  return isAgent(id) ? id : null;
 }
 // The agent a model belongs to: the agent whose discovered list names it, else its family by name; null if unknown.
 const MODEL_FAMILIES = [[/^(gpt|o\d|codex)/i, 'codex'], [/^(claude|opus|sonnet|haiku)/i, 'claude']];
@@ -567,7 +567,7 @@ function agentForModel(model) {
   const listed = Object.keys(AGENTS).find((id) => modelNames(id).includes(model));
   if (listed) return listed;
   const fam = MODEL_FAMILIES.find(([re]) => re.test(String(model).trim()))?.[1];
-  return fam && AGENTS[fam] ? fam : null;
+  return isAgent(fam) ? fam : null;
 }
 // An explicit agent paired with another agent's model keeps the agent and drops the model (null when they fit).
 // The agent's own list wins when another agent's list names the same model.
@@ -1354,7 +1354,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // Work slots hold work, reflect and integrator tasks; plan tasks (the owner's messages) run beside them as before.
   const workRunning = () => [...running.values()].filter((r) => r.kind !== 'plan' && r.node === LOCAL_NODE).length;
   const workEverywhere = () => [...running.values()].filter((r) => r.kind !== 'plan').length;
-  const listedModel = (agent, model) => !!AGENTS[agent] && (modelCatalog(agent).models || []).some((m) => m.id === model);
+  const listedModel = (agent, model) => isAgent(agent) && (modelCatalog(agent).models || []).some((m) => m.id === model);
   // A ready task whose agent has no free slot moves to the fallback spreadAssign picked (recorded like a delegation).
   function spread(task, to) {
     const from = intendedRoute(task, getProject(task.project_id));
@@ -1622,7 +1622,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   const blockedUntilOf = (scope) => { const u = parseFloat(kvGet(limitKey('blocked_until', scope), '0')) || 0; return u > now() ? u : null; };
   const blockedUntilFor = (agent = 'claude', model) => blockedUntilOf(limitScope(agent, model));
   const blockedUntil = () => blockedUntilFor('claude');
-  const agentName = (agent) => (agent === 'claude' ? 'Claude' : AGENTS[agent]?.label || agent);
+  const agentName = (agent) => (agent === 'claude' ? 'Claude' : (isAgent(agent) && AGENTS[agent].label) || agent);
   const scopeName = (scope) => agentName(scope);
   const limitName = (agent, model) => scopeName(limitScope(agent, model));
   // When `agent`'s current limit really resets, for display: { at, known, reason }, or null when it isn't blocked.
@@ -2062,7 +2062,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (!task) return { error: 'No such task', status: 404 };
     if (task.status !== 'queued') return { error: `Only queued tasks can be delegated (#${id} is ${task.status})`, status: 409 };
     if ((task.kind || 'work') !== 'work') return { error: 'Only work tasks can be delegated', status: 409 };
-    if (!AGENTS[agent]) return { error: 'Unknown agent' };
+    if (!isAgent(agent)) return { error: 'Unknown agent' };
     model = model ? String(model) : null;
     if (unlistedModel(agent, model)) return { error: `${model} is not a ${agent} model` };
     const project = getProject(task.project_id);
@@ -2147,7 +2147,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     // Queued too: a run that just ended on a limit (or was otherwise interrupted) is back in the queue by the time the owner acts.
     if (!['running', 'paused', 'queued'].includes(task.status)) return { error: `Only running, paused or queued tasks can be handed off (#${id} is ${task.status})`, status: 409 };
     if (task.status === 'running' && (running.get(id)?.node || LOCAL_NODE) !== LOCAL_NODE) return { error: `#${id} runs on another machine; pause it or let it finish there`, status: 409 };
-    if (!AGENTS[agent]) return { error: 'Unknown agent' };
+    if (!isAgent(agent)) return { error: 'Unknown agent' };
     model = model ? String(model) : null;
     if (unlistedModel(agent, model)) return { error: `${model} is not a ${agent} model` };
     const connected = agent === 'claude' ? onSubscription() : agentStatus(agent) === true && !(kvTime(`agent_auth_failed:${agent}`) > now());
@@ -2304,7 +2304,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return { ok: true };
   }
   // The planner runs on the chat's selected agent; Claude when none (or an unknown one) is selected.
-  const plannerAgent = (agent) => (agent && agent !== 'claude' && AGENTS[agent] ? agent : 'claude');
+  const plannerAgent = (agent) => (agent && agent !== 'claude' && isAgent(agent) ? agent : 'claude');
   // When the chat's agent is at its limit, the planner answers on the chat's first fallback (convo.fallbacks) with usage
   // left, and says so. With no fallbacks the message is saved until that agent's reset.
   async function planTurn(convo, text) {

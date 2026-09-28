@@ -13,3 +13,7 @@ Fix .agent-orch/AUDIT.md item 35. AGENTS in agents.mjs is a plain object, so nam
 ## Done when
 
 `node --test test/agent-names.test.mjs` and `grep -q 'Object.hasOwn(AGENTS' agents.mjs` and `grep -A1 '^### 35\.' .agent-orch/AUDIT.md | grep -q Fixed`
+
+## Result — done (check passed) (2026-09-28 05:20)
+
+AGENT-ORCH-STATUS: done — isAgent guards all agent names; chat modes validated against MODES

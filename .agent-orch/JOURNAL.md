@@ -798,3 +798,7 @@ touch screens get 44pt targets; target and keyboard tests pass
 ## 2026-09-28 05:18 — #269 README docs: browser capability, approval gate, audit log, live browser view and worker extension sync [done (check passed)]
 
 README documents browser tasks, approval gate, audit, live view, sync
+
+## 2026-09-28 05:20 — #270 AUDIT #35: reject prototype agent names and validate chat modes [done (check passed)]
+
+isAgent guards all agent names; chat modes validated against MODES

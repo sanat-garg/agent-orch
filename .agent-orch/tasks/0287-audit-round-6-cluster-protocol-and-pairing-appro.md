@@ -13,3 +13,7 @@ Security and correctness audit, findings only (no code changes). .agent-orch/AUD
 ## Done when
 
 `grep -q '^## Round 6' .agent-orch/AUDIT.md`
+
+## Result — done (check passed) (2026-09-28 08:24)
+
+AGENT-ORCH-STATUS: done — AUDIT.md Round 6 added: 16 findings (#37–#52), two high

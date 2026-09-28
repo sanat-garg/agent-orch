@@ -853,3 +853,7 @@ Branches 187, 244 and 247 deleted, others kept, journal noted
 ## 2026-09-28 08:14 — #286 finishReflection: a reflection with no task block is a warning and a quick retry, not an empty verdict [done (check passed)]
 
 blockless reflections now warn and retry in 5 min, tested
+
+## 2026-09-28 08:24 — #287 AUDIT round 6: cluster protocol and pairing, approvals and audit log, browser live view, extension sync, restart and machines APIs [done (check passed)]
+
+AUDIT.md Round 6 added: 16 findings (#37–#52), two high

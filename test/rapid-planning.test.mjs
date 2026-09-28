@@ -106,7 +106,8 @@ test('top-up fires below free cluster slots despite cooldown and excludes prereq
     const state=o.stateView(); const added=o.scheduleReflections(), duplicate=o.scheduleReflections();
     return { rapid: state.rapid, enabled: state.parallel.rapidDevelopment, added, duplicate, count: reflections().length };`);
   assert.equal(r.enabled, true);
-  assert.deepEqual([r.rapid.slots, r.rapid.running, r.rapid.ready, r.rapid.requested], [14, 3, 2, 11]);
+  assert.deepEqual([r.rapid.workers.slots, r.rapid.workers.running, r.rapid.ready, r.rapid.requested], [14, 3, 2, 11]);
+  assert.equal(r.rapid.slots - r.rapid.running, r.rapid.free, 'the totals (head reserved slots included) add up');
   assert.equal(r.added, true);
   assert.equal(r.duplicate, false);
   assert.equal(r.count, 1);

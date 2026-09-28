@@ -6535,6 +6535,7 @@ function onOrch(msg) {
     renderOrchBar();
     renderUpdateBanner();
     refreshAllCards();
+    if (!$('queueModal').hidden) scheduleQueue(); // its 'Waiting: …' line follows the stall reason
   } else if (msg.t === 'orun' && O.drawer === msg.taskId && O.detail) {
     appendRunEntry(msg.runId, msg.e);
   }
@@ -7602,6 +7603,10 @@ document.addEventListener('keydown', (e) => {
   else closeQueue();
 }, true);
 function scheduleQueue() { clearTimeout(Q.timer); Q.timer = setTimeout(renderQueue, 120); }
+// Why nothing starts although tasks are ready (the scheduler's stall reason, #453), e.g. 'Waiting: restart pending (integrator #439 is merging)'.
+function queueStallText(stall, queued) {
+  return stall?.reason && queued > 0 ? `Waiting: ${stall.reason}` : '';
+}
 // ----- refill status
 // The Queue's refill line (#436, plain words in #455): how many tasks are ready for how many open slots, and whether
 // agent-orch is asking the planner for more. refillStatus is pure (state + project → texts); the ⓘ opens a short
@@ -7613,10 +7618,11 @@ function refillStatus(r, project) {
   if (project && !project.perpetual) return { state: 'off', text: 'Keep improving is off for this project', short: 'Keep improving is off' };
   const blocked = r.blockedProjects || [];
   if (project ? blocked.some((b) => b.id === project.id) : blocked.length) return { state: 'limit', text: 'Planning paused: usage limit near', short: 'Planning paused: usage limit near' };
-  const ready = plural(r.ready, 'task');
-  if (r.toppingUp) return { state: 'planning', text: `${ready} ready for ${plural(r.free, 'open slot')} · planning more work`, short: `${r.ready} ready · ${r.free} open` };
-  if (!r.free) return { state: 'busy', text: `All slots busy · ${ready} ready`, short: `All busy · ${r.ready} ready` };
-  return { state: 'balanced', text: `${plural(r.free, 'open slot')} · ${ready} ready`, short: `${r.ready} ready · ${r.free} open` };
+  // r.free counts the head's reserved slots too (#453); the refill fills the worker side.
+  const free = (r.workers || r).free, ready = plural(r.ready, 'task');
+  if (r.toppingUp) return { state: 'planning', text: `${ready} ready for ${plural(free, 'open slot')} · planning more work`, short: `${r.ready} ready · ${free} open` };
+  if (!free) return { state: 'busy', text: `All slots busy · ${ready} ready`, short: `All busy · ${r.ready} ready` };
+  return { state: 'balanced', text: `${plural(free, 'open slot')} · ${ready} ready`, short: `${r.ready} ready · ${free} open` };
 }
 // Counts go in <b> (semibold, tabular figures).
 function refillText(cls, text) {
@@ -7687,6 +7693,8 @@ function renderQueue() {
   const refill = renderRefillStatus(O.state?.rapid, O.project);
   if (refill) body.append(refill);
   body.append(el('h3', 'dg-group', `Up next · ${queued.length}`));
+  const stall = queueStallText(O.state?.stall, queued.length);
+  if (stall) body.append(el('p', 'muted q-stall', stall));
   if (!queued.length) body.append(el('p', 'muted', 'Nothing queued.'));
   const list = el('div', 'q-list');
   list.id = 'qList';

@@ -1334,6 +1334,9 @@ assign API lists runnable tasks and starts them immediately
 
 card opens all-machines window, dots gone, tests pass
 
+## 2026-09-28 16:56 — #453 Fix the post-restart claim stall: 19 free slots, ready tasks, nothing starts [done (check passed)]
+
+worker claims continue during restart; stalls logged, surfaced; live check pending
 ## 2026-09-28 16:56 — #458 Machines: 'Update all' brings every machine to the latest version [done (check passed)]
 
 Update all rolls out machines one at a time; tests pass
@@ -1386,6 +1389,14 @@ CONTEXT.md conflict resolved again; Done-when tests pass (23/23)
 ## 2026-09-28 16:55 — #459 Rolling restart waits only for the git merge itself, not a whole integrator run [done (check passed)]
 
 Restarts wait only for merges; integrators pause; friendly 404 retry
+
+## 2026-09-28 17:02 — #467 Integrate #453: Fix the post-restart claim stall: 19 free slots, ready tasks, nothing starts [done (check passed)]
+
+merge conflicts resolved; claim-stall and related tests pass
+
+## 2026-09-28 17:02 — #467 Integrate #453: Fix the post-restart claim stall: 19 free slots, ready tasks, nothing starts [verify failed (1)]
+
+Command: merge main again
 ## 2026-09-28 16:59 — #460 Integrate #438: Files tab: go to parent folders and anywhere on the VPS, still opening on the project [done (check passed)]
 
 #438 merged with main; all Files UI tests pass
@@ -1397,3 +1408,7 @@ Waiting for the test run to finish.
 ## 2026-09-28 17:02 — #451 Simpler phone prompt window [done (check passed)]
 
 phone composer shows only field, send, model pill and '+'
+
+## 2026-09-28 17:02 — #467 Integrate #453: Fix the post-restart claim stall: 19 free slots, ready tasks, nothing starts [done (check passed)]
+
+CONTEXT.md conflict resolved; claim-stall tests pass

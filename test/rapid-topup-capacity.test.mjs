@@ -50,7 +50,7 @@ test('11 free worker slots, 4 worker-ready and 8 integrators ask for 9 worker-ru
     integrators(8);
     const state=o.stateView().rapid, added=o.scheduleReflections();
     return { state, added, count: reflections() };`);
-  assert.deepEqual([r.state.slots, r.state.free, r.state.ready, r.state.requested], [11, 11, 4, 9]);
+  assert.deepEqual([r.state.workers.slots, r.state.workers.free, r.state.ready, r.state.requested], [11, 11, 4, 9]);
   assert.equal(r.state.head.ready, 8);
   assert.equal(r.state.toppingUp, true);
   assert.equal(r.added, true);
@@ -68,7 +68,7 @@ test('enough worker-ready work: no top-up', async () => {
     integrators(3);
     const state=o.stateView().rapid, added=o.scheduleReflections();
     return { state, added, count: reflections() };`);
-  assert.deepEqual([r.state.free, r.state.ready, r.state.requested], [11, 13, 0]);
+  assert.deepEqual([r.state.workers.free, r.state.ready, r.state.requested], [11, 13, 0]);
   assert.equal(r.state.toppingUp, false);
   assert.equal(r.added, false);
   assert.equal(r.count, 0);
@@ -83,7 +83,8 @@ test('head-only, chained and running integrator work never counts toward worker 
     for(let i=0;i<3;i++) task('Running '+i,'running',{node:'pro'});
     return o.stateView().rapid;`);
   // Only 'Chain head' is worker-ready; 3 ordinary runs hold worker slots, the running integrator holds a head slot.
-  assert.deepEqual([r.slots, r.running, r.free, r.ready, r.requested], [11, 3, 8, 1, 9]);
+  assert.deepEqual([r.workers.slots, r.workers.running, r.workers.free, r.ready, r.requested], [11, 3, 8, 1, 9]);
+  assert.equal(r.running, 4, 'the running figure counts the integrator too');
   assert.equal(r.head.ready, 9);
   assert.equal(r.head.running, 1);
 });

@@ -50,6 +50,8 @@ const CFG = {
   memCheckMs: 5000,             // memory guard interval while tasks run
   memLowPauseSec: 30,           // MemAvailable under MEM.pauseBelow this long → pause the newest running task
   maxAttempts: 3,               // non-limit failures before a task is marked failed
+  startRetries: 5,              // failures after a claim but before the run began, retried without an attempt
+  startRetrySec: 30,            // ...this long after each
   maxContinuations: 4,          // times a worker may say "not finished yet"
   maxIntegrators: 3,            // integrators queued for one task whose landing keeps conflicting, before the owner is alerted
   resetBufferSec: 20,           // added after a reported reset time
@@ -318,7 +320,7 @@ export function plannerTurnPrompt(project, rows, text, environment, rapid = null
     `Project priority: ${project.priority}/100 · mode: ${project.mode}\n` +
     `Now: ${nowText()} (use this to turn 'tomorrow', 'by Friday' into real deadlines)\n` +
     `${environment}\n` +
-    (rapid && rapid.free > 0 ? `Rapid development mode: ${rapid.slots} slots, ${rapid.running} running, ${rapid.free} free.\n` +
+    (rapid && (rapid.workers?.free ?? rapid.free) > 0 ? `Rapid development mode: ${rapid.slots} slots, ${rapid.running} running, ${rapid.free} free.\n` +
       'When the owner asks for a feature, decompose it into small parallel parts by default. Declare disjoint `files` for each part, including tests. ' +
       'Use one deliverable and one check per task; add an integrator with true prerequisites only where the parts must combine. Stay within the requested feature.\n' + hotFilesText(rapid) : '') +
     `Current queue:\n${formatQueue(rows)}\n\n[Owner says]\n${text}`;
@@ -406,7 +408,8 @@ export function reflectPrompt(project, rows, journalTail, overage, limits, reaso
   if (rapid) {
     const head = rapid.head?.ready ? `Head-only backlog: ${rapid.head.ready} ready (integrators and work kept on the head) for ${rapid.head.free} free head slot${rapid.head.free === 1 ? '' : 's'}; ` +
       'it never runs on workers, so it does not fill worker slots and you need not add to it.\n' : '';
-    sections.push(`Rapid development mode: workers have ${rapid.slots} slots, ${rapid.running} running, ${rapid.ready} ready: queue about ${rapid.requested} more worker-runnable tasks.\n` + head +
+    const w = rapid.workers || rapid;
+    sections.push(`Rapid development mode: workers have ${w.slots} slots, ${w.running} running, ${rapid.ready} ready: queue about ${rapid.requested} more worker-runnable tasks.\n` + head +
       'The target is free worker slots plus a two-task buffer. Return this many independent tasks with declared `files`, split into small file-disjoint pieces (including their tests). ' +
       'No chains: a task with `after` waits for its prerequisites, so it does not count as ready and leaves a slot empty. ' +
       'Spread them across bugs from AUDIT.md, UI-REVIEW.md items, tests for untested modules, ROADMAP.md next items, and BRIEF.md goals still open. ' +
@@ -1537,6 +1540,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // Work slots hold work, reflect and integrator tasks; plan tasks (the owner's messages) run beside them as before.
   const workRunning = () => [...running.values()].filter((r) => r.kind !== 'plan' && r.node === LOCAL_NODE).length;
   const workEverywhere = () => [...running.values()].filter((r) => r.kind !== 'plan').length;
+  // What the owner's cap and pacing count: ordinary work only. Integrators and reflection hold the head's reserved slots, so
+  // they never take a slot from the workers (#453).
+  const ordinaryEverywhere = () => [...running.values()].filter((r) => r.kind !== 'plan' && !r.only).length;
   const listedModel = (agent, model) => isAgent(agent) && (modelCatalog(agent).models || []).some((m) => m.id === model);
   // A ready task whose agent has no free slot moves to the fallback spreadAssign picked (recorded like a delegation).
   function spread(task, to) {
@@ -1643,13 +1649,17 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // on the head while one is free, else it is placed like ordinary work (#435). null = not now.
   // A browser task (browser.mjs) goes only to a worker that reports browserCapable, or to the controller when the owner
   // allows it (controllerBrowser), and never while another task uses the same profile (Chromium locks it).
-  function place(task, agent, { localFree, localOk, cap }) {
-    if (task.kind === 'plan') return localOk ? LOCAL_NODE : null;
+  // why (optional): why it wasn't placed, for the stall diagnostics (claimNext's `why`); `hold`: a pending restart's reason.
+  function place(task, agent, { localFree, localOk, cap, hold = null }, why = {}) {
+    const no = (reason) => { why.reason = reason; return null; };
+    const headNo = () => (hold ? hold : !localOk ? 'server memory low' : 'no free slot on this server');
+    if (task.kind === 'plan') return localOk ? LOCAL_NODE : no(headNo());
     if (task.integrates && localFree === 'reserved' && localOk && !localDraining() && localAgentOk(agent)) return LOCAL_NODE;
-    if ((localFree !== 'reserved' || task.integrates) && workEverywhere() >= cap) return null;
+    // Integrators and reflection (reserved slots) never count against the cap on ordinary work.
+    if ((localFree !== 'reserved' || task.integrates) && ordinaryEverywhere() >= cap) return no(`at the ${parallelSettings().maxTasks === cap ? "owner's" : 'pacing'} cap of ${cap} running task${cap === 1 ? '' : 's'}`);
     const browser = needsBrowser(task);
-    if (isBrowserTask(task) && browserHeld(task.run_on, identityOf(task))) return null;
-    if (browser && profileBusy(task)) return null;
+    if (isBrowserTask(task) && browserHeld(task.run_on, identityOf(task))) return no('its browser identity is busy');
+    if (browser && profileBusy(task)) return no('its browser profile is in use');
     const project = getProject(task.project_id), remote = remoteCapable(task, project);
     const fits = (n) => (!browser || browserWorker(n)) && canClone(n, task, project) && (!task.integrates || integrateWorker(n));
     // Pinned by the owner (run_on): only that machine, waiting for it. A worker pin only binds a task that can run remotely.
@@ -1659,11 +1669,27 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         .sort((a, b) => (b.id === task.node_id) - (a.id === task.node_id) || headroom(b, agent) - headroom(a, agent));
       if (free.length) return free[0].id;
     }
-    if (pin && pin !== LOCAL_NODE) return null;
-    if (!localOk || !localFree || localDraining() || !localAgentOk(agent) || (localFree !== 'reserved' && slotsFor(agent) - runningOn(agent) <= 0)) return null;
-    if (browser && !parallelSettings().controllerBrowser && pin !== LOCAL_NODE) return null;
-    if (remote && !pin && !parallelSettings().controllerWork && workerNodes(agent).some(fits)) return null;
+    if (pin && pin !== LOCAL_NODE) return no(`pinned to ${nodeName(pin)}, which has no free slot`);
+    const workers = remote && !pin ? `${workersWhy(agent, task.id)}; ` : '';
+    if (!localOk || !localFree) return no(workers + headNo());
+    if (localDraining()) return no(`${workers}this server is drained`);
+    if (!localAgentOk(agent)) return no(`${workers}${agentName(agent)} is not signed in on this server`);
+    if (localFree !== 'reserved' && slotsFor(agent) - runningOn(agent) <= 0) return no(`${workers}${agentName(agent)} has no free slot on this server`);
+    if (browser && !parallelSettings().controllerBrowser && pin !== LOCAL_NODE) return no(`${workers}browser tasks are off on this server`);
+    if (remote && !pin && !parallelSettings().controllerWork && workerNodes(agent).some(fits)) return no(`${workers}this server leaves work to the workers`);
     return LOCAL_NODE;
+  }
+  // Why no worker takes a task now (stall diagnostics): 'no worker online', or each worker's state ('Mac: full 7/7').
+  function workersWhy(agent, taskId) {
+    const all = nodesNow().filter((n) => !n.local && n.enabled !== false && n.connected && n.status !== 'offline');
+    if (!all.length) return 'no worker online';
+    return `no free worker (${all.map((n) => {
+      const runs = nodeRuns(n.id).length, cap = nodeCap(n, agent);
+      const state = n.status !== 'online' ? n.status : n.draining ? 'draining'
+        : !(n.inventory?.agents || []).some((a) => a.id === agent && a.installed && a.signedIn) ? `${agentName(agent)} not signed in`
+          : runs >= cap ? `full ${runs}/${cap}` : !memOk(n, agent) ? 'low memory' : rejected.get(`${n.id}/${taskId}`) > Date.now() ? 'declined it' : 'cannot clone it';
+      return `${n.name || n.id}: ${state}`;
+    }).join('; ')})`;
   }
   // A worker that can run a browser task: it has a browser, and its approval gate can ask the head (feature 'approvals').
   const browserWorker = (n) => n.inventory?.browser?.capable === true && (n.features || []).includes('approvals');
@@ -1673,22 +1699,35 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     .some((r) => r.kind === 'work' && identityOf(r) === identityOf(task));
 
   // Claims the next task and its node: { task, node, prevNode }. slots: the controller's work slots now (slotCount);
-  // localOk: it may claim at all (memory); cap: work tasks allowed across all nodes (owner cap, pacing).
-  function claimNext(allowed, { slots = slotCount(decisionCache?.d), localOk = slots > 0, cap = Infinity } = {}) {
+  // localOk: it may claim on this server at all (memory, no pending restart: `hold` says why not); cap: ordinary work
+  // allowed across all nodes (owner cap, pacing). why (a Map): each ready task left unclaimed → why (stall diagnostics).
+  // One task that throws is logged and skipped; the rest are still considered, and the next tick retries it.
+  function claimNext(allowed, { slots = slotCount(decisionCache?.d), localOk = slots > 0, cap = Infinity, hold = null, why = null } = {}) {
+    const note = (task, reason) => { why?.set(task.id, reason); };
+    const guarded = (task, fn) => { try { return fn(); } catch (e) { claimError(task, e); note(task, `claim failed: ${e?.message || e}`); return null; } };
     // Mandatory GitHub protocol: a project's work only starts once its repo exists.
     // A plan task waits while the owner's chat turn holds the planner session (AUDIT #5).
     // A task whose agent is at its usage limit waits; others (e.g. codex-routed while Claude is limited) still run.
     // A waiting task that may be delegated moves to the owner's first fallback with usage left (delegate.mjs) and runs now.
     // Agent spreading (parallel.mjs spreadAssign): each task takes its own route while that agent has a free slot
     // (CFG.agentSlots here, plus free worker slots); one that would otherwise wait spills to its first fallback with a free slot and usage left.
-    let rows = runnable(allowed, true, 25).filter((r) => !(r.kind === 'plan' && planningProjects.has(r.project_id)) && (isBrowserTask(r) || projectReady(getProject(r.project_id)?.path)));
-    for (const r of rows) if (waitsForLimit(r)) delegate(r);
-    rows = rows.map((r) => getTask(r.id));
-    const ready = rows.filter((r) => !waitsForLimit(r)).map((r) => {
+    let rows = runnable(allowed, true, 25).filter((r) => {
+      if (r.kind === 'plan' && planningProjects.has(r.project_id)) return note(r, 'the planner is answering the chat'), false;
+      if (!isBrowserTask(r) && !projectReady(getProject(r.project_id)?.path)) return note(r, 'its project has no git repo yet'), false;
+      return true;
+    });
+    for (const r of rows) guarded(r, () => { if (waitsForLimit(r)) delegate(r); });
+    rows = rows.map((r) => getTask(r.id)).filter(Boolean);
+    const ready = rows.filter((r) => {
+      if (!waitsForLimit(r)) return true;
+      const route = guarded(r, () => routeNow(r, getProject(r.project_id)));
+      if (route) note(r, `${limitName(route.agent, route.model)} is at its usage limit`);
+      return false;
+    }).map((r) => guarded(r, () => {
       const route = routeNow(r, getProject(r.project_id)), primary = { agent: route.agent, model: route.model || delegator.defaultModel(route.agent), primary: true };
       const fallbacks = r.kind === 'work' ? (parseFallbacks(r.fallbacks) || []).filter((f) => listedModel(f.agent, f.model) && `${f.agent}/${f.model}` !== `${primary.agent}/${primary.model}`) : [];
       return { task: r, options: [primary, ...fallbacks] };
-    });
+    })).filter(Boolean);
     // Integrators and reflection go ahead of the rest on their own route (integrators first): they have reserved head slots.
     const only = ready.filter((r) => reservedWork(r.task)).sort((a, b) => !!b.task.integrates - !!a.task.integrates);
     const picks = [...only.filter((r) => delegator.hasUsage(r.options[0].agent, r.options[0].model)).map((r) => ({ task: r.task, ...r.options[0], spilled: false })),
@@ -1696,11 +1735,19 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         slotsFree: (a) => Math.max(0, slotsFor(a) - runningOn(a)) + workerSlots(a),
         hasUsage: (a, m) => delegator.hasUsage(a, m),
       })];
+    if (why) for (const r of ready) if (!picks.some((p) => p.task.id === r.task.id)) {
+      const [o] = r.options;
+      note(r.task, delegator.hasUsage(o.agent, o.model) ? `${agentName(o.agent)} has no free slot (${workersWhy(o.agent, r.task.id)})` : `${o.agent}/${o.model} has no usage left`);
+    }
     const load = headLoad();
     for (const pick of picks) {
-      const node = place(pick.task, pick.agent, { localFree: headFree(pick.task, slots, load), localOk, cap });
-      if (!node) continue;
-      assertPlacement(pick.task, node);
+      const w = {};
+      const node = guarded(pick.task, () => {
+        const n = place(pick.task, pick.agent, { localFree: headFree(pick.task, slots, load), localOk, cap, hold }, w);
+        if (n) assertPlacement(pick.task, n);
+        return n;
+      });
+      if (!node) { if (w.reason) note(pick.task, w.reason); continue; }
       if (pick.spilled) spread(pick.task, pick);
       const row = pick.task;
       run("UPDATE tasks SET status='running', started_at=:t, node_id=:n WHERE id=:id", { t: now(), n: node, id: row.id });
@@ -1708,6 +1755,14 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       return { task: getTask(row.id), node, prevNode: row.node_id || null };
     }
     return null;
+  }
+  // A claim that threw (a placement bug, a bad row): logged, at most once a minute per task; it stays queued for the next tick.
+  const claimErrors = new Map();
+  function claimError(task, e) {
+    console.error(`[orchestrator] claiming #${task.id} failed`, e);
+    if (Date.now() - (claimErrors.get(task.id) || 0) < 60e3) return;
+    claimErrors.set(task.id, Date.now());
+    logEvent(`#${task.id} couldn't be claimed: ${String(e?.message || e).slice(0, 300)}; retrying on the next tick`, { level: 'warn', projectId: task.project_id, taskId: task.id });
   }
 
   function cascadeBlock(taskId, status, reason) {
@@ -2539,8 +2594,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       emitChat(convo.id, { t: 'notice', msgId, text: 'Saved. The planner is busy answering earlier messages; it answers this right after.' });
       return;
     }
-    // Restart when idle is pending: save the message; a plan task answers it after the restart.
-    if (draining) {
+    // Restart when idle (or a rolling restart) is pending: save the message; a plan task answers it after the restart.
+    if (draining || restartHold) {
       const msgId = deferMessage(project.id, text);
       emitChat(convo.id, { t: 'notice', msgId, text: 'Saved. agent-orch is restarting once idle; the planner answers this after the restart.' });
       return;
@@ -2636,6 +2691,20 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // ---- the scheduler (agent-orch's daemon, as timers inside this process)
   let ticking = false;
   let draining = false, drained = []; // in memory only: a restart forgets drain()
+  // A pending rolling restart (prepareRestart) holds only new claims on this server, never those for workers (their jobs
+  // survive a restart), and only until `until` (the restart window), so a restart that never happens can't stall the head.
+  let restartHold = null;
+  function restartHoldNow() {
+    if (!restartHold) return null;
+    if (Date.now() > restartHold.until) {
+      restartHold = null;
+      logEvent('the pending restart never happened: claiming on this server resumes', { level: 'warn' });
+      pushState();
+      return null;
+    }
+    return holdReason();
+  }
+  const holdReason = () => { if (!restartHold) return null; const b = restartBlocker(); return `restart pending${b ? ` (${b})` : ''}`; };
   async function tick() {
     if (ticking || !leader.ok || draining) return;
     ticking = true;
@@ -2644,34 +2713,62 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       if (!cluster && adoptable.length) for (const id of adoptable.splice(0)) requeueIfRunning(id);
       armCheckpoints();
       cancelReflections();
-      if (kvGet('paused_all') === '1') return;
+      if (kvGet('paused_all') === '1') return setStall('everything is paused');
       if (!onSubscription()) {
         if (kvGet('announced_auth') !== '1') { kvSet('announced_auth', 1); logEvent('waiting: Claude Code is not signed in with the subscription', { level: 'warn' }); }
-        return;
+        return setStall('Claude Code is not signed in with the subscription');
       }
       kvSet('announced_auth', 0);
       const d = decision();
+      const hold = restartHoldNow();
       if (parallelSettings().rapidDevelopment) scheduleReflections();
-      considerPreemption(d);
+      if (!hold) considerPreemption(d);
       reapIfLow();
-      // Pacing and the owner's cap limit work across every node (all nodes share the same accounts' limits).
+      // Pacing and the owner's cap limit ordinary work across every node (all nodes share the same accounts' limits).
       const settings = parallelSettings();
       const cap = Math.min(settings.maxTasks || Infinity, d.scarce || d.concurrency < CFG.concurrency ? Math.max(1, d.concurrency) : Infinity);
+      let claimed = 0, why = new Map();
       for (;;) {
         const mem = readMemInfo(CFG.meminfo), slots = slotCount(d, mem);
         if (!slots) {
           if (kvGet('announced_mem') !== '1') { kvSet('announced_mem', 1); logEvent(`waiting: server memory low (${Math.round(mem.avail / 1024 ** 2)} MB available)`, { level: 'warn' }); }
-          if (!workerNodes('claude').length && !workerNodes('codex').length) break; // workers can still take work
+          if (!workerNodes('claude').length && !workerNodes('codex').length) { why = null; setStall('server memory low'); break; } // workers can still take work
         } else kvSet('announced_mem', 0);
-        const free = slots > 0 && headWorkUsed() < slots, claim = claimNext(d.allowed, { slots, localOk: slots > 0, cap });
+        why = new Map();
+        const localOk = slots > 0 && !hold, free = localOk && headWorkUsed() < slots, claim = claimNext(d.allowed, { slots, localOk, cap, hold, why });
         if (!claim) { if (free && scheduleReflections()) continue; break; }
+        claimed++;
         startTask(claim.task, claim.node, claim.prevNode);
       }
+      if (why) claimDecisions(claimed, why);
     } catch (e) {
       console.error('[orchestrator] tick failed', e);
+      setStall(`the scheduler failed: ${e?.message || e}`);
     } finally {
       ticking = false;
     }
+  }
+  // Stall diagnostics (#453). A tick that claimed nothing while tasks were ready logs each one's reason at debug level (at
+  // most once a minute per task: '#445 not started: <reason>'), and the most common reason becomes `stall` (stateView;
+  // the queue header shows 'Waiting: <reason>'). A tick that claimed something, or had nothing ready, clears it.
+  let stall = null;
+  const decisionLogged = new Map();
+  function setStall(reason, tasks = 0) {
+    if ((stall?.reason ?? null) === (reason ?? null) && (stall?.tasks ?? 0) === tasks) return;
+    stall = reason ? { reason, tasks, since: stall?.reason === reason ? stall.since : now() } : null;
+    pushState();
+  }
+  function claimDecisions(claimed, why) {
+    if (claimed || !why.size) return setStall(null);
+    const count = new Map();
+    for (const [id, reason] of why) {
+      count.set(reason, (count.get(reason) || 0) + 1);
+      if (Date.now() - (decisionLogged.get(id) || 0) < 60e3) continue;
+      decisionLogged.set(id, Date.now());
+      console.debug(`[orchestrator] claim decision: #${id} not started: ${reason}`);
+    }
+    for (const [id, at] of decisionLogged) if (Date.now() - at > 10 * 60e3) decisionLogged.delete(id);
+    setStall([...count].sort((a, b) => b[1] - a[1])[0][0], why.size);
   }
 
   // Low memory: reap leftover processes (resources.mjs) before claiming, at most every 30 s.
@@ -2689,7 +2786,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const abort = new AbortController();
     const project = getProject(task.project_id);
     // A remote task always has its own checkout, so it shares its project like a worktree task.
-    running.set(task.id, { abort, kind: task.kind, projectId: task.project_id, startedAt: now(), node, prevNode, adopt, assigned,
+    running.set(task.id, { abort, kind: task.kind, only: reservedWork(task), projectId: task.project_id, startedAt: now(), node, prevNode, adopt, assigned,
       wt: task.kind === 'work' && !isBrowserTask(task) && (node !== LOCAL_NODE || worktreeCapable(project)), agent: adopt?.agent || routeNow(task, project).agent });
     pushState();
     execute(task, abort.signal)
@@ -2720,15 +2817,16 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const [l] = landing.values();
     return l ? `${l.integrator ? 'integrator ' : ''}#${l.id} is merging` : '';
   }
-  // Stop claiming, then pause the head's own runs: work, integrators and reflection stop now (session and worktree kept;
-  // a paused integrator re-runs its check and lands after the restart), a planner turn gets planWaitMs first. A worker's
-  // job is left alone while it runs there (after the restart it is re-adopted, #220); one that has finished is waited
-  // for, since the head is merging it. Resolves
+  // Stop claiming on this server (restartHold: claims for workers go on, their jobs survive the restart), then pause the
+  // head's own runs: work, integrators and reflection stop now (session and worktree kept; a paused integrator re-runs its
+  // check and lands after the restart), a planner turn gets planWaitMs first. A worker's job is left alone while it runs
+  // there (after the restart it is re-adopted, #220); one that has finished is waited for, since the head is merging it. Resolves
   // {ok, paused} once only worker jobs run and no git operation is in flight (kv restart_paused lists the paused tasks
   // for resumeAfterRestart), else {ok: false, why, paused} after waitMs (resumeAfterRestart undoes it).
   async function prepareRestart({ waitMs = 5 * 60e3, planWaitMs = 60e3, pollMs = 250 } = {}) {
-    draining = true; pushState();
     const start = Date.now(), stopped = new Set();
+    restartHold = { since: start, until: start + waitMs + 3 * 60e3 }; // + the chat wait and the exit
+    pushState();
     const headSide = () => [...running].filter(([id, r]) => (r.node || LOCAL_NODE) !== LOCAL_NODE && !jobs.has(id));
     for (;;) {
       for (const [id, r] of localRuns()) {
@@ -2762,7 +2860,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       updateTask(id, { status: 'queued', not_before: 0 });
       logEvent(`▶ #${id} resumed after the restart${t.session_id ? ' (same session)' : ''}`, { projectId: t.project_id, taskId: id });
     }
-    if (draining) undrain(); else if (ids.length) setTimeout(tick, 100);
+    const held = !!restartHold;
+    restartHold = null;
+    if (held || ids.length) { pushState(); setTimeout(tick, 100); }
     return ids;
   }
 
@@ -2777,8 +2877,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const headOnly = (r) => reservedWork(r) || (!c.controller && (!!r.worktree || r.run_on === LOCAL_NODE));
     const running = q1("SELECT COUNT(*) AS n FROM tasks WHERE status='running' AND kind='work' AND integrates IS NULL").n;
     const ready = rows.filter((r) => !headOnly(r)).length, hs = headSlots(), only = headLoad().only;
-    return { ...rapidQueueTarget(Math.min(c.max, c.cap ?? Infinity), running, ready), hotFiles: project ? hotFiles(project.id) : [],
-      head: { slots: hs.reserved, running: only, free: Math.max(0, hs.reserved - only), ready: rows.length - ready } };
+    const w = rapidQueueTarget(Math.min(c.max, c.cap ?? Infinity), running, ready), head = { slots: hs.reserved, running: only, free: Math.max(0, hs.reserved - only), ready: rows.length - ready };
+    // slots/running/free count everything (the head's reserved slots and its integrators too, #453), so they add up;
+    // `workers` is the worker side alone, which is what the top-up (requested) fills.
+    return { ...w, slots: w.slots + head.slots, running: w.running + head.running, free: w.free + head.free, workers: { slots: w.slots, running: w.running, free: w.free },
+      hotFiles: project ? hotFiles(project.id) : [], head };
   }
   // Every project's hot files (stateView; the Queue modal shows the open project's in its Running header).
   const hotFilesAll = () => qa("SELECT DISTINCT project_id FROM tasks WHERE status='running' AND kind='work'").flatMap((r) => hotFiles(r.project_id).map((h) => ({ project_id: r.project_id, ...h })));
@@ -2835,7 +2938,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       const id = addTask(p.id, { title: 'Reflect: what else should be done?', prompt: '(reflection)', kind: 'reflect', source: 'reflection', agent: rs.agent, model: rs.model,
         fallbacks: reflectFallbacksFor(p) });
       if (p.convo_id) emitChat(p.convo_id, { t: 'reflect', taskId: id, text: p.reflect_direction ? `${REFLECT_ASK} Direction: ${p.reflect_direction}` : REFLECT_ASK });
-      logEvent(`${rapid ? `${rapid.ready} ready for ${rapid.free} open slots: planning ${rapid.requested} more` : 'queue empty → reflecting'} (task #${id})`, { projectId: p.id, taskId: id });
+      logEvent(`${rapid ? `${rapid.ready} ready for ${rapid.workers.free} open slots: planning ${rapid.requested} more` : 'queue empty → reflecting'} (task #${id})`, { projectId: p.id, taskId: id });
       added = true;
     }
     return added;
@@ -2873,6 +2976,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     r.abort.abort();
   }
 
+  const startFails = new Map(); // task id -> start failures in a row (execute: failed before its run began)
   async function execute(task, signal) {
     const project = getProject(task.project_id);
     if (!running.get(task.id)?.adopt) logEvent(`started #${task.id}: ${task.title}`, { projectId: project.id, taskId: task.id });
@@ -2912,11 +3016,21 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         requeueIfRunning(task.id, { not_before: now() + 60 });
         return;
       }
+      // It failed after the claim but before its run began (the pre-claim commit, the base, a worktree, the offer): logged
+      // and retried shortly without spending an attempt, a few times, instead of a silent stall or a 5-minute backoff.
+      const r = running.get(task.id), fails = startFails.get(task.id) || 0;
+      if (task.kind !== 'plan' && r && !r.runId && !r.adopt && fails < CFG.startRetries) {
+        startFails.set(task.id, fails + 1);
+        logEvent(`#${task.id} couldn't start: ${e?.message || e}; retrying in ${CFG.startRetrySec} s`, { level: 'warn', projectId: project.id, taskId: task.id });
+        requeueIfRunning(task.id, { not_before: now() + CFG.startRetrySec });
+        return;
+      }
       logEvent(`#${task.id} crashed: ${e?.message || e}`, { level: 'error', projectId: project.id, taskId: task.id });
       const attempts = task.attempts + 1;
       if (attempts >= CFG.maxAttempts) await fail(getTask(task.id), project, 'crash', String(e?.message || e));
       else requeueIfRunning(task.id, { attempts, not_before: now() + Math.min(300 * 2 ** (attempts - 1), 3600), last_error: `[crash] ${e?.message || e}`.slice(0, 2000) });
     } finally {
+      if (running.get(task.id)?.runId) startFails.delete(task.id);
       applyStopIntent(task.id);
       const wt = taskWts.get(task.id);
       taskWts.delete(task.id);
@@ -4122,7 +4236,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     });
     return { activeUsage, blocks, blockedUntil: blockedUntil(), blockedReason: kvGet('blocked_reason'),
       pacing: d?.reason || kvGet('budget_reason'), slots: slotCount(d, mem), parallel, lanes, hot_files: hotFilesAll(), capacity: capacityView(d, mem), rapid: rapidStatus(),
-      running: running.size, workRunning: workRunning(), remoteRunning: workEverywhere() - workRunning(), draining, subscription: onSubscription(), head: headView(d) };
+      running: running.size, workRunning: workRunning(), remoteRunning: workEverywhere() - workRunning(), draining: draining || !!restartHold, restartHold: holdReason(), stall, subscription: onSubscription(), head: headView(d) };
   }
   // The head's slots as the Machines view splits them ('Integrating 2 · Work 1/4'): its hardware and target, the reserved
   // slots and the controller-only runs in them, the work slots it may use now (slotCount) and those in use.

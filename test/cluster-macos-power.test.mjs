@@ -184,7 +184,7 @@ test('hub: welcome carries the policy, owner edits reach the worker as node.poli
 });
 
 // ---- the scheduler (orchestrator nodeCap / capacityView) with a stub hub
-test('scheduler: a Mac on Auto takes at most cores − 1 tasks and leaves 3 GB free; a paused Mac takes none', { timeout: 60000 }, async () => {
+test('scheduler: a Mac on Auto takes at most cores − 1 tasks and leaves 3 GB free, saying why when none fits; a paused Mac takes none', { timeout: 60000 }, async () => {
   const dataDir = fs.mkdtempSync(path.join(tmp, 'orch-'));
   const script = `import { createOrchestrator } from ${JSON.stringify(new URL('../orchestrator.mjs', import.meta.url).href)};
     import { effectivePolicy } from ${JSON.stringify(new URL('../power.mjs', import.meta.url).href)};
@@ -192,13 +192,13 @@ test('scheduler: a Mac on Auto takes at most cores − 1 tasks and leaves 3 GB f
       draining: false, maxSlots: null, inventory: { cores, agents: [] }, resources: { memAvailable: free * GB, at: Date.now() }, policy: effectivePolicy(os), ...extra });
     const nodes = [{ id: 'controller', local: true, status: 'online', connected: true, enabled: true },
       node('mac-tight', 'darwin', 8, 8), node('mac-roomy', 'darwin', 8, 32), node('mac-set', 'darwin', 8, 32, { maxSlots: 8 }),
-      node('vps', 'linux', 8, 8), node('mac-battery', 'darwin', 8, 32, { status: 'paused' })];
+      node('vps', 'linux', 8, 8), node('mac-battery', 'darwin', 8, 32, { status: 'paused' }), node('mac-full', 'darwin', 8, 3.5)];
     let version = 1;
     const o = createOrchestrator({ query: () => (async function* () {})(), dataDir: process.argv[1], disabled: true, claudeEnv: {}, getLimits: () => [],
       onSubscription: () => false, broadcast() {}, emitChat() {}, convoExists: () => false });
     o.attachCluster({ listNodes: () => nodes, onMessage() {}, version: () => version });
-    const slots = Object.fromEntries(o.machines(nodes).map((n) => [n.id, n.slots]));
-    console.log(JSON.stringify({ slots, workers: o.stateView().capacity.workers }));
+    const slots = Object.fromEntries(o.machines(nodes).map((n) => [n.id, n.slots])), why = Object.fromEntries(o.machines(nodes).map((n) => [n.id, n.slotsWhy]));
+    console.log(JSON.stringify({ slots, why, workers: o.stateView().capacity.workers }));
     process.exit(0);`;
   const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script, dataDir], { encoding: 'utf8', timeout: 30000 });
   const r = JSON.parse(stdout.trim().split('\n').pop());
@@ -206,4 +206,8 @@ test('scheduler: a Mac on Auto takes at most cores − 1 tasks and leaves 3 GB f
   // mac-set: the owner's explicit 8; vps: min(8, (8 − 0.8) / 1.2 = 6).
   assert.deepEqual([r.slots['mac-tight'], r.slots['mac-roomy'], r.slots['mac-set'], r.slots.vps], [4, 7, 8, 6]);
   assert.equal(r.workers, 4 + 7 + 8 + 6, 'the paused Mac adds no capacity');
+  // mac-full: (3.5 − 3) GB fits no 1.2 GB run, and its card says why.
+  assert.equal(r.slots['mac-full'], 0);
+  assert.equal(r.why['mac-full'], 'Auto fits no task: 3.5 GB free, and a task needs 1.2 GB on top of the 3 GB kept free');
+  assert.deepEqual(Object.entries(r.why).filter(([id, w]) => w && id !== 'mac-full'), []);
 });

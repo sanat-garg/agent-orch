@@ -106,6 +106,13 @@ export function parseVmStat(text) {
   const pages = (k) => Number(new RegExp(`^Pages ${k}:\\s+(\\d+)`, 'm').exec(text)?.[1] || 0);
   return (pages('free') + pages('inactive') + pages('speculative') + pages('purgeable')) * page;
 }
+// `sysctl -n kern.memorystatus_level` ("57"): the kernel's own percentage of memory available, what `memory_pressure`
+// prints as its free percentage. It counts the file cache and compressible pages that vm_stat's free + inactive leave
+// out, so an 8 GB Mac in daily use isn't read as full. → bytes of `total`, or null when unparseable.
+export function parseMemLevel(text, total) {
+  const s = String(text || '').trim();
+  return /^\d{1,3}$/.test(s) && Number(s) <= 100 && total > 0 ? Math.round((Number(s) / 100) * total) : null;
+}
 // `sysctl -n vm.swapusage` ("total = 2048.00M  used = 1024.50M  free = 1023.50M  (encrypted)") → {swapTotal, swapFree} bytes.
 export function parseSwapUsage(text) {
   const unit = { K: 1024, M: 1024 ** 2, G: 1024 ** 3 };
@@ -133,9 +140,10 @@ export function parseThermal(text) {
 function readSystemDarwin() {
   const out = (cmd, args) => { const r = runHelperSync(cmd, args, { timeoutMs: 3000 }); return r.status === 0 ? r.stdout : ''; };
   const avail = parseVmStat(out('/usr/bin/vm_stat', []));
+  const level = parseMemLevel(out('/usr/sbin/sysctl', ['-n', 'kern.memorystatus_level']), os.totalmem());
   const swap = parseSwapUsage(out('/usr/sbin/sysctl', ['-n', 'vm.swapusage']));
   const cpus = os.cpus().map(({ times: t }) => ({ total: (t.user + t.nice + t.sys + t.idle + t.irq) / 10, idle: t.idle / 10 }));
-  return { memTotal: os.totalmem(), memAvailable: avail ?? os.freemem(), ...swap, load: os.loadavg(), cpus, uptime: os.uptime() };
+  return { memTotal: os.totalmem(), memAvailable: Math.max(avail ?? 0, level ?? 0) || os.freemem(), ...swap, load: os.loadavg(), cpus, uptime: os.uptime() };
 }
 
 // ---- classification

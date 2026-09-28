@@ -12,7 +12,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createCluster } from '../cluster.mjs';
 import { CLAIM_PATH } from '../cluster-protocol.mjs';
-import { parseVmStat, parseSwapUsage } from '../resources.mjs';
+import { parseVmStat, parseSwapUsage, parseMemLevel } from '../resources.mjs';
 import { cacheName, sleptFor } from '../worker.mjs';
 import { isolatedPath } from './helpers/isolated-path.mjs';
 import { waitFor } from './helpers/wait.mjs';
@@ -72,11 +72,13 @@ after(async () => {
   if (tmp) fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-test('darwin memory readings parse vm_stat and vm.swapusage', () => {
+test('darwin memory readings parse vm_stat, kern.memorystatus_level and vm.swapusage', () => {
   const vm = 'Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                               1000.\nPages active:                             5000.\n' +
     'Pages inactive:                           2000.\nPages speculative:                         300.\nPages purgeable:                           200.\n';
   assert.equal(parseVmStat(vm), 3500 * 16384);
   assert.equal(parseVmStat('garbage'), null);
+  assert.equal(parseMemLevel('57\n', 8 * 1024 ** 3), Math.round(0.57 * 8 * 1024 ** 3));
+  for (const bad of ['', 'garbage', '140', '-5']) assert.equal(parseMemLevel(bad, 8 * 1024 ** 3), null);
   assert.deepEqual(parseSwapUsage('total = 2048.00M  used = 1024.50M  free = 1023.50M  (encrypted)'), { swapTotal: 2048 * 1024 ** 2, swapFree: Math.round(1023.5 * 1024 ** 2) });
   assert.equal(cacheName('git@github.com:Owner/My.Repo.git'), 'Owner__My.Repo');
 });

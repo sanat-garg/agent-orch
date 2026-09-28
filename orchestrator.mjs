@@ -27,7 +27,7 @@ import { registerPid, withOwner } from './resources.mjs';
 import { LOCAL_NODE, HEALTH } from './cluster.mjs';
 import { MSG, graceMs, isRepoUrl } from './cluster-protocol.mjs';
 import { autoTasks, reserveBytes } from './power.mjs';
-import { CPU_PER_TASK, FOOTPRINT, capSlots, localCap } from './cap.mjs';
+import { CPU_PER_TASK, FOOTPRINT, GB, capSlots, localCap } from './cap.mjs';
 import { extractCommand, runCheck, toolLine } from './taskrun.mjs';
 import { commitAll, ensureWorktree, isMerged, listWorktrees, mergeBack, parkWorktree, removeWorktree, repoInfo, startIntegration, taskBranch, unresolvedFiles, worktreesRoot } from './worktrees.mjs';
 
@@ -3489,8 +3489,15 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
           model: t.ran_model || t.model || delegator.defaultModel(agent) || null, started_at: t.started_at, waiting_for: running.get(t.id)?.waiting || null,
           phase: running.get(t.id)?.phase || null }; // a remote job's current phase (job.phase)
       });
-      return { ...n, tasks, used: tasks.filter((t) => t.kind !== 'plan').length, slots: n.local ? slotCount(decisionCache?.d) : nodeCap(n) };
+      return { ...n, tasks, used: tasks.filter((t) => t.kind !== 'plan').length, slots: n.local ? slotCount(decisionCache?.d) : nodeCap(n), slotsWhy: slotsWhy(n) };
     });
+  }
+  // Why a connected worker on Auto gets no slot at all (its Machines card says so): its free memory, or its local cap.
+  function slotsWhy(n) {
+    if (n.local || n.maxSlots != null || !n.connected || nodeRuns(n.id).length || nodeCap(n) > 0) return null;
+    const gb = (b) => `${+(Math.max(0, b) / GB).toFixed(1)} GB`;
+    if (spareMem(n) - floorOf(n) < footprint('claude')) return `Auto fits no task: ${gb(spareMem(n))} free, and a task needs ${gb(footprint('claude'))} on top of the ${gb(floorOf(n))} kept free`;
+    return 'Auto fits no task: its local cap (node worker.mjs limit, set on it) allows none';
   }
   function pushTask(id) {
     const t = taskView(getTask(id));

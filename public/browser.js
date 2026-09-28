@@ -5,8 +5,8 @@
 // back. The page is laid out for the canvas's area: its CSS size and devicePixelRatio go with bv_open and, debounced, as
 // bv_size after a resize or rotation, so on a phone it fills the tab with a phone layout. Below it a prompt box sends an
 // agent to work on that profile (POST /api/browser/task) and an activity panel
-// follows its running or last task (GET /api/browser/tasks, refreshed on otask/olane): status, steps, screenshots,
-// approvals, the result and Stop. The same viewer code also mounts in #bvModal, opened from a task drawer's live
+// follows only its running task (GET /api/browser/tasks filtered to live ones, refreshed on otask/olane): status, steps,
+// screenshots, approvals and Stop; a task that finishes while followed keeps its result until a new prompt or 30 s. No history. The same viewer code also mounts in #bvModal, opened from a task drawer's live
 // thumbnail (bvTaskThumb). The toolbar's Profiles button opens the Browser sheet (#browserModal): each machine that can
 // run a browser, its profiles, the signed-in sites (cookie domains only) and Clear. While a task uses the profile the
 // owner watches, and can take over (the task's browser actions wait) until they hand back. Loaded after app.js and uses
@@ -487,7 +487,8 @@ document.addEventListener('keydown', (e) => {
 }, true);
 
 // ----- the Browser tab: its profile, the prompt box and the agent's activity
-const BX = { sel: null, tasks: [], err: '', pin: null, ap: new Map(), sending: false, timer: 0, more: false, rules: null }; // ap: task id → held approvals; more: every earlier prompt shows; rules: Settings → Browser → Don't allow
+const BX = { sel: null, tasks: [], cur: null, sent: 0, err: '', ap: new Map(), sending: false, timer: 0, clear: 0, rules: null }; // tasks: the profile's live (queued/running) tasks only; cur: the one shown, kept briefly once it finishes (clear: its timer); sent: the task this tab just started; ap: task id → held approvals; rules: Settings → Browser → Don't allow
+const BX_KEEP_MS = 30_000; // how long a finished task's result stays
 const bxProfiles = () => (BV.data?.nodes || []).filter((n) => n.capable).flatMap((n) => n.profiles.map((p) => ({ n, p })));
 function bxShow() {
   bwLoad(); // fresh profiles; bxRenderPicker opens the chosen one once they are in
@@ -527,7 +528,7 @@ function bxSelect(node, identity, name, picked = true) {
   const same = BX.sel && bvKey(BX.sel.node, BX.sel.identity) === bvKey(node, identity);
   BX.sel = { node, identity, name: name || node };
   if (picked) store.set('cw.bxPick', bvKey(node, identity));
-  if (!same) { BX.tasks = []; BX.pin = null; BX.err = ''; BX.more = false; }
+  if (!same) { BX.tasks = []; bxDrop(); BX.err = ''; }
   bxRenderActivity(); // first, so the view opens with the stage's final size
   bxRenderPicker();
   bxOpenSel();
@@ -566,8 +567,10 @@ async function bxLoadTasks() {
   try {
     const r = await api(`/api/browser/tasks?${q}`);
     if (!BX.sel || bvKey(BX.sel.node, BX.sel.identity) !== k) return;
-    BX.tasks = Array.isArray(r) ? r : r.tasks || [];
+    const all = Array.isArray(r) ? r : r.tasks || [];
+    BX.tasks = all.filter(bxLive);
     BX.err = '';
+    bxFollow(all);
     const t = bxShown();
     if (t && t.status === 'running' && !O.tasks.get(t.id)) {
       const a = await api('/api/orch/approvals').catch(() => null);
@@ -582,17 +585,28 @@ function bxOnOrch(msg) {
   if (!BX.sel || !bvTabOn()) return;
   const id = msg.t === 'otask' ? msg.task.id : msg.t === 'olane' ? msg.taskId : null;
   if (id == null) return;
-  const mine = BX.tasks.some((t) => t.id === id) || (msg.t === 'otask' && msg.task.browser === BX.sel.identity && (msg.task.node || msg.task.run_on || 'controller') === BX.sel.node);
+  const mine = BX.tasks.some((t) => t.id === id) || BX.cur?.id === id || (msg.t === 'otask' && msg.task.browser === BX.sel.identity && (msg.task.node || msg.task.run_on || 'controller') === BX.sel.node);
   if (mine) bxSoon();
 }
-// The task the panel follows: the pinned one (just sent, or tapped in Earlier prompts), else the latest: a running one,
-// else a queued one, else the newest.
-function bxLatest() {
-  const ts = BX.tasks;
-  return ts.find((t) => t.status === 'running') || ts.find((t) => t.status === 'queued') || ts.reduce((a, t) => (!a || t.id > a.id ? t : a), null);
+const bxLive = (t) => !!t && ['running', 'queued'].includes(t.status);
+// The task the panel follows: a live one (running first). One that was followed and has just finished stays, with its
+// result, until the owner types a new prompt or BX_KEEP_MS pass; tasks that finished before are never shown.
+// all: the endpoint's whole list, used only to look up the followed task's final state.
+function bxFollow(all) {
+  const live = BX.tasks.find((t) => t.status === 'running') || BX.tasks.find((t) => t.status === 'queued') || null;
+  const cur = BX.cur && all.find((t) => t.id === BX.cur.id);
+  if (live && (!cur || !bxLive(cur) || live.id === cur.id)) { clearTimeout(BX.clear); BX.cur = live; return; }
+  if (cur && bxLive(cur)) { BX.cur = cur; return; }
+  if (cur) { // just finished: show its result for a while
+    if (bxLive(BX.cur)) { clearTimeout(BX.clear); BX.clear = setTimeout(() => { bxDrop(); bxRenderActivity(); }, BX_KEEP_MS); }
+    BX.cur = cur;
+    return;
+  }
+  if (BX.cur && !bxLive(BX.cur)) return; // the finished one we are still showing
+  if (!BX.cur || BX.cur.id !== BX.sent) bxDrop(); // (a just-sent task may not be listed yet)
 }
-const bxShown = () => BX.tasks.find((t) => t.id === BX.pin) || bxLatest();
-const bxLive = (t) => t && ['running', 'queued'].includes(t.status);
+function bxDrop() { clearTimeout(BX.clear); BX.cur = null; }
+const bxShown = () => BX.cur;
 function bxRenderBusy() {
   const s = BV.st, t = bxShown(), m = BVM.tab;
   const busy = BV.view?.m === m && !s?.closed && !s?.takeover && (!!(s?.active && s.task) || t?.status === 'running');
@@ -614,7 +628,7 @@ function bxRenderActivity() {
   }
   const t = bxShown();
   if (!t) {
-    if (BX.sel) box.append(el('div', 'bx-empty muted', `No agent has worked on ${BX.sel.identity} yet. Say what to do above: it opens sites, clicks and types here, and asks you first only for what Settings → Browser doesn't allow.`));
+    if (BX.sel) box.append(el('div', 'bx-empty muted', `Nothing is running on ${BX.sel.identity}. Say what to do above: it opens sites, clicks and types here, and asks you first only for what Settings → Browser doesn't allow.`));
     return;
   }
   const head = el('div', 'bx-head');
@@ -625,12 +639,6 @@ function bxRenderActivity() {
   title.title = 'Open the task';
   title.onclick = () => showTask(t.id);
   head.append(st, title);
-  if (t !== bxLatest()) {
-    const back = el('button', 'link-btn bx-back', 'Back to latest');
-    back.type = 'button';
-    back.onclick = () => { BX.pin = null; bxRenderActivity(); };
-    head.append(back);
-  }
   if (bxLive(t)) {
     const stop = el('button', 'btn small danger', 'Stop');
     stop.type = 'button';
@@ -664,7 +672,6 @@ function bxRenderActivity() {
     r.innerHTML = md(t.resultText);
     box.append(r);
   }
-  bxRenderEarlier(box, t);
 }
 // Details: how long the browser tool took to start on the latest run (and how many tries it needed), or that it didn't.
 function bxMcpLine(m) {
@@ -681,44 +688,6 @@ function bxDot(t) {
   st.title = BX_STATUS[t.status] || t.status;
   return st;
 }
-// Earlier prompts: the profile's other tasks, newest first (8, then Show more). A row shows that task above;
-// Ask again puts its prompt back in the box, unsent.
-function bxRenderEarlier(box, shown) {
-  const rest = BX.tasks.filter((t) => t !== shown).sort((a, b) => b.id - a.id);
-  if (!rest.length) return;
-  const sec = el('section', 'bx-earlier');
-  sec.append(el('h3', '', 'Earlier prompts'));
-  const ul = el('ul');
-  for (const t of BX.more ? rest : rest.slice(0, 8)) {
-    const li = el('li', 'bx-erow');
-    const row = el('button', 'bx-ebtn');
-    row.type = 'button';
-    row.title = t.title || '';
-    const ts = t.finishedAt ?? t.finished_at ?? t.startedAt ?? t.created_at ?? t.createdAt; // seconds
-    row.append(bxDot(t), el('span', 'bx-eid', `#${t.id}`), el('span', 'bx-etitle', t.title || ''));
-    if (ts) row.append(el('span', 'bx-etime muted', relTime(ts < 1e12 ? ts * 1000 : ts)));
-    row.onclick = () => { BX.pin = t.id; bxRenderActivity(); };
-    const again = el('button', 'link-btn bx-again', 'Ask again');
-    again.type = 'button';
-    again.title = 'Put this prompt back in the box';
-    again.onclick = () => {
-      bxIn.value = t.prompt || t.title || '';
-      bxIn.dispatchEvent(new Event('input')); // grows the box and runs bxSyncSend()
-      bxIn.focus();
-    };
-    li.append(row, again);
-    ul.append(li);
-  }
-  sec.append(ul);
-  if (!BX.more && rest.length > 8) {
-    const more = el('button', 'link-btn bx-more', 'Show more');
-    more.type = 'button';
-    more.onclick = () => { BX.more = true; bxRenderActivity(); };
-    sec.append(more);
-  }
-  box.append(sec);
-}
-
 // The prompt box: Enter sends on a desktop (Shift+Enter is a new line); a phone's return key is a new line.
 const bxIn = $('bxInput');
 // Which browser the next prompt drives (/api/browser runner, chrome.mjs): the owner's Chrome on a Mac, or the built-in one.
@@ -736,12 +705,15 @@ function bxSyncSend() {
 bxIn.addEventListener('input', () => {
   bxIn.style.height = 'auto';
   bxIn.style.height = Math.min(bxIn.scrollHeight, innerHeight * 0.3) + 'px';
+  if (bxIn.value.trim() && BX.cur && !bxLive(BX.cur)) { bxDrop(); bxRenderActivity(); } // a new prompt clears the finished result
   bxSyncSend();
 });
 bxIn.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !coarse) { e.preventDefault(); $('bxPrompt').requestSubmit(); }
 });
 kbAware(bxIn);
+// Pressing Send keeps the box focused: a blur would drop kb-open and show the activity panel, moving Send before the tap lands.
+$('bxSend').addEventListener('mousedown', (e) => e.preventDefault());
 $('bxPrompt').addEventListener('submit', async (e) => {
   e.preventDefault();
   const prompt = bxIn.value.trim(), s = BX.sel;
@@ -752,9 +724,12 @@ $('bxPrompt').addEventListener('submit', async (e) => {
     const r = await api('/api/browser/task', 'POST', { prompt, identity: s.identity, node: s.node });
     bxIn.value = '';
     bxIn.style.height = '';
+    if (coarse) bxIn.blur(); // the keyboard goes down so the activity panel shows
     if (r.taskId) {
-      BX.pin = r.taskId;
-      if (!BX.tasks.some((t) => t.id === r.taskId)) BX.tasks.unshift({ id: r.taskId, title: prompt.slice(0, 60), status: 'queued', steps: [] });
+      clearTimeout(BX.clear);
+      BX.sent = r.taskId;
+      BX.cur = BX.tasks.find((t) => t.id === r.taskId) || { id: r.taskId, title: prompt.slice(0, 60), status: 'queued', steps: [] };
+      if (!BX.tasks.includes(BX.cur)) BX.tasks.unshift(BX.cur);
     }
     bxRenderActivity();
     bxLoadTasks();

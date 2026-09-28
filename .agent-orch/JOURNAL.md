@@ -1564,6 +1564,10 @@ Cards and drawer share one proportional, muted 2px phase bar
 ## 2026-09-28 18:47 — #498 Machines graph on desktop: star layout, bigger machine cards with every task and its progress [done (check passed)]
 
 Desktop Machines graph is a star with task-listing cards and usage rings
+
+## 2026-09-28 18:56 — #499 Browser tab: show only the current task, no history [done (check passed)]
+
+Browser tab shows only the running task; tests pass
 ## 2026-09-28 18:52 — #496 Browser tasks via Claude in Chrome (claude --chrome) on a Mac [done (check passed)]
 
 browser tasks prefer a Claude in Chrome runner; tests pass, documented
@@ -1574,3 +1578,7 @@ Drawer and card phase bars share one renderer with milestone lines
 ## 2026-09-28 18:56 — #502 Files tab: drag a selection box to select multiple files [done (check passed)]
 
 Files list has marquee selection with auto-scroll; all 5 tests pass
+
+## 2026-09-28 18:57 — #503 Integrate #499: Browser tab: show only the current task, no history [done (check passed)]
+
+CONTEXT.md conflict resolved; browser-view tests pass

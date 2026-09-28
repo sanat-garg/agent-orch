@@ -1,7 +1,8 @@
 // The Browser header tab (public/browser.js bx*): the live view in place, the prompt box and the activity panel. The
 // /api/browser* routes are mocked and the /ws bv_* messages are intercepted (no real browser runs): the tab opens the
 // picked profile's view, sending the prompt posts {prompt, identity, node}, the returned task's steps, screenshots,
-// approval and Stop render, an agent on the profile shows the working ring with Take over, and at 390px the canvas
+// approval and Stop render (only the running task: finished ones in the response never show, and a finished result
+// clears on a new prompt), an agent on the profile shows the working ring with Take over, and at 390px the canvas
 // fits the width with the prompt box on screen, and two fingers pinch-zoom it (a tap maps through the zoom, a double-tap
 // resets). CW_UI_SHOTS=1 saves screenshots into .agent-orch/shots/.
 import { test, before, after } from 'node:test';
@@ -68,6 +69,9 @@ const NODES = { nodes: [{ id: 'mac', name: 'MacBook Air', local: false, online: 
   profiles: [{ identity: 'work', running: true, task: null }, { identity: 'default', running: false, task: null }] }] };
 const STEPS = [{ ts: 1, kind: 'nav', label: 'gmail.com' }, { ts: 2, kind: 'click', label: 'Archive', mediaId: 'shot-1' },
   { ts: 3, kind: 'type', label: 'Search', mediaId: 'shot-2' }];
+// The profile's older, finished tasks: the endpoint returns them, the tab never shows them.
+const HISTORY = [{ id: 41, title: 'Unsubscribe from the Acme list', status: 'failed', finishedAt: 1, steps: [{ ts: 1, kind: 'nav', label: 'acme.com' }] },
+  { id: 40, title: 'Star the mail from Sam', status: 'done', finishedAt: 1, steps: [], resultText: 'Starred 3 messages.' }];
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
 
 // A page with the Browser API mocked and the socket's bv_* traffic captured (and never sent to the server).
@@ -76,7 +80,7 @@ async function app(opts) {
   const ctx = await browser.newContext(opts);
   await ctx.addCookies([{ name, value, url: base }]);
   const p = await ctx.newPage();
-  const s = { errors: [], posts: [], stops: [], bv: [], tasks: [], ws: null };
+  const s = { errors: [], posts: [], stops: [], bv: [], tasks: [...HISTORY], ws: null };
   p.on('pageerror', (e) => s.errors.push(e.message));
   await p.routeWebSocket(/\/ws$/, (ws) => {
     const server = ws.connectToServer();
@@ -85,11 +89,13 @@ async function app(opts) {
     server.onMessage((m) => ws.send(m));
   });
   const json = (route, body, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+  // A worker without a Claude sign-in would show the login banner, which shortens the stage under the test's fixed frames.
+  await p.route('**/api/status', async (r) => json(r, { ...(await (await r.fetch()).json()), claudeSignedIn: true }));
   await p.route('**/api/browser', (r) => json(r, NODES));
   await p.route('**/api/browser/tasks?*', (r) => json(r, s.tasks));
   await p.route('**/api/browser/task', (r) => {
     s.posts.push(r.request().postDataJSON());
-    s.tasks = [{ id: 42, title: 'Archive every newsletter in the inbox', status: 'running', startedAt: Date.now(), steps: STEPS }];
+    s.tasks = [{ id: 42, title: 'Archive every newsletter in the inbox', status: 'running', startedAt: Date.now(), steps: STEPS }, ...HISTORY];
     return json(r, { taskId: 42 }, 201);
   });
   await p.route('**/api/browser/task/*/stop', (r) => { s.stops.push(r.request().url()); s.tasks = s.tasks.map((t) => ({ ...t, status: 'cancelled' })); return json(r, { ok: true }); });
@@ -114,7 +120,9 @@ test('desktop: the Browser tab shows the profile in place; the prompt posts to /
     await waitFor(() => s.bv.some((m) => m.t === 'bv_open' && m.node === 'mac' && m.identity === 'work' && m.thumb === false), { timeout: 10000, message: `opens the first profile: ${JSON.stringify(s.bv)}` });
     assert.equal(await p.locator('#bxProfile').inputValue(), 'mac/work');
     assert.ok(await p.locator('#bvModal').isHidden(), 'in place, not the modal');
-    await p.locator('#bxActivity', { hasText: 'No agent has worked on work yet' }).waitFor();
+    await p.locator('#bxActivity', { hasText: 'Nothing is running on work' }).waitFor();
+    // Finished tasks in the response are history: none of them renders.
+    assert.equal(await p.locator('#bxActivity .bx-head, #bxActivity .bx-step, #bxActivity .bx-result').count(), 0, 'no history on load');
     // The page arrives: the canvas fits the width.
     await serverSays(p, { t: 'bv_state', node: 'mac', identity: 'work', url: 'https://mail.google.com/mail/u/0/', title: 'Inbox', active: false, takeover: false, role: 'control', task: null });
     await serverSays(p, { t: 'bv_frame', node: 'mac', identity: 'work', n: 1, data: frame, w: 1280, h: 800 });
@@ -149,40 +157,17 @@ test('desktop: the Browser tab shows the profile in place; the prompt posts to /
     await act.getByRole('button', { name: 'Stop' }).click();
     await waitFor(() => s.stops.length === 1, { timeout: 5000, message: 'Stop posts' });
     assert.match(s.stops[0], /\/api\/browser\/task\/42\/stop$/);
-    s.tasks = [{ ...s.tasks[0], status: 'done', resultText: 'Archived **14** newsletters.' }];
+    s.tasks = [{ ...s.tasks[0], status: 'done', resultText: 'Archived **14** newsletters.' }, ...HISTORY];
     s.ws.send(JSON.stringify({ t: 'otask', task: { id: 42, status: 'done', browser: 'work', node: 'mac', title: 'Archive every newsletter in the inbox' } }));
     await act.locator('.bx-result', { hasText: 'Archived 14 newsletters.' }).waitFor({ timeout: 5000 });
     assert.match(await act.locator('.bx-head').textContent(), /Done/);
-    assert.equal(await act.locator('.bx-earlier').count(), 0, 'no Earlier prompts with one task');
-    // Earlier prompts: the other two tasks, newest first; a row shows that task, Back to latest returns, Ask again fills the box unsent.
-    const nowS = Date.now() / 1000;
-    s.tasks = [s.tasks[0], { id: 41, title: 'Unsubscribe from the Acme list', prompt: 'Unsubscribe from the Acme list, then archive its mail', status: 'failed', finishedAt: nowS - 7200, steps: [{ ts: 1, kind: 'nav', label: 'acme.com' }] },
-      { id: 40, title: 'Star the mail from Sam', status: 'done', finishedAt: nowS - 300, steps: [], resultText: 'Starred 3 messages.' }];
-    s.ws.send(JSON.stringify({ t: 'otask', task: { id: 42, status: 'done', browser: 'work', node: 'mac', title: 'Archive every newsletter in the inbox' } }));
-    const rows = act.locator('.bx-earlier .bx-erow');
-    await waitFor(async () => (await rows.count()) === 2, { timeout: 5000, message: 'two earlier prompts' });
-    assert.match(await rows.nth(0).textContent(), /#41\s*Unsubscribe from the Acme list\s*2h ago/);
-    assert.match(await rows.nth(1).textContent(), /#40\s*Star the mail from Sam\s*5m ago/);
-    const rh = await rows.nth(0).locator('.bx-ebtn').boundingBox();
-    assert.ok(Math.abs(rh.height - 36) < 1, `36px rows on desktop: ${JSON.stringify(rh)}`);
-    assert.equal(await act.getByRole('button', { name: 'Back to latest' }).count(), 0, 'the latest is shown');
-    await act.locator('.bx-earlier').scrollIntoViewIfNeeded();
-    await shot(p, 'desktop-earlier');
-    await rows.nth(0).locator('.bx-ebtn').click();
-    assert.match(await act.locator('.bx-title').textContent(), /^#41 Unsubscribe from the Acme list/);
-    assert.deepEqual(await act.locator('.bx-step').allTextContents(), ['Opened acme.com']);
-    assert.match(await act.locator('.bx-earlier').textContent(), /#42.*#40/);
-    await act.getByRole('button', { name: 'Back to latest' }).click();
-    assert.match(await act.locator('.bx-title').textContent(), /^#42 Archive every newsletter/);
-    assert.equal(await act.getByRole('button', { name: 'Back to latest' }).count(), 0);
-    await rows.nth(0).getByRole('button', { name: 'Ask again' }).click();
-    assert.equal(await p.locator('#bxInput').inputValue(), 'Unsubscribe from the Acme list, then archive its mail');
-    assert.ok(await p.locator('#bxInput').evaluate((n) => n === document.activeElement), 'the box takes focus');
-    assert.ok(await p.locator('#bxSend').isEnabled(), 'ready to send');
-    await rows.nth(1).getByRole('button', { name: 'Ask again' }).click();
-    assert.equal(await p.locator('#bxInput').inputValue(), 'Star the mail from Sam', 'no prompt: its title');
-    await p.waitForTimeout(300);
-    assert.equal(s.posts.length, 1, 'Ask again does not send');
+    assert.equal(await act.locator('.bx-earlier').count(), 0, 'no Earlier prompts');
+    assert.doesNotMatch(await act.textContent(), /#41|#40|Earlier/, 'older finished tasks never render');
+    // Typing a new prompt clears the finished result.
+    await p.locator('#bxInput').fill('Star');
+    await act.locator('.bx-result').waitFor({ state: 'detached', timeout: 5000 });
+    assert.equal(await act.locator('.bx-head').count(), 0);
+    assert.match(await act.textContent(), /Nothing is running on work/);
     await p.locator('#bxInput').fill('');
     // Another profile from the picker; leaving the tab closes the view.
     await p.locator('#bxProfile').selectOption('mac/default');

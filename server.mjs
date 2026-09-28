@@ -355,10 +355,16 @@ const restartPreflight = () => preflight({ root: ROOT });
 // Apply updates (the owner's setting, orchestrator applyUpdates): once merged commits since boot touch server code
 // (rolling.mjs serverFile), 'auto' schedules a rolling restart within 2 min even while busy, 'idle' drains and restarts
 // once idle, 'manual' only shows the banner. A cancelled or refused restart waits for a newer HEAD.
-let autoRestartSkipHead = '', autoRestartBusy = false;
+// restartDeferred {head, version}: the owner cancelled the restart for that HEAD (POST /api/restart/cancel); the banner
+// offers "Update ready: vX.YY · Restart now" until they restart or a newer HEAD lands (which re-arms unless manual).
+let autoRestartSkipHead = '', autoRestartBusy = false, restartDeferred = null;
 async function autoRestartCheck() {
   const mode = orch?.applyUpdates();
   if (mode !== 'auto') rolling.cancel();
+  if (restartDeferred && !autoRestartBusy && (await git(['rev-parse', 'HEAD'])) !== restartDeferred.head) {
+    restartDeferred = null;
+    for (const ws of allClients) send(ws, { t: 'status', ...updateStatus() });
+  }
   if (restartPending || autoRestartBusy || !bootCommit || !mode || mode === 'manual') return;
   autoRestartBusy = true;
   try {
@@ -367,14 +373,21 @@ async function autoRestartCheck() {
     if (!head || head === bootCommit || head === autoRestartSkipHead) return;
     const files = (await git(['diff', '--name-only', `${bootCommit}..${head}`])).split('\n').filter(serverFile);
     if (files.length && !restartPending && orch.applyUpdates() === 'idle') startRestartDrain(`auto: ${files.length} server file(s) changed since boot (${files.slice(0, 3).join(', ')})`);
-  } finally { autoRestartBusy = false; }
+  } finally {
+    autoRestartBusy = false;
+    // A re-armed restart (a newer HEAD) ends the deferral at once, not on the next poll.
+    if (restartDeferred && (restartPending || rolling.status())) {
+      restartDeferred = null;
+      for (const ws of allClients) send(ws, { t: 'status', ...updateStatus() });
+    }
+  }
 }
 // Rolling restarts (rolling.mjs): <DATA>/restart.json keeps the last one (the 10-min window, and "Updated to vX.YY"
 // for the clients of the process it started).
 const RESTART_STATE = path.join(DATA, 'restart.json'), BOOT_AT = Date.now();
 const lastRestart = readRestartState(RESTART_STATE);
 const updatedTo = lastRestart.to && lastRestart.version && BOOT_AT - lastRestart.at < 10 * 60e3 ? { version: lastRestart.version, at: Math.round(lastRestart.at / 1000) } : null;
-const updateStatus = () => ({ restartPending, update: rolling.status(), updated: updatedTo && Date.now() - BOOT_AT < 10 * 60e3 ? updatedTo : null });
+const updateStatus = () => ({ restartPending, update: rolling.status(), deferred: restartDeferred && { version: restartDeferred.version }, updated: updatedTo && Date.now() - BOOT_AT < 10 * 60e3 ? updatedTo : null });
 // Server files (rolling.mjs serverFile) changed between the running code and `head`.
 async function serverChanges(head) {
   return head === bootCommit || !bootCommit ? [] : (await git(['diff', '--name-only', `${bootCommit}..${head}`])).split('\n').filter(serverFile);
@@ -1590,6 +1603,7 @@ async function handleRequest(req, res) {
   // (Restart=always) brings the app back. `{cancel:true}` stops the drain and task claiming resumes.
   if (p === '/api/restart-when-idle' && req.method === 'POST') {
     if ((await readBody(req)).cancel) {
+      restartDeferred = null;
       if (restartPending) {
         restartPending = false; restartReason = null; restartGen++;
         autoRestartSkipHead = await git(['rev-parse', 'HEAD']);
@@ -1599,13 +1613,34 @@ async function handleRequest(req, res) {
       for (const ws of allClients) send(ws, { t: 'status', ...updateStatus() });
       return json(res, 200, { draining: false });
     }
+    restartDeferred = null;
     startRestartDrain('draining');
     return json(res, 202, { draining: true });
+  }
+  // The updates banner's "Cancel": calls off the pending restart (the rolling timer, or the idle drain: claiming resumes
+  // at once) and defers it until "Restart now" or a newer HEAD (autoRestartCheck re-arms it unless Apply updates is manual).
+  if (p === '/api/restart/cancel' && req.method === 'POST') {
+    const phase = rolling.status()?.phase;
+    if (!restartPending && !phase) return json(res, 409, { error: 'No restart is pending' });
+    const head = await git(['rev-parse', 'HEAD']);
+    if (phase && !rolling.defer(head)) return json(res, 409, { error: 'Too late: the restart is already under way' });
+    if (restartPending) {
+      restartPending = false; restartReason = null; restartGen++;
+      autoRestartSkipHead = head;
+      orch?.undrain();
+    }
+    const v = formatVersion(Number(await git(['rev-list', '--count', head])) || 0).slice(1);
+    restartDeferred = { head, version: v };
+    console.log(`[restart] cancelled by the owner; v${v} deferred`);
+    orch?.logEvent(`Restart cancelled by the owner: update v${v} waits for Restart now or a newer commit`);
+    for (const ws of allClients) send(ws, { t: 'status', ...updateStatus() });
+    return json(res, 200, { cancelled: true, ...updateStatus() });
   }
   // The updates banner's "Restart now": a rolling restart right away (still preflighted; worker jobs keep running).
   if (p === '/api/restart-now' && req.method === 'POST') {
     if (!orch || NO_ORCH) return json(res, 409, { error: 'The orchestrator is not running here' });
     if (restartPending) { restartPending = false; restartGen++; orch.undrain(); } // an idle drain gives way to it
+    restartDeferred = null;
     return json(res, 202, { update: rolling.restartNow('restart now') && rolling.status() });
   }
   // Settings → About: the build this process runs, the one on disk and whether a restart is on its way.

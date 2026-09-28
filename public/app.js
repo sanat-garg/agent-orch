@@ -163,6 +163,10 @@ $('updateRestart').addEventListener('click', async () => {
   try { upd.update = (await api('/api/restart-now', 'POST')).update || upd.update; } catch (e) { $('updateRestart').disabled = false; toast(e.message, { kind: 'error' }); }
   renderUpdateBanner();
 });
+$('updateCancel').addEventListener('click', async () => {
+  $('updateCancel').disabled = true;
+  try { applyUpdateStatus(await api('/api/restart/cancel', 'POST')); } catch (e) { $('updateCancel').disabled = false; toast(e.message, { kind: 'error' }); }
+});
 $('updateReload').addEventListener('click', () => location.reload());
 $('updateDismiss').addEventListener('click', () => {
   upd.dismissed = upd.commits; store.set('cw.updDismissed', String(upd.commits));
@@ -3402,11 +3406,12 @@ async function checkStatus() {
 
 // The server's checkout moved on since it booted (or a restart is queued or under way): offer "Restart now". A rolling
 // restart (update: {at, phase}) shows when it happens; new public/ files only need a reload of this page.
-const upd = { commits: 0, pending: false, update: null, publicBase: null, publicLatest: null, reload: false, dismissed: Number(store.get('cw.updDismissed')) || 0 };
+const upd = { commits: 0, pending: false, update: null, deferred: null, publicBase: null, publicLatest: null, reload: false, dismissed: Number(store.get('cw.updDismissed')) || 0 };
 function applyUpdateStatus(s) {
   if ('commitsSinceBoot' in s) upd.commits = s.commitsSinceBoot || 0;
   if ('restartPending' in s) upd.pending = !!s.restartPending;
   if ('update' in s) upd.update = s.update || null;
+  if ('deferred' in s) upd.deferred = s.deferred || null;
   if (s.publicCommit) { upd.publicLatest = s.publicCommit; upd.publicBase ??= s.publicCommit; upd.reload = s.publicCommit !== upd.publicBase; }
   if (s.updated?.version && store.get('cw.updToast') !== s.updated.version) {
     store.set('cw.updToast', s.updated.version);
@@ -3417,18 +3422,36 @@ function applyUpdateStatus(s) {
 }
 async function pollUpdates() { try { applyUpdateStatus(await api('/api/status')); } catch {} }
 const UPDATE_PHASE = { preflight: 'Updating: checking that the new code starts…', merging: 'Updating: waiting for a merge to finish…', pausing: 'Updating: pausing this server\'s tasks…', exiting: 'Updating: restarting…' };
+// What the updates banner shows (pure, tested): a rolling restart's time or phase, an idle drain, an update the owner
+// deferred with Cancel ('Update ready: vX.YY' + Restart now), a reload notice, or the new-commit count.
+function updateBannerView(upd, draining, applyUpdates) {
+  const u = upd.update, busy = draining || (u && u.phase !== 'scheduled');
+  const deferred = !u && !draining && upd.deferred;
+  const reloadOnly = !u && !draining && !deferred && upd.reload && (!upd.commits || upd.commits <= upd.dismissed);
+  const dismissed = upd.commits && upd.commits <= upd.dismissed;
+  return {
+    hidden: !u && !draining && !reloadOnly && (deferred ? !!dismissed : !upd.commits || dismissed),
+    text: u ? (UPDATE_PHASE[u.phase] || withUntil({ text: 'Updating the server at {until}', until: u.at }))
+      : draining ? (applyUpdates === 'idle' ? 'Restarting once idle (automatic)…' : 'Restarting after running tasks finish…')
+      : deferred ? `Update ready: v${deferred.version}`
+      : reloadOnly ? 'The app was updated: reload to get the new version'
+      : `${upd.commits} new commit${upd.commits === 1 ? '' : 's'} since the server started`,
+    restart: !busy && !reloadOnly,
+    cancel: !!draining || !!(u && ['scheduled', 'merging', 'preflight'].includes(u.phase)),
+    reload: reloadOnly,
+    dismiss: !busy && !u,
+  };
+}
 function renderUpdateBanner() {
-  const u = upd.update, draining = !u && (upd.pending || !!O.state?.draining), busy = draining || (u && u.phase !== 'scheduled');
-  const reloadOnly = !u && !draining && upd.reload && (!upd.commits || upd.commits <= upd.dismissed);
-  $('updateBanner').hidden = !u && !draining && !reloadOnly && (!upd.commits || upd.commits <= upd.dismissed);
-  $('updateText').textContent = u ? (UPDATE_PHASE[u.phase] || withUntil({ text: 'Updating the server at {until}', until: u.at }))
-    : draining ? (O.state?.parallel?.applyUpdates === 'idle' ? 'Restarting once idle (automatic)…' : 'Restarting after running tasks finish…')
-    : reloadOnly ? 'The app was updated: reload to get the new version'
-    : `${upd.commits} new commit${upd.commits === 1 ? '' : 's'} since the server started`;
-  $('updateRestart').hidden = busy || reloadOnly;
+  const v = updateBannerView(upd, !upd.update && (upd.pending || !!O.state?.draining), O.state?.parallel?.applyUpdates);
+  $('updateBanner').hidden = v.hidden;
+  $('updateText').textContent = v.text;
+  $('updateRestart').hidden = !v.restart;
   $('updateRestart').disabled = false;
-  $('updateReload').hidden = !reloadOnly;
-  $('updateDismiss').hidden = busy || !!u;
+  $('updateCancel').hidden = !v.cancel;
+  $('updateCancel').disabled = false;
+  $('updateReload').hidden = !v.reload;
+  $('updateDismiss').hidden = !v.dismiss;
 }
 
 // ---------- server metrics ----------

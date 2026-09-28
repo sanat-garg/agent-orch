@@ -1499,6 +1499,9 @@ Lightbox opens fitted; thumbnails contain; fit tests pass
 
 conflicts resolved; mobile Machines tests pass; ui-machines test 5 still fails
 
+## 2026-09-28 18:16 — #478 Restart banner: a Cancel button for 'Restarting once idle' [done (check passed)]
+
+Banner Cancel defers pending restarts; a new commit re-arms them
 ## 2026-09-28 18:15 — #481 Simpler Settings: one sound switch, no About section [done (check passed)]
 
 Settings has one sound switch, no About, four hinted sections
@@ -1536,3 +1539,10 @@ synced skills shown read-only; one-step Add skill from GitHub/zip
 ## 2026-09-28 18:17 — #490 Integrate #484: Files tab: one Back/Parent button, drag-and-drop upload and an Upload button [done (check passed)]
 
 CONTEXT.md conflict resolved; upload tests pass
+## 2026-09-28 18:17 — #491 Integrate #478: Restart banner: a Cancel button for 'Restarting once idle' [verify failed (1)]
+
+Command: node --test test/restart-cancel*.test.mjs
+
+## 2026-09-28 18:19 — #491 Integrate #478: Restart banner: a Cancel button for 'Restarting once idle' [done (check passed)]
+
+a re-armed restart clears the deferral at once; the restart-cancel tests pass

@@ -101,13 +101,22 @@ export function createRollingRestart(deps) {
     if (plan && plan.phase !== 'scheduled') return plan;
     return schedule(now(), reason);
   }
-  // Only a restart that hasn't started pausing can be called off (Apply updates changed away from auto).
+  // Only a restart that hasn't started running can be called off (Apply updates changed away from auto).
   function cancel() {
     if (!plan || plan.phase !== 'scheduled') return false;
     done();
     return true;
   }
+  // The owner's Cancel (the updates banner): also while waiting for a merge or the preflight, never once pausing. HEAD
+  // `skip` is not re-armed by check(); a newer one is, and restartNow still runs it.
+  function defer(skip) {
+    if (!plan || !['scheduled', 'merging', 'preflight'].includes(plan.phase)) return false;
+    skipHead = skip;
+    done();
+    return true;
+  }
   async function run() {
+    const mine = plan, gone = () => plan !== mine; // cancelled while waiting for a merge or the preflight
     const why = deps.busy?.() || '';
     if (why) {
       if (busyNoted !== why) log(`rolling: waiting (${why})`);
@@ -123,10 +132,12 @@ export function createRollingRestart(deps) {
       for (const end = now() + cfg.mergeWaitMs; deps.merging() && now() < end;) await sleep(cfg.pollMs);
       const still = deps.merging();
       if (still) log(`rolling: ${still} for over ${Math.round(cfg.mergeWaitMs / 1000)} s; restarting as soon as it finishes`);
+      if (gone()) return false;
     }
     plan.phase = 'preflight'; onChange();
     let head = await deps.head();
     let bad = await deps.preflight();
+    if (gone()) return false;
     if (bad) return refuse(head, bad);
     plan.phase = 'pausing'; onChange();
     const r = await deps.prepare();
@@ -157,5 +168,5 @@ export function createRollingRestart(deps) {
     alert(`Update skipped: the code at ${head?.slice(0, 8) || 'HEAD'} does not boot (${String(why).slice(0, 300)})`);
     return false;
   }
-  return { check, restartNow, cancel, status: () => (plan ? { at: Math.round(plan.at / 1000), phase: plan.phase, reason: plan.reason } : null) };
+  return { check, restartNow, cancel, defer, status: () => (plan ? { at: Math.round(plan.at / 1000), phase: plan.phase, reason: plan.reason } : null) };
 }

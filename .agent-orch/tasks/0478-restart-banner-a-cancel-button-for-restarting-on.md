@@ -13,3 +13,7 @@ The updates banner that says 'Restarting once idle (automatic)…' (or the rolli
 ## Done when
 
 `node --test test/restart-cancel*.test.mjs` passes (cancel stops the restart and resumes claims, banner deferred state, re-arm on a new commit)
+
+## Result — done (check passed) (2026-09-28 18:16)
+
+AGENT-ORCH-STATUS: done — Banner Cancel defers pending restarts; a new commit re-arms them

@@ -117,11 +117,12 @@ test('the head keeps to a worker\'s local cap: slots = min(its own setting, max 
     process.exit(0);`;
   const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script, dataDir, repo], { cwd: ROOT, encoding: 'utf8', timeout: 45000 });
   const r = JSON.parse(stdout.trim().split('\n').pop());
-  // capped: the head says 6, its cap 4 cores (1 a task) and 8 GB (6 Claude-sized runs) → 4. mac-tasks: Auto would be 9
-  // (cores − 1), its cap says 2. ram-used: its jobs use 3.5 of its 4 GB → no room. no-cap: resources say none (the
-  // inventory's older cap no longer counts) → the head's 3. old-worker: no cap in resources → its inventory's max 1.
-  assert.deepEqual(r.slots, { controller: r.slots.controller, capped: 4, 'mac-tasks': 2, 'ram-used': 0, 'no-cap': 3, 'old-worker': 1, 'both-agents': 3 });
-  assert.equal(r.workers, 4 + 2 + 0 + 3 + 1 + 3);
+  // capped: the head says 6, its cap 4 cores (1 a task) → 4. mac-tasks: Auto would be 9 (cores − 1), its cap says 2.
+  // ram-used: the head says 8; RAM is never a pre-emptive throttle, so its 4 GB cap doesn't limit the head (the worker
+  // still enforces it when a job arrives) → 8. no-cap: resources say none (the inventory's older cap no longer counts)
+  // → the head's 3. old-worker: no cap in resources → its inventory's max 1.
+  assert.deepEqual(r.slots, { controller: r.slots.controller, capped: 4, 'mac-tasks': 2, 'ram-used': 8, 'no-cap': 3, 'old-worker': 1, 'both-agents': 3 });
+  assert.equal(r.workers, 4 + 2 + 8 + 3 + 1 + 3);
   // Up next: the ready work tasks whose agent is signed in there (not the blocked one, not the plan task).
   assert.deepEqual(r.upNext, { claude: 2, both: 3, controller: null, unknown: null });
 });

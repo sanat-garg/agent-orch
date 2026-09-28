@@ -1079,3 +1079,7 @@ Stats and Skills & tools selected tabs: --seg-on, weight 600
 ## 2026-09-28 13:52 — #391 stats.mjs: every failed or cancelled task carries a classified `why`, and the snapshot a `failures` summary [done (check passed)]
 
 stats tasks carry classified `why`; snapshot has `failures` summary
+
+## 2026-09-28 13:54 — #388 Fix the failing worker-cap test: nodeCap keeps a worker's CPU and max-tasks cap when the owner set max slots [done (check passed)]
+
+owner-set worker slots now keep the worker's CPU cap

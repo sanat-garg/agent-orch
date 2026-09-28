@@ -30,7 +30,7 @@ import { registerPid, withOwner } from './resources.mjs';
 import { LOCAL_NODE, HEALTH, awayNote } from './cluster.mjs';
 import { MSG, graceMs, isRepoUrl } from './cluster-protocol.mjs';
 import { autoTasks, reserveBytes } from './power.mjs';
-import { CPU_PER_TASK, FOOTPRINT, GB, capSlots, localCap } from './cap.mjs';
+import { CPU_PER_TASK, FOOTPRINT, GB, capSlots, capTasks, localCap } from './cap.mjs';
 import { extractCommand, runCheck, toolLine } from './taskrun.mjs';
 import { gcRetention } from './retention.mjs';
 import { commitAll, ensureWorktree, isMerged, listWorktrees, mergeBack, parkWorktree, pruneOrphanWorktrees, removeWorktree, repoInfo, startIntegration, taskBranch, unresolvedFiles, worktreesRoot } from './worktrees.mjs';
@@ -1466,7 +1466,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // Mac keeps one for its owner), its runs + the Claude-sized runs its spare memory fits above its floor), never more than
   // its local cap allows (a hard ceiling: cap.mjs capSlots = its max tasks, its CPU at cpuPerTask cores a task, its runs +
   // what fits in the rest of its RAM cap at the agent's footprint), and headroom above its floor is checked per claim.
-  const nodeCap = (n, agent = 'claude') => (n.maxSlots != null ? Math.min(n.maxSlots, localCap(n)?.maxTasks ?? Infinity)
+  const nodeCap = (n, agent = 'claude') => (n.maxSlots != null ? Math.min(n.maxSlots, capTasks(localCap(n), CFG.cpuPerTask?.[agent] ?? CPU_PER_TASK))
     : Math.min(autoTasks(n.os, n.inventory?.cores || 1), nodeRuns(n.id).length + Math.max(0, Math.floor((spareMem(n) - floorOf(n)) / footprint('claude'))),
       capSlots(localCap(n), { runs: nodeRuns(n.id).length, jobsMem: jobsMem(n), footprint: footprint(agent), cpuPerTask: CFG.cpuPerTask?.[agent] ?? CPU_PER_TASK })));
   const memOk = (n, agent) => (n.maxSlots != null ? !((n.resources?.memAvailable ?? Infinity) < MEM.pauseBelow) : headroom(n, agent) >= floorOf(n));

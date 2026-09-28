@@ -13,3 +13,7 @@ test/worker-cap.test.mjs 'the head keeps to a worker's local cap' fails on main 
 ## Done when
 
 `npm test -- test/worker-cap.test.mjs`
+
+## Result — done (check passed) (2026-09-28 13:54)
+
+AGENT-ORCH-STATUS: done — owner-set worker slots now keep the worker's CPU cap

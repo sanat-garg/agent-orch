@@ -111,6 +111,27 @@
 .bx-result > :first-child { margin-top: 0; }
 .bx-result > :last-child { margin-bottom: 0; }
 .bx-empty { font-size: 13px; }
+.bx > [hidden] { display: none !important; }
+/* Claude in Chrome direct mode: the header and the latest screenshot instead of the live canvas. */
+.bx-direct { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; gap: 6px; padding: 10px 16px 8px; }
+.bx-direct-head { font-size: 13px; font-weight: 600; color: var(--text); flex: none; }
+.bx-direct-head::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 7px; border-radius: 50%; background: var(--ok, #34c759); vertical-align: 1px; }
+.bx-direct-shot { flex: 1 1 0; min-height: 0; display: flex; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: 10px; background: var(--raised); overflow: hidden; }
+.bx-direct-shot img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.bx-direct-empty { padding: 20px; text-align: center; font-size: 13px; }
+/* No Chrome runner online: the setup card. */
+.bx-setup { flex: 1 1 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 16px; }
+.bx-setup-card { max-width: 640px; margin: 0 auto; padding: 18px 20px; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); color: var(--text); }
+.bx-setup-card h2 { margin: 0 0 6px; font-size: 18px; }
+.bx-setup-card h3 { margin: 16px 0 6px; font-size: 14px; }
+.bx-setup-card p { margin: 0 0 10px; font-size: 13.5px; }
+.bx-setup-steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 10px; font-size: 14px; line-height: 1.45; }
+.bx-setup-cmd { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 8px; }
+.bx-setup-cmd pre { width: 100%; box-sizing: border-box; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; cursor: copy; }
+.bx-setup-note { font-size: 12px; }
+.bx-setup-mac { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 13.5px; }
+.bx-setup-name { font-weight: 550; }
+.bx-alt { flex: none; align-self: center; margin: 0 0 max(8px, env(safe-area-inset-bottom)); font-size: 12.5px; color: var(--muted); }
 @media (pointer: coarse) {
   .bx-bar select { height: 44px; font-size: 16px; }
 }

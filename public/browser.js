@@ -502,7 +502,7 @@ document.addEventListener('keydown', (e) => {
 }, true);
 
 // ----- the Browser tab: its profile, the prompt box and the agent's activity
-const BX = { sel: null, tasks: [], cur: null, sent: 0, err: '', ap: new Map(), sending: false, timer: 0, clear: 0, rules: null }; // tasks: the profile's live (queued/running) tasks only; cur: the one shown, kept briefly once it finishes (clear: its timer); sent: the task this tab just started; ap: task id → held approvals; rules: Settings → Browser → Don't allow
+const BX = { sel: null, tasks: [], cur: null, sent: 0, err: '', ap: new Map(), sending: false, timer: 0, clear: 0, rules: null, builtin: false, cmd: null }; // builtin: the owner chose the built-in browser over the Chrome setup card; cmd: the setup card's generated command; tasks: the profile's live (queued/running) tasks only; cur: the one shown, kept briefly once it finishes (clear: its timer); sent: the task this tab just started; ap: task id → held approvals; rules: Settings → Browser → Don't allow
 const BX_KEEP_MS = 30_000; // how long a finished task's result stays
 const bxProfiles = () => (BV.data?.nodes || []).filter((n) => n.capable).flatMap((n) => n.profiles.map((p) => ({ n, p })));
 function bxShow() {
@@ -521,6 +521,9 @@ function bxHide() { if (BV.view?.m === BVM.tab) bvClose({ keepFocus: true }); }
 // default machine's (the least-loaded online Mac; the controller only while no Mac is online).
 function bxOpenSel() {
   if (!bvTabOn() || !$('bvModal').hidden) return;
+  const mode = bxApplyMode();
+  if (mode !== 'builtin') return bxDirectSel(mode);
+  if (BX.sel?.chrome) BX.sel = null;
   if (!BX.sel) {
     const all = bxProfiles(), saved = store.get('cw.bxPick');
     const def = all.filter(({ n }) => n.default);
@@ -642,8 +645,10 @@ function bxRenderActivity() {
     box.append(r);
   }
   const t = bxShown();
+  bxRenderDirect();
   if (!t) {
-    if (BX.sel) box.append(el('div', 'bx-empty muted', `Nothing is running on ${BX.sel.identity}. Say what to do above: it opens sites, clicks and types here, and asks you first only for what Settings → Browser doesn't allow.`));
+    if (BX.sel?.chrome) box.append(el('div', 'bx-empty muted', 'Say what to do above. Claude does it in Chrome, using the Claude in Chrome extension.'));
+    else if (BX.sel) box.append(el('div', 'bx-empty muted', `Nothing is running on ${BX.sel.identity}. Say what to do above: it opens sites, clicks and types here, and asks you first only for what Settings → Browser doesn't allow.`));
     return;
   }
   const head = el('div', 'bx-head');
@@ -751,6 +756,111 @@ $('bxPrompt').addEventListener('submit', async (e) => {
   } catch (err) { toast(err.message, { kind: 'error' }); }
   finally { BX.sending = false; bxSyncSend(); }
 });
+
+// ----- Claude in Chrome (chrome.mjs, .agent-orch/CHROME.md). With a Chrome runner online the prompt goes straight to it
+// (direct mode): no live canvas or URL bar, the owner sees the real window on the Mac, and here the steps, the latest
+// screenshot and the answer. With none online the tab shows the setup card; the built-in browser stays behind a link.
+const bxMode = () => { const r = BV.data?.runner; return r?.mode === 'chrome' ? 'chrome' : r && !BX.builtin ? 'setup' : 'builtin'; };
+const bxMachine = (r) => String(r?.name || r?.node || '').replace(/^Chrome on /i, '');
+function bxApplyMode() {
+  const mode = bxMode(), root = $('browserView');
+  root.dataset.mode = mode;
+  for (const id of ['bxBar', 'bxStatus', 'bxStage']) $(id).hidden = mode !== 'builtin';
+  $('bxDirect').hidden = mode !== 'chrome';
+  $('bxSetup').hidden = mode !== 'setup';
+  $('bxPrompt').hidden = $('bxActivity').hidden = mode === 'setup';
+  const alt = $('bxAlt');
+  alt.hidden = mode === 'chrome' || !BV.data?.runner;
+  alt.textContent = mode === 'setup' ? 'Use built-in browser instead' : 'Set up Claude in Chrome instead';
+  if (mode === 'setup') bxRenderSetup();
+  return mode;
+}
+$('bxAlt').addEventListener('click', () => { BX.builtin = bxMode() === 'setup'; bxRenderPicker(); });
+// Direct mode follows the runner's tasks (identity 'default' on its node); the setup card follows none.
+function bxDirectSel(mode) {
+  if (BV.view?.m === BVM.tab) bvClose({ keepFocus: true });
+  const r = BV.data.runner;
+  if (mode === 'chrome' && !(BX.sel?.chrome && BX.sel.node === r.node)) {
+    BX.sel = { node: r.node, identity: 'default', name: bxMachine(r), chrome: true };
+    BX.tasks = []; bxDrop(); BX.err = '';
+    bxLoadTasks();
+  } else if (mode !== 'chrome') BX.sel = null;
+  bxRenderActivity();
+  bxSyncSend();
+}
+// The header and the latest screenshot from the extension (a `computer screenshot` result) in place of the canvas.
+function bxRenderDirect() {
+  if (bxMode() !== 'chrome') return;
+  const machine = bxMachine(BV.data.runner), t = bxShown(), last = (t?.steps || []).filter((s) => s.mediaId).at(-1);
+  $('bxDirectHead').textContent = `Running in Chrome on ${machine}`;
+  const box = $('bxDirectShot'), key = last ? last.mediaId : `none:${!!t}`;
+  if (box.dataset.key === key) return;
+  box.dataset.key = key;
+  box.textContent = '';
+  if (!last) {
+    box.append(el('div', 'bx-direct-empty muted', t ? 'The latest screenshot from Chrome shows here.'
+      : `Chrome opens on ${machine}, where you can watch it work. The latest screenshot shows here.`));
+    return;
+  }
+  const im = el('img');
+  im.src = mediaUrl(last.mediaId);
+  im.alt = 'Latest screenshot from Chrome';
+  box.append(im);
+}
+// The setup card: three steps, the install command with a fresh multi-use pairing code, and each Mac's status.
+const bxRunnerCmd = (code) => { const o = location.origin; return `curl -fsSL ${o}/install/worker-macos.sh | sudo bash -s -- --controller ${o} --code ${code} --chrome-runner`; };
+const BX_READY = { ready: 'on', offline: '', 'no Chrome runner': '' };
+function bxRenderSetup() {
+  const box = $('bxSetup'), macs = BV.data?.runner?.macs || [];
+  box.textContent = '';
+  const card = el('div', 'bx-setup-card');
+  card.append(el('h2', '', 'Set up Claude in Chrome'),
+    el('p', 'muted', 'Browser tasks run in your own Chrome on a Mac, through the Claude in Chrome extension. No Mac is ready yet: do this once on the Mac you use, signed in as yourself.'));
+  const ol = el('ol', 'bx-setup-steps');
+  const s1 = el('li');
+  const link = el('a', '', 'Claude in Chrome extension');
+  link.href = 'https://claude.ai/chrome'; link.target = '_blank'; link.rel = 'noopener';
+  s1.append('Install Google Chrome and the ', link, ', then sign in to it with your Claude account.');
+  const s2 = el('li');
+  s2.append('In Terminal, as yourself, run ', el('code', 'copy-cmd', 'claude login'), ' and then ', el('code', 'copy-cmd', 'claude --chrome'), ' once.');
+  const s3 = el('li');
+  s3.append('Run the Chrome runner install command in Terminal on that Mac:');
+  const gen = el('button', 'btn small', BX.cmd ? 'New code' : 'Generate command');
+  gen.type = 'button';
+  gen.id = 'bxGenCmd';
+  gen.onclick = async () => {
+    gen.disabled = true;
+    try {
+      const r = await api('/api/cluster/pair', 'POST', { uses: 2 });
+      BX.cmd = { code: r.code, expiresAt: r.expiresAt, text: bxRunnerCmd(r.code) };
+    } catch (e) { toast(e.message, { kind: 'error' }); }
+    bxRenderSetup();
+  };
+  const row = el('div', 'bx-setup-cmd');
+  if (BX.cmd) {
+    const pre = el('pre', 'am-cmd copy-cmd', BX.cmd.text);
+    pre.id = 'bxCmd';
+    pre.title = 'Click to copy';
+    row.append(pre, el('div', 'muted bx-setup-note', `Click the command to copy it. Its code pairs up to 2 machines until ${new Date(BX.cmd.expiresAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.`));
+  }
+  row.append(gen);
+  s3.append(row);
+  ol.append(s1, s2, s3);
+  card.append(ol);
+  const st = el('div', 'bx-setup-macs');
+  st.append(el('h3', '', 'Your Macs'));
+  if (!macs.length) st.append(el('div', 'muted', 'No Mac is paired yet.'));
+  for (const m of macs) {
+    const line = el('div', 'bx-setup-mac');
+    line.append(el('span', `dot ${BX_READY[m.status] ?? 'warn'}`), el('span', 'bx-setup-name', m.name), el('span', 'muted', m.status));
+    st.append(line);
+  }
+  card.append(st);
+  box.append(card);
+}
+// A machine came, went or changed (a 'cluster' push): the runner may be online now.
+let bxClusterTimer = 0;
+window.bxOnCluster = () => { if (bvTabOn()) { clearTimeout(bxClusterTimer); bxClusterTimer = setTimeout(bwLoad, 800); } };
 
 // ----- the task drawer's live thumbnail
 function bvTaskThumb(t) {

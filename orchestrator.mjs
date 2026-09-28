@@ -21,7 +21,7 @@ import { AGENTS, isAgent, agentEfforts, agentStatus, clampEffort, codexExhausted
 import { SHOTS_DIR, mediaCollector } from './media.mjs';
 import { BROWSER_SYSTEM, MCP_START_FAILED, needsBrowser, normIdentity, parseCapabilities, browserUnavailable, failedNodes, nextBrowserNode, chromeNode, findBrowser, FAILED_MS } from './browser.mjs';
 import { BROWSER_TASK_SYSTEM, browserTaskStatus, browserSteps, isBrowserTask } from './browser-task.mjs';
-import { browserRoute, chromeCapable, runnerLabel } from './chrome.mjs';
+import { browserRoute, chromeCapable, chromePrompt, chromeSetup, runnerLabel } from './chrome.mjs';
 import { APPROVAL_TTL_MS, DEFAULT_PATTERNS } from './gate.mjs';
 import { createApprovals } from './approvals.mjs';
 import { createUsageLog } from './usage.mjs';
@@ -3287,12 +3287,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const env = `Environment (cluster worker ${name}, ${n?.os || 'unknown'}/${n?.arch || 'unknown'}): a machine that runs agent-orch tasks; ` +
       `install whatever the task needs.\nYou are in ${where}, on branch ${branch}` + (task.integrates ? `: the main branch at ${baseSha.slice(0, 8)}, with ` +
       `${taskBranch(task.integrates)} being merged into it (its conflicted files hold the <<<<<<< markers)` : '') + '. The orchestrator pushes and merges it when you finish.';
-    const prompt = isBrowserTask(task) ? task.prompt : resume ? resumePrompt(task) : lostHandoff(task) ? handoffPrompt({ ...project, path: where }, task, env, await handoffInfo(task, project))
+    // Claude in Chrome: place() only sends a Claude browser task to a chrome node while one is online. A Browser-tab prompt
+    // then goes to the extension nearly verbatim (direct mode, chrome.mjs chromePrompt): no system prompt, no Playwright.
+    const chrome = needsBrowser(task) && route.agent === 'claude' && chromeCapable(n), direct = chrome && isBrowserTask(task);
+    const prompt = direct ? chromePrompt(task.prompt, gateSettings().rules) : isBrowserTask(task) ? task.prompt : resume ? resumePrompt(task) : lostHandoff(task) ? handoffPrompt({ ...project, path: where }, task, env, await handoffInfo(task, project))
       : workerTaskPrompt({ ...project, path: where }, task, env);
     const effort = taskEffort(task, project, route);
     const { runId, logPath } = startRun(task.id, task.kind, route.agent, nodeId, effort);
-    // Claude in Chrome: place() only sends a Claude browser task to a chrome node while one is online.
-    const chrome = needsBrowser(task) && route.agent === 'claude' && chromeCapable(n);
     updateTask(task.id, { ran_agent: route.agent, ran_model: route.model || null, route_note: routeNote(route), node_id: nodeId,
       ...(needsBrowser(task) && { browser_runner: chrome ? 'chrome' : 'builtin' }) });
     const r = running.get(task.id);
@@ -3300,7 +3301,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     pushState();
     logEvent(`#${task.id} runs on ${name}`, { projectId: project.id, taskId: task.id });
     const res = await remoteJob(task.id, nodeId, name, { runId, logPath }, {
-      title: task.title, prompt, systemAppend: withBrowser(task, isBrowserTask(task) ? BROWSER_TASK_SYSTEM : resume ? null : withPersona(WORKER_SYSTEM, project)) || undefined, agent: route.agent, model: route.model || undefined, effort: effort || undefined,
+      title: task.title, prompt, systemAppend: direct ? undefined : withBrowser(task, isBrowserTask(task) ? BROWSER_TASK_SYSTEM : resume ? null : withPersona(WORKER_SYSTEM, project)) || undefined, agent: route.agent, model: route.model || undefined, effort: effort || undefined,
       ...(needsBrowser(task) && { capabilities: ['browser'], identity: identityOf(task), gate: (({ rules, ttlMs }) => ({ rules, ttlMs }))(gateSettings()) }),
       ...(chrome && { chrome: true }),
       ...(isBrowserTask(task) ? { execution: 'browser' } : { repo: repo || undefined, gitUrl: viaHead ? gitPath(project.id) : undefined, baseSha, branch, doneWhen: task.done_when || undefined }), resume: resume || undefined,
@@ -4484,10 +4485,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     });
   }
   // How the Browser tab's next prompt runs (chrome.mjs browserRoute; its tasks run on Claude unless routed elsewhere):
-  // {mode, label, node?, name?, note?}.
+  // {mode, label, node?, name?, note?, macs}; macs: each paired Mac's Chrome status for the tab's setup card.
   function browserRunner() {
-    const r = browserRoute(nodesNow(), { agent: 'claude' });
-    return { mode: r.mode, label: runnerLabel(r), ...(r.mode === 'chrome' ? { node: r.nodes[0], name: r.name } : { note: r.note }) };
+    const nodes = nodesNow(), r = browserRoute(nodes, { agent: 'claude' });
+    return { mode: r.mode, label: runnerLabel(r), ...(r.mode === 'chrome' ? { node: r.nodes[0], name: r.name } : { note: r.note }), macs: chromeSetup(nodes) };
   }
   function stopBrowserTask(id) {
     if (!isBrowserTask(getTask(id))) return { error: 'No such browser task', status: 404 };

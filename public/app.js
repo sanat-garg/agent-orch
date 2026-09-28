@@ -3247,6 +3247,7 @@ function onServer(msg) {
     if (msg.kind === 'notice') { toast(msg.text, { kind: 'warn', duration: 12000 }); return scheduleMachines(0); }
     scheduleMachines(msg.kind === 'resources' ? 600 : 0);
     if (msg.kind === 'resources') return; // only a worker's CPU/RAM reading changed
+    window.bxOnCluster?.(); // a Chrome runner came or went (the Browser tab, browser.js)
     if (!$('connsModal').hidden) loadConnNodes();
     return checkPairing();
   }

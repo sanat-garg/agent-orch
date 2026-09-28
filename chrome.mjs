@@ -114,3 +114,26 @@ export function judgeChrome(tool, args = {}, { rules = [], page = null } = {}) {
   const rule = matchRule(rules, c.facts);
   return rule ? { ...c, hold: true, rule: rule.text, reason: `your rule "${rule.text}"` } : { ...c, hold: false };
 }
+
+// ---- direct mode (#512): a Browser-tab prompt goes to the extension nearly verbatim, behind this short fixed preface and
+// the owner's "Don't allow" rules as text (they are still enforced on each call by the gate hook). No system prompt.
+export const CHROME_PREFACE = 'Use the Claude in Chrome tools to do this in the browser. Stop and ask if a login or 2FA is needed.';
+export function chromePrompt(prompt, rules = []) {
+  const deny = (rules || []).map((r) => String(r).trim()).filter(Boolean);
+  return [CHROME_PREFACE, ...(deny.length ? [`Don't allow without asking the owner first: ${deny.join('; ')}.`] : []), '', String(prompt ?? '').trim()].join('\n');
+}
+// One Mac's line on the Browser tab's setup card, from its inventory.chrome (detectChrome): 'ready' or what is missing.
+export function chromeSetupStatus(n) {
+  const c = n?.inventory?.chrome;
+  if (!c) return n?.inventory?.chromeRunner ? 'checking Chrome' : 'no Chrome runner';
+  if (c.capable) return chromeCapable(n) ? 'ready' : 'worker needs an update';
+  if (!c.chrome) return 'Chrome not installed';
+  if (!c.extension) return 'extension missing';
+  if (!c.nativeHost) return 'run `claude --chrome` once';
+  if (!c.gui) return 'no desktop session';
+  return c.reason || 'not ready';
+}
+// Every paired Mac and its line: [{id, name, online, status}], runners first.
+export const chromeSetup = (nodes) => (nodes || []).filter((n) => !n.local && n.os === 'darwin')
+  .map((n) => ({ id: n.id, name: n.name || n.id, online: online(n), runner: !!n.inventory?.chromeRunner, status: online(n) ? chromeSetupStatus(n) : 'offline' }))
+  .sort((a, b) => b.runner - a.runner);

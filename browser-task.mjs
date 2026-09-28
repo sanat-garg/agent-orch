@@ -1,3 +1,5 @@
+import { chromeTool } from './chrome.mjs';
+
 // Screen tasks use the normal agent/event pipeline in a files-only workspace, without a git lifecycle.
 export const isBrowserTask = (task) => task?.execution === 'browser';
 export const BROWSER_TASK_SYSTEM = `Carry out the owner's request on the live browser screen using the Playwright MCP tools.
@@ -34,6 +36,24 @@ export function stripStatusMarker(text) {
   return String(text || '').split('\n').filter((l) => !MARKER.test(l)).join('\n').trimEnd();
 }
 
+// A Claude in Chrome call (mcp__claude-in-chrome__<tool>, chrome.mjs) as a step, or null for bookkeeping calls.
+const CHROME_CLICK = /click|drag|key|hover/;
+function chromeStep(tool, input) {
+  if (tool === 'navigate') return { kind: 'nav', label: String(input.url || 'a page') };
+  if (tool === 'computer') {
+    const a = String(input.action || '');
+    if (a === 'screenshot') return { kind: 'shot', label: 'the page' };
+    if (a === 'type') return { kind: 'type', label: `"${String(input.text || '').slice(0, 80)}"` };
+    if (a === 'key') return { kind: 'click', label: `key ${input.text || ''}`.trim() };
+    if (CHROME_CLICK.test(a)) return { kind: 'click', label: input.ref || (Array.isArray(input.coordinate) ? `(${input.coordinate.join(', ')})` : a.replaceAll('_', ' ')) };
+    return null; // scroll, wait, zoom…
+  }
+  if (tool === 'form_input') return { kind: 'type', label: String(input.ref || 'a field') };
+  if (tool === 'find') return { kind: 'read', label: String(input.query || 'the page') };
+  if (/^(read_page|get_page_text)$/.test(tool)) return { kind: 'read', label: 'the page' };
+  return null; // tabs context, plans, shortcuts…
+}
+
 export function browserSteps(entries) {
   const steps = [];
   for (const e of entries) {
@@ -46,6 +66,9 @@ export function browserSteps(entries) {
       if (e.text) steps.push({ ts, kind: 'text', label: e.text });
     } else if (e.k === 'approval') {
       steps.push({ ts, kind: 'approval', label: e.label, ...(e.mediaId && { mediaId: e.mediaId }) });
+    } else if (e.k === 'tool' && chromeTool(e.name)) {
+      const step = chromeStep(chromeTool(e.name), e.input || {});
+      if (step) steps.push({ ts, ...step });
     } else if (e.k === 'tool') {
       const name = String(e.name || '').match(/(?:^|__)browser_(\w+)$/)?.[1];
       if (!name) continue;

@@ -138,7 +138,9 @@ test('routing: a browser task goes to the chrome node with chrome: true; without
     console.log(JSON.stringify(out));
     process.exit(0);`, dir], { cwd: ROOT, encoding: 'utf8', timeout: 50_000 });
   const r = JSON.parse(stdout.trim().split('\n').pop());
-  assert.deepEqual(r.runner, { mode: 'chrome', label: "Using Chrome on Sanat's Macbook Pro", node: 'cr', name: "Chrome on Sanat's Macbook Pro" });
+  const { macs, ...runner } = r.runner;
+  assert.deepEqual(runner, { mode: 'chrome', label: "Using Chrome on Sanat's Macbook Pro", node: 'cr', name: "Chrome on Sanat's Macbook Pro" });
+  assert.equal(macs.find((m) => m.id === 'cr')?.status, 'ready');
   assert.deepEqual(r.first, { node: 'cr', chrome: true, execution: 'browser' }, 'the Browser-tab prompt runs on the chrome node with Claude in Chrome');
   assert.equal(r.firstRunner, 'chrome');
   assert.equal(r.fallbackRunner.mode, 'builtin');

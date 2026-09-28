@@ -13,3 +13,7 @@ Simplify browser tasks per the owner: 'use the extension and just pass on the pr
 ## Done when
 
 `node --test test/chrome-direct*.test.mjs` passes (direct mode passes the prompt with the chrome option and no Playwright, setup card with fresh command when no runner, deny rule enforced)
+
+## Result — done (check passed) (2026-09-28 19:21)
+
+AGENT-ORCH-STATUS: done — Browser prompts go straight to Chrome; setup card shows without runner

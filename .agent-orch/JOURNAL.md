@@ -1613,3 +1613,7 @@ reflections use random pool models; Settings shows Reflection models
 ## 2026-09-28 19:21 — #513 Browser task drawer: show the last screen when the session ends [done (check passed)]
 
 browser task screens now show latest first, ordered by time
+
+## 2026-09-28 19:21 — #512 Browser tab: hand the prompt straight to Claude in Chrome; setup card when no runner [done (check passed)]
+
+Browser prompts go straight to Chrome; setup card shows without runner

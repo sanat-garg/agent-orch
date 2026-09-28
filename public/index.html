@@ -253,6 +253,11 @@
         <span class="bx-busy" id="bxBusy" hidden>Agent is working</span>
         <input id="bxKeys" class="bv-keys" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="Type into the page" enterkeyhint="send">
       </div>
+      <div class="bx-direct" id="bxDirect" hidden>
+        <div class="bx-direct-head" id="bxDirectHead"></div>
+        <div class="bx-direct-shot" id="bxDirectShot"></div>
+      </div>
+      <div class="bx-setup" id="bxSetup" hidden></div>
       <form class="composer bx-prompt" id="bxPrompt">
         <div class="box">
           <textarea id="bxInput" rows="2" placeholder="Tell an agent what to do on this screen…" autocomplete="off" spellcheck="true" aria-label="Tell an agent what to do on this screen"></textarea>
@@ -265,6 +270,7 @@
         </div>
       </form>
       <div class="bx-act" id="bxActivity" aria-live="polite"></div>
+      <button type="button" class="link-btn bx-alt" id="bxAlt" hidden></button>
     </section>
 
     <section class="term" id="termView" hidden>

@@ -94,8 +94,13 @@ takes only browser tasks:
   Browser-tab prompt drops its profile's machine pin for it. Only when no chrome node is online does it take the
   Playwright path as before. Codex-routed browser tasks keep Playwright. The job's `job.start.chrome: true` makes the
   worker run Claude with `CHROME_OPTIONS` and no Playwright MCP; `tasks.browser_runner` records 'chrome'/'builtin'.
-- **Browser tab**: `/api/browser` returns `runner` (`orch.browserRunner()`), and the prompt hint reads "Using Chrome
-  on Sanat's Macbook Pro" or "Built-in browser (no Chrome runner online) · <profile>".
+- **Browser tab direct mode (#512)**: a Browser-tab prompt on a chrome node is sent as `chromePrompt()` (the fixed
+  `CHROME_PREFACE`, the "Don't allow" rules as text, then the owner's prompt verbatim) with NO systemAppend, no
+  Playwright, no live stream. The tab (public/browser.js `bxMode`) then hides the canvas/URL bar and shows "Running in
+  Chrome on <machine>", the steps (browser-task.mjs `chromeStep`) and the latest screenshot; it follows identity
+  `default` on the runner node. With no runner online (`runner.mode === 'builtin'`) it shows a setup card (3 steps, a
+  `--chrome-runner` command with a fresh `uses: 2` pair code, each Mac's `chromeSetup()` status from `runner.macs`);
+  the built-in browser is behind a "Use built-in browser instead" link (per page load).
 - **"Don't allow" rules (#476)**: the extension's calls don't pass through gate-proxy.mjs, so agents.mjs `gateHooks`
   judges every `mcp__claude-in-chrome__*` call itself (chrome.mjs `judgeChrome`, gate.mjs `matchRule`): a match is
   written to the gate dir's `approvals/` and waits for the owner exactly like a Playwright hold (the worker relays it

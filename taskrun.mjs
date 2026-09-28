@@ -18,6 +18,8 @@ const CMD_START = /^(!|test\s|\[\s|grep\b|node\b|npm\b|bash\b|sh\s|curl\b|python
 const looksLikeCommand = (s) => RUNNERS.some((r) => s.startsWith(r)) || CMD_START.test(s);
 // The command with its quoted and backslash-escaped text blanked out, leaving only what the shell parses as operators.
 const unquoted = (s) => s.replace(/'[^']*'|"(?:\\.|[^"\\])*"|\\./g, '_');
+// The command with only single-quoted and backslash-escaped text blanked: bash still expands $( ` ${ inside "…".
+const expandable = (s) => s.replace(/'[^']*'|\\.|"((?:\\.|[^"\\])*)"/g, (m, dq) => (dq === undefined ? '_' : dq.replace(/\\./g, '_')));
 export function extractCommand(doneWhen) {
   if (!doneWhen) return null;
   const triple = doneWhen.match(/```(?:\w+\n)?([\s\S]*?)```/);
@@ -41,9 +43,12 @@ export function extractCommand(doneWhen) {
 function checkCommand(cand, doneWhen) {
   cand = cand.trim().replace(/^\$\s+/, '');
   // Risk is judged on what the shell parses, so a quoted pattern (`grep -q 'a -> b' f`, `grep -c 'rm -rf' x.sh`)
-  // doesn't void the check; a real redirect or an unquoted rm/sudo/curl/git push still refuses it.
+  // doesn't void the check; a real redirect or an unquoted rm/sudo/curl/git push still refuses it. Command and process
+  // substitution ($(…), backticks, ${…}, <(…), >(…)) is refused wherever it appears, double quotes included, since
+  // it could hide any of those; only single-quoted (or backslash-escaped) text is inert. $? still works.
   const bare = unquoted(cand);
   if (!cand || />|\brm\s|\bsudo\b|\bgit\s+push\b|\bcurl\b/.test(bare)) return null;
+  if (/\$[({]|`|[<>]\(/.test(expandable(cand))) return null;
   if ((bare.match(/;/g) || []).length + (bare.match(/&&/g) || []).length > 1) return null;
   if (!RUNNERS.some((r) => cand.startsWith(r)) && !/^(test|ls|grep|cat|git|!|\[|bash|sh)(\s|\b)/.test(cand)) return null;
   // "`grep …` prints nothing": grep exits 1 when clean, so pass only on exit 1 (matches → 0, errors → 2 still fail).

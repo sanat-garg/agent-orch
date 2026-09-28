@@ -972,3 +972,6 @@ digest.mjs reports per-project done/failed/needs-you, tests pass
 ## 2026-09-28 12:30 — #338 Gate proxy: a page that can't be read makes element tools, key presses and dialogs outbound, with tests [done (check passed)]
 
 Proxy holds page actions when the snapshot errors or hangs; tests pass
+## 2026-09-28 12:31 — #335 Verifier loophole: extractCommand refuses command and process substitution even inside double quotes [done (check passed)]
+
+extractCommand now refuses substitution, including inside double quotes

@@ -13,3 +13,7 @@ taskrun.mjs `extractCommand` / `checkCommand` judge risk on `unquoted(cand)`, wh
 ## Done when
 
 `node bin/test.mjs test/verify.test.mjs test/runcheck.test.mjs` passes and `grep -n 'substitution' taskrun.mjs` prints a line
+
+## Result — done (check passed) (2026-09-28 12:31)
+
+AGENT-ORCH-STATUS: done — extractCommand now refuses substitution, including inside double quotes

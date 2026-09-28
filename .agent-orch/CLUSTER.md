@@ -167,13 +167,15 @@ controller appends a project's persona to `job.start.systemAppend`.
   a free slot, and `memAvailable - footprint(agent)` stays above the node's floor (the local node keeps today's
   `MEM` thresholds; workers report the same numbers). `footprint(agent)` is the per-agent measured RSS from #209
   (until then a constant per agent, e.g. 1.2 GB for claude, 0.8 GB for codex).
-- Slots per node = `min(cores, floor((memAvailable - floor) / footprint))` when its max tasks is Auto (`max_slots` 0,
-  API `maxSlots: null`), else the owner's number from the Machines view; headroom is checked per claim either way. A
-  Mac's Auto keeps a core and its policy's RAM reserve for its owner: `min(cores − 1, (memAvailable − max(floor,
-  reserve)) / footprint)` (power.mjs `autoTasks`, orchestrator `nodeCap`/`floorOf`). New Linux nodes start at 1 task,
-  new Macs on Auto. Either way a worker's own local cap is a hard ceiling on top (see Local cap and status view). A
-  node whose worker reports no intake (status `paused`, see Power policy) gets nothing new. The local node keeps its
-  current `taskSlots` rule.
+- Slots per node when its max tasks is Auto (`max_slots` 0, API `maxSlots: null`) = `min(cores, floor((memAvailable -
+  floor) / footprint))`, with headroom above the floor checked per claim. A Mac's Auto keeps a core and its policy's RAM
+  reserve for its owner: `min(cores − 1, (memAvailable − max(floor, reserve)) / footprint)` (power.mjs `autoTasks`,
+  orchestrator `nodeCap`/`floorOf`), and a worker's own local cap is a hard ceiling on top (see Local cap and status
+  view). An owner-set `maxSlots` (Machines, 1-16; BRIEF goal 9) is the limit: `min(maxSlots, the worker's own
+  --max-tasks)`, with no footprint or spare-memory arithmetic and no headroom check; the node is admitted unless its
+  last reported `memAvailable` is under `MEM.pauseBelow` (the emergency floor). New Linux nodes start at 1 task, new
+  Macs on Auto. A node whose worker reports no intake (status `paused`, see Power policy) gets nothing new. The local
+  node keeps its current `taskSlots` rule.
 - Placement picks the placeable node with the most headroom, preferring: the node that last ran the task (warm
   worktree and session), then remote nodes over the local one (the controller also serves the UI and merges). Plan and
   reflect tasks always run on the local node: they need the DB and project context (asserted, see Compute-only workers).
@@ -295,7 +297,9 @@ changes either, `node.policy`; the worker enforces it, and the scheduler keeps t
   and an offer that races it is declined with reason `power`. Running jobs go on. No reading (a VPS, a Mac mini's
   battery) never blocks.
 - **Caps**: at most `maxTasks` jobs (Auto: cores − 1 on a Mac, all cores elsewhere) and none that would leave less than
-  `max(MEM.claimFloor, reserveGB)` free (`low_memory`). The controller's placement uses the same numbers.
+  `max(MEM.claimFloor, reserveGB)` free (`low_memory`). The controller's placement uses the same numbers for a
+  node on Auto; an owner-set `maxSlots` replaces them there (see Scheduling), though this worker-side offer check
+  still declines `low_memory` by them.
 - **Keep awake** (`createKeepAwake`): `caffeinate -i -w <worker pid>` runs while the worker has a job that isn't paused
   and `keepAwake` allows it for the power source; it is stopped (process group SIGTERM) when the last job ends, on
   battery under `ac`, or at shutdown, and exits by itself if the worker dies (`-w`). `-i` only prevents idle sleep: a

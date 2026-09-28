@@ -13,3 +13,7 @@ BRIEF goal 9 (rewritten 2026-09-28): the owner states the MacBook handles 10 par
 ## Done when
 
 `npm test -- test/cluster-capacity.test.mjs test/scheduling.test.mjs` passes and `grep -n 'maxSlots' .agent-orch/CLUSTER.md` prints a line
+
+## Result — done (check passed) (2026-09-28 11:19)
+
+AGENT-ORCH-STATUS: done — Done-when passes; test runner uses a lock directory without flock

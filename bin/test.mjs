@@ -52,10 +52,27 @@ const tempBase = Buffer.byteLength(socketPath(cache)) <= 107 ? cache : path.join
 fs.mkdirSync(tempBase, { recursive: true });
 const temp = fs.mkdtempSync(path.join(tempBase, 'agent-orch-test-'));
 // One suite at a time per machine (several sessions share this 1-core box), at low CPU priority so the live server and
-// chats stay responsive. flock waits for the lock; AGENT_ORCH_TEST_NOLOCK=1 skips it.
+// chats stay responsive. flock waits for the lock; AGENT_ORCH_TEST_NOLOCK=1 skips it. Without flock (macOS) a lock
+// directory holding the owner's pid does the same, taken over when that pid is gone.
 const lock = path.join(cache, 'agent-orch-test.lock');
 const cmd = [process.execPath, '--test', `--test-concurrency=${concurrency}`, ...files];
-const [bin, ...args] = process.env.AGENT_ORCH_TEST_NOLOCK ? ['nice', '-n', '10', ...cmd] : ['flock', lock, 'nice', '-n', '10', ...cmd];
+const hasFlock = (process.env.PATH || '').split(path.delimiter).some((d) => d && fs.existsSync(path.join(d, 'flock')));
+const useFlock = !process.env.AGENT_ORCH_TEST_NOLOCK && hasFlock;
+const lockDir = !process.env.AGENT_ORCH_TEST_NOLOCK && !hasFlock ? `${lock}.d` : null;
+if (lockDir) {
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+  for (let waited = false; ;) {
+    try { fs.mkdirSync(lockDir); fs.writeFileSync(path.join(lockDir, 'pid'), String(process.pid)); break; } catch (e) { if (e.code !== 'EEXIST') throw e; }
+    let pid = 0;
+    try { pid = Number(fs.readFileSync(path.join(lockDir, 'pid'), 'utf8')); } catch {}
+    const age = (() => { try { return Date.now() - fs.statSync(lockDir).mtimeMs; } catch { return 0; } })();
+    if (pid ? !alive(pid) : age > 10_000) { fs.rmSync(lockDir, { recursive: true, force: true }); continue; } // a dead holder
+    if (!waited) { console.log(`npm test: waiting for another suite (pid ${pid || '?'}) to finish`); waited = true; }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+  }
+  process.on('exit', () => { try { if (fs.readFileSync(path.join(lockDir, 'pid'), 'utf8') === String(process.pid)) fs.rmSync(lockDir, { recursive: true, force: true }); } catch {} });
+}
+const [bin, ...args] = useFlock ? ['flock', lock, 'nice', '-n', '10', ...cmd] : ['nice', '-n', '10', ...cmd];
 // Ample memory: scheduling tests stay deterministic on a busy server (memory-guard tests point at their own file).
 const child = spawn(bin, args, {
   cwd: root, stdio: 'inherit', detached: true, // its own process group, so a signal reaches node past flock and nice

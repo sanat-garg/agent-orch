@@ -900,3 +900,6 @@ Rapid mode tops up parallel work with verified quota guards.
 ## 2026-09-28 11:17 — #308 Browser prompt backend: POST /api/browser/task runs an agent on the live screen now [done (check passed)]
 
 Browser task API verified; pinned agents run without git lifecycle.
+## 2026-09-28 11:19 — #303 Goal 9 worker placement: an owner-set node cap is the limit; no headroom or spare-memory clipping for capped nodes [done (check passed)]
+
+Done-when passes; test runner uses a lock directory without flock

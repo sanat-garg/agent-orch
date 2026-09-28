@@ -33,3 +33,68 @@ test('capacity counts an Auto worker by its nodeCap and follows a node change at
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });
+
+// BRIEF goal 9: an owner-set cap (maxSlots) is the limit. A Mac capped at 10 with 4 GB free (under the old footprint and
+// 3 GB reserve arithmetic: no Claude run at all) counts 10 slots and takes a 6th task while 5 run there; only a
+// MemAvailable under MEM.pauseBelow (the emergency floor) keeps a capped node from getting work.
+test('an owner-capped node takes tasks up to its cap, stopped only by the emergency memory floor', { timeout: 60000 }, async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-capped-'));
+  const dataDir = path.join(tmp, 'data'), repo = path.join(tmp, 'repo');
+  const common = `import { createOrchestrator } from ${JSON.stringify(new URL('../orchestrator.mjs', import.meta.url).href)};
+    import { effectivePolicy } from ${JSON.stringify(new URL('../power.mjs', import.meta.url).href)};
+    import { DatabaseSync } from 'node:sqlite';
+    import path from 'node:path';
+    const [dataDir, repo] = process.argv.slice(1), GB = 2 ** 30, MB = 2 ** 20;
+    const node = (id, free) => ({ id, name: id, os: 'darwin', local: false, status: 'online', connected: true, enabled: true, draining: false, maxSlots: 10,
+      inventory: { cores: 8, agents: [{ id: 'claude', installed: true, signedIn: true }] }, resources: { memAvailable: free, at: Date.now() }, policy: effectivePolicy('darwin') });
+    const opts = { query: () => (async function* () {})(), dataDir, claudeEnv: {}, getLimits: () => [], onSubscription: () => true,
+      broadcast() {}, emitChat() {}, convoExists: () => false };
+    const db = () => new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));`;
+  // Boot 1 (disabled, never schedules): five work tasks were running on the Mac when the controller stopped, one is queued.
+  const seed = `${common}
+    import { execFileSync } from 'node:child_process';
+    import fs from 'node:fs';
+    createOrchestrator({ ...opts, disabled: true });
+    execFileSync('git', ['init', '-q', '-b', 'main', repo]);
+    execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/test-owner/capped.git'], { cwd: repo });
+    const d = db(), t = Date.now() / 1000;
+    const pid = Number(d.prepare("INSERT INTO projects(path,name,priority,status,perpetual,position,created_at) VALUES(?,'capped',50,'active',0,1,0)").run(repo).lastInsertRowid);
+    for (let i = 0; i < 5; i++) {
+      const id = Number(d.prepare("INSERT INTO tasks(project_id,kind,title,prompt,status,node_id,started_at,created_at) VALUES(?,'work',?,'p','running','mac',?,?)").run(pid, 'run ' + i, t, t).lastInsertRowid);
+      const log = path.join(dataDir, 'run-' + i + '.jsonl');
+      fs.writeFileSync(log, '');
+      d.prepare("INSERT INTO runs(task_id,purpose,started_at,log_path) VALUES(?,'work',?,?)").run(id, t, log);
+    }
+    d.prepare("INSERT INTO tasks(project_id,kind,title,prompt,created_at) VALUES(?,'work','sixth','p',?)").run(pid, t);
+    process.exit(0);`;
+  // Boot 2 (the scheduler, its tick parked): the hub re-adopts the five, then the sixth is claimed.
+  const check = `${common}
+    const nodes = [{ id: 'controller', local: true, status: 'online', connected: true, enabled: true }, node('mac', 4 * GB), node('mac-low', 200 * MB)];
+    let version = 1;
+    const o = createOrchestrator({ ...opts, config: { pollMs: 1e9 } });
+    o.attachCluster({ listNodes: () => nodes, node: (id) => nodes.find((n) => n.id === id) || null, isConnected: () => false, send: () => false,
+      onMessage() {}, version: () => version });
+    const out = { workers: o.stateView().capacity.workers, running: o.machines(nodes).find((n) => n.id === 'mac').used, adopted: [1, 2, 3, 4, 5].map((id) => o.isRunning(id)) };
+    const c = o.claimNext(null);
+    out.sixth = c && [c.task.title, c.node];
+    // The same queue with only the capped node at 200 MB free: nothing goes to it.
+    db().prepare("UPDATE tasks SET status='queued', node_id=NULL WHERE title='sixth'").run();
+    nodes.splice(1, 1); version++;
+    const low = o.claimNext(null);
+    out.low = low && [low.task.title, low.node];
+    console.log(JSON.stringify(out));
+    process.exit(0);`;
+  try {
+    const run = (script) => promisify(execFile)(process.execPath, ['--input-type=module', '-e', script, dataDir, repo], { encoding: 'utf8', timeout: 30000 });
+    await run(seed);
+    const r = JSON.parse((await run(check)).stdout.trim().split('\n').pop());
+    assert.deepEqual(r.adopted, [true, true, true, true, true]);
+    assert.equal(r.running, 5);
+    // The owner's 10 on each capped node (mac-low's 200 MB counts slots it can't use until memory is back).
+    assert.equal(r.workers, 20);
+    assert.deepEqual(r.sixth, ['sixth', 'mac']);
+    assert.equal(r.low, null, 'a capped node under the emergency floor gets nothing');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});

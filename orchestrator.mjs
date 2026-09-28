@@ -1445,15 +1445,18 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const sum = (list) => list.reduce((a, r) => a + footprint(r.agent), 0);
     return (Number.isFinite(res.jobsMem) ? res.jobsMem : sum(runs.filter((r) => !fresh.includes(r)))) + sum(fresh);
   }
-  // A worker's slots: the owner's cap (nodes.max_slots), or Auto (null) = min(its cores (a Mac keeps one for its owner),
-  // its runs + the Claude-sized runs its spare memory fits above its floor); and never more than its local cap allows
-  // (`node worker.mjs limit` on that machine, a hard ceiling: cap.mjs capSlots = its max tasks, its CPU at cpuPerTask cores
-  // a task, its runs + what fits in the rest of its RAM cap at the agent's footprint). Headroom is checked per claim either way.
-  const nodeCap = (n, agent = 'claude') => Math.min(n.maxSlots ?? Math.min(autoTasks(n.os, n.inventory?.cores || 1),
-    nodeRuns(n.id).length + Math.max(0, Math.floor((spareMem(n) - floorOf(n)) / footprint('claude')))),
-  capSlots(localCap(n), { runs: nodeRuns(n.id).length, jobsMem: jobsMem(n), footprint: footprint(agent), cpuPerTask: CFG.cpuPerTask?.[agent] ?? CPU_PER_TASK }));
+  // A worker's slots (BRIEF goal 9). The owner's cap (nodes.max_slots, set in Machines) is the limit: min(it, the worker's
+  // own max tasks from `node worker.mjs limit --max-tasks`), with no footprint or spare-memory arithmetic, and it is
+  // admitted unless its last MemAvailable is under MEM.pauseBelow (the emergency floor). Auto (null) = min(its cores (a
+  // Mac keeps one for its owner), its runs + the Claude-sized runs its spare memory fits above its floor), never more than
+  // its local cap allows (a hard ceiling: cap.mjs capSlots = its max tasks, its CPU at cpuPerTask cores a task, its runs +
+  // what fits in the rest of its RAM cap at the agent's footprint), and headroom above its floor is checked per claim.
+  const nodeCap = (n, agent = 'claude') => (n.maxSlots != null ? Math.min(n.maxSlots, localCap(n)?.maxTasks ?? Infinity)
+    : Math.min(autoTasks(n.os, n.inventory?.cores || 1), nodeRuns(n.id).length + Math.max(0, Math.floor((spareMem(n) - floorOf(n)) / footprint('claude'))),
+      capSlots(localCap(n), { runs: nodeRuns(n.id).length, jobsMem: jobsMem(n), footprint: footprint(agent), cpuPerTask: CFG.cpuPerTask?.[agent] ?? CPU_PER_TASK })));
+  const memOk = (n, agent) => (n.maxSlots != null ? !((n.resources?.memAvailable ?? Infinity) < MEM.pauseBelow) : headroom(n, agent) >= floorOf(n));
   const freeWorkers = (agent, taskId) => workerNodes(agent).filter((n) => nodeRuns(n.id).length < nodeCap(n, agent)
-    && headroom(n, agent) >= floorOf(n) && !(rejected.get(`${n.id}/${taskId}`) > Date.now()));
+    && memOk(n, agent) && !(rejected.get(`${n.id}/${taskId}`) > Date.now()));
   const workerSlots = (agent) => freeWorkers(agent).reduce((sum, n) => sum + nodeCap(n, agent) - nodeRuns(n.id).length, 0);
   // The owner drained the controller (Machines view): it starts no new work tasks; plan tasks still run here.
   const localDraining = () => !!nodesNow().find((n) => n.local)?.draining;

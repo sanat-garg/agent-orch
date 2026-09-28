@@ -1065,6 +1065,10 @@ extractCheck reports refused Done-when snippets; verify tests pass
 ## 2026-09-28 13:00 — #369 retention.mjs AUDIT #61: keep approval screenshots and review shots, prune stale uploads [done (check passed)]
 
 retention keeps referenced approval and review shots, prunes stale uploads
+
+## 2026-09-28 13:08 — #380 Sidebar usage card cycles through the VPS and every worker [done (check passed)]
+
+card rotates; Node tests pass, browser tests and screenshots impossible here
 ## 2026-09-28 13:01 — #373 files.mjs: GET /api/files/changed lists git-changed files and /api/files/diff serves one file's diff [done (check passed)]
 
 Changed-files and per-file diff routes added and tested
@@ -1208,6 +1212,11 @@ merge resolved; browser e2e tests and phone screenshot verified
 orchestrator.mjs conflicts resolved, rapid-overlap tests pass, merge uncommitted
 
 ## 2026-09-28 14:32 — #417 Integrate #378: Rapid mode: file overlap never blocks a free slot; merges handle it [verify failed (1)]
+## 2026-09-28 14:29 — #386 Integrate #380: Sidebar usage card cycles through the VPS and every worker [done (check passed)]
+
+Merge resolved; mini-rotate tests pass with main's machine sounds
+
+## 2026-09-28 14:29 — #386 Integrate #380: Sidebar usage card cycles through the VPS and every worker [verify failed (1)]
 
 Command: merge main again
 ## 2026-09-28 14:28 — #398 Integrate #381: oracle-vm node in the Machines graph opens the full server details [done (check passed)]
@@ -1250,3 +1259,6 @@ CONTEXT conflict resolved; e2e passes; phone screenshot saved
 ## 2026-09-28 14:33 — #417 Integrate #378: Rapid mode: file overlap never blocks a free slot; merges handle it [done (check passed)]
 
 merge conflicts resolved again, rapid-overlap tests pass
+## 2026-09-28 14:33 — #386 Integrate #380: Sidebar usage card cycles through the VPS and every worker [done (check passed)]
+
+Conflicts resolved and staged; mini-rotate tests pass (7/7)

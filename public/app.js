@@ -3089,7 +3089,8 @@ async function checkStatus() {
   try {
     const s = await api('/api/status');
     state.workspace = s.workspace;
-    $('hostName').textContent = s.host;
+    MINI.host = s.host;
+    miniRender();
     $('loginBanner').hidden = s.claudeSignedIn;
     const a = s.claudeAuth || {};
     if (!s.claudeSignedIn) {
@@ -3409,14 +3410,102 @@ function setBar(bar, pct) {
   bar.style.width = `${Math.max(0, Math.min(100, pct))}%`;
   bar.className = pct >= 90 ? 'crit' : pct >= 75 ? 'warn' : '';
 }
-function renderMini() {
-  const now = M.latest;
-  if (!now) return;
-  tween($('miniCpu'), now.cpu, fmtPct);
-  setBar($('miniCpuBar'), now.cpu);
-  tween($('miniMem'), now.mem, fmtPct);
-  setBar($('miniMemBar'), now.mem);
+// ----- the sidebar machine card -----
+// Rotates through the head, then every online worker (MC.nodes, GET /api/cluster/nodes), MINI_MS each with a cross-fade;
+// offline workers are skipped and counted ('+1 offline'). Hover or focus holds it; a dot jumps; a click opens the machine
+// shown (Server details for the head, a worker's node detail). id: the machine wanted, shown: the one painted.
+// test/ui-mini-rotate.test.mjs runs this block (from `const MINI` to miniClick) in Node.
+const MINI = { id: null, shown: null, host: '', timer: null, hold: new Set(), fading: false, fetch: null, dots: '' };
+const MINI_MS = 5000;
+function miniMachines(nodes, host) {
+  const head = nodes.find((n) => n.local) || { id: 'controller', local: true, name: host };
+  const workers = nodes.filter((n) => !n.local && n.enabled);
+  return { list: [head, ...workers.filter((n) => n.connected)], offline: workers.filter((n) => !n.connected).length };
 }
+const miniShown = (list) => list.find((n) => n.id === MINI.id) || list[0];
+// The machine `step` places after `id`; one that left the rotation restarts it at the head.
+function miniNext(list, id, step = 1) {
+  const at = list.findIndex((n) => n.id === id);
+  return at < 0 ? list[0].id : list[(at + step + list.length) % list.length].id;
+}
+// Forward one machine (the timer), or to `id` (a dot); either way the new one gets its full MINI_MS.
+function miniGo(step, id) {
+  const { list } = miniMachines(MC.nodes, MINI.host);
+  MINI.id = id ?? miniNext(list, miniShown(list).id, step);
+  miniArm();
+  miniRender();
+}
+function miniArm() {
+  clearTimeout(MINI.timer);
+  MINI.timer = null;
+  if (MINI.hold.size || miniMachines(MC.nodes, MINI.host).list.length < 2) return;
+  MINI.timer = setTimeout(() => miniGo(1), MINI_MS);
+}
+function miniClick() {
+  const n = miniShown(miniMachines(MC.nodes, MINI.host).list);
+  if (n.local) return openServer();
+  closeSidebar();
+  openNode(n.id);
+}
+function miniRender() {
+  const { list } = miniMachines(MC.nodes, MINI.host), n = miniShown(list);
+  const key = list.map((m) => m.id).join(' ');
+  if (key !== MINI.dots) {
+    MINI.dots = key;
+    $('miniDots').hidden = list.length < 2;
+    $('miniDots').replaceChildren(...list.map((m) => {
+      const b = el('button', 'ms-dot');
+      b.type = 'button';
+      b.dataset.id = m.id;
+      b.setAttribute('aria-label', `Show ${m.name}${m.local ? ' (head)' : ''}`);
+      b.addEventListener('click', () => miniGo(0, m.id));
+      return b;
+    }));
+  }
+  for (const b of $('miniDots').children) b.setAttribute('aria-current', String(b.dataset.id === n.id));
+  if (list.length < 2 || MINI.hold.size) { clearTimeout(MINI.timer); MINI.timer = null; } else if (!MINI.timer) miniArm();
+  if (MINI.fading) return; // the fade's end paints the newest numbers
+  if (MINI.shown && MINI.shown !== n.id && !reduceMotion.matches) {
+    MINI.fading = true;
+    $('miniSlide').classList.add('out');
+    setTimeout(() => { MINI.fading = false; $('miniSlide').classList.remove('out'); miniPaint(); }, 180);
+  } else miniPaint();
+}
+function miniPaint() {
+  const { list, offline } = miniMachines(MC.nodes, MINI.host), n = miniShown(list), swap = MINI.shown !== n.id;
+  MINI.shown = n.id;
+  // The head's numbers come live from its metric ticks; a worker's from its latest reading.
+  const live = n.local && M.latest, total = n.inventory?.mem;
+  const cpu = live ? M.latest.cpu : caCpu(n), mem = live ? M.latest.mem : caRam(n);
+  const gb = (b) => (b / 2 ** 30).toFixed(1).replace(/\.0$/, '');
+  const memText = mem == null ? '–' : total ? `${gb((total * mem) / 100)}/${gb(total)} GB` : fmtPct(mem);
+  const put = (node, text) => { if (swap) { clearTimeout(node._swap); node._next = null; node.classList.remove('blur-out'); node.textContent = text; } else blurSwap(node, text); };
+  put($('miniCpu'), cpu == null ? '–' : fmtPct(cpu));
+  put($('miniMem'), memText);
+  setBar($('miniCpuBar'), cpu ?? 0);
+  setBar($('miniMemBar'), mem ?? 0);
+  if (swap || $('hostName').textContent !== (n.name || MINI.host)) { // also the head renamed once its node row arrives
+    $('hostName').textContent = n.name || MINI.host;
+    $('miniRole').hidden = !n.local;
+    $('miniLive').hidden = !n.local; // the head's pulse is its live stream; a worker's numbers are its latest reading
+    $('miniOs').innerHTML = OS_ICON[n.os] || OS_ICON.linux;
+    $('miniOs').title = OS_NAME[n.os] || n.os || '';
+    $('miniStats').title = n.local ? 'Open server details' : `Open ${n.name}'s details`;
+  }
+  const running = n.tasks?.length;
+  $('miniTasks').textContent = running == null ? '' : running ? `${plural(running, 'task')} running` : 'Idle';
+  $('miniOff').textContent = offline ? `+${offline} offline` : '';
+  $('miniOff').title = offline ? MC.nodes.filter((m) => !m.local && m.enabled && !m.connected).map((m) => m.name).join(', ') : '';
+}
+// With Server details closed only this card reads the machines: at most every 10 s, and not while the page is hidden.
+function miniFetch() {
+  if (MINI.fetch || document.hidden) return;
+  MINI.fetch = setTimeout(() => { MINI.fetch = null; if (!document.hidden) loadMachines(); }, Math.max(0, MC.at + 10e3 - Date.now()));
+}
+$('miniMachine').addEventListener('mouseenter', () => { MINI.hold.add('hover'); miniArm(); });
+$('miniMachine').addEventListener('mouseleave', () => { MINI.hold.delete('hover'); miniArm(); });
+$('miniMachine').addEventListener('focusin', () => { MINI.hold.add('focus'); miniArm(); });
+$('miniMachine').addEventListener('focusout', (e) => { if (!$('miniMachine').contains(e.relatedTarget)) { MINI.hold.delete('focus'); miniArm(); } });
 
 // ----- plan usage -----
 function fmtReset(iso) {
@@ -3586,7 +3675,7 @@ function onMetrics(msg) {
     renderUsage(pressed);
     return;
   }
-  renderMini();
+  miniRender();
   if (serverOpen()) renderMetrics();
   updateLive();
 }
@@ -3656,7 +3745,7 @@ $('rangePicker').addEventListener('click', (e) => {
   renderRangePicker();
   loadHistory(true);
 });
-$('miniStats').addEventListener('click', openServer);
+$('miniStats').addEventListener('click', miniClick);
 setInterval(() => { if (M.usage) renderUsage(); }, 30e3); // keep the "in 2h 9m" countdowns current
 
 // ----- machines (cluster nodes) and the "Add machine" wizard -----
@@ -3685,10 +3774,12 @@ async function loadMachines() {
   try { MC.nodes = (await api('/api/cluster/nodes')).nodes || []; MC.at = Date.now(); } catch { return; } finally { MC.loading = false; }
   setMachineSounds(MC.nodes);
   renderMachines();
+  miniRender();
 }
 // Coalesces bursts (task updates, pushes) into one read while a node detail is open.
 function scheduleMachines(ms = 600) {
-  if ($('nodeModal').hidden || MC.timer) return;
+  if ($('nodeModal').hidden) return miniFetch();
+  if (MC.timer) return;
   MC.timer = setTimeout(() => { MC.timer = null; if (!$('nodeModal').hidden) loadMachines(); }, ms);
 }
 // Online / Draining / Disabled while connected; away: Connection lost (silent, no bye), Shut down (bye), Asleep (a legacy
@@ -4552,7 +4643,7 @@ const ND_CHARTS = [
 ];
 // The controller before GET /api/cluster/nodes has answered: its details need no node row.
 const ndNode = () => MC.nodes.find((n) => n.id === ND.id)
-  || (ND.id === 'controller' ? { id: 'controller', local: true, name: $('hostName').textContent, connected: true, enabled: true, tasks: [] } : undefined);
+  || (ND.id === 'controller' ? { id: 'controller', local: true, name: MINI.host || $('hostName').textContent, connected: true, enabled: true, tasks: [] } : undefined);
 function openNode(id) {
   const open = !$('nodeModal').hidden;
   if (!MC.nodes.some((n) => n.id === id) && id !== 'controller') return;

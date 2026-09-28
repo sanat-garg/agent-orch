@@ -760,6 +760,25 @@ code, pre, kbd { font-family: var(--mono); }
 .ms-note { font-size: 11.5px; color: var(--faint); line-height: 1.45; white-space: pre-line; }
 #usNote { min-height: 2.9em; } /* Keep the card steady while agent limits rotate. */
 .ms-note b { color: var(--ok); font-weight: 600; }
+/* The machine card rotates (app.js MINI): every slide has the same rows, so the card never changes height. */
+.ms-slide { display: flex; flex-direction: column; gap: 5px; min-width: 0; transition: opacity .18s ease; }
+.ms-slide.out { opacity: 0; }
+.ms-server .ms-row { grid-template-columns: 30px 1fr 72px; }
+.ms-server .ms-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ms-title small { font-weight: 500; color: var(--faint); }
+.ms-os { display: inline-grid; place-items: center; flex: none; color: var(--muted); }
+.ms-os svg { width: 14px; height: 14px; }
+.ms-foot { display: flex; gap: 8px; min-height: 1.4em; font-size: 11.5px; color: var(--faint); white-space: nowrap; }
+.ms-foot > span:first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ms-dots { display: flex; justify-content: center; margin-top: -4px; padding-bottom: 2px; }
+.ms-dots[hidden] { display: none; }
+.ms-dot { width: 18px; height: 14px; display: grid; place-items: center; padding: 0; border: 0; background: transparent; cursor: pointer; }
+.ms-dot::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--faint); opacity: .45; transition: opacity .18s ease, background .18s ease; }
+.ms-dot:hover::before { opacity: .8; }
+.ms-dot[aria-current="true"]::before { background: var(--accent); opacity: 1; }
+.ms-dot:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; border-radius: 4px; }
+@media (pointer: coarse) { .ms-dot { width: 28px; height: 28px; } }
+@media (prefers-reduced-motion: reduce) { .ms-slide, .ms-dot::before, .mini-stats .ms-bar i { transition: none; } }
 .plan { font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 99px; background: var(--accent-soft); color: var(--text); }
 
 /* live indicator: the dot pulses once for every sample that arrives */
@@ -1763,5 +1782,5 @@ button.dg-row:disabled { opacity: .6; cursor: progress; }
    12px minimum for metadata. Last in the file so it beats the base rules (.att-size, .fb-pop) that come after the other mobile blocks. */
 @media (max-width: 600px) {
   .msg.text, .tcard, .tcard .tc-title, .convo .ct, .dr-summary { font-size: 16px; }
-  .tc-tag, .ms-age, .ms-open, .ms-note, .cn-step.muted, .att-size, .fb-pop .m-head h2 { font-size: 12px; }
+  .tc-tag, .ms-age, .ms-open, .ms-note, .ms-foot, .cn-step.muted, .att-size, .fb-pop .m-head h2 { font-size: 12px; }
 }

@@ -25,6 +25,7 @@ import { createCluster } from './cluster.mjs';
 import { WS_PATH, PAIR_PATH, CLAIM_PATH } from './cluster-protocol.mjs';
 import { createRemoteLogins } from './remote-login.mjs';
 import { createExtensions } from './extensions.mjs';
+import { createAgentShare, wireAgentShare, shareTargets } from './agent-share.mjs';
 import { saveUpload, readUpload, placeUploads, attachmentView, attachmentNote, claudeImageBlocks, MAX_UPLOAD_BYTES, MAX_ATTACHMENTS } from './uploads.mjs';
 import { headRefusal } from './role.mjs';
 
@@ -710,9 +711,19 @@ const signInChanged = (id) => () => { clearLoginCache(); modelStore.refresh([id]
 // health: the compact status each Connections row shows (health.mjs), from the cached model and limit checks.
 const agentEntry = (a, extra = {}) => ({ id: a.id, label: a.label, installed: () => a.available(), signedIn: () => a.loggedIn(), envFilter: a.envFilter, afterChange: signInChanged(a.id),
   health: (st) => healthRow(a.id, { ...st, version: st.installed ? agentVersion(a.id) : null, models: modelCatalog(a.id), limits: limitStore.get(a.id) }), ...extra });
+// The head's Claude and Codex sign-ins, shared with its worker machines so none of them signs in (agent-share.mjs); set
+// once the cluster hub exists. Codex needs nothing extra; Claude needs one long-lived token, made here once.
+let agentShare = null;
 const connections = createConnections({
   entries: [
     agentEntry(AGENTS.claude, { spec: SPECS.claude, account: () => AGENTS.claude.account() }),
+    { id: 'claude-machines', label: 'Claude for your machines', installed: () => !!agentShare && AGENTS.claude.available(),
+      signedIn: () => !!agentShare?.hasClaude(), envFilter: AGENTS.claude.envFilter,
+      spec: { ...SPECS.claudeShare, logoutWarning: 'Your worker machines stop running Claude until you share it again. Codex stays shared.' },
+      onCapture: (token) => { const r = agentShare.setClaudeToken(token); if (r.error) throw new Error(r.error); },
+      logout: async () => agentShare.setClaudeToken(null),
+      ui: { on: 'Shared with your machines', off: 'Not shared with your machines yet',
+        connect: 'Share with machines', disconnect: 'Stop sharing' } },
     agentEntry(AGENTS.codex, { spec: SPECS.codex, account: () => codexAccount() }),
     { id: 'github', label: 'GitHub', installed: () => onPath('gh'), signedIn: () => gh.status().linked, account: () => gh.status().login,
       spec: SPECS.github, afterChange: () => gh.refresh() },
@@ -773,6 +784,14 @@ let resourcesTimer = null;
 function resourcesPush() { resourcesTimer ??= setTimeout(() => { resourcesTimer = null; clusterPush('resources'); }, 5000); }
 // The scheduler places work on online workers through the hub (orchestrator.mjs `place`/`runRemote`).
 if (cluster && !NO_ORCH) orch.attachCluster(cluster);
+// Workers get the head's Claude token and Codex sign-in when they connect and whenever either changes; a worker whose
+// Codex copy refreshed itself sends it back and the head keeps the newest (agent-share.mjs).
+if (cluster) {
+  agentShare = createAgentShare({ dataDir: DATA, send: (id, frame) => cluster.send(id, frame), targets: shareTargets(cluster),
+    log: (m) => console.log(`[share] ${m}`),
+    onChange: () => { const list = connList(); for (const ws of allClients) send(ws, { t: 'connections', connections: list }); } });
+  wireAgentShare(cluster, agentShare, (m) => console.log(`[share] ${m}`));
+}
 if (cluster) remoteLogins = createRemoteLogins({ cluster, local: () => connections.list(),
   onChange: (node) => { const list = remoteLogins.list(node); for (const ws of allClients) send(ws, { t: 'connections', node, connections: list }); } });
 

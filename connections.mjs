@@ -30,6 +30,17 @@ export const SPECS = {
     logout: [path.join(BIN, 'claude'), 'auth', 'logout'],
     logoutWarning: 'Every chat and orchestrator agent in agent-orch runs on this Claude login. Signing out stops them all until you sign in again.',
   },
+  // `claude setup-token`: a long-lived (about a year) OAuth token on the subscription, for machines that don't sign
+  // in themselves (agent-share.mjs shares it with the workers). The same OAuth page and pasted code as a sign-in; the
+  // token it prints is captured, then the session and its scrollback are killed.
+  claudeShare: {
+    start: [path.join(BIN, 'claude'), 'setup-token'],
+    url: /(https:\/\/claude\.(?:com|ai)\/\S*oauth\/authorize\S+)/,
+    needsPastedCode: true,
+    successRe: /sk-ant-oat01-/,
+    capture: /(sk-ant-oat01-[A-Za-z0-9_-]{20,})/,
+    captureError: "claude setup-token finished without printing a token",
+  },
   codex: {
     start: ['codex', 'login', '--device-auth', '-c', 'forced_login_method="chatgpt"'],
     url: /(https:\/\/auth\.openai\.com\/\S+)/,
@@ -68,7 +79,9 @@ export function parsePane(spec, text) {
   const exitCode = Number(ex[1]);
   const ok = exitCode === 0 || !!spec.successRe?.test(text);
   const before = text.slice(0, ex.index).split('\n').map((l) => l.trim()).filter(Boolean);
-  const error = ok ? null : (before.filter((l) => /error|fail|expired|denied|cancel/i.test(l)).pop() || before.pop() || `exited with code ${exitCode}`).slice(0, 300);
+  // A failure's last line is shown in the UI: never with a token in it.
+  const error = ok ? null : (before.filter((l) => /error|fail|expired|denied|cancel/i.test(l)).pop() || before.pop() || `exited with code ${exitCode}`)
+    .replace(/sk-ant-[A-Za-z0-9_-]+/g, '[token]').slice(0, 300);
   return { url, code, prompts, ...(promptText ? { prompt: promptText } : {}), exited: true, exitCode, ok, error };
 }
 
@@ -148,8 +161,9 @@ export function createConnections({ entries, env = process.env, onChange = () =>
         if (signedIn) detail = e.detail?.() || {};
         if (e.health) detail.health = e.health({ installed, signedIn, account });
       } catch {}
-      return { id: e.id, label: e.label, installed, signedIn, account, canLogin: !!e.spec, canLogout: !!e.spec?.logout,
-        ...(e.spec?.logoutWarning ? { logoutWarning: e.spec.logoutWarning } : {}), ...detail, login: view(logins.get(e.id)) || null };
+      // ui: an entry's own wording ({on, off, connect, disconnect}) for rows that aren't a plain sign-in.
+      return { id: e.id, label: e.label, installed, signedIn, account, canLogin: !!e.spec, canLogout: !!(e.spec?.logout || e.logout),
+        ...(e.spec?.logoutWarning ? { logoutWarning: e.spec.logoutWarning } : {}), ...(e.ui ? { ui: e.ui } : {}), ...detail, login: view(logins.get(e.id)) || null };
     });
   }
   const changed = () => { try { onChange(list()); } catch {} };
@@ -178,6 +192,13 @@ export function createConnections({ entries, env = process.env, onChange = () =>
         if (l.answered.has(i)) continue;
         l.answered.add(i);
         await tmux(['send-keys', '-t', `=${session(id)}:`, ...l.spec.answers[i][1]]);
+      }
+      // spec.capture: a value the command prints on success (a token) goes to the entry's onCapture before the
+      // session (and so its scrollback) is killed; it is never kept in the login's view or a log.
+      if (p.exited && p.ok && l.spec.capture) {
+        const v = grab(l.spec.capture, r.out.replace(/\r/g, ''));
+        if (!v) return finish(id, 'failed', l.spec.captureError || 'the command finished without printing what was expected', l);
+        try { await e.onCapture(v); } catch (err) { return finish(id, 'failed', err.message, l); }
       }
       if (p.exited) return finish(id, p.ok ? 'done' : 'failed', p.error, l);
       if (p.url !== l.url || p.code !== l.code) { l.url = p.url; l.code = p.code; changed(); }
@@ -240,9 +261,14 @@ export function createConnections({ entries, env = process.env, onChange = () =>
   async function logout(id, { confirm = false } = {}) {
     const e = byId.get(id);
     if (!e) return { status: 404, error: 'No such connection' };
-    if (!e.spec?.logout) return { status: 400, error: `${e.label} can't be signed out from here` };
+    if (!e.spec?.logout && !e.logout) return { status: 400, error: `${e.label} can't be signed out from here` };
+    if (e.spec?.logoutWarning && confirm !== true) return { status: 409, error: e.spec.logoutWarning, needsConfirm: true };
+    if (e.logout) { // the entry's own "disconnect" (e.g. stop sharing), not a CLI sign-out
+      const r = await e.logout();
+      changed();
+      return r?.error ? { status: r.status || 500, error: r.error } : { status: 200, ok: true };
+    }
     const argv = e.spec.logout;
-    if (e.spec.logoutWarning && confirm !== true) return { status: 409, error: e.spec.logoutWarning, needsConfirm: true };
     const unset = new Set(e.envFilter ? Object.keys(env).filter((k) => e.envFilter.test(k)) : []);
     const r = await new Promise((resolve) => execFile(argv[0], argv.slice(1), {
       timeout: 15000, env: Object.fromEntries(Object.entries(env).filter(([k]) => !unset.has(k))),

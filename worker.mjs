@@ -35,6 +35,7 @@ import {
 import { AGENTS, agentStatus, clearLoginCache, fetchLimits, modelCatalog, readVersion, runAgentCli } from './agents.mjs';
 import { agentAccount } from './health.mjs';
 import { createNodeLogins } from './remote-login.mjs';
+import { parseCodexAuth } from './agent-share.mjs';
 import { createModelStore } from './models.mjs';
 import { createLimitStore } from './usage.mjs';
 import { cpuPercent, createResources, readSystem, registerPid, withOwner } from './resources.mjs';
@@ -357,13 +358,62 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   // until the controller re-attaches it (or cancels it): its branch may belong to the new run by now.
   const pastGrace = (job) => !job.attached && job.detachedAt && Date.now() - job.detachedAt > graceMs;
 
+  // ---- the head's agent sign-ins (agent.credential, agent-share.mjs): nothing to sign in on this machine.
+  // claude: the head's long-lived token, as CLAUDE_CODE_OAUTH_TOKEN for every Claude this worker starts (runs, the
+  //         sign-in check, model and limit reads). Memory only: the head sends it again on every connect.
+  // codex:  the head's ~/.codex/auth.json, written to this account's ~/.codex/auth.json (0600). Codex refreshes it now
+  //         and then; a refresh made here goes back to the head, which keeps the newest and re-shares it.
+  const codexAuthFile = path.join(os.homedir(), '.codex', 'auth.json');
+  let codexShared = null; // the text last taken from, or sent back to, the head
+  const readCodexAuth = () => { try { return fs.readFileSync(codexAuthFile, 'utf8'); } catch { return null; } };
+  function applyCredential(msg) {
+    if (msg.agent === 'claude') {
+      if (msg.value) process.env.CLAUDE_CODE_OAUTH_TOKEN = msg.value;
+      else delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      log(msg.value ? "Claude: using the head's shared account" : 'Claude: the head stopped sharing its account');
+    } else if (msg.agent === 'codex') {
+      if (msg.value) {
+        if (readCodexAuth() !== msg.value) {
+          fs.mkdirSync(path.dirname(codexAuthFile), { recursive: true, mode: 0o700 });
+          const tmp = `${codexAuthFile}.${process.pid}.tmp`;
+          fs.writeFileSync(tmp, msg.value, { mode: 0o600 });
+          fs.renameSync(tmp, codexAuthFile);
+        }
+        codexShared = msg.value;
+        log("Codex: using the head's sign-in");
+      } else {
+        // The head signed out: drop the copy it gave us (a sign-in made here by hand is left alone).
+        if (codexShared && readCodexAuth() === codexShared) fs.rmSync(codexAuthFile, { force: true });
+        codexShared = null;
+        log('Codex: the head stopped sharing its sign-in');
+      }
+    }
+    clearLoginCache();
+    sendInventory();
+    // Its models were read (or not, signed out) before this sign-in: read them again, then report.
+    models.refresh([msg.agent]).catch(() => {}).then(() => sendInventory());
+  }
+  // Codex rewrote the shared file (a token refresh): the same account, newer → back to the head.
+  function checkCodexRefresh() {
+    if (!codexShared) return;
+    const now = readCodexAuth();
+    if (!now || now === codexShared) return;
+    const mine = parseCodexAuth(now), was = parseCodexAuth(codexShared);
+    if (!mine || !was || mine.accountId !== was.accountId || mine.lastRefresh <= was.lastRefresh) return;
+    if (raw(MSG.AGENT_CREDENTIAL, { agent: 'codex', value: now })) { codexShared = now; log('Codex refreshed its sign-in here: sent the new one to the head'); }
+  }
+  const credWatch = setInterval(checkCodexRefresh, Number(process.env.AGENT_ORCH_CRED_WATCH_MS) || 10_000);
+  credWatch.unref?.();
+
   // ---- inventory and resources
   async function inventory() {
     const agents = await Promise.all(Object.values(AGENTS).map(async (a) => {
       const installed = !!a.available(), signedIn = installed && !!a.loggedIn();
       const version = installed ? await readVersion(a.id).catch(() => null) : null;
       const cat = modelCatalog(a.id);
-      return { id: a.id, installed, version, signedIn, account: signedIn ? agentAccount(a.id) : null, models: cat.models, modelsError: cat.error };
+      // shared: signed in with the head's sign-in (agent.credential), not one made on this machine.
+      const shared = a.id === 'claude' ? !!process.env.CLAUDE_CODE_OAUTH_TOKEN : !!codexShared && readCodexAuth() === codexShared;
+      return { id: a.id, installed, version, signedIn, shared, account: signedIn ? agentAccount(a.id) : null, models: cat.models, modelsError: cat.error };
     }));
     let gitVersion = null;
     try { gitVersion = /\d+\.\d+[\w.]*/.exec(await git(home, ['--version']))?.[0] || null; } catch {}
@@ -374,11 +424,15 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     };
   }
   let invBusy = null;
+  // One inventory at a time; a change while one is being gathered (a sign-in arriving) sends another after it, so the
+  // head never keeps a reading taken before the change.
+  let invAgain = false;
   function sendInventory() {
-    if (!live() || invBusy) return invBusy;
+    if (!live()) return invBusy;
+    if (invBusy) { invAgain = true; return invBusy; }
     return invBusy = inventory().then((inv) => { lastInv = inv; return raw(MSG.INVENTORY, inv); })
       .catch((e) => { log(`inventory failed: ${e.message}`, 'warn'); nodeError('inventory', `inventory failed: ${e.message}`, { stack: e.stack }); })
-      .finally(() => { invBusy = null; });
+      .finally(() => { invBusy = null; if (invAgain) { invAgain = false; sendInventory(); } });
   }
 
   // ---- health telemetry, sent with every resources frame: CPU % per core, memory, swap, disk free on the volume holding
@@ -657,6 +711,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       case MSG.JOB_PAUSE: return stopJob(msg.job, 'pause');
       case MSG.JOB_RESUME: return resumeJob(msg);
       case MSG.GIT_CREDENTIAL: gitCreds.set(msg.host, msg.token); return log(`received a git credential for ${msg.host}`);
+      case MSG.AGENT_CREDENTIAL: return applyCredential(msg);
       case MSG.MODELS_REFRESH: {
         clearLoginCache();
         await models.refresh([msg.agent]);
@@ -1087,7 +1142,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     ]);
     for (const j of allJobs()) flushJob(j);
     raw(MSG.BYE, { reason });
-    clearInterval(flusher); clearInterval(beat); clearInterval(clock); clearInterval(sampler);
+    clearInterval(flusher); clearInterval(beat); clearInterval(clock); clearInterval(sampler); clearInterval(credWatch);
     models.stop(); limits.stop(); resources?.stop(); awake?.stop();
     await status?.close().catch(() => {});
     // Let the bye and the close frame out before the process exits.

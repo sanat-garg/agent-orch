@@ -238,7 +238,9 @@ async function runClaude({ model, prompt, cwd, resume, systemAppend, signal, onE
 export function parseClaudeAuth(out) {
   let j;
   try { j = JSON.parse(String(out || '')); } catch { return { ok: false, email: null }; }
-  const ok = j?.loggedIn === true && (j.apiProvider || 'firstParty') === 'firstParty' && /^claude\.ai$/i.test(j.authMethod || '');
+  // claude.ai: an interactive subscription login; oauth_token: CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token` (also the
+  // subscription; how worker machines run Claude on the head's account, agent-share.mjs). API keys never count.
+  const ok = j?.loggedIn === true && (j.apiProvider || 'firstParty') === 'firstParty' && /^(claude\.ai|oauth_token)$/i.test(j.authMethod || '');
   return { ok, email: ok ? j.email || null : null };
 }
 

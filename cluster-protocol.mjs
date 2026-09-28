@@ -2,8 +2,9 @@
 // worker daemon, so it has no deps beyond node built-ins. A frame is one JSON text message over the WebSocket:
 //   {t, seq, ts, ...fields}   t = a MSG type, seq = per-sender counter (starts at 1 per connection), ts = epoch ms.
 // Replies and acks name the frame they answer with `re` (its seq). Job frames carry `job` = the controller's task id.
-// Secrets never travel over the wire (the node token rides in the upgrade's Authorization header); the one exception
-// is `git.credential`, sent only to nodes the owner explicitly authorised to push with their GitHub token.
+// Secrets never travel over the wire (the node token rides in the upgrade's Authorization header); the exceptions are
+// `git.credential`, sent only to nodes the owner explicitly authorised to push with their GitHub token, and
+// `agent.credential`: the head's Claude worker token and Codex sign-in, so no worker needs a sign-in of its own.
 
 import crypto from 'node:crypto';
 
@@ -29,7 +30,7 @@ export const MSG = {
   JOB_OFFER: 'job.offer', JOB_ACCEPT: 'job.accept', JOB_REJECT: 'job.reject', JOB_START: 'job.start',
   JOB_EVENT: 'job.event', JOB_CHECK: 'job.check', JOB_WIP: 'job.wip', JOB_DONE: 'job.done',
   JOB_CANCEL: 'job.cancel', JOB_PAUSE: 'job.pause', JOB_RESUME: 'job.resume', JOB_ATTACH: 'job.attach', WAKE: 'wake',
-  GIT_CREDENTIAL: 'git.credential',
+  GIT_CREDENTIAL: 'git.credential', AGENT_CREDENTIAL: 'agent.credential',
   LOGIN_START: 'login.start', LOGIN_STATE: 'login.state', LOGIN_CODE: 'login.code', LOGIN_CANCEL: 'login.cancel', LOGIN_LOGOUT: 'login.logout',
   MODELS_REFRESH: 'models.refresh', MODELS: 'models', LIMITS_REFRESH: 'limits.refresh', LIMITS: 'limits',
   JOB_PHASE: 'job.phase', JOB_ERROR: 'job.error', NODE_ERROR: 'node.error', LOGS_TAIL: 'logs.tail', LOGS: 'logs', NODE_UPDATE: 'node.update',
@@ -41,7 +42,7 @@ const C = 'c', W = 'w', B = 'both';
 export const DIRECTION = {
   hello: W, welcome: C, inventory: W, resources: W, heartbeat: B, ack: B, error: B, bye: B,
   'job.offer': C, 'job.accept': W, 'job.reject': W, 'job.start': C, 'job.event': W, 'job.check': W, 'job.wip': W,
-  'job.done': W, 'job.cancel': C, 'job.pause': C, 'job.resume': C, 'job.attach': C, wake: W, 'git.credential': C,
+  'job.done': W, 'job.cancel': C, 'job.pause': C, 'job.resume': C, 'job.attach': C, wake: W, 'git.credential': C, 'agent.credential': B,
   'login.start': C, 'login.state': W, 'login.code': C, 'login.cancel': C, 'login.logout': C,
   'models.refresh': C, models: W, 'limits.refresh': C, limits: W,
   'job.phase': W, 'job.error': W, 'node.error': W, 'logs.tail': C, logs: W, 'node.update': C, 'node.policy': C,
@@ -52,7 +53,7 @@ export const DIRECTION = {
 // Feature 'policy' also covers the job.reject reason 'power'; feature 'cap' (no frame type of its own) is the job.reject
 // reason 'cap': the worker's local cap (cap.mjs) is full.
 export const FEATURES = { 'job.phase': 'phases', 'job.error': 'errors', 'node.error': 'errors', 'logs.tail': 'logs', logs: 'logs', 'node.update': 'update',
-  'node.policy': 'policy' };
+  'node.policy': 'policy', 'agent.credential': 'creds' };
 export const FEATURE_LIST = [...new Set([...Object.values(FEATURES), 'cap'])];
 // Compute-only workers (BRIEF goal 11): the only frames a worker acts on, all from the head it dialled. Connection
 // upkeep; jobs (job.*, plus git.credential for their pushes); remote sign-in driven from the head's Connections (login.*);
@@ -61,7 +62,7 @@ export const FEATURE_LIST = [...new Set([...Object.values(FEATURES), 'cap'])];
 // sends one: there is no chat, prompt, planner, reflection or settings frame for a worker.
 export const WORKER_ACCEPTS = Object.freeze([
   MSG.WELCOME, MSG.HEARTBEAT, MSG.ACK, MSG.ERROR, MSG.BYE,
-  MSG.JOB_OFFER, MSG.JOB_START, MSG.JOB_CANCEL, MSG.JOB_PAUSE, MSG.JOB_RESUME, MSG.JOB_ATTACH, MSG.GIT_CREDENTIAL,
+  MSG.JOB_OFFER, MSG.JOB_START, MSG.JOB_CANCEL, MSG.JOB_PAUSE, MSG.JOB_RESUME, MSG.JOB_ATTACH, MSG.GIT_CREDENTIAL, MSG.AGENT_CREDENTIAL,
   MSG.LOGIN_START, MSG.LOGIN_CODE, MSG.LOGIN_CANCEL, MSG.LOGIN_LOGOUT,
   MSG.MODELS_REFRESH, MSG.LIMITS_REFRESH, MSG.LOGS_TAIL, MSG.NODE_UPDATE, MSG.NODE_POLICY,
 ]);
@@ -127,6 +128,11 @@ const S = {
   // A time jump on the worker (a laptop's sleep): it was suspended from sleptAt (epoch ms) for sleptMs.
   wake: { sleptAt: 'num', sleptMs: 'int' },
   'git.credential': { host: 'str', token: 'str' },
+  // The head's sign-in for an agent, so workers need none (agent-share.mjs). claude: the long-lived token from
+  // `claude setup-token` (the worker runs Claude with CLAUDE_CODE_OAUTH_TOKEN); codex: the text of ~/.codex/auth.json.
+  // value null = the head stopped sharing it. Controller → worker to share; worker → controller only for codex, when
+  // the worker's copy refreshed itself (the head keeps the newest and re-shares it, so every machine stays signed in).
+  'agent.credential': { agent: 'agent', value: 'str?' },
   // Remote sign-in (the worker runs connections.mjs locally): `login` = the controller's id for this attempt.
   // login.state.prompt: a CLI question nobody auto-answers; message: the error on failed.
   'login.start': { login: 'str', agent: 'agent' },
@@ -199,7 +205,7 @@ export function validate(msg, { from } = {}) {
     if (v == null) { if (opt) continue; return `${msg.t}: missing ${key}`; }
     if (!TYPES[base](v)) return `${msg.t}: bad ${key}`;
   }
-  if (msg.t !== MSG.GIT_CREDENTIAL) {
+  if (msg.t !== MSG.GIT_CREDENTIAL && msg.t !== MSG.AGENT_CREDENTIAL) {
     const bad = secretKeys({ ...msg, events: undefined });
     if (bad.length) return `${msg.t}: secrets may not travel over the wire (${bad.join(', ')})`;
   }

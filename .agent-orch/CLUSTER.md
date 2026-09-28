@@ -77,7 +77,8 @@ Direction: C = controller → worker, W = worker → controller (`DIRECTION`; `v
 | `job.done` | W | job, outcome, text, usage, limits, sha, sessionId | the agent turn ended (outcomes = `runAgentCli`'s + setup_failed, lost) |
 | `job.cancel` / `job.pause` / `job.resume` | C | job (+reason / +prompt) | cancel = kill + push WIP + drop worktree (reason `reassigned`/`disabled`: no push); pause = kill + keep worktree + push WIP; resume = continue the session |
 | `job.attach` | C | job, from | after a reconnect: the controller still wants the job and has its events up to `from`; the worker replays from there |
-| `git.credential` | C | host, token | the only frame that may carry a secret (see Security) |
+| `git.credential` | C | host, token | one of two frames that may carry a secret (see Security) |
+| `agent.credential` | both | agent, value (null = stop sharing) | C→W: the head's Claude worker token / Codex `auth.json`; W→C: a Codex refresh made on the worker (see Security); only with feature `creds` |
 | `login.start` / `login.code` / `login.cancel` / `login.logout` | C | login, agent / login, code / login / login, agent | remote sign-in and sign-out: connections.mjs runs on the worker (tmux, or a `script` pty when tmux is missing) |
 | `login.state` | W | login, state (starting, url, waiting_code, done, failed, cancelled, signed_out), url, code, account, message, prompt | relayed to the owner's Connections sheet for that node |
 | `models.refresh` / `limits.refresh` | C | agent | the owner pressed refresh for that node's agent (nothing polls: BRIEF goal 7) |
@@ -343,10 +344,21 @@ A worker's owner decides how much of the machine the cluster may use; everything
   account, FileVault on) so agents can't read the owner's home, keychain or browser profiles; launchd runs it as
   that user (a LaunchDaemon with `UserName`, or the owner's LaunchAgent through a one-command sudoers rule). Agent env is stripped exactly as on the controller (API_ENV / `envFilter`), so runs stay on
   the subscription login.
-- **Secrets never travel over the wire**: the validators refuse any frame whose keys look like secrets
-  (`secretKeys`: `*token`, `*secret`, `password`, `api_key`, `cookie`, `credential(s)`, `authorization`), repo URLs
-  with embedded credentials, and agent logins: each machine signs in its own agents locally via `login.*` (the CLI's
-  OAuth tokens stay on that machine). The single exception is `git.credential {host, token}`: a GitHub token the
+- **Agent sign-ins come from the head** (agent-share.mjs; the owner's rule: nothing to sign in on a worker). Two
+  frames carry them, `agent.credential {agent, value}`, sent as a worker connects and whenever they change:
+  - Claude: a long-lived token the owner creates once on the head (Connections → Claude for your machines → Share
+    with machines runs `claude setup-token`; the token is captured from that session, which is then killed, and kept
+    in `<DATA>/agent-share.json`, 0600). The worker holds it in memory and runs Claude with `CLAUDE_CODE_OAUTH_TOKEN`
+    (no credentials file, no macOS Keychain). The head's own login and its refresh token never leave the head.
+  - Codex: the head's `~/.codex/auth.json` (a ChatGPT login; copying it is how Codex signs in headless machines),
+    written to the worker account's `~/.codex/auth.json` (0600). Its refresh token rotates, so a refresh made on any
+    machine is sent back (W→C) and the head keeps it only for the same ChatGPT account and a newer `last_refresh`,
+    then re-shares it; no machine is left with a used refresh token.
+  Null stops sharing (the worker drops the token, or the copy it was given). A machine can still sign in to an
+  account of its own (`login.*`, for more quota); its Connections row shows which applies.
+- **Other secrets never travel over the wire**: the validators refuse any frame whose keys look like secrets
+  (`secretKeys`: `*token`, `*secret`, `password`, `api_key`, `cookie`, `credential(s)`, `authorization`), except the two
+  `*.credential` frames, and repo URLs with embedded credentials. `git.credential {host, token}` is a GitHub token the
   owner explicitly authorises per node in the UI (a fine-grained token limited to the project repos with
   contents:write is recommended); the worker keeps it in memory or a 0600 git credential store, never in a repo URL
   or a log. Without it the worker uses its own `gh auth`/ssh key.

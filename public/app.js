@@ -6416,6 +6416,8 @@ async function linkGitHub() {
 const CONN_ICONS = {
   claude: '<path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6L5.6 18.4" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>',
   codex: '<path d="M12 2.8l8 4.6v9.2l-8 4.6-8-4.6V7.4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M9 10l2.5 2L9 14M13 14.5h3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+  // Claude, shared with the worker machines (agent-share.mjs): the Claude mark over a small laptop.
+  'claude-machines': '<path d="M12 3v9M7.5 7.5h9M8.8 4.3l6.4 6.4M15.2 4.3l-6.4 6.4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M5 15.5h14v3.5H5zM3 21h18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>',
 };
 const connIcon = (id) => {
   const s = id === 'github' ? $('repoLink').querySelector('svg').cloneNode(true) : null;
@@ -6586,7 +6588,8 @@ async function connStart(c) {
 }
 async function connLogout(c) {
   const where = c.node ? CONN.nodes.find((n) => n.id === c.node)?.name || 'that machine' : 'this server';
-  if (!confirm(c.logoutWarning ? `Sign out of ${c.label} on ${where}?\n\n${c.logoutWarning}` : `Sign out of ${c.label} on ${where}?`)) return;
+  const ask = c.ui?.disconnect ? `${c.ui.disconnect}: ${c.label}?` : `Sign out of ${c.label} on ${where}?`;
+  if (!confirm(c.logoutWarning ? `${ask}\n\n${c.logoutWarning}` : ask)) return;
   await connAction(c, 'logout', c.logoutWarning ? { confirm: true } : {});
 }
 // An agent CLI whose limits can't be read at all (health.limits.exposed false; see .agent-orch/AGENTS.md).
@@ -6633,9 +6636,9 @@ async function refreshHealth() {
 $('connsRefresh').addEventListener('click', refreshHealth);
 function connStatus(c) {
   if (!c.installed) return ['', 'Not installed'];
-  if (c.signedIn) return ['on', c.account ? `Connected as ${c.account}` : 'Connected'];
+  if (c.signedIn) return ['on', c.ui?.on || (c.account ? `Connected as ${c.account}` : 'Connected')];
   if (c.login?.state === 'waiting') return ['wait', 'Signing in…'];
-  return ['warn', 'Not signed in'];
+  return ['warn', c.ui?.off || 'Not signed in'];
 }
 function connPanel(c) {
   const l = c.login, box = el('div', 'cn-panel');
@@ -6744,12 +6747,12 @@ function renderConnections(force) {
     main.append(connIcon(c.id), info);
     const waiting = c.login?.state === 'waiting';
     if (c.installed && c.signedIn && c.canLogout && !waiting) {
-      const b = el('button', 'btn small cn-btn', 'Disconnect');
+      const b = el('button', 'btn small cn-btn', c.ui?.disconnect || 'Disconnect');
       b.type = 'button';
       b.onclick = () => connLogout(c);
       main.append(b);
     } else if (c.installed && !c.signedIn && c.canLogin && !waiting) {
-      const b = el('button', 'btn small primary cn-btn', 'Connect');
+      const b = el('button', 'btn small primary cn-btn', c.ui?.connect || 'Connect');
       b.type = 'button';
       b.onclick = () => connStart(c);
       main.append(b);

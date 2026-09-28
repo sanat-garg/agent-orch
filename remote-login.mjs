@@ -161,9 +161,15 @@ export function createRemoteLogins({ cluster, local = () => [], onChange = () =>
       if (l?.state === 'waiting' && !n.connected) end(l, 'failed', `${n.name} went offline`);
       const installed = !!a.installed, signedIn = installed && !!a.signedIn, account = signedIn ? a.account || null : null;
       const spec = SPECS[a.id];
+      // shared: signed in with the head's own sign-in (agent-share.mjs), so there is nothing to sign in or out here.
+      // Unshared, the row says where to share it; signing this machine in to an account of its own still works (more quota).
+      const shared = signedIn && !!a.shared;
+      const ui = shared ? { on: 'From the head: nothing to sign in on this machine' }
+        : { off: a.id === 'claude' ? 'Not shared yet: on this server, Connections → Claude for your machines → Share with machines'
+          : 'Sign in to Codex on this server: machines get it automatically' };
       return {
-        id: a.id, label: AGENTS[a.id].label, installed, signedIn, account, node, connected: n.connected,
-        canLogin: !!spec && n.connected, canLogout: !!spec?.logout && n.connected,
+        id: a.id, label: AGENTS[a.id].label, installed, signedIn, account, node, connected: n.connected, shared, ui,
+        canLogin: !!spec && n.connected && !shared, canLogout: !!spec?.logout && n.connected && !shared,
         ...(spec?.logoutWarning ? { logoutWarning: `Tasks placed on ${n.name} with ${AGENTS[a.id].label} stop until it is signed in again.` } : {}),
         health: healthRow(a.id, { installed, signedIn, account, version: a.version || null,
           models: { models: a.models || [], error: a.modelsError || null, at: null }, limits: inv.limits?.[a.id] }),

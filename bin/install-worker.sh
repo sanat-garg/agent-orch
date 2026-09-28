@@ -114,7 +114,9 @@ install_agents() {
   local a g=()
   [[ -w "$(npm prefix -g 2>/dev/null || echo /usr)" ]] || g=(sudo)
   for a in ${AGENTS//,/ }; do
-    if command -v "$a" >/dev/null; then say "$a already installed"; continue; fi
+    # The worker runs Claude from ~/.local/bin/claude (agents.mjs): a claude elsewhere on PATH doesn't count.
+    if [[ "$a" == claude ]]; then if [[ -x "$HOME/.local/bin/claude" ]]; then say "claude already installed"; continue; fi
+    elif command -v "$a" >/dev/null; then say "$a already installed"; continue; fi
     say "Installing $a"
     case "$a" in
       claude) if ((DRY)); then echo "+ curl -fsSL https://claude.ai/install.sh | bash"; else curl -fsSL https://claude.ai/install.sh | bash </dev/null; fi ;;
@@ -185,7 +187,7 @@ main() {
   install_service
   say "Done. Live status (connection, cap, running tasks; q quits): node $DIR/worker.mjs status · logs: journalctl -u $UNIT -f"
   say "Cap what this machine lends the cluster: node $DIR/worker.mjs limit --cpu 2 --mem 4   (cores or %, GB or %; --show, --reset)"
-  say "Next: sign the agents in on this machine (the head's Connections window, or run \`claude\` / \`codex login --device-auth\` here)."
+  say "Claude and Codex run on the head's accounts: nothing to sign in here. If Claude isn't shared yet, on the head open Connections → Claude for your machines → Share with machines."
 }
 
 main "$@"

@@ -156,7 +156,14 @@ install_agents() {
   [[ -n "$AGENTS" ]] || return 0
   local a ok
   for a in ${AGENTS//,/ }; do
-    if command -v "$a" >/dev/null; then say "$a already installed ($(command -v "$a"))"; continue; fi
+    # The worker runs Claude from ~/.local/bin/claude (agents.mjs), so a claude elsewhere on PATH (the admin's
+    # Homebrew copy) doesn't count; codex is found anywhere on the worker's PATH.
+    local have=''
+    case "$a" in
+      claude) if [[ -x "$HOME/.local/bin/claude" ]]; then have="$HOME/.local/bin/claude"; fi ;;
+      codex) have="$(command -v codex || true)" ;;
+    esac
+    if [[ -n "$have" ]]; then say "$a already installed ($have)"; continue; fi
     say "Installing $a into ~/.local/bin"
     ok=1
     case "$a" in
@@ -442,7 +449,7 @@ finish() { # finish WORKER-HOME RUN-AS-PREFIX
   say "Live status (connection, cap, running tasks; q quits): ${2}node $1/agent-orch-worker/worker.mjs status"
   if [[ -n "$STATUS_NOTE" ]]; then say "$STATUS_NOTE"; else say "To open it in Terminal at every login, run this installer again with --status-window."; fi
   say "Cap what this Mac lends the cluster: ${2}node $1/agent-orch-worker/worker.mjs limit --cpu 4 --mem 8   (cores or %, GB or %; --show, --reset)"
-  say "Next: sign the agents in on this machine (the head's Connections window)."
+  say "Claude and Codex run on the head's accounts: nothing to sign in here. If Claude isn't shared yet, on the head open Connections → Claude for your machines → Share with machines."
 }
 
 main "$@"

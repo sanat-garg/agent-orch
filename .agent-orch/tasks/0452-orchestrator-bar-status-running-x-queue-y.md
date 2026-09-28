@@ -13,3 +13,7 @@ In the orchestrator bar above the composer (#orchBar, status element in public/a
 ## Done when
 
 `node --test test/ui-orchbar-status*.test.mjs` passes (Running 3 · Queue 7, Paused · Queue 7, Idle)
+
+## Result — done (check passed) (2026-09-28 15:14)
+
+AGENT-ORCH-STATUS: done — orchestrator bar shows Running X · Queue Y; tests pass

@@ -95,8 +95,8 @@ test('the orchestrator bar is a status word plus Queue and Pause only', () => {
   }
   assert.doesNotMatch(bar, /[⏸▶]/, 'Pause/Resume are plain text');
   assert.doesNotMatch(appJs, /[⏸▶] (Pause|Resume)/);
-  assert.match(appJs, /paused \? 'Paused' : running \? 'Running' : queued \? 'Waiting' : 'Idle'/);
-  assert.match(appJs, /\$\('obQueueCount'\)\.hidden = !queued/);
+  assert.match(appJs, /status = orchBarStatus\(paused, p\?\.counts\?\.running \|\| 0, p\?\.counts\?\.queued \|\| 0\)/);
+  assert.ok(!indexHtml.includes('obQueueCount') && !appJs.includes('obQueueCount'), 'the queue count shows only in the status');
   assert.match(appCss, /\.ob-pause \{ color: var\(--accent\); border-color: var\(--accent\); background: transparent;/);
 });
 

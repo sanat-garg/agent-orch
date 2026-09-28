@@ -980,11 +980,11 @@ label.mc-row { cursor: pointer; }
 .ob-state[data-state="running"] .ob-dot { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
 .ob-state[data-state="waiting"] .ob-dot { background: var(--warn); }
 .ob-state[data-state="paused"] .ob-dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--muted); }
+#obStatus { overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
 .ob-state[data-state="running"] #obStatus { color: var(--text); }
 .ob-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 34px; padding: 0 12px; flex: none; white-space: nowrap; font-size: 13.5px; color: var(--text); }
 .ob-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .ob-btn .ob-ico { display: none; }
-.ob-badge { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 600; line-height: 18px; font-variant-numeric: tabular-nums; }
 .ob-pause { color: var(--accent); border-color: var(--accent); background: transparent; min-width: 76px; }
 .ob-pause:hover { background: var(--accent-soft); }
 .ob-pause.primary, .ob-pause.primary:hover { color: var(--accent-text); }
@@ -996,8 +996,6 @@ label.mc-row { cursor: pointer; }
   .ob-btn { width: 44px; padding: 0; min-width: 0; }
   .ob-btn .ob-label { display: none; }
   .ob-btn .ob-ico { display: block; }
-  #obQueue { position: relative; }
-  #obQueue .ob-badge { position: absolute; top: 2px; right: 0; }
 }
 /* keep the "scroll to latest" button clear of the bar */
 .chat:has(.orch-bar:not([hidden])) .jump { bottom: 196px; }

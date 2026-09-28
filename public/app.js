@@ -6198,6 +6198,13 @@ function onOrch(msg) {
 }
 
 // ----- the status bar above the chat
+// #452: 'Running X · Queue Y' (X = running tasks on every machine, Y = queued ones, waiting on a prerequisite included),
+// 'Paused · Queue Y' or 'Idle'. The Queue button shows no count of its own, so Y appears once.
+function orchBarStatus(paused, running, queued) {
+  if (paused) return { text: `Paused · Queue ${queued}`, state: 'paused' };
+  if (!running && !queued) return { text: 'Idle', state: 'idle' };
+  return { text: `Running ${running} · Queue ${queued}`, state: running ? 'running' : 'waiting' };
+}
 let obTogglePending = null;
 function renderOrchBar() {
   renderConnFoot(); // routing rules decide whether a signed-out agent warrants the footer's warning
@@ -6208,15 +6215,11 @@ function renderOrchBar() {
   if (!on) return;
   const p = O.project, s = O.state || {};
   const paused = (obTogglePending && obTogglePending.id === p?.id ? obTogglePending.status : p?.status) === 'paused';
-  const running = p?.counts?.running || 0, queued = p?.counts?.queued || 0;
-  // One short word; detail belongs in the Queue modal (.agent-orch/CONTEXT.md: the bar stays minimal).
-  const status = paused ? 'Paused' : running ? 'Running' : queued ? 'Waiting' : 'Idle';
-  blurSwap($('obStatus'), status);
-  $('obState').dataset.state = status.toLowerCase();
+  // One short status; detail belongs in the Queue modal (.agent-orch/CONTEXT.md: the bar stays minimal).
+  const status = orchBarStatus(paused, p?.counts?.running || 0, p?.counts?.queued || 0);
+  blurSwap($('obStatus'), status.text);
+  $('obState').dataset.state = status.state;
   $('obState').title = s.rapid?.reason || (s.pacing ? `Pacing: ${s.pacing}` : '');
-  $('obQueueCount').hidden = !queued;
-  $('obQueueCount').textContent = queued ? String(queued) : '';
-  $('obQueue').setAttribute('aria-label', queued ? `Queue, ${queued} queued` : 'Queue');
   $('obPause').hidden = !p;
   $('obQueue').hidden = !p;
   if (p) {

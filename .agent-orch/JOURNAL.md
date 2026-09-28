@@ -1330,3 +1330,7 @@ phone header: one 44pt row, title menu switches views; tests pass
 ## 2026-09-28 15:08 — #456 Sign out moves to the Connections window; version shown under the logo [done (check passed)]
 
 Sign out moved to Connections; version shows under logo
+
+## 2026-09-28 15:14 — #452 Orchestrator bar status: 'Running X · Queue Y' [done (check passed)]
+
+orchestrator bar shows Running X · Queue Y; tests pass

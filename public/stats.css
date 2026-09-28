@@ -124,6 +124,8 @@
 .sx-heat-key i { width: 10px; height: 10px; border-radius: 2px; background: var(--sx-empty); }
 .sx-heat-you { position: relative; display: inline-flex; align-items: center; gap: 6px; }
 .sx-heat-you::before { content: ""; position: static; margin: 0; }
+.sx-heat-more { align-self: flex-start; border: 0; background: none; padding: 0; font: inherit; font-size: 13px; font-weight: 550; color: var(--accent-strong); cursor: pointer; }
+@media (pointer: coarse) { .sx-heat-more { min-height: 44px; } }
 
 /* line */
 .sx-line { position: relative; }
@@ -199,14 +201,13 @@
   .sx-hero-num strong { font-size: 48px; }
   .sx-twin { grid-template-columns: minmax(0, 1fr); }
   /* Phones: tighter grid. */
-  .sx-heat { grid-template-columns: 38px repeat(24, minmax(0, 1fr)) minmax(0, 1fr); gap: 2px; }
+  .sx-heat { grid-template-columns: 44px repeat(24, minmax(0, 1fr)) minmax(0, 1fr); gap: 2px; }
   .sx-heat .g { margin-left: 2px; }
   .sx-heat-dtot, .sx-heat-toth, .sx-heat-sum { margin-left: 3px; }
   .sx-heat-totlab, .sx-heat-htot, .sx-heat-sum { margin-top: 4px; }
   .sx-heat-c { height: 10px; border-radius: 2px; }
   .sx-heat-c .msg { width: 3px; height: 3px; margin: -1.5px 0 0 -1.5px; }
-  .sx-heat-h, .sx-heat-row { font-size: 9.5px; }
-  .sx-heat-sum { font-size: 8.5px; }
+  .sx-heat-h, .sx-heat-row, .sx-heat-sum { font-size: 11px; } /* UI-REVIEW #23: Apple's 11pt minimum */
   .sx-insights { grid-template-columns: minmax(0, 1fr); }
   .sx-insights li { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   .sx-insights li:nth-child(2) { border-top: 1px solid var(--border); padding-top: 9px; }
@@ -220,6 +221,8 @@
   .sx-records li { grid-template-columns: minmax(0, 1fr) auto; }
   .sx-records .k { grid-column: 1 / -1; }
 }
+/* An 11px corner total doesn't fit a phone's ~10px column; the card's subtitle already gives it. */
+@media (max-width: 600px) { .sx-heat-sum { display: none; } }
 
 /* Phones (UI-REVIEW #27): one pinned row of tabs + a range chip whose menu drops below it; the subtitle scrolls with the body. */
 @media (max-width: 600px) {

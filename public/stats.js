@@ -11,7 +11,7 @@
     data: null, err: '', loading: null, lastFocus: null, observers: [],
     tab: TABS.includes(store.get('cw.sx.tab')) ? store.get('cw.sx.tab') : 'overview',
     range: store.get('cw.sx.range') in RANGE_MS ? store.get('cw.sx.range') : 'all',
-    project: 'all',
+    project: 'all', heatAll: false,
   };
   // Agents keep one color everywhere (validated set: blue, orange, aqua); "you" is blue and the orchestrator orange.
   const AGENT_VAR = { codex: 'var(--sx-c1)', claude: 'var(--sx-c2)' };
@@ -340,60 +340,82 @@
     return `Last ${HEAT_DAYS} days · ${hrs(agentMs)} of agent work on ${plural(active, 'day')}${away && away.share >= 0.05 ? ` · ${pct(away.share)} while you were away` : ''}`;
   }
   const step = (v, max, n) => (v ? Math.min(n, Math.ceil((v / max) * n)) : 0);
+  // Phones show the last 14 days (or just the active days when there are fewer) until "Show all days" is tapped.
+  const HEAT_PHONE_DAYS = 14;
   function heatmap(c, h = heatData(c)) {
     const { rows, cells, days, hours, max } = h;
+    const phone = matchMedia('(max-width: 600px)').matches;
     const grid = el('div', 'sx-heat');
-    grid.setAttribute('role', 'img');
+    grid.setAttribute('role', 'group');
     grid.setAttribute('aria-label', `Agent time and your messages by day and hour: ${heatSummary(c, h)}`);
-    grid.append(el('span'));
-    for (let hr = 0; hr < 24; hr++) grid.append(el('span', `sx-heat-h${hr && hr % 6 === 0 ? ' g' : ''}`, hr % 6 === 0 ? (hr === 12 ? 'Noon' : hourName(hr)) : ''));
-    grid.append(el('span', 'sx-heat-h sx-heat-toth', 'Day'));
     const nowH = Math.floor(Date.now() / H);
     const taskTitle = (id) => SX.data.tasks.find((t) => t.id === id)?.title || '';
     // "Sep 28" on the first row and on the 1st of a month, else "Mon 28".
     const rowName = (r, i) => new Date(r).toLocaleDateString([], i === 0 || new Date(r).getDate() === 1 ? { month: 'short', day: 'numeric' } : { weekday: 'short', day: 'numeric' });
     const dayMax = Math.max(1, ...days.map((d) => d.ms)), hourMax = Math.max(1, ...hours.map((x) => x.ms));
-    rows.forEach((r, ri) => {
-      grid.append(el('span', 'sx-heat-row', rowName(r, ri)));
-      for (let hr = 0; hr < 24; hr++) {
-        const x = cells.get(`${r}|${hr}`), v = x?.ms || 0, n = x?.msgs || 0;
-        const cell = el('span', `sx-heat-c${hr && hr % 6 === 0 ? ' g' : ''}`);
-        const cellStart = new Date(new Date(r).setHours(hr)).getTime();
-        if (cellStart + H <= c.from || Math.floor(cellStart / H) > nowH) cell.classList.add('out');
-        cell.dataset.s = String(step(v, max, 4));
-        if (n) cell.append(el('i', 'msg'));
-        if (v || n) {
+    // Every cell says its value in words (screen readers; a native tooltip on desktop where there's no data-tip one).
+    const say = (n, text) => { n.setAttribute('role', 'img'); n.setAttribute('aria-label', text); if (!phone && !n.dataset.tip) n.title = text; };
+    const all = rows.map((_, i) => i), active = all.filter((i) => days[i].ms || days[i].n);
+    const few = active.length && active.length < HEAT_PHONE_DAYS ? active : all.slice(-HEAT_PHONE_DAYS);
+    const draw = (shown) => {
+      grid.replaceChildren(el('span'));
+      for (let hr = 0; hr < 24; hr++) grid.append(el('span', `sx-heat-h${hr && hr % 6 === 0 ? ' g' : ''}`, hr % 6 === 0 ? (hr === 12 ? 'Noon' : hourName(hr)) : ''));
+      grid.append(el('span', 'sx-heat-h sx-heat-toth', 'Day'));
+      shown.forEach((ri, i) => {
+        const r = rows[ri];
+        grid.append(el('span', 'sx-heat-row', rowName(r, i)));
+        for (let hr = 0; hr < 24; hr++) {
+          const x = cells.get(`${r}|${hr}`), v = x?.ms || 0, n = x?.msgs || 0;
+          const cell = el('span', `sx-heat-c${hr && hr % 6 === 0 ? ' g' : ''}`);
+          const cellStart = new Date(new Date(r).setHours(hr)).getTime();
+          if (cellStart + H <= c.from || Math.floor(cellStart / H) > nowH) cell.classList.add('out');
+          cell.dataset.s = String(step(v, max, 4));
+          if (n) cell.append(el('i', 'msg'));
           const lines = [`${dayName(r)}, ${hourName(hr)}–${hourName((hr + 1) % 24)}`];
-          if (v) {
-            const at = overlap(x.spans);
-            lines.push(`${hrs(v)} of agent time${at > 1 ? ` · ${at} at once` : ''}`);
-            lines.push([...x.agents].sort((a, b) => b[1] - a[1]).map(([a, ms]) => `${safeAgent(a)} ${hrs(ms)}`).join(' · '));
-            const ids = [...x.tasks];
-            lines.push(ids.slice(0, 3).map((id) => `#${id} ${taskTitle(id)}`.trim()).join('\n') + (ids.length > 3 ? `\n+${ids.length - 3} more` : ''));
-          }
-          if (n) lines.push(`You sent ${plural(n, 'message')}`);
-          cell.dataset.tip = lines.join('\n');
+          if (v || n) {
+            if (v) {
+              const at = overlap(x.spans);
+              lines.push(`${hrs(v)} of agent time${at > 1 ? ` · ${at} at once` : ''}`);
+              lines.push([...x.agents].sort((a, b) => b[1] - a[1]).map(([a, ms]) => `${safeAgent(a)} ${hrs(ms)}`).join(' · '));
+              const ids = [...x.tasks];
+              lines.push(ids.slice(0, 3).map((id) => `#${id} ${taskTitle(id)}`.trim()).join('\n') + (ids.length > 3 ? `\n+${ids.length - 3} more` : ''));
+            }
+            if (n) lines.push(`You sent ${plural(n, 'message')}`);
+            cell.dataset.tip = lines.join('\n');
+          } else lines.push('No activity');
+          say(cell, lines.join('\n').replaceAll('\n', '. '));
+          grid.append(cell);
         }
-        grid.append(cell);
-      }
-      const t = days[ri], tot = el('span', 'sx-heat-c sx-heat-tot sx-heat-dtot');
-      tot.dataset.t = String(step(t.ms, dayMax, 4));
-      tot.dataset.tip = `${dayName(r)}\n${t.ms ? `${hrs(t.ms)} of agent time` : 'No agent work'}${t.n ? ` · ${plural(t.n, 'message')} from you` : ''}`;
-      grid.append(tot);
-    });
-    // Each hour of the day across the month.
-    grid.append(el('span', 'sx-heat-row sx-heat-totlab', 'Total'));
-    hours.forEach((x, hr) => {
-      const tot = el('span', `sx-heat-c sx-heat-tot sx-heat-htot${hr && hr % 6 === 0 ? ' g' : ''}`);
-      tot.dataset.t = String(step(x.ms, hourMax, 4));
-      tot.dataset.tip = `${hourName(hr)}–${hourName((hr + 1) % 24)}, last ${HEAT_DAYS} days\n${x.ms ? `${hrs(x.ms)} of agent time` : 'No agent work'}${x.n ? ` · ${plural(x.n, 'message')} from you` : ''}`;
-      grid.append(tot);
-    });
-    const all = sum(days, (d) => d.ms), allN = sum(days, (d) => d.n);
-    const corner = el('span', 'sx-heat-sum', all ? hrs(all).replace(' ', '') : '–');
-    corner.dataset.tip = `Last ${HEAT_DAYS} days\n${hrs(all)} of agent time${allN ? ` · ${plural(allN, 'message')} from you` : ''}`;
-    grid.append(corner);
+        const t = days[ri], tot = el('span', 'sx-heat-c sx-heat-tot sx-heat-dtot');
+        tot.dataset.t = String(step(t.ms, dayMax, 4));
+        tot.dataset.tip = `${dayName(r)}\n${t.ms ? `${hrs(t.ms)} of agent time` : 'No agent work'}${t.n ? ` · ${plural(t.n, 'message')} from you` : ''}`;
+        say(tot, tot.dataset.tip.replace('\n', ', total: '));
+        grid.append(tot);
+      });
+      // Each hour of the day across the month.
+      grid.append(el('span', 'sx-heat-row sx-heat-totlab', 'Total'));
+      hours.forEach((x, hr) => {
+        const tot = el('span', `sx-heat-c sx-heat-tot sx-heat-htot${hr && hr % 6 === 0 ? ' g' : ''}`);
+        tot.dataset.t = String(step(x.ms, hourMax, 4));
+        tot.dataset.tip = `${hourName(hr)}–${hourName((hr + 1) % 24)}, last ${HEAT_DAYS} days\n${x.ms ? `${hrs(x.ms)} of agent time` : 'No agent work'}${x.n ? ` · ${plural(x.n, 'message')} from you` : ''}`;
+        say(tot, tot.dataset.tip.replace('\n', ': '));
+        grid.append(tot);
+      });
+      const allMs = sum(days, (d) => d.ms), allN = sum(days, (d) => d.n);
+      const corner = el('span', 'sx-heat-sum', allMs ? hrs(allMs).replace(' ', '') : '–');
+      corner.dataset.tip = `Last ${HEAT_DAYS} days\n${hrs(allMs)} of agent time${allN ? ` · ${plural(allN, 'message')} from you` : ''}`;
+      grid.append(corner);
+    };
     const wrap = el('div', 'sx-heat-wrap');
+    wrap.append(grid);
+    if (phone && few.length < all.length) {
+      const more = el('button', 'sx-heat-more');
+      more.type = 'button';
+      const sync = () => { draw(SX.heatAll ? all : few); more.textContent = SX.heatAll ? 'Show fewer' : 'Show all days'; more.setAttribute('aria-expanded', String(!!SX.heatAll)); };
+      more.addEventListener('click', () => { SX.heatAll = !SX.heatAll; sync(); });
+      sync();
+      wrap.append(more);
+    } else draw(all);
     const key = el('div', 'sx-heat-scale');
     const ramp = (attr, label) => {
       const g = el('span', 'sx-heat-key');
@@ -402,7 +424,7 @@
       return g;
     };
     key.append(ramp('s', 'Agent time per hour'), ramp('t', 'Totals per day and hour'), el('span', 'sx-heat-you', 'Your messages'));
-    wrap.append(grid, key);
+    wrap.append(key);
     return wrap;
   }
 

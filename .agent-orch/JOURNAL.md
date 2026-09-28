@@ -911,6 +911,9 @@ Done-when passes; test runner uses a lock directory without flock
 
 Owner pushes wired for approvals, failures, reviews, waits, permissions
 
+## 2026-09-28 11:46 — #319 UI-REVIEW #23: Stats heatmap labels at 11px, a text value per cell, and 14 days on phones with Show all days [done (check passed)]
+
+Phone heatmap has 11px labels, cell labels, and a 14-day collapse
 ## 2026-09-28 11:35 — #313 Integrate #309: Browser as a header tab with an in-place live view and an agent prompt box [done (check passed)]
 
 CONTEXT.md conflict resolved; UI tests pass against main's backend
@@ -986,3 +989,7 @@ Unusable VAPID key file now disables push instead of replacing it
 ## 2026-09-28 12:34 — #316 AUDIT #46: fromWorker keeps auth.json.prev, rejects a future last_refresh and checks the token's account [done (check passed)]
 
 fromWorker blocks future/mismatched-JWT refreshes and keeps auth.json.prev
+
+## 2026-09-28 12:36 — #334 Integrate #319: UI-REVIEW #23: Stats heatmap labels at 11px, a text value per cell, and 14 days on phones with Show all days [done (check passed)]
+
+Conflicts resolved; phone range chip and heatmap tests both pass

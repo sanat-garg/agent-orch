@@ -132,6 +132,9 @@ test('desktop: Overview leads with shipped tasks; every tab renders the seeded w
   assert.notEqual(colors[0], colors[1], 'totals use their own color');
   assert.match(await heat.locator('.sx-heat-sum').textContent(), /^\d+(\.\d)?(h|min)$/);
   assert.equal(await heat.locator('.sx-heat-day, .msg.m, .msg.l').count(), 0, 'no day dots or big message dots');
+  assert.equal(await heat.locator('.sx-heat-more').count(), 0, 'desktop shows every day');
+  assert.equal(await heat.locator('.sx-heat-c:not([aria-label])').count(), 0, 'every cell has a text value');
+  assert.match(await heat.locator('.sx-heat-c:not([data-tip])').first().getAttribute('title'), /No activity$/);
   // The range picker doesn't change it.
   await page.locator('#sxRange [data-range="24h"]').click();
   assert.equal(await page.locator('.sx-card', { hasText: 'Who worked when' }).locator('.sx-heat-dtot').count(), 30);
@@ -223,6 +226,26 @@ test('375×667: a bottom sheet with nothing sticking out sideways on any tab', {
   await chip.click();
   await page.locator('#sxRange [data-range="all"]').click();
   assert.match(await chip.textContent(), /^All ▾$/);
+  // UI-REVIEW #23 (still on Overview, range All): legible labels, a text value per cell, and at most 14 day rows until "Show all days".
+  const heat = page.locator('.sx-card', { hasText: 'Who worked when' });
+  const dayRows = () => heat.locator('.sx-heat-row:not(.sx-heat-totlab)').count();
+  const few = await dayRows();
+  assert.ok(few >= 1 && few <= 14, `${few} day rows on a phone`);
+  const sizes = await heat.evaluate((h) => [...h.querySelectorAll('.sx-heat-h, .sx-heat-row, .sx-heat-sum')].map((e) => parseFloat(getComputedStyle(e).fontSize)));
+  assert.ok(Math.min(...sizes) >= 11, `heatmap labels ${Math.min(...sizes)}px`);
+  assert.ok(parseFloat(await heat.locator('.sx-heat-h').first().evaluate((e) => getComputedStyle(e).fontSize)) >= 11);
+  assert.deepEqual((await heat.locator('.sx-heat-h').allTextContents()).filter(Boolean), ['12 AM', '6 AM', 'Noon', '6 PM', 'Day']);
+  const unlabelled = () => heat.locator('.sx-heat-c').evaluateAll((cs) => cs.filter((c) => !c.getAttribute('aria-label')).length);
+  assert.equal(await unlabelled(), 0, 'every cell has a text value');
+  assert.match(await heat.locator('.sx-heat-c[data-tip]:not(.sx-heat-tot)').first().getAttribute('aria-label'), /^.+, \d+ (AM|PM)–\d+ (AM|PM)\. /);
+  const more = heat.locator('button.sx-heat-more');
+  assert.equal(await more.textContent(), 'Show all days');
+  await more.click();
+  assert.equal(await dayRows(), 30, 'all days after Show all days');
+  assert.equal(await unlabelled(), 0);
+  assert.equal(await more.textContent(), 'Show fewer');
+  await more.click();
+  assert.equal(await dayRows(), few);
   await ctx.close();
   assert.deepEqual(errors, []);
 });

@@ -1694,6 +1694,12 @@ async function handleRequest(req, res) {
       return json(res, 200, p.endsWith('/sites') ? { sites: await browserViews.sites(String(q.node || BV_LOCAL), q.identity) } : { ok: await browserViews.clear(String(q.node || BV_LOCAL), q.identity) });
     } catch (e) { return json(res, 409, { error: e.message }); }
   }
+  // The tasks the owner could start on a machine now (#444): {tasks: [{id, title, urgency, agent, model, files, waitingSince}]}.
+  const cas = p.match(/^\/api\/cluster\/nodes\/([\w-]+)\/assignable$/);
+  if (cas && req.method === 'GET') {
+    const r = orch.assignable(cas[1]);
+    return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r);
+  }
   if (p.startsWith('/api/cluster/') && !cluster) return json(res, 503, { error: 'cluster unavailable' });
   // build: the agent-orch build each machine runs (a worker's own report, else counted here from its sha); version: its v3.52.
   if (p === '/api/cluster/nodes' && req.method === 'GET') return json(res, 200, { nodes: orch.machines(cluster.listNodes()).map((n) => {
@@ -1889,6 +1895,14 @@ async function handleRequest(req, res) {
     const node = (await readBody(req)).node;
     if (node != null && typeof node !== 'string') return json(res, 400, { error: 'node must be a machine id or null' });
     const r = orch.setTaskRunOn(Number(tro[1]), node || null);
+    return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r);
+  }
+  // Manual assignment (#444): start a queued task on one machine now, {node} → {started, taskId, node, warning?} or 409 {error}.
+  const tas = p.match(/^\/api\/orch\/tasks\/(\d+)\/assign$/);
+  if (tas && req.method === 'POST') {
+    const node = (await readBody(req)).node;
+    if (typeof node !== 'string' || !node) return json(res, 400, { error: 'node must be a machine id' });
+    const r = orch.assignTask(Number(tas[1]), node);
     return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r);
   }
   // Reflection fallbacks for a project's reflection-queued tasks: {fallbacks: [{agent, model}] | null}, same rules as a chat's.

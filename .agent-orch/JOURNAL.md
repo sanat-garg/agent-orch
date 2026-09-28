@@ -1310,3 +1310,6 @@ Assign task picker on every machine card and detail panel
 ## 2026-09-28 14:57 — #457 Integrate #407: Version format: v<major>.<minor> from the commit count (352 → v3.52) [done (check passed)]
 
 Conflict resolved; version tests and UI static tests pass
+## 2026-09-28 14:57 — #444 Assign API: list a machine's runnable tasks and start one on it immediately [done (check passed)]
+
+assign API lists runnable tasks and starts them immediately

@@ -2667,12 +2667,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
 
   // node: where it runs (LOCAL_NODE or a worker id); prevNode: where it ran before (a worker's pushed branch is adopted).
-  // adopt: {runId, logPath, from, agent} continues a remote job that outlived a controller restart.
-  function startTask(task, node = LOCAL_NODE, prevNode = null, adopt = null) {
+  // adopt: {runId, logPath, from, agent} continues a remote job that outlived a controller restart. assigned: the owner
+  // started it there (assignTask): a worker takes it over its slot target.
+  function startTask(task, node = LOCAL_NODE, prevNode = null, adopt = null, assigned = false) {
     const abort = new AbortController();
     const project = getProject(task.project_id);
     // A remote task always has its own checkout, so it shares its project like a worktree task.
-    running.set(task.id, { abort, kind: task.kind, projectId: task.project_id, startedAt: now(), node, prevNode, adopt,
+    running.set(task.id, { abort, kind: task.kind, projectId: task.project_id, startedAt: now(), node, prevNode, adopt, assigned,
       wt: task.kind === 'work' && !isBrowserTask(task) && (node !== LOCAL_NODE || worktreeCapable(project)), agent: adopt?.agent || routeNow(task, project).agent });
     pushState();
     execute(task, abort.signal)
@@ -3180,7 +3181,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         if (Date.now() - lostSince >= (n.graceMs ?? graceMs(n.os))) job.lost(`node ${name} disappeared`);
       }, 1000);
       if (attach) return;
-      if (!cluster.send(nodeId, { t: MSG.JOB_OFFER, job: id, agent: spec.agent, model: spec.model, footprint: Math.round(footprint(spec.agent)) })) {
+      const assigned = running.get(id)?.assigned ? { assigned: true } : {};
+      if (!cluster.send(nodeId, { t: MSG.JOB_OFFER, job: id, agent: spec.agent, model: spec.model, footprint: Math.round(footprint(spec.agent)), ...assigned })) {
         return finish({ outcome: 'aborted', text: `${name} is not connected` });
       }
       offerTimer = setTimeout(() => job.reject('no answer'), CFG.offerMs);
@@ -3839,6 +3841,87 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     setTimeout(tick, 0);
     return { ok: true, task: taskView(getTask(id)) };
   }
+  // ---- manual assignment (#444): the owner starts a queued task on one machine from its card, now. It skips the queue
+  // order, the node's slot target, pacing, the owner's cap and Rapid overlap, but never a real blocker: an unfinished
+  // prerequisite, a hold (review, approval, Take-over), an offline node, an agent not signed in there, a kind that runs
+  // only on the controller, or a shared checkout. Candidates: queued work (integrators included) and reflection.
+  const ASSIGNABLE = `SELECT t.*, ${EFFECTIVE_SQL} AS eff, p.position AS project_position FROM tasks t JOIN projects p ON p.id=t.project_id
+    WHERE t.status='queued' AND p.status='active' AND (t.kind='work' OR (t.kind='reflect' AND p.perpetual=1))
+      AND NOT EXISTS(SELECT 1 FROM all_deps x LEFT JOIN tasks d ON d.id=x.depends_on WHERE x.task_id=t.id AND d.status IS NOT 'done')`;
+  const assignNode = (id) => nodesNow().find((n) => n.id === id) || (id === LOCAL_NODE ? { id: LOCAL_NODE, name: 'this server', local: true } : null);
+  const nodeUp = (n) => (n.local ? !localDraining() : n.status === 'online' && !!n.connected);
+  const nodeWhere = (n) => (n.local ? 'this server' : n.os === 'darwin' ? 'this Mac' : n.name || n.id);
+  // Why `task` can't start on node n now (a plain sentence for the owner), or null.
+  function assignBlocker(task, n) {
+    if (running.has(task.id) || task.status === 'running') return 'already running';
+    if (task.status !== 'queued') return `#${task.id} is ${task.status}`;
+    if (!(task.kind === 'work' || task.kind === 'reflect')) return `#${task.id} is a ${task.kind} task, not work`;
+    const project = getProject(task.project_id);
+    if (project?.status !== 'active') return `${project?.name || 'its project'} is paused`;
+    if (task.kind === 'reflect' && !project.perpetual) return `Keep improving is off for ${project.name}`;
+    const dep = depsOf(task.id).find((d) => getTask(d)?.status !== 'done');
+    if (dep != null) return `#${task.id} waits for #${dep}`;
+    if (approvals.pending(task.id).length) return `#${task.id} is waiting for your approval`;
+    if (isBrowserTask(task) && browserHeld(task.run_on, identityOf(task))) return `#${task.id}'s browser is taken over`;
+    if (!nodeUp(n)) return n.local ? 'node draining' : n.connected && n.status !== 'offline' ? `node ${n.status}` : 'node offline';
+    if (isBrowserTask(task) && task.run_on && task.run_on !== n.id) return `#${task.id}'s browser profile is on ${nodeName(task.run_on)}`;
+    if (!n.local) {
+      if (!remoteWork(task)) return `#${task.id} is ${task.integrates ? 'an integrator' : `a ${task.kind} task`}; it runs only on the controller`;
+      if (!remoteCapable(task, project)) return task.worktree ? `#${task.id} has its checkout on the controller` : `${project.name} can't run on a worker (no git checkout)`;
+      if (!canClone(n, task, project)) return `${nodeWhere(n)} can't clone ${project.name} (no GitHub remote)`;
+      if (needsBrowser(task) && !browserWorker(n)) return `${nodeWhere(n)} has no browser for #${task.id}`;
+      if (isBrowserTask(task) && !n.features?.includes('browser-task')) return `${nodeWhere(n)} can't run browser tasks (update it)`;
+    }
+    if (!isBrowserTask(task) && !projectReady(project.path)) return `${project.name} has no GitHub repo yet`;
+    const agent = routeNow(task, project).agent;
+    const signed = n.local ? localAgentOk(agent) : (n.inventory?.agents || []).some((a) => a.id === agent && a.installed && a.signedIn);
+    if (!signed) return `${agentName(agent).replace(/ CLI$/, '')} isn't signed in on ${nodeWhere(n)}`;
+    if (needsBrowser(task) && profileBusy(task)) return `#${task.id}'s browser profile is in use by another task`;
+    // Only work in its own checkout (a worktree here, or any worker) shares a project with running tasks.
+    if (!isBrowserTask(task) && !(task.kind === 'work' && (!n.local || worktreeCapable(project)))) {
+      const rapid = parallelSettings().rapidDevelopment;
+      const other = qa("SELECT id FROM tasks WHERE status='running' AND project_id=:p AND id!=:id AND execution IS NOT 'browser'", { p: project.id, id: task.id })
+        .find((b) => !(rapid && task.kind === 'reflect' && running.get(b.id)?.wt));
+      if (other) return `#${task.id} shares its checkout with running #${other.id}`;
+    }
+    return null;
+  }
+  // A node's CPU is saturated: its average core use (or 1-min load per core) at 90% or more.
+  function cpuBusy(n) {
+    const c = n.resources?.cpu, cores = n.inventory?.cores || (n.local ? hw.cores : null);
+    const load = n.resources?.load?.[0] ?? (n.local ? os.loadavg()[0] : null);
+    const pct = Array.isArray(c) && c.length ? c.reduce((a, b) => a + b, 0) / c.length : load != null && cores ? (load / cores) * 100 : null;
+    return pct != null && pct >= 90;
+  }
+  // GET /api/cluster/nodes/:id/assignable: what the owner could start on node `nodeId` now, in the scheduler's order.
+  function assignable(nodeId) {
+    const n = assignNode(nodeId);
+    if (!n) return { error: 'No such machine', status: 404 };
+    if (!nodeUp(n)) return { tasks: [] };
+    return { tasks: queueOrder(qa(ASSIGNABLE, { now: now() })).filter((t) => !assignBlocker(t, n)).map((t) => {
+      const route = routeNow(t, getProject(t.project_id));
+      return { id: t.id, title: t.title, urgency: t.urgency, agent: route.agent, model: route.model || delegator.defaultModel(route.agent) || null,
+        files: parseFiles(t.files), waitingSince: t.created_at };
+    }) };
+  }
+  // POST /api/orch/tasks/:id/assign {node}: pin the task there (run_on) and start it now.
+  function assignTask(id, nodeId) {
+    const task = getTask(id);
+    if (!task) return { error: 'No such task', status: 404 };
+    const n = assignNode(nodeId);
+    if (!n) return { error: 'No such machine', status: 404 };
+    if (!leader.ok) return { error: 'the scheduler is not running on this server', status: 409 };
+    const why = assignBlocker(task, n);
+    if (why) return { error: why, status: 409 };
+    assertPlacement(task, n.id);
+    if (!run("UPDATE tasks SET status='running', started_at=:t, node_id=:n, run_on=:n, not_before=0 WHERE id=:id AND status='queued'", { t: now(), n: n.id, id }).changes) {
+      return { error: 'already running', status: 409 };
+    }
+    logEvent(`#${id} assigned by owner to ${n.local ? 'this server' : n.name || n.id}`, { projectId: task.project_id, taskId: id });
+    pushTask(id);
+    startTask(getTask(id), n.id, task.node_id || null, null, true);
+    return { started: true, taskId: id, node: n.id, ...(cpuBusy(n) && { warning: 'CPU busy' }) };
+  }
   // Reflection fallbacks (list already validated by the server): [{agent, model}] or null = none.
   function setReflectFallbacks(id, list) {
     if (!getProject(id)) return { error: 'No such project', status: 404 };
@@ -4159,7 +4242,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   return {
     createBrowserTask, listBrowserTasks, stopBrowserTask, attachBrowserViews,
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
-    planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, insertCheckpoint, approveCheckpoint, requestChanges, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setTaskRunOn, setReflectFallbacks, setReflectSettings, syncConvoModel, pauseTask, resumeTask, handoffTask, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
+    planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, insertCheckpoint, approveCheckpoint, requestChanges, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setTaskRunOn, assignable, assignTask, setReflectFallbacks, setReflectSettings, syncConvoModel, pauseTask, resumeTask, handoffTask, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
     drain, undrain, chatPlanning, applyUpdates: () => parallelSettings().applyUpdates,
     prepareRestart, resumeAfterRestart, restartBlocker, stateView, machines, browserTasks, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, reconcileClaudeLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     // A sidebar chat's project rank ({id, position, priority}), or null when its folder has no orchestrator project.

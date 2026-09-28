@@ -68,7 +68,7 @@ Direction: C = controller → worker, W = worker → controller (`DIRECTION`; `v
 | `heartbeat` | both | queued (C) | liveness; the controller's carries `queued` |
 | `ack` / `error` / `bye` | both | re (+job) / message / reason | replies; the controller acks each `job.done` with its `job` (the worker then forgets the job); `bye` before a clean shutdown |
 | `wake` | W | sleptAt, sleptMs | a time jump on the worker (a laptop's sleep), sent after the next `welcome` |
-| `job.offer` | C | job, agent, model, footprint | "can you take this?" |
+| `job.offer` | C | job, agent, model, footprint, assigned? | "can you take this?"; `assigned` = the owner started it here by hand, so it goes over the head's task cap (never the local cap) |
 | `job.accept` / `job.reject` | W | job / job, reason (busy, low_memory, agent_missing, not_signed_in, draining, version, other, power, cap) | answer within 10 s or counts as reject; `power` only to a controller with feature `policy`, `cap` only with feature `cap` |
 | `job.start` | C | job, title, prompt, systemAppend, agent, model, effort, account, repo, baseSha, branch, doneWhen, resume, timeouts{taskSec, verifySec, installSec}, autonomous, tools, install[argv], capabilities["browser"], identity, execution?, ext | run it (a browser task gets the Playwright MCP on that profile, browser.mjs); `ext` = the controller's extension bundle hash, fetched first unless the worker has it |
 | `job.event` | W | job, from, events[≤200 normalised agent events] | batched every ~1 s; `from` = index of the first event so resends dedupe |

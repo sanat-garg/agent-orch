@@ -13,3 +13,7 @@ Backend for manual assignment from a machine card. Contract (the UI task codes a
 ## Done when
 
 `node --test test/assign*.test.mjs` passes (assignable filtering, immediate start over the target, 409 reasons for prerequisite/offline)
+
+## Result — done (check passed) (2026-09-28 14:57)
+
+AGENT-ORCH-STATUS: done — assign API lists runnable tasks and starts them immediately

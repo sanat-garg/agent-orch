@@ -129,7 +129,8 @@ const S = {
   ack: { re: 'int', job: 'int?' }, // job: the controller acks a job.done (the worker then forgets the job)
   error: { message: 'str', re: 'int?', job: 'int?' },
   bye: { reason: 'str?' },
-  'job.offer': { job: 'int', agent: 'agent', model: 'str?', footprint: 'int?' },
+  // assigned: the owner started this task on this node by hand (#444): take it over the head's task cap (maxTasks).
+  'job.offer': { job: 'int', agent: 'agent', model: 'str?', footprint: 'int?', assigned: 'bool?' },
   'job.accept': { job: 'int' },
   'job.reject': { job: 'int', reason: 'reject' },
   'job.start': {

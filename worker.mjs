@@ -908,7 +908,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     const st = agentStatus(msg.agent);
     if (st === 'not installed' || st === 'unknown agent') return 'agent_missing';
     if (st !== true) return 'not_signed_in';
-    if (activeJobs() >= maxJobs()) return 'busy';
+    if (activeJobs() >= maxJobs() && !msg.assigned) return 'busy'; // the owner's assignment overrides the head's cap, never the local one
     const over = await capCheck(msg);
     if (over) return over;
     const avail = readSystem().memAvailable ?? os.freemem();

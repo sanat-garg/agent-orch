@@ -1300,3 +1300,6 @@ README covers parallel slots, push notifications, Browser tab tasks
 ## 2026-09-28 14:54 — #418 files.mjs: rename, new file/folder and delete endpoints with the copy/move path rules [done (check passed)]
 
 rename/new/delete endpoints added to files.mjs; files-ops tests pass
+## 2026-09-28 14:56 — #445 Assign task button on machine cards: pick a ready task, start it there now [done (check passed)]
+
+Assign task picker on every machine card and detail panel

@@ -4086,6 +4086,7 @@ function machineCard(n) {
     list.append(b);
   }
   if (tasks.length) run.append(list);
+  run.append(renderAssignButton(n));
   li.append(run);
   li.append(machineSettings(n));
   return li;
@@ -4183,6 +4184,158 @@ function pingBox(n) {
   }
   return box;
 }
+// ----- assign a task (the 'Assign task' button on every machine card and machine detail) -----
+// renderAssignButton(node) opens a picker titled 'Run on <machine> now' (a popover by the button; a bottom sheet on
+// phones) listing GET /api/cluster/nodes/:id/assignable → {tasks}: the queued tasks with no unfinished prerequisite.
+// A row (click, tap or Enter) → POST /api/orch/tasks/:id/assign {node}: success closes it with a toast (' · CPU busy'
+// when the answer carries a warning) and re-reads the machines; a refusal (409) shows its reason in that row.
+// AS: node/name (the machine it is open for), tasks (null while loading), errs (task id → why it was refused), busy (the
+// task being posted), q (the search), seq (drops answers for a picker since closed), the parts, and rows (shown rows).
+const AS = { node: null, name: '', tasks: null, err: '', errs: new Map(), busy: null, q: '', seq: 0, layer: null, pop: null, list: null, search: null, close: null, anchor: null, rows: [] };
+const URGENCY_WORD = { urgent: 'Urgent', normal: 'Normal', background: 'Later' };
+const CLOSE_SVG = '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+function renderAssignButton(n) {
+  const b = el('button', 'btn small as-btn', 'Assign task');
+  b.type = 'button';
+  b.dataset.act = 'assign';
+  b.dataset.node = n.id;
+  b.setAttribute('aria-haspopup', 'dialog');
+  b.setAttribute('aria-expanded', String(AS.node === n.id));
+  b.disabled = !n.connected;
+  b.title = n.connected ? `Pick a ready task and start it on ${n.name} now` : `${n.name} is offline: tasks can start there once it reconnects`;
+  b.addEventListener('click', () => (AS.node === n.id ? closeAssign() : openAssign(n, b)));
+  return b;
+}
+function openAssign(n, anchor) {
+  closeAssign(false);
+  const layer = el('div', 'as-layer'), scrim = el('div', 'as-scrim'), pop = el('div', 'as-pop'), head = el('div', 'as-head'), h = el('h3', '', `Run on ${n.name} now`);
+  const x = el('button', 'icon-btn as-x'), search = el('input', 'as-search'), list = el('div', 'as-list'), grip = el('div', 'sheet-grip');
+  h.id = 'asTitle';
+  pop.setAttribute('role', 'dialog');
+  pop.setAttribute('aria-modal', 'true');
+  pop.setAttribute('aria-labelledby', 'asTitle');
+  pop.tabIndex = -1;
+  grip.setAttribute('aria-hidden', 'true');
+  x.type = 'button';
+  x.setAttribute('aria-label', 'Close');
+  x.innerHTML = CLOSE_SVG;
+  search.type = 'search';
+  search.placeholder = 'Search ready tasks';
+  search.autocomplete = 'off';
+  search.setAttribute('aria-label', 'Search ready tasks');
+  head.append(h, x);
+  pop.append(grip, head, search, list);
+  layer.append(scrim, pop);
+  scrim.addEventListener('click', () => closeAssign());
+  x.addEventListener('click', () => closeAssign());
+  search.addEventListener('input', () => { AS.q = search.value; renderAssign(); });
+  pop.addEventListener('keydown', assignKey);
+  Object.assign(AS, { node: n.id, name: n.name, tasks: null, err: '', errs: new Map(), busy: null, q: '', seq: AS.seq + 1, layer, pop, list, search, close: x, anchor, rows: [] });
+  anchor.setAttribute('aria-expanded', 'true');
+  layer.classList.toggle('sheet', phoneMQ.matches);
+  document.body.append(layer);
+  renderAssign();
+  if (!phoneMQ.matches) placeMenu(pop, anchor);
+  (phoneMQ.matches ? pop : search).focus({ preventScroll: true }); // a phone's keyboard stays down until the owner taps Search
+  void loadAssignable();
+}
+function closeAssign(refocus = true) {
+  const { layer, anchor, node } = AS;
+  if (!layer) return;
+  Object.assign(AS, { node: null, seq: AS.seq + 1, layer: null, pop: null, list: null, search: null, close: null, anchor: null, rows: [] });
+  layer.remove();
+  anchor.setAttribute('aria-expanded', 'false');
+  // A live re-render may have replaced the button meanwhile: focus its successor.
+  if (refocus) (anchor.isConnected ? anchor : document.querySelector(`.as-btn[data-node="${CSS.escape(node)}"]`))?.focus({ preventScroll: true });
+}
+async function loadAssignable() {
+  const seq = AS.seq;
+  try {
+    const d = await api(`/api/cluster/nodes/${encodeURIComponent(AS.node)}/assignable`);
+    if (seq !== AS.seq) return;
+    AS.tasks = d.tasks || [];
+  } catch (e) {
+    if (seq !== AS.seq) return;
+    Object.assign(AS, { tasks: [], err: e.message });
+  }
+  renderAssign();
+  if (!phoneMQ.matches && AS.anchor.isConnected) placeMenu(AS.pop, AS.anchor);
+}
+const assignWaited = (t, now) => Math.max(0, t.waited ?? now - (t.queued_at || t.created_at || now));
+function renderAssign() {
+  const list = AS.list;
+  if (!list) return;
+  const note = (text, cls = '') => { AS.rows = []; list.replaceChildren(el('p', `as-note ${cls}`.trim(), text)); };
+  if (!AS.tasks) return note('Loading ready tasks…');
+  if (AS.err) return note(`Couldn't load the ready tasks: ${AS.err}`, 'bad');
+  if (!AS.tasks.length) return note('No ready tasks: everything queued is waiting on another task');
+  const q = AS.q.trim().toLowerCase(), now = Date.now() / 1000, had = document.activeElement?.dataset?.task;
+  const shown = AS.tasks.filter((t) => !q || [`#${t.id}`, t.title, t.project, URGENCY_WORD[t.urgency], shortLabel(t.agent || 'claude'), modelName(t.agent || 'claude', t.model)]
+    .some((s) => String(s || '').toLowerCase().includes(q)));
+  if (!shown.length) return note(`No ready task matches “${AS.q.trim()}”`);
+  const items = shown.map((t) => {
+    const item = el('div', 'as-item'), b = el('button', 'mc-task as-row'), main = el('span'), s = el('span', 's'), agent = t.agent || 'claude', why = AS.errs.get(t.id);
+    b.type = 'button';
+    b.dataset.task = t.id;
+    b.disabled = AS.busy != null;
+    s.append(document.createTextNode(`#${t.id} · `), el('span', `as-urg ${t.urgency || 'normal'}`, URGENCY_WORD[t.urgency] || 'Normal'),
+      document.createTextNode(` · ${shortLabel(agent)} · ${modelName(agent, t.model)}`));
+    main.append(el('span', 't', t.title), s);
+    const w = assignWaited(t, now), e = el('span', 'e', AS.busy === t.id ? 'Starting…' : `waited ${fmtDur(w)}`);
+    e.title = `Queued ${fmtDur(w)} ago`;
+    b.append(main, e);
+    b.addEventListener('click', () => assignPick(t));
+    item.append(b);
+    if (why) {
+      const p = el('p', 'as-why', why);
+      p.id = `asWhy${t.id}`;
+      p.setAttribute('role', 'alert');
+      b.setAttribute('aria-describedby', p.id);
+      item.append(p);
+    }
+    return { t, b, item };
+  });
+  AS.rows = items.map((r) => r.b);
+  list.replaceChildren(...items.map((r) => r.item));
+  if (had != null) items.find((r) => String(r.t.id) === had)?.b.focus({ preventScroll: true });
+}
+async function assignPick(t) {
+  if (AS.busy != null || !AS.node) return;
+  const { seq, node, name } = AS;
+  AS.busy = t.id;
+  AS.errs.delete(t.id);
+  renderAssign();
+  try {
+    const r = await fetch(`/api/orch/tasks/${encodeURIComponent(t.id)}/assign`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ node }) });
+    if (r.status === 401) { location.href = '/login'; return; }
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.reason || d.error || `Request failed (${r.status})`);
+    if (seq === AS.seq) closeAssign();
+    toast(`Started #${t.id} on ${name}${d.warning ? ' · CPU busy' : ''}`, { kind: d.warning ? 'warn' : 'success' });
+    loadMachines();
+  } catch (e) {
+    if (seq !== AS.seq) return;
+    AS.busy = null;
+    AS.errs.set(t.id, e.message);
+    renderAssign();
+    AS.rows.find((b) => b.dataset.task === String(t.id))?.focus({ preventScroll: true });
+  }
+}
+// Arrows move between the search and the rows, Enter in the search starts its only match (else goes to the first row),
+// Tab stays inside; Escape (the document listener below, ahead of the machine detail's own) closes.
+function assignKey(e) {
+  const rows = AS.rows.filter((b) => !b.disabled), i = rows.indexOf(document.activeElement), inSearch = e.target === AS.search;
+  const go = (j) => { e.preventDefault(); rows[Math.max(0, Math.min(rows.length - 1, j))]?.focus(); };
+  if (e.key === 'ArrowDown') go(i + 1);
+  else if (e.key === 'ArrowUp') { if (i > 0) go(i - 1); else if (i === 0) { e.preventDefault(); AS.search.focus(); } }
+  else if (e.key === 'Enter' && inSearch) { e.preventDefault(); if (rows.length === 1) rows[0].click(); else rows[0]?.focus(); }
+  else if (e.key === 'Tab') {
+    const f = [AS.close, AS.search, ...rows], k = f.indexOf(document.activeElement);
+    e.preventDefault();
+    f[(k + (e.shiftKey ? -1 : 1) + f.length) % f.length].focus();
+  }
+}
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && AS.layer) { e.preventDefault(); e.stopImmediatePropagation(); closeAssign(); } }, true);
 // ----- machine settings (the 'Machine settings' disclosure at the foot of each card) -----
 // Plain words in at most three sections, a row each (label, one-line hint, one control; a switch's row is its label):
 //   Work: parallel tasks (Auto or a cap; the controller's own follow its free memory, capped in Settings) and Run tasks
@@ -4965,6 +5118,7 @@ function ndRender() {
     if (tl) wrap.append(tl);
     box.append(wrap);
   }
+  box.append(renderAssignButton(n));
 }
 async function ndLoadRun(id) {
   const node = ND.id;

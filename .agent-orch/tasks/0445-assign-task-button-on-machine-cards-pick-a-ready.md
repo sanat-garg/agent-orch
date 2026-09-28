@@ -13,3 +13,7 @@ UI for manual assignment (public/app.js, app.css). Add renderAssignButton(node) 
 ## Done when
 
 `node --test test/ui-assign*.test.mjs` passes (button on every card and detail panel, picker lists assignable tasks, assign posts and toasts, 409 reason shown)
+
+## Result — done (check passed) (2026-09-28 14:56)
+
+AGENT-ORCH-STATUS: done — Assign task picker on every machine card and detail panel

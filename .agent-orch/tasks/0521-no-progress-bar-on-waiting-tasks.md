@@ -13,3 +13,7 @@ Task cards (the compact .tl-bar from #507, rendered in taskCard in public/app.js
 ## Done when
 
 `node --test test/ui-phase-strip*.test.mjs` passes with no .tl-bar on queued/waiting cards and bars on running, done and paused ones
+
+## Result — done (check passed) (2026-09-28 19:25)
+
+AGENT-ORCH-STATUS: done — Timeline bars now hidden on waiting tasks, shown once a run starts

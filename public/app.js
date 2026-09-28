@@ -6790,9 +6790,12 @@ function stripSegs(t, s) {
   else if (t.status === 'done') segs.push({ phase: 'done', ms: 0 });
   return segs;
 }
+// Whether a task has a started run to show a Timeline for (#521): not while it waits (queued, whatever it waits on: a
+// prerequisite, a limit, approval) or for a checkpoint, which never runs; a paused or finished one keeps its last timeline.
+const hasStartedRun = (t) => !!t.started_at && t.kind !== 'review' && t.status !== 'queued' && t.status !== 'awaiting_review';
 function syncPhaseStrip(b, t, s) {
   let bar = b.querySelector(':scope > .tl-bar');
-  if (t.kind === 'review') { bar?.remove(); return; } // a checkpoint never runs
+  if (!hasStartedRun(t)) { bar?.remove(); return; } // no element at all until a run starts
   if (!bar) {
     bar = b.appendChild(el('span', 'tl-bar compact'));
     bar.addEventListener('pointerenter', () => bar._redo?.()); // the live step's time, fresh on hover
@@ -7731,7 +7734,7 @@ function renderDrawer(fromLive = false) {
   const live = window.bvTaskThumb?.(t);
   if (live) body.append(live);
   // A worker's steps for the latest run (runs.phases): where the time went, what it's doing now, what failed.
-  const lastRun = d.runs.at(-1), tl = lastRun && timelineSection(lastRun, t.status === 'running' && !lastRun.outcome);
+  const lastRun = hasStartedRun(t) && d.runs.at(-1), tl = lastRun && timelineSection(lastRun, t.status === 'running' && !lastRun.outcome);
   if (tl) body.append(tl);
 
   // 2. The instructions it was given.

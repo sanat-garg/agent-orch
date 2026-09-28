@@ -21,9 +21,9 @@ const appCss = fs.readFileSync(path.join(PUB, 'app.css'), 'utf8');
 const indexHtml = fs.readFileSync(path.join(PUB, 'index.html'), 'utf8');
 const src = (re) => { const m = appJs.match(re); assert.ok(m, `app.js: ${re}`); return m[0]; };
 const STRIP_SRC = [/^const el = .*?^};$/ms, /^function fmtDur\(.*?^}$/ms, /^const PHASE_LABEL = .*?;$/ms,
-  /^function stripDur\(.*?^}$/ms, /^const PH_LOG = .*$/m, /^function stripSegs\(.*?^}$/ms, /^function syncPhaseStrip\(.*?^}$/ms,
+  /^function stripDur\(.*?^}$/ms, /^const PH_LOG = .*$/m, /^const hasStartedRun = .*$/m, /^function stripSegs\(.*?^}$/ms, /^function syncPhaseStrip\(.*?^}$/ms,
   /^function section\(.*?^}$/ms, /^const PHASE_NAME = .*$/m, /^const ERROR_KIND = .*$/m, /^const OUTCOME_TEXT = .*$/m, /^function timelineSection\(.*?^}$/ms].map(src).join('\n');
-const pure = new Function(`${STRIP_SRC.replace(/^const el = .*?^};$/ms, '')}\nreturn { stripSegs, stripDur };`)();
+const pure = new Function(`${STRIP_SRC.replace(/^const el = .*?^};$/ms, '')}\nreturn { stripSegs, stripDur, hasStartedRun };`)();
 const S = 1000;
 
 test('stripSegs: each step as long as it took, the live one last', () => {
@@ -62,6 +62,17 @@ test('the #229 .tl-bar is back: CSS exactly as it was, the phase palette and mil
   assert.match(src(/^function syncPhaseStrip\(.*?^}$/ms), /el\('span', 'tl-bar compact'\)/);
 });
 
+test('#521: no Timeline until a run starts; running, paused and finished tasks keep theirs', () => {
+  const at = Date.now() / S - 60;
+  const waiting = [{ status: 'queued' }, { status: 'queued', waiting: 'prerequisite' }, { status: 'queued', limited: true },
+    { status: 'queued', started_at: at }, { kind: 'review', status: 'queued' }, { kind: 'review', status: 'awaiting_review', started_at: at },
+    { status: 'cancelled' }];
+  for (const t of waiting) assert.equal(pure.hasStartedRun(t), false, JSON.stringify(t));
+  for (const status of ['running', 'paused', 'done', 'failed', 'needs_integration', 'cancelled']) assert.equal(pure.hasStartedRun({ status, started_at: at }), true, status);
+  assert.match(src(/^function syncPhaseStrip\(.*?^}$/ms), /if \(!hasStartedRun\(t\)\) \{ bar\?\.remove\(\); return; \}/, 'no element, not a zero-width one');
+  assert.match(appJs, /const lastRun = hasStartedRun\(t\) && d\.runs\.at\(-1\), tl = lastRun && timelineSection\(/, 'the drawer follows the same rule');
+});
+
 let browser, noBrowser = false;
 try { browser = await chromium.launch(); } catch {
   const mac = macChromiumEnv(); // the MacBook worker: Playwright's headless shell with the WindowManagement shim
@@ -98,6 +109,21 @@ for (const scheme of ['light', 'dark']) {
         phase_log: [['running', started], ['checking', now - 60_000]] }, { cls: 'running' });
       const failCard = card({ id: 2, status: 'failed', created_at: (started - 100_000) / 1000, started_at: started / 1000, finished_at: now / 1000 }, { cls: 'failed' });
       const run = runCard.querySelector('.tl-bar'), fail = failCard.querySelector('.tl-bar');
+      // #521: waiting cards carry no .tl-bar at all; done and paused ones keep theirs (the paused one frozen: no live step).
+      const bars = {
+        queued: card({ id: 3, status: 'queued', created_at: now / 1000 - 30 }, { cls: 'queued' }),
+        prereq: card({ id: 4, status: 'queued', created_at: now / 1000 - 30, depends_on: [3] }, { cls: 'blocked' }),
+        limit: card({ id: 5, status: 'queued', created_at: now / 1000 - 30, started_at: started / 1000 }, { cls: 'limited' }),
+        done: card({ id: 6, status: 'done', created_at: (started - 100_000) / 1000, started_at: started / 1000, finished_at: now / 1000 }, { cls: 'done' }),
+        paused: card({ id: 7, status: 'paused', created_at: (started - 100_000) / 1000, started_at: started / 1000 }, { cls: 'paused' }),
+      };
+      const running = card({ id: 8, status: 'queued', created_at: (started - 100_000) / 1000 }, { cls: 'queued' });
+      const beforeStart = running.querySelectorAll('.tl-bar').length;
+      S.syncPhaseStrip(running, { id: 8, status: 'running', created_at: (started - 100_000) / 1000, started_at: started / 1000 }, { cls: 'running' });
+      const afterStart = running.querySelectorAll('.tl-bar').length;
+      const waitBars = Object.fromEntries(Object.entries(bars).map(([k, b]) => [k, [b.querySelectorAll('.tl-bar').length, b.querySelectorAll('.tl-bar i[data-since]').length]]));
+      S.syncPhaseStrip(running, { id: 8, status: 'queued', created_at: now / 1000 }, { cls: 'limited' });
+      const requeued = running.querySelectorAll('.tl-bar').length;
       const host = document.createElement('div');
       host.style.cssText = 'width: 360px; background: var(--bg)';
       document.body.append(host);
@@ -113,6 +139,7 @@ for (const scheme of ['light', 'dark']) {
         bad: segs(tlBad.querySelector('.tl-bar')).map((g) => g.cls),
         card: segs(run), cardBox: box(run), cardCls: run.className, cardSteps: runCard.querySelectorAll('.tl-steps').length,
         cardBottom: runCard.getBoundingClientRect().bottom, title: run.title, fail: segs(fail),
+        waitBars, beforeStart, afterStart, requeued,
         vars: { done: rgb(cs(bar).getPropertyValue('--tl-done')), run: rgb('var(--run)'), danger: rgb('var(--danger)') },
       };
     });
@@ -144,6 +171,11 @@ for (const scheme of ['light', 'dark']) {
     assert.deepEqual(got.fail.map((g) => g.cls), ['', 'bad'], 'queued, then the agent step it failed in');
     assert.equal(got.fail.at(-1).bg, got.vars.danger, 'a failed step in --danger');
     assert.equal(got.title, 'Queued 1m 40s · Agent 4m 0s · Checking 1m 0s\nNow: Checking', 'the tooltip lists the steps and names the current one');
+    assert.deepEqual(got.waitBars, { queued: [0, 0], prereq: [0, 0], limit: [0, 0], done: [1, 0], paused: [1, 0] },
+      'no .tl-bar on queued/waiting cards; done and paused keep one, with no live step');
+    assert.equal(got.beforeStart, 0, 'none while queued');
+    assert.equal(got.afterStart, 1, 'one once its run starts');
+    assert.equal(got.requeued, 0, 'removed again when it goes back to waiting');
     await page.emulateMedia({ reducedMotion: 'reduce' });
     assert.deepEqual(await page.evaluate(() => [...document.querySelectorAll('.tl-bar i.cur')].map((i) => getComputedStyle(i).animationName)), ['none', 'none'], 'no pulse under reduced motion');
     await page.close();

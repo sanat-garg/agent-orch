@@ -1617,3 +1617,7 @@ browser task screens now show latest first, ordered by time
 ## 2026-09-28 19:21 — #512 Browser tab: hand the prompt straight to Claude in Chrome; setup card when no runner [done (check passed)]
 
 Browser prompts go straight to Chrome; setup card shows without runner
+
+## 2026-09-28 19:25 — #521 No progress bar on waiting tasks [done (check passed)]
+
+Timeline bars now hidden on waiting tasks, shown once a run starts

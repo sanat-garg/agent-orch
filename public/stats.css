@@ -16,6 +16,9 @@
 @media (pointer: coarse) { .sx-tabs button { min-height: 44px; min-width: 44px; } } /* UI-REVIEW #22 */
 .sx-filters { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap; }
 .sx-filters select { height: 32px; border: 1px solid var(--border); border-radius: 9px; background: var(--raised); color: var(--text); font: inherit; font-size: 13px; padding: 0 8px; max-width: 160px; }
+/* The phone range chip and its menu (UI-REVIEW #27): desktop keeps the plain select + range buttons. */
+.sx-range-chip { display: none; }
+.sx-range-pop { display: contents; }
 #sxBody { padding-top: 16px; }
 #sxBody.busy { opacity: .5; }
 
@@ -216,4 +219,30 @@
   .sx-outcome::before { display: none; }
   .sx-records li { grid-template-columns: minmax(0, 1fr) auto; }
   .sx-records .k { grid-column: 1 / -1; }
+}
+
+/* Phones (UI-REVIEW #27): one pinned row of tabs + a range chip whose menu drops below it; the subtitle scrolls with the body. */
+@media (max-width: 600px) {
+  .sx .m-head { padding-top: 2px; padding-bottom: 2px; }
+  .sx-bar { position: relative; flex-wrap: nowrap; align-items: stretch; gap: 8px; padding-bottom: 6px; }
+  .sx-tabs { flex: 1 1 auto; min-width: 0; padding: 0; }
+  .sx-tabs button { flex: 1 1 auto; padding: 5px 6px; }
+  .sx-filters { flex: none; align-items: stretch; }
+  .sx-range-chip { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-width: 44px; min-height: 36px; padding: 0 10px;
+    border: 1px solid var(--border); border-radius: 9px; background: var(--raised); color: var(--text); font: inherit; font-size: 14px; font-weight: 550; white-space: nowrap; cursor: pointer; }
+  .sx-range-chip .caret { color: var(--faint); font-size: .8em; }
+  .sx-range-pop { display: none; position: absolute; top: calc(100% - 2px); right: 16px; z-index: 5; flex-direction: column; gap: 6px; min-width: 180px; padding: 6px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.22); }
+  .sx-filters.open .sx-range-pop { display: flex; }
+  .sx-range-pop select { max-width: none; width: 100%; }
+  .sx-range-pop .range-picker { display: flex; flex-direction: column; padding: 0; border: 0; background: none; }
+  .sx-range-pop .range-picker button { height: auto; min-height: 36px; text-align: left; padding: 8px 12px; border-radius: 8px; font-size: 14px; }
+  .sx-range-pop .range-picker button[aria-pressed="true"] { background: var(--raised); box-shadow: none; }
+  .sx-range-pop .range-picker button[aria-pressed="true"]::after { content: "✓"; float: right; color: var(--accent); }
+  #sxBody { padding-top: 12px; }
+  #sxBody > .m-sub { margin: 0 0 12px; white-space: normal; }
+}
+@media (max-width: 600px) and (pointer: coarse) {
+  .sx-range-chip { min-height: 44px; font-size: 16px; }
+  .sx-range-pop select, .sx-range-pop .range-picker button { min-height: 44px; font-size: 16px; }
 }

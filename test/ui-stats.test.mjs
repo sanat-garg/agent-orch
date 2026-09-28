@@ -1,6 +1,7 @@
 // The Stats sheet (public/stats.js): boots server.mjs (CW_NO_ORCHESTRATOR=1, temp data dir) with a few days of work seeded
 // into the DB, a chat log and the usage log, then opens Stats from the sidebar and checks every tab renders the seeded
-// numbers without page errors, the range buttons re-slice it, it fits a 375×667 phone with nothing sticking out sideways,
+// numbers without page errors, the range buttons re-slice it, it fits a 375×667 phone with nothing sticking out sideways
+// (tabs and a range menu chip on one short pinned row),
 // and Escape closes it. Skips when Playwright's Chromium can't launch.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -190,6 +191,38 @@ test('375×667: a bottom sheet with nothing sticking out sideways on any tab', {
     assert.ok(m.pageW <= m.vw && m.bodyW <= m.bodyCW, `${id}: scrolls sideways ${JSON.stringify(m)}`);
     assert.ok(m.headH < 80, `${id}: title and buttons stay on one line (${m.headH}px)`);
   }
+  // UI-REVIEW #27: the pinned part above the scrolling body (grabber, title, tabs + range chip) stays short, the tabs and
+  // the chip share one row, and the subtitle scrolls with the body.
+  const pin = await page.evaluate(() => {
+    const panel = document.querySelector('#statsModal .modal-panel'), body = document.getElementById('sxBody');
+    return { pinned: body.getBoundingClientRect().top - panel.getBoundingClientRect().top, tabsTop: document.getElementById('sxTabs').offsetTop,
+      chipTop: document.getElementById('sxRangeChip').offsetTop, subInBody: body.contains(document.getElementById('sxSub')) };
+  });
+  assert.ok(pin.pinned < 120, `pinned header is ${pin.pinned}px`);
+  assert.equal(pin.chipTop, pin.tabsTop, 'tabs and range chip on one row');
+  assert.equal(pin.subInBody, true, 'the subtitle scrolls with the body');
+  assert.equal(await page.locator('#sxRange').isVisible(), false, 'range buttons wait behind the chip');
+  await tab(page, 'overview');
+  const chip = page.locator('#sxRangeChip');
+  const all = await page.locator('.sx-hero-num strong').textContent();
+  assert.match(await chip.textContent(), /^All ▾$/);
+  await chip.click();
+  assert.equal(await chip.getAttribute('aria-expanded'), 'true');
+  const b24 = page.locator('#sxRange [data-range="24h"]');
+  assert.ok((await b24.boundingBox()).height >= 44, '44pt rows in the range menu');
+  await b24.click();
+  assert.equal(await b24.getAttribute('aria-pressed'), 'true');
+  assert.equal(await page.locator('#sxRange').isVisible(), false, 'picking closes the menu');
+  assert.match(await chip.textContent(), /^24h ▾$/);
+  assert.ok(Number(await page.locator('.sx-hero-num strong').textContent()) < Number(all), 'the 24h range re-slices the data');
+  assert.equal(await page.evaluate(() => localStorage.getItem('cw.sx.range')), '24h');
+  await chip.click();
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('#statsModal').isVisible(), true, 'Escape closes the menu first');
+  assert.equal(await chip.getAttribute('aria-expanded'), 'false');
+  await chip.click();
+  await page.locator('#sxRange [data-range="all"]').click();
+  assert.match(await chip.textContent(), /^All ▾$/);
   await ctx.close();
   assert.deepEqual(errors, []);
 });

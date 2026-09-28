@@ -921,3 +921,6 @@ checkCommand now judges risk on the command with quoted text removed
 ## 2026-09-28 11:45 — #318 AUDIT #42 outside cluster.mjs: sampleOf clips cpu to 256 cores, metrics read is bounded, pending approvals per run are capped [done (check passed)]
 
 Metrics cpu clipped, reads bounded to 8 MB, approvals capped per run
+## 2026-09-28 11:45 — #320 UI-REVIEW #27: Stats tabs and the range chip share one row on phones and the subtitle scrolls with the body [done (check passed)]
+
+Phone Stats header pins tabs and range chip in one row

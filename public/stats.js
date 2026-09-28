@@ -889,6 +889,8 @@
       b.setAttribute('aria-selected', String(on)); b.tabIndex = on ? 0 : -1;
     }
     for (const b of document.querySelectorAll('#sxRange button')) b.setAttribute('aria-pressed', String(b.dataset.range === SX.range));
+    chip.firstChild.textContent = `${document.querySelector(`#sxRange [data-range="${SX.range}"]`).textContent} `;
+    placeSub();
     const d = SX.data, body = $('sxBody');
     $('sxSub').textContent = SX.err ? `Couldn't load stats: ${SX.err}` : !d ? 'Loading…' : `You and the orchestrator · updated ${fmtWhen(d.at)}`;
     if (!d) { body.classList.toggle('busy', !SX.err); return; }
@@ -908,7 +910,7 @@
     const grid = el('div', 'sx-grid');
     grid.append(...content);
     const y = body.scrollTop;
-    body.replaceChildren(grid);
+    body.replaceChildren(...(phone.matches ? [$('sxSub')] : []), grid);
     body.scrollTop = y;
   }
   async function load(fresh = false) {
@@ -925,6 +927,7 @@
     $('statsModal').querySelector('.icon-btn[data-close]').focus();
   }
   function close() {
+    rangeMenu(false);
     $('statsModal').hidden = true;
     hideTip();
     for (const ro of SX.observers) ro.disconnect();
@@ -932,9 +935,48 @@
     SX.lastFocus?.focus?.();
   }
 
+  // Phones (UI-REVIEW #27): the range picker folds into a menu chip beside the tabs (project select and range buttons
+  // open below it), and the subtitle scrolls with the body, so only the grabber, title and tabs row stay pinned.
+  const phone = matchMedia('(max-width: 600px)');
+  const chip = el('button', 'sx-range-chip');
+  chip.id = 'sxRangeChip'; chip.type = 'button';
+  chip.setAttribute('aria-haspopup', 'true'); chip.setAttribute('aria-expanded', 'false'); chip.setAttribute('aria-controls', 'sxRangePop');
+  chip.setAttribute('aria-label', 'Time range');
+  chip.append(document.createTextNode('All '), el('span', 'caret', '▾'));
+  const pop = el('div', 'sx-range-pop');
+  pop.id = 'sxRangePop';
+  $('sxRange').before(chip);
+  pop.append($('sxProject'), $('sxRange'));
+  chip.after(pop);
+  function rangeMenu(on) {
+    chip.parentNode.classList.toggle('open', on);
+    chip.setAttribute('aria-expanded', String(on));
+    if (on) document.querySelector('#sxRange [aria-pressed="true"]')?.focus();
+  }
+  // The subtitle lives in the head on desktop and at the top of the scrolling body on phones.
+  function placeSub() {
+    const sub = $('sxSub'), body = $('sxBody');
+    if (phone.matches && sub.parentNode !== body) body.prepend(sub);
+    else if (!phone.matches && sub.parentNode === body) $('sxTitle').after(sub);
+  }
+  phone.addEventListener('change', () => { rangeMenu(false); placeSub(); });
+  chip.addEventListener('click', () => rangeMenu(chip.getAttribute('aria-expanded') !== 'true'));
+  document.addEventListener('click', (e) => { if (chip.getAttribute('aria-expanded') === 'true' && !e.target.closest('.sx-filters')) rangeMenu(false); });
+  // Up/down arrows walk the open menu's range buttons.
+  pop.addEventListener('keydown', (e) => {
+    if (!phone.matches || (e.key !== 'ArrowDown' && e.key !== 'ArrowUp')) return;
+    const bs = [...document.querySelectorAll('#sxRange button')], i = bs.indexOf(document.activeElement);
+    e.preventDefault();
+    bs[(i + (e.key === 'ArrowDown' ? 1 : bs.length - 1)) % bs.length].focus();
+  });
+
   $('statsBtn').addEventListener('click', open);
   $('statsModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) close(); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('statsModal').hidden) { e.stopImmediatePropagation(); close(); } }, true);
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || $('statsModal').hidden) return;
+    e.stopImmediatePropagation();
+    if (chip.getAttribute('aria-expanded') === 'true') { rangeMenu(false); chip.focus(); } else close();
+  }, true);
   $('sxTabs').addEventListener('click', (e) => {
     const b = e.target.closest('[role=tab]');
     if (!b || b.dataset.tab === SX.tab) return;
@@ -951,7 +993,9 @@
   });
   $('sxRange').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-range]');
-    if (!b || b.dataset.range === SX.range) return;
+    if (!b) return;
+    if (chip.getAttribute('aria-expanded') === 'true') { rangeMenu(false); chip.focus(); }
+    if (b.dataset.range === SX.range) return;
     SX.range = b.dataset.range; store.set('cw.sx.range', SX.range);
     render();
   });

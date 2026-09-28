@@ -3761,7 +3761,7 @@ async function patchNode(n, body) {
 // setting, saved as soon as it changes. A value set another way (the API) shows as an extra option.
 const POWER_ROWS = [
   ['minBattery', 'New tasks on battery', [[null, 'Never: AC power only'], [25, 'Above 25%'], [50, 'Above 50%'], [75, 'Above 75%'], [0, 'At any charge']], (v) => `Above ${v}%`],
-  ['keepAwake', 'Keep awake while tasks run', [['ac', 'On AC power'], ['always', 'Always'], ['never', 'Never']]],
+  ['keepAwake', 'Keep awake while connected', [['ac', 'On AC power'], ['always', 'Always'], ['never', 'Never']]],
   ['thermal', 'Pause new tasks when hot', [['heavy', 'At heavy pressure'], ['moderate', 'From moderate pressure'], ['off', 'Never']]],
   ['reserveGB', 'RAM kept free for you', [1, 2, 3, 4, 6, 8].map((g) => [g, `${g} GB`]), (v) => `${v} GB`],
 ];

@@ -1,5 +1,5 @@
 // A Mac worker's power policy (power.mjs): the readings (pmset batt/therm, the thermal pressure level) parsed from
-// fixtures, the intake decisions on AC, on battery and when hot, keep-awake only while jobs run, the caffeinate manager
+// fixtures, the intake decisions on AC, on battery and when hot, keep-awake while connected (on battery too by default), the caffeinate manager
 // (stubbed spawn), the policy on the controller's hub (defaults per OS in welcome, the owner's edits pushed as
 // node.policy, 'paused' while the worker reports no intake), and the scheduler's caps (Auto = cores − 1 on a Mac, 3 GB
 // left free for its owner).
@@ -33,6 +33,7 @@ const THERM = {
 };
 const PRESSURE = (level) => `com.apple.system.thermalpressurelevel ${level}\n`;
 const MAC = effectivePolicy('darwin');
+const MAC_AC = { ...MAC, keepAwake: 'ac' }; // an owner who keeps it awake only on AC power
 let tmp;
 before(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-macos-power-')); });
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -80,13 +81,14 @@ test('intake: new jobs on AC power, or on battery above 50% by default; paused a
   assert.deepEqual(intake(MAC, null), { ok: true }, 'no readings (a VPS) never blocks');
 });
 
-test('keep awake only while jobs run, and by default only on AC power', async () => {
+test('keep awake while connected (or running jobs), on battery too by default; keepAwake ac/never still apply', async () => {
   const ac = await reading(BATT.acCharging), batt = await reading(BATT.battery(80)), mini = await reading(BATT.mini);
-  assert.equal(wantsAwake(MAC, ac, 1), true);
-  assert.equal(wantsAwake(MAC, ac, 0), false, 'idle: the Mac may sleep');
-  assert.equal(wantsAwake(MAC, batt, 2), false, 'on battery by default');
+  assert.equal(MAC.keepAwake, 'always');
+  assert.equal(wantsAwake(MAC, ac, true), true);
+  assert.equal(wantsAwake(MAC, ac, false), false, 'disconnected and idle: the Mac may sleep');
+  assert.equal(wantsAwake(MAC, batt, true), true, 'battery never matters by default');
   assert.equal(wantsAwake(MAC, mini, 1), true);
-  assert.equal(wantsAwake({ ...MAC, keepAwake: 'always' }, batt, 1), true);
+  assert.equal(wantsAwake(MAC_AC, batt, 2), false, "'ac': not on battery");
   assert.equal(wantsAwake({ ...MAC, keepAwake: 'never' }, ac, 1), false);
 });
 
@@ -96,7 +98,7 @@ test('caffeinate -i -w <worker pid> starts with the first job and stops with the
   const k = createKeepAwake({ bin: '/usr/bin/caffeinate', pid: 4242, spawn, kill: (pid) => killed.push(pid), log: (m) => lines.push(m) });
   const ac = { battery: { pct: 90, charging: true, source: 'ac' } }, batt = { battery: { pct: 90, charging: false, source: 'battery' } };
   let jobs = 0;
-  const tick = (power = ac) => k.set(wantsAwake(MAC, power, jobs));
+  const tick = (power = ac) => k.set(wantsAwake(MAC_AC, power, jobs));
   tick();
   assert.equal(spawned.length, 0, 'nothing runs while idle');
   jobs = 1; tick(); jobs = 2; tick();
@@ -120,7 +122,7 @@ test('caffeinate -i -w <worker pid> starts with the first job and stops with the
 });
 
 test('policy settings: defaults per OS, validation, Auto task cap', () => {
-  assert.deepEqual(policyDefaults('darwin'), { minBattery: 50, keepAwake: 'ac', thermal: 'heavy', reserveGB: 3 });
+  assert.deepEqual(policyDefaults('darwin'), { minBattery: 50, keepAwake: 'always', thermal: 'heavy', reserveGB: 3 });
   assert.equal(policyDefaults('linux').reserveGB, 0);
   assert.deepEqual(effectivePolicy('darwin', { minBattery: null }), { ...MAC, minBattery: null });
   for (const bad of [{ minBattery: 101 }, { minBattery: '50' }, { keepAwake: 'lid' }, { thermal: 'hot' }, { reserveGB: -1 }, { cpu: 1 }, [], null]) {
@@ -153,18 +155,18 @@ test('hub: welcome carries the policy, owner edits reach the worker as node.poli
     return { node, frames, send, got: (t) => frames.filter((f) => f.t === t) };
   }
   const mac = await worker('MacBook Pro (policy)', 'darwin');
-  assert.deepEqual(mac.got('welcome')[0].policy, { minBattery: 50, keepAwake: 'ac', thermal: 'heavy', reserveGB: 3, maxTasks: null });
+  assert.deepEqual(mac.got('welcome')[0].policy, { minBattery: 50, keepAwake: 'always', thermal: 'heavy', reserveGB: 3, maxTasks: null });
   assert.deepEqual(hub.node(mac.node).policy, MAC);
   const vps = await worker('vps-policy', 'linux');
   assert.equal(vps.got('welcome')[0].policy.reserveGB, 0);
 
   // The owner's edits: merged over the defaults, stored, and sent to the worker right away.
-  assert.equal(hub.update(mac.node, { policy: { minBattery: null, keepAwake: 'always' } }).node.policy.minBattery, null);
+  assert.equal(hub.update(mac.node, { policy: { minBattery: null, keepAwake: 'ac' } }).node.policy.minBattery, null);
   let p = await waitFor(() => mac.got('node.policy')[0], { timeout: 5000 });
-  assert.deepEqual(p.policy, { minBattery: null, keepAwake: 'always', thermal: 'heavy', reserveGB: 3, maxTasks: null });
+  assert.deepEqual(p.policy, { minBattery: null, keepAwake: 'ac', thermal: 'heavy', reserveGB: 3, maxTasks: null });
   hub.update(mac.node, { maxSlots: 2 });
   p = await waitFor(() => mac.got('node.policy')[1], { timeout: 5000 });
-  assert.deepEqual([p.policy.maxTasks, p.policy.keepAwake], [2, 'always']);
+  assert.deepEqual([p.policy.maxTasks, p.policy.keepAwake], [2, 'ac']);
   assert.equal(hub.update(mac.node, { policy: { minBattery: 150 } }).status, 400);
   assert.equal(hub.update(mac.node, { policy: { lid: 'open' } }).status, 400);
   assert.equal(hub.update('controller', { policy: { minBattery: 20 } }).status, 400);

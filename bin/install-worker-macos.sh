@@ -11,7 +11,9 @@
 #          command), and it stops when you log out.
 # Either way launchd restarts it if it stops. Power policy (the head sends it; change it per Mac in Machines → Power):
 # new tasks on AC power or above 50% battery, none at heavy thermal pressure, at most cores − 1 tasks with 3 GB of RAM
-# left for you, and while tasks run on AC power the worker keeps the Mac awake with `caffeinate -i -w <worker pid>`.
+# left for you, and while it is connected the worker keeps the Mac awake with `caffeinate -i -w <worker pid>`, on
+# battery too (closing the lid still sleeps it). Always installs /usr/local/bin/agent-orch-worker-status: the live
+# status view in one word, run as the worker's user.
 # Installs Node 22 if missing (nvm when present, else the official tarball in ~/.local/node), clones or updates
 # github.com/sanat-garg/agent-orch into ~/agent-orch-worker with the gh login, runs npm ci, optionally installs agent
 # CLIs and pairs the machine. Idempotent: re-running updates everything; without --code an existing pairing is kept.
@@ -19,7 +21,7 @@
 #   --controller URL  --code CODE  --name NAME (default: "<model> (<host name>)")  --agents claude,codex
 #   --service daemon|login  --user NAME (dedicated user, default agentorch)
 #   --no-dedicated-user (run as yourself from your own LaunchAgent, without sudo; not advised)
-#   --status-window (also open the live status view, worker.mjs status, in a Terminal window at every login)
+#   --status-window (also open the live status view, agent-orch-worker-status, in a Terminal window at every login)
 #   --repair (pair again as a new machine even though the head still knows this one; re-runs keep the pairing)
 #   --dry-run (print what would run, change nothing)  --uninstall [--purge] (also delete the worker home)
 set -euo pipefail
@@ -29,8 +31,8 @@ LABEL=com.agent-orch.worker
 LAUNCHER=/usr/local/bin/agent-orch-worker-run
 SUDOERS=/etc/sudoers.d/agent-orch-worker
 DAEMON_PLIST=/Library/LaunchDaemons/$LABEL.plist
-# --status-window: a root-owned script that opens the status view as the worker's user (a sudoers rule allows exactly
-# that one command), and your LaunchAgent that opens it in Terminal when you log in.
+# agent-orch-worker-status: a root-owned script that opens the status view as the worker's user (a sudoers rule allows
+# exactly that one command); --status-window adds your LaunchAgent that opens it in Terminal when you log in.
 STATUS_LABEL=$LABEL.status
 STATUS_BIN=/usr/local/bin/agent-orch-worker-status
 STATUS_SUDOERS=/etc/sudoers.d/agent-orch-worker-status
@@ -333,29 +335,42 @@ remove_daemon() {
   run rm -f "$DAEMON_PLIST"
 }
 
-# --status-window: the live status view (worker.mjs status, q quits) opens in a Terminal window each time OWNER logs in:
-# their LaunchAgent runs `open -a Terminal SCRIPT` once per login. With the dedicated user, SCRIPT is root-owned and
-# re-runs itself as that user (the status socket is theirs, 0600) under a sudoers rule for exactly it.
+# agent-orch-worker-status: the live status view (worker.mjs status, q quits) in one word. With the dedicated user it is
+# root-owned and re-runs itself as that user (the status socket is theirs, 0600) under a sudoers rule for exactly it,
+# with the worker's own Node. --no-dedicated-user writes it there only when /usr/local/bin is yours, else status.command.
 status_script() { # status_script NODE WORKER-HOME [RUN-AS]
-  printf '#!/bin/sh\n# agent-orch worker status (install-worker-macos.sh --status-window): the live view of this Mac'"'"'s worker; q quits.\n'
+  printf '#!/bin/sh\n# agent-orch-worker-status (install-worker-macos.sh): the live view of this Mac'"'"'s worker; q quits.\n'
   if [[ -n "${3:-}" ]]; then printf '[ "$(id -un)" = %s ] || exec /usr/bin/sudo -u %s -H "$0" "$@"\n' "$3" "$3"; fi
   printf 'exec "%s" "%s/agent-orch-worker/worker.mjs" status "$@"\n' "$1" "$2"
 }
-install_status_window() { # install_status_window OWNER NODE WORKER-HOME
-  local ohome script; if ((SELF)); then ohome="$HOME"; else ohome="$(home_of "$1")"; fi
-  local plistf="$ohome/Library/LaunchAgents/$STATUS_LABEL.plist"
+STATUS_CMD=''
+install_status_cmd() { # install_status_cmd OWNER NODE WORKER-HOME
   if ((SELF)); then
-    script="$3/.agent-orch-worker/status.command"
-    say "Adding the status view to your logins ($script, opened in Terminal)"
-    run mkdir -p "$3/.agent-orch-worker"
-    status_script "$2" "$3" | write "$script"
-    run chmod 0755 "$script"
-  else
-    script="$STATUS_BIN"
-    say "Installing $STATUS_BIN and allowing $1 to run it as $WUSER ($STATUS_SUDOERS); it opens in Terminal at each login"
-    status_script "$2" "$3" "$WUSER" | write_root "$STATUS_BIN" 0755
-    printf '%s ALL=(%s) NOPASSWD: %s\n' "$1" "$WUSER" "$STATUS_BIN" | write_root "$STATUS_SUDOERS" 0440 check
+    if ((DRY)) || [[ -w /usr/local/bin ]]; then
+      STATUS_CMD="$STATUS_BIN"
+      say "Installing $STATUS_BIN (the live status view)"
+      status_script "$2" "$3" | write "$STATUS_BIN"
+      run chmod 0755 "$STATUS_BIN"
+    else
+      STATUS_CMD="$3/.agent-orch-worker/status.command"
+      say "/usr/local/bin isn't writable without sudo: the status view is $STATUS_CMD"
+      run mkdir -p "$3/.agent-orch-worker"
+      status_script "$2" "$3" | write "$STATUS_CMD"
+      run chmod 0755 "$STATUS_CMD"
+    fi
+    return
   fi
+  STATUS_CMD="$STATUS_BIN"
+  say "Installing $STATUS_BIN (the live status view) and allowing $1 to run it as $WUSER ($STATUS_SUDOERS)"
+  run mkdir -p /usr/local/bin
+  status_script "$2" "$3" "$WUSER" | write_root "$STATUS_BIN" 0755
+  printf '%s ALL=(%s) NOPASSWD: %s\n' "$1" "$WUSER" "$STATUS_BIN" | write_root "$STATUS_SUDOERS" 0440 check
+}
+# --status-window: OWNER's LaunchAgent runs `open -a Terminal <agent-orch-worker-status>` once per login.
+install_status_window() { # install_status_window OWNER
+  local ohome script="$STATUS_CMD"; if ((SELF)); then ohome="$HOME"; else ohome="$(home_of "$1")"; fi
+  local plistf="$ohome/Library/LaunchAgents/$STATUS_LABEL.plist"
+  say "Adding the status view to $1's logins ($script, opened in Terminal)"
   if ((SELF)); then run mkdir -p "$ohome/Library/LaunchAgents"; else run sudo -u "$1" mkdir -p "$ohome/Library/LaunchAgents"; fi
   write "$plistf" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -387,11 +402,12 @@ power_policy() {
   cat <<'EOF'
     - new tasks only on AC power, or on battery above 50%; none while the Mac runs hot (heavy thermal pressure)
     - at most cores − 1 tasks at once (Max tasks: Auto), leaving 3 GB of RAM free for you
-    - while tasks run on AC power the worker keeps the Mac awake: caffeinate -i -w <worker pid> (idle sleep only; it
-      ends with the last task or the worker)
-    - closing the lid still sleeps the Mac: the head shows it asleep and moves its tasks to another machine after 5 min
+    - while it is connected the worker keeps the Mac awake, on battery too: caffeinate -i -w <worker pid> (idle sleep
+      only; it ends with the connection or the worker)
+    - closing the lid still sleeps the Mac (nothing can prevent that): the head shows it asleep and moves its tasks to
+      another machine after 5 min
 EOF
-  [[ -x /usr/bin/caffeinate ]] || ((DRY)) || say "Warning: /usr/bin/caffeinate is missing, so the Mac may sleep while tasks run"
+  [[ -x /usr/bin/caffeinate ]] || ((DRY)) || say "Warning: /usr/bin/caffeinate is missing, so the Mac may idle to sleep and drop off"
 }
 
 uninstall() {
@@ -404,6 +420,7 @@ uninstall() {
   run launchctl bootout "gui/$(id -u "$owner")/$LABEL" 2>/dev/null || true
   run launchctl bootout "gui/$(id -u "$owner")/$STATUS_LABEL" 2>/dev/null || true
   run rm -f "$(home_of "$owner")/Library/LaunchAgents/$LABEL.plist" "$(home_of "$owner")/Library/LaunchAgents/$STATUS_LABEL.plist"
+  if ((SELF)) && [[ -w "$STATUS_BIN" ]]; then run rm -f "$STATUS_BIN"; fi
   local home="$HOME"
   if ((EUID == 0 || DRY)) && ((!SELF)); then home="$(home_of "$WUSER")"; fi
   say "Removing $home/agent-orch-worker"
@@ -433,7 +450,8 @@ main() {
 $(env_keys "$HOME" "$(worker_path "$node_bin" "$HOME")")
 " plist "$node_bin" "$HOME/agent-orch-worker/worker.mjs" run | write "$plistf"
     load_agent "$(id -un)" "$plistf"
-    ((STATUS_WINDOW)) && install_status_window "$(id -un)" "$node_bin" "$HOME"
+    install_status_cmd "$(id -un)" "$node_bin" "$HOME"
+    if ((STATUS_WINDOW)); then install_status_window "$(id -un)"; fi
     power_policy
     FINISH="Done. The worker runs while you're logged in and restarts if it stops. Log: $LOG"
     finish "$HOME" ''
@@ -476,7 +494,8 @@ $(env_keys "$HOME" "$(worker_path "$node_bin" "$HOME")")
   [[ "$node_bin" == /* ]] || die "the worker stage didn't report a node binary"
 
   if [[ "$SERVICE" == daemon ]]; then install_daemon "$owner" "$node_bin" "$whome"; else install_login "$owner" "$node_bin" "$whome"; fi
-  ((STATUS_WINDOW)) && install_status_window "$owner" "$node_bin" "$whome"
+  install_status_cmd "$owner" "$node_bin" "$whome"
+  if ((STATUS_WINDOW)); then install_status_window "$owner"; fi
   power_policy
   finish "$whome" "sudo -u $WUSER -H "
 }
@@ -484,10 +503,11 @@ $(env_keys "$HOME" "$(worker_path "$node_bin" "$HOME")")
 # How to open the status view and set the one local setting, the cap on what this Mac lends (the head keeps to it).
 finish() { # finish WORKER-HOME RUN-AS-PREFIX
   say "$FINISH"
-  say "Live status (connection, cap, running tasks; q quits): ${2}node $1/agent-orch-worker/worker.mjs status"
+  say "Live status (connection, cap, running tasks; q quits): ${STATUS_CMD##*/}   (or ${2}node $1/agent-orch-worker/worker.mjs status)"
   if [[ -n "$STATUS_NOTE" ]]; then say "$STATUS_NOTE"; else say "To open it in Terminal at every login, run this installer again with --status-window."; fi
   say "Cap what this Mac lends the cluster: ${2}node $1/agent-orch-worker/worker.mjs limit --cpu 4 --mem 8   (cores or %, GB or %; --show, --reset)"
   say "Claude and Codex run on the head's accounts: nothing to sign in here. If Claude isn't shared yet, on the head open Connections → Claude for your machines → Share with machines."
+  say "Progress: ${STATUS_CMD##*/}"
 }
 
 # AGENT_ORCH_INSTALLER_NO_MAIN=1 only defines the functions (test/install-macos-bash32.test.mjs). Not "${BASH_SOURCE[0]}":

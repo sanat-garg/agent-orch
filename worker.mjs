@@ -5,7 +5,9 @@
 // reports richly: each job's phases with progress hints, health telemetry every heartbeat, structured errors, its log
 // tail on request, and it updates itself (git pull + service restart) when the controller asks while it is idle. On a
 // Mac it follows its power policy from the controller (power.mjs): no new jobs on low battery or when hot, and awake
-// (caffeinate) only while jobs run.
+// (caffeinate) while it is connected or runs jobs. The head and git hosts resolve without depending on DNS
+// (net-resolve.mjs: system DNS first, then the sslip.io-embedded, pinned or last good IP), and it reconnects with a
+// backoff capped at 15 s, telling the head why it was away (hello.reconnect).
 // Compute-only (BRIEF goal 11): no chat, planner, reflection or management here, and nothing of the controller's is
 // loaded (server.mjs, orchestrator.mjs, cluster.mjs). It acts only on the head's allow-listed frames (cluster-protocol.mjs
 // WORKER_ACCEPTS), rejecting and logging anything else; it opens no TCP port; its slots, power policy and draining come
@@ -59,6 +61,7 @@ import { ensureBrowser, needsBrowser, normIdentity } from './browser.mjs';
 import { APPROVAL_TTL_MS, hostGate, patternsWith } from './gate.mjs';
 import { MEDIA_ID_RE } from './media.mjs';
 import { createLiveBrowsers, screenOp } from './browser-live.mjs';
+import { createResolver, gitResolves, isDnsError, netFetch, pinGitRemote, plainAddress, reconnectDelay, resolveEntry, RECONNECT_MAX_MS } from './net-resolve.mjs';
 
 const execFileP = promisify(execFile);
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -68,8 +71,10 @@ const EVENT_FLUSH_MS = 1000;
 const MAX_PENDING_EVENTS = 5000; // events kept per job for a replay after a reconnect (oldest dropped)
 const CLOCK_MS = 5000; // the sleep detector's tick
 // Tests shorten these: the reconnect backoff's ceiling and the time jump that counts as a sleep.
-const BACKOFF_MAX_MS = Number(process.env.AGENT_ORCH_WORKER_BACKOFF_MAX_MS) || Infinity;
+const BACKOFF_MAX_MS = Number(process.env.AGENT_ORCH_WORKER_BACKOFF_MAX_MS) || RECONNECT_MAX_MS;
 const SLEEP_MS = Number(process.env.AGENT_ORCH_WORKER_SLEEP_JUMP_MS) || SLEEP_JUMP_MS;
+// AGENT_ORCH_WORKER_DNS=fail: every system DNS lookup fails (tests run the IP fallback with it).
+const DNS_FAIL = process.env.AGENT_ORCH_WORKER_DNS === 'fail';
 // A timer due every `interval` that fires `gap` ms after the last one: the process was suspended (a laptop's sleep).
 export const sleptFor = (gap, interval, jump = SLEEP_JUMP_MS) => (gap > interval + jump ? gap - interval : 0);
 const BATCH_BYTES = 512 * 1024;
@@ -159,6 +164,17 @@ export function tailLines(file, n, maxBytes = 512 * 1024) {
   return out.reverse();
 }
 
+// ---------------------------------------------------------------- name resolution (net-resolve.mjs)
+
+const dnsFail = (host, _opts, cb) => setImmediate(() => cb(Object.assign(new Error(`getaddrinfo EAI_AGAIN ${host}`), { code: 'EAI_AGAIN', hostname: host })));
+// The head's host falls back to config.headIp; every host to its last good address (resolve.json).
+export function workerResolver({ home = workerHome(), config = () => readConfig(home), log, onDnsError } = {}) {
+  const pins = (host) => { const c = config(); try { return c?.headIp && new URL(c.controller).hostname === host ? c.headIp : null; } catch { return null; } };
+  return createResolver({ pins, cacheFile: path.join(home, 'resolve.json'), log, onDnsError, ...(DNS_FAIL ? { lookup: dnsFail } : {}) });
+}
+// The head's address as the connection saw it, for config.headIp (none for an IP-literal controller URL).
+const headIpOf = (controller, address) => (net.isIP(new URL(controller).hostname) ? null : plainAddress(address) || null);
+
 // ---------------------------------------------------------------- pairing
 
 // The name a machine pairs under unless --name is given: on a Mac its model and local host name ('MacBook Pro
@@ -178,13 +194,15 @@ export async function pair({ controller, code, name, home = workerHome() }) {
   if (!OS_KINDS.includes(process.platform)) throw new Error(`unsupported OS ${process.platform} (need ${OS_KINDS.join(' or ')})`);
   name ||= await defaultName();
   const base = new URL(controller);
-  const r = await fetch(new URL(CLAIM_PATH, base), {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+  const r = await netFetch(new URL(CLAIM_PATH, base), {
+    method: 'POST', headers: { 'content-type': 'application/json' }, lookup: workerResolver({ home, config: () => null }).lookup,
     body: JSON.stringify({ code, name, os: process.platform, arch: process.arch }),
   });
   const j = await r.json().catch(() => ({}));
   if (!r.ok || !j.token) throw new Error(`pairing failed (HTTP ${r.status}): ${j.error || 'no token'}`);
-  writeConfig(home, { controller: base.origin, node: j.node, name: j.name || name, token: j.token, pairedAt: Date.now() });
+  // headIp: where the head answered, the fallback when DNS can't resolve its name later.
+  const headIp = headIpOf(base.origin, r.remoteAddress);
+  writeConfig(home, { controller: base.origin, node: j.node, name: j.name || name, token: j.token, pairedAt: Date.now(), ...(headIp ? { headIp } : {}) });
   return { node: j.node, name: j.name || name };
 }
 
@@ -196,7 +214,8 @@ export async function checkPairing({ controller = null, home = workerHome() } = 
   if (!c?.token || !c?.controller) return { state: 'unpaired', why: 'not paired' };
   if (controller && new URL(controller).origin !== c.controller) return { state: 'unpaired', why: `paired with ${c.controller}` };
   try {
-    const r = await fetch(new URL(WHOAMI_PATH, c.controller), { headers: { authorization: `Bearer ${c.token}` }, signal: AbortSignal.timeout(15_000) });
+    const r = await netFetch(new URL(WHOAMI_PATH, c.controller), { headers: { authorization: `Bearer ${c.token}` }, signal: AbortSignal.timeout(15_000),
+      lookup: workerResolver({ home, config: () => c }).lookup });
     const j = await r.json().catch(() => ({}));
     if (r.ok && j.node === c.node) return { state: 'ok', name: j.name || c.name };
     if (r.status === 401) return { state: 'unpaired', why: 'the head removed this machine' };
@@ -235,7 +254,7 @@ async function dirSize(dir, stop = Infinity) {
 // ---------------------------------------------------------------- the daemon
 
 // restart(): after a self-update, start the new code (default: a clean stop, then exit 0 so systemd/launchd restart it).
-export function createWorker({ home = workerHome(), config = readConfig(home), log = createLog(home), srcDir = SRC_DIR, restart = null } = {}) {
+export function createWorker({ home = workerHome(), config = readConfig(home), log = createLog(home), srcDir = SRC_DIR, restart = null, resolver = null } = {}) {
   if (!config?.token || !config?.node || !config?.controller) throw new Error(`not paired: run \`node worker.mjs pair --controller https://<host> --code <code>\` first (${configFile(home)})`);
   const dirs = { repos: path.join(home, 'repos'), worktrees: path.join(home, 'worktrees'), deps: path.join(home, 'deps'), npmCache: path.join(home, 'npm-cache') };
   for (const d of Object.values(dirs)) fs.mkdirSync(d, { recursive: true });
@@ -247,6 +266,11 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   let ws = null, send = null, welcomed = false, attempt = 0, connectedAt = 0, lastFrame = 0, stopping = false;
   let heartbeatMs = HEARTBEAT_MS, wipPushMs = WIP_PUSH_MS, graceMs = process.platform === 'darwin' ? GRACE_MS.mac : GRACE_MS.vps, beat = null, reconnectTimer = null;
   let pendingWake = null;
+  // Why the connection is down, for the next hello's reconnect {reason, since, lastError}: a sleep the clock saw, else a
+  // failed DNS lookup of the head (even one the IP fallback covered), else the network. Reset once welcomed.
+  let everUp = false, outage = { sleep: false, dnsError: null };
+  const headHost = () => new URL(config.controller).hostname;
+  resolver ??= workerResolver({ home, config: () => config, log, onDnsError: (host, e) => { if (host === headHost()) outage.dnsError = `DNS lookup of ${host} failed: ${e.code || e.message}`; } });
   let peer = new Set(); // the controller's features (welcome.features): newer frame types go only to one that reads them
   let srcSha = null, lastInv = null, updating = false;
   // The power policy and task cap the controller set for this node (welcome.policy, node.policy); its OS defaults until then.
@@ -496,7 +520,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   // a bundle that changes again meanwhile can't keep it looping; the newest one wins either way. Logs carry names and
   // counts only: the bundle holds the MCP servers' secrets.
   async function fetchExt() {
-    const r = await fetch(new URL(EXT_PATH, config.controller), { headers: { authorization: `Bearer ${config.token}` }, signal: AbortSignal.timeout(120_000) });
+    const r = await netFetch(new URL(EXT_PATH, config.controller), { headers: { authorization: `Bearer ${config.token}` }, signal: AbortSignal.timeout(120_000), lookup: resolver.lookup });
     if (!r.ok) throw new Error(`the controller answered HTTP ${r.status}`);
     const chunks = [];
     let n = 0;
@@ -583,11 +607,12 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   const activeJobs = () => [...jobs.values()].filter((j) => j.state !== 'paused').length;
   // At most the head's max tasks (Auto: cores − 1 on a Mac, all cores elsewhere): slots are set on the head only.
   const maxJobs = () => policy.maxTasks ?? autoTasks(process.platform, os.cpus().length);
-  function syncAwake() { awake?.set(!stopping && wantsAwake(policy, power, activeJobs())); }
+  // Awake while connected (or running jobs): a Mac that idles to sleep drops off the cluster.
+  function syncAwake() { awake?.set(!stopping && wantsAwake(policy, power, live() || activeJobs() > 0)); }
   function setPolicy(p) {
     policy = { ...effectivePolicy(process.platform), ...p };
     const rules = !POWERED ? '' : `new jobs on AC power${policy.minBattery == null ? ' only' : ` or above ${policy.minBattery}% battery`}` +
-      `${policy.thermal === 'off' ? '' : `, none at ${policy.thermal} thermal pressure`}; awake while jobs run: ${{ ac: 'on AC power', always: 'always', never: 'never' }[policy.keepAwake]}; `;
+      `${policy.thermal === 'off' ? '' : `, none at ${policy.thermal} thermal pressure`}; awake while connected: ${{ ac: 'on AC power', always: 'always', never: 'never' }[policy.keepAwake]}; `;
     const text = `${rules}at most ${maxJobs()} jobs at once, leaving ${+(Math.max(MEM.claimFloor, reserveBytes(policy)) / 1024 ** 3).toFixed(1)} GB free`;
     if (text !== policyText) log(`policy: ${text}`);
     policyText = text;
@@ -720,16 +745,26 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   function connect() {
     if (stopping) return;
     reconnectTimer = null;
-    const sock = new WebSocket(wsUrl(), { headers: { authorization: `Bearer ${config.token}` }, maxPayload: MAX_FRAME, handshakeTimeout: 15_000 });
+    // The head's name resolves without DNS when need be (resolver.lookup); TLS still checks the certificate for the name.
+    const sock = new WebSocket(wsUrl(), { headers: { authorization: `Bearer ${config.token}` }, maxPayload: MAX_FRAME, handshakeTimeout: 15_000, lookup: resolver.lookup });
     ws = sock;
     welcomed = false;
+    // Where the head answered becomes config.headIp: the fallback for the next time DNS can't resolve its name.
+    sock.on('upgrade', (res) => {
+      const ip = headIpOf(config.controller, res.socket?.remoteAddress);
+      if (!ip || ip === config.headIp) return;
+      config.headIp = ip;
+      try { writeConfig(home, { ...(readConfig(home) || config), headIp: ip }); log(`the head is at ${ip} (saved as headIp)`); } catch (e) { log(`could not save headIp: ${e.message}`, 'warn'); }
+    });
     sock.on('open', () => {
       connectedAt = lastFrame = Date.now();
       send = createSender('w');
       log(`connected to ${config.controller}`);
       // Every job still here (finished ones whose job.done wasn't acked too): the controller attaches or cancels each.
       sock.send(send(MSG.HELLO, { node: config.node, protocol: PROTOCOL_VERSION, version: VERSION, ...(srcSha ? { sha: srcSha } : {}), features: FEATURE_LIST,
-        jobs: allJobs().map((j) => ({ job: j.id, state: held.has(j.id) ? 'done' : j.state, next: evEnd(j), ...(j.pushed ? { sha: j.pushed } : {}) })) }));
+        jobs: allJobs().map((j) => ({ job: j.id, state: held.has(j.id) ? 'done' : j.state, next: evEnd(j), ...(j.pushed ? { sha: j.pushed } : {}) })),
+        ...(everUp || attempt ? { reconnect: reconnectInfo() } : {}) }));
+      everUp = true;
     });
     sock.on('unexpected-response', (_req, res) => {
       connError = res.statusCode === 401 ? 'the controller refused this node token (revoked?): pair again'
@@ -748,7 +783,11 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
         nodeError('exception', `handling ${msg.t} failed: ${e.message}`, { stack: e.stack });
       });
     });
-    sock.on('error', (e) => { if (!REFUSED_RE.test(connError || '')) connError = `connection error: ${e.message}`; log(`connection error: ${e.message}`, 'warn'); });
+    sock.on('error', (e) => {
+      if (isDnsError(e)) outage.dnsError = `connection error: ${e.message}`;
+      if (!REFUSED_RE.test(connError || '')) connError = `connection error: ${e.message}`;
+      log(`connection error: ${e.message}`, 'warn');
+    });
     sock.on('close', (code, reason) => {
       if (ws !== sock) return;
       ws = null; welcomed = false;
@@ -758,11 +797,17 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       if (connectedAt) { log(`disconnected (${code}${reason?.length ? ` ${reason}` : ''})`); downSince = Date.now(); connError ??= code === 4003 ? `the controller ${reason?.length ? reason : 'revoked'} this machine` : `disconnected (${code})`; }
       if (connectedAt && Date.now() - connectedAt > 60_000) attempt = 0;
       connectedAt = 0;
+      syncAwake();
       if (stopping) return;
-      const delay = Math.min(BACKOFF_MAX_MS, backoffMs(attempt++));
+      const delay = reconnectDelay(attempt++, BACKOFF_MAX_MS);
       retryAt = Date.now() + delay;
       reconnectTimer = setTimeout(connect, delay);
     });
+  }
+
+  function reconnectInfo() {
+    const reason = outage.sleep ? 'sleep' : outage.dnsError ? 'dns' : 'network';
+    return { reason, since: downSince, ...((reason === 'dns' ? outage.dnsError : connError) ? { lastError: String(reason === 'dns' ? outage.dnsError : connError).slice(0, 300) } : {}) };
   }
 
   function onWelcome(msg) {
@@ -772,6 +817,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     peer = new Set(Array.isArray(msg.features) ? msg.features : []);
     welcomed = true;
     connError = null;
+    outage = { sleep: false, dnsError: null };
+    syncAwake();
     queued = Number.isSafeInteger(msg.queued) ? msg.queued : null;
     log(`welcomed as ${msg.node}`);
     if (msg.policy) setPolicy(msg.policy);
@@ -796,6 +843,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     if (slept) {
       log(`woke up after ${Math.round(slept / 1000)} s asleep`);
       pendingWake = { sleptAt: lastTick, sleptMs: Math.round(slept) };
+      outage.sleep = true;
       attempt = 0;
       if (ws) ws.terminate();
       else if (reconnectTimer) { clearTimeout(reconnectTimer); connect(); }
@@ -883,16 +931,34 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
 
   // Bare cache clone (blob-less), fetched before each job; remote branches land in refs/remotes/origin/*.
   const cacheDir = (repo) => path.join(dirs.repos, `${cacheName(repo)}.git`);
+  // git ≥ 2.37: each cache clone pins its remote's host in its local config (http.curloptResolve, net-resolve.mjs), so
+  // git's curl never needs DNS for it; worktrees share that config. An older git retries its fetches instead.
+  let gitPins = null;
+  const canPin = () => (gitPins ??= git(home, ['--version']).then((v) => {
+    const ok = gitResolves(v);
+    if (!ok) log(`${v.trim()} predates 2.37 (no http.curloptResolve): git depends on DNS here, and fetches retry`, 'warn');
+    return ok;
+  }, () => false));
+  const pinRemote = async (dir, repo) => ((await canPin()) ? pinGitRemote({ git, dir, repo, resolver }).catch((e) => log(`git host pin failed: ${e.message}`, 'warn')) : null);
+  async function retried(fn, tries) {
+    for (let i = 0; ; i++) {
+      try { return await fn(); } catch (e) { if (i >= tries - 1) throw e; await new Promise((r) => setTimeout(r, backoffMs(i))); }
+    }
+  }
   async function ensureCache(repo) {
-    const dir = cacheDir(repo), env = gitAuthEnv(repo);
+    const dir = cacheDir(repo), env = gitAuthEnv(repo), tries = (await canPin()) ? 1 : 3;
     if (!fs.existsSync(path.join(dir, 'HEAD'))) {
-      fs.rmSync(dir, { recursive: true, force: true });
-      await git(dirs.repos, ['clone', '--bare', '--filter=blob:none', '-q', repo, dir], { env });
+      const entry = (await canPin()) ? await resolveEntry(repo, resolver) : null;
+      await retried(async () => {
+        fs.rmSync(dir, { recursive: true, force: true });
+        await git(dirs.repos, ['clone', '--bare', '--filter=blob:none', '-q', ...(entry ? ['--config', `http.curloptResolve=${entry}`] : []), repo, dir], { env });
+      }, tries);
       await git(dir, ['config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*']);
       fs.appendFileSync(path.join(dir, 'info', 'exclude'), '\nnode_modules\n');
     }
     await git(dir, ['remote', 'set-url', 'origin', repo]);
-    await git(dir, ['fetch', '-q', '--prune', 'origin'], { env });
+    await pinRemote(dir, repo);
+    await retried(() => git(dir, ['fetch', '-q', '--prune', 'origin'], { env }), tries);
     const now = new Date();
     try { fs.utimesSync(dir, now, now); } catch {}
     return dir;
@@ -1164,6 +1230,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
           jobError(job, 'push_failed', `push of ${branch} failed: ${why}`, { stderr: e.stderr });
           if ((!final && i >= 2) || job.stop?.kind === 'cancel') throw new Error(why);
           await new Promise((r) => setTimeout(r, backoffMs(i)));
+          if (job.cache) await pinRemote(job.cache, job.spec.repo); // re-resolve: the head (or GitHub) may have moved
         }
       }
       job.pushed = sha;

@@ -175,7 +175,7 @@ test('the status view renders a snapshot: connection, cap, bars, one line per jo
   assert.match(renderStatus({ ok: false, config: { controller: 'https://h' }, error: 'no status socket' }).join('\n'), /Not running/);
 });
 
-test('the macOS installer says how to open the status view and set the cap; --status-window adds a Terminal login item', () => {
+test('the macOS installer always installs agent-orch-worker-status and says how to set the cap; --status-window adds a Terminal login item', () => {
   const dry = (...args) => {
     const h = fs.mkdtempSync(path.join(tmp, 'inst-'));
     return spawnSync('bash', [path.join(ROOT, 'bin', 'install-worker-macos.sh'), '--dry-run', '--controller', 'https://head.example', '--code', 'ABCD-2345', ...args],
@@ -183,10 +183,11 @@ test('the macOS installer says how to open the status view and set the cap; --st
   };
   const plain = dry();
   assert.equal(plain.status, 0, plain.stderr);
-  assert.match(plain.stdout, /Live status \(connection, cap, running tasks; q quits\): sudo -u agentorch -H node \/Users\/agentorch\/agent-orch-worker\/worker\.mjs status/);
+  assert.match(plain.stdout, /Live status \(connection, cap, running tasks; q quits\): agent-orch-worker-status {3}\(or sudo -u agentorch -H node \/Users\/agentorch\/agent-orch-worker\/worker\.mjs status\)/);
   assert.match(plain.stdout, /run this installer again with --status-window/);
   assert.match(plain.stdout, /Cap what this Mac lends the cluster: sudo -u agentorch -H node \S+\/worker\.mjs limit --cpu 4 --mem 8/);
-  assert.doesNotMatch(plain.stdout, /agent-orch-worker-status/);
+  assert.match(plain.stdout, /NOPASSWD: \/usr\/local\/bin\/agent-orch-worker-status\n/);
+  assert.doesNotMatch(plain.stdout, /com\.agent-orch\.worker\.status\.plist/);
   const win = dry('--status-window');
   assert.equal(win.status, 0, win.stderr);
   // A root-owned script that re-runs itself as agentorch (whose status socket it reads), one sudoers rule for exactly it,

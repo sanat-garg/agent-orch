@@ -98,7 +98,8 @@ export const PHASES = ['queued', 'cloning', 'fetching', 'installing', 'running',
 // Field specs: type name, '?' suffix = optional. Types: str, int, num, bool, obj, arr, sha, agent, os, plus enums above.
 const S = {
   // sha: the worker's agent-orch checkout (the controller compares it with its origin/main); features: see FEATURES.
-  hello: { node: 'str', protocol: 'int', version: 'str', jobs: 'arr', sha: 'sha?', features: 'arr?' },
+  // reconnect: after a lost connection or failed attempts, why it was away: {reason: 'dns'|'network'|'sleep', since (ms), lastError?}.
+  hello: { node: 'str', protocol: 'int', version: 'str', jobs: 'arr', sha: 'sha?', features: 'arr?', reconnect: 'obj?' },
   // policy: the node's power policy and caps (power.mjs: minBattery, keepAwake, thermal, reserveGB, plus maxTasks).
   // queued: work tasks on the head ready to start that this node could take ("up next" in its status view).
   welcome: { node: 'str', protocol: 'int', heartbeatMs: 'int', wipPushMs: 'int', graceMs: 'int', features: 'arr?', policy: 'obj?', queued: 'int?' },

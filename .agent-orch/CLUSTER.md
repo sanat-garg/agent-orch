@@ -272,6 +272,16 @@ Workers report richly; the controller keeps what the owner needs and acts on it.
   systemd (`Restart=always`) or launchd (`KeepAlive`) to start the new code. Its next hello on another sha ends the
   update; a failed one isn't retried on its own for the same target, and one that doesn't come back within 10 min fails.
 
+## Network resilience (#359)
+
+Some home routers/ISPs fail to resolve the head's wildcard-DNS name (`a-b-c-d.sslip.io`), and a Mac then drops off.
+The worker resolves every connection to the head and its git hosts through net-resolve.mjs: system DNS first (3 s),
+then the IP embedded in an sslip.io/nip.io name, the head's `headIp` (config.json, saved from the connection's remote
+address at pairing and on every connect) or the last good address (`resolve.json`). The hostname stays the TLS SNI
+and Host, so the certificate still validates. Cache clones pin their remote in local git config
+(`http.curloptResolve=<host>:443:<ip>`, git ≥ 2.37; older git retries fetches). Reconnects back off exponentially
+with jitter up to 15 s, and the next `hello` carries `reconnect {reason: 'sleep'|'dns'|'network', since, lastError}`.
+
 ## Power policy (#230)
 
 A Mac is someone's laptop: it works for the cluster when that suits its owner. Each node has a policy on the
@@ -283,7 +293,7 @@ changes either, `node.policy`; the worker enforces it, and the scheduler keeps t
 | setting | default | meaning |
 | --- | --- | --- |
 | `minBattery` | 50 | on battery power, new jobs only above this charge (%); null = only on AC power |
-| `keepAwake` | `ac` | while jobs run, `caffeinate -i -w <worker pid>`: `ac` (only on AC power), `always`, `never` |
+| `keepAwake` | `always` | while connected, `caffeinate -i -w <worker pid>`: `always`, `ac` (only on AC power), `never` |
 | `thermal` | `heavy` | no new jobs at this thermal pressure or worse: `moderate`, `heavy`, `off` |
 | `reserveGB` | 3 (Mac), 0 (Linux) | RAM a new job must leave free for the owner (never below `MEM.claimFloor`) |
 
@@ -300,9 +310,9 @@ changes either, `node.policy`; the worker enforces it, and the scheduler keeps t
   `max(MEM.claimFloor, reserveGB)` free (`low_memory`). The controller's placement uses the same numbers for a
   node on Auto; an owner-set `maxSlots` replaces them there (see Scheduling), though this worker-side offer check
   still declines `low_memory` by them.
-- **Keep awake** (`createKeepAwake`): `caffeinate -i -w <worker pid>` runs while the worker has a job that isn't paused
-  and `keepAwake` allows it for the power source; it is stopped (process group SIGTERM) when the last job ends, on
-  battery under `ac`, or at shutdown, and exits by itself if the worker dies (`-w`). `-i` only prevents idle sleep: a
+- **Keep awake** (`createKeepAwake`): `caffeinate -i -w <worker pid>` runs while the worker is connected (or has a job
+  that isn't paused) and `keepAwake` allows it for the power source; it is stopped (process group SIGTERM) when it is
+  disconnected and idle, on battery under `ac`, or at shutdown, and exits by itself if the worker dies (`-w`). `-i` only prevents idle sleep: a
   closed lid still sleeps the Mac, and the failover above (grace, then reassignment from the pushed WIP) applies.
 - **Service** (bin/install-worker-macos.sh): the worker runs as the dedicated `agentorch` user, by default from a
   LaunchDaemon (`/Library/LaunchDaemons/com.agent-orch.worker.plist`, `UserName agentorch`, from boot, no login

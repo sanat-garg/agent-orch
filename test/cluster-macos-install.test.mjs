@@ -32,9 +32,15 @@ test('`bash bin/install-worker-macos.sh --dry-run --code TEST` exits 0 and shows
     assert.ok(out.includes(key), key);
   }
   assert.match(out, /\+ launchctl bootstrap system \/Library\/LaunchDaemons\/com\.agent-orch\.worker\.plist/);
-  assert.doesNotMatch(out, /LimitLoadToSessionType|sudoers|LaunchAgents/, 'no login-mode pieces');
-  // The power policy, with caffeinate holding the Mac awake only while tasks run.
+  assert.doesNotMatch(out, /LimitLoadToSessionType|sudoers\.d\/agent-orch-worker\b(?!-status)|LaunchAgents/, 'no login-mode pieces');
+  // The one-word status view, always: it re-runs itself as agentorch under a sudoers rule for exactly it.
+  assert.match(out, /\+ write \/usr\/local\/bin\/agent-orch-worker-status \(mode 0755, root\)/);
+  assert.match(out, /NOPASSWD: \/usr\/local\/bin\/agent-orch-worker-status\n/);
+  assert.match(out, /Progress: agent-orch-worker-status\n/);
+  // The power policy, with caffeinate holding the Mac awake while connected, on battery too; the lid still sleeps it.
   assert.match(out, /caffeinate -i -w <worker pid>/);
+  assert.match(out, /keeps the Mac awake, on battery too/);
+  assert.match(out, /closing the lid still sleeps the Mac/);
   assert.match(out, /on battery above 50%/);
   assert.match(out, /cores − 1 tasks at once \(Max tasks: Auto\), leaving 3 GB of RAM free for you/);
   assert.match(out, /whether or not anyone is logged in/);

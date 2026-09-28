@@ -849,3 +849,7 @@ worktree dirs always removed; boot sweep deletes orphans; stale dirs gone
 ## 2026-09-28 06:04 — #283 Delete the dead local task branches 187, 244 and 247 [done (check passed)]
 
 Branches 187, 244 and 247 deleted, others kept, journal noted
+
+## 2026-09-28 08:14 — #286 finishReflection: a reflection with no task block is a warning and a quick retry, not an empty verdict [done (check passed)]
+
+blockless reflections now warn and retry in 5 min, tested

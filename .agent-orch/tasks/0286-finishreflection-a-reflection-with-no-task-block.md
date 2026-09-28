@@ -13,3 +13,7 @@ In orchestrator.mjs `finishReflection` (about line 3218) uses `extractTasks(res.
 ## Done when
 
 `grep -q 'ended without a task block' orchestrator.mjs` and `npm test -- test/reflect-fallbacks.test.mjs`
+
+## Result — done (check passed) (2026-09-28 08:14)
+
+AGENT-ORCH-STATUS: done — blockless reflections now warn and retry in 5 min, tested

@@ -64,6 +64,58 @@ test('reflection-queued tasks snapshot the project reflection fallbacks', { time
   }
 });
 
+// A reflection that ends without an agent-orch-tasks block is a slip, not a verdict: the empty streak stays and it
+// retries in 5 min. An explicit empty list still bumps the streak.
+test('reflection without a task block retries in 5 min; an empty list bumps the streak', { timeout: 60000 }, async () => {
+  const dirs = ['cw-rm-', 'cw-rm-p-'].map((p) => fs.mkdtempSync(path.join(os.tmpdir(), p)));
+  const [dataDir, root] = dirs;
+  try {
+    const url = (f) => JSON.stringify(new URL(`../${f}`, import.meta.url).href);
+    const script = `import { createOrchestrator } from ${url('orchestrator.mjs')};
+      import { setModelCatalog } from ${url('agents.mjs')};
+      import { DatabaseSync } from 'node:sqlite';
+      import fs from 'node:fs';
+      import path from 'node:path';
+      const [dataDir, root] = process.argv.slice(1);
+      setModelCatalog('claude', { models: [{ id: 'opus', default: true }], error: null, at: 1 });
+      const query = ({ options }) => (async function* () {
+        const empty = path.basename(options.cwd) === 'empty';
+        yield { type: 'result', subtype: 'success', result: 'Looked around.' + (empty ? '\\n\`\`\`agent-orch-tasks\\n{"tasks": []}\\n\`\`\`' : ''), session_id: 's', num_turns: 1 };
+      })();
+      const o = createOrchestrator({ query, dataDir, claudeEnv: { PATH: process.env.PATH, HOME: process.env.HOME }, getLimits: () => [], onSubscription: () => true,
+        broadcast() {}, emitChat() {}, convoExists: () => false });
+      const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
+      const ids = {};
+      for (const n of ['missing', 'empty']) {
+        const p = path.join(root, n); fs.mkdirSync(p);
+        ids[n] = Number(db.prepare("INSERT INTO projects(path,name,status,perpetual,created_at) VALUES(?,?,'active',0,0)").run(p, n).lastInsertRowid);
+        db.prepare("INSERT OR REPLACE INTO kv(key,value) VALUES(?,'2')").run('reflect_empty_streak:' + ids[n]);
+        db.prepare("INSERT INTO tasks(project_id,kind,title,prompt,source,origin,created_at) VALUES(?,'reflect','Reflect','(reflection)','reflection','reflection',0)").run(ids[n]);
+      }
+      const done = () => db.prepare("SELECT COUNT(*) AS n FROM tasks WHERE kind='reflect' AND status='done'").get().n;
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      for (let i = 0; i < 300 && done() < 2; i++) await sleep(100);
+      const at = Date.now() / 1000, out = { at };
+      for (const [n, id] of Object.entries(ids)) out[n] = { streak: db.prepare('SELECT value FROM kv WHERE key=?').get('reflect_empty_streak:' + id).value,
+        next: db.prepare('SELECT next_reflect_at AS n FROM projects WHERE id=?').get(id).n,
+        warn: db.prepare("SELECT level, message FROM events WHERE project_id=? AND message LIKE '%without a task block%'").all(id) };
+      console.log(JSON.stringify(out));
+      process.exit(0);`;
+    const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script, dataDir, root], { encoding: 'utf8', timeout: 50000 });
+    const r = JSON.parse(stdout.trim().split('\n').pop());
+    assert.equal(r.missing.streak, '2', JSON.stringify(r));
+    assert.ok(Math.abs(r.missing.next - r.at - 300) < 30, 'retries in ~5 min');
+    assert.equal(r.missing.warn.length, 1);
+    assert.equal(r.missing.warn[0].level, 'warn');
+    assert.match(r.missing.warn[0].message, /^reflection #\d+ ended without a task block; retrying in 5 min$/);
+    assert.equal(r.empty.streak, '3', 'an explicit empty list is a verdict');
+    assert.ok(r.empty.next - r.at > 300, 'backs off');
+    assert.equal(r.empty.warn.length, 0);
+  } finally {
+    for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
+  }
+});
+
 // Settings → This project: each project's reflection model and fallbacks (projects.reflect_agent/_model/_fallbacks).
 test('reflection settings are per project: its reflect task runs on its model; the work it queues snapshots its list', { timeout: 60000 }, async () => {
   const dirs = ['cw-rs-', 'cw-rs-p-'].map((p) => fs.mkdtempSync(path.join(os.tmpdir(), p)));

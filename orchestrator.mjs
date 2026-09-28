@@ -3219,10 +3219,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     // The project's curated reflection fallbacks are snapshotted, so a later edit doesn't change what's already queued.
     const fresh = getProject(project.id);
     const ids = queuePayload(fresh, payload, 'reflection', { fallbacks: reflectFallbacksFor(fresh) });
-    const key = `reflect_empty_streak:${project.id}`;
-    const streak = ids.length ? 0 : (parseInt(kvGet(key, '0'), 10) || 0) + 1;
-    kvSet(key, streak);
-    const cooldown = ids.length ? 0 : reflectCooldown(decision(), streak);
+    // No block (or an unparsable one) is a reflector slip, not a verdict: the empty streak stays and it retries in 5 min.
+    const key = `reflect_empty_streak:${project.id}`, missing = payload === null;
+    const streak = ids.length ? 0 : missing ? null : (parseInt(kvGet(key, '0'), 10) || 0) + 1;
+    if (streak !== null) kvSet(key, streak);
+    const cooldown = ids.length ? 0 : missing ? 300 : reflectCooldown(decision(), streak);
     updateProject(project.id, { next_reflect_at: now() + cooldown });
     updateTask(task.id, { status: 'done', finished_at: now(), result: (clean || '').slice(0, 4000) }, true);
     await gitCommit(project.path, `agent-orch: roadmap update (reflection #${task.id})`);
@@ -3230,8 +3231,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (project.convo_id && convoExists(project.convo_id)) {
       if (summary) emitChat(project.convo_id, { t: 'text', text: summary });
       if (ids.length) emitChat(project.convo_id, { t: 'tasks', ids, source: 'reflection' });
+      else if (missing) emitChat(project.convo_id, { t: 'notice', text: 'The reflection ended without a task list; retrying in 5 min.' });
       else emitChat(project.convo_id, { t: 'notice', text: `Nothing valuable to add right now. Next look in ${Math.round(cooldown / 60)} min.` });
     }
+    if (missing) return logEvent(`reflection #${task.id} ended without a task block; retrying in 5 min`, { level: 'warn', projectId: project.id, taskId: task.id });
     logEvent(ids.length ? `reflection queued ${ids.length} step(s): ${ids.map((i) => `#${i}`).join(', ')}`
       : `reflection found nothing valuable; next check in ${Math.round(cooldown / 60)} min`, { projectId: project.id, taskId: task.id });
   }

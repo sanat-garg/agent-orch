@@ -790,3 +790,7 @@ Low-disk drains now lift themselves after three recovered frames
 ## 2026-09-28 05:02 — #266 UI-REVIEW #3: task-card titles wrap on phones and the model chip drops under the title [done (check passed)]
 
 Phone task cards wrap titles to two lines; chip moved below
+
+## 2026-09-28 05:05 — #267 UI-REVIEW #5: 44pt touch targets for chips, small buttons and icon buttons on touch screens [done (check passed)]
+
+touch screens get 44pt targets; target and keyboard tests pass

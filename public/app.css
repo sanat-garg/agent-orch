@@ -1685,3 +1685,13 @@ button.dg-row:disabled { opacity: .6; cursor: progress; }
 }
 
 .lane-group { color: var(--accent); }
+
+/* 44pt touch targets on touch screens (UI-REVIEW #5). Desktop (fine pointer) sizes stay as they are. The small glyph
+   buttons keep their look and get an invisible 44pt hit area (.convo .more is already absolutely positioned). */
+@media (pointer: coarse) {
+  .chip, .orch-bar .chip, .btn.small, .cn-btn.btn.small { min-height: 44px; }
+  .icon-btn, .send { width: 44px; height: 44px; }
+  details.dr-prompt summary { min-height: 44px; line-height: 44px; }
+  #usRefresh { position: relative; }
+  #usRefresh::after, .convo .more::after { content: ''; position: absolute; inset: -10px; }
+}

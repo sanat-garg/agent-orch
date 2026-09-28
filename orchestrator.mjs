@@ -992,8 +992,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       ORDER BY ${EFFECTIVE_SQL.replaceAll(':now', String(Date.now() / 1000))} DESC, t.created_at ASC, t.id ASC) AS rn
       FROM tasks t JOIN projects p ON p.id=t.project_id) o WHERE o.id=tasks.id)`);
   }
-  // Keep improving was removed from Settings: Orchestrator Mode itself means "keep improving", so every project reflects
-  // when its queue empties (projects.perpetual stays for the API). Once, turn it back on where the old toggle was off.
+  // Keep improving (projects.perpetual) was once removed from Settings and this one-time migration turned it back on
+  // everywhere. The toggle is back (Settings → This project): off means the project never reflects. Never re-run this.
   if (!db.prepare("SELECT 1 FROM kv WHERE key='perpetual_always'").get()) {
     db.exec("UPDATE projects SET perpetual=1, next_reflect_at=0 WHERE perpetual=0; INSERT INTO kv(key,value) VALUES('perpetual_always','1')");
   }
@@ -1131,7 +1131,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
 
   const RUNNABLE = `SELECT t.*, ${EFFECTIVE_SQL} AS eff, p.position AS project_position FROM tasks t JOIN projects p ON p.id=t.project_id
-    WHERE t.status='queued' AND t.kind!='review' AND p.status='active' AND t.not_before<=:now
+    WHERE t.status='queued' AND t.kind!='review' AND p.status='active' AND t.not_before<=:now AND (t.kind!='reflect' OR p.perpetual=1)
       AND NOT EXISTS(SELECT 1 FROM all_deps x LEFT JOIN tasks d ON d.id=x.depends_on WHERE x.task_id=t.id AND d.status IS NOT 'done')`;
   function runnable(allowed, exclusive, limit) {
     let sql = RUNNABLE;
@@ -2489,6 +2489,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       // No hub was attached (the cluster is off): tasks left running on workers can't be re-adopted.
       if (!cluster && adoptable.length) for (const id of adoptable.splice(0)) requeueIfRunning(id);
       armCheckpoints();
+      cancelReflections();
       if (kvGet('paused_all') === '1') return;
       if (!onSubscription()) {
         if (kvGet('announced_auth') !== '1') { kvSet('announced_auth', 1); logEvent('waiting: Claude Code is not signed in with the subscription', { level: 'warn' }); }
@@ -2580,6 +2581,18 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const blockedProjects = qa("SELECT * FROM projects WHERE status='active' AND perpetual=1")
       .map((p) => ({ id: p.id, reason: rapidLimitReason(p) })).filter((p) => p.reason);
     return { ...rapidQueue(), blockedProjects, reason: blockedProjects.length ? blockedProjects[0].reason : null };
+  }
+  // Keep improving off (projects.perpetual=0) means no reflection at all: scheduleReflections is the only path that
+  // creates reflect tasks, RUNNABLE never claims one, and this cancels any left waiting (one project, or every project
+  // that is off: a reflection requeued after the toggle). A running one finishes, but finishReflection discards its tasks.
+  function cancelReflections(pid = null) {
+    const rows = qa(`SELECT t.id, t.project_id FROM tasks t JOIN projects p ON p.id=t.project_id
+      WHERE t.kind='reflect' AND t.status IN ('queued','paused') AND p.perpetual=0${pid == null ? '' : ' AND p.id=:p'}`, pid == null ? {} : { p: pid });
+    for (const r of rows) {
+      updateTask(r.id, { status: 'cancelled', finished_at: now(), result: 'Keep improving is off for this project.' });
+      logEvent(`Keep improving off: cancelled reflection #${r.id}`, { projectId: r.project_id, taskId: r.id });
+    }
+    return rows.length;
   }
   function scheduleReflections() {
     let added = false;
@@ -3322,6 +3335,14 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const [clean, payload] = extractTasks(res.text);
     // The project's curated reflection fallbacks are snapshotted, so a later edit doesn't change what's already queued.
     const fresh = getProject(project.id);
+    if (!fresh.perpetual) { // switched off while it ran: nothing it proposes is queued
+      const n = payload?.tasks?.length || 0;
+      const note = `Keep improving was switched off while this reflection ran${n ? `: its ${n} proposed task(s) were discarded, not queued` : ''}.`;
+      updateTask(task.id, { status: 'done', finished_at: now(), result: `${(clean || '').trim()}\n\n${note}`.trim().slice(-4000) }, true);
+      await gitCommit(project.path, `agent-orch: roadmap update (reflection #${task.id})`);
+      if (project.convo_id && convoExists(project.convo_id)) emitChat(project.convo_id, { t: 'notice', text: note });
+      return logEvent(`reflection #${task.id}: ${note}`, { projectId: project.id, taskId: task.id });
+    }
     const ids = queuePayload(fresh, payload, 'reflection', { fallbacks: reflectFallbacksFor(fresh) });
     // No block (or an unparsable one) is a reflector slip, not a verdict: the empty streak stays and it retries in 5 min.
     const key = `reflect_empty_streak:${project.id}`, missing = payload === null;
@@ -3522,6 +3543,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         return { ok: true };
       }
       case 'retry': {
+        if (task.kind === 'reflect' && !getProject(task.project_id)?.perpetual) return { error: 'Keep improving is off for this project; turn it on to reflect again' };
         const res = run("UPDATE tasks SET status='queued', attempts=0, continuations=0, not_before=0, result=NULL, finished_at=NULL WHERE id=:id AND status IN ('failed','cancelled')", { id });
         if (!res.changes) return { error: 'Only failed or cancelled tasks can be retried' };
         pushTask(id);
@@ -3558,6 +3580,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     }
     updateProject(id, allowed);
     if (allowed.status === 'paused') pauseProject(id);
+    if (allowed.perpetual === 0 && p.perpetual) cancelReflections(id);
     logEvent(`project settings: ${JSON.stringify(allowed)}`, { projectId: id });
     setTimeout(tick, 100);
     return { ok: true };

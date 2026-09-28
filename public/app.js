@@ -5510,6 +5510,8 @@ function renderSettings() {
   $('stProject').hidden = !p;
   if (!p) return;
   $('stProjectTitle').textContent = `This project · ${p.path.split('/').pop()}`;
+  // Keep improving (projects.perpetual): live from the project pushes, not flipped while a save is in flight.
+  if (!PERP.saving) $('stPerpetual').checked = !!p.perpetual;
   // Never overwrite what the owner is typing (renderSettings runs on every state push).
   if (document.activeElement !== $('stDirection') && !DIR.timer && !DIR.saving) { $('stDirection').value = p.reflect_direction || ''; fitDirection(); }
 }
@@ -5582,6 +5584,19 @@ $('stParallel').addEventListener('change', (e) => { saveParallel({ maxTasks: e.t
 $('stServerTasks').addEventListener('change', (e) => { saveParallel({ parallelTasks: Number(e.target.value) }); e.target.blur(); });
 $('stRapid').addEventListener('change', async (e) => { await saveParallel({ rapidDevelopment: e.target.checked }); e.target.blur(); renderSettings(); });
 $('stAutoRestart').addEventListener('change', async (e) => { await saveParallel({ autoRestart: e.target.checked }); e.target.blur(); renderSettings(); });
+// Keep improving: off means this project never reflects (queued reflections are cancelled; a running one's tasks are dropped).
+const PERP = { saving: false };
+$('stPerpetual').addEventListener('change', async (e) => {
+  const p = O.project, on = e.target.checked;
+  if (!p) return;
+  PERP.saving = true;
+  try {
+    await api(`/api/orch/project/${p.id}`, 'POST', { perpetual: on });
+    if (O.project?.id === p.id) O.project.perpetual = on;
+    toast(on ? 'Keep improving is on' : 'Keep improving is off: this project won\'t reflect', { kind: 'success' });
+  } catch (err) { toast(err.message, { kind: 'error' }); }
+  finally { PERP.saving = false; e.target.blur(); renderSettings(); }
+});
 // Reflection direction (per project, optional): saved as you type (debounced) and on blur; blank = the reflector decides.
 const DIR = { timer: null, saving: false };
 // The box grows with its text (CSS caps it; past that it scrolls).

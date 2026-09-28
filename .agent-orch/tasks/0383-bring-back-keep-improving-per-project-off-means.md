@@ -13,3 +13,7 @@ The owner wants the 'Keep improving' toggle back in Settings, per project. When 
 ## Done when
 
 `node --test test/keep-improving*.test.mjs` passes (no reflection from any path when off, queued ones cancelled, running one's tasks discarded, on re-enables), and the Settings sheet has a Keep improving switch bound to projects.perpetual
+
+## Result — done (check passed) (2026-09-28 13:03)
+
+AGENT-ORCH-STATUS: done — Keep improving switch is back; off blocks every reflection path

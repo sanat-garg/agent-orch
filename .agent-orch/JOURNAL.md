@@ -1056,3 +1056,6 @@ Changed-files and per-file diff routes added and tested
 ## 2026-09-28 13:03 — #375 Files tab ui: Ask in chat puts path:line into the composer from Quick Look and a Contents hit [done (check passed)]
 
 Ask in chat inserts path[:line] from Files, tested
+## 2026-09-28 13:03 — #383 Bring back 'Keep improving' per project; off means no reflection at all [done (check passed)]
+
+Keep improving switch is back; off blocks every reflection path

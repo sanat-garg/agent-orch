@@ -115,8 +115,10 @@ test('the sidebar gear opens Settings: sound + MP3 upload, parallel tasks (what 
   const sound = sheet.slice(sheet.indexOf('class="st-row st-sound"'), sheet.indexOf('class="st-sec">Tasks'));
   for (const id of ['stSound"', 'stSoundName', 'stSoundTest', 'stSoundUpload']) assert.ok(sound.includes(`id="${id}`), id);
   assert.equal((sound.match(/class="st-row/g) || []).length, 1);
-  // Orchestrator Mode already means "keep improving": no toggle for it.
-  assert.doesNotMatch(sheet + appJs, /stPerpetual|Keep improving/);
+  // Keep improving is back per project: a switch in This project, saved through the project POST as `perpetual`.
+  assert.match(sheet.slice(sheet.indexOf('id="stProject"')), /<strong>Keep improving<\/strong>[\s\S]*<input type="checkbox" class="st-switch" id="stPerpetual"/);
+  assert.match(appJs, /\$\('stPerpetual'\)\.checked = !!p\.perpetual/);
+  assert.match(appJs, /\/api\/orch\/project\/\$\{p\.id\}`, 'POST', \{ perpetual: on \}/);
   // Reflection is per project and one row: the model and its fallbacks together, inside This project.
   const project = sheet.slice(sheet.indexOf('id="stProject"'));
   const reflect = project.slice(project.indexOf('class="st-row st-reflect"'), project.indexOf('st-dir'));

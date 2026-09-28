@@ -6692,6 +6692,7 @@ function fillCard(b, id) {
   }
   const s = taskState(t);
   b.querySelector('.tc-glyph').className = `tc-glyph ${s.cls}`;
+  syncPhaseStrip(b, t, s);
   title.textContent = title.title = displayTitle(t);
   sub.textContent = '';
   sub.append(el('span', 'id', `#${t.id}`));
@@ -6742,6 +6743,70 @@ function fillCard(b, id) {
   // Waiting checkpoints in the chat and the queue get their review panel right under the card.
   if (b.isConnected) { syncReviewPanel(b, t); syncApprovalPanels(b, t); }
   else queueMicrotask(() => { if (b.isConnected) { syncReviewPanel(b, O.tasks.get(id)); syncApprovalPanels(b, O.tasks.get(id)); } });
+}
+// The phase strip along a card's bottom edge: the job's steps (the drawer Timeline's phases) as coloured segments, done
+// ones filled, the current one pulsing, later ones faint; a failed task's step in red, a limit wait in amber. The step
+// comes from the task view (phase: a worker's job.phase or this server's check/merge; none while running = the agent).
+const STRIP = [['queued', 'Queued'], ['cloning', 'Cloning'], ['installing', 'Installing'], ['running', 'Running agent'], ['checking', 'Checking'],
+  ['committing', 'Committing'], ['pushing', 'Pushing'], ['merging', 'Merging'], ['done', 'Done']];
+const STRIP_OF = { fetching: 'cloning' };
+const STRIP_LEGEND = [['queued', 'Queued'], ['prep', 'Preparing'], ['agent', 'Agent'], ['check', 'Checking'], ['ship', 'Pushing / merging'],
+  ['done', 'Done'], ['failed', 'Failed'], ['limit', 'Waiting on limit']];
+const stripTone = (k) => ({ cloning: 'prep', installing: 'prep', running: 'agent', checking: 'check', committing: 'ship', pushing: 'ship', merging: 'ship' })[k] || k;
+function stripDur(sec) {
+  sec = Math.max(0, Math.round(sec));
+  return sec < 60 || sec >= 3600 ? fmtDur(sec) : `${Math.floor(sec / 60)}m ${sec % 60}s`;
+}
+// Where a task is on the strip: {at: index of its step, state: 'cur' | 'failed' | 'limit' | 'stopped' | 'done', since}.
+function stripState(t, s) {
+  const idx = (k) => Math.max(0, STRIP.findIndex(([x]) => x === (STRIP_OF[k] || k)));
+  const nowMs = Date.now(), started = (t.started_at || 0) * 1000;
+  switch (t.status) {
+    case 'running': {
+      const ph = t.phase && t.phase !== 'done' ? t.phase : t.phase === 'done' ? 'checking' : 'running';
+      return { at: idx(ph), state: t.waiting_for || s.cls.includes('awaiting') ? 'limit' : 'cur', since: t.phase_at || started || nowMs };
+    }
+    case 'done': return { at: STRIP.length - 1, state: 'done', since: (t.finished_at || 0) * 1000 || nowMs, took: t.finished_at && t.started_at ? t.finished_at - t.started_at : null };
+    case 'failed': return { at: idx(t.phase || (t.has_verify_failure ? 'checking' : t.started_at ? 'running' : 'queued')), state: 'failed', since: (t.finished_at || 0) * 1000 || nowMs };
+    case 'needs_integration': return { at: idx('merging'), state: 'limit', since: (t.finished_at || 0) * 1000 || nowMs };
+    case 'paused': return { at: idx(t.phase || 'running'), state: 'stopped', since: started || nowMs };
+    case 'cancelled': return { at: idx(t.phase || (t.started_at ? 'running' : 'queued')), state: 'stopped', since: (t.finished_at || 0) * 1000 || nowMs };
+    default: return { at: 0, state: s.cls === 'limited' ? 'limit' : 'cur', since: (t.created_at || 0) * 1000 || nowMs };
+  }
+}
+function stripTitle(st) {
+  const name = STRIP[st.at][1], ago = stripDur((Date.now() - st.since) / 1000);
+  if (st.state === 'done') return st.took != null ? `Done · took ${stripDur(st.took)}` : 'Done';
+  if (st.state === 'failed') return `Failed while ${name.toLowerCase()} · ${ago} ago`;
+  if (st.state === 'stopped') return `Stopped at ${name.toLowerCase()}`;
+  if (st.state === 'limit') return `${name} · waiting · ${ago}`;
+  return `${name} · ${ago}`;
+}
+function syncPhaseStrip(b, t, s) {
+  let bar = b.querySelector(':scope > .tc-strip');
+  if (t.kind === 'review') { bar?.remove(); return; } // a checkpoint never runs
+  if (!bar) {
+    bar = el('span', 'tc-strip');
+    bar.setAttribute('role', 'img');
+    for (const [k] of STRIP) { const i = el('i'); i.dataset.phase = k; i.dataset.tone = stripTone(k); bar.append(i); }
+    bar.addEventListener('pointerenter', () => { if (bar._st) bar.title = stripTitle(bar._st); }); // the time, fresh on hover
+    b.append(bar);
+  }
+  const st = stripState(t, s);
+  bar._st = st;
+  bar.dataset.state = st.state;
+  [...bar.children].forEach((i, n) => {
+    i.className = n < st.at ? 'past' : n > st.at ? '' : st.state === 'done' ? 'past' : st.state;
+  });
+  bar.title = stripTitle(st);
+  bar.setAttribute('aria-label', `Progress: ${bar.title}`);
+}
+// The legend of the strip's colours (the Queue sheet's header).
+function phaseLegend() {
+  const l = el('div', 'tc-legend');
+  l.setAttribute('aria-label', 'Phase colours');
+  for (const [k, name] of STRIP_LEGEND) { const s = el('span', 'lg'); const sw = el('i'); sw.dataset.tone = k; s.append(sw, name); l.append(s); }
+  return l;
 }
 // A running work task's card pauses it; a paused one's resumes it (the card itself is a button, so this is a role=button span).
 function cardControl(t) {
@@ -8085,6 +8150,7 @@ function closeQueue(refocus = true) {
   if (refocus) Q.lastFocus?.focus?.();
 }
 $('obQueue').addEventListener('click', openQueue);
+$('qLegend').replaceWith(Object.assign(phaseLegend(), { id: 'qLegend' }));
 $('queueModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeQueue(); });
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || $('queueModal').hidden) return;

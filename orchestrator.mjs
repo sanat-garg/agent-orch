@@ -3271,7 +3271,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         if (p) e.progress = { tools: Number.isFinite(p.tools) ? p.tools : 0, files: Number.isFinite(p.files) ? p.files : 0, last: String(p.last || '').slice(0, 200) };
         if (msg.outcome) e.outcome = msg.outcome;
         const r = running.get(id);
-        if (r && list.at(-1) === e) r.phase = msg.phase;
+        if (r && list.at(-1) === e && r.phase !== msg.phase) { r.phase = msg.phase; r.phaseAt = e.at; pushTask(id); }
         saveRun('phases');
       };
       // job.error: kept on the run (the latest 20; a repeat of the last one counts up) and logged on the task.
@@ -3615,6 +3615,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const command = extractCommand(task.done_when);
     let checked = '';
     if (command) {
+      stage(tid, 'checking');
       logEvent(`checking #${tid}: ${command}`, { projectId: project.id, taskId: tid });
       let ok, output, code;
       if (remote) [ok, output, code] = remote.check ? [remote.check.pass, remote.check.output, remote.check.code] : [false, 'command not found: the worker ran no check', 127]; // the worker ran it in its checkout
@@ -3645,6 +3646,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     let sha;
     if (wt) {
       const message = `agent-orch #${tid}: ${task.title}`;
+      stage(tid, 'merging');
       let merged = await mergeTask(task, project, wt, message);
       if (remote && task.integrates) await serialGit(project.path, () => git(project.path, ['branch', '-D', integrateBranch(tid)]).catch(() => {}));
       if (merged.conflict && !task.integrates) {
@@ -4210,6 +4212,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       run_on: t.run_on ?? null, run_on_name: t.run_on ? nodeName(t.run_on) : null, // the machine the owner pinned it to
       // A remote run whose node went away (within its grace period): 'Mac mini (connection lost)'.
       waiting_for: running.get(t.id)?.waiting || null,
+      // The step a running task is on (a worker's job.phase, or this server's check/merge; null = the agent) and since
+      // when (ms): the cards' phase strip.
+      phase: running.get(t.id)?.phase || null, phase_at: running.get(t.id)?.phaseAt || null,
       // Held browser/connector calls waiting for the owner (the approval gate): the task shows 'Awaiting approval'.
       approvals: t.status === 'running' ? approvals.pending(t.id).map(({ args, ...a }) => a) : [],
     };
@@ -4339,6 +4344,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // Running browser tasks and the profile each uses (the live browser view, browser-view.mjs).
   const browserTasks = () => qa("SELECT id, title, node_id, capabilities, browser_identity FROM tasks WHERE status='running' AND kind='work' AND capabilities IS NOT NULL")
     .filter(needsBrowser).map((t) => ({ id: t.id, title: t.title, node: t.node_id || LOCAL_NODE, identity: identityOf(t) }));
+  // This server's own steps after the agent (the check, the merge) on a running task's phase strip.
+  function stage(id, phase) {
+    const r = running.get(id);
+    if (!r || r.phase === phase) return;
+    Object.assign(r, { phase, phaseAt: Date.now() });
+    pushTask(id);
+  }
   function pushTask(id) {
     const t = taskView(getTask(id));
     if (!t) return;

@@ -1502,6 +1502,9 @@ conflicts resolved; mobile Machines tests pass; ui-machines test 5 still fails
 ## 2026-09-28 18:15 — #481 Simpler Settings: one sound switch, no About section [done (check passed)]
 
 Settings has one sound switch, no About, four hinted sections
+## 2026-09-28 18:13 — #479 Task cards: a coloured phase progress strip along the bottom edge [done (check passed)]
+
+Task cards show a live coloured phase strip, with a legend
 ## 2026-09-28 18:11 — #483 Files backend: upload files and folders [done (check passed)]
 
 Streamed, login-protected Files upload endpoint works; its tests pass
@@ -1515,3 +1518,7 @@ Machines is a wide modal with four cards in one row
 ## 2026-09-28 18:15 — #488 Integrate #481: Simpler Settings: one sound switch, no About section [done (check passed)]
 
 CONTEXT.md conflict resolved; settings and static tests pass
+
+## 2026-09-28 18:15 — #487 Integrate #479: Task cards: a coloured phase progress strip along the bottom edge [done (check passed)]
+
+app.css conflict resolved, keeping phase and pace colours; tests pass

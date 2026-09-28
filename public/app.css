@@ -35,6 +35,15 @@
   --focus: rgba(201, 100, 66, 0.28);
   --chart-2: #3b6fa0;
   --chart-3: #6a8f3a;
+  /* Task phase colours (the cards' phase strip, app.js STRIP, and its legend in the Queue sheet). */
+  --ph-queued: #a8a398;
+  --ph-prep: #2f6fdb;
+  --ph-agent: #c96442;
+  --ph-check: #7d4fc4;
+  --ph-ship: #1d8a86;
+  --ph-done: #2e7d4f;
+  --ph-failed: #c62f26;
+  --ph-limit: #c98a00;
   --pace-over: #c2410c;
   --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
   --scroll: rgba(0, 0, 0, 0.18);
@@ -77,6 +86,14 @@
     --focus: rgba(217, 119, 87, 0.35);
     --chart-2: #7eaed8;
     --chart-3: #a3c77a;
+    --ph-queued: #7c786f;
+    --ph-prep: #6ea8ff;
+    --ph-agent: #d97757;
+    --ph-check: #b596f0;
+    --ph-ship: #4fc4bd;
+    --ph-done: #7fcf99;
+    --ph-failed: #f28b82;
+    --ph-limit: #f0c46c;
     --pace-over: #f08a3c;
     --scroll: rgba(255, 255, 255, 0.14);
     --scroll-hover: rgba(255, 255, 255, 0.3);
@@ -1329,6 +1346,29 @@ label.st-row, label.st-text { cursor: pointer; }
 @media (pointer: coarse) { .dr-model > .tc-tag.model { min-height: 44px; } }
 .notice.moved { cursor: pointer; }
 .tcard .chev { color: var(--faint); flex: none; }
+/* The phase strip (app.js syncPhaseStrip): a segmented bar just above the card's lower border. */
+.tcard:has(> .tc-strip) { position: relative; padding-bottom: 13px; }
+.tc-strip { position: absolute; left: 10px; right: 10px; bottom: 4px; height: 3px; display: flex; gap: 2px; }
+.tc-strip i { flex: 1; border-radius: 2px; background: var(--ph); opacity: .18; }
+.tc-strip i.past { opacity: 1; }
+.tc-strip i.cur, .tc-strip i.limit { opacity: 1; animation: tc-pulse 1.6s ease-in-out infinite; }
+.tc-strip i.limit, .tc-strip[data-state="limit"] i.past { --ph: var(--ph-limit); }
+.tc-strip i.failed { opacity: 1; --ph: var(--ph-failed); }
+.tc-strip i.stopped { opacity: .6; }
+.tc-strip[data-state="failed"] i.past, .tc-strip[data-state="stopped"] i.past { opacity: .55; }
+[data-tone="queued"] { --ph: var(--ph-queued); }
+[data-tone="prep"] { --ph: var(--ph-prep); }
+[data-tone="agent"] { --ph: var(--ph-agent); }
+[data-tone="check"] { --ph: var(--ph-check); }
+[data-tone="ship"] { --ph: var(--ph-ship); }
+[data-tone="done"] { --ph: var(--ph-done); }
+[data-tone="failed"] { --ph: var(--ph-failed); }
+[data-tone="limit"] { --ph: var(--ph-limit); }
+@keyframes tc-pulse { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .tc-strip i.cur, .tc-strip i.limit { animation: none; } }
+.tc-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; font-size: 11.5px; color: var(--muted); }
+.tc-legend .lg { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.tc-legend i { width: 12px; height: 3px; border-radius: 2px; background: var(--ph); }
 
 /* status glyph: one shape per state */
 .tc-glyph { position: relative; width: 22px; height: 22px; flex: none; border-radius: 50%; display: grid; place-items: center; }

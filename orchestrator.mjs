@@ -67,6 +67,9 @@ const CFG = {
   footprint: { ...FOOTPRINT },
   cpuPerTask: {},
   controllerWork: false,
+  // overlapWaits: a work task whose declared files overlap a running task in its project waits for it (default: no, it
+  // runs once disjoint work has taken the free slots, and the two meet at merge time).
+  overlapWaits: false,
   // controllerBrowser: whether browser tasks (capabilities ["browser"]) may run on the controller at all (default: no,
   // they wait for a browserCapable worker); the owner's kv parallel_settings overrides it.
   controllerBrowser: false,
@@ -949,7 +952,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
   // tasks.capabilities: JSON ["browser"] (browser.mjs; NULL = none); tasks.browser_identity: the browser profile a browser
   // task uses (NULL = 'default'). Browser tasks run on browserCapable nodes, one per profile at a time (`place`).
-  for (const col of ['capabilities', 'browser_identity']) {
+  // tasks.run_on: the machine the owner pinned a work task to (a node id; NULL = any machine), `place` honours it.
+  for (const col of ['capabilities', 'browser_identity', 'run_on']) {
     if (!db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === col)) db.exec(`ALTER TABLE tasks ADD COLUMN ${col} TEXT`);
   }
   // messages.task_id: the plan task that took a saved message (status 'taken'); it is 'done' once answered.
@@ -1092,20 +1096,27 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       allowed.forEach((u, i) => (p[`u${i}`] = u));
     }
     let rows = queueOrder(qa(sql, p));
-    // Two tasks share a project only if both are work tasks in their own worktrees and their declared files don't
-    // overlap (parallel.mjs; undeclared = everything); anything else would race on the same checkout, its commits or
-    // the same lines. A waiting plan/reflect task also stops more work from starting in its project.
+    // Two tasks share a project only if both are work tasks in their own worktrees; anything else would race on the same
+    // checkout or its commits. A waiting plan/reflect task also stops more work from starting in its project. Work whose
+    // declared files overlap a running task's (parallel.mjs; undeclared = everything) goes after the rest, so free slots
+    // fill with disjoint work first; with CFG.overlapWaits it waits instead. Overlapping edits meet at merge time
+    // (mergeBack; a conflict queues an integrator).
     if (exclusive) {
       const busy = qa("SELECT id, project_id, files FROM tasks WHERE status='running'");
-      const blocked = new Set();
+      const blocked = new Set(), later = [];
       rows = rows.filter((r) => {
         if (blocked.has(r.project_id)) return false;
         const others = busy.filter((b) => b.project_id === r.project_id);
-        const ok = !others.length || (r.kind === 'work' && worktreeCapable(getProject(r.project_id))
-          && others.every((b) => running.get(b.id)?.wt && !filesOverlap(filesOf(r), filesOf(b))));
-        if (!ok && r.kind !== 'work') blocked.add(r.project_id);
-        return ok;
+        if (!others.length) return true;
+        if (!(r.kind === 'work' && worktreeCapable(getProject(r.project_id)) && others.every((b) => running.get(b.id)?.wt))) {
+          if (r.kind !== 'work') blocked.add(r.project_id);
+          return false;
+        }
+        if (!others.some((b) => filesOverlap(filesOf(r), filesOf(b)))) return true;
+        if (!CFG.overlapWaits) later.push(r);
+        return false;
       });
+      rows = [...rows, ...later];
     }
     return rows.slice(0, limit);
   }
@@ -1394,13 +1405,17 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const browser = needsBrowser(task);
     if (browser && profileBusy(task)) return null;
     const remote = remoteCapable(task, getProject(task.project_id));
-    if (remote) {
-      const free = freeWorkers(agent, task.id).filter((n) => !browser || n.inventory?.browser?.capable === true).sort((a, b) => (b.id === task.node_id) - (a.id === task.node_id) || headroom(b, agent) - headroom(a, agent));
+    // Pinned by the owner (run_on): only that machine, waiting for it. A worker pin only binds a task that can run remotely.
+    const pin = task.kind === 'work' && task.run_on && (task.run_on === LOCAL_NODE || remote) ? task.run_on : null;
+    if (remote && pin !== LOCAL_NODE) {
+      const free = freeWorkers(agent, task.id).filter((n) => (!browser || n.inventory?.browser?.capable === true) && (!pin || n.id === pin))
+        .sort((a, b) => (b.id === task.node_id) - (a.id === task.node_id) || headroom(b, agent) - headroom(a, agent));
       if (free.length) return free[0].id;
     }
+    if (pin && pin !== LOCAL_NODE) return null;
     if (!localOk || !localFree || localDraining() || !localAgentOk(agent) || slotsFor(agent) - runningOn(agent) <= 0) return null;
-    if (browser && !parallelSettings().controllerBrowser) return null;
-    if (remote && !parallelSettings().controllerWork && workerNodes(agent).some((n) => !browser || n.inventory?.browser?.capable === true)) return null;
+    if (browser && !parallelSettings().controllerBrowser && pin !== LOCAL_NODE) return null;
+    if (remote && !pin && !parallelSettings().controllerWork && workerNodes(agent).some((n) => !browser || n.inventory?.browser?.capable === true)) return null;
     return LOCAL_NODE;
   }
   const identityOf = (task) => (needsBrowser(task) ? normIdentity(task.browser_identity) : null);
@@ -3360,6 +3375,17 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     delegateTried.delete(id);
     return { ok: true, task: taskView(getTask(id)) };
   }
+  // The owner pins a queued work task to one machine (PATCH /api/orch/tasks/:id/run-on {node}), or null for any machine.
+  function setTaskRunOn(id, node) {
+    const t = getTask(id);
+    if (!t) return { error: 'No such task', status: 404 };
+    if (t.kind !== 'work' || t.integrates || !['queued', 'paused'].includes(t.status)) return { error: 'Only a queued work task can be pinned to a machine', status: 409 };
+    if (node != null && node !== LOCAL_NODE && !nodesNow().some((n) => n.id === node)) return { error: 'No such machine', status: 400 };
+    updateTask(id, { run_on: node ?? null });
+    logEvent(`#${id} ${node ? `runs only on ${node === LOCAL_NODE ? 'this server' : nodeName(node)}` : 'runs on any machine'}`, { projectId: t.project_id, taskId: id });
+    setTimeout(tick, 0);
+    return { ok: true, task: taskView(getTask(id)) };
+  }
   // Reflection fallbacks (list already validated by the server): [{agent, model}] or null = none.
   function setReflectFallbacks(id, list) {
     if (!getProject(id)) return { error: 'No such project', status: 404 };
@@ -3437,6 +3463,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       worktree: t.worktree ?? null, integrates: t.integrates ?? null,
       // Where it runs (or last ran): a worker's id and name; null/controller = this server.
       node: t.node_id ?? null, node_name: t.node_id && t.node_id !== LOCAL_NODE ? nodeName(t.node_id) : null,
+      run_on: t.run_on ?? null, run_on_name: t.run_on ? nodeName(t.run_on) : null, // the machine the owner pinned it to
       // A remote run whose node went away (within its grace period): 'Mac mini (Mac asleep)'.
       waiting_for: running.get(t.id)?.waiting || null,
     };
@@ -3604,7 +3631,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   return {
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
-    planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, insertCheckpoint, approveCheckpoint, requestChanges, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setReflectFallbacks, setReflectSettings, syncConvoModel, pauseTask, resumeTask, handoffTask, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
+    planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, insertCheckpoint, approveCheckpoint, requestChanges, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setTaskRunOn, setReflectFallbacks, setReflectSettings, syncConvoModel, pauseTask, resumeTask, handoffTask, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
     drain, undrain, chatPlanning, stateView, machines, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, reconcileClaudeLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     // A sidebar chat's project rank ({id, position, priority}), or null when its folder has no orchestrator project.
     projectRank: (cwd) => q1('SELECT id, position, priority FROM projects WHERE path=:p', { p: cwd }) ?? null,

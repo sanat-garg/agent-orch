@@ -1622,6 +1622,14 @@ async function handleRequest(req, res) {
     const r = orch.setTaskFallbacks(Number(tf[1]), list);
     return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r);
   }
+  // Pin a queued work task to one machine: {node: '<node id>' | 'controller' | null (any machine)}.
+  const tro = p.match(/^\/api\/orch\/tasks\/(\d+)\/run-on$/);
+  if (tro && req.method === 'PATCH') {
+    const node = (await readBody(req)).node;
+    if (node != null && typeof node !== 'string') return json(res, 400, { error: 'node must be a machine id or null' });
+    const r = orch.setTaskRunOn(Number(tro[1]), node || null);
+    return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r);
+  }
   // Reflection fallbacks for a project's reflection-queued tasks: {fallbacks: [{agent, model}] | null}, same rules as a chat's.
   const rf = p.match(/^\/api\/orch\/projects\/(\d+)\/reflect-fallbacks$/);
   if (rf && req.method === 'PUT') {

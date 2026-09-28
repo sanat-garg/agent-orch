@@ -946,6 +946,9 @@ label.st-row, label.st-text { cursor: pointer; }
 .tc-tag.model svg { vertical-align: -1px; margin-right: 4px; }
 /* The drawer's Model row: the model → fallbacks chip and "Add fallback", one style (buttons when the list is editable). */
 .dr-model { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.dr-runon { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; color: var(--muted); }
+.dr-runon select { height: 30px; min-width: 0; max-width: 70%; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; font-size: 13px; padding: 0 6px; }
+@media (pointer: coarse) { .dr-runon select { height: 44px; font-size: 16px; } }
 .dr-model > .tc-tag.model { display: inline-flex; align-items: center; font-size: 13px; padding: 3px 10px; white-space: normal; text-align: left; }
 .dr-model > .tc-tag.model strong { font-weight: 650; color: var(--text); margin: 0 1px; }
 .dr-model > .tc-tag.model svg { flex: none; }

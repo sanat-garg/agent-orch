@@ -5120,9 +5120,11 @@ function reviewPanel(t) {
   p.append(row, form);
   return p;
 }
-// The machine a running task is on ('on vps-2', 'waiting for Mac mini (Mac asleep)'); tasks on the controller say
+// The machine a running task is on ('on vps-2', 'waiting for Mac mini (Mac asleep)'), or a queued one is pinned to
+// ('only on MacBook Air'); tasks on the controller say
 // 'on this server' only once the cluster has workers (MC.nodes, read when the Queue or Server details opens).
 function taskMachine(t) {
+  if (t.status === 'queued' && t.run_on_name) return `only on ${t.run_on_name}`; // pinned by the owner (Run on)
   if (t.status !== 'running' || t.kind === 'plan') return '';
   if (t.waiting_for) return `waiting for ${t.waiting_for}`;
   if (t.node_name) return `on ${t.node_name}`;
@@ -5443,6 +5445,10 @@ function modelSection(t) {
   }
   c.append(row);
   if (ms.kind === 'waiting' || ms.kind === 'delegated') c.append(el('div', 'dr-check', ms.text));
+  if (t.kind === 'work' && !t.integrates && ['queued', 'paused'].includes(t.status)) {
+    if (!MC.at) loadMachines().then(() => { if (O.drawer === t.id && MC.nodes.some((n) => !n.local)) renderDrawer(true); });
+    if (MC.nodes.some((n) => !n.local)) c.append(runOnRow(t));
+  }
   // Remote runs (cluster workers) name their machine; the controller's own runs don't.
   if (t.waiting_for) c.append(el('div', 'dr-check', `Waiting for ${t.waiting_for} to come back`));
   else if (t.node_name) c.append(el('div', 'dr-check', `${t.status === 'running' ? 'Running' : 'Ran'} on ${t.node_name}`));
@@ -5459,6 +5465,28 @@ function modelSection(t) {
     c.append(ul);
   }
   return c;
+}
+
+// Run on: the owner pins a queued work task to one machine, or leaves it to any (PATCH /api/orch/tasks/:id/run-on).
+function runOnRow(t) {
+  const row = el('label', 'dr-runon'), sel = el('select');
+  sel.append(new Option('Any machine', ''));
+  for (const n of MC.nodes) {
+    const off = !n.local && (!n.connected || n.status === 'offline') ? ' (offline)' : '';
+    sel.append(new Option(n.local ? `${n.name} (this server)` : `${n.name}${off}`, n.id));
+  }
+  if (t.run_on && !MC.nodes.some((n) => n.id === t.run_on)) sel.append(new Option(t.run_on_name || t.run_on, t.run_on));
+  sel.value = t.run_on || '';
+  sel.onchange = async () => {
+    try {
+      const r = await api(`/api/orch/tasks/${t.id}/run-on`, 'PATCH', { node: sel.value || null });
+      if (r.task) { O.tasks.set(t.id, { ...(O.tasks.get(t.id) || {}), ...r.task }); refreshCards(t.id); }
+      toast(sel.value ? `#${t.id} runs only on ${sel.selectedOptions[0].text.replace(/ \((this server|offline)\)$/, '')}` : `#${t.id} runs on any machine`);
+    } catch (e) { sel.value = t.run_on || ''; toast(e.message, { kind: 'error' }); }
+  };
+  row.title = 'Pinned to one machine, it waits for that machine even while others are free';
+  row.append(el('span', '', 'Run on'), sel);
+  return row;
 }
 
 function section(title) {

@@ -147,7 +147,7 @@ async function scenario(body, { config = {} } = {}) {
 const overlaps = (a, b) => a[0] < b[1] && b[0] < a[1];
 
 describe('parallel scheduling', { concurrency: true, timeout: 120000 }, () => {
-  test('file-disjoint tasks run together; overlapping (glob) and undeclared ones wait', async () => {
+  test('with overlapWaits: file-disjoint tasks run together; overlapping (glob) and undeclared ones wait', async () => {
     const r = await scenario(`
       await plan([
         { title: 'A', prompt: 'WRITE a.js A', files: ['src/a.js'] },
@@ -156,13 +156,30 @@ describe('parallel scheduling', { concurrency: true, timeout: 120000 }, () => {
         { title: 'D', prompt: 'WRITE d.txt D' },
       ]);
       await until(() => all().length === 4 && all().every((t) => t.status === 'done'));
-      return { spans: spans(), statuses: all().map((t) => t.status), files: all().map((t) => JSON.parse(t.files)) };`, { config: { concurrency: 4, parallelTasks: 4, agentSlots: 4 } });
+      return { spans: spans(), statuses: all().map((t) => t.status), files: all().map((t) => JSON.parse(t.files)) };`, { config: { concurrency: 4, parallelTasks: 4, agentSlots: 4, overlapWaits: true } });
     assert.deepEqual(r.statuses, ['done', 'done', 'done', 'done']);
     assert.deepEqual(r.files, [['src/a.js'], ['src/b.js'], ['src/*.js'], null]);
     const s = r.spans;
     assert.ok(overlaps(s.A, s.B), 'A and B (disjoint files) ran at the same time');
     assert.ok(!overlaps(s.C, s.A) && !overlaps(s.C, s.B), 'C (src/*.js) waited for A and B');
     for (const t of ['A', 'B', 'C']) assert.ok(!overlaps(s.D, s[t]), `D (no files) never ran beside ${t}`);
+  });
+
+  test('by default a free slot takes disjoint work first, then overlapping work runs beside the task it overlaps', async () => {
+    const r = await scenario(`
+      await plan([
+        { title: 'A', prompt: 'WAIT a\\nWRITE a.js A', files: ['src/a.js'] },
+        { title: 'C', prompt: 'WRITE c.js C', files: ['src/*.js'] },
+        { title: 'B', prompt: 'WRITE b.js B', files: ['src/b.js'] },
+      ]);
+      await until(() => byTitle('C')?.status === 'done');
+      const aStillRunning = byTitle('A').status === 'running';
+      released.add('a');
+      await until(() => all().length === 3 && all().every((t) => t.status === 'done'));
+      return { spans: spans(), aStillRunning };`, { config: { concurrency: 2, parallelTasks: 2, agentSlots: 2 } });
+    const s = r.spans;
+    assert.ok(s.B[0] <= s.C[0], 'B (disjoint) took the free slot before C (overlapping), though queued after it');
+    assert.ok(r.aStillRunning && overlaps(s.C, s.A), 'C ran beside A (src/*.js overlaps src/a.js) instead of waiting');
   });
 
   test('multi-dependency: the integrator starts only after ALL parts; cancel cascades and retry revives', async () => {

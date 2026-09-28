@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
-import { ensureWorktree, listWorktrees, mergeBack, repoInfo, startIntegration, unresolvedFiles, worktreePath } from '../worktrees.mjs';
+import { ensureWorktree, listWorktrees, mergeBack, pruneOrphanWorktrees, removeWorktree, repoInfo, startIntegration, unresolvedFiles, worktreePath } from '../worktrees.mjs';
 
 const ORCH = JSON.stringify(new URL('../orchestrator.mjs', import.meta.url).href);
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -210,6 +210,33 @@ describe('worktrees', { concurrency: true, timeout: 120000 }, () => {
       assert.equal(git(repo, 'rev-parse', 'HEAD'), head);
       assert.equal(fs.readFileSync(path.join(wt.cwd, 'a.txt'), 'utf8'), 'one\nmine\nthree\n');
       assert.equal(git(wt.dir, 'status', '--porcelain'), ''); // squashed into one commit, rebase aborted
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test('removing a worktree deletes its directory even when ignored files were left in it', async () => {
+    const { root, repo } = makeRepo();
+    try {
+      const info = await repoInfo(repo);
+      const wt = await ensureWorktree(info, 10);
+      fs.rmSync(path.join(wt.cwd, 'node_modules'));
+      fs.mkdirSync(path.join(wt.cwd, 'node_modules', '.cache'), { recursive: true });
+      fs.writeFileSync(path.join(wt.cwd, 'node_modules', '.cache', 'x'), 'cached');
+      await removeWorktree(info, 10);
+      assert.equal(fs.existsSync(wt.dir), false);
+      assert.deepEqual(await listWorktrees(repo), []);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test('the sweep deletes an orphan task dir but keeps a live task\'s and one git still lists', async () => {
+    const { root, repo } = makeRepo();
+    try {
+      const info = await repoInfo(repo);
+      const listed = await ensureWorktree(info, 11);
+      const orphan = worktreePath(info.top, 12), kept = worktreePath(info.top, 13), other = path.join(path.dirname(orphan), 'elsewhere-task-14');
+      for (const d of [orphan, kept, other]) { fs.mkdirSync(path.join(d, 'node_modules', '.cache'), { recursive: true }); fs.writeFileSync(path.join(d, 'node_modules', '.cache', 'x'), '1'); }
+      assert.deepEqual(await pruneOrphanWorktrees(info, [13]), [12]);
+      assert.equal(fs.existsSync(orphan), false);
+      assert.ok(fs.existsSync(kept) && fs.existsSync(other) && fs.existsSync(path.join(listed.cwd, 'a.txt')));
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 

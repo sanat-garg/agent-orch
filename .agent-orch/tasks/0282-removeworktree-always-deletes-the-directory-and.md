@@ -19,3 +19,7 @@ Do:
 ## Done when
 
 `npm test -- test/worktree.test.mjs` && `! test -d /home/ubuntu/.agent-orch-worktrees/agent-orch-task-216` && `! test -d /home/ubuntu/.agent-orch-worktrees/agent-orch-task-232`
+
+## Result — done (check passed) (2026-09-28 06:03)
+
+AGENT-ORCH-STATUS: done — worktree dirs always removed; boot sweep deletes orphans; stale dirs gone

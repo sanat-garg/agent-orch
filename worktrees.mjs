@@ -153,12 +153,33 @@ export async function mergeBack(info, id, message) {
   return { sha: (await git(info.top, ['rev-parse', '--short', 'HEAD'])).trim() };
 }
 
-// Remove a task's worktree; `keepBranch` keeps its commits reachable (failed or cancelled work).
+// Remove a task's worktree; `keepBranch` keeps its commits reachable (failed or cancelled work). The directory goes
+// too: `git worktree remove` can succeed yet leave ignored leftovers behind (a tool's node_modules/.cache).
 export async function removeWorktree(info, id, { keepBranch = false } = {}) {
   const dir = worktreePath(info.top, id);
-  if (!(await ok(info.top, ['worktree', 'remove', '--force', dir]))) fs.rmSync(dir, { recursive: true, force: true });
+  await ok(info.top, ['worktree', 'remove', '--force', dir]);
   await ok(info.top, ['worktree', 'prune']);
+  if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
   if (!keepBranch) await ok(info.top, ['branch', '-D', taskBranch(id)]);
+}
+
+// Delete <repo>-task-<id> directories under the worktrees root that git no longer lists, except those of task ids in
+// `keep` (running or awaiting integration). Returns the removed ids.
+export async function pruneOrphanWorktrees(info, keep = []) {
+  const root = worktreesRoot(info.top), prefix = `${path.basename(info.top)}-task-`, keepIds = new Set([...keep].map(Number));
+  let names;
+  try { names = fs.readdirSync(root); } catch { return []; }
+  await ok(info.top, ['worktree', 'prune']);
+  const listed = new Set(await registered(info.top)), removed = [];
+  if (!listed.has(info.top)) return []; // git failed to list even the main tree: delete nothing
+  for (const name of names) {
+    const id = name.startsWith(prefix) && /^\d+$/.test(name.slice(prefix.length)) ? Number(name.slice(prefix.length)) : null;
+    const dir = path.join(root, name);
+    if (id === null || keepIds.has(id) || listed.has(dir)) continue;
+    fs.rmSync(dir, { recursive: true, force: true });
+    removed.push(id);
+  }
+  return removed;
 }
 
 // Commit a task's unfinished work to its branch and drop the checkout (the branch stays for a retry).

@@ -31,7 +31,7 @@ import { MSG, graceMs, isRepoUrl } from './cluster-protocol.mjs';
 import { autoTasks, reserveBytes } from './power.mjs';
 import { CPU_PER_TASK, FOOTPRINT, GB, capSlots, localCap } from './cap.mjs';
 import { extractCommand, runCheck, toolLine } from './taskrun.mjs';
-import { commitAll, ensureWorktree, isMerged, listWorktrees, mergeBack, parkWorktree, removeWorktree, repoInfo, startIntegration, taskBranch, unresolvedFiles, worktreesRoot } from './worktrees.mjs';
+import { commitAll, ensureWorktree, isMerged, listWorktrees, mergeBack, parkWorktree, pruneOrphanWorktrees, removeWorktree, repoInfo, startIntegration, taskBranch, unresolvedFiles, worktreesRoot } from './worktrees.mjs';
 
 // ---------------------------------------------------------------- config
 
@@ -1943,6 +1943,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
           if (t) run('UPDATE tasks SET worktree=NULL WHERE id=:id', { id: w.id });
           logEvent(`removed the orphaned worktree of #${w.id}${merged ? '' : ` (work kept on branch agent-orch/task-${w.id})`}`, { projectId: p.id, taskId: w.id });
         }
+        // Directories git no longer lists (a removal that left ignored files behind); live tasks' are kept.
+        const live = qa("SELECT id FROM tasks WHERE status IN ('queued','running','paused','needs_integration')").map((r) => r.id);
+        const swept = await pruneOrphanWorktrees(info, live);
+        if (swept.length) logEvent(`deleted ${swept.length} leftover worktree dir(s): ${swept.map((id) => `#${id}`).join(', ')}`, { projectId: p.id });
       }).catch((e) => console.error('[orchestrator] worktree cleanup failed', p.path, e));
     }
   }

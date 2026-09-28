@@ -838,3 +838,7 @@ Opt-in autoRestart setting drains and restarts after server-code merges; tests p
 ## 2026-09-28 06:02 — #281 Auto-restart setting in the Settings sheet ui and banner wording [done (check passed)]
 
 Settings switch saves autoRestart; the banner now says when a restart is automatic
+
+## 2026-09-28 06:03 — #282 removeWorktree always deletes the directory and ensureWorktree sweeps orphan task dirs [done (check passed)]
+
+worktree dirs always removed; boot sweep deletes orphans; stale dirs gone

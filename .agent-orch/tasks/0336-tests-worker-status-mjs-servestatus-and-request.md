@@ -13,3 +13,7 @@ worker-status.mjs (a worker's status daemon socket and terminal view) has no tes
 ## Done when
 
 `node bin/test.mjs test/worker-status.test.mjs` passes and `grep -c '^test(' test/worker-status.test.mjs` prints at least 6
+
+## Result — done (check passed) (2026-09-28 11:48)
+
+AGENT-ORCH-STATUS: done — worker-status socket lifecycle covered by 7 passing tests

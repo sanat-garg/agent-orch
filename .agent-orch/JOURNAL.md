@@ -932,3 +932,6 @@ push drops repeatedly rejected devices and honours Retry-After pauses
 ## 2026-09-28 11:47 — #330 changes.mjs: a task's changes as a file stat and a capped patch, from its merged commit or live branch [done (check passed)]
 
 changes.mjs taskChanges returns branch/commit/none diffs; tests pass
+## 2026-09-28 11:48 — #336 tests: worker-status.mjs serveStatus and request over a real unix socket [done (check passed)]
+
+worker-status socket lifecycle covered by 7 passing tests

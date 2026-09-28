@@ -13,3 +13,7 @@ Reliability fix in taskrun.mjs (read its header comment and .agent-orch/AUDIT.md
 ## Done when
 
 `npm test -- test/verify.test.mjs` passes and `node -e "import('./taskrun.mjs').then(m=>{const c=m.extractCommand('\`\`\`\nnode -e \"process.exit(1)\"\nnode -e \"process.exit(0)\"\n\`\`\`');process.exit(c&&c.includes(' && ')?0:1)})"` exits 0
+
+## Result — done (check passed) (2026-09-28 12:39)
+
+AGENT-ORCH-STATUS: done — Each fenced-block line and each `;` part must now pass

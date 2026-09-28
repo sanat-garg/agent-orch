@@ -1006,3 +1006,7 @@ Browser tab lists earlier prompts with show, Back to latest and Ask again
 ## 2026-09-28 12:37 — #311 Integrate #302: Goal 9 controller slots: parallelTasks 1-16 (default 4), memory only an emergency floor, Settings select for this server [done (check passed)]
 
 merge conflicts resolved; parallel slots 1-16 and rapid mode both kept
+
+## 2026-09-28 12:39 — #349 Verifier AUDIT #64: every line of a fenced Done-when block and every ;-part of a snippet must pass [done (check passed)]
+
+Each fenced-block line and each `;` part must now pass

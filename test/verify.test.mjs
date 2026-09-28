@@ -112,3 +112,24 @@ test('extractCommand accepts env prefixes and a leading cd into a relative dir',
   assert.equal(extractCommand('`X=$(id) npm test` passes'), null);
   assert.equal(extractCommand('`cd web && npm test > out.txt` passes'), null);
 });
+
+test('extractCommand: every line of a fenced block and every ;-part of a snippet must pass (AUDIT #64)', async () => {
+  const { runCheck } = await import('../taskrun.mjs');
+  const run = async (c) => (await runCheck(c, process.cwd(), process.env, 30))[0];
+  const failing = extractCommand('```\nnode -e "process.exit(1)"\nnode -e "process.exit(0)"\n```');
+  assert.equal(failing, 'node -e "process.exit(1)" && node -e "process.exit(0)"');
+  assert.equal(await run(failing), false);
+  const semi = extractCommand('`test -f /nonexistent; test -d /tmp` passes');
+  assert.equal(semi, 'test -f /nonexistent && test -d /tmp');
+  assert.equal(await run(semi), false);
+  const ok = extractCommand('```bash\n# both hold\n$ test -d /tmp\n\nnode -e "process.exit(0)"\n```');
+  assert.equal(ok, 'test -d /tmp && node -e "process.exit(0)"');
+  assert.equal(await run(ok), true);
+  // A quoted ; is not a separator; any refused line voids the whole block.
+  assert.equal(extractCommand("`grep -c 'a;b' f; npm test` passes"), "grep -c 'a;b' f && npm test");
+  assert.equal(extractCommand('```\nnpm test\nnode x.mjs > out\n```'), null);
+  assert.equal(extractCommand('`npm test; rm -rf dist` passes'), null);
+  // The grep "prints nothing" rewrite is unchanged, and a rewritten line is grouped in a block.
+  assert.equal(extractCommand('`grep -q foo file` prints nothing'), 'grep -q foo file; test $? -eq 1');
+  assert.equal(extractCommand('```\nnpm test\ngrep -q foo file\n``` prints nothing'), 'npm test && { grep -q foo file; test $? -eq 1; }');
+});

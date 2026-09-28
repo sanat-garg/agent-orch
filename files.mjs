@@ -24,6 +24,7 @@
 //   POST /api/files/rename {cid, path, name}        → {from, to}   (name: one path segment ≤ 255 bytes; 409 if taken)
 //   POST /api/files/new    {cid, dir, name, type}   → {created: rel}   (type 'file' (empty) or 'dir'; 404 if dir isn't a folder)
 //   POST /api/files/delete {cid, paths}             → {deleted: [rel], skipped: [{path, reason}]}   (recursive; missing = skipped)
+//   GET /api/files/download?cid=<chat>&path=<p>[&path=<p2>…] → one file as an attachment, else a zip streamed on the fly (rules above sendDownload)
 //   POST /api/files/upload?cid=&dir=<abs|rel>&path=<rel in upload>&overwrite=0|1, raw body → {saved} (409 {error: 'exists', path}; rules above uploadFile)
 //   (the rules for these seven are above copyPaths; errors are {error} with 400/403/404/409/413)
 import { execFile } from 'node:child_process';
@@ -712,6 +713,133 @@ export async function deletePaths(rootDir, paths) {
   return { deleted, skipped };
 }
 
+// ── Download: GET /api/files/download?path=<p>[&path=<p2>…] ─────────────────────────────────────────────────────────
+// One regular file streams as itself (attachment, its Content-Type and Content-Length). Several paths, or one folder,
+// stream a zip built on the fly in plain node (never written to disk; deflated entries with data descriptors, no zip64),
+// named '<folder>.zip' for one folder, else 'agent-orch-files.zip'. Sources follow sourceOf's rules (a PROTECTED one is
+// 403). Entry paths are relative to the selection's common parent folder. Inside a folder, secrets, unreadable entries
+// and links whose target is outside the selection are skipped, listed in DOWNLOAD_NOTE at the top of the zip (and the
+// X-Skipped header counts them); a link inside the selection is stored as its target. Over DOWNLOAD_ENTRY_MAX entries or
+// ZIP_INPUT_MAX bytes it's 413 before anything is sent. A client that disconnects stops the zip (zipStats counts them).
+export const DOWNLOAD_ENTRY_MAX = 50000;
+export const DOWNLOAD_NOTE = 'agent-orch-skipped.txt';
+export const zipStats = { active: 0, aborted: 0, done: 0 };
+const TYPES = { ...IMAGE_TYPES, '.txt': 'text/plain; charset=utf-8', '.md': 'text/markdown; charset=utf-8', '.csv': 'text/csv; charset=utf-8',
+  '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
+  '.json': 'application/json', '.xml': 'application/xml', '.pdf': 'application/pdf', '.zip': 'application/zip', '.gz': 'application/gzip',
+  '.tar': 'application/x-tar', '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime' };
+const attachment = (name) => `attachment; filename*=UTF-8''${encodeURIComponent(name).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)}`;
+
+export async function sendDownload(req, res, rootDir, paths) {
+  const srcs = sourcesOf(rootDir, paths);
+  if (srcs.length === 1 && !srcs[0].dir) {
+    const s = srcs[0];
+    let fh;
+    try { fh = await fs.promises.open(s.real, 'r'); } catch (e) { throw denied(e); }
+    const st = await fh.stat();
+    if (!st.isFile()) { await fh.close(); throw new FileError(400, 'Not a file'); }
+    res.writeHead(200, { 'Content-Type': TYPES[path.extname(s.name).toLowerCase()] || 'application/octet-stream', 'Content-Length': st.size,
+      'Content-Disposition': attachment(s.name), 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' });
+    return pipeline(fh.createReadStream(), res).catch(() => {});
+  }
+  let common = path.dirname(srcs[0].abs);
+  for (const s of srcs) while (!within(path.dirname(s.abs), common)) common = path.dirname(common);
+  const sel = srcs.map((s) => s.real), inSel = (real) => sel.some((r) => within(real, r));
+  const entries = [], skipped = [], stack = [];
+  let bytes = 0;
+  const add = (e) => {
+    if (entries.push(e) > DOWNLOAD_ENTRY_MAX) throw new FileError(413, `More than ${DOWNLOAD_ENTRY_MAX} items to download`);
+    if ((bytes += e.size || 0) > ZIP_INPUT_MAX) throw new FileError(413, 'Too much to download at once (2 GB at most)');
+  };
+  const walk = (dirReal, prefix) => {
+    let names;
+    try { names = fs.readdirSync(dirReal).sort(); } catch { skipped.push([prefix, "can't be read"]); return; }
+    stack.push(dirReal);
+    for (const n of names) {
+      const p = path.join(dirReal, n), name = prefix + n;
+      let st, real = p;
+      try {
+        st = fs.lstatSync(p);
+        if (st.isSymbolicLink()) {
+          try { real = fs.realpathSync(p); st = fs.statSync(real); } catch { skipped.push([name, 'broken link']); continue; }
+          if (!inSel(real)) { skipped.push([name, 'link to outside the selection']); continue; }
+        }
+      } catch { skipped.push([name, "can't be read"]); continue; }
+      if (isSecret(p, real)) { skipped.push([name, 'protected']); continue; }
+      if (st.isDirectory()) {
+        if (stack.includes(real)) { skipped.push([name, 'link loop']); continue; }
+        add({ name: `${name}/`, dir: true, st });
+        walk(real, `${name}/`);
+      } else if (st.isFile()) {
+        try { fs.accessSync(real, fs.constants.R_OK); } catch { skipped.push([name, "can't be read"]); continue; }
+        add({ name, abs: real, size: st.size, st });
+      }
+    }
+    stack.pop();
+  };
+  for (const s of srcs) {
+    const name = relOf(common, s.abs), st = fs.statSync(s.real);
+    if (!st.isDirectory()) { add({ name, abs: s.real, size: st.size, st }); continue; }
+    add({ name: `${name}/`, dir: true, st });
+    walk(s.real, `${name}/`);
+  }
+  if (skipped.length) {
+    const note = Buffer.from(`Left out of this zip by agent-orch:\n${skipped.map(([p, why]) => `${p} (${why})\n`).join('')}`);
+    entries.unshift({ name: DOWNLOAD_NOTE, data: note, size: note.length, st: { mtimeMs: Date.now(), mode: 0o644 } });
+  }
+  const file = srcs.length === 1 ? `${srcs[0].name}.zip` : 'agent-orch-files.zip';
+  res.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Disposition': attachment(file), 'Cache-Control': 'private, no-store',
+    'X-Content-Type-Options': 'nosniff', 'X-Skipped': String(skipped.length) });
+  zipStats.active++;
+  let ok = false;
+  try { await pipeline(Readable.from(zipStream(entries)), res); ok = true; }
+  catch { res.destroy(); }
+  finally { zipStats.active--; zipStats[ok ? 'done' : 'aborted']++; }
+}
+
+// The zip as a stream of buffers: each entry's local header (flag 8: crc and sizes follow the data), its deflated data
+// and a data descriptor, then the central directory. Stopping the iteration (a disconnect) closes the open file.
+async function* zipStream(entries) {
+  let pos = 0;
+  const central = [];
+  for (const e of entries) {
+    const name = Buffer.from(e.name, 'utf8'), offset = pos, method = e.dir ? 0 : 8;
+    const { time, date } = dosTime(e.st.mtimeMs);
+    const h = Buffer.alloc(30);
+    h.writeUInt32LE(0x04034b50, 0); h.writeUInt16LE(20, 4); h.writeUInt16LE(e.dir ? 0x0800 : 0x0808, 6); h.writeUInt16LE(method, 8);
+    h.writeUInt16LE(time, 10); h.writeUInt16LE(date, 12); h.writeUInt16LE(name.length, 26);
+    yield Buffer.concat([h, name]);
+    pos += 30 + name.length;
+    let crc = 0, size = 0, csize = 0;
+    if (!e.dir) {
+      const src = e.data ? Readable.from([e.data]) : fs.createReadStream(e.abs), def = zlib.createDeflateRaw();
+      src.on('data', (c) => { crc = zlib.crc32(c, crc); size += c.length; });
+      src.on('error', (err) => def.destroy(err));
+      try {
+        for await (const c of src.pipe(def)) {
+          csize += c.length; pos += c.length;
+          if (pos > 0xfffffff0) throw new FileError(413, 'The zip would be too large (4 GB at most)');
+          yield c;
+        }
+      } finally { src.destroy(); def.destroy(); }
+      const dd = Buffer.alloc(16);
+      dd.writeUInt32LE(0x08074b50, 0); dd.writeUInt32LE(crc, 4); dd.writeUInt32LE(csize, 8); dd.writeUInt32LE(size, 12);
+      yield dd;
+      pos += 16;
+    }
+    h.writeUInt32LE(crc, 14); h.writeUInt32LE(csize, 18); h.writeUInt32LE(size, 22);
+    const mode = e.dir ? 0o40755 : 0o100000 | (e.st.mode & 0o111 ? 0o755 : 0o644);
+    const c = Buffer.alloc(46);
+    c.writeUInt32LE(0x02014b50, 0); c.writeUInt16LE((3 << 8) | 20, 4); h.copy(c, 6, 4, 30);
+    c.writeUInt32LE(((mode << 16) | (e.dir ? 0x10 : 0)) >>> 0, 38); c.writeUInt32LE(offset, 42);
+    central.push(c, name);
+  }
+  const cd = Buffer.concat(central), end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(pos, 16);
+  yield Buffer.concat([cd, end]);
+}
+
 // ── Upload: POST /api/files/upload?dir=&path=<relative path in the upload>&overwrite=0|1, raw body ─────────────────────
 // The body streams to a temp file beside the target (never buffered whole; at most UPLOAD_MAX bytes), then is renamed
 // into place. `path` is the file's place inside the upload ('folder/sub/a.txt'): plain segments only (no '..', no
@@ -768,7 +896,7 @@ const OPS = { copy: (root, b) => copyPaths(root, b.paths, b.dest), move: (root, 
 const FS_ERRORS = { EACCES: [403, 'Permission denied'], EPERM: [403, 'Permission denied'], EROFS: [403, 'The disk is read-only'],
   EEXIST: [409, 'Something with that name is already there'], ENOSPC: [507, 'The disk is full'], ENOENT: [404, 'Not found'] };
 export function handleFiles(req, res, url, { rootFor, json, readBody }) {
-  const m = url.pathname.match(/^\/api\/files\/(list|raw|find|grep|changed|diff|copy|move|zip|unzip|rename|new|delete|upload)$/);
+  const m = url.pathname.match(/^\/api\/files\/(list|raw|find|grep|changed|diff|download|copy|move|zip|unzip|rename|new|delete|upload)$/);
   if (!m || req.method !== (OPS[m[1]] || m[1] === 'upload' ? 'POST' : 'GET')) return false;
   const fail = (e) => {
     if (res.headersSent) return res.destroy();
@@ -801,6 +929,7 @@ export function handleFiles(req, res, url, { rootFor, json, readBody }) {
       else if (q.length > 200) throw new FileError(400, 'Search for 200 characters at most');
       else grepFiles(root, q, { dir }).then((r) => json(res, 200, r), fail);
     }
+    else if (m[1] === 'download') sendDownload(req, res, root, url.searchParams.getAll('path')).catch(fail);
     else if (m[1] === 'changed') changedFiles(root).then((r) => json(res, 200, r), fail);
     else if (m[1] === 'diff') sendDiff(req, res, root, url.searchParams.get('path')).catch(fail);
     else sendFile(req, res, root, url.searchParams.get('path'));

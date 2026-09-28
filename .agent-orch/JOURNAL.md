@@ -1630,6 +1630,13 @@ lock, slots, sign-in fixed+tested; live proof needs deploy
 
 review checkpoints owner-only; planner/reflection entries dropped, tests pass
 
+## 2026-09-28 23:15 — #761 Files backend: download a file, or a streamed zip of several [done (check passed)]
+
+file download and streamed zip endpoint added, 7 tests pass
 ## 2026-09-28 23:15 — #762 Files tab: Download button; several selected download as one zip [done (check passed)]
 
 Files Download button, menu item, ⌘⇧D shortcut and tests added
+
+## 2026-09-28 23:17 — #767 Integrate #761: Files backend: download a file, or a streamed zip of several [done (check passed)]
+
+CONTEXT.md conflict resolved; download backend and UI tests pass

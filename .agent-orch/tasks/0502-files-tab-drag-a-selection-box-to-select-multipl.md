@@ -13,3 +13,7 @@ Add marquee (rubber-band) selection to the Files tab list (public/files.js, file
 ## Done when
 
 `node --test test/ui-files-marquee*.test.mjs` passes (drag selects intersected rows, Cmd adds, edge auto-scroll, click clears, drag on selected row doesn't marquee)
+
+## Result — done (check passed) (2026-09-28 18:56)
+
+AGENT-ORCH-STATUS: done — Files list has marquee selection with auto-scroll; all 5 tests pass

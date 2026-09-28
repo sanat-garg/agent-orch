@@ -1571,3 +1571,6 @@ browser tasks prefer a Claude in Chrome runner; tests pass, documented
 ## 2026-09-28 18:54 — #501 Bring back the milestone-line Timeline bar; use it on task cards too [done (check passed)]
 
 Drawer and card phase bars share one renderer with milestone lines
+## 2026-09-28 18:56 — #502 Files tab: drag a selection box to select multiple files [done (check passed)]
+
+Files list has marquee selection with auto-scroll; all 5 tests pass

@@ -9,7 +9,7 @@
 // The Changed view lists the files that differ from git HEAD with +/− counts; Quick Look shows their diff.
 // Ask in chat (Quick Look's header, a Contents hit's trailing button, Shift+Enter on a row) puts `path[:line]` into the composer. Loaded after
 // app.js and uses its helpers ($, el, api, store, md, currentConvo, toast, copyToClipboard).
-// Selection: click, ⌘/Ctrl-click, Shift-click ranges, ⌘A. A context menu (right-click, long-press, a row's ⋯, Shift+F10) offers
+// Selection: click, ⌘/Ctrl-click, Shift-click ranges, ⌘A, a marquee dragged from empty space (fxMarqueeDown). A context menu (right-click, long-press, a row's ⋯, Shift+F10) offers
 // Open, Copy/Cut/Paste (⌘C ⌘X ⌘V), Compress to ZIP, Extract here, Rename… (F2), New file…/New folder…, Delete (Delete or
 // Backspace, after an in-page confirm), Copy path and Ask in chat. The clipboard is app-internal
 // (absolute paths plus copy|cut) and outlives folder changes; pasting POSTs /api/files/copy or /move {paths, dest},
@@ -29,6 +29,7 @@ const FX = {
   goto: { cache: new Map(), opts: [], i: -1, seq: 0 }, // Go to folder's suggestions
   climbed: false, // the selection is only the folder ‹ Parent came out of: Backspace climbs on instead of deleting it
   upl: null, uplFrame: 0, conflict: null, // the running upload batch (fxUpload) and its Replace / Keep both / Skip question
+  mq: null, mqDone: 0, // the marquee drag in progress (fxMarqueeDown) and when the last one ended
   edit: null, // a name being typed: {kind: 'rename', rel, value} | {kind: 'new', type: 'file'|'dir', dir, value}
 };
 const FX_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
@@ -193,6 +194,8 @@ function fxBuild() {
     else if (e.key === 'Escape' && (FX.find || e.target.value)) { e.preventDefault(); fxFindExit(true); }
   });
   $('fxMain').addEventListener('keydown', fxKey);
+  $('fxMain').addEventListener('pointerdown', fxMarqueeDown);
+  $('fxMain').addEventListener('click', (e) => { if (Date.now() - (FX.mqDone || 0) < 300) e.stopPropagation(); }, true); // the click ending a marquee
   $('fxMain').addEventListener('contextmenu', (e) => {
     if (fxFlat() || !FX.data || e.target.closest('.fx-head')) return;
     e.preventDefault();
@@ -710,14 +713,123 @@ function fxSelect(rel, how = null) {
     FX.picked = new Set(FX.rows.slice(lo, hi + 1).map((r) => r.rel));
   } else { FX.picked = new Set(rel == null ? [] : [rel]); FX.anchor = rel; }
   FX.sel = how === 'toggle' && !FX.picked.has(rel) ? [...FX.picked].at(-1) ?? null : how === 'all' ? FX.sel ?? FX.rows[0]?.rel ?? null : rel;
-  const c = $('fxMain').querySelector('[role="listbox"], [role="tree"]');
+  const c = fxPaintPicked();
   if (!c) return;
-  c.querySelectorAll('[data-i]').forEach((o) => o.setAttribute('aria-selected', String(FX.picked.has(FX.rows[+o.dataset.i]?.rel))));
   if (how !== 'all') c.querySelector(`#fx-o-${i}`)?.scrollIntoView({ block: 'nearest' });
   fxActive(c);
   if (FX.ql && i >= 0 && !FX.rows[i].e.dir && FX.picked.has(rel)) fxPreview(FX.rows[i]); // Quick Look follows the selection
 }
 const fxPickedRows = () => FX.rows.filter((r) => FX.picked.has(r.rel));
+function fxPaintPicked() {
+  const c = $('fxMain').querySelector('[role="listbox"], [role="tree"]');
+  c?.querySelectorAll('[data-i]').forEach((o) => o.setAttribute('aria-selected', String(FX.picked.has(FX.rows[+o.dataset.i]?.rel))));
+  return c;
+}
+// Marquee (mouse and pen; touch keeps long-press): pressing on empty space (not a row's name or icon, not a selected row) and
+// dragging past 4px draws a box; every row it touches is selected live (plain replaces, ⌘/Ctrl toggles, Shift adds).
+// Near the top/bottom edge (40px) the list scrolls, faster the closer; Esc restores the previous selection. A click
+// without moving on space outside the rows clears the selection. FX.mq is the drag in progress.
+const FX_MQ_EDGE = 40, FX_MQ_SPEED = 24; // px from the edge where auto-scroll starts; px per frame at the very edge
+function fxMarqueeDown(ev) {
+  if (ev.pointerType === 'touch' || ev.button !== 0 || FX.mq || fxFlat() || !FX.data || FX.edit) return;
+  const main = $('fxMain'), c = main.querySelector('[role="listbox"], [role="tree"]'), o = ev.target.closest('[data-i]');
+  if (ev.target.closest('.fx-head, .fx-edit, button, input, a') || (c && !c.contains(ev.target) && ev.target !== main)) return;
+  if (o && (FX.view === 'icons' || FX.picked.has(FX.rows[+o.dataset.i]?.rel) || ev.target.closest('.fx-n, .fx-ico'))) return;
+  const k = main.getBoundingClientRect();
+  FX.mq = {
+    id: ev.pointerId, x0: ev.clientX - k.left + main.scrollLeft, y0: ev.clientY - k.top + main.scrollTop, cx: ev.clientX, cy: ev.clientY,
+    on: false, row: !!o, how: ev.metaKey || ev.ctrlKey ? 'toggle' : ev.shiftKey ? 'add' : null, mod: ev.metaKey || ev.ctrlKey || ev.shiftKey,
+    base: new Set(FX.picked), sel: FX.sel, anchor: FX.anchor, box: null, raf: 0,
+  };
+  window.addEventListener('pointermove', fxMarqueeMove, true);
+  window.addEventListener('pointerup', fxMarqueeUp, true);
+  window.addEventListener('pointercancel', fxMarqueeUp, true);
+  document.addEventListener('keydown', fxMarqueeKey, true);
+}
+function fxMarqueeMove(ev) {
+  const m = FX.mq;
+  if (!m || ev.pointerId !== m.id) return;
+  m.cx = ev.clientX; m.cy = ev.clientY;
+  if (!m.on) {
+    const main = $('fxMain'), k = main.getBoundingClientRect();
+    if (Math.hypot(m.cx - (m.x0 - main.scrollLeft + k.left), m.cy - (m.y0 - main.scrollTop + k.top)) < 4) return;
+    m.on = true;
+    m.box = el('div', 'fx-marquee');
+    document.body.append(m.box);
+    document.documentElement.classList.add('fx-marqueeing');
+    getSelection()?.removeAllRanges();
+    try { main.setPointerCapture(m.id); } catch {}
+    const tick = () => { if (FX.mq !== m) return; fxMarqueeScroll(); m.raf = requestAnimationFrame(tick); };
+    m.raf = requestAnimationFrame(tick);
+  }
+  ev.preventDefault();
+  fxMarqueePaint();
+}
+// Scrolls the list while the pointer is within FX_MQ_EDGE of its top or bottom edge (or past it).
+function fxMarqueeScroll() {
+  const m = FX.mq, main = $('fxMain'), k = main.getBoundingClientRect();
+  const top = m.cy - k.top, bottom = k.bottom - m.cy;
+  const d = bottom < FX_MQ_EDGE ? FX_MQ_SPEED * Math.min(1, (FX_MQ_EDGE - bottom) / FX_MQ_EDGE) : top < FX_MQ_EDGE ? -FX_MQ_SPEED * Math.min(1, (FX_MQ_EDGE - top) / FX_MQ_EDGE) : 0;
+  if (!d) return;
+  const before = main.scrollTop;
+  main.scrollTop += d;
+  if (main.scrollTop !== before) fxMarqueePaint();
+}
+function fxMarqueePaint() {
+  const m = FX.mq, main = $('fxMain'), k = main.getBoundingClientRect();
+  const x1 = m.cx - k.left + main.scrollLeft, y1 = m.cy - k.top + main.scrollTop;
+  const l = Math.min(m.x0, x1), r = Math.max(m.x0, x1), t = Math.min(m.y0, y1), b = Math.max(m.y0, y1);
+  // The box in viewport coordinates, clipped to the list.
+  const vl = Math.max(k.left, l - main.scrollLeft + k.left), vr = Math.min(k.right, r - main.scrollLeft + k.left);
+  const vt = Math.max(k.top, t - main.scrollTop + k.top), vb = Math.min(k.bottom, b - main.scrollTop + k.top);
+  Object.assign(m.box.style, { left: `${vl}px`, top: `${vt}px`, width: `${Math.max(0, vr - vl)}px`, height: `${Math.max(0, vb - vt)}px` });
+  const hit = [];
+  main.querySelectorAll('[data-i]').forEach((o) => {
+    const q = o.getBoundingClientRect(), ql = q.left - k.left + main.scrollLeft, qt = q.top - k.top + main.scrollTop;
+    if (ql < r && ql + q.width > l && qt < b && qt + q.height > t) { const rel = FX.rows[+o.dataset.i]?.rel; if (rel != null) hit.push(rel); }
+  });
+  const picked = new Set(m.how ? m.base : []);
+  for (const rel of hit) { if (m.how === 'toggle' && m.base.has(rel)) picked.delete(rel); else picked.add(rel); }
+  FX.picked = picked;
+  FX.climbed = false;
+  const lead = hit.filter((rel) => picked.has(rel)).at(-1);
+  FX.sel = lead ?? (picked.has(m.sel) ? m.sel : [...picked].at(-1) ?? null);
+  FX.anchor = FX.sel;
+  const c = fxPaintPicked();
+  if (c) fxActive(c);
+}
+function fxMarqueeEnd() {
+  const m = FX.mq;
+  if (!m) return;
+  FX.mq = null;
+  cancelAnimationFrame(m.raf);
+  m.box?.remove();
+  document.documentElement.classList.remove('fx-marqueeing');
+  window.removeEventListener('pointermove', fxMarqueeMove, true);
+  window.removeEventListener('pointerup', fxMarqueeUp, true);
+  window.removeEventListener('pointercancel', fxMarqueeUp, true);
+  document.removeEventListener('keydown', fxMarqueeKey, true);
+  try { $('fxMain').releasePointerCapture(m.id); } catch {}
+  return m;
+}
+function fxMarqueeUp(ev) {
+  if (!FX.mq || ev.pointerId !== FX.mq.id) return;
+  const m = fxMarqueeEnd();
+  if (m.on) FX.mqDone = Date.now(); // the click that follows a drag doesn't reselect a row
+  else if (!m.row && !m.mod && ev.type === 'pointerup') fxSelect(null);
+  else return;
+  $('fxMain').querySelector('[role="listbox"], [role="tree"]')?.focus({ preventScroll: true }); // the selection shows in the accent
+}
+function fxMarqueeKey(e) {
+  if (e.key !== 'Escape' || !FX.mq) return;
+  e.preventDefault(); e.stopPropagation();
+  const m = fxMarqueeEnd();
+  if (!m.on) return;
+  FX.picked = m.base; FX.sel = m.sel; FX.anchor = m.anchor;
+  FX.mqDone = Date.now();
+  const c = fxPaintPicked();
+  if (c) fxActive(c);
+}
 function fxFocus(selectFirst) {
   const c = $('fxMain').querySelector('[role="listbox"], [role="tree"]'), field = $('fxMain').querySelector('.fx-edit');
   if (field) return field.focus({ preventScroll: true }); // a name being typed keeps the focus through refreshes

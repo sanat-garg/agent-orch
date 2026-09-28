@@ -31,10 +31,10 @@ after(() => {
 
 test('a multi-use code pairs up to N machines, each with its own node, token and unique name, then refuses more', () => {
   const h = hub();
-  const t0 = Date.now(), p = h.createPairing({ uses: 3 });
+  const t0 = Date.now(), p = h.createPairing({ uses: 3 }), t1 = Date.now(); // the clock may tick during the call
   assert.match(p.code, /^[A-Z2-9]{4}-[A-Z2-9]{4}$/);
   assert.deepEqual([p.uses, p.used, p.nodes], [3, 0, []]);
-  assert.ok(p.expiresAt - t0 >= PAIRING_MULTI_TTL_MS - 1000 && p.expiresAt - t0 <= PAIRING_MULTI_TTL_MS && PAIRING_MULTI_TTL_MS === 3600e3, 'valid 1 hour');
+  assert.ok(p.expiresAt >= t0 + PAIRING_MULTI_TTL_MS && p.expiresAt <= t1 + PAIRING_MULTI_TTL_MS && PAIRING_MULTI_TTL_MS === 3600e3, 'valid 1 hour');
   const a = h.claim(mac(p.code, 'MacBook Pro (Sanat-MBP)'));
   const b = h.claim(mac(p.code.toLowerCase().replace('-', ''), 'MacBook Air (Sanat-MBA)'));
   assert.deepEqual(h.pairing(p.code), { state: 'waiting', expiresAt: p.expiresAt, uses: 3, used: 2, nodes: [h.node(a.node), h.node(b.node)] });
@@ -54,9 +54,9 @@ test('a multi-use code pairs up to N machines, each with its own node, token and
 
 test('a one-time code still pairs exactly one machine; bad use counts are refused', () => {
   const h = hub();
-  const t0 = Date.now(), p = h.createPairing();
+  const t0 = Date.now(), p = h.createPairing(), t1 = Date.now();
   assert.equal(p.uses, undefined);
-  assert.ok(p.expiresAt - t0 <= PAIRING_TTL_MS && p.expiresAt - t0 >= PAIRING_TTL_MS - 1000);
+  assert.ok(p.expiresAt >= t0 + PAIRING_TTL_MS && p.expiresAt <= t1 + PAIRING_TTL_MS, 'valid 10 minutes');
   assert.deepEqual(h.pairing(p.code), { state: 'waiting', expiresAt: p.expiresAt });
   const a = h.claim(mac(p.code, 'mini'));
   assert.match(a.token, /^aon_/);

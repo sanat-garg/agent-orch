@@ -3369,6 +3369,7 @@ function openServer() {
   renderMetrics();
   loadHistory();
   updateLive();
+  CA.ready = false; // the cluster diagram's first snapshot is drawn as it is, not replayed
   loadMachines();
   $('serverModal').querySelector('[data-close].icon-btn').focus();
 }
@@ -3391,7 +3392,7 @@ function closeServer() {
 $('miniStats').addEventListener('click', openServer);
 $('serverModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeServer(); });
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !$('serverModal').hidden && $('machineModal').hidden) { e.stopImmediatePropagation(); closeServer(); }
+  if (e.key === 'Escape' && !$('serverModal').hidden && $('machineModal').hidden && $('nodeModal').hidden) { e.stopImmediatePropagation(); closeServer(); }
 }, true);
 setInterval(() => { if (M.usage) renderUsage(); }, 30e3); // keep the "in 2h 9m" countdowns current
 
@@ -3444,6 +3445,8 @@ function machineSummary(nodes) {
     `${used} of ${plural(slots, 'slot')} running`, off && `${off} offline`, dis && `${dis} disabled`].filter(Boolean).join(' · ');
 }
 function renderMachines() {
+  caSync(MC.nodes);
+  if (ND.id) ndRender();
   // A power menu in use isn't replaced under the owner's finger: the render waits until it loses focus.
   if (document.activeElement?.matches?.('#mMachines select')) { MC.stale = true; return; }
   MC.stale = false;
@@ -3673,6 +3676,731 @@ function powerPanel(n) {
   box.append(el('p', 'mc-pnote', 'Running tasks go on either way. A closed lid still sleeps the Mac; its tasks then move to another machine.'));
   return box;
 }
+
+// ----- cluster diagram (Server details → Machines, above the cards) -----
+// One SVG drawn by one requestAnimationFrame loop: the head (this server) in the middle and the workers around it (a
+// vertical list under 640px), each with CPU (outer) and RAM (inner) ring gauges, its OS icon and its running tasks as
+// chips. It moves on data the page already gets: a worker's newer reading (resources.at, sent every heartbeat) pulses it
+// and its link; lane activity (olane, one push per tool call) sends particles up the link of that task's machine, at
+// most 6 a second per link; a task that shows up on a machine travels there from the head as a chip, and one that leaves
+// returns and merges into the head (a check when it finished, a cross when it failed). Phase changes cross-fade on the
+// chip. Offline machines turn grey with a dashed link, asleep Macs wear a moon and draining ones an amber ring. The loop
+// runs only while something moves, Server details is open, the diagram in view and the page visible (at most 60 fps),
+// and never reads layout; with reduced motion every change is a static swap. Colours are theme variables (app.css .ca-*).
+const SVGNS = 'http://www.w3.org/2000/svg';
+const sv = (tag, attrs, parent) => {
+  const n = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) n.setAttribute(k, v);
+  parent?.append(n);
+  return n;
+};
+const CA_CHIP = 132, CA_ROW = 26; // a resting chip's width; the spacing of a machine's chip seats
+// The step a chip shows (remote jobs report phases; a task on this server just runs) and its dot's tone.
+const CA_PHASE = { queued: 'starting', cloning: 'cloning', fetching: 'fetching', installing: 'installing', running: 'running', checking: 'checking', committing: 'committing', pushing: 'pushing', done: 'finishing' };
+const CA_TONE = { running: 'run', checking: 'check', committing: 'check', finishing: 'check', pushing: 'push', waiting: 'wait' };
+// nodes: id → view (its group, place, link); chips: task id → chip; anims: what moves now; seen: node id → its newest
+// reading's time; status: task id → its last pushed status; emit: node id → particle throttle; ready: the first
+// snapshot since Server details opened is drawn (later changes animate).
+const CA = { wrap: null, svg: null, g: {}, w: 0, h: 0, list: false, key: '', head: null, nodes: new Map(), chips: new Map(), anims: new Set(),
+  seen: new Map(), status: new Map(), emit: new Map(), raf: 0, last: 0, ready: false, inView: true, asked: 0, mark: null, markPath: null, markAnim: null, markTimer: 0 };
+
+function caBuild() {
+  if (CA.svg) return;
+  CA.wrap = $('caWrap');
+  CA.svg = sv('svg', { class: 'ca', role: 'group' }, CA.wrap);
+  for (const k of ['links', 'glow', 'dots', 'nodes', 'chips', 'marks']) CA.g[k] = sv('g', { class: `ca-${k}` }, CA.svg);
+  for (const k of ['glow', 'dots', 'chips', 'marks']) CA.g[k].setAttribute('aria-hidden', 'true');
+  CA.mark = sv('g', { class: 'ca-mark', opacity: 0 }, CA.g.marks);
+  sv('circle', { r: 10 }, CA.mark);
+  CA.markPath = sv('path', {}, CA.mark);
+  new ResizeObserver(([e]) => {
+    const w = Math.round(e.contentRect.width);
+    if (w && w !== CA.w) { CA.w = w; caLayout(); }
+  }).observe(CA.wrap);
+  // Scrolled out of view (Server details scrolls): nothing moves until it's back.
+  new IntersectionObserver(([e]) => { CA.inView = e.isIntersecting; if (!CA.inView) caFlush(); }).observe(CA.wrap);
+  // A chip opens its task's drawer; a machine its detail.
+  CA.svg.addEventListener('click', (e) => {
+    const chip = e.target.closest('.ca-chip'), node = e.target.closest('.ca-node');
+    if (chip) { closeServer(); openTask(Number(chip.dataset.task)); } else if (node) openNode(node.dataset.node);
+  });
+  CA.svg.addEventListener('keydown', (e) => {
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.classList?.contains('ca-node')) { e.preventDefault(); openNode(e.target.dataset.node); }
+  });
+}
+function caClear() {
+  caFlush();
+  for (const v of CA.nodes.values()) { v.g.remove(); v.link?.remove(); v.glow?.remove(); }
+  for (const c of CA.chips.values()) c.g.remove();
+  CA.nodes.clear(); CA.chips.clear(); CA.seen.clear();
+  CA.key = ''; CA.head = null; CA.ready = false;
+}
+// A new snapshot of GET /api/cluster/nodes (renderMachines): the machines, their readings and running tasks.
+function caSync(nodes) {
+  if ($('serverModal').hidden) return; // drawn only while Server details is open; the next open starts fresh
+  const head = nodes.find((n) => n.local);
+  if (!head || !nodes.some((n) => !n.local)) { if (CA.wrap) { CA.wrap.hidden = true; caClear(); } return; } // alone: just its card
+  caBuild();
+  CA.wrap.hidden = false;
+  if (!CA.w) CA.w = Math.round(CA.wrap.clientWidth); // until the ResizeObserver's first report
+  const ids = new Set(nodes.map((n) => n.id));
+  for (const [id, v] of CA.nodes) if (!ids.has(id)) { v.g.remove(); v.link?.remove(); v.glow?.remove(); CA.nodes.delete(id); CA.seen.delete(id); }
+  for (const n of nodes) {
+    const v = CA.nodes.get(n.id) || caNode(n);
+    v.n = n;
+    CA.nodes.set(n.id, v);
+  }
+  CA.head = CA.nodes.get(head.id);
+  if (`${CA.w}|${[...ids].join(',')}` !== CA.key) caLayout();
+  else for (const v of CA.nodes.values()) caPaint(v);
+  // Heartbeats: a worker's newer reading (not on the first look).
+  for (const n of nodes) {
+    if (n.local) continue;
+    const at = n.resources?.at || 0, prev = CA.seen.get(n.id);
+    CA.seen.set(n.id, at);
+    if (CA.ready && prev != null && at > prev && n.connected) caBeat(CA.nodes.get(n.id));
+  }
+  if (ND.id && ND.at && Date.now() - ND.at > 10e3) ndMetrics(); // an open detail's charts follow along
+  caChips(nodes);
+  const up = nodes.filter((n) => !n.local && n.connected && n.enabled).length;
+  CA.svg.setAttribute('aria-label', `Cluster diagram: this server in the middle and ${plural(nodes.length - 1, 'worker')} around it, ${up} online`);
+  CA.ready = true;
+}
+
+// ---- machines
+function caNode(n) {
+  const g = sv('g', { class: 'ca-node', 'data-node': n.id, tabindex: '0', role: 'button' }, CA.g.nodes);
+  const v = { n, g, x: 0, y: 0, r: 0, side: 'below', beats: 0, rc: 0, rr: 0 };
+  v.title = sv('title', {}, g);
+  v.halo = sv('circle', { class: 'ca-halo' }, g);
+  v.focus = sv('circle', { class: 'ca-focus' }, g);
+  v.drain = sv('circle', { class: 'ca-drain' }, g);
+  v.plate = sv('circle', { class: 'ca-plate' }, g);
+  v.cpuT = sv('circle', { class: 'ca-track' }, g);
+  v.cpu = sv('circle', { class: 'ca-gauge', transform: 'rotate(-90)' }, g);
+  v.ramT = sv('circle', { class: 'ca-track' }, g);
+  v.ram = sv('circle', { class: 'ca-gauge', transform: 'rotate(-90)' }, g);
+  v.icon = sv('g', { class: 'ca-icon' }, g);
+  v.moon = sv('g', { class: 'ca-moon' }, g); // SF Symbols style moon.fill on a badge
+  sv('circle', { r: 9 }, v.moon);
+  sv('path', { d: 'M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z', transform: 'translate(-6.3 -6.3) scale(.52)' }, v.moon);
+  v.name = sv('text', { class: 'ca-name' }, g);
+  v.sub = sv('text', { class: 'ca-sub' }, g);
+  v.more = sv('text', { class: 'ca-more' }, g);
+  if (!n.local) {
+    v.link = sv('path', { class: 'ca-link' }, CA.g.links);
+    v.glow = sv('path', { class: 'ca-glow', pathLength: '1' }, CA.g.glow);
+  }
+  return v;
+}
+// Places: the head in the middle and the workers on an ellipse around it (odd counts start at the top, even ones
+// straddle it), labels and chips on the outer side, the drawing centred; under 640px a vertical list, the head on top,
+// every worker linked to it by a bus down the left edge.
+function caLayout() {
+  const W = CA.w, all = [...CA.nodes.values()], head = CA.head, workers = all.filter((v) => v !== head);
+  if (!W || !head) return;
+  CA.key = `${W}|${all.map((v) => v.n.id).join(',')}`;
+  CA.list = W < 640;
+  if (CA.list) {
+    let y = 6;
+    for (const v of [head, ...workers]) {
+      const h = v === head ? 84 : 76;
+      Object.assign(v, { r: v === head ? 26 : 22, side: 'right', x: 70, y: y + h / 2 });
+      y += h;
+    }
+    CA.h = y + 4;
+    for (const v of workers) v.poly = caPoly(caElbow(v, head, 28));
+  } else {
+    const n = workers.length, rx = Math.max(150, Math.min(W / 2 - 180, n === 1 ? 250 : 170 + 45 * n)), ry = Math.max(96, Math.min(150, rx * 0.46));
+    Object.assign(head, { r: 34, side: 'below', x: 0, y: 0 });
+    workers.forEach((v, i) => {
+      const a = n === 1 ? 0 : -Math.PI / 2 + (2 * Math.PI / n) * (i + (n % 2 ? 0 : 0.5)), c = Math.cos(a), s = Math.sin(a);
+      Object.assign(v, { r: 26, x: rx * c, y: ry * s, side: c > 0.3 ? 'right' : c < -0.3 ? 'left' : s < 0 ? 'above' : 'below' });
+    });
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (const v of all) {
+      const [a, b, c, d] = caBox(v);
+      x0 = Math.min(x0, v.x + a); x1 = Math.max(x1, v.x + b); y0 = Math.min(y0, v.y + c); y1 = Math.max(y1, v.y + d);
+    }
+    const dx = Math.round(W / 2 - (x0 + x1) / 2), dy = Math.round(14 - y0);
+    for (const v of all) { v.x += dx; v.y += dy; }
+    CA.h = Math.round(y1 - y0 + 28);
+    for (const v of workers) v.poly = caPoly([[v.x, v.y], [head.x, head.y]]);
+  }
+  CA.svg.setAttribute('viewBox', `0 0 ${W} ${CA.h}`);
+  CA.svg.setAttribute('height', CA.h);
+  for (const v of all) {
+    caShape(v);
+    caPaint(v);
+    if (v.poly) {
+      const d = caD(caCut(v.poly, v.r + 3, v.poly.len - head.r - 3));
+      v.link.setAttribute('d', d);
+      v.glow.setAttribute('d', d);
+    }
+  }
+  caSeats(false); // resting chips move to their new seats at once; travelling ones land there
+}
+// A machine's extent around its centre [left, right, top, bottom]: glyph, labels, two chip seats and a '+N'.
+function caBox(v) {
+  const r = v.r, w = CA_CHIP + 40, low = 33 + CA_ROW + 11;
+  if (v.side === 'right') return [-r, r + 10 + w, -r, Math.max(r, low)];
+  if (v.side === 'left') return [-(r + 10 + w), r, -r, Math.max(r, low)];
+  if (v.side === 'above') return [-w / 2 - 20, w / 2 + 20, -(r + 48 + CA_ROW + 11), r + 6];
+  return [-w / 2 - 20, w / 2 + 20, -r - 6, r + 51 + CA_ROW + 11];
+}
+// Seat k of a machine's chips, in drawing coordinates (the list layout has one per row).
+function caSeat(v, k) {
+  const r = v.r, w = CA_CHIP / 2;
+  const [dx, dy] = CA.list ? [r + 12 + w, 25] : v.side === 'right' ? [r + 10 + w, 33 + CA_ROW * k] : v.side === 'left' ? [-(r + 10 + w), 33 + CA_ROW * k]
+    : v.side === 'above' ? [0, -r - 48 - CA_ROW * k] : [0, r + 51 + CA_ROW * k];
+  return [v.x + dx, v.y + dy];
+}
+// Geometry that follows the machine's size and side: plate, rings, badges and where its labels sit.
+function caShape(v) {
+  const r = v.r;
+  v.g.setAttribute('transform', `translate(${v.x} ${v.y})`);
+  for (const [c, rad] of [[v.plate, r], [v.halo, r], [v.drain, r + 4.5], [v.focus, r + 8]]) c.setAttribute('r', rad);
+  v.rc = r - 4; v.rr = r - 10;
+  for (const c of [v.cpuT, v.cpu]) c.setAttribute('r', v.rc);
+  for (const c of [v.ramT, v.ram]) c.setAttribute('r', v.rr);
+  v.moon.setAttribute('transform', `translate(${(r * 0.74).toFixed(1)} ${(-r * 0.74).toFixed(1)})`);
+  const [nx, ny, sy, anchor] = CA.list ? [r + 12, -8, 7, 'start'] : v.side === 'right' ? [r + 10, -3, 12, 'start'] : v.side === 'left' ? [-(r + 10), -3, 12, 'end']
+    : v.side === 'above' ? [0, -r - 24, -r - 9, 'middle'] : [0, r + 17, r + 31, 'middle'];
+  for (const [t, y] of [[v.name, ny], [v.sub, sy]]) { t.setAttribute('x', nx); t.setAttribute('y', y); t.setAttribute('text-anchor', anchor); }
+}
+const caCpu = (n) => {
+  const c = n.resources?.cpu, l = n.resources?.load?.[0], k = n.inventory?.cores;
+  return Array.isArray(c) && c.length ? c.reduce((a, b) => a + b, 0) / c.length : l != null && k ? Math.min(100, (l / k) * 100) : null;
+};
+const caRam = (n) => {
+  const m = n.inventory?.mem, a = n.resources?.memAvailable;
+  return m && a != null ? Math.max(0, Math.min(100, ((m - a) / m) * 100)) : null;
+};
+// A ring gauge: the used share of the ring, from the top, clockwise (warn ≥ 75%, crit ≥ 90%, like the cards' bars).
+function caGauge(c, r, pct) {
+  const len = 2 * Math.PI * r, p = pct == null ? 0 : Math.max(0, Math.min(100, pct));
+  c.style.strokeDasharray = `${((len * p) / 100).toFixed(1)} ${len.toFixed(1)}`;
+  c.setAttribute('class', `ca-gauge${p < 0.5 ? ' zero' : p >= 90 ? ' crit' : p >= 75 ? ' warn' : ''}`);
+}
+// State, readings and words: offline/asleep/disabled grey, a moon, an amber ring, the gauges and the label lines.
+function caPaint(v) {
+  const n = v.n, st = nodeState(n), off = !n.connected || !n.enabled, asleep = !n.connected && n.away === 'asleep';
+  v.g.setAttribute('class', `ca-node${n.local ? ' head' : ''}${off ? ' off' : ''}${asleep ? ' asleep' : ''}${n.draining ? ' draining' : ''}`);
+  v.link?.setAttribute('class', off ? 'ca-link off' : 'ca-link');
+  const cpu = caCpu(n), ram = caRam(n);
+  if (v.rc) { caGauge(v.cpu, v.rc, cpu); caGauge(v.ram, v.rr, ram); }
+  const s = v.r <= 22 ? 14 : v.r <= 26 ? 18 : 24, k = `${n.os}|${s}`;
+  if (v.icon.dataset.k !== k) {
+    v.icon.innerHTML = OS_ICON[n.os] || OS_ICON.linux;
+    const i = v.icon.firstElementChild;
+    for (const [a, val] of [['width', s], ['height', s], ['x', -s / 2], ['y', -s / 2]]) i.setAttribute(a, val);
+    v.icon.dataset.k = k;
+  }
+  v.name.textContent = n.name.length > 20 ? `${n.name.slice(0, 19)}…` : n.name;
+  const pct = [cpu != null && `CPU ${Math.round(cpu)}%`, ram != null && `RAM ${Math.round(ram)}%`].filter(Boolean).join(' · ');
+  v.sub.textContent = n.local ? ['Head', pct].filter(Boolean).join(' · ') : !n.enabled ? 'Disabled'
+    : !n.connected ? `${st.label} · ${n.lastSeen ? `seen ${relTime(n.lastSeen)}` : 'never connected'}` : st.label === 'Online' ? pct || 'Online' : [st.label, pct].filter(Boolean).join(' · ');
+  const tasks = n.tasks?.length || 0;
+  const label = `${n.name}${n.local ? ' (this server, the head)' : ''}: ${st.label}${pct ? `, ${pct}` : ''}, ${tasks ? `${plural(tasks, 'task')} running` : 'nothing running'}. Show details`;
+  v.g.setAttribute('aria-label', label);
+  v.title.textContent = label;
+}
+
+// ---- links: polylines from a worker's centre to the head's
+function caPoly(pts) {
+  const lens = [0];
+  for (let i = 1; i < pts.length; i++) lens.push(lens[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+  return { pts, lens, len: lens[lens.length - 1] };
+}
+function caAt(p, s) {
+  s = Math.max(0, Math.min(p.len, s));
+  let i = 1;
+  while (i < p.pts.length - 1 && p.lens[i] < s) i++;
+  const a = p.pts[i - 1], b = p.pts[i], t = (s - p.lens[i - 1]) / (p.lens[i] - p.lens[i - 1] || 1);
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+}
+// The stretch of a polyline between two distances along it.
+function caCut(p, s0, s1) {
+  const out = [caAt(p, s0)];
+  for (let i = 1; i < p.pts.length - 1; i++) if (p.lens[i] > s0 && p.lens[i] < s1) out.push(p.pts[i]);
+  out.push(caAt(p, s1));
+  return out;
+}
+const caD = (pts) => pts.map((q, i) => `${i ? 'L' : 'M'}${q[0].toFixed(1)} ${q[1].toFixed(1)}`).join('');
+// The list layout's link: left from the worker to the bus at x = b, up it and right into the head (rounded corners).
+function caElbow(v, head, b) {
+  const rc = 10, pts = [[v.x, v.y], [b + rc, v.y]];
+  for (let i = 1; i <= 6; i++) { const a = Math.PI / 2 + (Math.PI / 2) * (i / 6); pts.push([b + rc + rc * Math.cos(a), v.y - rc + rc * Math.sin(a)]); }
+  for (let i = 0; i <= 6; i++) { const a = Math.PI + (Math.PI / 2) * (i / 6); pts.push([b + rc + rc * Math.cos(a), head.y + rc + rc * Math.sin(a)]); }
+  pts.push([head.x, head.y]);
+  return pts;
+}
+// A link's inner corners, head → worker (out) or worker → head.
+const caRoute = (v, out) => (v.poly ? (out ? v.poly.pts.slice(1, -1).reverse() : v.poly.pts.slice(1, -1)) : []);
+
+// ---- the loop: time-based animations {dur, step(u), done()}; nothing runs (or queues) unseen
+const caEase = (u) => (u < 0.5 ? 4 * u * u * u : 1 - (-2 * u + 2) ** 3 / 2);
+const caBack = (u) => 1 + 2.70158 * (u - 1) ** 3 + 1.70158 * (u - 1) ** 2; // overshoots, then settles
+const caCanMove = () => !!CA.svg && CA.inView && !CA.wrap.hidden && !reduceMotion.matches && !document.hidden && !$('serverModal').hidden;
+function caAnim(a) {
+  a.t0 = performance.now();
+  if (!caCanMove()) { a.step(1); a.done?.(); return null; } // a static change: straight to the end state
+  a.step(0); // drawn at its start now, not a frame late
+  CA.anims.add(a);
+  CA.raf ||= requestAnimationFrame(caFrame);
+  return a;
+}
+const caStop = (a) => { if (a) CA.anims.delete(a); }; // leaves it where it is; its done() doesn't run
+function caFrame(ts) {
+  CA.raf = 0;
+  if (!caCanMove()) return caFlush(); // hidden, closed or reduced motion: jump to the end states
+  if (ts - CA.last < 1000 / 60 - 2) { CA.raf = requestAnimationFrame(caFrame); return; } // at most 60 fps (120 Hz screens)
+  CA.last = ts;
+  for (const a of [...CA.anims]) {
+    if (!CA.anims.has(a)) continue; // stopped by another one this frame
+    const u = Math.max(0, Math.min(1, (ts - a.t0) / a.dur));
+    a.step(u);
+    if (u >= 1) { CA.anims.delete(a); a.done?.(); }
+  }
+  if (CA.anims.size) CA.raf ||= requestAnimationFrame(caFrame);
+}
+function caFlush() {
+  cancelAnimationFrame(CA.raf);
+  CA.raf = 0;
+  for (let i = 0; i < 5 && CA.anims.size; i++) for (const a of [...CA.anims]) { CA.anims.delete(a); a.step(1); a.done?.(); }
+}
+document.addEventListener('visibilitychange', () => { if (document.hidden) caFlush(); });
+
+// ---- pulses and particles
+function caPulse(v, strength = 1) {
+  caStop(v.pulse);
+  v.pulse = caAnim({ dur: 950, step: (u) => {
+    v.halo.setAttribute('r', (v.r + 2 + 14 * (1 - (1 - u) ** 3)).toFixed(1));
+    v.halo.setAttribute('opacity', (u >= 1 ? 0 : (1 - u) * 0.55 * strength).toFixed(3));
+  } });
+}
+// A heartbeat: the machine pulses and a glow runs up its link; the head pulses softly when it lands.
+function caBeat(v) {
+  if (!v) return;
+  v.g.dataset.beats = String(++v.beats);
+  if (!caCanMove()) return;
+  caPulse(v);
+  if (!v.glow) return;
+  caStop(v.glowAnim);
+  v.glowAnim = caAnim({ dur: 1000, step: (u) => {
+    v.glow.style.strokeDashoffset = (0.18 - 1.2 * caEase(u)).toFixed(3);
+    v.glow.style.opacity = (0.8 * (u < 0.15 ? u / 0.15 : u > 0.85 ? (1 - u) / 0.15 : 1)).toFixed(3);
+  }, done: () => { if (CA.head) caPulse(CA.head, 0.35); } });
+}
+// Lane activity (olane): a particle up the task's link, at most 6 a second per link (one waits; the rest fold into it).
+// While jobs stream, the machines are re-read at most every 5 s so their chips show the current phase.
+function caEvent(taskId) {
+  const c = CA.chips.get(taskId), v = c && !c.leaving ? CA.nodes.get(c.node) : null;
+  if (!v?.poly || !v.n.connected || !caCanMove()) return;
+  if (Date.now() - CA.asked > 5000) { CA.asked = Date.now(); scheduleMachines(0); }
+  const e = CA.emit.get(v.n.id) || { at: 0, timer: 0 };
+  CA.emit.set(v.n.id, e);
+  if (e.timer) return;
+  const fire = () => { e.timer = 0; e.at = performance.now(); if (CA.nodes.get(v.n.id) === v && v.poly && caCanMove()) caParticle(v); };
+  const wait = 1000 / 6 - (performance.now() - e.at);
+  if (wait <= 0) fire(); else e.timer = setTimeout(fire, wait);
+}
+function caParticle(v) {
+  const p = v.poly, s0 = v.r + 3, s1 = p.len - CA.head.r - 3;
+  const dot = sv('circle', { class: 'ca-pt', r: CA.list ? 2.2 : 2.6, opacity: 0 }, CA.g.dots);
+  caAnim({ dur: Math.max(700, Math.min(1400, 450 + (s1 - s0) * 2)), step: (u) => {
+    const [x, y] = caAt(p, s0 + (s1 - s0) * u * u * (3 - 2 * u));
+    dot.setAttribute('cx', x.toFixed(1));
+    dot.setAttribute('cy', y.toFixed(1));
+    dot.setAttribute('opacity', (u < 0.15 ? u / 0.15 : u > 0.8 ? (1 - u) / 0.2 : 1).toFixed(3));
+  }, done: () => dot.remove() });
+}
+
+// ---- task chips
+function caChip(t, node) {
+  const g = sv('g', { class: 'ca-chip', 'data-task': t.id }, CA.g.chips);
+  const c = { id: t.id, t, node, g, x: 0, y: 0, e: 1, s: 1, o: 0, pa: 1, pb: 0, flip: false, phase: null, slot: 0, hidden: false, fresh: true, from: null, motion: null, leaving: false };
+  c.bg = sv('rect', { y: -11, height: 22, rx: 11 }, g);
+  c.dot = sv('circle', { class: 'ca-cd', r: 3.5 }, g);
+  c.idText = sv('text', { class: 'ca-cid', y: 4 }, g);
+  c.idText.textContent = `#${t.id}`;
+  c.ta = sv('text', { class: 'ca-ph', y: 4, 'text-anchor': 'end' }, g);
+  c.tb = sv('text', { class: 'ca-ph', y: 4, 'text-anchor': 'end' }, g);
+  c.cw = 30 + 6.6 * String(t.id).length; // packed for travel: the dot and '#id'
+  return c;
+}
+// A chip where it is: e 0 = packed for travel, 1 = resting with its step; s its scale, o its opacity.
+function caDraw(c) {
+  const w = c.cw + (CA_CHIP - c.cw) * c.e, l = -w / 2;
+  c.g.setAttribute('transform', `translate(${c.x.toFixed(1)} ${c.y.toFixed(1)})${c.s !== 1 ? ` scale(${c.s.toFixed(3)})` : ''}`);
+  c.g.setAttribute('opacity', c.o.toFixed(3));
+  c.g.style.visibility = c.o < 0.02 ? 'hidden' : '';
+  c.bg.setAttribute('x', l.toFixed(1));
+  c.bg.setAttribute('width', w.toFixed(1));
+  c.dot.setAttribute('cx', (l + 11).toFixed(1));
+  c.idText.setAttribute('x', (l + 19).toFixed(1));
+  for (const [t, f] of [[c.ta, c.pa], [c.tb, c.pb]]) { t.setAttribute('x', (-l - 10).toFixed(1)); t.setAttribute('opacity', (c.e * c.e * f).toFixed(3)); }
+}
+function caPhaseOf(c) {
+  if (c.t.waiting_for) return 'waiting';
+  return c.t.phase ? CA_PHASE[c.t.phase] || c.t.phase : CA.nodes.get(c.node)?.n.local ? 'running' : 'starting';
+}
+// A new step cross-fades in over the old one.
+function caSetPhase(c, word, animate) {
+  if (c.phase === word) return;
+  const first = c.phase == null, next = c.flip ? c.ta : c.tb, kc = c.flip ? 'pb' : 'pa', kn = c.flip ? 'pa' : 'pb';
+  c.phase = word;
+  c.flip = !c.flip;
+  next.textContent = word;
+  c.dot.setAttribute('class', `ca-cd ${CA_TONE[word] || 'setup'}`);
+  c.g.dataset.phase = word;
+  caStop(c.fade);
+  if (first || !animate) { c[kc] = 0; c[kn] = 1; if (!first) caDraw(c); return; }
+  const a0 = c[kc], b0 = c[kn];
+  c.fade = caAnim({ dur: 450, step: (u) => { const k = caEase(u); c[kc] = a0 * (1 - k); c[kn] = b0 + (1 - b0) * k; caDraw(c); } });
+}
+// Tasks per machine from the snapshot: new ones are dispatched, gone ones merge back, moved ones travel via the head.
+function caChips(nodes) {
+  const want = new Map();
+  for (const n of nodes) for (const t of n.tasks || []) want.set(t.id, [t, n.id]);
+  for (const c of [...CA.chips.values()]) if (!want.has(c.id) && !c.leaving) caLeave(c);
+  for (const [id, [t, node]] of want) {
+    let c = CA.chips.get(id);
+    if (c?.leaving) { caStop(c.motion); c.g.remove(); c = null; } // it came back before it got home
+    if (!c) CA.chips.set(id, (c = caChip(t, node)));
+    else if (c.node !== node) { c.from = c.node; c.node = node; }
+    c.t = t;
+    caSetPhase(c, caPhaseOf(c), CA.ready);
+  }
+  caSeats(true);
+}
+// Each machine's chips, oldest first, take its seats (two; one in the list layout); the rest fold into '+N'.
+function caSeats(animate) {
+  const rows = CA.list ? 1 : 2;
+  for (const v of CA.nodes.values()) {
+    const mine = [...CA.chips.values()].filter((c) => c.node === v.n.id && !c.leaving).sort((a, b) => (a.t.started_at || 0) - (b.t.started_at || 0) || a.id - b.id);
+    mine.forEach((c, k) => { c.slot = Math.min(k, rows - 1); c.hidden = k >= rows; });
+    const over = mine.length - rows;
+    v.more.textContent = over > 0 ? `+${over}` : '';
+    if (over > 0) {
+      const [x, y] = caSeat(v, rows - 1), left = !CA.list && v.side === 'left';
+      v.more.setAttribute('x', (x - v.x + (left ? -1 : 1) * (CA_CHIP / 2 + 8)).toFixed(1));
+      v.more.setAttribute('y', (y - v.y + 4).toFixed(1));
+      v.more.setAttribute('text-anchor', left ? 'end' : 'start');
+    }
+    for (const c of mine) caGo(c, animate);
+  }
+}
+function caGo(c, animate) {
+  const v = CA.nodes.get(c.node), head = CA.head;
+  if (!v || !head) return;
+  const [sx, sy] = caSeat(v, c.slot), o = c.hidden ? 0 : 1, moving = animate && CA.ready && caCanMove();
+  if (c.fresh) {
+    // Dispatched: packed at the head, along the link, unpacking onto its seat.
+    c.fresh = false;
+    if (moving) return caTravel(c, [[head.x, head.y], ...(v === head ? [] : [...caRoute(v, true), [v.x, v.y]]), [sx, sy]],
+      (u) => ({ e: u < 0.78 ? 0 : caEase((u - 0.78) / 0.22), s: 0.6 + 0.4 * Math.min(1, u / 0.15), o: Math.min(1, u / 0.1) * (o || Math.max(0, 1 - (u - 0.85) / 0.15)) }));
+  } else if (c.from != null) {
+    // Moved to another machine: home through the head, then out again.
+    const from = CA.nodes.get(c.from);
+    c.from = null;
+    if (moving && from) return caTravel(c, [[c.x, c.y], ...(from === head ? [] : [[from.x, from.y], ...caRoute(from, false)]), [head.x, head.y], ...(v === head ? [] : [...caRoute(v, true), [v.x, v.y]]), [sx, sy]],
+      (u, e0) => ({ e: u < 0.2 ? e0 * (1 - u / 0.2) : u > 0.8 ? (u - 0.8) / 0.2 : 0, s: 1, o: 1 }));
+  } else if (c.motion) return; // it lands on its current seat when it arrives (caPlace)
+  else if (moving && (Math.abs(c.x - sx) > 0.5 || Math.abs(c.y - sy) > 0.5 || c.o !== o)) {
+    const o0 = c.o;
+    return caTravel(c, [[c.x, c.y], [sx, sy]], (u) => ({ e: 1, s: 1, o: o0 + (o - o0) * u }), 380);
+  }
+  caPlace(c);
+}
+function caTravel(c, pts, prof, dur, done) {
+  caStop(c.motion);
+  const p = caPoly(pts), e0 = c.e;
+  c.motion = caAnim({ dur: dur || Math.max(900, Math.min(1800, 650 + p.len * 1.6)), step: (u) => {
+    [c.x, c.y] = caAt(p, caEase(u) * p.len);
+    Object.assign(c, prof(u, e0));
+    caDraw(c);
+  }, done: () => { c.motion = null; (done || caPlace)(c); } });
+}
+function caPlace(c) {
+  const v = CA.nodes.get(c.node);
+  if (!v || c.leaving) return;
+  [c.x, c.y] = caSeat(v, c.slot);
+  Object.assign(c, { e: 1, s: 1, o: c.hidden ? 0 : 1 });
+  caDraw(c);
+}
+// Gone from its machine: it packs up, travels home and merges into the head, which checks it off when it finished
+// (a cross when it failed; nothing when it was only put back in the queue).
+function caLeave(c) {
+  c.leaving = true;
+  const head = CA.head, v = CA.nodes.get(c.node);
+  const home = () => {
+    c.g.remove();
+    if (CA.chips.get(c.id) === c) CA.chips.delete(c.id);
+    const st = CA.status.get(c.id) ?? O.tasks.get(c.id)?.status;
+    caMerged(st === 'done' ? 'ok' : st === 'failed' ? 'bad' : null);
+  };
+  if (!CA.ready || !head) { caStop(c.motion); c.g.remove(); CA.chips.delete(c.id); return; }
+  caTravel(c, [[c.x, c.y], ...(v && v !== head ? [[v.x, v.y], ...caRoute(v, false)] : []), [head.x, head.y]],
+    (u, e0) => ({ e: e0 * Math.max(0, 1 - u / 0.2), s: u > 0.82 ? 1 - (0.65 * (u - 0.82)) / 0.18 : 1, o: (c.hidden ? 0.001 : 1) * (u > 0.86 ? (1 - u) / 0.14 : 1) }), 0, home);
+}
+function caMerged(kind) {
+  const head = CA.head;
+  if (!head) return;
+  caPulse(head, 0.6);
+  if (!kind) return;
+  const m = CA.mark, x = head.x + head.r * 0.74, y = head.y - head.r * 0.74;
+  m.setAttribute('class', `ca-mark ${kind}`);
+  CA.markPath.setAttribute('d', kind === 'ok' ? 'M-4.4 .2l2.8 2.8 5.8-5.9' : 'M-3.2-3.2l6.4 6.4M3.2-3.2l-6.4 6.4');
+  const put = (s, o) => { m.setAttribute('transform', `translate(${x.toFixed(1)} ${y.toFixed(1)}) scale(${s.toFixed(3)})`); m.setAttribute('opacity', o.toFixed(3)); };
+  caStop(CA.markAnim);
+  clearTimeout(CA.markTimer);
+  if (!caCanMove()) { put(1, 1); CA.markTimer = setTimeout(() => put(1, 0), 1600); return; } // static: shown, then gone
+  CA.markAnim = caAnim({ dur: 1700, step: (u) => put(u < 0.18 ? Math.max(0, caBack(u / 0.18)) : 1, u > 0.8 ? (1 - u) / 0.2 : 1) });
+}
+// Every otask push: how a chip that leaves its machine ends (checked off, crossed out or just home).
+function caTask(t) {
+  CA.status.set(t.id, t.status);
+  if (CA.status.size > 500) CA.status.delete(CA.status.keys().next().value);
+}
+
+// ----- a machine's detail (tap it in the diagram) -----
+// Its telemetry as charts (GET /api/cluster/nodes/:id/metrics?range=: CPU, memory, load, disk; a hover readout), what
+// runs there with each remote run's phase timeline (the task's latest run, as in its drawer), and its log tail on
+// demand (GET /api/cluster/nodes/:id/logs?tail=200, fetched over the worker's socket).
+const ND_RANGES = ['15m', '1h', '6h', '24h'];
+// els: the sheet's parts (charts grid, running list, log section, log button), built per open.
+const ND = { id: null, range: ND_RANGES.includes(store.get('cw.nd.range')) ? store.get('cw.nd.range') : '1h', samples: null, err: '', at: 0, seq: 0,
+  runs: new Map(), taskKey: '', log: null, lastFocus: null, draws: [], els: {} };
+// [key, title, value of a sample, format, top of the scale]
+const ND_CHARTS = [
+  ['cpu', 'CPU', (s) => s.cpu, fmtPct, () => 100],
+  ['mem', 'Memory used', (s, n) => (n.inventory?.mem && s.mem != null ? Math.max(0, (1 - s.mem / n.inventory.mem) * 100) : null), fmtPct, () => 100],
+  ['load', 'Load (1 min)', (s) => s.load, (v) => v.toFixed(2), (n, vals) => Math.max(n.inventory?.cores || 1, ...vals) * 1.15],
+  ['disk', 'Disk free', (s) => s.disk, (v) => fmtBytes(v), (n, vals) => Math.max(n.resources?.disk?.total || 0, ...vals) * 1.05],
+];
+const ndNode = () => MC.nodes.find((n) => n.id === ND.id);
+function openNode(id) {
+  if (!MC.nodes.some((n) => n.id === id)) return;
+  Object.assign(ND, { id, samples: null, err: '', at: 0, runs: new Map(), taskKey: '', log: null, lastFocus: document.activeElement });
+  $('nodeModal').hidden = false;
+  ndBuild();
+  ndRender();
+  ndMetrics();
+  $('nodeModal').querySelector('[data-close].icon-btn').focus();
+}
+function closeNode() {
+  if ($('nodeModal').hidden) return;
+  $('nodeModal').hidden = true;
+  ND.id = null;
+  ND.lastFocus?.focus?.({ preventScroll: true });
+}
+$('nodeModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeNode(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('nodeModal').hidden) { e.stopImmediatePropagation(); closeNode(); }
+}, true);
+function ndBuild() {
+  const body = $('ndBody'), row = el('div', 'range-row'), pick = el('div', 'range-picker');
+  pick.setAttribute('role', 'group');
+  pick.setAttribute('aria-label', 'Chart time range');
+  for (const r of ND_RANGES) {
+    const b = el('button', '', r);
+    b.type = 'button';
+    b.dataset.range = r;
+    b.setAttribute('aria-pressed', String(r === ND.range));
+    b.addEventListener('click', () => {
+      if (r === ND.range) return;
+      ND.range = r;
+      store.set('cw.nd.range', r);
+      for (const x of pick.children) x.setAttribute('aria-pressed', String(x.dataset.range === r));
+      ndMetrics();
+    });
+    pick.append(b);
+  }
+  row.append(el('span', '', 'Charts show'), pick);
+  const grid = el('div', 'nd-grid');
+  grid.id = 'ndCharts';
+  ND.draws = ND_CHARTS.map(([key, title, get, fmt, top]) => {
+    const card = el('div', 'm-card nd-chart'), headRow = el('div', 'tile-top'), host = el('div'), val = el('span', 'nd-val', '–');
+    card.dataset.chart = key;
+    headRow.append(el('h3', '', title), val);
+    card.append(headRow, host);
+    grid.append(card);
+    return ndChart(host, val, get, fmt, top);
+  });
+  const run = section('Running here'), log = section('Log');
+  run.id = 'ndRun';
+  log.id = 'ndLog';
+  ND.els = { charts: grid, run, log };
+  body.replaceChildren(row, grid, run, log);
+  ndLogRender();
+}
+function ndRender() {
+  const n = ndNode();
+  if (!n) return closeNode(); // removed meanwhile
+  const st = nodeState(n);
+  $('ndTitle').textContent = n.name;
+  $('ndSub').textContent = [n.local ? 'This server · the head' : null, OS_NAME[n.os] || n.os, n.arch, st.label,
+    !n.local && (n.lastSeen ? `${n.connected ? 'seen' : 'last seen'} ${relTime(n.lastSeen)}` : 'never connected')].filter(Boolean).join(' · ');
+  // What runs here: tap for the drawer; a remote run's phase timeline under it (re-read when its phase moves on).
+  const tasks = n.tasks || [], key = tasks.map((t) => `${t.id}:${t.phase || ''}:${t.waiting_for || ''}`).join(',');
+  if (key !== ND.taskKey) {
+    ND.taskKey = key;
+    for (const t of tasks) if (!n.local) ndLoadRun(t.id);
+  }
+  const box = ND.els.run;
+  box.replaceChildren(box.firstElementChild);
+  if (!tasks.length) box.append(el('p', 'nd-note', n.connected && n.enabled && !n.draining ? 'Idle: nothing running here.' : 'Nothing running here.'));
+  for (const t of tasks) {
+    const wrap = el('div', 'nd-task'), b = el('button', 'mc-task'), main = el('span');
+    b.type = 'button';
+    main.append(el('span', 't', displayTitle(t)), el('span', 's', [`#${t.id}`, t.project, `${shortLabel(t.agent)} · ${modelName(t.agent, t.model)}`,
+      t.phase && t.phase !== 'running' ? PHASE_DOING[t.phase] : ''].filter(Boolean).join(' · ')));
+    const e = el('span', t.waiting_for ? 'e wait' : 'e', t.waiting_for ? 'waiting' : fmtDur(Date.now() / 1000 - t.started_at));
+    if (!t.waiting_for) e.dataset.started = t.started_at;
+    b.append(main, e);
+    b.addEventListener('click', () => { closeNode(); closeServer(); openTask(t.id); });
+    wrap.append(b);
+    const tl = ND.runs.get(t.id) && timelineSection(ND.runs.get(t.id), true);
+    if (tl) wrap.append(tl);
+    box.append(wrap);
+  }
+}
+async function ndLoadRun(id) {
+  const node = ND.id;
+  try {
+    const d = await api(`/api/orch/task/${id}`), r = d.runs.at(-1);
+    if (ND.id !== node || !r) return;
+    ND.runs.set(id, { phases: r.phases, errors: r.errors, outcome: r.outcome });
+    ndRender();
+  } catch {}
+}
+async function ndMetrics() {
+  const id = ND.id, seq = ++ND.seq, grid = ND.els.charts;
+  grid?.classList.add('loading'); // the charts keep their frame while the new range loads
+  try {
+    const d = await api(`/api/cluster/nodes/${encodeURIComponent(id)}/metrics?range=${ND.range}`);
+    if (seq !== ND.seq || ND.id !== id) return;
+    ND.samples = d.samples || [];
+    ND.err = '';
+  } catch (e) {
+    if (seq !== ND.seq) return;
+    ND.err = e.message;
+  }
+  ND.at = Date.now();
+  grid?.classList.remove('loading');
+  ND.draws.forEach((draw) => draw());
+}
+// A single-series chart of the node's samples across the chosen range: line, a faint area, and a crosshair readout.
+function ndChart(host, val, get, fmt, top) {
+  host.className = 'sline';
+  host.innerHTML = '<svg aria-hidden="true"><line class="base"/><path class="area"/><path class="line"/><line class="cross" hidden/><circle class="pt" r="4" hidden/></svg><div class="tip" hidden></div>';
+  const svg = host.querySelector('svg'), [base, area, line, cross, pt] = svg.children, tip = host.querySelector('.tip');
+  const label = el('div', 'sline-label'), [lFrom, lStat] = [el('span'), el('span', 'stat')];
+  label.append(lFrom, lStat, el('span', '', 'now'));
+  host.after(label);
+  let hoverX = null, pts = [];
+  function draw() {
+    const n = ndNode(), w = host.clientWidth, h = host.clientHeight, end = Date.now(), start = end - RANGE_MS[ND.range], span = end - start;
+    if (!n || !w) return;
+    lFrom.textContent = RANGE_AGO[ND.range];
+    svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    for (const [k, v] of [['x1', 0], ['x2', w], ['y1', h - 0.5], ['y2', h - 0.5]]) base.setAttribute(k, v);
+    pts = (ND.samples || []).map((s) => [s.t, get(s, n)]).filter(([t, v]) => v != null && Number.isFinite(v) && t >= start);
+    const last = pts.at(-1)?.[1];
+    val.textContent = last != null ? fmt(last) : '–';
+    if (pts.length < 2) {
+      line.setAttribute('d', '');
+      area.setAttribute('d', '');
+      lStat.textContent = ND.err || (ND.samples ? 'collecting…' : 'loading…');
+      cross.setAttribute('hidden', ''); pt.setAttribute('hidden', ''); tip.hidden = true;
+      return;
+    }
+    const vals = pts.map((p) => p[1]), max = top(n, vals) || 1;
+    const x = (t) => ((t - start) / span) * w, y = (v) => h - 1 - Math.min(v / max, 1) * (h - 6);
+    // A gap in the readings (the machine was away) breaks the line instead of bridging it.
+    const steps = pts.slice(1).map((p, i) => p[0] - pts[i][0]).sort((a, b) => a - b), gap = Math.max(60e3, 3 * steps[Math.floor(steps.length / 2)]);
+    let d = '', ad = '', from = 0;
+    const closeRun = (i) => { if (i > from) ad += `L${x(pts[i - 1][0]).toFixed(1)},${h}L${x(pts[from][0]).toFixed(1)},${h}Z`; };
+    pts.forEach(([t, v], i) => {
+      const brk = i === 0 || t - pts[i - 1][0] > gap;
+      if (brk && i) { closeRun(i); from = i; }
+      const seg = `${brk ? 'M' : 'L'}${x(t).toFixed(1)},${y(v).toFixed(1)}`;
+      d += seg;
+      ad += seg;
+    });
+    closeRun(pts.length);
+    line.setAttribute('d', d);
+    area.setAttribute('d', ad);
+    lStat.textContent = `avg ${fmt(vals.reduce((a, b) => a + b, 0) / vals.length)} · peak ${fmt(Math.max(...vals))}`;
+    if (hoverX == null) { cross.setAttribute('hidden', ''); pt.setAttribute('hidden', ''); tip.hidden = true; return; }
+    const tAt = start + (hoverX / w) * span;
+    let i = 0;
+    for (let k = 1; k < pts.length; k++) if (Math.abs(pts[k][0] - tAt) < Math.abs(pts[i][0] - tAt)) i = k;
+    const cx = x(pts[i][0]), cy = y(pts[i][1]);
+    cross.removeAttribute('hidden'); pt.removeAttribute('hidden');
+    for (const [k, v] of [['x1', cx], ['x2', cx], ['y1', 0], ['y2', h]]) cross.setAttribute(k, v);
+    pt.setAttribute('cx', cx); pt.setAttribute('cy', cy);
+    tip.hidden = false;
+    tip.textContent = `${fmt(pts[i][1])} · ${new Date(pts[i][0]).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: span <= 3600e3 ? '2-digit' : undefined })}`;
+    tip.style.left = `${Math.max(70, Math.min(w - 70, cx))}px`;
+  }
+  host.addEventListener('pointermove', (e) => { hoverX = e.clientX - host.getBoundingClientRect().left; draw(); });
+  host.addEventListener('pointerleave', () => { hoverX = null; draw(); });
+  return draw;
+}
+// The worker's log tail, fetched when asked (this server logs to its journal instead).
+function ndLogRender() {
+  const box = ND.els.log, n = ndNode();
+  if (!box || !n) return;
+  box.replaceChildren(box.firstElementChild);
+  if (n.local) {
+    const p = el('p', 'nd-note', 'This server writes its log to the system journal: ');
+    p.append(el('code', '', 'journalctl -u agent-orch -n 200'));
+    box.append(p);
+    return;
+  }
+  const L = ND.log, row = el('div', 'nd-logbar'), b = el('button', 'btn small', L?.lines ? 'Refresh' : 'View logs');
+  b.type = 'button';
+  b.id = 'ndLogs';
+  b.disabled = !!L?.loading;
+  ND.els.logBtn = b;
+  b.addEventListener('click', ndLogs);
+  row.append(b);
+  if (L?.loading) row.append(el('span', 'nd-note', 'Fetching the last 200 lines…'));
+  else if (L?.lines) row.append(el('span', 'nd-note', `Last ${plural(L.lines.length, 'line')} · fetched ${new Date(L.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`));
+  box.append(row);
+  if (L?.error) box.append(el('p', 'nd-note bad', L.error));
+  if (L?.lines) {
+    const pre = el('pre', 'dr-pre nd-log', L.lines.join('\n') || '(empty)');
+    box.append(pre);
+    requestAnimationFrame(() => { pre.scrollTop = pre.scrollHeight; }); // newest lines in view
+  }
+}
+async function ndLogs() {
+  const id = ND.id;
+  ND.log = { ...ND.log, loading: true, error: '' };
+  ndLogRender();
+  try {
+    const d = await api(`/api/cluster/nodes/${encodeURIComponent(id)}/logs?tail=200`);
+    if (ND.id !== id) return;
+    ND.log = { lines: d.lines, at: d.at || Date.now() };
+  } catch (e) {
+    if (ND.id !== id) return;
+    ND.log = { ...ND.log, loading: false, error: e.message };
+  }
+  ndLogRender();
+  ND.els.logBtn?.focus({ preventScroll: true });
+}
+// Live times while the detail is open: elapsed per task and the running step of each timeline.
+setInterval(() => {
+  if (!ND.id) return;
+  for (const n of document.querySelectorAll('#ndBody .mc-task .e[data-started]')) n.textContent = fmtDur(Date.now() / 1000 - Number(n.dataset.started));
+  for (const n of document.querySelectorAll('#ndBody .tl-bar i[data-since]')) n.style.flexGrow = String(Math.max(1, Date.now() - Number(n.dataset.since)));
+  for (const n of document.querySelectorAll('#ndBody .tl-steps [data-since]')) n.textContent = `${fmtDur((Date.now() - Number(n.dataset.since)) / 1000)}…`;
+}, 1000);
+addEventListener('resize', () => { if (ND.id) ND.draws.forEach((d) => d()); });
+
 const installCmd = (os, code) => {
   const o = location.origin;
   return os === 'mac' ? `curl -fsSL ${o}/install/worker-macos.sh | sudo bash -s -- --controller ${o} --code ${code} --agents claude,codex`
@@ -4414,9 +5142,10 @@ function applyOrchSnapshot(s) {
 }
 
 function onOrch(msg) {
-  if (msg.t === 'olane') return; // live lane activity: the Queue window no longer shows lanes
+  if (msg.t === 'olane') return caEvent(msg.taskId); // live lane activity: particles on the cluster diagram (no lanes in the Queue)
   if (msg.t === 'otask' || msg.t === 'ostate') scheduleMachines(); // running tasks per machine
   if (msg.t === 'otask') {
+    caTask(msg.task);
     observeTaskCompletion(msg.task);
     if (FB.local?.url === `/api/orch/tasks/${msg.task.id}/fallbacks`) msg.task.fallbacks = FB.local.list; // a save still in flight
     O.tasks.set(msg.task.id, msg.task);

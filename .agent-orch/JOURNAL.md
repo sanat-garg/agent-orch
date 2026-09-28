@@ -707,3 +707,11 @@ Command: npm test && node worker.mjs status --once
 ## 2026-09-27 23:00 — #234 Worker terminal status view and a local cap on pooled CPU/RAM [done (check passed)]
 
 full test suite passes; worker status view and local cap verified
+
+## 2026-09-27 23:48 — #231 Machines view: smooth sync animations between workers and the head [verify failed (1)]
+
+Command: node --check public/app.js && npm test
+
+## 2026-09-28 00:05 — #231 Machines view: smooth sync animations between workers and the head [done (check passed)]
+
+Branch on main; check passes 427/427 in worktree

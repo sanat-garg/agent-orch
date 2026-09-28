@@ -501,6 +501,7 @@
       <section class="mc-sec" aria-labelledby="mcTitle">
         <div class="mc-head"><h3 id="mcTitle">Machines</h3><button class="btn small" id="addMachine" type="button">Add machine</button></div>
         <p class="mc-sum" id="mcSum"></p>
+        <div class="ca-wrap" id="caWrap" hidden></div>
         <ul class="mc-grid" id="mMachines"></ul>
       </section>
     </div>
@@ -520,6 +521,23 @@
       </button>
     </div>
     <div class="cn-body am-body" id="amBody"></div>
+  </div>
+</div>
+
+<div class="modal sheet" id="nodeModal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-panel nd" role="dialog" aria-modal="true" aria-labelledby="ndTitle">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <div class="m-head">
+      <div>
+        <h2 id="ndTitle">Machine</h2>
+        <p class="m-sub" id="ndSub"></p>
+      </div>
+      <button class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="m-body nd-body" id="ndBody"></div>
   </div>
 </div>
 

@@ -564,6 +564,72 @@ code, pre, kbd { font-family: var(--mono); }
 .mc-pnote { margin: 0; font-size: 12px; }
 @media (pointer: coarse) { .am-uses select, .mc-prow select { height: 44px; } }
 
+/* cluster diagram (app.js CA): one SVG; every colour a theme variable, so light and dark follow the theme */
+.ca-wrap { margin: 0 0 14px; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); overflow: hidden; }
+.ca { display: block; width: 100%; font-family: inherit; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+.ca-link { fill: none; stroke: var(--border-strong); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ca-link.off { stroke: var(--faint); stroke-dasharray: 3 5; opacity: .7; }
+.ca-glow { fill: none; stroke: var(--ok); stroke-width: 3; stroke-linecap: round; stroke-dasharray: .18 2; stroke-dashoffset: .18; opacity: 0; }
+.ca-pt { fill: var(--run); }
+.ca-node { cursor: pointer; outline: none; }
+.ca-plate { fill: var(--panel); stroke: var(--border-strong); stroke-width: 1; transition: stroke .2s; }
+.ca-node.head .ca-plate { fill: var(--raised); }
+.ca-node:hover .ca-plate { stroke: var(--muted); }
+/* CPU (outer) and RAM (inner) rings: the used share in the accent (warn, then danger, like the cards' bars) on a soft track */
+.ca-track { fill: none; stroke: var(--accent-soft); stroke-width: 4; }
+.ca-gauge { fill: none; stroke: var(--accent); stroke-width: 4; stroke-linecap: round; transition: stroke-dasharray .6s ease, stroke .3s; }
+.ca-gauge.warn { stroke: var(--warn); }
+.ca-gauge.crit { stroke: var(--danger); }
+.ca-gauge.zero { stroke-opacity: 0; }
+.ca-icon { color: var(--text); }
+.ca-name { fill: var(--text); font-size: 13px; font-weight: 600; }
+.ca-node.head .ca-name { font-size: 14px; }
+.ca-sub { fill: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.ca-more { fill: var(--muted); font-size: 12px; font-weight: 600; }
+.ca-halo { fill: none; stroke: var(--ok); stroke-width: 2; opacity: 0; }
+.ca-focus { fill: none; stroke: var(--accent); stroke-width: 2; opacity: 0; }
+.ca-node:focus-visible .ca-focus { opacity: 1; }
+.ca-drain { fill: none; stroke: var(--warn); stroke-width: 2.5; opacity: 0; transition: opacity .3s; }
+.ca-node.draining .ca-drain { opacity: 1; }
+.ca-moon { opacity: 0; transition: opacity .3s; }
+.ca-moon circle { fill: var(--panel); stroke: var(--border-strong); }
+.ca-moon path { fill: var(--muted); }
+.ca-node.asleep .ca-moon { opacity: 1; }
+.ca-node.off .ca-plate { stroke: var(--border); }
+.ca-node.off .ca-track { stroke: var(--raised); }
+.ca-node.off .ca-gauge { stroke: var(--faint); }
+.ca-node.off .ca-icon { color: var(--faint); }
+.ca-node.off .ca-name { fill: var(--muted); }
+.ca-chip { cursor: pointer; }
+.ca-chip rect { fill: var(--panel); stroke: var(--border-strong); stroke-width: 1; }
+.ca-chip text { font-size: 11px; }
+.ca-cid { fill: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.ca-ph { fill: var(--muted); }
+.ca-cd { fill: var(--faint); transition: fill .4s; }
+.ca-cd.run { fill: var(--run); }
+.ca-cd.check { fill: var(--chart-3); }
+.ca-cd.push { fill: var(--accent); }
+.ca-cd.wait { fill: var(--warn); }
+.ca-mark circle { fill: var(--ok); }
+.ca-mark.bad circle { fill: var(--danger); }
+.ca-mark path { fill: none; stroke: var(--panel); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+@media (prefers-reduced-motion: reduce) { .ca-plate, .ca-gauge, .ca-drain, .ca-moon, .ca-cd { transition: none; } }
+/* a machine's detail (tap it in the diagram) */
+.modal-panel.nd { width: min(760px, 100%); }
+.nd-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: 12px; margin: 0 0 20px; }
+.nd-grid .sline { height: 72px; }
+.nd-grid.loading .sline svg { opacity: .45; }
+.nd-val { font-size: 20px; font-weight: 600; color: var(--text); }
+.nd-task + .nd-task { margin-top: 10px; }
+.nd-task .dr-sec { margin: 8px 2px 0; }
+.nd-task .dr-sec > h3 { display: none; }
+.nd-note { margin: 0; font-size: 13px; color: var(--muted); }
+.nd-note.bad { margin-top: 8px; color: var(--danger); }
+.nd-note code { font-family: var(--mono); font-size: 12px; color: var(--text); }
+.nd-logbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.nd-log { font-family: var(--mono); font-size: 11.5px; line-height: 1.45; }
+@media (pointer: coarse) { .nd-logbar .btn.small { height: 44px; } }
+
 /* sidebar connections (agent CLI + GitHub sign-ins) */
 .modal-panel.conns { width: min(520px, 100%); font-size: 13px; color: var(--muted); }
 .cn-body { padding: 0 20px 20px; overflow-y: auto; min-height: 0; }

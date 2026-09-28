@@ -37,6 +37,7 @@
 .ext-edit-head h3 { margin: 0; flex: 1; min-width: 0; font-size: 17px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ext-back { display: inline-flex; align-items: center; gap: 2px; padding: 6px 8px 6px 4px; color: var(--accent-ink); font-size: 13.5px; font-weight: 550; }
 .ext-back:hover { color: var(--accent-ink-hover); }
+.ext-back-settings { margin: -6px 0 2px -4px; } /* above the sheet title, when opened from Settings (UI-REVIEW #33) */
 .ext-fields { display: flex; flex-direction: column; gap: 14px; }
 .ext-field { display: flex; flex-direction: column; gap: 5px; }
 .ext-field[hidden] { display: none; }

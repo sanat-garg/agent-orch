@@ -108,6 +108,9 @@ test('add a skill, an MCP server and a persona, then pick the persona for the ch
   await saved(page);
   await page.keyboard.press('Escape');
   assert.equal(await page.locator('#extModal').isHidden(), true);
+  assert.equal(await page.locator('#settingsModal').isVisible(), true, 'opened from Settings, so closing returns there');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('#settingsModal').isHidden(), true);
 
   await page.locator('#personaChip').waitFor();
   await page.click('#personaChip');
@@ -136,6 +139,31 @@ test('375×667: the editor fits the screen and Save stays on screen', { skip, ti
   assert.equal(m.overflow, 0, 'no sideways scroll');
   assert.ok(m.scrolls, 'the form is taller than the sheet');
   assert.ok(m.saveBottom <= m.vh, 'Save is on screen while the form scrolls');
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test('closing Skills & tools returns to Settings only when it was opened from there (UI-REVIEW #33)', { skip, timeout: 60000 }, async () => {
+  const { page, errors, ctx } = await open({ width: 1280, height: 860 });
+  for (const close of ['#extModal .m-head .icon-btn[data-close]', '#extBackSettings']) {
+    await page.click('#settingsBtn');
+    await page.click('[data-ext-open="skills"]');
+    await saved(page);
+    assert.equal(await page.locator('#settingsModal').isHidden(), true, 'the Skills & tools sheet replaces Settings');
+    assert.equal(await page.locator('#extBackSettings').isVisible(), true, '"‹ Settings" shows');
+    await page.click(close);
+    assert.equal(await page.locator('#extModal').isHidden(), true);
+    assert.equal(await page.locator('#settingsModal').isVisible(), true, `${close} returns to Settings`);
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#settingsModal').isHidden(), true);
+  }
+
+  await page.evaluate(() => exOpen('skills'));
+  await saved(page);
+  assert.equal(await page.locator('#extBackSettings').isHidden(), true, 'no "‹ Settings" when opened elsewhere');
+  await page.click('#extModal .m-head .icon-btn[data-close]');
+  assert.equal(await page.locator('#extModal').isHidden(), true);
+  assert.equal(await page.locator('#settingsModal').isHidden(), true, 'closing does not open Settings');
   assert.deepEqual(errors, []);
   await ctx.close();
 });

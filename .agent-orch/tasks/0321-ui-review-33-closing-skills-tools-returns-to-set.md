@@ -13,3 +13,7 @@ Fix UI-REVIEW.md row 33 in public/ext.js only (do not touch app.js or index.html
 ## Done when
 
 `node --test test/ui-ext.test.mjs` passes and `grep -n 'fromSettings' public/ext.js` prints a line
+
+## Result — done (check passed) (2026-09-28 12:25)
+
+AGENT-ORCH-STATUS: done — Closing Skills & tools opened from Settings reopens Settings

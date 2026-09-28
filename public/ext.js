@@ -3,8 +3,8 @@
 // Settings → Skills & tools opens the sheet (#extModal) on one kind's tab: its list, and an editor that takes the list's
 // place (Back, Cancel or Esc returns, asking first when something was typed). The composer's persona chip (#personaChip)
 // picks the open chat's persona, or the next new chat's. Loaded after app.js and uses its helpers ($, el, api, toast,
-// store, state, currentConvo, menuOpt, bindMenu, closeSettings, CM).
-const EX = { data: null, err: '', tab: 'skills', edit: null, dirty: false, saving: false, lastFocus: null, seq: 0, personas: null, draft: store.get('cw.persona') || null };
+// store, state, currentConvo, menuOpt, bindMenu, openSettings, closeSettings, CM).
+const EX = { data: null, err: '', tab: 'skills', edit: null, dirty: false, saving: false, lastFocus: null, fromSettings: false, seq: 0, personas: null, draft: store.get('cw.persona') || null };
 const EX_KINDS = {
   skills: { label: 'Skills', one: 'skill', key: (s) => s.folder,
     sub: 'Instructions, and any files they need, that an agent loads when a task calls for them. Saved in ~/.claude/skills and ~/.codex/skills, so chats, tasks and the Terminal all use them.',
@@ -63,9 +63,11 @@ function exCounts() {
 }
 
 // ----- sheet
-function exOpen(tab = EX.tab) {
+// fromSettings: opened from a Settings row, so closing returns to Settings and the header shows "‹ Settings".
+function exOpen(tab = EX.tab, { fromSettings = false } = {}) {
   const m = $('extModal');
-  if (m.hidden) EX.lastFocus = document.activeElement;
+  if (m.hidden) { EX.lastFocus = document.activeElement; EX.fromSettings = fromSettings; }
+  $('extBackSettings').hidden = !EX.fromSettings;
   EX.tab = EX_KINDS[tab] ? tab : 'skills';
   EX.edit = null;
   EX.dirty = false;
@@ -81,6 +83,7 @@ function exClose() {
   EX.edit = null;
   EX.dirty = false;
   (EX.lastFocus?.isConnected ? EX.lastFocus : $('settingsBtn')).focus?.();
+  if (EX.fromSettings) { EX.fromSettings = false; openSettings(); }
 }
 const exDiscardOk = () => !EX.dirty || confirm('Discard your changes?');
 function exTabs() {
@@ -111,6 +114,15 @@ $('extTabs').addEventListener('keydown', (e) => {
   exSelectTab(t.dataset.tab);
 });
 $('extModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) exClose(); });
+{ // "‹ Settings", above the title; shown only when the sheet was opened from Settings (closing goes back there too)
+  const back = exBtn('', 'link-btn ext-back ext-back-settings', () => exClose());
+  back.id = 'extBackSettings';
+  back.hidden = true;
+  back.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
+  back.append(el('span', null, 'Settings'));
+  back.setAttribute('aria-label', 'Back to Settings');
+  $('extTitle').before(back);
+}
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || $('extModal').hidden || CM.open) return;
   e.preventDefault();
@@ -118,7 +130,7 @@ document.addEventListener('keydown', (e) => {
   if (EX.edit) exBack(); else exClose();
 }, true);
 // Settings → Skills & tools rows (their counts load with the sheet).
-for (const b of document.querySelectorAll('[data-ext-open]')) b.addEventListener('click', () => { closeSettings(); exOpen(b.dataset.extOpen); });
+for (const b of document.querySelectorAll('[data-ext-open]')) b.addEventListener('click', () => { closeSettings(); exOpen(b.dataset.extOpen, { fromSettings: true }); });
 $('settingsBtn').addEventListener('click', () => exLoad());
 
 // ----- list

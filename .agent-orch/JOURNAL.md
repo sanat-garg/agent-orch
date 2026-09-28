@@ -954,3 +954,6 @@ AUDIT.md Round 7 adds 15 findings (#53–#67), priorities included
 ## 2026-09-28 11:53 — #331 Files tab: find files by name across the whole project [done (check passed)]
 
 Files tab finds files by name across the whole project
+## 2026-09-28 12:25 — #321 UI-REVIEW #33: closing Skills & tools returns to Settings when it was opened from there [done (check passed)]
+
+Closing Skills & tools opened from Settings reopens Settings

@@ -1505,3 +1505,6 @@ Streamed, login-protected Files upload endpoint works; its tests pass
 ## 2026-09-28 18:13 — #482 Claude limits card: an ideal-pace line on each usage bar [done (check passed)]
 
 Usage bars show pace markers; usage charts show dashed pace diagonals
+## 2026-09-28 18:15 — #480 Machines window: a wide modal titled 'Machines', head KPIs only on click [done (check passed)]
+
+Machines is a wide modal with four cards in one row

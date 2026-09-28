@@ -1,4 +1,4 @@
-// The full-screen Machines view (app.js MX) against an isolated server (CW_NO_ORCHESTRATOR=1, temp data dir) with seeded
+// The Machines window (app.js MX) against an isolated server (CW_NO_ORCHESTRATOR=1, temp data dir) with seeded
 // nodes and tasks: two fake workers dial in over the cluster socket, the DB holds running tasks on them and the head and a
 // queue for the open project. Desktop: the cluster diagram and the queue side by side (count header, running lanes per
 // machine, queued cards in order with 'after #N'), live lanes from the worker's pushes, Alt+↑ reorders, a queued card opens
@@ -125,9 +125,9 @@ test('desktop: the diagram and the queue side by side, lanes per machine, live u
   await page.locator('#machinesBtn').click();
   await page.locator('#mxModal:not([hidden])').waitFor();
   await settle(page);
-  // Full screen, over the app.
+  // A wide window over the app (its size: ui-machines-modal.test.mjs).
   const panel = await box(page, '#mxModal .mx-panel');
-  assert.deepEqual([panel.l, panel.t, panel.w, panel.h], [0, 0, 1440, 900]);
+  assert.ok(panel.l > 0 && panel.t > 0 && panel.w >= 1300, JSON.stringify(panel));
   assert.equal(await page.locator('.mx-tabs').isVisible(), false, 'no tabs on a desktop: both sides show');
   // The summary line and the diagram: the head and both workers, each with a card listing its running tasks.
   await page.locator('#caWrap:not([hidden]) .ca-node[data-node]').nth(2).waitFor();
@@ -149,7 +149,7 @@ test('desktop: the diagram and the queue side by side, lanes per machine, live u
   assert.equal(await page.locator('#qList .q-card .q-grip').count(), 4, 'every queued card drags');
   // Side by side: the machines on the left, the queue in a column on the right.
   const [main, queue] = [await box(page, '#mxMain'), await box(page, '#mxQueue')];
-  assert.ok(main.r <= queue.l + 1 && queue.r >= 1439 && queue.w >= 340 && main.w > queue.w, JSON.stringify({ main, queue }));
+  assert.ok(main.r <= queue.l + 1 && queue.r >= panel.r - 2 && queue.w >= 320 && main.w > queue.w, JSON.stringify({ main, queue }));
   assert.equal(await page.evaluate(() => document.querySelector('#queueModal').hidden), true);
 
   // Live: a task starts on the Mac; the worker's next reading ('cluster' push) brings it into its lane and the counts.

@@ -694,10 +694,11 @@
   </div>
 </div>
 
-<!-- Machines (app.js MX): full screen over the app (a full-height sheet on phones). The cluster summary, diagram and
+<!-- Machines (app.js MX): a wide window over a backdrop (a full-height sheet on phones). The cluster summary, diagram and
      machine cards on the left; the queue (#qBody, borrowed from the Queue sheet while this is open) on the right, a tab
      of its own on phones; a machine's detail (#nodeModal) slides in as a side panel. -->
 <div class="modal mx" id="mxModal" data-tab="machines" hidden>
+  <div class="modal-backdrop" data-close></div>
   <div class="modal-panel mx-panel" role="dialog" aria-modal="true" aria-labelledby="mxTitle">
     <div class="sheet-grip" aria-hidden="true"></div>
     <div class="m-head mx-head">

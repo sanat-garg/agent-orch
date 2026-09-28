@@ -13,3 +13,7 @@ Rework the Machines window (the full-screen view from #382/#472, the graph cards
 ## Done when
 
 `node --test test/ui-machines-modal*.test.mjs` passes (wide modal not full-screen, 'Machines' title, 4 cards in a row, head KPIs only after click)
+
+## Result — done (check passed) (2026-09-28 18:15)
+
+AGENT-ORCH-STATUS: done — Machines is a wide modal with four cards in one row

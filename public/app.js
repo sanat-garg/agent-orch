@@ -5207,7 +5207,7 @@ function caLayout() {
   caSeats(false); // resting chips move to their new seats at once; travelling ones land there
 }
 // The card layout's places. Narrow (< 820px): a list, the head on top, each card right of its machine and each row as
-// tall as its card. Wider: caLayout's ellipse, each card outward from the head (beside a machine to the left or right,
+// tall as its card. Wide enough for every card side by side (four in the Machines window at 1440px): one row. Otherwise caLayout's ellipse, each card outward from the head (beside a machine to the left or right,
 // growing away from the head's row; above or below one near the top or bottom; the head's toward its widest gap),
 // nudged further out until it clears the cards placed before it, every machine and every link. An ellipse too wide
 // for the view shrinks and tries again.
@@ -5223,6 +5223,23 @@ function caCardLayout(W, head, workers) {
     }
     CA.h = y + 4;
     for (const v of workers) v.poly = caPoly(caElbow(v, head, 28));
+  } else if (all.length * (CC_W + 12) - 12 <= W - 16) {
+    // Every card fits side by side: one row of cards, each under its machine, the head second from the left and
+    // raised, its links a bus along its row that drops into each worker (rounded corners).
+    const k = all.length, g = k > 1 ? Math.min(40, (W - 16 - k * CC_W) / (k - 1)) : 0, x0 = (W - k * CC_W - (k - 1) * g) / 2, hi = Math.min(1, k - 1);
+    const cols = [...workers];
+    cols.splice(hi, 0, head);
+    Object.assign(head, { r: 34, y: 42, side: 'below' });
+    cols.forEach((v, i) => { v.x = x0 + i * (CC_W + g) + CC_W / 2; if (v !== head) Object.assign(v, { r: 26, y: 118, side: 'below' }); size(v, CC_W); });
+    const top = 118 + 26 + CC_GAP;
+    for (const v of all) { v.cl = v.x - CC_W / 2; v.ct = top; }
+    CA.h = Math.round(top + Math.max(...all.map((v) => v.ch)) + 12);
+    for (const v of workers) {
+      const s = Math.sign(head.x - v.x), rc = 12, pts = [[v.x, v.y], [v.x, head.y + rc]];
+      for (let i = 1; i <= 6; i++) { const a = (Math.PI / 2) * (i / 6); pts.push([v.x + s * rc * (1 - Math.cos(a)), head.y + rc - rc * Math.sin(a)]); }
+      pts.push([head.x, head.y]);
+      v.poly = caPoly(pts);
+    }
   } else {
     for (const v of all) size(v, CC_W);
     const n = workers.length;

@@ -529,14 +529,19 @@ code, pre, kbd { font-family: var(--mono); }
 .term-bar .link-btn { color: #bdb9ae; }
 .term-bar .link-btn:hover { background: #262522; color: #fff; }
 
-/* Machines (app.js MX): full screen over the app; the cluster summary in its head, the diagram and one card per node on
-   the left, the queue on the right (a tab on phones), a machine's detail as a side panel. Under the task drawer (45). */
+/* Machines (app.js MX): a wide window over a backdrop (four machine cards side by side at 1440px; full screen up to
+   800px); the cluster summary in its head, the diagram and one card per node on the left, the queue on the right (a tab
+   on phones), a machine's detail as a side panel. Under the task drawer (45). */
 .modal.mx { z-index: 42; padding: 0; }
 .modal-panel.mx-panel { width: 100%; height: 100dvh; max-height: none; border: 0; border-radius: 0; box-shadow: none; padding-top: env(safe-area-inset-top); }
+@media (min-width: 801px) {
+  .modal.mx { padding: 24px; }
+  .modal-panel.mx-panel { width: min(1400px, 96vw); height: min(90dvh, 100%); border: 1px solid var(--border); border-radius: 18px; box-shadow: 0 24px 80px rgba(0,0,0,.35); padding-top: 0; overflow: hidden; }
+}
 .mx-head .mc-acts { flex: none; }
 .mc-sum { font-variant-numeric: tabular-nums; }
 .mx-tabs { display: none; }
-.mx-body { position: relative; flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, 30%); grid-template-rows: minmax(0, 1fr); border-top: 1px solid var(--border); }
+.mx-body { position: relative; flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 27%); grid-template-rows: minmax(0, 1fr); border-top: 1px solid var(--border); }
 .mx-main { grid-area: 1 / 1; min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 16px 20px max(24px, env(safe-area-inset-bottom)); }
 .mx-queue { grid-area: 1 / 2; min-width: 0; min-height: 0; display: flex; flex-direction: column; border-left: 1px solid var(--border); background: var(--panel); }
 .mx-qhead { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; padding: 14px 16px 2px; flex: none; }

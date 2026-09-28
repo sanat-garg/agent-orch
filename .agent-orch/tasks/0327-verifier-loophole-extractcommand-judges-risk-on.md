@@ -13,3 +13,7 @@ taskrun.mjs extractCommand/checkCommand build the done-when check that orchestra
 ## Done when
 
 `npm test -- test/verify.test.mjs test/runcheck.test.mjs` passes and `grep -n 'unquoted(cand)' taskrun.mjs` prints a line.
+
+## Result — done (check passed) (2026-09-28 11:43)
+
+AGENT-ORCH-STATUS: done — checkCommand now judges risk on the command with quoted text removed

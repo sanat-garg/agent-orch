@@ -914,3 +914,7 @@ Owner pushes wired for approvals, failures, reviews, waits, permissions
 ## 2026-09-28 11:35 — #313 Integrate #309: Browser as a header tab with an in-place live view and an agent prompt box [done (check passed)]
 
 CONTEXT.md conflict resolved; UI tests pass against main's backend
+
+## 2026-09-28 11:43 — #327 Verifier loophole: extractCommand judges risk on the unquoted command so a quoted grep pattern never voids the check [done (check passed)]
+
+checkCommand now judges risk on the command with quoted text removed

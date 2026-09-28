@@ -38,3 +38,13 @@ test('extractCommand keeps a backslash-escaped backtick inside the snippet', () 
   assert.equal(extractCommand('`! grep -nE "signed in\\`|x" a.js` finds nothing, and `node --check a.js && npm test` passes'),
     '! grep -nE "signed in\\`|x" a.js && node --check a.js && npm test');
 });
+
+test('extractCommand judges risk on the unquoted command, so a quoted pattern keeps the check', () => {
+  assert.equal(extractCommand("`grep -q 'a -> b' README.md` succeeds"), "grep -q 'a -> b' README.md");
+  assert.equal(extractCommand("`grep -n 'rm -rf' bin/x.sh` prints a line"), "grep -n 'rm -rf' bin/x.sh");
+  assert.equal(extractCommand("`grep -c 'a;b' f` prints 1"), "grep -c 'a;b' f");
+  assert.equal(extractCommand("`grep 'a|b' f` prints nothing"), "grep 'a|b' f; test $? -eq 1");
+  // A real redirect or an unquoted rm is still refused.
+  assert.equal(extractCommand("`grep 'x' f > out` succeeds"), null);
+  assert.equal(extractCommand('`rm -rf dist` succeeds'), null);
+});

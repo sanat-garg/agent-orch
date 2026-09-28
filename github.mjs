@@ -1,5 +1,7 @@
 // GitHub protocol: every project is a private GitHub repo, and every finished piece of work is
 // committed and pushed. Uses the GitHub CLI (`gh`), signed in once by the owner from a terminal.
+// `gh` is only needed to create a repo: a folder that already has an `origin` pushes with plain git
+// (whatever credentials this machine has), so a gh/network hiccup or a missing gh never blocks it.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -48,13 +50,14 @@ export function createGitHub({ env, log }) {
     }
   }
 
-  function repoOf(url) {
-    const m = String(url).match(/github\.com[:/]([^/]+\/[^/]+?)(\.git)?$/);
-    return m ? { full: m[1], url: `https://github.com/${m[1]}` } : null;
-  }
-  async function remoteOf(dir) {
+  async function originUrl(dir) {
     const r = await run('git', ['remote', 'get-url', 'origin'], opts(dir));
-    return r.ok ? repoOf(r.out) : null;
+    return r.ok && r.out ? r.out : null;
+  }
+  // The GitHub repo behind an origin, or null when origin isn't on GitHub.
+  async function remoteOf(dir) {
+    const url = await originUrl(dir);
+    return url ? repoOf(url) : null;
   }
 
   // A private repo named after the folder (with -2, -3… if the name is taken), pushed straight away.
@@ -66,12 +69,13 @@ export function createGitHub({ env, log }) {
     ensuring.set(dir, p);
     return p;
   }
+  // An existing origin is returned as is, without asking gh (null when it isn't on GitHub; pushing still works).
   async function createRepo(dir) {
+    await ensureLocalRepo(dir);
+    const url = await originUrl(dir);
+    if (url) return repoOf(url);
     if (!status.linked) await refresh();
     if (!status.linked) throw new Error('GitHub is not linked');
-    await ensureLocalRepo(dir);
-    const existing = await remoteOf(dir);
-    if (existing) return existing;
     const base = path.basename(dir).replace(/[^A-Za-z0-9._-]/g, '-').replace(/^[.-]+/, '').slice(0, 90) || 'project';
     let name = base;
     for (let n = 2; (await run('gh', ['repo', 'view', `${status.login}/${name}`, '--json', 'name'], opts())).ok; n++) name = `${base}-${n}`;
@@ -118,4 +122,11 @@ export function createGitHub({ env, log }) {
   }
 
   return { refresh, status: () => status, ensureRepo, push, commitAndPush, unpushed, remoteOf };
+}
+
+// owner/name of a GitHub remote url: git@github.com:o/r.git, https://github.com/o/r(.git), ssh://git@github.com/o/r.
+// Any other host gives null; push() still works for those remotes, it just runs git.
+export function repoOf(url) {
+  const m = String(url).trim().match(/^(?:(?:https?|ssh|git):\/\/(?:[^@/]+@)?|[^@/:]+@)github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?\/?$/i);
+  return m ? { full: `${m[1]}/${m[2]}`, url: `https://github.com/${m[1]}/${m[2]}` } : null;
 }

@@ -957,3 +957,7 @@ Files tab finds files by name across the whole project
 ## 2026-09-28 12:25 — #321 UI-REVIEW #33: closing Skills & tools returns to Settings when it was opened from there [done (check passed)]
 
 Closing Skills & tools opened from Settings reopens Settings
+
+## 2026-09-28 12:27 — #339 github.mjs: push to an existing origin without asking gh; tests with a local bare remote [done (check passed)]
+
+existing origins push without gh; repoOf handles all URL forms

@@ -13,3 +13,7 @@ Reliability fix in github.mjs (read its header). Bug: createRepo() throws 'GitHu
 ## Done when
 
 `node --test test/github.test.mjs` and `grep -q 'remoteOf(dir)' github.mjs`
+
+## Result — done (check passed) (2026-09-28 12:27)
+
+AGENT-ORCH-STATUS: done — existing origins push without gh; repoOf handles all URL forms

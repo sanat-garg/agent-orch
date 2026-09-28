@@ -1034,3 +1034,7 @@ completion sound now plays in active tabs too; tests pass
 ## 2026-09-28 12:44 — #317 AUDIT #49 and #41 in gate.mjs: no always key for arbitrary-code tools, argument hashes on connector keys, loopback navigation is outbound [done (check passed)]
 
 Code tools have no always key; local navigation now held
+
+## 2026-09-28 12:46 — #366 models.mjs: a failed rediscovery keeps the last good model list, never saves an empty one over it, and retries hourly [done (check passed)]
+
+Failed model rediscovery keeps last good list, retries hourly

@@ -152,3 +152,51 @@ test('model store: a cached list younger than a day is not rediscovered at boot;
   await store.refreshStale();
   assert.deepEqual(asked, ['codex'], 'nothing is a day old now');
 });
+
+test('model store: a failed rediscovery keeps the last good list on disk too, and is retried after retryMs', async (t) => {
+  const dir = tmp(), file = path.join(dir, 'models.json');
+  t.after(() => { setModelCatalog('codex', { models: [], error: 'loading', at: null }); fs.rmSync(dir, { recursive: true, force: true }); });
+  let fail = false, n = 0;
+  const two = [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }];
+  const discover = async () => { n++; return fail ? { models: [], error: 'timed out', at: Date.now() } : { models: two, error: null, at: Date.now() }; };
+  const logs = [];
+  const store = createModelStore({ file, ids: ['codex'], discover, intervalMs: 24 * 3600e3, retryMs: 1, minGapMs: 0, log: (m) => logs.push(m) });
+  t.after(() => store.stop());
+  await store.refresh(['codex']);
+  const at = store.get('codex').at;
+  fail = true;
+  await store.refresh(['codex']);
+  assert.deepEqual(store.get('codex').models, two);
+  assert.equal(store.get('codex').error, 'timed out');
+  assert.equal(store.get('codex').at, at);
+  assert.ok(store.get('codex').failedAt > 0);
+  assert.match(logs.at(-1), /codex: rediscovery failed, keeping 2 models \(timed out\)/);
+  const disk = JSON.parse(fs.readFileSync(file, 'utf8')).agents.codex;
+  assert.deepEqual(disk.models, two);
+  assert.ok(disk.failedAt && disk.error === 'timed out');
+  // A restart keeps the failure, so the retry schedule survives it.
+  setModelCatalog('codex', { models: [], error: 'loading', at: null });
+  assert.ok(store.load());
+  assert.deepEqual(store.get('codex').models, two);
+  assert.ok(store.get('codex').failedAt);
+  // Stale after retryMs rather than a day; a success clears the failure.
+  fail = false;
+  const before = n;
+  await new Promise((r) => setTimeout(r, 5));
+  await store.refreshStale();
+  assert.equal(n, before + 1);
+  assert.equal(store.get('codex').error, null);
+  assert.equal(store.get('codex').failedAt, undefined);
+  await store.refreshStale();
+  assert.equal(n, before + 1, 'a good list is only rediscovered after intervalMs');
+});
+
+test('model store: a first discovery that fails stores the empty list with the reason', async (t) => {
+  const dir = tmp(), file = path.join(dir, 'models.json');
+  t.after(() => { setModelCatalog('codex', { models: [], error: 'loading', at: null }); fs.rmSync(dir, { recursive: true, force: true }); });
+  setModelCatalog('codex', { models: [], error: 'loading', at: null });
+  const store = createModelStore({ file, ids: ['codex'], discover: async () => ({ models: [], error: 'not signed in', at: 5 }), minGapMs: 0 });
+  await store.refresh(['codex']);
+  assert.deepEqual(store.get('codex'), { models: [], error: 'not signed in', at: 5 });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).agents.codex, { models: [], error: 'not signed in', at: 5 });
+});

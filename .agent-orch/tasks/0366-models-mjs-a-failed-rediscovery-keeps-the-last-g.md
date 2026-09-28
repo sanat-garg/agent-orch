@@ -23,3 +23,7 @@ Verify with `npm test -- test/models.test.mjs`.
 ## Done when
 
 `npm test -- test/models.test.mjs` passes and `grep -q failedAt models.mjs`
+
+## Result — done (check passed) (2026-09-28 12:46)
+
+AGENT-ORCH-STATUS: done — Failed model rediscovery keeps last good list, retries hourly

@@ -25,7 +25,13 @@
 .bv-bar :disabled { opacity: .5; cursor: default; }
 .bv-stage { position: relative; flex: 1; min-height: 0; display: grid; place-items: center; padding: 0 12px 12px; }
 .bv-stage canvas { max-width: 100%; max-height: 100%; width: auto; height: auto; border-radius: 10px; border: 1px solid var(--border); background: var(--panel);
-  touch-action: none; cursor: default; box-shadow: 0 2px 12px rgba(0,0,0,.08); }
+  touch-action: none; cursor: default; box-shadow: 0 2px 12px rgba(0,0,0,.08); transform-origin: 0 0; }
+/* Zoomed (browser.js bvZoom*): the canvas is transformed and the stage clips it; the '1×' chip goes back to fit-width. */
+.bv-stage.zoomed { overflow: hidden; }
+.bv-zoom { position: absolute; top: 8px; right: 20px; z-index: 1; min-width: 44px; height: 32px; padding: 0 10px; border-radius: 99px;
+  border: 1px solid var(--border-strong); background: var(--panel); color: var(--text); font: inherit; font-size: 13px; font-weight: 600;
+  box-shadow: 0 2px 8px rgba(0,0,0,.14); cursor: pointer; }
+.bv-zoom[hidden] { display: none; }
 .bv-stage canvas:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 .bv.watching .bv-stage canvas { cursor: not-allowed; }
 .bv-wait[hidden] { display: none; }
@@ -37,6 +43,7 @@
 @media (pointer: coarse) {
   .bv-bar input { font-size: 16px; } /* UI-REVIEW #20 */
   .bv-bar input, .bw-add input { height: 44px; } /* UI-REVIEW #22 */
+  .bv-zoom { height: 44px; }
 }
 @media (max-width: 800px) {
   .bv { padding: 0; align-items: stretch; }
@@ -44,7 +51,8 @@
     padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
   .bv-bar .icon-btn { width: 44px; height: 44px; }
   .bv-bar .btn.small { height: 36px; padding: 0 10px; }
-  .bv-stage { padding: 0 6px 6px; align-items: start; }
+  .bv-stage { padding: 0 6px 6px; align-items: center; } /* UI-REVIEW #18 */
+  .bv-zoom { right: 12px; }
 }
 @media (max-width: 480px) { #bvPaste { display: none; } }
 

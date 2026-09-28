@@ -939,3 +939,7 @@ worker-status socket lifecycle covered by 7 passing tests
 ## 2026-09-28 11:48 — #326 Fix the stale cluster-protocol test: FEATURE_LIST includes browser-task [done (check passed)]
 
 cluster-protocol test now expects browser-task; all 11 pass
+
+## 2026-09-28 11:49 — #332 UI-REVIEW #18: pinch and pan on the live browser view with double-tap zoom, stage centred on phones [done (check passed)]
+
+Live browser view pinch/pan, double-tap and wheel zoom work; tests pass

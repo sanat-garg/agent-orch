@@ -13,3 +13,7 @@ UI-REVIEW.md row 18 (high): the live browser view (public/browser.js, canvas #bv
 ## Done when
 
 `npm test -- test/ui-browser-view.test.mjs test/ui-static.test.mjs` passes and `grep -n 'pinch' public/browser.js` prints a line.
+
+## Result — done (check passed) (2026-09-28 11:49)
+
+AGENT-ORCH-STATUS: done — Live browser view pinch/pan, double-tap and wheel zoom work; tests pass

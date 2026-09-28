@@ -2,7 +2,8 @@
 // /api/browser* routes are mocked and the /ws bv_* messages are intercepted (no real browser runs): the tab opens the
 // picked profile's view, sending the prompt posts {prompt, identity, node}, the returned task's steps, screenshots,
 // approval and Stop render, an agent on the profile shows the working ring with Take over, and at 390px the canvas
-// fits the width with the prompt box on screen. CW_UI_SHOTS=1 saves screenshots into .agent-orch/shots/.
+// fits the width with the prompt box on screen, and two fingers pinch-zoom it (a tap maps through the zoom, a double-tap
+// resets). CW_UI_SHOTS=1 saves screenshots into .agent-orch/shots/.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -183,6 +184,62 @@ test('iPhone (390px): the canvas fits the width and the prompt box stays on scre
     assert.deepEqual(s.posts[0], { prompt: 'Find the invoice from Acme and download it', identity: 'work', node: 'mac' });
     await p.locator('#bxActivity .bx-step').first().waitFor({ timeout: 10000 });
     await shot(p, 'iphone-steps');
+    assert.deepEqual(s.errors, []);
+  } finally { await ctx.close(); }
+});
+
+test('iPhone (390px): two fingers pinch-zoom the canvas, a tap maps through the zoom, a double-tap goes back to fit', { skip, timeout: 120000 }, async () => {
+  const { ctx, p, s } = await app({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+  try {
+    await p.locator('.seg [data-view="browser"]').tap();
+    await waitFor(() => s.bv.some((m) => m.t === 'bv_open' && m.identity === 'work'), { timeout: 10000, message: 'opens the profile' });
+    await serverSays(p, { t: 'bv_state', node: 'mac', identity: 'work', url: 'https://mail.google.com/mail/u/0/', title: 'Inbox', active: false, takeover: false, role: 'control', task: null });
+    await serverSays(p, { t: 'bv_frame', node: 'mac', identity: 'work', n: 1, data: frame, w: 1280, h: 800 });
+    await p.locator('#bxWait').waitFor({ state: 'hidden' });
+    const cv = p.locator('#bxCanvas'), fit = await cv.boundingBox();
+    const scale = () => cv.evaluate((n) => new DOMMatrix(getComputedStyle(n).transform).a);
+    const ev = (type, id, x, y) => cv.dispatchEvent(type, { pointerId: id, pointerType: 'touch', isPrimary: id === 1, clientX: x, clientY: y, button: 0 });
+    const tap = async (x, y) => { await ev('pointerdown', 7, x, y); await ev('pointerup', 7, x, y); };
+    const inputs = () => s.bv.filter((m) => m.t === 'bv_input');
+    assert.equal(await scale(), 1, 'fit-width to start');
+    assert.ok(await p.locator('.bx-stage .bv-zoom').isHidden(), 'no 1× chip at fit');
+    // Pinch: two fingers 60px apart spread to 180px around the canvas's middle (3×); nothing goes to the page.
+    const cx = fit.x + fit.width / 2, cy = fit.y + fit.height / 2, n0 = inputs().length;
+    await ev('pointerdown', 1, cx - 30, cy);
+    await ev('pointerdown', 2, cx + 30, cy);
+    await ev('pointermove', 1, cx - 90, cy);
+    await ev('pointermove', 2, cx + 90, cy);
+    await ev('pointerup', 1, cx - 90, cy);
+    await ev('pointerup', 2, cx + 90, cy);
+    const s1 = await scale();
+    assert.ok(Math.abs(s1 - 3) < 0.01, `the canvas zooms to 3×: ${s1}`);
+    assert.equal(inputs().length, n0, `a pinch sends nothing to the page: ${JSON.stringify(inputs().slice(n0))}`);
+    assert.ok(await p.locator('.bx-stage').evaluate((n) => n.classList.contains('zoomed') && getComputedStyle(n).overflow === 'hidden'), 'the stage clips the zoomed canvas');
+    assert.ok(await p.locator('.bx-stage .bv-zoom').isVisible(), 'the 1× chip shows');
+    await shot(p, 'iphone-zoomed');
+    // A tap 45px right of and 15px above the pinch's middle lands on the page point that was under it, 3× closer.
+    const x = cx + 45, y = cy - 15;
+    await tap(x, y);
+    await waitFor(() => inputs().length === n0 + 1, { timeout: 5000, message: 'the tap is sent' });
+    const click = inputs().at(-1).events[0];
+    const want = { x: ((cx - fit.x + (x - cx) / 3) / fit.width) * 1280, y: ((cy - fit.y + (y - cy) / 3) / fit.height) * 800 };
+    assert.equal(click.type, 'click');
+    assert.ok(Math.abs(click.x - want.x) <= 1 && Math.abs(click.y - want.y) <= 1, `the click maps through the zoom: ${JSON.stringify({ click, want })}`);
+    // A double-tap (two taps within 300 ms and 30px) goes back to fit-width, sending only the first tap.
+    await p.waitForTimeout(350);
+    await tap(x, y);
+    await tap(x + 5, y + 5);
+    assert.equal(await scale(), 1, 'a double-tap resets to fit');
+    assert.equal(inputs().length, n0 + 2, 'the second tap of a double-tap is not a click');
+    assert.ok(await p.locator('.bx-stage .bv-zoom').isHidden());
+    // Another double-tap zooms to 2.5×; the chip resets.
+    await p.waitForTimeout(350);
+    await tap(cx, cy);
+    await tap(cx, cy);
+    assert.ok(Math.abs(await scale() - 2.5) < 0.01, 'a double-tap at fit zooms to 2.5×');
+    await p.locator('.bx-stage .bv-zoom').tap();
+    assert.equal(await scale(), 1, 'the 1× chip resets');
+    assert.equal(await p.locator('.bx-stage').evaluate((n) => getComputedStyle(n).alignItems), 'center', 'the stage is centred on phones');
     assert.deepEqual(s.errors, []);
   } finally { await ctx.close(); }
 });

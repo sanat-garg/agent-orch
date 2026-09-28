@@ -1,7 +1,7 @@
 'use strict';
 // ---------- Browser: profiles per machine and the live view (server: browser-view.mjs, /api/browser*, bv_* on /ws) ----------
 // The header's Browser tab (#browserView, bx*) shows the live view in place: a profile picker, the URL bar, Back, Reload
-// and Take over / Hand back, then the page on a canvas that fits the width, the owner's mouse, touch, keys and paste sent
+// and Take over / Hand back, then the page on a canvas that fits the width (pinch, double-tap or ctrl+wheel zooms it), the owner's mouse, touch, keys and paste sent
 // back. Below it a prompt box sends an agent to work on that profile (POST /api/browser/task) and an activity panel
 // follows its running or last task (GET /api/browser/tasks, refreshed on otask/olane): status, steps, screenshots,
 // approvals, the result and Stop. The same viewer code also mounts in #bvModal, opened from a task drawer's live
@@ -188,6 +188,7 @@ function bvOpen(node, identity, name, { take = false, inline = false } = {}) {
   BV.st = null;
   BV.frame = { w: 0, h: 0 };
   BV.take = take;
+  bvZoomClear(m);
   if (!inline) $('bvTitle').textContent = identity;
   m.url.value = '';
   m.wait.hidden = false;
@@ -204,6 +205,7 @@ function bvClose({ keepFocus = false, next = false } = {}) {
   const { node, identity, m } = BV.view;
   BV.view = null;
   BV.st = null;
+  bvZoomClear(m);
   m.keys.blur();
   bvWant(node, identity, 'view', false);
   if (m === BVM.tab) { m.wait.hidden = false; m.wait.textContent = ''; m.status.textContent = ''; bxRenderBusy(); return; }
@@ -265,11 +267,49 @@ function bvDraw(f) {
   img.src = `data:image/jpeg;base64,${f.data}`;
 }
 
-// ----- input: canvas pixels → page CSS px (the frame's w×h)
+// ----- zoom: each mount keeps m.z = {s, ox, oy} (s 1 = fit-width; ox/oy in CSS px), shown as a transform on the canvas
+// inside its stage (which clips while zoomed). Two fingers pinch (1–4×) and pan, a double-tap toggles fit / 2.5×, ctrl or
+// ⌘ + wheel zooms. The pan is clamped so the page always covers its fit box.
+const BV_ZMAX = 4;
+// The canvas's fit box (its untransformed layout box) in client px; the transform's origin is its top left.
+function bvFit(m) {
+  const r = m.canvas.getBoundingClientRect(), z = m.z;
+  return { left: r.left - z.ox, top: r.top - z.oy, width: r.width / z.s, height: r.height / z.s };
+}
+function bvZoomShow(m) {
+  const { s, ox, oy } = m.z, on = s > 1;
+  m.canvas.style.transform = on ? `translate(${ox}px, ${oy}px) scale(${s})` : '';
+  m.canvas.parentElement.classList.toggle('zoomed', on);
+  m.zoom.hidden = !on;
+}
+function bvZoomSet(m, s, ox, oy) {
+  const f = bvFit(m);
+  s = Math.min(BV_ZMAX, s < 1.02 ? 1 : s);
+  m.z = { s, ox: Math.min(0, Math.max(f.width * (1 - s), ox)), oy: Math.min(0, Math.max(f.height * (1 - s), oy)) };
+  bvZoomShow(m);
+}
+// Zoom to s so the page point under client (x0, y0) at zoom z0 lands at client (x, y).
+function bvZoomAt(m, s, x, y, z0 = m.z, x0 = x, y0 = y) {
+  const f = bvFit(m), px = (x0 - f.left - z0.ox) / z0.s, py = (y0 - f.top - z0.oy) / z0.s;
+  s = Math.min(BV_ZMAX, Math.max(1, s));
+  bvZoomSet(m, s, x - f.left - px * s, y - f.top - py * s);
+}
+function bvZoomReset(m) { m.z = { s: 1, ox: 0, oy: 0 }; m.pinch = null; m.tap = null; bvZoomShow(m); }
+const bvZoomClear = (m) => { m.pts.clear(); m.gest = false; bvZoomReset(m); }; // the view closes or shows another profile
+// A double-tap: back to fit-width, or 2.5× with the tapped point in the middle.
+function bvZoomToggle(m, x, y) {
+  if (m.z.s > 1) return bvZoomReset(m);
+  const f = bvFit(m);
+  bvZoomAt(m, 2.5, f.left + f.width / 2, f.top + f.height / 2, m.z, x, y);
+}
+
+// ----- input: canvas pixels → page CSS px (the frame's w×h), through the zoom
 function bvPoint(e) {
-  const r = BV.view?.m.canvas.getBoundingClientRect();
-  if (!r?.width || !BV.frame.w) return null;
-  return { x: Math.round(((e.clientX - r.left) / r.width) * BV.frame.w), y: Math.round(((e.clientY - r.top) / r.height) * BV.frame.h) };
+  const m = BV.view?.m;
+  if (!m || !BV.frame.w) return null;
+  const f = bvFit(m), { s, ox, oy } = m.z;
+  if (!f.width) return null;
+  return { x: Math.round(((e.clientX - f.left - ox) / s / f.width) * BV.frame.w), y: Math.round(((e.clientY - f.top - oy) / s / f.height) * BV.frame.h) };
 }
 const bvMods = (e) => ({ ...(e.altKey && { alt: true }), ...(e.ctrlKey && { ctrl: true }), ...(e.metaKey && { meta: true }), ...(e.shiftKey && { shift: true }) });
 const bvInput = (events) => { if (bvCanDrive() && events.length) bvSay({ t: 'bv_input', events }); };
@@ -283,12 +323,35 @@ async function bvPaste() {
 // The same handlers on both mounts; each acts only while its mount shows the view.
 function bvWire(m) {
   const on = () => BV.view?.m === m, cv = m.canvas, keys = m.keys;
+  // The zoom, the touch pointers down on the canvas (id → {x, y}) and the '1×' chip that resets to fit-width.
+  m.pts = new Map();
+  m.zoom = el('button', 'bv-zoom', '1×');
+  Object.assign(m.zoom, { type: 'button', title: 'Fit the page to the width', hidden: true });
+  m.zoom.setAttribute('aria-label', 'Reset zoom');
+  m.zoom.addEventListener('click', () => { bvZoomReset(m); cv.focus({ preventScroll: true }); });
+  cv.parentElement.append(m.zoom);
+  bvZoomReset(m);
+  const two = () => {
+    const [a, b] = [...m.pts.values()];
+    return { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  };
+  const lift = (id) => {
+    m.pts.delete(id);
+    if (m.pts.size < 2) m.pinch = null;
+    if (!m.pts.size) m.gest = false;
+  };
   cv.addEventListener('pointerdown', (e) => {
     const p = on() && bvPoint(e);
     if (!p) return;
     cv.focus({ preventScroll: true });
-    if (e.pointerType === 'mouse') { e.preventDefault(); cv.setPointerCapture(e.pointerId); bvInput([{ type: 'mouse', action: 'down', button: BV_BTN[e.button] || 'left', clickCount: e.detail || 1, ...p, ...bvMods(e) }]); }
-    else bvTouch = { id: e.pointerId, x: e.clientX, y: e.clientY, at: Date.now(), lastY: e.clientY, lastX: e.clientX, p, moved: false };
+    if (e.pointerType === 'mouse') { e.preventDefault(); cv.setPointerCapture(e.pointerId); bvInput([{ type: 'mouse', action: 'down', button: BV_BTN[e.button] || 'left', clickCount: e.detail || 1, ...p, ...bvMods(e) }]); return; }
+    m.pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (m.pts.size === 2) { // a second finger: pinch and pan; nothing goes to the page until every finger lifts
+      const g = two();
+      bvTouch = null;
+      m.gest = true;
+      m.pinch = { z0: { ...m.z }, d0: g.d, x0: g.x, y0: g.y };
+    } else if (m.pts.size === 1) bvTouch = { id: e.pointerId, x: e.clientX, y: e.clientY, at: Date.now(), lastY: e.clientY, lastX: e.clientX, p, moved: false };
   });
   cv.addEventListener('pointermove', (e) => {
     const p = on() && bvPoint(e);
@@ -299,7 +362,14 @@ function bvWire(m) {
       bvMoveAt = now;
       return bvInput([{ type: 'mouse', action: 'move', buttons: e.buttons, button: e.buttons & 2 ? 'right' : 'left', ...p }]);
     }
-    // Touch: a drag scrolls the page.
+    const q = m.pts.get(e.pointerId);
+    if (q) { q.x = e.clientX; q.y = e.clientY; }
+    if (m.gest) {
+      const z = m.pinch;
+      if (z && q && m.pts.size >= 2) { const g = two(); bvZoomAt(m, (z.z0.s * g.d) / z.d0, g.x, g.y, z.z0, z.x0, z.y0); }
+      return;
+    }
+    // Touch: a one-finger drag scrolls the page.
     const t = bvTouch;
     if (!t || t.id !== e.pointerId) return;
     if (Math.hypot(e.clientX - t.x, e.clientY - t.y) > 8) t.moved = true;
@@ -311,17 +381,26 @@ function bvWire(m) {
   cv.addEventListener('pointerup', (e) => {
     const p = on() && bvPoint(e);
     if (e.pointerType === 'mouse') { if (p) bvInput([{ type: 'mouse', action: 'up', button: BV_BTN[e.button] || 'left', clickCount: e.detail || 1, ...p, ...bvMods(e) }]); return; }
-    const t = bvTouch;
+    const t = bvTouch, gest = m.gest;
     bvTouch = null;
-    if (t && t.id === e.pointerId && !t.moved && p) bvInput([{ type: 'click', ...p }]); // a tap is a click
+    lift(e.pointerId);
+    if (gest || !t || t.id !== e.pointerId || t.moved || !p) return;
+    // A tap is a click; a second tap within 300 ms and 30px toggles the zoom instead.
+    const last = m.tap;
+    m.tap = null;
+    if (last && Date.now() - last.at < 300 && Math.hypot(e.clientX - last.x, e.clientY - last.y) < 30) return bvZoomToggle(m, e.clientX, e.clientY);
+    m.tap = { at: Date.now(), x: e.clientX, y: e.clientY };
+    bvInput([{ type: 'click', ...p }]);
   });
-  cv.addEventListener('pointercancel', () => { bvTouch = null; });
+  cv.addEventListener('pointercancel', (e) => { bvTouch = null; lift(e.pointerId); });
   cv.addEventListener('contextmenu', (e) => e.preventDefault());
   cv.addEventListener('wheel', (e) => {
     const p = on() && bvPoint(e);
-    if (!p || !bvCanDrive()) return;
-    e.preventDefault();
+    if (!p) return;
     const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;
+    if (e.ctrlKey || e.metaKey) { e.preventDefault(); return bvZoomAt(m, m.z.s * Math.exp(-e.deltaY * k * 0.01), e.clientX, e.clientY); } // a trackpad pinch
+    if (!bvCanDrive()) return;
+    e.preventDefault();
     bvInput([{ type: 'mouse', action: 'wheel', ...p, dx: Math.round(e.deltaX * k), dy: Math.round(e.deltaY * k) }]);
   }, { passive: false });
   // Keys while the canvas has focus go to the page (Escape too; the close button or a click outside closes).

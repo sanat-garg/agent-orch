@@ -1049,3 +1049,6 @@ extractCheck reports refused Done-when snippets; verify tests pass
 ## 2026-09-28 13:00 — #369 retention.mjs AUDIT #61: keep approval screenshots and review shots, prune stale uploads [done (check passed)]
 
 retention keeps referenced approval and review shots, prunes stale uploads
+## 2026-09-28 13:01 — #373 files.mjs: GET /api/files/changed lists git-changed files and /api/files/diff serves one file's diff [done (check passed)]
+
+Changed-files and per-file diff routes added and tested

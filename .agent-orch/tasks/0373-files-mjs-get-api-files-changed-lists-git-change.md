@@ -13,3 +13,7 @@ Backend for a 'Changed' view in the Files tab (public/files.js is done in a late
 ## Done when
 
 `npm test -- test/files.test.mjs` passes and `grep -q 'api/files/changed' files.mjs`
+
+## Result — done (check passed) (2026-09-28 13:01)
+
+AGENT-ORCH-STATUS: done — Changed-files and per-file diff routes added and tested

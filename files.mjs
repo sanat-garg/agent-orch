@@ -6,14 +6,21 @@
 //   GET /api/files/raw?cid=<chat>&path=<rel>   → the file (images), or text/plain (first TEXT_MAX bytes; 415 for binary)
 //   GET /api/files/find?cid=<chat>&q=<text>    → {q, entries: [{name, path, dir, size, mtime}], truncated} (q: 2+ chars)
 //   GET /api/files/grep?cid=<chat>&q=<text>    → {q, hits: [{path, line, text}], files, truncated} (q: 2–200 chars; text files ≤ 1 MB)
+//   GET /api/files/changed?cid=<chat>          → {branch, entries: [{path, status, add, del, binary, from?}], truncated}, status
+//       M/A/D/R/? against HEAD (R: path is the new name, from the old); {branch: null, entries: [], notGit: true} outside git
+//   GET /api/files/diff?cid=<chat>&path=<rel>  → text/plain unified diff of one changed file against HEAD (first DIFF_MAX bytes)
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { promisify } from 'node:util';
 
 export const TEXT_MAX = 1024 * 1024;
 export const IMAGE_MAX = 25 * 1024 * 1024;
 export const LIST_MAX = 5000;
 export const FIND_VISIT_MAX = 20000;
 export const GREP_TEXT = 200;
+export const CHANGED_MAX = 2000;
+export const DIFF_MAX = 200 * 1024;
 const FIND_SKIP = new Set(['.git', 'node_modules', '.agent-orch-worktrees']);
 export const IMAGE_TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp',
   '.avif': 'image/avif', '.bmp': 'image/bmp', '.ico': 'image/x-icon', '.svg': 'image/svg+xml' };
@@ -154,10 +161,94 @@ export function sendFile(req, res, rootDir, rel) {
   } finally { fs.closeSync(fd); }
 }
 
+// git in the project's folder, never through a shell. Paths are pathspec-literal, and git takes no optional locks, so
+// looking never fights the orchestrator's own git work on the same checkout. Exit codes in `ok` still resolve; a buffer
+// output past maxBuffer resolves to what was read, flagged `overflow`.
+const execFileP = promisify(execFile);
+function git(root, args, { encoding = 'utf8', ok = [0] } = {}) {
+  return execFileP('git', ['-C', root, '--literal-pathspecs', ...args],
+    { encoding, timeout: 20000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } })
+    .then((r) => r.stdout, (e) => {
+      if (ok.includes(e.code)) return e.stdout;
+      if (e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' && encoding === 'buffer') return Object.assign(e.stdout, { overflow: true });
+      throw e;
+    });
+}
+const skipped = (rel) => rel.split('/').some((s) => FIND_SKIP.has(s));
+function statusOf(xy) {
+  if (xy === '??') return '?';
+  if (xy.includes('R')) return 'R';
+  if (xy[0] === 'A' || xy[0] === 'C') return 'A';
+  return xy.includes('D') ? 'D' : 'M';
+}
+
+// Files that differ from HEAD in the project (relative to its root, even when that is a subfolder of the repo), sorted
+// by path, at most `max`. add/del come from `git diff --numstat` (untracked: the line count); binary files have 0/0.
+// Entries under FIND_SKIP folders or whose path leaves the project (a link out) are left out.
+export async function changedFiles(rootDir, { max = CHANGED_MAX } = {}) {
+  const { root } = resolveInside(rootDir, '');
+  let prefix;
+  try { await git(root, ['rev-parse', '--show-toplevel']); prefix = (await git(root, ['rev-parse', '--show-prefix'])).trim(); }
+  catch { return { branch: null, entries: [], notGit: true }; }
+  const [status, numstat, branch] = await Promise.all([
+    git(root, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--', '.']),
+    git(root, ['diff', '--numstat', '-z', '--no-ext-diff', '--relative', 'HEAD', '--']).catch(() => ''), // no commits yet
+    git(root, ['symbolic-ref', '--short', '-q', 'HEAD']).catch(() => git(root, ['rev-parse', '--short', 'HEAD'])).then((b) => b.trim() || null, () => null),
+  ]);
+  const counts = new Map(), nf = numstat.split('\0');
+  for (let i = 0; i < nf.length - 1; i++) {
+    const [add, del, p] = nf[i].split('\t');
+    const at = p === '' ? nf[i += 2] : p; // a rename: add\tdel\t\0old\0new
+    counts.set(at, add === '-' ? { add: 0, del: 0, binary: true } : { add: +add, del: +del, binary: false });
+  }
+  const strip = (p) => (p.startsWith(prefix) ? p.slice(prefix.length) : null);
+  const entries = [], sf = status.split('\0');
+  for (let i = 0; i < sf.length - 1; i++) {
+    const xy = sf[i].slice(0, 2), rel = strip(sf[i].slice(3));
+    const from = xy.includes('R') || xy.includes('C') ? strip(sf[++i]) : null;
+    if (!rel || skipped(rel)) continue;
+    const st = statusOf(xy);
+    if (st !== 'D') try { resolveInside(root, rel); } catch { continue; }
+    entries.push({ path: rel, status: st, add: 0, del: 0, binary: false, ...(st === 'R' && from ? { from } : {}), ...counts.get(rel) });
+  }
+  entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const kept = entries.slice(0, max);
+  for (const e of kept) {
+    if (e.status !== '?') continue;
+    try {
+      const { real } = resolveInside(root, e.path);
+      if ((await fs.promises.stat(real)).size > 16 * 1024 * 1024) continue;
+      const buf = await fs.promises.readFile(real);
+      if (buf.subarray(0, 8192).includes(0)) e.binary = true;
+      else e.add = buf.length ? buf.toString('utf8').split('\n').length - (buf.at(-1) === 10 ? 1 : 0) : 0;
+    } catch { /* gone, or too big to read */ }
+  }
+  return { branch, entries: kept, truncated: entries.length > max };
+}
+
+// One changed file's unified diff against HEAD (an untracked file: against /dev/null), under the same sandbox CSP as
+// sendFile. 404 unless `rel` is in changedFiles; X-Truncated: 1 past DIFF_MAX bytes.
+export async function sendDiff(req, res, rootDir, rel) {
+  const clean = String(rel || '').split('/').filter((s) => s && s !== '.').join('/');
+  const { root } = resolveInside(rootDir, '');
+  const changed = await changedFiles(root, { max: Infinity });
+  const entry = changed.entries.find((e) => e.path === clean);
+  if (!entry) throw new FileError(404, changed.notGit ? 'Not a git repository' : 'No changes in this file');
+  const opts = ['--no-color', '--no-ext-diff'];
+  const out = entry.status === '?'
+    ? await git(root, ['diff', '--no-index', ...opts, '--', '/dev/null', clean], { encoding: 'buffer', ok: [1] })
+    : await git(root, ['diff', ...opts, '--relative', 'HEAD', '--', ...(entry.from ? [entry.from] : []), clean], { encoding: 'buffer' });
+  if (!out.length) throw new FileError(404, 'No changes in this file');
+  const cut = out.length > DIFF_MAX || out.overflow;
+  res.writeHead(200, { 'Content-Security-Policy': SANDBOX, 'Cache-Control': 'private, no-cache', 'Content-Type': 'text/plain; charset=utf-8',
+    ...(cut ? { 'X-Truncated': '1' } : {}) });
+  res.end(out.subarray(0, DIFF_MAX));
+}
+
 // The route handler: rootFor(cid) → the chat's project folder, or null. Returns true (synchronously) when it answers;
-// grep answers later, from its own promise.
+// grep, changed and diff answer later, from their own promises.
 export function handleFiles(req, res, url, { rootFor, json }) {
-  const m = url.pathname.match(/^\/api\/files\/(list|raw|find|grep)$/);
+  const m = url.pathname.match(/^\/api\/files\/(list|raw|find|grep|changed|diff)$/);
   if (!m || req.method !== 'GET') return false;
   const root = rootFor(url.searchParams.get('cid'));
   const fail = (e) => {
@@ -174,6 +265,8 @@ export function handleFiles(req, res, url, { rootFor, json }) {
       else if (q.length > 200) throw new FileError(400, 'Search for 200 characters at most');
       else grepFiles(root, q).then((r) => json(res, 200, r), fail);
     }
+    else if (m[1] === 'changed') changedFiles(root).then((r) => json(res, 200, r), fail);
+    else if (m[1] === 'diff') sendDiff(req, res, root, url.searchParams.get('path')).catch(fail);
     else sendFile(req, res, root, url.searchParams.get('path'));
   } catch (e) { fail(e); }
   return true;

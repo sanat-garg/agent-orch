@@ -1,11 +1,12 @@
 // files.mjs (the Files view): listing and serving stay inside the chat's project, whatever the path or symlink says.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { findFiles, FIND_VISIT_MAX, grepFiles, handleFiles, listDir, resolveInside, TEXT_MAX } from '../files.mjs';
+import { changedFiles, findFiles, FIND_VISIT_MAX, grepFiles, handleFiles, listDir, resolveInside, TEXT_MAX } from '../files.mjs';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-files-'));
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -194,4 +195,83 @@ test('GET /api/files/grep: 2+ characters, only for a known chat', async (t) => {
     assert.equal(r.status, status, q);
     await r.arrayBuffer();
   }
+});
+
+test('changedFiles and GET /api/files/changed|diff: M/?/D/R against HEAD with counts, diffs per file, notGit outside git', async (t) => {
+  const repo = path.join(tmp, 'gitrepo');
+  const git = (...a) => execFileSync('git', ['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', ...a], { stdio: 'pipe' });
+  fs.mkdirSync(path.join(repo, 'sub'), { recursive: true });
+  git('init', '-q');
+  fs.writeFileSync(path.join(repo, 'mod.txt'), 'one\ntwo\nthree\n');
+  fs.writeFileSync(path.join(repo, 'gone.txt'), 'a\nb\n');
+  fs.writeFileSync(path.join(repo, 'old.txt'), 'same\n');
+  fs.writeFileSync(path.join(repo, 'sub/in.txt'), 'x\n');
+  git('add', '.');
+  git('commit', '-qm', 'init');
+  fs.writeFileSync(path.join(repo, 'mod.txt'), 'one\nTWO\nthree\nfour\n');
+  fs.rmSync(path.join(repo, 'gone.txt'));
+  git('mv', 'old.txt', 'new.txt');
+  fs.writeFileSync(path.join(repo, 'fresh.txt'), 'hello\nworld\n');
+  fs.writeFileSync(path.join(repo, 'fresh.bin'), Buffer.from([1, 0, 2]));
+  fs.mkdirSync(path.join(repo, 'node_modules/pkg'), { recursive: true });
+  fs.writeFileSync(path.join(repo, 'node_modules/pkg/i.js'), 'x');
+  fs.symlinkSync(path.join(outside, 'key.txt'), path.join(repo, 'key-out.txt'));
+  fs.writeFileSync(path.join(repo, 'sub/in.txt'), 'y\n');
+
+  const r = await changedFiles(repo);
+  assert.equal(typeof r.branch, 'string');
+  assert.equal(r.truncated, false);
+  assert.deepEqual(r.entries.map((e) => [e.path, e.status, e.add, e.del, e.binary]), [
+    ['fresh.bin', '?', 0, 0, true], ['fresh.txt', '?', 2, 0, false], ['gone.txt', 'D', 0, 2, false], ['mod.txt', 'M', 2, 1, false],
+    ['new.txt', 'R', 0, 0, false], ['sub/in.txt', 'M', 1, 1, false]]);
+  assert.equal(r.entries.find((e) => e.status === 'R').from, 'old.txt');
+  assert.deepEqual((await changedFiles(repo, { max: 2 })).truncated, true);
+  // A project that is a subfolder of the repo: paths relative to it, nothing from outside it.
+  assert.deepEqual((await changedFiles(path.join(repo, 'sub'))).entries.map((e) => e.path), ['in.txt']);
+  assert.deepEqual(await changedFiles(root), { branch: null, entries: [], notGit: true });
+
+  const json = (res, status, body) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
+  const roots = { c1: repo, c2: path.join(repo, 'sub'), c3: root };
+  const server = http.createServer((req, res) => {
+    if (!handleFiles(req, res, new URL(req.url, 'http://x'), { rootFor: (cid) => roots[cid] || null, json })) { res.writeHead(404); res.end(); }
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const diff = (p, cid = 'c1') => fetch(`${base}/api/files/diff?cid=${cid}&path=${encodeURIComponent(p)}`);
+
+  const changed = await fetch(`${base}/api/files/changed?cid=c1`);
+  assert.equal(changed.status, 200);
+  assert.equal((await changed.json()).entries.length, 6);
+  const notGit = await fetch(`${base}/api/files/changed?cid=c3`);
+  assert.deepEqual([notGit.status, (await notGit.json()).notGit], [200, true]);
+
+  const mod = await diff('mod.txt');
+  assert.equal(mod.status, 200);
+  assert.equal(mod.headers.get('content-type'), 'text/plain; charset=utf-8');
+  assert.match(mod.headers.get('content-security-policy'), /^sandbox;/);
+  const modText = await mod.text();
+  assert.match(modText, /^@@ .* @@/m);
+  assert.match(modText, /^-two$/m);
+  assert.match(modText, /^\+TWO$/m);
+  assert.match(modText, /^\+four$/m);
+  const fresh = await (await diff('fresh.txt')).text();
+  assert.match(fresh, /^--- \/dev\/null$/m);
+  assert.match(fresh, /^\+hello$/m);
+  assert.match(await (await diff('gone.txt')).text(), /^-b$/m);
+  assert.match(await (await diff('in.txt', 'c2')).text(), /^\+y$/m);
+  for (const [p, cid, status] of [['README.md', 'c3', 404], ['sub/in.txt', 'c2', 404], ['old.txt', 'c1', 404], ['nope.txt', 'c1', 404],
+    ['key-out.txt', 'c1', 404], ['node_modules/pkg/i.js', 'c1', 404], ['../secret/key.txt', 'c1', 404]]) {
+    const res = await diff(p, cid);
+    assert.equal(res.status, status, p);
+    assert.doesNotMatch(await res.text(), /top secret/);
+  }
+  const bigRepo = path.join(tmp, 'gitbig');
+  fs.mkdirSync(bigRepo);
+  execFileSync('git', ['-C', bigRepo, 'init', '-q']);
+  fs.writeFileSync(path.join(bigRepo, 'huge.txt'), 'line\n'.repeat(60000));
+  roots.c4 = bigRepo;
+  const huge = await diff('huge.txt', 'c4');
+  assert.equal(huge.headers.get('x-truncated'), '1');
+  assert.equal((await huge.arrayBuffer()).byteLength, 200 * 1024);
 });

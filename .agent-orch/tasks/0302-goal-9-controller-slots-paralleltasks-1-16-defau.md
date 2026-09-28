@@ -1,0 +1,15 @@
+# Task #302: Goal 9 controller slots: parallelTasks 1-16 (default 4), memory only an emergency floor, Settings select for this server
+
+- kind: work  
+- source: reflection  
+- priority: 30 (normal)  
+- created: 2026-09-28 10:55  
+- files: parallel.mjs, orchestrator.mjs, server.mjs, public/index.html, public/app.js, test/parallel.test.mjs, test/parallel-settings.test.mjs, .agent-orch/CONTEXT.md
+
+## Prompt
+
+BRIEF goal 9 was rewritten (rapid development mode): owner-set caps are the limit and memory is only an emergency guard, never a pre-emptive throttle; this VPS should run 4 tasks. Today parallel.mjs `taskSlots` allows a setting of 1 or 2 and grants the second slot only above MEM.secondSlot (2.5 GB) and under 25% swap, and orchestrator.mjs `parallelSettings`/`setParallelSettings` (search 'Expected parallelTasks 1 or 2') accept only 1 or 2. Change: (1) parallel.mjs: `taskSlots({setting, mem, pacingLimit})` returns `min(setting, pacingLimit)` whenever `mem.avail >= MEM.claimFloor` (800 MB, the emergency floor: 0 below it, unchanged) and drops the secondSlot/secondSlotSwap gate; remove those two MEM keys or leave them unused but documented; update the header comment. (2) orchestrator.mjs: `parallelTasks` accepts integers 1-16, `CFG.parallelTasks` default becomes 4 (BRIEF goal 9: this VPS handles 4), the kv migration near 'parallelTasks' in migrations (line ~1000, `s.maxTasks = 1` when parallelTasks !== 2) must not clamp a new value; `capacityView.controllerMax` is the setting; the error text becomes 'Expected parallelTasks 1-16'. The existing MEM.pauseBelow watch (memLowPauseSec: pause the newest running task) stays: that is the emergency guard. Also server.mjs passes `config: { parallelTasks: 2 }` to createOrchestrator: change it to 4. (3) UI: in public/index.html's Settings sheet next to `#stParallel` add `<select id="stServerTasks">` 'This server runs up to N' with options 1-16, and in public/app.js `renderParallel` fill it from `c.controllerMax`, save on change via `saveParallel({ parallelTasks: n })`, and delete the ' needs more free memory' wording (keep 'none can start now: memory is low' for the floor case). Keep the 16px/44pt touch rules that neighbouring selects use. (4) Tests: update test/parallel.test.mjs 'taskSlots' test to the new rule (setting 4 with 1 GB free → 4; 700 MB → 0; pacing 2 → 2), and add a case in test/parallel-settings.test.mjs (create it, copying a createOrchestrator scheduler test's setup) that PUT-equivalent `setParallelSettings({parallelTasks: 12})` is accepted and `parallelSettings().parallelTasks === 12`, and that 17 is rejected. Update the comment block above `parallelSettings` and CONTEXT.md's Architecture bullet on parallel slots if it states 1|2. Run `npm test -- test/parallel.test.mjs test/parallel-settings.test.mjs test/ui-static.test.mjs`.
+
+## Done when
+
+`npm test -- test/parallel.test.mjs test/parallel-settings.test.mjs test/ui-static.test.mjs` passes and `! grep -n 'Expected parallelTasks 1 or 2' orchestrator.mjs` prints nothing

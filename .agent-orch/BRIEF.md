@@ -38,11 +38,12 @@ was retired when benchmark ranking was removed in #152/#153. Current work harden
    When a task's model is rate-limited, it moves to the first fallback that has usage left. With an empty list the
    task waits. The UI must make it obvious which model a task is on, whether it was delegated, and what happens
    when a limit hits. Keep it simple and foolproof.
-9. Parallel agents: capacity-driven (owner, 2026-09-27). On a single machine, the default is one task at a time (RAM
-   is tight). Once the cluster (goal 11) is working, the goal is MAXIMUM development speed: run as many tasks in
-   parallel as the whole cluster's CPU and RAM can take (the owner will add 4 MacBooks plus a second VPS). The
-   planner should then split work into file-disjoint parallel tasks with integrator tasks, and the scheduler fills
-   every node's measured headroom. Remember that rate limits per account are shared across machines.
+9. Parallel agents: RAPID DEVELOPMENT MODE (owner, 2026-09-28). The owner states the MacBook handles 10 parallel
+   tasks and this VPS 4, and is explicitly unhappy with conservative limits. Concurrency is MEASURED, not fixed (owner,
+   10:53): each machine's slot count adapts continuously from live performance (CPU/memory pressure, throughput),
+   growing while healthy and backing off under saturation. Owner caps are optional ceilings. Memory is only an emergency guard (pause the newest task near OOM), never a pre-emptive throttle. Keep
+   the queue full: the planner and reflection split work into many file-disjoint parallel tasks (with integrators)
+   so every slot has work. Rate limits per account are the real ceiling, so use the fallback list to spread load.
 10. Removed agent CLIs (owner, 2026-09-27): Antigravity, OpenCode, Kiro and GitHub Copilot were uninstalled and all
    their code deleted. Claude Code and Codex are the only agents; never re-add the others.
 

@@ -5,6 +5,10 @@
 // dispatcher. The proxy talks to its host (the orchestrator, or the worker that relays to the head) through files in a
 // per-run gate dir: approvals/<id>.json asked, approvals/<id>.answer.json answered; checks/ the same for the hook; and
 // audit.jsonl + shots/<sha256>.<ext> written by the proxy, tailed by the host. Files keep a worker free of listeners.
+// Browser steps that are always outbound: file uploads (any local file can reach the page; the "always" key hashes the
+// paths), clicks and drags by coordinates (the target is unknown; no "always"), and navigating to javascript:/data:/blob:/
+// vbscript: (code in the page; no "always") or to file:/chrome: and local or private hosts. browser_press_key's "always"
+// key names the focused element, so one approved Enter doesn't cover Enter in every other field.
 // Worker-safe: node built-ins only (test/compute-only.test.mjs).
 import fs from 'node:fs';
 import path from 'node:path';
@@ -28,8 +32,9 @@ const BROWSER_READ = new Set(['browser_snapshot', 'browser_take_screenshot', 'br
   'browser_install', 'browser_close', 'browser_generate_locator', 'browser_verify_element_visible', 'browser_verify_text_visible',
   'browser_verify_list_visible', 'browser_verify_value', 'browser_pdf_save', 'browser_mouse_move_xy']);
 const BROWSER_DRAFT = new Set(['browser_navigate', 'browser_navigate_back', 'browser_navigate_forward', 'browser_click', 'browser_type',
-  'browser_fill_form', 'browser_select_option', 'browser_press_key', 'browser_file_upload', 'browser_drag', 'browser_drop',
-  'browser_handle_dialog', 'browser_tabs', 'browser_mouse_click_xy', 'browser_mouse_drag_xy']);
+  'browser_fill_form', 'browser_select_option', 'browser_press_key', 'browser_drag', 'browser_drop', 'browser_handle_dialog', 'browser_tabs']);
+// Outbound whatever the page shows: the target of a coordinate click or drag is unknown.
+const XY_TOOLS = new Set(['browser_mouse_click_xy', 'browser_mouse_drag_xy']);
 const ELEMENT_TOOLS = new Set(['browser_click', 'browser_type', 'browser_select_option', 'browser_drag', 'browser_handle_dialog']);
 export const isBrowserRead = (tool) => BROWSER_READ.has(tool);
 // Connector tools with no explicit marking: names like send_email, create_payment, delete_file, publish_design, share_doc.
@@ -112,6 +117,11 @@ const isSearchField = (e) => e?.role === 'searchbox' || /search|filter|find/i.te
 
 // Arbitrary-code browser tools: no "always" covers them, since the next call's code can do anything.
 const CODE_TOOL_RE = /evaluate|run_code|execute/i;
+// URL schemes that run code in the page (like browser_evaluate), and ones that open the machine's own files or browser.
+const CODE_SCHEMES = new Set(['javascript:', 'data:', 'blob:', 'vbscript:']);
+const LOCAL_SCHEMES = new Set(['file:', 'chrome:', 'chrome-extension:', 'chrome-untrusted:', 'devtools:', 'view-source:']);
+// A url's scheme as the browser reads it (leading spaces and embedded tabs/newlines stripped), lowercased.
+const schemeOf = (u) => { try { return new URL(String(u || '')).protocol; } catch { return /^([a-z][a-z0-9+.-]*:)/i.exec(String(u || '').replace(/[\t\n\r]/g, '').replace(/^[\x00-\x20]+/, ''))?.[1].toLowerCase() || ''; } };
 // Connector args that say who or what a call reaches; their values go into the "always" key.
 const RECIPIENT_ARG_RE = /^(to|cc|bcc|recipient|recipients|email|channel|chat|phone|number|account|payee|url|path|id)s?$/i;
 // A url's host is loopback, link-local or private (a bare hostname like `caddy` counts): the controller's ttyd, app and
@@ -139,8 +149,9 @@ export function isLocalUrl(u, { base } = {}) {
 
 // Classifies one call. ctx: {server, kind: 'browser' | 'connector', snapshot (parseSnapshot, fresh), patterns,
 // connector: {outbound: [names], read: [names], draft: [names]}}. Returns {cls, reason, action (what the owner reads),
-// key (the "always allow" identity: null for arbitrary-code tools, so no "always" covers them; a connector's includes a
-// hash of its recipient-like args), target?, url?}. Navigating to (or clicking a link to) a local or private host is outbound.
+// key (the "always allow" identity: null for arbitrary-code tools, coordinate clicks and code urls, so no "always" covers
+// them; a connector's includes a hash of its recipient-like args, an upload's a hash of its paths), target?, url?}.
+// Navigating to (or clicking a link to) a local or private host is outbound.
 export function classify(tool, args = {}, ctx = {}) {
   const { server = 'mcp', kind = 'browser', patterns = DEFAULT_PATTERNS } = ctx;
   const snap = ctx.snapshot || { url: null, refs: new Map(), dialog: null };
@@ -160,9 +171,20 @@ export function classify(tool, args = {}, ctx = {}) {
   const key = (...parts) => [server, tool, ...parts].map((x) => String(x ?? '').toLowerCase().trim()).join('|');
   if (BROWSER_READ.has(tool)) return { cls: 'read', reason: 'reads the page', action: `${tool.replace(/^browser_/, '')}${where}`, key: key() };
   if (tool === 'browser_navigate') {
-    const to = String(args.url || '');
+    const to = String(args.url || ''), scheme = schemeOf(to);
+    if (CODE_SCHEMES.has(scheme)) return { cls: 'outbound', reason: 'runs code in the page', action: `Open ${clip(to, 200)}`, key: null, url: to };
+    if (LOCAL_SCHEMES.has(scheme)) return { cls: 'outbound', reason: 'opens a local or private service', action: `Open ${clip(to, 200)}`, key: key(hostOf(to)), url: to };
     const hit = CHECKOUT_URL_RE.test(safePath(to)), local = !hit && isLocalUrl(to);
     return { cls: hit || local ? 'outbound' : 'draft', reason: hit ? 'opens a checkout/payment page' : local ? 'opens a local or private service' : 'navigation', action: `Open ${clip(to, 200)}`, key: key(hostOf(to)), url: to };
+  }
+  if (tool === 'browser_file_upload') {
+    const paths = (Array.isArray(args.paths) ? args.paths : args.paths != null ? [args.paths] : []).map(String);
+    return { cls: 'outbound', reason: 'uploads local files', action: `Upload ${paths.length ? clip(paths.join(', '), 200) : 'nothing (cancel the file chooser)'}${where}`,
+      key: key(sha(JSON.stringify([...paths].sort()))) };
+  }
+  if (XY_TOOLS.has(tool)) {
+    const at = tool === 'browser_mouse_drag_xy' ? ` from (${args.startX}, ${args.startY}) to (${args.endX}, ${args.endY})` : ` at (${args.x}, ${args.y})`;
+    return { cls: 'outbound', reason: 'clicks by coordinates, target unknown', action: `${tool === 'browser_mouse_drag_xy' ? 'Drag' : 'Click'}${at}${where}`, key: null };
   }
   if (tool === 'browser_handle_dialog') {
     const msg = snap.dialog || '', hit = args.accept !== false ? matchPattern(msg, patterns) : null;
@@ -204,7 +226,7 @@ export function classify(tool, args = {}, ctx = {}) {
     const submits = SUBMIT_KEY_RE.test(String(args.key || '').replace(/\s+/g, '')) && (inField || hit || !snap.refs.size);
     const action = `press key ${args.key}${focus?.name ? ` in "${clip(focus.name, 80)}" ${focus.role}` : ''}${where}`;
     return { cls: submits ? 'outbound' : 'draft', reason: !submits ? 'page interaction' : hit ? `focused element matches "${hit}"` : 'may submit the focused field',
-      action, key: key(args.key), ...(focus && { target: pick(focus) }) };
+      action, key: key(args.key, focus?.role || 'none', focus ? focus.name || 'none' : 'none', url ? hostOf(url).split('/')[0] : ''), ...(focus && { target: pick(focus) }) };
   }
   if (BROWSER_DRAFT.has(tool)) {
     const detail = tool === 'browser_fill_form' ? ` (${(args.fields || []).length} fields)` : '';

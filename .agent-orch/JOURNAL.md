@@ -1189,3 +1189,7 @@ main and task-branch pushes queue, retry, never force or crash
 ## 2026-09-28 14:27 — #415 Integrate #406: Show the running build number, restart time and pending build [done (check passed)]
 
 CONTEXT.md conflicts resolved; version tests pass, merge left uncommitted
+
+## 2026-09-28 14:27 — #428 gate.mjs AUDIT #68 (re-run, browser-free check): uploads, coordinate clicks and javascript:/data: navigation are outbound; Enter's Always key names the field [done (check passed)]
+
+gate classifies uploads, xy clicks, code URLs outbound; Enter keyed

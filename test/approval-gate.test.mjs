@@ -70,7 +70,7 @@ test('classify: element names from the snapshot, checkout URLs, reads, custom pa
   assert.equal(enter.cls, 'outbound');
   assert.equal(enter.reason, 'may submit the focused field');
   assert.equal(enter.action, 'press key Enter in "Message #general" textbox on app.slack.com/client/T1/C1');
-  assert.equal(enter.key, 'playwright|browser_press_key|enter', 'the "always allow" key is unchanged');
+  assert.equal(enter.key, 'playwright|browser_press_key|enter|textbox|message #general|app.slack.com', 'the "always allow" key names the focused field');
   assert.equal(classify('browser_press_key', { key: 'Control+Enter' }, sctx).cls, 'outbound', 'Ctrl+Enter sends in Gmail');
   assert.equal(classify('browser_press_key', { key: 'Control+Enter' }, {}).cls, 'outbound', 'no snapshot: assume a composer');
   assert.equal(classify('browser_press_key', { key: 'ArrowDown' }, sctx).cls, 'draft', 'other keys');

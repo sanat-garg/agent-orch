@@ -13,3 +13,7 @@ Close four loopholes in gate.mjs `classify` (the approval gate for browser tasks
 ## Done when
 
 `node --test test/gate-classify.test.mjs test/approval-gate.test.mjs`
+
+## Result — done (check passed) (2026-09-28 14:27)
+
+AGENT-ORCH-STATUS: done — gate classifies uploads, xy clicks, code URLs outbound; Enter keyed

@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
-import { ensureWorktree, listWorktrees, mergeBack, pruneOrphanWorktrees, removeWorktree, repoInfo, startIntegration, unresolvedFiles, worktreePath } from '../worktrees.mjs';
+import { commitAll, ensureWorktree, listWorktrees, mergeBack, retryOptions, pruneOrphanWorktrees, removeWorktree, repoInfo, startIntegration, unresolvedFiles, worktreePath } from '../worktrees.mjs';
 
 const ORCH = JSON.stringify(new URL('../orchestrator.mjs', import.meta.url).href);
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -286,5 +286,45 @@ describe('worktrees', { concurrency: true, timeout: 120000 }, () => {
       fs.writeFileSync(path.join(wt.cwd, 'a.txt'), 'one\nmine\ntheirs\nthree\n'); // edited, not `git add`ed
       assert.deepEqual(await unresolvedFiles(wt.dir), []);
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+// Sequential: these swap in a counting sleep for the module's git retries.
+describe('worktree git retries', { timeout: 60000 }, () => {
+  const counting = () => {
+    const waits = [];
+    retryOptions.sleep = (ms) => { waits.push(ms); return new Promise((r) => setTimeout(r, ms)); };
+    return waits;
+  };
+
+  test('commitAll waits out an index.lock held by another git', async () => {
+    const { root, repo } = makeRepo();
+    const waits = counting();
+    try {
+      fs.writeFileSync(path.join(repo, 'b.txt'), 'changed\n');
+      const lock = path.join(repo, '.git', 'index.lock');
+      fs.writeFileSync(lock, '');
+      const release = setTimeout(() => fs.rmSync(lock, { force: true }), 300);
+      const sha = await commitAll(repo, 'while locked');
+      clearTimeout(release);
+      assert.ok(sha, 'committed');
+      assert.equal(git(repo, 'log', '-1', '--format=%s'), 'while locked');
+      assert.equal(git(repo, 'status', '--porcelain'), '');
+      assert.ok(waits.length >= 1, 'the locked add was retried');
+    } finally { delete retryOptions.sleep; fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test('a real rebase conflict in mergeBack reports needs-integration without a retry', async () => {
+    const { root, repo } = makeRepo();
+    try {
+      const info = await repoInfo(repo);
+      const wt = await ensureWorktree(info, 11);
+      fs.writeFileSync(path.join(wt.cwd, 'a.txt'), 'one\nmine\nthree\n');
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'one\ntheirs\nthree\n');
+      git(repo, 'commit', '-qam', 'main moved');
+      const waits = counting();
+      assert.deepEqual(await mergeBack(info, 11, 'task 11'), { conflict: ['a.txt'] });
+      assert.deepEqual(waits, [], 'no git call was retried');
+    } finally { delete retryOptions.sleep; fs.rmSync(root, { recursive: true, force: true }); }
   });
 });

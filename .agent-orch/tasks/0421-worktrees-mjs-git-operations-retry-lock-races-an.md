@@ -13,3 +13,7 @@ Goal: the main tree of the live checkout is touched by several sessions and orch
 ## Done when
 
 `npm test -- test/worktree.test.mjs test/git-retry.test.mjs` passes and `grep -c "retryGit" worktrees.mjs` prints at least 1
+
+## Result — done (check passed) (2026-09-28 14:15)
+
+AGENT-ORCH-STATUS: done — worktrees.mjs git calls retry lock races; conflicts never retried

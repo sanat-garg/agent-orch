@@ -1129,3 +1129,7 @@ Merge conflict resolved; browser-live tests pass; #50 marked Fixed
 ## 2026-09-28 14:09 — #408 Fix the failing compute-only scheduler test: its project must have Keep improving on for its reflect task to run [done (check passed)]
 
 compute-only tests pass; Linux-only /proc/systemd checks now skipped on macOS
+
+## 2026-09-28 14:15 — #421 worktrees.mjs: git operations retry lock races and network blips through retryGit [done (check passed)]
+
+worktrees.mjs git calls retry lock races; conflicts never retried

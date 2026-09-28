@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { retryGit, transientGit } from './taskrun.mjs';
 
 const execFileP = promisify(execFile);
 export const GIT_ID = ['-c', 'user.name=agent-orch Orchestrator', '-c', 'user.email=orchestrator@agent-orch.local'];
@@ -15,8 +16,27 @@ const BRANCH_RE = /^agent-orch\/task-(\d+)$/;
 // Every task appends to JOURNAL.md; a union merge keeps both sides instead of calling that a conflict.
 const ATTRIBUTES = ['.agent-orch/JOURNAL.md merge=union'];
 
+// Other sessions and auto-commits share the main tree, so a lock race or network blip is retried (retryGit; tests may
+// set `retryOptions.sleep`). Anything else fails at once, and the last failure is thrown as git reported it.
+export const retryOptions = {};
+const run = async (cwd, args) => (await execFileP('git', args, { cwd, encoding: 'utf8', timeout: 120000, maxBuffer: 16 * 1024 * 1024 })).stdout;
+// A rebase or merge that stopped partway (its state is on disk) is never rerun: a second one would refuse or tangle it.
+const RESUMABLE = new Set(['rebase', 'merge', 'cherry-pick', 'am']);
+const subcommand = (args) => args.find((a, i) => !a.startsWith('-') && args[i - 1] !== '-c');
+async function midway(cwd) {
+  const gitDir = (await run(cwd, ['rev-parse', '--absolute-git-dir']).catch(() => '')).trim();
+  return !!gitDir && ['rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD'].some((d) => fs.existsSync(path.join(gitDir, d)));
+}
 async function git(cwd, args) {
-  return (await execFileP('git', args, { cwd, encoding: 'utf8', timeout: 120000, maxBuffer: 16 * 1024 * 1024 })).stdout;
+  let stuck = null;
+  try {
+    return await retryGit(async () => {
+      try { return await run(cwd, args); } catch (e) {
+        if (RESUMABLE.has(subcommand(args)) && !args.includes('--abort') && transientGit(e.stderr || e.message) && await midway(cwd)) stuck = e;
+        throw stuck ? new Error('stopped midway') : e;
+      }
+    }, retryOptions);
+  } catch (e) { throw stuck || e; }
 }
 const ok = (cwd, args) => git(cwd, args).then(() => true, () => false);
 

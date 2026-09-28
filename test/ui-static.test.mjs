@@ -105,7 +105,7 @@ test('the sidebar gear opens Settings: sound + MP3 upload, parallel tasks (what 
   assert.match(side, /id="settingsBtn"[^>]*aria-label="Settings"/);
   const sheet = indexHtml.slice(indexHtml.indexOf('id="settingsModal"'), indexHtml.indexOf('id="fbModal"'));
   const sections = [...sheet.matchAll(/class="st-sec"[^>]*>([^<]+)</g)].map((m) => m[1]);
-  assert.deepEqual(sections, ['Sound', 'Tasks', 'Agents', 'This project']);
+  assert.deepEqual(sections, ['Sound', 'Tasks', 'Agents', 'This project', 'About']);
   // Skills & tools is one row (a summary line) that opens the sheet, whose tabs hold the four kinds.
   assert.deepEqual([...sheet.matchAll(/data-ext-open="(\w+)"/g)].map((m) => m[1]), ['skills']);
   assert.match(sheet, /id="stExtSummary"/);

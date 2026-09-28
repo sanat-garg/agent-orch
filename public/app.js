@@ -431,8 +431,8 @@ $('logout').addEventListener('click', async () => {
   location.href = '/login';
 });
 
-function relTime(ts) {
-  const s = (Date.now() - ts) / 1000;
+function relTime(ts, now = Date.now()) {
+  const s = (now - ts) / 1000;
   if (s < 60) return 'just now';
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
@@ -2963,7 +2963,8 @@ function onServer(msg) {
     return checkPairing();
   }
   if (msg.t === 'models') return api('/api/agents').then((d) => { AGENT_LIST = d.agents || []; renderAgentPicker(); }).catch(() => {});
-  if (msg.t === 'status') { upd.pending = !!msg.restartPending; return renderUpdateBanner(); }
+  if (msg.t === 'status') { upd.pending = !!msg.restartPending; if (!$('settingsModal').hidden) loadAbout(); return renderUpdateBanner(); }
+  if (msg.t === 'version') return onVersion(msg.running);
   if (msg.t === 'ext') return window.Ext?.changed(msg.kind); // skills/MCP/subagents/personas changed (ext.js)
   if (msg.t === 'convos') {
     const drChat = O.detail?.project?.convo_id, effortOf = () => state.convos.find((c) => c.id === drChat)?.effort ?? null;
@@ -3689,6 +3690,9 @@ function machineCard(n) {
   icon.innerHTML = OS_ICON[n.os] || OS_ICON.linux;
   icon.title = OS_NAME[n.os] || n.os || '';
   if (n.local) name.append(el('small', '', '(this server)'));
+  if (n.build) name.append(el('small', 'mc-build', `build ${n.build}`));
+  // Behind the head's origin/main (or, while that count is unknown, an older build than the one running here).
+  if (!n.local && (n.behind > 0 || (n.behind == null && n.build && VER.running?.build && n.build < VER.running.build))) name.append(el('span', 'tc-tag outdated', 'outdated'));
   const seen = n.local ? 'controller' : n.lastSeen ? `${n.connected ? 'seen' : 'last seen'} ${relTime(n.lastSeen)}` : 'never connected';
   id.append(name, el('span', 'mc-meta', [OS_NAME[n.os] || n.os, n.arch, seen].filter(Boolean).join(' · ')));
   const pill = el('span', 'mc-st');
@@ -5659,6 +5663,7 @@ function openSettings() {
   $('settingsModal').hidden = false;
   renderSettings();
   loadGatePatterns();
+  loadAbout();
   $('settingsModal').querySelector('.icon-btn[data-close]').focus();
 }
 function closeSettings() {
@@ -5669,6 +5674,53 @@ const ST = { lastFocus: null };
 $('settingsBtn').addEventListener('click', openSettings);
 $('settingsModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeSettings(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('settingsModal').hidden && $('fbModal').hidden) { e.stopImmediatePropagation(); closeSettings(); } }, true);
+// ----- About (Settings): the build this server runs and since when (ws 'version' on connect), and the newer one on
+// disk (GET /api/version). A build newer than the one this tab (or, on a fresh load, this browser) last saw toasts.
+const VER = { running: null, seq: 0 };
+function onVersion(running) {
+  const b = running?.build, prev = VER.running?.build || Number(store.get('cw.build')) || 0;
+  VER.running = running || null;
+  if (b) {
+    if (prev && b > prev) toast(`Updated to build ${b}`, { kind: 'success', duration: 8000 });
+    store.set('cw.build', String(b));
+  }
+  $('buildFoot').hidden = !b;
+  $('buildFoot').textContent = b ? `build ${b}` : '';
+  if (!$('settingsModal').hidden) loadAbout();
+}
+async function loadAbout() {
+  const seq = ++VER.seq;
+  try { const d = await api('/api/version'); if (seq === VER.seq) renderAbout(d); } catch { if (seq === VER.seq) $('abRunning').textContent = "Couldn't read the running build"; }
+}
+// The About lines for a GET /api/version answer, in the browser's timezone (pure: test/version-ui.test.mjs).
+function aboutLines(d, now = Date.now()) {
+  const r = d?.running || {}, disk = d?.disk, rs = d?.restart || {}, waits = !!(rs.pending || rs.auto);
+  return {
+    running: r.sha ? `Running build ${r.build ?? '?'} (${r.sha.slice(0, 7)})${r.subject ? ` · "${r.subject}"` : ''}` : 'Running build unknown (not a git checkout)',
+    runningTip: r.committedAt ? `Committed ${fmtWhen(r.committedAt, now)}` : '',
+    restarted: r.startedAt ? `Restarted ${relTime(r.startedAt, now)} (${fmtWhen(r.startedAt, now)}) · up ${fmtDur((now - r.startedAt) / 1000)}` : '',
+    restartedTip: r.serviceStartedAt ? `Service started ${fmtWhen(r.serviceStartedAt, now)}` : '',
+    pending: disk?.ahead > 0 ? `Build ${disk.build} ready (${plural(disk.ahead, 'newer commit')})${waits ? ' · restarts when idle' : ''}` : null,
+    restartButton: disk?.ahead > 0 && !waits,
+  };
+}
+function renderAbout(d) {
+  const a = aboutLines(d);
+  $('abRunning').textContent = a.running;
+  $('abRunning').title = a.runningTip;
+  $('abRestarted').textContent = a.restarted;
+  $('abRestarted').title = a.restartedTip;
+  $('abPending').hidden = !a.pending;
+  $('abPendingText').textContent = a.pending || '';
+  $('abRestart').hidden = !a.restartButton;
+  $('abRestart').disabled = false;
+}
+$('abRestart').addEventListener('click', async () => {
+  $('abRestart').disabled = true;
+  try { await api('/api/restart-when-idle', 'POST'); upd.pending = true; renderUpdateBanner(); } catch (e) { toast(e.message, { kind: 'error' }); }
+  loadAbout();
+});
+$('buildFoot').addEventListener('click', () => { openSettings(); $('stAboutTitle').scrollIntoView({ block: 'start' }); });
 function renderSettings() {
   if ($('settingsModal').hidden) return;
   const s = O.state || {}, p = O.project;

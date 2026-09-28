@@ -33,6 +33,7 @@ import { saveUpload, readUpload, placeUploads, attachmentView, attachmentNote, c
 import { headRefusal } from './role.mjs';
 import { createBrowserViews, LOCAL as BV_LOCAL } from './browser-view.mjs';
 import { searchConvos } from './search.mjs';
+import { createVersion } from './version.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -299,6 +300,9 @@ const git = (args) => new Promise((resolve) => execFile('git', args, { cwd: ROOT
 let bootCommit = '', restartPending = false, restartGen = 0, sinceBoot = { at: 0, count: 0, busy: false };
 if (process.env.AGENT_ORCH_BOOT_COMMIT) bootCommit = process.env.AGENT_ORCH_BOOT_COMMIT;
 else git(['rev-parse', 'HEAD']).then((c) => { bootCommit = c; });
+// The running build (Settings → About, GET /api/version, the ws 'version' frame); restartReason: why a drain is on.
+const version = createVersion({ dir: ROOT, boot: process.env.AGENT_ORCH_BOOT_COMMIT || '', unit: process.env.AGENT_ORCH_UNIT || 'agent-orch.service' });
+let restartReason = null;
 function commitsSinceBoot() {
   if (bootCommit && !sinceBoot.busy && Date.now() - sinceBoot.at > 30e3) {
     sinceBoot.busy = true;
@@ -310,7 +314,7 @@ function commitsSinceBoot() {
 // (Restart=always) brings the app back. Cancelled by POST /api/restart-when-idle {cancel:true}.
 function startRestartDrain(reason) {
   if (restartPending) return;
-  restartPending = true;
+  restartPending = true; restartReason = reason;
   const gen = ++restartGen;
   console.log(`[restart] ${reason}: waiting for running tasks and chat turns to finish`);
   const idle = () => chatIdle({ runtimes, agentTurns, planning, chatPlanning: orch.chatPlanning });
@@ -327,7 +331,7 @@ function startRestartDrain(reason) {
     }
     // Stay up on the old code: resume claiming like a cancel, and let the auto path wait for a newer HEAD.
     console.error(`[restart] preflight failed: ${why}`);
-    restartPending = false; restartGen++; autoRestartSkipHead = head;
+    restartPending = false; restartReason = null; restartGen++; autoRestartSkipHead = head;
     orch.undrain();
     orch.logEvent(`Restart skipped: the code at ${head.slice(0, 8) || 'HEAD'} does not boot (${why.slice(0, 300)})`, { level: 'warn' });
     for (const ws of allClients) send(ws, { t: 'status', restartPending });
@@ -1557,7 +1561,7 @@ async function handleRequest(req, res) {
   if (p === '/api/restart-when-idle' && req.method === 'POST') {
     if ((await readBody(req)).cancel) {
       if (restartPending) {
-        restartPending = false; restartGen++;
+        restartPending = false; restartReason = null; restartGen++;
         autoRestartSkipHead = await git(['rev-parse', 'HEAD']);
         orch.undrain();
         console.log('[restart] cancelled');
@@ -1567,6 +1571,11 @@ async function handleRequest(req, res) {
     }
     startRestartDrain('draining');
     return json(res, 202, { draining: true });
+  }
+  // Settings → About: the build this process runs, the one on disk and whether a restart is on its way.
+  if (p === '/api/version' && req.method === 'GET') {
+    const disk = await version.disk();
+    return json(res, 200, { running: version.running(), disk, restart: { pending: restartPending, reason: restartReason, auto: !!orch?.autoRestart?.() } });
   }
   if (p === '/api/metrics/history') {
     return json(res, 200, historyFor(url.searchParams.get('range') || '1h'));
@@ -1663,7 +1672,9 @@ async function handleRequest(req, res) {
     } catch (e) { return json(res, 409, { error: e.message }); }
   }
   if (p.startsWith('/api/cluster/') && !cluster) return json(res, 503, { error: 'cluster unavailable' });
-  if (p === '/api/cluster/nodes' && req.method === 'GET') return json(res, 200, { nodes: orch.machines(cluster.listNodes()) });
+  // build: the agent-orch build each machine runs (a worker's own report, else counted here from its sha).
+  if (p === '/api/cluster/nodes' && req.method === 'GET') return json(res, 200, { nodes: orch.machines(cluster.listNodes()).map((n) => ({ ...n,
+    build: n.local ? version.running().build : n.inventory?.versions?.build ?? version.buildOf(n.sha || n.inventory?.versions?.sha) })) });
   // "Add machine": a pairing code, {uses: N} for one code that pairs N machines (valid 1 h); DELETE revokes a code.
   if (p === PAIR_PATH && req.method === 'POST') { const r = cluster.createPairing(await readBody(req)); return r.error ? json(res, r.status, { error: r.error }) : json(res, 200, r); }
   const pcode = p.match(/^\/api\/cluster\/pair\/([\w-]{1,20})$/);
@@ -2117,6 +2128,7 @@ wss.on('connection', (ws, req) => {
   send(ws, { t: 'convos', convos: convos.map(publicConvo) });
   if (history.length) send(ws, { t: 'mtick', s: history[history.length - 1], sampleMs: SAMPLE_MS });
   send(ws, { t: 'usage', usage });
+  version.ready.then(() => send(ws, { t: 'version', running: version.running() }));
 
   ws.on('message', (raw) => {
     let msg;

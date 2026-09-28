@@ -287,7 +287,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   let heartbeatMs = HEARTBEAT_MS, wipPushMs = WIP_PUSH_MS, graceMs = process.platform === 'darwin' ? GRACE_MS.mac : GRACE_MS.vps, beat = null, reconnectTimer = null;
   let pendingWake = null;
   let peer = new Set(); // the controller's features (welcome.features): newer frame types go only to one that reads them
-  let srcSha = null, lastInv = null, updating = false;
+  let srcSha = null, srcBuild = null, lastInv = null, updating = false;
   // The power policy and task cap the controller set for this node (welcome.policy, node.policy); its OS defaults until then.
   let policy = effectivePolicy(process.platform), policyText = '';
   const awake = POWERED ? createKeepAwake({ log }) : null;
@@ -526,7 +526,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     return {
       node: config.node, name: config.name || os.hostname(), os: process.platform, arch: process.arch, cores: os.cpus().length, mem: os.totalmem(),
       agents, limits: Object.fromEntries(ids.map((id) => [id, limits.get(id)]).filter(([, v]) => v)),
-      versions: { agentOrch: VERSION, node: process.version, git: gitVersion }, cap, ...(browser && { browser }),
+      versions: { agentOrch: VERSION, node: process.version, git: gitVersion, ...(srcSha ? { sha: srcSha, build: srcBuild } : {}) }, cap, ...(browser && { browser }),
       ext: { hash: synced.hash, ...(extError ? { error: extError } : {}), ...(synced.kept.length ? { kept: synced.kept } : {}) },
     };
   }
@@ -1437,6 +1437,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     ensureLimiter();
     srcSha = await git(srcDir, ['rev-parse', 'HEAD']).then((s) => s.trim(), () => null);
     if (srcSha && !/^[0-9a-f]{40}$/.test(srcSha)) srcSha = null;
+    if (srcSha) srcBuild = Number(await git(srcDir, ['rev-list', '--count', srcSha]).then((s) => s.trim(), () => '')) || null; // the head's Machines view
     await sweepLeftovers().catch((e) => log(`leftover sweep failed: ${e.message}`, 'warn'));
     await probePower();
     setPolicy(policy);

@@ -112,6 +112,7 @@ const S = {
   // cap: the machine's local cap in effect (cap.mjs resolveCap: {cpu: cores, mem: bytes, maxTasks, onlyOnAc}; null = none).
   // browser: {capable, headed, error?}: whether it has a Chromium/Chrome for browser tasks (browser.mjs ensureBrowser).
   // ext: the extension bundle applied here {hash, error?, kept?[hand-installed entries left in place of the controller's]}.
+  // versions: {agentOrch, node, git, sha?, build?}: build = `git rev-list --count sha` of its agent-orch checkout.
   inventory: { node: 'str', name: 'str', os: 'os', arch: 'str', cores: 'int', mem: 'int', agents: 'arr', limits: 'obj?', versions: 'obj', cap: 'obj?', browser: 'obj?', ext: 'obj?' },
   // Also the worker's health telemetry (every heartbeat, the controller keeps a 24 h series): cpu (% per core), memTotal,
   // swapTotal/swapUsed (bytes), disk {path, free, total} (the volume holding its repos), net {host, ok, ms, at, error}

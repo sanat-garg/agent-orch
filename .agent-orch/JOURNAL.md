@@ -1090,6 +1090,9 @@ Stats and Skills & tools selected tabs: --seg-on, weight 600
 
 stats tasks carry classified `why`; snapshot has `failures` summary
 
+## 2026-09-28 14:01 — #406 Show the running build number, restart time and pending build [done (check passed)]
+
+About section, /api/version, build label, worker builds, update toast added
 ## 2026-09-28 13:54 — #388 Fix the failing worker-cap test: nodeCap keeps a worker's CPU and max-tasks cap when the owner set max slots [done (check passed)]
 
 owner-set worker slots now keep the worker's CPU cap
@@ -1182,3 +1185,7 @@ CONTEXT.md conflict resolved; ui-stats tests pass
 ## 2026-09-28 14:27 — #427 One push to main at a time: queue and retry the head's GitHub pushes, never crash a task [done (check passed)]
 
 main and task-branch pushes queue, retry, never force or crash
+
+## 2026-09-28 14:27 — #415 Integrate #406: Show the running build number, restart time and pending build [done (check passed)]
+
+CONTEXT.md conflicts resolved; version tests pass, merge left uncommitted

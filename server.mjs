@@ -33,6 +33,7 @@ import { saveUpload, readUpload, placeUploads, attachmentView, attachmentNote, c
 import { headRefusal } from './role.mjs';
 import { createBrowserViews, LOCAL as BV_LOCAL } from './browser-view.mjs';
 import { searchConvos } from './search.mjs';
+import { createRollingRestart, preflight, readRestartState, serverFile, versionOf } from './rolling.mjs';
 import { createSounds, MAX_SOUND_BYTES as MAX_CUSTOM_SOUND_BYTES } from './sounds.mjs';
 import { createVersion } from './version.mjs';
 
@@ -301,6 +302,15 @@ const git = (args) => new Promise((resolve) => execFile('git', args, { cwd: ROOT
 let bootCommit = '', restartPending = false, restartGen = 0, sinceBoot = { at: 0, count: 0, busy: false };
 if (process.env.AGENT_ORCH_BOOT_COMMIT) bootCommit = process.env.AGENT_ORCH_BOOT_COMMIT;
 else git(['rev-parse', 'HEAD']).then((c) => { bootCommit = c; });
+// The last commit that touched public/: a client that loaded older files is offered a reload (no restart needed).
+let publicAt = { at: 0, sha: '', busy: false };
+function publicCommit() {
+  if (!publicAt.busy && Date.now() - publicAt.at > 30e3) {
+    publicAt.busy = true;
+    git(['log', '-1', '--format=%H', '--', 'public']).then((sha) => { publicAt = { at: Date.now(), sha, busy: false }; });
+  }
+  return publicAt.sha;
+}
 // The running build (Settings → About, GET /api/version, the ws 'version' frame); restartReason: why a drain is on.
 const version = createVersion({ dir: ROOT, boot: process.env.AGENT_ORCH_BOOT_COMMIT || '', unit: process.env.AGENT_ORCH_UNIT || 'agent-orch.service' });
 let restartReason = null;
@@ -335,55 +345,59 @@ function startRestartDrain(reason) {
     restartPending = false; restartReason = null; restartGen++; autoRestartSkipHead = head;
     orch.undrain();
     orch.logEvent(`Restart skipped: the code at ${head.slice(0, 8) || 'HEAD'} does not boot (${why.slice(0, 300)})`, { level: 'warn' });
-    for (const ws of allClients) send(ws, { t: 'status', restartPending });
+    for (const ws of allClients) send(ws, { t: 'status', ...updateStatus() });
   });
-  for (const ws of allClients) send(ws, { t: 'status', restartPending });
+  for (const ws of allClients) send(ws, { t: 'status', ...updateStatus() });
 }
-// Proves the code at HEAD boots before a restart: `node --check` every root and bin/ *.mjs, then start server.mjs
-// once on a spare port with no orchestrator (never on the live DB) and a throwaway data dir, and wait up to 20 s
-// for /auth/check to answer. Resolves '' when it booted, else why not.
-async function restartPreflight() {
-  const mjs = (dir) => fs.readdirSync(path.join(ROOT, dir)).filter((f) => f.endsWith('.mjs')).map((f) => path.join(dir, f));
-  for (const f of [...mjs('.'), ...mjs('bin')]) {
-    const err = await new Promise((resolve) => execFile(process.execPath, ['--check', f], { cwd: ROOT, timeout: 30e3 },
-      (e, _out, stderr) => resolve(e ? `${f}: ${String(stderr || e.message).trim().split('\n').slice(0, 5).join(' | ')}` : '')));
-    if (err) return err;
-  }
-  const port = await new Promise((resolve, reject) => {
-    const s = net.createServer().listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); }).on('error', reject);
-  });
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-orch-preflight-'));
-  const child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, PORT: String(port), CW_DATA_DIR: dir, CW_NO_ORCHESTRATOR: '1' } });
-  let out = '', exited = null;
-  const tail = () => { const lines = out.trim().split('\n'); return lines.find((l) => /Error\b/.test(l))?.trim() || lines.slice(-3).join(' | '); };
-  child.stdout.on('data', (d) => { out = (out + d).slice(-4000); });
-  child.stderr.on('data', (d) => { out = (out + d).slice(-4000); });
-  child.on('exit', (code, sig) => { exited = code ?? sig; });
-  try {
-    for (const end = Date.now() + 20e3; Date.now() < end && exited == null; await new Promise((r) => setTimeout(r, 500))) {
-      try { await (await fetch(`http://127.0.0.1:${port}/auth/check`, { signal: AbortSignal.timeout(2000) })).body?.cancel(); return ''; } catch {}
-    }
-    return exited != null ? `server.mjs exited (${exited}) during boot: ${tail()}` : `server.mjs did not answer /auth/check within 20 s: ${tail()}`;
-  } finally {
-    try { process.kill(-child.pid, 'SIGKILL'); } catch {}
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-}
-// The owner's autoRestart setting: once merged commits since boot touch server-side code (root *.mjs, bin/,
-// package.json, package-lock.json), drain and restart by itself. A cancelled auto restart waits for a newer HEAD.
-const SERVER_FILE = (f) => /^[^/]+\.mjs$/.test(f) || f.startsWith('bin/') || f === 'package.json' || f === 'package-lock.json';
+// Proves the code at HEAD boots before a restart (rolling.mjs preflight): '' when it does, else why not.
+const restartPreflight = () => preflight({ root: ROOT });
+// Apply updates (the owner's setting, orchestrator applyUpdates): once merged commits since boot touch server code
+// (rolling.mjs serverFile), 'auto' schedules a rolling restart within 2 min even while busy, 'idle' drains and restarts
+// once idle, 'manual' only shows the banner. A cancelled or refused restart waits for a newer HEAD.
 let autoRestartSkipHead = '', autoRestartBusy = false;
 async function autoRestartCheck() {
-  if (restartPending || autoRestartBusy || !bootCommit || !orch?.autoRestart()) return;
+  const mode = orch?.applyUpdates();
+  if (mode !== 'auto') rolling.cancel();
+  if (restartPending || autoRestartBusy || !bootCommit || !mode || mode === 'manual') return;
   autoRestartBusy = true;
   try {
+    if (mode === 'auto') return void await rolling.check();
     const head = await git(['rev-parse', 'HEAD']);
     if (!head || head === bootCommit || head === autoRestartSkipHead) return;
-    const files = (await git(['diff', '--name-only', `${bootCommit}..${head}`])).split('\n').filter(SERVER_FILE);
-    if (files.length && !restartPending && orch.autoRestart()) startRestartDrain(`auto: ${files.length} server file(s) changed since boot (${files.slice(0, 3).join(', ')})`);
+    const files = (await git(['diff', '--name-only', `${bootCommit}..${head}`])).split('\n').filter(serverFile);
+    if (files.length && !restartPending && orch.applyUpdates() === 'idle') startRestartDrain(`auto: ${files.length} server file(s) changed since boot (${files.slice(0, 3).join(', ')})`);
   } finally { autoRestartBusy = false; }
 }
+// Rolling restarts (rolling.mjs): <DATA>/restart.json keeps the last one (the 10-min window, and "Updated to vX.YY"
+// for the clients of the process it started).
+const RESTART_STATE = path.join(DATA, 'restart.json'), BOOT_AT = Date.now();
+const PKG_VERSION = (() => { try { return JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version; } catch { return '1'; } })();
+const lastRestart = readRestartState(RESTART_STATE);
+const updatedTo = lastRestart.to && lastRestart.version && BOOT_AT - lastRestart.at < 10 * 60e3 ? { version: lastRestart.version, at: Math.round(lastRestart.at / 1000) } : null;
+const updateStatus = () => ({ restartPending, update: rolling.status(), updated: updatedTo && Date.now() - BOOT_AT < 10 * 60e3 ? updatedTo : null });
+const envMs = (k) => (Number(process.env[k]) >= 0 && process.env[k] !== undefined && process.env[k] !== '' ? Number(process.env[k]) : undefined);
+const rolling = createRollingRestart({
+  stateFile: RESTART_STATE,
+  bootCommit: () => bootCommit,
+  head: () => git(['rev-parse', 'HEAD']),
+  changed: async (head) => (head === bootCommit || !bootCommit ? [] : (await git(['diff', '--name-only', `${bootCommit}..${head}`])).split('\n').filter(serverFile)),
+  version: async (head) => versionOf(await git(['rev-list', '--count', head]) || 0, PKG_VERSION),
+  preflight: () => restartPreflight().catch((e) => String(e?.message || e)),
+  busy: () => (restartPending ? 'a restart-when-idle drain is in progress' : orch?.restartBlocker() || ''),
+  prepare: () => orch.prepareRestart(),
+  resume: () => orch.resumeAfterRestart(),
+  chatIdle: () => chatIdle({ runtimes, agentTurns, planning, chatPlanning: orch.chatPlanning }),
+  exit: (code) => process.exit(code),
+  log: (m) => console.log(`[restart] ${m}`),
+  alert: (m) => {
+    console.error(`[restart] ${m}`);
+    orch?.logEvent(m, { level: 'warn' });
+    notify({ title: 'Update not applied', body: m, tag: 'update' });
+    for (const ws of allClients) send(ws, { t: 'status', ...updateStatus(), alert: m });
+  },
+  onChange: () => { for (const ws of allClients) send(ws, { t: 'status', ...updateStatus() }); },
+  cfg: { delayMs: envMs('AGENT_ORCH_ROLLING_DELAY_MS'), windowMs: envMs('AGENT_ORCH_ROLLING_WINDOW_MS') },
+});
 
 // ---------- server metrics ----------
 const readText = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } };
@@ -1557,7 +1571,7 @@ async function handleRequest(req, res) {
     if (!onSubscription() && Date.now() - claudeAuth.checkedAt > 5000) await refreshClaudeAuth();
     return json(res, 200, {
       claudeSignedIn: onSubscription(), claudeAuth, host: DEVICE_NAME, workspace: WORKSPACE,
-      restartPending, commitsSinceBoot: commitsSinceBoot(),
+      commitsSinceBoot: commitsSinceBoot(), publicCommit: publicCommit(), applyUpdates: orch?.applyUpdates() || 'manual', ...updateStatus(),
     });
   }
   // Stop claiming tasks, then exit once the running ones and every chat reply/planner turn finish; systemd
@@ -1570,16 +1584,22 @@ async function handleRequest(req, res) {
         orch.undrain();
         console.log('[restart] cancelled');
       }
-      for (const ws of allClients) send(ws, { t: 'status', restartPending });
+      for (const ws of allClients) send(ws, { t: 'status', ...updateStatus() });
       return json(res, 200, { draining: false });
     }
     startRestartDrain('draining');
     return json(res, 202, { draining: true });
   }
+  // The updates banner's "Restart now": a rolling restart right away (still preflighted; worker jobs keep running).
+  if (p === '/api/restart-now' && req.method === 'POST') {
+    if (!orch || NO_ORCH) return json(res, 409, { error: 'The orchestrator is not running here' });
+    if (restartPending) { restartPending = false; restartGen++; orch.undrain(); } // an idle drain gives way to it
+    return json(res, 202, { update: rolling.restartNow('restart now') && rolling.status() });
+  }
   // Settings → About: the build this process runs, the one on disk and whether a restart is on its way.
   if (p === '/api/version' && req.method === 'GET') {
     const disk = await version.disk();
-    return json(res, 200, { running: version.running(), disk, restart: { pending: restartPending, reason: restartReason, auto: !!orch?.autoRestart?.() } });
+    return json(res, 200, { running: version.running(), disk, restart: { pending: restartPending, reason: restartReason, auto: !!orch && !NO_ORCH && orch.applyUpdates() !== 'manual' } });
   }
   if (p === '/api/metrics/history') {
     return json(res, 200, historyFor(url.searchParams.get('range') || '1h'));

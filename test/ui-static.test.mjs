@@ -128,12 +128,12 @@ test('the sidebar gear opens Settings: sound + MP3 upload, parallel tasks (what 
   assert.match(sheet, /id="stParHint"/);
   assert.doesNotMatch(sheet, /1 \(recommended\)|Max parallel tasks/);
   assert.match(appJs, /saveParallel\(\{ maxTasks: /);
-  // Auto-restart: a switch beside the parallel cap, saved through the same PUT; the banner says a drain is automatic.
-  assert.match(sheet, /id="stParallel"[\s\S]*<input type="checkbox" class="st-switch" id="stAutoRestart" name="autoRestart" role="switch"[\s\S]*id="stGatePatterns"/);
-  assert.match(sheet, /Restart automatically once idle after server code changes/);
-  assert.match(appJs, /saveParallel\(\{ autoRestart: e\.target\.checked \}\)/);
-  assert.match(appJs, /if \(document\.activeElement !== \$\('stAutoRestart'\)\) \$\('stAutoRestart'\)\.checked = !!s\.parallel\?\.autoRestart/);
-  assert.match(appJs, /O\.state\?\.parallel\?\.autoRestart \? 'Restarting once idle \(automatic\)…'/);
+  // Apply updates (#426): a three-way choice beside the parallel cap, saved through the same PUT; the banner offers "Restart now".
+  assert.match(sheet, /id="stParallel"[\s\S]*<select id="stApplyUpdates" name="applyUpdates"[\s\S]*<option value="auto">Automatically within 2 min<\/option>[\s\S]*<option value="idle">When idle<\/option>[\s\S]*<option value="manual">Manually<\/option>[\s\S]*id="stGatePatterns"/);
+  assert.match(appJs, /saveParallel\(\{ applyUpdates: e\.target\.value \}\)/);
+  assert.match(appJs, /if \(document\.activeElement !== \$\('stApplyUpdates'\)\) \$\('stApplyUpdates'\)\.value = s\.parallel\?\.applyUpdates \|\| 'auto'/);
+  assert.match(appJs, /O\.state\?\.parallel\?\.applyUpdates === 'idle' \? 'Restarting once idle \(automatic\)…'/);
+  assert.match(appJs, /toast\(`Updated to v\$\{s\.updated\.version\}`/);
   assert.doesNotMatch(sheet, /stRank|stRoutes|Project priority|Routes/, 'no priority or routes rows in project settings');
   assert.match(appJs, /openFallbacks\(reflectFallbacks\(\), /);
   assert.match(appJs, /fetch\('\/api\/settings\/sound', \{ method: 'POST'/);

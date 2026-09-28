@@ -133,7 +133,8 @@
 
     <div class="banner update" id="updateBanner" hidden>
       <span id="updateText"></span>
-      <button class="btn small primary" id="updateRestart">Restart when idle</button>
+      <button class="btn small primary" id="updateRestart">Restart now</button>
+      <button class="btn small primary" id="updateReload" hidden>Reload</button>
       <button class="icon-btn" id="updateDismiss" aria-label="Dismiss">
         <svg viewBox="0 0 24 24" width="16" height="16"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
       </button>
@@ -471,8 +472,12 @@
         <input type="checkbox" class="st-switch" id="stRapid" name="rapidDevelopment" role="switch" aria-describedby="stRapidHint" checked>
       </label>
       <label class="st-row">
-        <span class="st-text"><strong>Restart automatically once idle after server code changes</strong><small id="stAutoRestartHint">A restart waits for running tasks and chat turns to finish</small></span>
-        <input type="checkbox" class="st-switch" id="stAutoRestart" name="autoRestart" role="switch" aria-describedby="stAutoRestartHint">
+        <span class="st-text"><strong>Apply updates</strong><small id="stApplyUpdatesHint">When new server code lands: tasks on this server pause and resume after the restart; workers keep running</small></span>
+        <select id="stApplyUpdates" name="applyUpdates" aria-describedby="stApplyUpdatesHint">
+          <option value="auto">Automatically within 2 min</option>
+          <option value="idle">When idle</option>
+          <option value="manual">Manually</option>
+        </select>
       </label>
       <div class="st-row st-dir">
         <label class="st-text" for="stGatePatterns"><strong>Ask me before</strong><small id="stGateHint">Browser tasks wait for your approval before clicking buttons or links named Send, Pay, Transfer, Submit order, Publish, Share, Delete, Confirm, Place order or Sign, or opening checkout pages. Add more names, one per line</small></label>

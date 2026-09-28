@@ -33,6 +33,7 @@ import { autoTasks, reserveBytes } from './power.mjs';
 import { CPU_PER_TASK, FOOTPRINT, GB, capSlots, capTasks, localCap } from './cap.mjs';
 import { extractCommand, runCheck, toolLine } from './taskrun.mjs';
 import { gcRetention } from './retention.mjs';
+import { APPLY_UPDATES } from './rolling.mjs';
 import { pushBranch, pushedBase } from './github.mjs';
 import { commitAll, ensureWorktree, fetchMain, isMerged, listWorktrees, mergeBack, parkWorktree, pruneOrphanWorktrees, removeWorktree, repoInfo, startIntegration, taskBranch, unresolvedFiles, worktreesRoot } from './worktrees.mjs';
 
@@ -1394,7 +1395,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // kv parallel_settings { parallelTasks: 1-16 (the controller's own work slots, default headTarget's; memory only an emergency floor), controllerWork: bool (see
   // CFG.controllerWork), controllerBrowser: bool (see CFG.controllerBrowser), maxTasks: null | n (owner cap on work tasks across every node),
   // rapidDevelopment: bool (default on: fill free cluster slots plus two ready tasks),
-  // autoRestart: bool (server.mjs restarts itself once idle after merged commits touched server code; default off) }. Older shapes read as defaults.
+  // applyUpdates: 'auto' (a rolling restart within 2 min of new server code, rolling.mjs; the default) | 'idle' (once idle)
+  // | 'manual'; the older autoRestart bool reads as auto (true) or manual (false) }. Older shapes read as defaults.
   function validParallel(n) { return Number.isInteger(n) && n >= 1 && n <= 16; }
   function parallelSettings() {
     let s = {};
@@ -1403,7 +1405,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       controllerWork: typeof s.controllerWork === 'boolean' ? s.controllerWork : CFG.controllerWork,
       controllerBrowser: typeof s.controllerBrowser === 'boolean' ? s.controllerBrowser : CFG.controllerBrowser,
       maxTasks: Number.isInteger(s.maxTasks) && s.maxTasks > 0 ? s.maxTasks : null,
-      rapidDevelopment: s.rapidDevelopment !== false, autoRestart: s.autoRestart === true };
+      rapidDevelopment: s.rapidDevelopment !== false, ...applyUpdatesOf(s) };
+  }
+  function applyUpdatesOf(s) {
+    const applyUpdates = APPLY_UPDATES.includes(s.applyUpdates) ? s.applyUpdates : s.autoRestart === false ? 'manual' : 'auto';
+    return { applyUpdates, autoRestart: applyUpdates !== 'manual' };
   }
   const slotsFor = (a) => typeof CFG.agentSlots === 'number' ? CFG.agentSlots : CFG.agentSlots[a] ?? 1;
 
@@ -1498,12 +1504,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const v = value && typeof value === 'object' ? value : {};
     let next = {};
     try { next = JSON.parse(kvGet('parallel_settings') || '{}') || {}; } catch {} // only what the owner set is stored
-    if (!['parallelTasks', 'controllerWork', 'controllerBrowser', 'maxTasks', 'autoRestart', 'rapidDevelopment'].some((k) => k in v)) return { error: 'Expected parallelTasks 1-16' };
+    if (!['parallelTasks', 'controllerWork', 'controllerBrowser', 'maxTasks', 'autoRestart', 'applyUpdates', 'rapidDevelopment'].some((k) => k in v)) return { error: 'Expected parallelTasks 1-16' };
     if ('parallelTasks' in v) { if (!validParallel(v.parallelTasks)) return { error: 'Expected parallelTasks 1-16' }; next.parallelTasks = v.parallelTasks; }
     if ('controllerWork' in v) { if (typeof v.controllerWork !== 'boolean') return { error: 'controllerWork must be true or false' }; next.controllerWork = v.controllerWork; }
     if ('controllerBrowser' in v) { if (typeof v.controllerBrowser !== 'boolean') return { error: 'controllerBrowser must be true or false' }; next.controllerBrowser = v.controllerBrowser; }
     if ('rapidDevelopment' in v) { if (typeof v.rapidDevelopment !== 'boolean') return { error: 'rapidDevelopment must be true or false' }; next.rapidDevelopment = v.rapidDevelopment; }
-    if ('autoRestart' in v) { if (typeof v.autoRestart !== 'boolean') return { error: 'autoRestart must be true or false' }; next.autoRestart = v.autoRestart; }
+    if ('autoRestart' in v) { if (typeof v.autoRestart !== 'boolean') return { error: 'autoRestart must be true or false' }; delete next.autoRestart; next.applyUpdates = v.autoRestart ? 'auto' : 'manual'; }
+    if ('applyUpdates' in v) { if (!APPLY_UPDATES.includes(v.applyUpdates)) return { error: `applyUpdates must be one of ${APPLY_UPDATES.join(', ')}` }; delete next.autoRestart; next.applyUpdates = v.applyUpdates; }
     if ('maxTasks' in v) { if (v.maxTasks !== null && !(Number.isInteger(v.maxTasks) && v.maxTasks >= 1 && v.maxTasks <= 64)) return { error: 'maxTasks must be null or 1-64' }; next.maxTasks = v.maxTasks; }
     kvSet('parallel_settings', JSON.stringify(next));
     pushState(); setTimeout(tick, 0);
@@ -2272,7 +2279,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // ---- owner controls on a running task (drawer and card): pause and hand off. Aborting only asks the session to stop;
   // the intent is applied once the run has really ended (applyStopIntent, from execute), so a run that finishes in the
   // meantime simply finishes, and a limit that hits mid-handoff is recorded as usual and the handoff still happens.
-  const stopIntents = new Map(); // task id -> { kind: 'pause' } | { kind: 'handoff', agent, model, account }
+  const stopIntents = new Map(); // task id -> { kind: 'pause' | 'restart' } | { kind: 'handoff', agent, model, account }
   const stopWaiters = new Map(); // task id -> [resolve]: callers waiting for the run to end
   const runEnded = (id, ms) => new Promise((resolve) => {
     if (!running.has(id)) return resolve(true);
@@ -2296,7 +2303,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     stopIntents.delete(id);
     const task = getTask(id);
     if (!intent || !['queued', 'running'].includes(task?.status)) return;
-    if (intent.kind === 'pause') {
+    if (intent.kind === 'restart') { // prepareRestart: work waits paused for the new process; reflection just stays queued
+      const work = task.kind === 'work';
+      if (work) updateTask(id, { status: 'paused', not_before: 0, agent: task.ran_agent || task.agent, model: task.ran_agent ? task.ran_model : task.model });
+      logEvent(`⏸ #${id} ${work ? 'paused' : 'stopped'} for a restart (session${work ? ' and worktree' : ''} kept); it continues after the update`, { projectId: task.project_id, taskId: id });
+    } else if (intent.kind === 'pause') {
       // Pinned to the agent/model it ran on, so Resume continues that session (a session resumes only on its agent).
       updateTask(id, { status: 'paused', not_before: 0, agent: task.ran_agent || task.agent, model: task.ran_agent ? task.ran_model : task.model });
       logEvent(`⏸ #${id} paused by the owner (session and worktree kept)`, { projectId: task.project_id, taskId: id });
@@ -2684,6 +2695,57 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     draining = false; pushState(); setTimeout(tick, 100);
   }
   const chatPlanning = () => [...planningProjects.values()].includes('chat');
+
+  // ---- rolling restart (#426, rolling.mjs). restartBlocker: why a restart must wait right now (an integrator mid-merge).
+  const localRuns = () => [...running].filter(([, r]) => (r.node || LOCAL_NODE) === LOCAL_NODE);
+  function restartBlocker() {
+    const id = localRuns().map(([id]) => id).find((id) => getTask(id)?.integrates);
+    return id ? `integrator #${id} is merging` : '';
+  }
+  // Stop claiming, then pause the head's own runs: work and reflection stop now (session and worktree kept), a planner
+  // turn gets planWaitMs first, an integrator finishes. A worker's job is left alone while it runs there (after the
+  // restart it is re-adopted, #220); one that has finished is waited for, since the head is merging it. Resolves
+  // {ok, paused} once only worker jobs run and no git operation is in flight (kv restart_paused lists the paused tasks
+  // for resumeAfterRestart), else {ok: false, why, paused} after waitMs (resumeAfterRestart undoes it).
+  async function prepareRestart({ waitMs = 5 * 60e3, planWaitMs = 60e3, pollMs = 250 } = {}) {
+    draining = true; pushState();
+    const start = Date.now(), stopped = new Set();
+    const headSide = () => [...running].filter(([id, r]) => (r.node || LOCAL_NODE) !== LOCAL_NODE && !jobs.has(id));
+    for (;;) {
+      for (const [id, r] of localRuns()) {
+        if (stopIntents.has(id) || (r.kind === 'plan' && Date.now() - start < planWaitMs) || getTask(id)?.integrates) continue;
+        stopIntents.set(id, { kind: 'restart' });
+        stopped.add(id);
+        r.abort.abort();
+      }
+      const paused = [...stopped].filter((id) => getTask(id)?.status === 'paused');
+      const left = [...localRuns(), ...headSide()].map(([id]) => `#${id}`);
+      if (!left.length && !gitChains.size) {
+        kvSet('restart_paused', JSON.stringify(paused));
+        return { ok: true, paused };
+      }
+      if (Date.now() - start >= waitMs) {
+        kvSet('restart_paused', JSON.stringify(paused));
+        return { ok: false, paused, why: left.length ? `${left.join(', ')} still running on this server` : 'a merge is still in flight' };
+      }
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
+  }
+  // After boot, or when a restart is called off: the tasks prepareRestart paused are queued again (same session), and
+  // claiming resumes.
+  function resumeAfterRestart() {
+    let ids = [];
+    try { ids = JSON.parse(kvGet('restart_paused') || '[]'); } catch {}
+    if (ids.length) kvSet('restart_paused', '[]');
+    for (const id of ids) {
+      const t = getTask(id);
+      if (t?.status !== 'paused') continue;
+      updateTask(id, { status: 'queued', not_before: 0 });
+      logEvent(`▶ #${id} resumed after the restart${t.session_id ? ' (same session)' : ''}`, { projectId: t.project_id, taskId: id });
+    }
+    if (draining) undrain(); else if (ids.length) setTimeout(tick, 100);
+    return ids;
+  }
 
   // Rapid top-up demand per node class (#436). Worker slots: every node taking ordinary work (online workers at their
   // target, the controller's work slots when it takes work) less the ordinary work running. Worker-ready: queued work
@@ -4047,6 +4109,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     run(`UPDATE runs SET outcome='error', finished_at=:t WHERE finished_at IS NULL
       AND id NOT IN (SELECT MAX(id) FROM runs WHERE task_id IN (SELECT value FROM json_each(:k)) GROUP BY task_id)`, { t: now(), k: JSON.stringify(adoptable) });
     if (orphans) logEvent(`requeued ${orphans} interrupted task(s) after a restart`);
+    resumeAfterRestart();
     cleanupWorktrees(); // per-project merge lock: a claim in the same project waits for it
     // #345: workers push through the head now, so a work task that failed on a worker's push to GitHub gets one more go
     // (once per database).
@@ -4097,7 +4160,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     createBrowserTask, listBrowserTasks, stopBrowserTask, attachBrowserViews,
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
     planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, insertCheckpoint, approveCheckpoint, requestChanges, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setTaskRunOn, setReflectFallbacks, setReflectSettings, syncConvoModel, pauseTask, resumeTask, handoffTask, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
-    drain, undrain, chatPlanning, autoRestart: () => parallelSettings().autoRestart, stateView, machines, browserTasks, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, reconcileClaudeLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
+    drain, undrain, chatPlanning, applyUpdates: () => parallelSettings().applyUpdates,
+    prepareRestart, resumeAfterRestart, restartBlocker, stateView, machines, browserTasks, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, reconcileClaudeLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     // A sidebar chat's project rank ({id, position, priority}), or null when its folder has no orchestrator project.
     projectRank: (cwd) => q1('SELECT id, position, priority FROM projects WHERE path=:p', { p: cwd }) ?? null,
     isRunning: (id) => running.has(Number(id)), logEvent, attachCluster, detectHardware,

@@ -111,10 +111,15 @@ document.querySelectorAll('.seg button').forEach((b) => b.addEventListener('clic
 $('bannerTerm').addEventListener('click', () => setView('term'));
 $('updateRestart').addEventListener('click', async () => {
   $('updateRestart').disabled = true;
-  try { await api('/api/restart-when-idle', 'POST'); upd.pending = true; } catch { $('updateRestart').disabled = false; }
+  try { upd.update = (await api('/api/restart-now', 'POST')).update || upd.update; } catch (e) { $('updateRestart').disabled = false; toast(e.message, { kind: 'error' }); }
   renderUpdateBanner();
 });
-$('updateDismiss').addEventListener('click', () => { upd.dismissed = upd.commits; store.set('cw.updDismissed', String(upd.commits)); renderUpdateBanner(); });
+$('updateReload').addEventListener('click', () => location.reload());
+$('updateDismiss').addEventListener('click', () => {
+  upd.dismissed = upd.commits; store.set('cw.updDismissed', String(upd.commits));
+  upd.publicBase = upd.publicLatest; upd.reload = false; // until public/ changes again
+  renderUpdateBanner();
+});
 
 // ---------- terminals ----------
 // Every terminal is a tmux session running bash on the server, so it keeps running when the
@@ -3066,7 +3071,11 @@ function onServer(msg) {
     return checkPairing();
   }
   if (msg.t === 'models') return api('/api/agents').then((d) => { AGENT_LIST = d.agents || []; renderAgentPicker(); }).catch(() => {});
-  if (msg.t === 'status') { upd.pending = !!msg.restartPending; if (!$('settingsModal').hidden) loadAbout(); return renderUpdateBanner(); }
+  if (msg.t === 'status') {
+    if (msg.alert) toast(msg.alert, { kind: 'error' });
+    if (!$('settingsModal').hidden) loadAbout();
+    return applyUpdateStatus(msg);
+  }
   if (msg.t === 'version') return onVersion(msg.running);
   if (msg.t === 'ext') return window.Ext?.changed(msg.kind); // skills/MCP/subagents/personas changed (ext.js)
   if (msg.t === 'convos') {
@@ -3266,23 +3275,35 @@ async function checkStatus() {
   } catch {}
 }
 
-// The server's checkout moved on since it booted (or a restart is queued): offer to restart once idle.
-const upd = { commits: 0, pending: false, dismissed: Number(store.get('cw.updDismissed')) || 0 };
+// The server's checkout moved on since it booted (or a restart is queued or under way): offer "Restart now". A rolling
+// restart (update: {at, phase}) shows when it happens; new public/ files only need a reload of this page.
+const upd = { commits: 0, pending: false, update: null, publicBase: null, publicLatest: null, reload: false, dismissed: Number(store.get('cw.updDismissed')) || 0 };
 function applyUpdateStatus(s) {
-  upd.commits = s.commitsSinceBoot || 0;
-  upd.pending = !!s.restartPending;
+  if ('commitsSinceBoot' in s) upd.commits = s.commitsSinceBoot || 0;
+  if ('restartPending' in s) upd.pending = !!s.restartPending;
+  if ('update' in s) upd.update = s.update || null;
+  if (s.publicCommit) { upd.publicLatest = s.publicCommit; upd.publicBase ??= s.publicCommit; upd.reload = s.publicCommit !== upd.publicBase; }
+  if (s.updated?.version && store.get('cw.updToast') !== s.updated.version) {
+    store.set('cw.updToast', s.updated.version);
+    toast(`Updated to v${s.updated.version}`, { kind: 'success' });
+  }
   if (upd.commits < upd.dismissed) { upd.dismissed = 0; store.set('cw.updDismissed', '0'); } // a restart reset the count
   renderUpdateBanner();
 }
 async function pollUpdates() { try { applyUpdateStatus(await api('/api/status')); } catch {} }
+const UPDATE_PHASE = { preflight: 'Updating: checking that the new code starts…', pausing: 'Updating: pausing this server\'s tasks…', exiting: 'Updating: restarting…' };
 function renderUpdateBanner() {
-  const draining = upd.pending || !!O.state?.draining;
-  $('updateBanner').hidden = !draining && (!upd.commits || upd.commits <= upd.dismissed);
-  $('updateText').textContent = draining ? (O.state?.parallel?.autoRestart ? 'Restarting once idle (automatic)…' : 'Restarting after running tasks finish…')
+  const u = upd.update, draining = !u && (upd.pending || !!O.state?.draining), busy = draining || (u && u.phase !== 'scheduled');
+  const reloadOnly = !u && !draining && upd.reload && (!upd.commits || upd.commits <= upd.dismissed);
+  $('updateBanner').hidden = !u && !draining && !reloadOnly && (!upd.commits || upd.commits <= upd.dismissed);
+  $('updateText').textContent = u ? (UPDATE_PHASE[u.phase] || withUntil({ text: 'Updating the server at {until}', until: u.at }))
+    : draining ? (O.state?.parallel?.applyUpdates === 'idle' ? 'Restarting once idle (automatic)…' : 'Restarting after running tasks finish…')
+    : reloadOnly ? 'The app was updated: reload to get the new version'
     : `${upd.commits} new commit${upd.commits === 1 ? '' : 's'} since the server started`;
-  $('updateRestart').hidden = draining;
+  $('updateRestart').hidden = busy || reloadOnly;
   $('updateRestart').disabled = false;
-  $('updateDismiss').hidden = draining;
+  $('updateReload').hidden = !reloadOnly;
+  $('updateDismiss').hidden = busy || !!u;
 }
 
 // ---------- server metrics ----------
@@ -6109,8 +6130,8 @@ function renderSettings() {
   $('stRapid').disabled = !s.parallel;
   if (document.activeElement !== $('stRapid')) $('stRapid').checked = s.parallel?.rapidDevelopment !== false;
   $('stRapidHint').textContent = s.rapid?.reason || 'Keep free slots fed with small parallel tasks. Off waits for an empty queue.';
-  $('stAutoRestart').disabled = !s.parallel;
-  if (document.activeElement !== $('stAutoRestart')) $('stAutoRestart').checked = !!s.parallel?.autoRestart;
+  $('stApplyUpdates').disabled = !s.parallel;
+  if (document.activeElement !== $('stApplyUpdates')) $('stApplyUpdates').value = s.parallel?.applyUpdates || 'auto';
   renderReflectModel();
   renderReflectBtn();
   $('stProject').hidden = !p;
@@ -6189,7 +6210,7 @@ $('stGatePatterns').addEventListener('change', async (e) => {
 $('stParallel').addEventListener('change', (e) => { saveParallel({ maxTasks: e.target.value ? Number(e.target.value) : null }); e.target.blur(); });
 $('stServerTasks').addEventListener('change', (e) => { saveParallel({ parallelTasks: Number(e.target.value) }); e.target.blur(); });
 $('stRapid').addEventListener('change', async (e) => { await saveParallel({ rapidDevelopment: e.target.checked }); e.target.blur(); renderSettings(); });
-$('stAutoRestart').addEventListener('change', async (e) => { await saveParallel({ autoRestart: e.target.checked }); e.target.blur(); renderSettings(); });
+$('stApplyUpdates').addEventListener('change', async (e) => { await saveParallel({ applyUpdates: e.target.value }); e.target.blur(); renderSettings(); });
 // Keep improving: off means this project never reflects (queued reflections are cancelled; a running one's tasks are dropped).
 const PERP = { saving: false };
 $('stPerpetual').addEventListener('change', async (e) => {

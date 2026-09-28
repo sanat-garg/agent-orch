@@ -1188,6 +1188,9 @@ gcRetention now sweeps finished and orphaned browser-task workspaces, tests pass
 
 CONTEXT.md conflict resolved; cluster-git tests pass
 
+## 2026-09-28 14:40 — #426 Rolling restart: new server code goes live within minutes, even when busy [done (check passed)]
+
+rolling restarts land new server code within 2 min; tests pass
 ## 2026-09-28 14:23 — #430 gate-proxy.mjs http upstream: on a 404 for a stale session, initialize again once and retry the call [done (check passed)]
 
 http gate proxy re-initializes after a stale-session 404 and retries
@@ -1283,3 +1286,7 @@ Merged main again; Done-when and Machines browser tests pass
 ## 2026-09-28 14:38 — #443 Integrate #432: Custom completion sounds: upload your own, per machine or for all [done (check passed)]
 
 merge conflicts resolved; custom-sound and machine-settings tests pass
+
+## 2026-09-28 14:42 — #446 Integrate #426: Rolling restart: new server code goes live within minutes, even when busy [done (check passed)]
+
+merge conflicts resolved; rolling-restart, version, and UI tests pass

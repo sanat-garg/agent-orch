@@ -70,8 +70,8 @@ test('restart-when-idle rejects unauthenticated calls, then drains and exits 0',
   assert.match(out, /\[restart\]/);
 });
 
-// autoRestart: with the boot commit set before the latest server.mjs change, the poll drains and exits 0 once the
-// owner turns the setting on, and stays up while it's off.
+// Apply updates 'idle' (#281): with the boot commit set before the latest server.mjs change, the poll drains and exits 0
+// once the owner picks it, and stays up with 'manual'. The default ('auto', a rolling restart) is rolling-restart*.test.mjs's.
 const bootBeforeServerChange = () => new Promise((resolve, reject) => {
   const g = spawn('git', ['log', '-2', '--format=%H', '--', 'server.mjs'], { cwd: ROOT });
   let o = '';
@@ -109,17 +109,25 @@ async function bootServer(extraEnv, cwd = ROOT) {
   return s;
 }
 
-test('autoRestart drains and exits 0 after server code changed since boot; stays up while off', async () => {
-  const env = { AGENT_ORCH_BOOT_COMMIT: await bootBeforeServerChange(), AGENT_ORCH_RESTART_POLL_MS: '200' };
+test("Apply updates 'idle' drains and exits 0 after server code changed since boot; 'manual' stays up", async () => {
+  const env = { AGENT_ORCH_BOOT_COMMIT: await bootBeforeServerChange(), AGENT_ORCH_RESTART_POLL_MS: '200', AGENT_ORCH_ROLLING_DELAY_MS: '60000' };
   const off = await bootServer(env);
   const on = await bootServer(env);
+  const put = (s, body) => fetch(s.base + '/api/orch/parallel', { method: 'PUT', headers: { cookie: s.cookie }, body: JSON.stringify(body) });
 
-  const bad = await fetch(on.base + '/api/orch/parallel', { method: 'PUT', headers: { cookie: on.cookie }, body: JSON.stringify({ autoRestart: 'yes' }) });
+  // The legacy autoRestart bool still works: true reads as 'auto', false as 'manual'.
+  const legacy = await put(off, { autoRestart: true });
+  assert.equal(legacy.status, 200);
+  assert.deepEqual((({ applyUpdates, autoRestart }) => ({ applyUpdates, autoRestart }))((await legacy.json()).state.parallel), { applyUpdates: 'auto', autoRestart: true });
+  const manual = await put(off, { applyUpdates: 'manual' });
+  assert.equal((await manual.json()).state.parallel.applyUpdates, 'manual');
+
+  const bad = await put(on, { applyUpdates: 'sometimes' });
   assert.equal(bad.status, 400);
   await bad.arrayBuffer();
-  const put = await fetch(on.base + '/api/orch/parallel', { method: 'PUT', headers: { cookie: on.cookie }, body: JSON.stringify({ autoRestart: true }) });
-  assert.equal(put.status, 200);
-  assert.equal((await put.json()).state.parallel.autoRestart, true);
+  const idle = await put(on, { applyUpdates: 'idle' });
+  assert.equal(idle.status, 200);
+  assert.equal((await idle.json()).state.parallel.applyUpdates, 'idle');
 
   const timer = setTimeout(() => on.proc.kill('SIGKILL'), 45000);
   const code = await on.exited;
@@ -127,11 +135,13 @@ test('autoRestart drains and exits 0 after server code changed since boot; stays
   assert.equal(code, 0, `server exited with ${code}:\n${on.out}`);
   assert.match(on.out, /\[restart\] auto:/);
 
-  // The off server has polled all along (≥ 1 s at 200 ms) without restarting.
+  // The manual server has polled all along (≥ 1 s at 200 ms): the rolling restart it scheduled at boot was called off.
   const st = await (await fetch(off.base + '/api/status', { headers: { cookie: off.cookie } })).json();
   assert.equal(st.restartPending, false);
+  assert.equal(st.update, null);
+  assert.equal(st.applyUpdates, 'manual');
   assert.equal(off.proc.exitCode, null);
-  assert.doesNotMatch(off.out, /\[restart\]/);
+  assert.doesNotMatch(off.out, /exiting for restart|\[restart\] auto:/);
 });
 
 // Preflight: a root module with a syntax error (one server.mjs never imports) fails `node --check`, so the drain

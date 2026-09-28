@@ -1062,3 +1062,7 @@ Keep improving switch is back; off blocks every reflection path
 ## 2026-09-28 13:04 — #377 approvals.mjs: the expiry note states the row's real TTL and overdue rows expire at boot [done (check passed)]
 
 expiry notes show each row's own window; overdue rows expire at boot
+
+## 2026-09-28 13:08 — #368 Ping button for worker machines: round-trip plus an on-Mac network self-check [done (check passed)]
+
+Ping per worker card and Ping all work; ping tests pass

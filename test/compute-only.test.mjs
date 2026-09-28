@@ -50,7 +50,7 @@ test('the allow-list: jobs, sign-in, refreshes, logs, updates, policy, the live 
   assert.deepEqual([...WORKER_ACCEPTS].sort(), [
     'ack', 'agent.credential', 'bye', 'error', 'ext.sync', 'git.credential', 'heartbeat', 'job.approval', 'job.attach', 'job.cancel', 'job.offer', 'job.pause', 'job.resume', 'job.start',
     'limits.refresh', 'login.cancel', 'login.code', 'login.logout', 'login.start', 'logs.tail', 'models.refresh', 'node.policy', 'node.update',
-    'screen.input', 'screen.req', 'welcome',
+    'ping', 'screen.input', 'screen.req', 'welcome',
   ]);
   for (const t of WORKER_ACCEPTS) {
     assert.doesNotMatch(t, /chat|prompt|plan|reflect|convo|setting|config|ui\b/, t);

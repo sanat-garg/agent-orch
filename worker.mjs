@@ -29,6 +29,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import net from 'node:net';
+import dns from 'node:dns';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -101,6 +102,42 @@ const EDIT_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
 // The files an edit tool call touched: Claude's file_path, or codex's file_change lines ("add hello.txt").
 const editedFiles = (e) => (EDIT_TOOLS.has(e.name) ? String(e.input?.file_path || e.input?.path || '').split('\n')
   .map((l) => l.replace(/^(add|update|delete|modify|rename|move)\s+/, '').trim()).filter(Boolean) : []);
+// The owner's Ping (ping → pong {diag}; cluster.mjs pingReport words it): a quick network self-check, each probe in
+// parallel with its own budget. dns: the head's name through the system resolver (getaddrinfo, as curl and git see it);
+// head: GET its /api/health; git: `git ls-remote` of the head's git endpoint when the head names one; github: an HTTPS
+// HEAD of github.com (null = skipped); conn: this worker's reconnect state, added by the caller.
+export async function selfCheck({ controller, git = null, github = 'https://github.com/', budgetMs = 5000 } = {}) {
+  const timed = async (fn) => {
+    const t0 = Date.now();
+    let timer;
+    try {
+      const r = await Promise.race([fn(), new Promise((_, no) => { timer = setTimeout(() => no(Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' })), budgetMs); })]);
+      return { ...r, ms: Date.now() - t0 };
+    } catch (e) {
+      const code = e.cause?.code || e.code;
+      return { ok: false, ...(typeof code === 'string' ? { code } : {}), error: firstLine(e.cause?.message || e).slice(0, 200), ms: Date.now() - t0 };
+    } finally { clearTimeout(timer); }
+  };
+  const get = (url, method) => timed(async () => {
+    const r = await fetch(url, { method, redirect: 'manual', signal: AbortSignal.timeout(budgetMs), headers: { 'user-agent': 'agent-orch-worker ping' } });
+    r.body?.cancel().catch(() => {});
+    return { ok: r.status < 500, status: r.status };
+  });
+  let host = '', health = null;
+  try { const u = new URL(controller); host = u.hostname.replace(/^\[|\]$/g, ''); health = new URL('/api/health', u).href; } catch {}
+  const [dnsR, head, gitR, gh] = await Promise.all([
+    host ? timed(async () => ({ ok: true, ips: (await dns.promises.lookup(host, { all: true })).map((a) => a.address).slice(0, 5) })) : null,
+    health ? get(health, 'GET').then((r) => ({ url: health, ...r, ok: r.status >= 200 && r.status < 400 })) : null,
+    git ? timed(async () => {
+      await execFileP('git', ['ls-remote', git, 'HEAD'], { timeout: budgetMs, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, maxBuffer: 1 << 20 }).catch((e) => {
+        throw Object.assign(new Error(String(e.stderr || '').trim().split('\n').pop() || e.message), { code: e.killed ? 'ETIMEDOUT' : 'EGIT' });
+      });
+      return { ok: true };
+    }) : null,
+    github ? get(github, 'HEAD') : null,
+  ]);
+  return { host, ...(dnsR ? { dns: dnsR } : {}), ...(head ? { head } : {}), ...(gitR ? { git: gitR } : {}), github: gh || { skipped: true } };
+}
 const firstLine = (e) => String(e?.message || e || '').trim().split('\n')[0].slice(0, 500);
 
 // ---------------------------------------------------------------- config, logs
@@ -263,6 +300,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   // For the status view: the last finished jobs, the head's count of tasks up next for this machine, the connection.
   const recent = [];
   let queued = null, downSince = Date.now(), retryAt = 0, connError = null, status = null;
+  let netErr = null; // the last connection error {at, error}, kept after it reconnects (a Ping reports it)
   // browser: {capable, headed, error?} once checked (inventory.browser).
   let browser = null, browserAbort = null;
   // The owner's live view of a browser profile here (browser-live.mjs), driven by the head's screen.* frames; frames are
@@ -748,7 +786,11 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
         nodeError('exception', `handling ${msg.t} failed: ${e.message}`, { stack: e.stack });
       });
     });
-    sock.on('error', (e) => { if (!REFUSED_RE.test(connError || '')) connError = `connection error: ${e.message}`; log(`connection error: ${e.message}`, 'warn'); });
+    sock.on('error', (e) => {
+      if (!REFUSED_RE.test(connError || '')) connError = `connection error: ${e.message}`;
+      netErr = { at: Date.now(), error: `${e.code ? `${e.code}: ` : ''}${e.message}`.slice(0, 300) };
+      log(`connection error: ${e.message}`, 'warn');
+    });
     sock.on('close', (code, reason) => {
       if (ws !== sock) return;
       ws = null; welcomed = false;
@@ -846,6 +888,12 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       case MSG.NODE_POLICY: setPolicy(msg.policy); return sendResources(); // the controller sees the new intake at once
       case MSG.SCREEN_REQ: return screenReq(msg);
       case MSG.SCREEN_INPUT: return screens?.input(msg.identity, msg.events);
+      case MSG.PING: {
+        const diag = await selfCheck({ controller: config.controller, git: msg.git || null, github: NET_PROBE === 'off' ? null : 'https://github.com/' });
+        diag.conn = { since: connectedAt, attempt, ...(netErr ? { lastError: netErr.error, lastErrorAt: netErr.at } : {}), ...(netState ? { probe: netState } : {}) };
+        log(`ping: ${['dns', 'head', 'git', 'github'].filter((k) => diag[k] && !diag[k].skipped).map((k) => `${k} ${diag[k].ok ? 'ok' : diag[k].code || 'failed'}`).join(', ')}`);
+        return raw(MSG.PONG, { id: msg.id, diag });
+      }
       default: return reject(msg.t); // allow-listed but not handled here: still never acted on
     }
   }

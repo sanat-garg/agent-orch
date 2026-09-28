@@ -13,3 +13,7 @@ Add a 'Ping' button per machine in the Machines view (public/app.js; one per nod
 ## Done when
 
 `node --test test/cluster-ping*.test.mjs` passes (round-trip with diag, timeout, DNS-failure hint, disconnected node info), and the Machines view renders a Ping button per node
+
+## Result — done (check passed) (2026-09-28 13:08)
+
+AGENT-ORCH-STATUS: done — Ping per worker card and Ping all work; ping tests pass

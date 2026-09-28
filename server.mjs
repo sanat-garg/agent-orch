@@ -1459,6 +1459,8 @@ async function handleRequest(req, res) {
     res.writeHead(200, { 'Content-Type': 'text/x-shellscript; charset=utf-8', 'Cache-Control': 'no-store' });
     return res.end(fs.readFileSync(path.join(ROOT, 'bin', inst)));
   }
+  // Liveness, without a session: a worker's Ping and the owner's one-liner for a disconnected machine test the head with it.
+  if (p === '/api/health' && (req.method === 'GET' || req.method === 'HEAD')) return json(res, 200, { ok: true });
   // A worker asks whether the head still knows it (its node token is the credential; a wrong one counts as a failure).
   if (p === WHOAMI_PATH && req.method === 'GET') {
     if (!cluster) return json(res, 503, { error: 'cluster unavailable' });
@@ -1658,15 +1660,17 @@ async function handleRequest(req, res) {
     const r = req.method === 'PATCH' ? cluster.update(cnode[1], await readBody(req)) : cluster.revoke(cnode[1]);
     return r.error ? json(res, r.status, { error: r.error }) : json(res, 200, r);
   }
-  // A node's health: its telemetry series (?range=15m|1h|6h|24h), its log tail fetched over the socket (?tail=200), and
-  // the owner's "Update" (the worker pulls and restarts once idle).
-  const nsub = p.match(/^\/api\/cluster\/nodes\/([\w-]+)\/(metrics|logs|update)$/);
+  // A node's health: its telemetry series (?range=15m|1h|6h|24h), its log tail fetched over the socket (?tail=200),
+  // the owner's "Update" (the worker pulls and restarts once idle) and "Ping" (a round trip and the worker's network
+  // self-check; a disconnected node: its last seen and a command to test the head from it).
+  const nsub = p.match(/^\/api\/cluster\/nodes\/([\w-]+)\/(metrics|logs|update|ping)$/);
   if (nsub) {
     const [, id, what] = nsub;
     let r = null;
     if (what === 'metrics' && req.method === 'GET') r = cluster.metrics(id, url.searchParams.get('range') || '1h');
     else if (what === 'logs' && req.method === 'GET') r = await cluster.logsTail(id, Number(url.searchParams.get('tail')) || 200);
     else if (what === 'update' && req.method === 'POST') r = cluster.requestUpdate(id);
+    else if (what === 'ping' && req.method === 'POST') r = await cluster.ping(id, { headUrl: `${isHttps(req) ? 'https' : 'http'}://${req.headers.host}` });
     if (r) return r.error ? json(res, r.status, { error: r.error }) : json(res, 200, r);
   }
   if (p === '/api/resources' && req.method === 'GET') return json(res, 200, resources.summary());

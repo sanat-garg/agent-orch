@@ -89,6 +89,7 @@ Direction: C = controller → worker, W = worker → controller (`DIRECTION`; `v
 | `node.update` | C | sha | update agent-orch and restart, sent only while the node is idle (feature `update`) |
 | `node.policy` | C | policy | the owner changed the node's power policy or max tasks (feature `policy`); older workers read it in the next `welcome` |
 | `ext.sync` | C | hash, bytes | the controller's skills, subagents or MCP servers are now bundle `hash` (sent after `welcome` and on every change); a worker holding another one GETs `EXT_PATH` (feature `ext`) |
+| `ping` / `pong` | C / W | id, sentAt, git / id, diag | the owner's Ping (feature `ping`): the worker answers with a parallel self-check (DNS of the head, the head's `/api/health`, `git ls-remote` of `git`, GitHub, its reconnect state); see Health |
 | `screen.req` / `screen.res` / `screen.input` / `screen.frame` / `screen.state` | C / W / C / W / W | req, op, identity… / req, result, error / identity, events / identity, n, data, w, h / identity, url, title, active, takeover | the owner's live view of a browser profile on the worker (browser-live.mjs; feature `screen`); input is never logged |
 
 Screen prompts use `job.start.execution='browser'` (feature `browser-task`): `repo`, `baseSha` and `branch` are omitted, and the worker uses a plain per-task workspace, skipping clone/worktree, install, done-when and commit/push. Other work still requires all three git fields.
@@ -253,6 +254,10 @@ Workers report richly; the controller keeps what the owner needs and acts on it.
   crashed checks are `job.error` (kept on the run, `runs.errors`, and in the task's events); daemon exceptions (a frame
   handler, uncaughtException: reported, then a clean stop and exit 1 for the service manager) are `node.error` (the
   node's `last_error`, shown on its card for a day).
+- **Ping** (#368): `POST /api/cluster/nodes/:id/ping` sends `ping` and waits 8 s for `pong` → `{rtt, diag, parts, hints}`
+  (cluster.mjs `pingReport`: the summary and plain-language hints), else 504 'no answer'; a disconnected node answers
+  its last seen, drop reason, 24 h drops and a shell one-liner to test the head from that machine. Every result is a
+  `node_events` row (kind `ping`, kept 7 days: `hub.nodeEvents(id)`).
 - **Logs**: `GET /api/cluster/nodes/:id/logs?tail=200` sends `logs.tail {req}` and waits (15 s) for `logs {req, lines}`:
   the worker's `logs/worker.log` (and the rotated one before it), at most 2000 lines clipped to fit one frame.
 - **Auto-health** (cluster.mjs `HEALTH`): a worker is drained (`nodes.drain_reason`, a notice in the event log and a

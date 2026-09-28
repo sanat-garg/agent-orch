@@ -547,6 +547,12 @@ code, pre, kbd { font-family: var(--mono); }
 .mc-health { margin: 0; font-size: 12.5px; line-height: 1.4; overflow-wrap: anywhere; }
 .mc-health.warn { color: var(--warn); }
 .mc-health.bad { color: var(--danger); }
+.mc-acts { display: flex; gap: 8px; }
+.mc-ping { display: flex; flex-direction: column; gap: 4px; }
+.mc-ping-sum { color: var(--text); font-variant-numeric: tabular-nums; }
+.mc-ping-sum .bad { color: var(--danger); font-weight: 550; }
+.mc-cmd { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.mc-cmd code { flex: 1; min-width: 0; padding: 6px 8px; border-radius: 8px; background: var(--code-bg); color: var(--text); font-size: 12px; overflow-x: auto; white-space: nowrap; }
 .mc-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: auto; padding-top: 10px; border-top: 1px solid var(--border); }
 .mc-ctl .mc-slots { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-basis: 100%; font-size: 12.5px; }
 .mc-ctl .mc-auto { color: var(--text); font-weight: 550; cursor: help; }
@@ -568,7 +574,8 @@ code, pre, kbd { font-family: var(--mono); }
 .am-status .dot.wait { animation-duration: 1.6s; }
 .am-next { margin: 0; padding: 10px 12px; border-radius: 10px; background: var(--accent-soft); color: var(--text); }
 .am-acts { display: flex; gap: 8px; justify-content: flex-end; }
-@media (max-width: 700px) { .am-acts .btn { height: 44px; } #addMachine { height: 44px; } }
+@media (max-width: 700px) { .am-acts .btn { height: 44px; } #addMachine, #pingAll { height: 44px; } }
+@media (pointer: coarse) { .mc-cmd .btn.small { min-height: 44px; } }
 .am-uses { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; color: var(--text); font-weight: 550; font-size: 13.5px; }
 .am-uses select, .mc-prow select { height: 34px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit;
   font-size: 13.5px; font-weight: 500; padding: 0 6px; }

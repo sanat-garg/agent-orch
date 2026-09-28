@@ -24,6 +24,51 @@ export const LOCAL_NODE = 'controller';
 // Why a task waits for its node ('waiting for Mac mini (connection lost)'): a drop without a bye is 'connection lost' on
 // every OS; 'Mac asleep' only when that is known (a legacy away value: a sleep is otherwise learned on reconnect).
 export const awayNote = (n) => (!n || n.connected ? null : n.away === 'asleep' ? 'Mac asleep' : n.away === 'lost' ? 'connection lost' : null);
+
+// A Ping's pong diag → the owner's summary ('Ping 84 ms · DNS ok (129.154.229.134, 12 ms) · head HTTPS 200 (140 ms) · GitHub
+// ok'; parts [{text, bad}]) and plain-language hints for what failed. os: the node's, for 'this Mac' / 'this machine'.
+export function pingReport(diag, rtt, os) {
+  const d = diag && typeof diag === 'object' ? diag : {}, mac = os === 'darwin' ? 'this Mac' : 'this machine', Mac = os === 'darwin' ? "the Mac's" : "the machine's";
+  const ms = (x) => (Number.isFinite(x?.ms) ? `${Math.round(x.ms)} ms` : null), why = (x) => x?.code || x?.error || 'failed';
+  const parts = [{ text: `Ping ${rtt} ms`, bad: false }], hints = [];
+  const host = typeof d.host === 'string' ? d.host : '', zone = host.split('.').slice(-2).join('.');
+  const scheme = /^http:/.test(d.head?.url || '') ? 'HTTP' : 'HTTPS';
+  if (d.dns) {
+    const ips = Array.isArray(d.dns.ips) ? d.dns.ips.slice(0, 3).join(', ') : '';
+    parts.push(d.dns.ok ? { text: `DNS ok (${[ips, ms(d.dns)].filter(Boolean).join(', ')})`, bad: false }
+      : { text: `DNS failed (${[why(d.dns), ms(d.dns)].filter(Boolean).join(', ')})`, bad: true });
+    if (!d.dns.ok) {
+      hints.push(`DNS lookup of the head failed on ${mac}: its router or ISP can't resolve ${zone || 'the head\'s name'}. `
+        + `The worker falls back to the IP once #359 lands; or set ${Mac} DNS to 1.1.1.1`);
+    }
+  }
+  if (d.head) {
+    const ok = d.head.ok && d.head.status >= 200 && d.head.status < 400;
+    parts.push(d.head.status ? { text: `head ${scheme} ${d.head.status}${ms(d.head) ? ` (${ms(d.head)})` : ''}`, bad: !ok }
+      : { text: `head ${scheme} failed (${why(d.head)})`, bad: true });
+    if (!d.head.status && d.dns?.ok) hints.push(`DNS works, but ${mac} can't reach the head over ${scheme} (${why(d.head)}): a firewall, VPN or captive portal may be in the way`);
+    else if (d.head.status && !ok) hints.push(`The head answered HTTP ${d.head.status}: agent-orch or Caddy on the head may be down or restarting`);
+  }
+  if (d.git) {
+    parts.push(d.git.ok ? { text: `head git ok${ms(d.git) ? ` (${ms(d.git)})` : ''}`, bad: false } : { text: `head git failed (${why(d.git)})`, bad: true });
+    if (!d.git.ok) hints.push(`git ls-remote of the head's git endpoint failed on ${mac} (${why(d.git)}): task branches can't sync through the head`);
+  }
+  if (d.github && !d.github.skipped) {
+    parts.push(d.github.ok ? { text: 'GitHub ok', bad: false } : { text: `GitHub failed (${why(d.github)})`, bad: true });
+    if (!d.github.ok) hints.push(`${mac[0].toUpperCase()}${mac.slice(1)} can't reach GitHub (${why(d.github)}): it can't clone or push task branches`);
+  }
+  return { parts, hints };
+}
+// A one-liner the owner runs on a disconnected machine to test the head from there: the health endpoint's status and
+// time, then a lookup of the head's name through the system resolver (dscacheutil on a Mac, getent on Linux).
+export function testCommand(headUrl, os) {
+  let u;
+  try { u = new URL('/api/health', headUrl); } catch { return null; }
+  if (!/^https?:$/.test(u.protocol) || !/^[\w.-]+(:\d+)?$/.test(u.host)) return null; // it is pasted into a shell
+  const curl = `curl -sS -o /dev/null -w '%{http_code} %{time_total}s\\n' ${u.href}`;
+  if (/^[\d.]+$/.test(u.hostname)) return curl; // an IP: nothing to look up
+  return `${curl}; ${os === 'darwin' ? `dscacheutil -q host -a name ${u.hostname}` : `getent hosts ${u.hostname}`}`;
+}
 const MAX_ERRORS = 5; // invalid frames per connection before the worker is disconnected
 // Auto-health: a worker is drained, and the owner told, when the disk holding its repos has under 2 GB free, when it lost
 // its connection 3 times in 30 min (missed heartbeats or a dropped socket, not a Mac's sleep), or when 3 different tasks
@@ -94,6 +139,15 @@ CREATE TABLE IF NOT EXISTS node_drops (
 );
 CREATE INDEX IF NOT EXISTS node_drops_node ON node_drops (node, at)`;
 const DROP_KEEP_MS = 24 * 3600e3;
+// Things that happened to a node, for patterns over time (kept EVENT_KEEP_MS): kind 'ping' = one owner's Ping and its
+// result (data: {rtt, error, diag} or, when it wasn't connected, {connected: false}).
+const NODE_EVENTS = `
+CREATE TABLE IF NOT EXISTS node_events (
+  id INTEGER PRIMARY KEY, node TEXT NOT NULL, at INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT
+);
+CREATE INDEX IF NOT EXISTS node_events_node ON node_events (node, at)`;
+const EVENT_KEEP_MS = 7 * 86400e3;
+export const PING_TIMEOUT_MS = 8000;
 // hello.reconnect.reason → node_drops.reason. Older workers send no reconnect: their drops stay 'lost'.
 const DROP_REASONS = { sleep: 'asleep', dns: 'dns', network: 'network' };
 // Added later: grace_ms (the owner's per-node grace before its jobs are reassigned; NULL = graceMs(os)); away (why a
@@ -119,14 +173,17 @@ const cleanName = (s) => (typeof s === 'string' ? s.replace(/[\u0000-\u001f]/g, 
 // workers on its own. onNotice({node, level, text}): something the owner should hear about (an auto-drain, an update).
 // health: HEALTH overrides (tests); logsTimeoutMs: how long a log tail may take. ext: extensions.mjs (syncInfo/syncBundle):
 // workers get its bundle (ext.sync, EXT_PATH); null = none is offered.
+// pingTimeoutMs: how long a Ping waits for its pong. headGit(): the head's git endpoint a Ping has workers try (null = none).
 export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTBEAT_MS, wipPushMs = WIP_PUSH_MS, graceMs: graceAll = null, log = () => {}, onChange = () => {},
-  metricsDir = null, repoDir = null, outdatedAfter = OUTDATED_AFTER, autoUpdate = true, mainTtlMs, onNotice = () => {}, health: healthOpts = {}, logsTimeoutMs = 15_000, ext = null }) {
+  metricsDir = null, repoDir = null, outdatedAfter = OUTDATED_AFTER, autoUpdate = true, mainTtlMs, onNotice = () => {}, health: healthOpts = {}, logsTimeoutMs = 15_000, ext = null,
+  pingTimeoutMs = PING_TIMEOUT_MS, headGit = () => null }) {
   const health = { ...HEALTH, ...healthOpts };
   const db = new DatabaseSync(dbFile);
   db.exec('PRAGMA busy_timeout=5000');
   db.exec(SCHEMA);
   db.exec(PAIRINGS);
   db.exec(NODE_DROPS);
+  db.exec(NODE_EVENTS);
   const cols = db.prepare('PRAGMA table_info(nodes)').all().map((c) => c.name);
   for (const [c, type] of COLUMNS) if (!cols.includes(c)) db.exec(`ALTER TABLE nodes ADD COLUMN ${c} ${type}`);
   const conns = new Map(); // node id -> { ws, send, lastFrame, hello, errors, connectedAt }
@@ -137,7 +194,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
   const recovered = new Map(); // node id -> resources frames in a row with the disk back above the low-disk drain's mark
   const updates = new Map(); // node id -> { state: 'pending' | 'sent' | 'failed', target, from, by, at, error }
   const failedFor = new Map(); // node id -> the origin/main sha an automatic update failed for (not retried on its own)
-  const requests = new Map(); // request id -> { node, done(frame) } (log tails)
+  const requests = new Map(); // request id -> { node, done(frame) } (log tails, screen requests, pings)
   let busy = () => false; // setBusy: the scheduler's view (jobs placed or offered there) for the update's idle check
   // setUpNext: how many queued tasks the scheduler could give a worker next; it rides welcome and every heartbeat, for
   // the worker's status view (`node worker.mjs status`). null = unknown.
@@ -336,6 +393,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     if (!get(id)) return { status: 404, error: 'no such node' };
     db.prepare('DELETE FROM nodes WHERE id=?').run(id);
     db.prepare('DELETE FROM node_drops WHERE node=?').run(id);
+    db.prepare('DELETE FROM node_events WHERE node=?').run(id);
     const c = conns.get(id);
     if (c) { conns.delete(id); c.ws.close(4003, 'revoked'); }
     metrics?.remove(id);
@@ -477,8 +535,8 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
           changed();
           break;
         }
-        case MSG.LOGS: case MSG.SCREEN_RES: {
-          const r = requests.get(msg.req);
+        case MSG.LOGS: case MSG.SCREEN_RES: case MSG.PONG: {
+          const r = requests.get(msg.t === MSG.PONG ? msg.id : msg.req);
           if (r?.node === id) r.done(msg);
           touch();
           break;
@@ -652,14 +710,48 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
   }
 
   // ---- on-demand reads from a worker
-  // One request frame and its reply (matched by `req`): the reply, null on timeout, undefined when it couldn't be sent.
-  function request(id, t, fields, timeoutMs) {
+  // One request frame and its reply (matched by `req`, or the field named `key`): the reply, null on timeout, undefined
+  // when it couldn't be sent.
+  function request(id, t, fields, timeoutMs, key = 'req') {
     const req = crypto.randomBytes(6).toString('hex');
     return new Promise((resolve) => {
       const timer = setTimeout(() => { requests.delete(req); resolve(null); }, timeoutMs);
       requests.set(req, { node: id, done: (m) => { clearTimeout(timer); requests.delete(req); resolve(m); } });
-      if (!send(id, { t, req, ...fields })) { clearTimeout(timer); requests.delete(req); resolve(undefined); }
+      if (!send(id, { t, [key]: req, ...fields })) { clearTimeout(timer); requests.delete(req); resolve(undefined); }
     });
+  }
+  function logEvent(id, kind, data) {
+    const t = Date.now();
+    db.prepare('DELETE FROM node_events WHERE at<?').run(t - EVENT_KEEP_MS);
+    db.prepare('INSERT INTO node_events (node, at, kind, data) VALUES (?, ?, ?, ?)').run(id, t, kind, JSON.stringify(data));
+  }
+  // A node's events, newest first (kind: only those).
+  function nodeEvents(id, { kind = null, limit = 50 } = {}) {
+    return db.prepare(`SELECT at, kind, data FROM node_events WHERE node=?${kind ? ' AND kind=?' : ''} ORDER BY at DESC, id DESC LIMIT ?`)
+      .all(...[id, kind, limit].filter((v) => v !== null)).map((r) => ({ at: r.at, kind: r.kind, ...parse(r.data) }));
+  }
+  // The owner's Ping (POST /api/cluster/nodes/:id/ping). Connected: ping → pong {diag}, answered with the round trip and
+  // pingReport's summary and hints; 504 'no answer' after pingTimeoutMs. Not connected: when it was last seen, why it
+  // dropped, its drops today and a command to test the head from that machine (headUrl: the head as the owner reaches it).
+  async function ping(id, { headUrl = null, timeoutMs = pingTimeoutMs } = {}) {
+    const row = get(id), c = conns.get(id);
+    if (!row) return { status: 404, error: 'no such node' };
+    if (id === LOCAL_NODE) return { status: 400, error: 'the controller is this server: there is nothing to ping' };
+    if (!c?.hello) {
+      const v = view(row), last = v.drops?.last;
+      logEvent(id, 'ping', { connected: false });
+      return { node: id, connected: false, lastSeen: row.last_seen ?? null, away: v.away, awayLabel: v.awayLabel,
+        reason: last ? { at: last.at, reason: last.reason, error: last.error } : null, drops: v.drops, command: headUrl ? testCommand(headUrl, row.os) : null };
+    }
+    if (!c.hello.features?.includes('ping')) return { status: 409, error: `${row.name} runs an older worker: update the worker to ping` };
+    const sentAt = Date.now(), git = (() => { try { return headGit() || null; } catch { return null; } })();
+    const m = await request(id, MSG.PING, { sentAt, ...(git ? { git } : {}) }, timeoutMs, 'id');
+    if (m === undefined) return { status: 409, error: `${row.name} is not connected` };
+    if (!m) { logEvent(id, 'ping', { rtt: null, error: 'no answer' }); return { status: 504, error: 'no answer' }; }
+    const rtt = Date.now() - sentAt;
+    logEvent(id, 'ping', { rtt, diag: m.diag });
+    log(`node ${id} ping: ${rtt} ms`);
+    return { node: id, connected: true, rtt, diag: m.diag, ...pingReport(m.diag, rtt, row.os), at: Date.now() };
   }
   // The worker's log, last `lines` lines (GET /api/cluster/nodes/:id/logs?tail=).
   async function logsTail(id, lines = 200) {
@@ -700,6 +792,6 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
   }
 
   return { listNodes, node, createPairing, pairing, revokePairing, claim, whoami, update, revoke, handleUpgrade, send, onMessage, isConnected: (id) => conns.has(id), version: () => version, close,
-    autoDrain, requestUpdate, logsTail, request, metrics: metricsOf, setBusy: (fn) => { busy = fn; }, setUpNext: (fn) => { upNext = fn; }, health,
+    autoDrain, requestUpdate, logsTail, request, ping, nodeEvents, metrics: metricsOf, setBusy: (fn) => { busy = fn; }, setUpNext: (fn) => { upNext = fn; }, health,
     handleExt, syncExt, extHash: () => extInfo()?.hash || null };
 }

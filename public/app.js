@@ -3514,7 +3514,8 @@ setInterval(() => { if (M.usage) renderUsage(); }, 30e3); // keep the "in 2h 9m"
 const AM = { code: null, expiresAt: 0, uses: 1, pairing: null, err: '', timer: null, lastFocus: null };
 const AM_USES = [1, 2, 3, 4, 5, 6, 8, 10];
 // power: the Macs whose Power settings are open; stale: a render skipped while one of its menus was in use.
-const MC = { nodes: [], at: 0, timer: null, loading: false, power: new Set(), stale: false };
+// pings: node id → the owner's last Ping ({busy} | {r: the answer} | {error}), shown under the node (pingBox).
+const MC = { nodes: [], at: 0, timer: null, loading: false, power: new Set(), stale: false, pings: new Map() };
 const fmtGB = (b) => `${((b || 0) / 2 ** 30).toFixed(1)} GB`;
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const NODE_ST = { online: 'Online', draining: 'Draining', disabled: 'Disabled', updating: 'Updating', paused: 'Paused' };
@@ -3564,6 +3565,7 @@ function renderMachines() {
   if (first !== (body.firstElementChild === sec)) { if (first) body.prepend(sec); else body.append(sec); }
   sec.classList.toggle('first', first);
   $('mcSum').textContent = nodes.length ? machineSummary(nodes) : '';
+  $('pingAll').hidden = !first;
   // Live re-renders keep keyboard focus on the same control of the same card.
   const f = document.activeElement, card = f?.closest?.('#mMachines .mc-node'), key = (b) => b.dataset.act || b.dataset.task || b.textContent;
   const was = card && f.tagName === 'BUTTON' && [card.dataset.node, key(f)];
@@ -3614,6 +3616,8 @@ function machineCard(n) {
   if (pool) li.append(pool);
   const health = machineHealth(n);
   if (health.length) li.append(...health);
+  const ping = !n.local && pingBox(n);
+  if (ping) li.append(ping);
 
   const ag = el('div', 'mc-agents'), signed = (inv.agents || []).filter((a) => a.signedIn);
   for (const a of signed) {
@@ -3701,6 +3705,47 @@ function dropLines(n) {
   out.push([d.total >= 3 ? 'warn' : '', `Connection drops today: ${d.total} (${by.join(', ')})`, 'Connections this machine lost without saying goodbye in the last 24 hours, by the reason its worker reported on reconnect.']);
   return out;
 }
+// The owner's Ping (POST /api/cluster/nodes/:id/ping; cluster.mjs ping, pingReport), per worker card and 'Ping all' in
+// the Machines header. Connected: the round trip and the worker's own check ('Ping 84 ms · DNS ok (…, 12 ms) · head HTTPS
+// 200 (140 ms) · GitHub ok'), failures in red with a hint each. Not connected: when it was last seen, why it dropped, its
+// drops today and a command to test the head from that machine.
+async function pingNode(n) {
+  if (MC.pings.get(n.id)?.busy) return;
+  MC.pings.set(n.id, { busy: true });
+  renderMachines();
+  try { MC.pings.set(n.id, { r: await api(`/api/cluster/nodes/${encodeURIComponent(n.id)}/ping`, 'POST') }); } catch (e) { MC.pings.set(n.id, { error: e.message }); }
+  renderMachines();
+}
+$('pingAll').addEventListener('click', () => { for (const n of MC.nodes) if (!n.local) pingNode(n); });
+function pingBox(n) {
+  const p = MC.pings.get(n.id), r = p?.r;
+  if (!p || (r && r.connected !== n.connected)) return null; // it came back (or went away) since: that answer is stale
+  const box = el('div', 'mc-ping'), line = (cls, text) => { const x = el('p', `mc-health ${cls}`, text); box.append(x); return x; };
+  box.setAttribute('role', 'status');
+  if (p.busy) line('', 'Pinging…');
+  else if (p.error) line('bad', `Ping: ${p.error === 'no answer' ? 'no answer (its worker did not reply within 8 s)' : p.error}`);
+  else if (r.connected) {
+    const sum = line('mc-ping-sum', '');
+    r.parts.forEach((x, i) => { if (i) sum.append(' · '); sum.append(el('span', x.bad ? 'bad' : '', x.text)); });
+    for (const h of r.hints || []) line('bad', h);
+    const c = r.diag?.conn;
+    if (c?.lastError) line('', `Last connection error ${relTime(c.lastErrorAt)}: ${c.lastError}`);
+  } else {
+    line('warn', ['Not connected', r.lastSeen ? `last seen ${relTime(r.lastSeen)}` : 'never connected', r.awayLabel].filter(Boolean).join(' · '));
+    if (r.reason) line('', `Last drop ${relTime(r.reason.at)}: ${r.reason.reason === 'asleep' && n.os === 'darwin' ? 'the Mac was asleep' : DROP_WHY[r.reason.reason] || r.reason.reason}${r.reason.error ? ` (${r.reason.error})` : ''}`);
+    if (r.drops?.total) line(r.drops.total >= 3 ? 'warn' : '', `Drops in the last 24 h: ${r.drops.total} (${Object.entries(r.drops.by).map(([k, v]) => `${DROP_NAME[k] || k} ${v}`).join(', ')})`);
+    if (r.command) {
+      line('', `To test the head from ${n.os === 'darwin' ? 'that Mac' : 'that machine'}, run this in its Terminal:`);
+      const cmd = el('div', 'mc-cmd'), code = el('code', '', r.command), copy = el('button', 'btn small', 'Copy');
+      copy.type = 'button';
+      copy.dataset.act = 'copy-ping';
+      copy.addEventListener('click', async () => { copy.textContent = (await copyToClipboard(r.command)) ? 'Copied' : 'Copy failed'; });
+      cmd.append(code, copy);
+      box.append(cmd);
+    }
+  }
+  return box;
+}
 // Rename, max parallel tasks, Drain, Disable and Remove. The controller's own slots follow its free memory (the owner
 // only caps tasks across all machines, in Settings), so its card names no choice; it can't be disabled or removed.
 function machineControls(n) {
@@ -3745,6 +3790,11 @@ function machineControls(n) {
     const pw = btn('Power', 'power', () => { if (open) MC.power.delete(n.id); else MC.power.add(n.id); renderMachines(); });
     pw.setAttribute('aria-expanded', String(open));
     pw.title = 'When this Mac takes tasks on battery or when hot, whether it stays awake for them, and the RAM kept for you';
+  }
+  if (!n.local) {
+    const busy = !!MC.pings.get(n.id)?.busy, pb = btn(busy ? 'Pinging…' : n.connected ? 'Ping' : 'Not connected', 'ping', () => pingNode(n));
+    pb.disabled = busy;
+    pb.title = n.connected ? 'Round trip to its worker, plus its own check of DNS, the head, and GitHub' : 'Not connected: when it was last seen, why it dropped, and a command to test the head from it';
   }
   const moving = n.used ? ` Its ${plural(n.used, 'running task')} go${n.used === 1 ? 'es' : ''} back to the queue now.` : '';
   // Update: a worker behind this server's agent-orch (outdated ones update on their own), or one whose update failed,

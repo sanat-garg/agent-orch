@@ -37,6 +37,12 @@ test('macos: the worker stage survives the declare -f hand-over (bash 3.2 on mac
   for (const sh of shells) {
     const dumps = execFileSync(sh, ['-c', `${body}\ndeclare -f; echo '#---'; declare -f "\${WORKER_FUNCS[@]}"`], { encoding: 'utf8' });
     for (const part of dumps.split('#---')) execFileSync(sh, ['-n'], { input: part }); // throws on a syntax error
+    // Every script function the handed-over ones call is handed over too (a missing one only fails on its branch).
+    const [defined, listed] = execFileSync(sh, ['-c', `${body}\ndeclare -F | awk '{print $3}' | tr '\\n' ' '; echo; echo "\${WORKER_FUNCS[*]}"`], { encoding: 'utf8' })
+      .trim().split('\n').map((l) => l.trim().split(/\s+/));
+    const handed = dumps.split('#---')[1];
+    const missing = defined.filter((f) => !listed.includes(f) && new RegExp(`(^|[\\s;(&|])${f}([\\s;)]|$)`, 'm').test(handed));
+    assert.deepEqual(missing, [], `${sh}: WORKER_FUNCS lacks functions the worker stage calls`);
     // Exactly what main runs as the worker account (here in dry-run, as this user, in a temp HOME).
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-install-'));
     try {
@@ -48,6 +54,26 @@ test('macos: the worker stage survives the declare -f hand-over (bash 3.2 on mac
       assert.match(r.stdout, /worker\.mjs pair --controller https:\/\/head\.example --code ABCD-2345/);
     } finally { fs.rmSync(home, { recursive: true, force: true }); }
   }
+});
+
+// Agent CLIs go into the worker's own ~/.local: npm -g would write to the Node's prefix, which under Homebrew belongs
+// to the Mac's admin (a real Mac: EACCES on /opt/homebrew/lib/node_modules/@openai). PATH here has node but no codex.
+test('macos --dry-run: codex installs into the worker account\'s ~/.local, never the Node\'s global prefix', () => {
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-install-bin-'));
+  try {
+    for (const t of ['node', 'id', 'uname', 'sed', 'dirname', 'cat', 'tr', 'awk', 'mkdir']) {
+      const p = execFileSync('bash', ['-c', `command -v ${t}`], { encoding: 'utf8' }).trim();
+      fs.symlinkSync(p, path.join(bin, t));
+    }
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-install-'));
+    try {
+      const r = spawnSync(execFileSync('bash', ['-c', 'command -v bash'], { encoding: 'utf8' }).trim(), [MAC, ...ARGS.filter((a) => a !== 'claude,codex'), 'codex', '--no-dedicated-user', '--service', 'login'],
+        { encoding: 'utf8', env: { HOME: home, PATH: bin, NVM_DIR: path.join(home, 'nvm') } });
+      assert.equal(r.status, 0, r.stderr);
+      assert.ok(r.stdout.includes(`+ npm i -g --prefix ${home}/.local @openai/codex`), r.stdout);
+      assert.doesNotMatch(r.stdout, /npm i -g @openai\/codex/);
+    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+  } finally { fs.rmSync(bin, { recursive: true, force: true }); }
 });
 
 test('linux --dry-run: clones, pairs and writes a systemd unit with Restart=always and MemoryHigh', () => {

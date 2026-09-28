@@ -36,11 +36,20 @@ STATUS_SUDOERS=/etc/sudoers.d/agent-orch-worker-status
 CONTROLLER='' CODE='' NAME='' AGENTS='' WUSER=agentorch SERVICE='' SELF=0 DRY=0 UNINSTALL=0 PURGE=0 STATUS_WINDOW=0 STATUS_NOTE=''
 
 say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[1mwarning:\033[0m %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 # run CMD…: runs it, or prints it under --dry-run. stdin is /dev/null so a `curl … | bash` install never feeds the
 # rest of this script to a child.
 run() { if ((DRY)); then printf '+ %s\n' "$*"; else "$@" </dev/null; fi; }
-tty_run() { if ((DRY)); then printf '+ %s\n' "$*"; else "$@" </dev/tty; fi; }
+# tty_run CMD…: an interactive step (gh auth login). Its prompts can leave the terminal in raw mode, where every later
+# line starts where the last one ended; stty sane puts it back either way.
+tty_run() {
+  if ((DRY)); then printf '+ %s\n' "$*"; return; fi
+  local rc=0
+  "$@" </dev/tty || rc=$?
+  stty sane </dev/tty 2>/dev/null || true
+  return "$rc"
+}
 # write FILE: stdin → FILE (printed under --dry-run).
 write() { if ((DRY)); then printf '+ write %s:\n' "$1"; sed 's/^/    /'; else cat >"$1"; fi; }
 # write_root FILE MODE [check]: stdin → a root:wheel FILE (check = validate as sudoers first).
@@ -96,7 +105,7 @@ EOF
 # declare -f reprints a here-document piped into a command (`cat <<EOF | cmd`) with the pipe after EOF, which no bash
 # can parse back ("syntax error near unexpected token `|'"): so nothing in this file pipes a here-document; feed it
 # straight in (`cmd <<EOF`). test/install-scripts.test.mjs checks both.
-WORKER_FUNCS=(say die run tty_run node_major ensure_node ensure_gh ensure_checkout install_agents pair worker_stage node_path)
+WORKER_FUNCS=(say warn die run tty_run node_major ensure_node ensure_gh ensure_checkout install_agents pair worker_stage node_path)
 # Everything here uses $HOME, so the same functions serve the dedicated user (via sudo -u … -H) and --no-dedicated-user.
 
 node_major() { command -v node >/dev/null && node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0; }
@@ -138,18 +147,23 @@ ensure_checkout() {
   if ((DRY)); then echo "+ (cd $dir && npm ci)"; else (cd "$dir" && npm ci </dev/null); fi
 }
 
-# The same commands as .agent-orch/AGENTS.md; an agent already on PATH is left alone. npm -g goes to the Node
-# installed above (~/.local/node or nvm) or needs no sudo under Homebrew.
+# The same commands as .agent-orch/AGENTS.md; an agent already on PATH is left alone. Both land in the worker's own
+# ~/.local/bin (on its PATH here and in the launchd service): Claude's installer puts it there, and codex goes there
+# with --prefix, because npm -g would write to the Node's own prefix, which under Homebrew (/opt/homebrew) belongs to
+# the Mac's admin, not to the worker account (EACCES). A failed install warns and the rest carries on: the machine
+# pairs, and the head shows the agent as missing until it is installed.
 install_agents() {
   [[ -n "$AGENTS" ]] || return 0
-  local a
+  local a ok
   for a in ${AGENTS//,/ }; do
-    if command -v "$a" >/dev/null; then say "$a already installed"; continue; fi
-    say "Installing $a"
+    if command -v "$a" >/dev/null; then say "$a already installed ($(command -v "$a"))"; continue; fi
+    say "Installing $a into ~/.local/bin"
+    ok=1
     case "$a" in
-      claude) if ((DRY)); then echo "+ curl -fsSL https://claude.ai/install.sh | bash"; else curl -fsSL https://claude.ai/install.sh | bash </dev/null; fi ;;
-      codex) run npm i -g @openai/codex ;;
+      claude) if ((DRY)); then echo "+ curl -fsSL https://claude.ai/install.sh | bash"; else curl -fsSL https://claude.ai/install.sh | bash </dev/null || ok=0; fi ;;
+      codex) run npm i -g --prefix "$HOME/.local" @openai/codex || ok=0 ;;
     esac
+    ((ok)) || warn "couldn't install $a; the worker still pairs without it. Install it later as $(id -un) (the same command) and re-run this installer."
   done
 }
 

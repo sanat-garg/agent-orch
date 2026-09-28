@@ -3560,7 +3560,7 @@ const PHASE_DOING = { queued: 'starting', cloning: 'cloning', fetching: 'fetchin
 function machineHealth(n) {
   const out = [], res = n.resources || {}, line = (cls, text, title) => { const p = el('p', `mc-health ${cls}`, text); if (title) p.title = title; out.push(p); };
   if (n.drainReason) line('warn', `Drained automatically${n.drainedAt ? ` ${relTime(n.drainedAt)}` : ''}: ${n.drainReason}. Undrain it when that's fixed.`);
-  if (n.slotsWhy) line('warn', `${n.slotsWhy}. Pick a number under Max tasks to run tasks anyway.`);
+  if (n.slotsWhy) line('warn', `${n.slotsWhy}. It takes tasks once more memory is free.`);
   const paused = n.status === 'paused' ? res.intake?.reason : null;
   if (paused) line('warn', `${res.intake.text}. Its running tasks go on.`);
   const u = n.update;

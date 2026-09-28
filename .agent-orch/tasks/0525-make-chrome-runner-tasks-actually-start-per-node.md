@@ -1,0 +1,15 @@
+# Task #525: Make Chrome-runner tasks actually start: per-node profile lock, runner sign-in, live proof
+
+- kind: work  
+- source: planner  
+- priority: 85 (urgent)  
+- created: 2026-09-28 19:31  
+- files: orchestrator.mjs, worker.mjs, chrome.mjs, browser-task.mjs, public/browser.js, public/app.js, .agent-orch/CHROME.md, test/chrome-runner-start*.test.mjs
+
+## Prompt
+
+URGENT. The owner's Chrome runner node is online and capable ('Chrome on Sanat's MacBook Air', id n_c009a8d4b08b, inventory.chrome {capable:true, extension:true, gui:true}), yet browser task #523 ('search nykaa for glow led masks', capabilities ['browser'], run_on that node) stays queued. Live evidence (2026-09-28 19:27-19:30, journalctl): every minute 'claim decision: #523 not started: its browser profile is in use'. Cause 1: orchestrator.mjs ~line 1781 `profileBusy(task)` treats ANY running work task with browser capabilities and the same identity ('default') as a conflict, cluster-wide (#506, a Playwright audit on another Mac, holds it). Fix: the lock is per (node, identity), not global; Chrome-runner tasks (a chrome-capable target node, or the chrome direct mode from #512) use no browser profile and are NEVER gated by it; and a lock held by a run that's dead/stale (no events for 10 min, or its node offline) doesn't count. Also make the runner's slot sizing sane: Auto = 2 browser tasks at once on a runner (Chrome tabs are cheap), not cores-based. Cause 2: the runner's inventory reports claude signedIn:false (agents: claude signedIn false, codex signedIn false). worker.mjs ~line 520 uses a.loggedIn() with the worker's env; in chrome-runner mode (AGENT_ORCH_CHROME_RUNNER=1, worker home ~/.agent-orch-chrome-runner) it must check and use the OWNER's own Claude login (their ~/.claude credentials / CLAUDE_CONFIG_DIR unset, never the head's shared setup token, per CHROME.md) and report the account. If it's genuinely not signed in, the Machines view and the Browser tab must say 'Sign in to Claude on <Mac> as yourself: run `claude` in Terminal' instead of silently queueing forever. Placement for chrome tasks must accept the runner when its Claude is signed in. 3) Proof: with the owner's runner online, run the real prompt from #523 through POST /api/browser/task (or retry #523) and confirm it starts on the runner within 30 s, the extension's tool calls stream as steps, and it finishes with a result. Record the run id and outcome in .agent-orch/CHROME.md under 'First real run'. If it fails, fix the cause and repeat. 4) Tests: a browser task targeting a chrome node isn't blocked by another node's running browser task; the same-node same-profile lock still holds; a stale lock (dead run) is ignored; runner sign-in detection uses the owner's config; a signed-out runner yields the sign-in message. Run only the touched test files.
+
+## Done when
+
+`node --test test/chrome-runner-start*.test.mjs` passes (per-node lock, chrome tasks never profile-gated, stale lock ignored, owner sign-in detection), and .agent-orch/CHROME.md's 'First real run' records a browser task that started on the runner and finished

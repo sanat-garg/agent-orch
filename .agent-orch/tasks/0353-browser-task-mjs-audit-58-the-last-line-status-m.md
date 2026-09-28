@@ -13,3 +13,7 @@ Reliability fix in browser-task.mjs (read the file and .agent-orch/AUDIT.md Roun
 ## Done when
 
 `npm test -- test/browser-task.test.mjs` passes and `node -e "import('./browser-task.mjs').then(m=>process.exit(m.browserTaskStatus('Blocked by a CAPTCHA on the checkout page.')==='failed'&&m.browserTaskStatus('Checked out.\nAGENT-ORCH-STATUS: done — order placed')==='done'?0:1))"` exits 0
+
+## Result — done (check passed) (2026-09-28 12:39)
+
+AGENT-ORCH-STATUS: done — Screen prompt outcome now comes from last-line status marker

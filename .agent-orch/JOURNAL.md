@@ -1010,3 +1010,6 @@ merge conflicts resolved; parallel slots 1-16 and rapid mode both kept
 ## 2026-09-28 12:39 — #349 Verifier AUDIT #64: every line of a fenced Done-when block and every ;-part of a snippet must pass [done (check passed)]
 
 Each fenced-block line and each `;` part must now pass
+## 2026-09-28 12:39 — #353 browser-task.mjs AUDIT #58: the last-line status marker decides a screen prompt's outcome; phrase matching only as a last resort on the final paragraph [done (check passed)]
+
+Screen prompt outcome now comes from last-line status marker

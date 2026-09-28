@@ -33,6 +33,7 @@ import { autoTasks, reserveBytes } from './power.mjs';
 import { CPU_PER_TASK, FOOTPRINT, GB, capSlots, capTasks, localCap } from './cap.mjs';
 import { extractCommand, runCheck, toolLine } from './taskrun.mjs';
 import { gcRetention } from './retention.mjs';
+import { pushBranch, pushedBase } from './github.mjs';
 import { commitAll, ensureWorktree, isMerged, listWorktrees, mergeBack, parkWorktree, pruneOrphanWorktrees, removeWorktree, repoInfo, startIntegration, taskBranch, unresolvedFiles, worktreesRoot } from './worktrees.mjs';
 
 // ---------------------------------------------------------------- config
@@ -81,6 +82,7 @@ const CFG = {
   // they wait for a browserCapable worker); the owner's kv parallel_settings overrides it.
   controllerBrowser: false,
   offerMs: 10_000,
+  pushWaitMs: 10_000,           // how long a GitHub-cloning worker's start waits for main's push before using origin's last main
   // Tools a worker may use without full autonomy. Anything else is refused, never prompted.
   // File changes are limited to the project folder (./** is relative to the session's cwd).
   safeTools: [
@@ -2751,6 +2753,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       }
       await handle(getTask(task.id), getProject(project.id), res, signal);
     } catch (e) {
+      if (e?.pushRetry) { // a push it needs failed after its retries: not the task's fault, so it waits a minute
+        logEvent(`#${task.id} waits: ${e.message}`, { level: 'warn', projectId: project.id, taskId: task.id });
+        requeueIfRunning(task.id, { not_before: now() + 60 });
+        return;
+      }
       logEvent(`#${task.id} crashed: ${e?.message || e}`, { level: 'error', projectId: project.id, taskId: task.id });
       const attempts = task.attempts + 1;
       if (attempts >= CFG.maxAttempts) await fail(getTask(task.id), project, 'crash', String(e?.message || e));
@@ -3179,20 +3186,30 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
 
   // The base a worker starts from: the main branch's head. For a worker that clones from GitHub (github), it is pushed
-  // to origin first when origin lacks it, and a task whose last run was here and left its branch (a retried task) pushes
+  // to origin when origin lacks it, and a task whose last run was here and left its branch (a retried task) pushes
   // that branch too, so the worker continues from it; a worker that clones through the head finds both here.
+  // The pushes run after the merge lock, through github.mjs's per-branch push queue (retried, never forced): a main push
+  // that doesn't land within CFG.pushWaitMs leaves the worker on origin's last main and catches up in the background.
+  // Only a push the task can't start without (no main on origin, or its own branch) requeues it, without an attempt.
   function remoteBase(task, project, prevNode, github = true) {
     return serialGit(project.path, async () => {
       const info = await repoInfo(project.path);
       if (!info) throw new Error('not on a git branch');
       await commitNow(project.path, `agent-orch: uncommitted changes before #${task.id}`);
-      const sha = (await git(info.top, ['rev-parse', info.branch])).trim();
+      return { info, sha: (await git(info.top, ['rev-parse', info.branch])).trim() };
+    }).then(async ({ info, sha }) => {
       if (!github) return sha;
-      const has = (args) => git(info.top, args).then(() => true, () => false);
-      if (!(await has(['merge-base', '--is-ancestor', sha, `refs/remotes/origin/${info.branch}`]))) await git(info.top, ['push', '-q', 'origin', `${info.branch}:refs/heads/${info.branch}`]);
+      const where = { projectId: project.id, taskId: task.id };
+      const base = await pushedBase(info.top, info.branch, sha, { waitMs: CFG.pushWaitMs,
+        onResult: (r) => { if (!r.ok) logEvent(`pushing ${info.branch} to GitHub failed: ${r.error}`, { level: r.diverged ? 'error' : 'warn', ...where }); } });
+      if (!base) throw Object.assign(new Error(`GitHub has no ${info.branch} for the worker to start from yet`), { pushRetry: true });
+      if (base !== sha) logEvent(`#${task.id} starts from ${base.slice(0, 8)}, the last ${info.branch} on GitHub; ${sha.slice(0, 8)} is pushed in the background`, where);
       const b = taskBranch(task.id);
-      if ((!prevNode || prevNode === LOCAL_NODE) && await has(['rev-parse', '--verify', '-q', `refs/heads/${b}`])) await git(info.top, ['push', '-q', '-f', 'origin', `${b}:refs/heads/${b}`]);
-      return sha;
+      if ((!prevNode || prevNode === LOCAL_NODE) && await git(info.top, ['rev-parse', '--verify', '-q', `refs/heads/${b}`]).then(() => true, () => false)) {
+        const r = await pushBranch(info.top, b, { force: true }); // this machine's branch is the task's latest work
+        if (!r.ok) throw Object.assign(new Error(`couldn't push ${b} to GitHub: ${r.error}`), { pushRetry: true });
+      }
+      return base;
     });
   }
   // A task that last ran on a worker continues here from its pushed branch (unless a worktree here already has it).

@@ -2,10 +2,12 @@
 // committed and pushed. Uses the GitHub CLI (`gh`), signed in once by the owner from a terminal.
 // `gh` is only needed to create a repo: a folder that already has an `origin` pushes with plain git
 // (whatever credentials this machine has), so a gh/network hiccup or a missing gh never blocks it.
+// Every push of a branch (main, a task branch) goes through pushBranch: one per repo+branch at a time, retried, never forced.
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
+import { transientGit } from './taskrun.mjs';
 
 const GIT_ID = ['-c', 'user.name=agent-orch', '-c', 'user.email=agent-orch@users.noreply.github.com'];
 
@@ -18,13 +20,15 @@ const GITIGNORE = [
   '', '# Agent screenshots (shown in chat from agent-orch\'s media store)', SHOTS_RULE,
 ];
 
+const UNPUSHED_WARN_MS = 10 * 60_000;
+
 const run = (cmd, args, opts = {}) => new Promise((resolve) => {
   execFile(cmd, args, { timeout: 180000, maxBuffer: 20e6, ...opts }, (err, stdout, stderr) => {
     resolve({ ok: !err, out: String(stdout || '').trim(), err: String(stderr || err?.message || '').trim() });
   });
 });
 
-export function createGitHub({ env, log }) {
+export function createGitHub({ env, log, alert = () => {}, now = Date.now }) {
   const opts = (cwd) => ({ cwd, env });
   let status = { linked: false, login: null, checkedAt: 0 };
 
@@ -92,22 +96,23 @@ export function createGitHub({ env, log }) {
     return parseInt(r.out, 10) || 0;
   }
 
-  // One push at a time per repo; callers arriving mid-push share its result.
-  const inflight = new Map();
-  function push(dir) {
-    if (inflight.has(dir)) return inflight.get(dir);
-    const p = (async () => {
-      try {
-        const repo = await ensureRepo(dir);
-        const r = await run('git', ['push', '-u', 'origin', 'HEAD'], opts(dir));
-        if (!r.ok) return { ok: false, repo, error: r.err.split('\n').filter(Boolean).pop() || 'push failed' };
-        return { ok: true, repo };
-      } catch (e) {
-        return { ok: false, error: e.message };
-      }
-    })().finally(() => inflight.delete(dir));
-    inflight.set(dir, p);
-    return p;
+  // Pushes go through pushBranch's per-branch queue (shared with the orchestrator's pushes of main). A failing push sets
+  // `warn` only once it has kept failing for UNPUSHED_WARN_MS, or at once when origin diverged (then `alert` is called,
+  // once per divergence), so a lock race that the next retry fixes never shows.
+  const failingSince = new Map(), diverged = new Set();
+  async function push(dir) {
+    let repo;
+    try { repo = await ensureRepo(dir); } catch (e) { return fail(dir, { error: e.message }); }
+    const r = await pushBranch(dir, null, { env, upstream: true });
+    if (!r.ok) return fail(dir, { repo, error: r.error, diverged: !!r.diverged });
+    failingSince.delete(dir);
+    diverged.delete(dir);
+    return { ok: true, repo };
+  }
+  function fail(dir, r) {
+    if (!failingSince.has(dir)) failingSince.set(dir, now());
+    if (r.diverged && !diverged.has(dir)) { diverged.add(dir); log(`${dir}: ${r.error}`); alert(dir, r.error); }
+    return { ok: false, ...r, warn: !!r.diverged || now() - failingSince.get(dir) > UNPUSHED_WARN_MS };
   }
 
   // Commit whatever changed (if anything) and push.
@@ -129,4 +134,89 @@ export function createGitHub({ env, log }) {
 export function repoOf(url) {
   const m = String(url).trim().match(/^(?:(?:https?|ssh|git):\/\/(?:[^@/]+@)?|[^@/:]+@)github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?\/?$/i);
   return m ? { full: `${m[1]}/${m[2]}`, url: `https://github.com/${m[1]}/${m[2]}` } : null;
+}
+
+// ---- Pushes of a branch to origin: one at a time per repo and branch, retried, never forced (task #427).
+// Every push of a project's main (a merge's sync, a worker's base) and of a task branch goes through pushBranch: pushes
+// of one repo+branch run one at a time, and calls arriving while one runs share ONE follow-up push that takes the
+// branch's tip when it starts (so a burst of commits pushes once, at the latest). A lock race ('cannot lock ref'), a
+// push rejected because a concurrent push moved origin, a 5xx or a network blip is retried after pushOptions.delays,
+// each time after fetching origin's branch: if it is not an ancestor of ours (origin has commits we don't), the push
+// stops with { diverged: true } and nothing is forced. Anything else (auth, a missing remote) fails at once.
+// Resolves { ok, sha, error?, diverged? } and never rejects. retryGit (taskrun.mjs) doesn't fit: the delays are fixed
+// and every retry must re-check origin first.
+export const pushOptions = { delays: [2000, 5000, 15000, 60000], sleep: (ms) => new Promise((r) => setTimeout(r, ms)) };
+const PUSH_RETRY = /\[rejected\][^\n]*\((?:non-fast-forward|fetch first)\)|returned error: 5\d\d\b/i;
+const pushRetryable = (t) => transientGit(t) || (PUSH_RETRY.test(t) && !/Authentication failed|Permission denied/i.test(t));
+const lastLine = (t) => String(t || '').split('\n').filter(Boolean).pop() || 'push failed';
+// git's line that says why a push failed (a lock race, a rejection), else its last one.
+const pushError = (t) => {
+  const lines = String(t || '').split('\n');
+  return lines.find((l) => /cannot lock ref/.test(l)) || lines.find((l) => /\[(?:remote )?rejected\]/.test(l))?.trim() || lastLine(t);
+};
+const queues = new Map(); // `<git common dir>\0<branch>` -> { running, next }
+
+export async function pushBranch(dir, branch = null, { env, force = false, upstream = false } = {}) {
+  const g = (args) => run('git', args, { cwd: dir, env });
+  const common = await g(['rev-parse', '--git-common-dir']);
+  if (!common.ok) return { ok: false, error: lastLine(common.err) };
+  branch ||= (await g(['symbolic-ref', '--short', '-q', 'HEAD'])).out;
+  if (!branch) return { ok: false, error: 'HEAD is detached: no branch to push' };
+  const gitDir = path.resolve(dir, common.out);
+  let key;
+  try { key = `${fs.realpathSync(gitDir)}\0${branch}`; } catch { key = `${gitDir}\0${branch}`; }
+  return enqueue(key, () => pushWithRetry(g, branch, { force, upstream }));
+}
+
+function enqueue(key, job) {
+  const q = queues.get(key) || { running: null, next: null };
+  queues.set(key, q);
+  if (q.next) return q.next; // coalesced: the queued push reads the branch's tip only when it starts
+  const go = () => {
+    const p = job().catch((e) => ({ ok: false, error: lastLine(e?.message) })).finally(() => {
+      if (q.running !== p) return;
+      q.running = null;
+      if (!q.next) queues.delete(key);
+    });
+    q.running = p;
+    return p;
+  };
+  if (!q.running) return go();
+  q.next = q.running.then(() => { q.next = null; return go(); });
+  return q.next;
+}
+
+async function pushWithRetry(g, branch, { force, upstream }) {
+  const local = `refs/heads/${branch}`, tracking = `refs/remotes/origin/${branch}`;
+  for (let attempt = 0; ; attempt++) {
+    const sha = (await g(['rev-parse', '--verify', '-q', local])).out;
+    if (!sha) return { ok: false, error: `no branch ${branch}` };
+    const r = await g(['push', '-q', ...(upstream ? ['-u'] : []), 'origin', `${force ? '+' : ''}${local}:refs/heads/${branch}`]);
+    if (r.ok) return { ok: true, sha };
+    const error = pushError(r.err);
+    if (!pushRetryable(r.err) || attempt >= pushOptions.delays.length) return { ok: false, sha, error };
+    if (!force && (await g(['fetch', '-q', 'origin', `+refs/heads/${branch}:${tracking}`])).ok
+      && !(await g(['merge-base', '--is-ancestor', tracking, local])).ok) {
+      const theirs = (await g(['rev-parse', '--short', tracking])).out;
+      return { ok: false, sha, diverged: true, error: `origin's ${branch} (${theirs}) has commits this machine doesn't: not pushing (never forced); merge it by hand` };
+    }
+    await pushOptions.sleep(pushOptions.delays[attempt]);
+  }
+}
+
+// The newest commit of `branch` a worker cloning from GitHub can start from: `sha` (pushed now through pushBranch) when
+// origin has it or the push lands within waitMs, else origin's last known tip when that is an ancestor of `sha` (the
+// push catches up in the background; onResult gets its outcome), so starting a task never waits on a push race.
+// null when origin has nothing usable.
+export async function pushedBase(dir, branch, sha, { env, waitMs = 10_000, onResult = () => {} } = {}) {
+  const g = (args) => run('git', args, { cwd: dir, env });
+  const tracking = `refs/remotes/origin/${branch}`;
+  if ((await g(['merge-base', '--is-ancestor', sha, tracking])).ok) return sha;
+  const pushed = pushBranch(dir, branch, { env }).then((r) => { onResult(r); return r; });
+  let timer;
+  const r = await Promise.race([pushed, new Promise((res) => { timer = setTimeout(res, waitMs, null); })]);
+  clearTimeout(timer);
+  if (r?.ok && (await g(['merge-base', '--is-ancestor', sha, r.sha])).ok) return sha;
+  const known = (await g(['rev-parse', '--verify', '-q', tracking])).out;
+  return known && (await g(['merge-base', '--is-ancestor', known, sha])).ok ? known : null;
 }

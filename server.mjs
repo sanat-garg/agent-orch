@@ -795,7 +795,9 @@ if (orch && !NO_ORCH) setInterval(() => autoRestartCheck().catch((e) => console.
 
 // ---------- GitHub protocol ----------
 // Every project is a private GitHub repo; every finished task and chat reply is pushed.
-const gh = createGitHub({ env: CLAUDE_ENV, log: (m) => console.log(`[github] ${m}`) });
+// A push that origin's diverged main stopped (github.mjs never forces) needs the owner: it buzzes the phone.
+const gh = createGitHub({ env: CLAUDE_ENV, log: (m) => console.log(`[github] ${m}`),
+  alert: (dir, error) => notify({ title: 'Push to GitHub stopped', body: `${path.basename(dir)}: ${error}`, tag: 'push-diverged', url: '/' }) });
 // ---------- Sign-in connections (agent CLIs + GitHub), driven from the web UI ----------
 // Each agent's models, discovered from its CLI (models.mjs); clients refetch /api/agents on {t:'models'}.
 const modelStore = createModelStore({ file: path.join(DATA, 'models.json'), log: (m) => console.log(`[models] ${m}`),
@@ -936,7 +938,8 @@ async function syncGit(dir, message) {
   if (!c || !fs.existsSync(dir)) return;
   const r = message ? await gh.commitAndPush(dir, message) : await gh.push(dir);
   if (r.repo && r.repo.full !== c.repo?.full) { c.repo = r.repo; orch?.refreshProjects(); }
-  c.git = { pushedAt: r.ok ? Date.now() : c.git?.pushedAt || null, error: r.ok ? null : r.error, unpushed: r.ok ? 0 : await gh.unpushed(dir) };
+  // error (the chat's sticky 'not pushed') only once pushes have failed for 10 min or origin diverged; the queue retries a race.
+  c.git = { pushedAt: r.ok ? Date.now() : c.git?.pushedAt || null, error: r.warn ? r.error : null, unpushed: r.ok ? 0 : await gh.unpushed(dir) };
   saveConvos();
   broadcastConvos();
 }

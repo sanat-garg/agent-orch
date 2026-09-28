@@ -1179,3 +1179,6 @@ Pushes now stream into git after the ref check; dropped clients kill git
 ## 2026-09-28 14:25 — #416 Integrate #392: Stats ui: a Why tasks failed card on Overview with a count per reason and the last tasks of each [done (check passed)]
 
 CONTEXT.md conflict resolved; ui-stats tests pass
+## 2026-09-28 14:27 — #427 One push to main at a time: queue and retry the head's GitHub pushes, never crash a task [done (check passed)]
+
+main and task-branch pushes queue, retry, never force or crash

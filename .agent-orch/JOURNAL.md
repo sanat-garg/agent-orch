@@ -1038,3 +1038,7 @@ Code tools have no always key; local navigation now held
 ## 2026-09-28 12:46 — #366 models.mjs: a failed rediscovery keeps the last good model list, never saves an empty one over it, and retries hourly [done (check passed)]
 
 Failed model rediscovery keeps last good list, retries hourly
+
+## 2026-09-28 12:54 — #365 Stats ui: a Machines tab with one row per machine: tasks done and failed, check pass rate, busy time, tokens and last active [done (check passed)]
+
+Stats has a tested Machines tab with per-machine rows and share bar

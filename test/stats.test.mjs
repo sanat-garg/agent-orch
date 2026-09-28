@@ -92,7 +92,10 @@ test('createStats: joins every source into one snapshot, cached until asked for 
       ran_model TEXT, commit_sha TEXT, moves TEXT, node_id TEXT, effort TEXT);
     CREATE TABLE runs (id INTEGER PRIMARY KEY, task_id INTEGER, purpose TEXT, outcome TEXT, agent TEXT, node_id TEXT, effort TEXT,
       input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER, num_turns INTEGER, started_at REAL, finished_at REAL, log_path TEXT);
-    CREATE TABLE events (id INTEGER PRIMARY KEY, ts REAL, level TEXT, project_id INTEGER, task_id INTEGER, message TEXT);`);
+    CREATE TABLE events (id INTEGER PRIMARY KEY, ts REAL, level TEXT, project_id INTEGER, task_id INTEGER, message TEXT);
+    CREATE TABLE nodes (id TEXT PRIMARY KEY, name TEXT NOT NULL, os TEXT, arch TEXT, token_hash TEXT UNIQUE, created_at INTEGER NOT NULL,
+      last_seen INTEGER, status TEXT NOT NULL DEFAULT 'offline');`);
+  db.prepare('INSERT INTO nodes (id, name, os, created_at, last_seen, status) VALUES (?, ?, ?, ?, ?, ?)').run('n1', 'MacBook', 'darwin', T, T + 500, 'online');
   db.prepare('INSERT INTO projects VALUES (1, ?, ?, ?, ?)').run(repo, 'proj', 'active', T);
   const addT = db.prepare('INSERT INTO tasks (id, project_id, kind, title, status, urgency, source, origin, attempts, continuations, created_at, started_at, finished_at, agent, model, ran_agent, ran_model, commit_sha) VALUES (?, 1, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)');
   addT.run(2, 'work', 'Add a', 'done', 'normal', 'planner', 'chat', T + 60, T + 70, T + 400, 'claude', null, 'claude', 'opus', 'abc');
@@ -135,6 +138,7 @@ test('createStats: joins every source into one snapshot, cached until asked for 
   assert.deepEqual(d.windows.map((w) => [w.window, w.peak, w.closed]), [['five_hour', 40, false]]);
   assert.deepEqual(d.limits.map((l) => [l.status, l.window]), [['hit', 'five_hour']]);
   assert.deepEqual(d.commits.map((c) => [c.by, c.task, c.add, c.del, c.files, c.p]), [['task', 2, 3, 0, ['a.js'], 1], ['you', null, 0, 1, ['a.js'], 1]]);
+  assert.deepEqual(d.nodes, [{ id: 'n1', name: 'MacBook', os: 'darwin', status: 'online', lastSeen: (T + 500) * 1000 }]);
   assert.deepEqual(d.machine, [{ t: T * 1000 - ((T * 1000) % 3600e3), cpu: 12, mem: 40, peak: 12 }]);
 
   clock += 1000;
@@ -146,5 +150,5 @@ test('createStats: joins every source into one snapshot, cached until asked for 
 
 test('createStats: a data dir with nothing in it gives empty lists', async () => {
   const d = await createStats({ dataDir: path.join(tmp, 'nothing') }).collect();
-  for (const k of ['projects', 'tasks', 'runs', 'chat', 'you', 'owner', 'checks', 'moves', 'windows', 'limits', 'commits', 'machine']) assert.deepEqual(d[k], [], k);
+  for (const k of ['projects', 'tasks', 'runs', 'chat', 'you', 'owner', 'checks', 'moves', 'windows', 'limits', 'commits', 'machine', 'nodes']) assert.deepEqual(d[k], [], k);
 });

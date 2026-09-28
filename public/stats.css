@@ -155,6 +155,7 @@
 /* models table: a grid that becomes cards on phones */
 .sx-table { display: flex; flex-direction: column; font-size: 13px; }
 .sx-tr { display: grid; grid-template-columns: minmax(150px, 1.7fr) repeat(7, minmax(0, .75fr)) minmax(90px, 1.2fr); gap: 10px; align-items: center; padding: 9px 0; border-top: 1px solid var(--border); }
+.sx-machines .sx-tr { grid-template-columns: minmax(150px, 1.6fr) repeat(4, minmax(0, .7fr)) minmax(0, 1.1fr) minmax(0, 1fr); }
 .sx-th { border-top: 0; padding-top: 0; font-size: 11.5px; color: var(--muted); align-items: end; }
 .sx-td { font-variant-numeric: tabular-nums; min-width: 0; }
 .sx-td-name { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
@@ -214,6 +215,7 @@
   .sx-th { display: none; }
   .sx-tr { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px 10px; padding: 12px 0; }
   .sx-tr:nth-child(2) { border-top: 0; padding-top: 0; }
+  .sx-machines .sx-tr { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .sx-td-name, .sx-outcome { grid-column: 1 / -1; }
   .sx-td { display: flex; flex-direction: column; gap: 1px; font-size: 14px; font-weight: 600; }
   .sx-td::before { content: attr(data-label); font-size: 11.5px; font-weight: 400; color: var(--muted); }
@@ -228,8 +230,9 @@
 @media (max-width: 600px) {
   .sx .m-head { padding-top: 2px; padding-bottom: 2px; }
   .sx-bar { position: relative; flex-wrap: nowrap; align-items: stretch; gap: 8px; padding-bottom: 6px; }
-  .sx-tabs { flex: 1 1 auto; min-width: 0; padding: 0; }
-  .sx-tabs button { flex: 1 1 auto; padding: 5px 6px; }
+  /* Five tabs fit a 375pt row; narrower phones scroll the row sideways instead of clipping labels. */
+  .sx-tabs { flex: 1 1 auto; min-width: 0; padding: 0; overflow-x: auto; scrollbar-width: none; }
+  .sx-tabs button { flex: 1 1 auto; padding: 5px 4px; font-size: 13px; white-space: nowrap; }
   .sx-filters { flex: none; align-items: stretch; }
   .sx-range-chip { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-width: 44px; min-height: 36px; padding: 0 10px;
     border: 1px solid var(--border); border-radius: 9px; background: var(--raised); color: var(--text); font: inherit; font-size: 14px; font-weight: 550; white-space: nowrap; cursor: pointer; }

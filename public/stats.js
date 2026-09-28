@@ -1,12 +1,12 @@
 'use strict';
 // ---------- Stats: you and the orchestrator (server: stats.mjs, GET /api/stats) ----------
 // The server sends raw records; everything here is sliced by the chosen range and project, bucketed in the browser's
-// timezone and turned into tiles, charts and plain-language insights. Tabs: Overview · You · Agents · Projects.
+// timezone and turned into tiles, charts and plain-language insights. Tabs: Overview · You · Agents · Projects · Machines.
 // Loaded after app.js and uses its helpers ($, el, api, store, fmtTok, fmtDur, closeSidebar, modelName, agentLabel).
 (() => {
   const MIN = 60e3, H = 3600e3, DAY = 864e5;
   const RANGE_MS = { all: 0, '30d': 30 * DAY, '7d': 7 * DAY, '24h': DAY };
-  const TABS = ['overview', 'you', 'agents', 'projects'];
+  const TABS = ['overview', 'you', 'agents', 'projects', 'machines'];
   const SX = {
     data: null, err: '', loading: null, lastFocus: null, observers: [],
     tab: TABS.includes(store.get('cw.sx.tab')) ? store.get('cw.sx.tab') : 'overview',
@@ -903,6 +903,92 @@
     return out;
   }
 
+  // ---------- machines: what each machine of the cluster did ----------
+  // Runs say where they ran ('controller' = this server); tasks where they last started (null or 'controller' = here).
+  const sxMachineKey = (n) => (!n || n === 'controller' ? 'controller' : n);
+  const SX_OS = { darwin: 'macOS', linux: 'Linux', win32: 'Windows' };
+  function sxMachinesTab(c, m) {
+    const d = SX.data, nodes = new Map((d.nodes || []).map((n) => [n.id, n]));
+    const rows = new Map();
+    const row = (id) => rows.get(id) || rows.set(id, { id, done: 0, failed: 0, pass: 0, checks: 0, ms: 0, in: 0, out: 0, last: 0 }).get(id);
+    if (d.runs.some((r) => sxMachineKey(r.node) === 'controller') || d.tasks.some((t) => sxMachineKey(t.node) === 'controller')) row('controller');
+    for (const n of nodes.keys()) row(n);
+    for (const t of m.shipped) row(sxMachineKey(t.node)).done++;
+    for (const t of m.failed) row(sxMachineKey(t.node)).failed++;
+    for (const r of c.runs) {
+      const x = row(sxMachineKey(r.node));
+      x.ms += runMs(r, c.from, c.to);
+      if (c.inR(r.end ?? r.start)) { x.in += r.in; x.out += r.out; }
+      x.last = Math.max(x.last, r.end ?? d.at, r.start);
+    }
+    // A check belongs to the machine of its task's latest run that started before it.
+    const runsByTask = new Map();
+    for (const r of d.runs) (runsByTask.get(r.task) || runsByTask.set(r.task, []).get(r.task)).push(r);
+    for (const k of c.checks) {
+      const run = (runsByTask.get(k.task) || []).filter((r) => r.start <= k.t).sort((a, b) => b.start - a.start)[0];
+      if (!run) continue;
+      const x = row(sxMachineKey(run.node));
+      x.checks++; if (k.ok) x.pass++;
+    }
+    const name = (id) => (id === 'controller' ? 'This server' : nodes.get(id)?.name || id);
+    const sub = (id) => {
+      if (id === 'controller') return 'Controller';
+      const n = nodes.get(id);
+      return n ? [SX_OS[n.os] || n.os, n.status].filter(Boolean).join(' · ') || 'Worker' : 'No longer paired';
+    };
+    const list = [...rows.values()].sort((a, b) => b.ms - a.ms || (a.id === 'controller' ? -1 : b.id === 'controller' ? 1 : name(a.id).localeCompare(name(b.id))));
+    // The three busiest keep the validated hues; past that, machines fold into one neutral "Other" (colour never alone:
+    // the legend names each part).
+    const HUES = ['var(--sx-c2)', 'var(--sx-c1)', 'var(--sx-c3)'];
+    const busy = list.filter((x) => x.ms > 0);
+    const color = (id) => { const i = busy.findIndex((x) => x.id === id); return i >= 0 && i < HUES.length ? HUES[i] : 'var(--faint)'; };
+    const out = [];
+
+    const share = card('Busy time by machine', `${hrs(sum(list, (x) => x.ms))} of agent work in this range`, 'wide');
+    if (busy.length) {
+      const rest = busy.slice(HUES.length);
+      const parts = busy.slice(0, HUES.length).map((x) => ({ label: name(x.id), v: x.ms, color: color(x.id) }));
+      if (rest.length) parts.push({ label: rest.length === 1 ? name(rest[0].id) : `Other (${rest.map((x) => name(x.id)).join(', ')})`, v: sum(rest, (x) => x.ms), color: 'var(--faint)' });
+      share.append(splitBar(parts, dur));
+    } else share.append(empty('No runs in this range.'));
+    out.push(share);
+
+    const mc = card('Machines', 'Every machine that ran work or is paired with this server', 'wide');
+    const COLS = ['Machine', 'Done', 'Failed', 'Checks passed', 'Busy', 'Tokens in / out', 'Last active'];
+    if (!list.length) mc.append(empty('No machines have run work yet.'));
+    else {
+      const table = el('div', 'sx-table sx-machines');
+      table.setAttribute('role', 'table');
+      table.setAttribute('aria-label', 'Machines');
+      const hr = el('div', 'sx-tr sx-th');
+      hr.setAttribute('role', 'row');
+      for (const h of COLS) { const x = el('span', '', h); x.setAttribute('role', 'columnheader'); hr.append(x); }
+      table.append(hr);
+      for (const x of list) {
+        const tr = el('div', 'sx-tr');
+        tr.setAttribute('role', 'row');
+        tr.dataset.machine = x.id;
+        const nm = el('span', 'sx-td-name');
+        const sw = el('i', 'sx-sw'); sw.style.background = x.ms > 0 ? color(x.id) : 'var(--sx-empty)';
+        const txt = el('span'); txt.append(el('strong', '', name(x.id)), el('small', '', sub(x.id)));
+        nm.append(sw, txt);
+        const cells = [nm];
+        const passText = x.checks ? pct(x.pass / x.checks) : '—';
+        for (const [i, v] of [num(x.done), num(x.failed), passText, x.ms ? dur(x.ms) : '—', x.in + x.out ? `${compact(x.in)} / ${compact(x.out)}` : '—',
+          x.last ? (x.last >= d.at ? 'Now' : fmtWhen(x.last)) : '—'].entries()) {
+          const td = el('span', 'sx-td', v); td.dataset.label = COLS[i + 1]; cells.push(td);
+          if (i === 2 && x.checks) td.title = `${x.pass} of ${plural(x.checks, 'check')} passed`;
+        }
+        for (const cell of cells) cell.setAttribute('role', 'cell');
+        tr.append(...cells);
+        table.append(tr);
+      }
+      mc.append(table);
+    }
+    out.push(mc);
+    return out;
+  }
+
   // ---------- sheet ----------
   function render() {
     if ($('statsModal').hidden) return;
@@ -928,7 +1014,7 @@
     hideTip();
     const { cur, prev } = slices();
     const m = metrics(cur), pm = prev && metrics(prev);
-    const content = SX.tab === 'you' ? youTab(cur, m, pm) : SX.tab === 'agents' ? agentsTab(cur, m) : SX.tab === 'projects' ? projectsTab(cur, m) : overview(cur, m, pm);
+    const content = SX.tab === 'you' ? youTab(cur, m, pm) : SX.tab === 'agents' ? agentsTab(cur, m) : SX.tab === 'projects' ? projectsTab(cur, m) : SX.tab === 'machines' ? sxMachinesTab(cur, m) : overview(cur, m, pm);
     const grid = el('div', 'sx-grid');
     grid.append(...content);
     const y = body.scrollTop;
@@ -991,6 +1077,13 @@
     e.preventDefault();
     bs[(i + (e.key === 'ArrowDown' ? 1 : bs.length - 1)) % bs.length].focus();
   });
+
+  // The Machines tab button is added here (index.html lists the first four), before the tab handlers below.
+  if (!document.querySelector('#sxTabs [data-tab="machines"]')) {
+    const mb = el('button', '', 'Machines');
+    mb.type = 'button'; mb.setAttribute('role', 'tab'); mb.dataset.tab = 'machines'; mb.setAttribute('aria-controls', 'sxBody');
+    $('sxTabs').append(mb);
+  }
 
   $('statsBtn').addEventListener('click', open);
   $('statsModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) close(); });

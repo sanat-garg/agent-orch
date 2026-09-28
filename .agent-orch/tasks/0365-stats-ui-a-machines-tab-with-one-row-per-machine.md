@@ -21,3 +21,7 @@ Verify with `npm test -- test/stats.test.mjs test/ui-stats.test.mjs`.
 ## Done when
 
 `npm test -- test/stats.test.mjs test/ui-stats.test.mjs` passes and `grep -q "'machines'" public/stats.js`
+
+## Result — done (check passed) (2026-09-28 12:54)
+
+AGENT-ORCH-STATUS: done — Stats has a tested Machines tab with per-machine rows and share bar

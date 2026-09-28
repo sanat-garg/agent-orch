@@ -66,16 +66,21 @@ before(async () => {
   const pid = Number(db.prepare('INSERT INTO projects (path, name, created_at) VALUES (?, ?, ?)').run(proj, 'demo', s - 4 * 86400).lastInsertRowid);
   // A paused project: left out of the Projects tab (unless picked in the project filter).
   db.prepare("INSERT INTO projects (path, name, status, created_at) VALUES (?, ?, 'paused', ?)").run(path.join(dataDir, 'p', 'old'), 'old-paused', s - 9 * 86400);
-  const addT = db.prepare(`INSERT INTO tasks (project_id, kind, title, prompt, status, source, origin, created_at, started_at, finished_at, agent, model, ran_agent, ran_model)
-    VALUES (?, 'work', ?, 'x', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-  const addR = db.prepare(`INSERT INTO runs (task_id, purpose, outcome, agent, input_tokens, output_tokens, cache_read_tokens, num_turns, started_at, finished_at)
-    VALUES (?, 'work', ?, ?, 100, 2000, 90000, 12, ?, ?)`);
+  // A paired worker (cluster.mjs's schema; the boot creates it only with the orchestrator on): task 0 ran there, the rest here.
+  db.exec(`CREATE TABLE IF NOT EXISTS nodes (id TEXT PRIMARY KEY, name TEXT NOT NULL, os TEXT, arch TEXT, token_hash TEXT UNIQUE,
+    created_at INTEGER NOT NULL, last_seen INTEGER, status TEXT NOT NULL DEFAULT 'offline', inventory TEXT, resources TEXT,
+    max_slots INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 1, draining INTEGER NOT NULL DEFAULT 0)`);
+  db.prepare("INSERT INTO nodes (id, name, os, created_at, last_seen, status) VALUES ('mac1', 'Test MacBook', 'darwin', ?, ?, 'online')").run(Math.round(s - 86400), Math.round(s));
+  const addT = db.prepare(`INSERT INTO tasks (project_id, kind, title, prompt, status, source, origin, created_at, started_at, finished_at, agent, model, ran_agent, ran_model, node_id)
+    VALUES (?, 'work', ?, 'x', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+  const addR = db.prepare(`INSERT INTO runs (task_id, purpose, outcome, agent, input_tokens, output_tokens, cache_read_tokens, num_turns, started_at, finished_at, node_id)
+    VALUES (?, 'work', ?, ?, 100, 2000, 90000, 12, ?, ?, ?)`);
   for (let i = 0; i < 12; i++) {
     const created = s - (i * 6 + 3) * 3600, agent = i % 4 === 3 ? 'codex' : 'claude', model = agent === 'codex' ? 'gpt-6-sol' : 'opus';
     const status = i === 5 ? 'cancelled' : 'done', reflect = i % 3 === 0;
     const id = Number(addT.run(pid, `Task number ${i} with a fairly long title that has to be truncated on phones`, status, reflect ? 'reflection' : 'planner', reflect ? 'reflection' : 'chat',
-      created, created + 60, status === 'done' ? created + 1500 + i * 60 : created + 100, agent, model, agent, model).lastInsertRowid);
-    if (status === 'done') addR.run(id, i === 7 ? 'rate_limited' : 'ok', agent, created + 60, created + 1500 + i * 60);
+      created, created + 60, status === 'done' ? created + 1500 + i * 60 : created + 100, agent, model, agent, model, i === 0 ? 'mac1' : i === 1 ? 'controller' : null).lastInsertRowid);
+    if (status === 'done') addR.run(id, i === 7 ? 'rate_limited' : 'ok', agent, created + 60, created + 1500 + i * 60, i === 0 ? 'mac1' : i === 1 ? 'controller' : null);
   }
   db.prepare("INSERT INTO events (ts, level, project_id, message) VALUES (?, 'info', ?, ?)").run(s - 7200, pid, '#3 moved before #2');
   db.close();
@@ -162,6 +167,19 @@ test('desktop: Overview leads with shipped tasks; every tab renders the seeded w
   assert.doesNotMatch(await page.locator('#sxBody').textContent(), /old-paused/);
   assert.match(await page.locator('.sx-card-sub').first().textContent(), /^1 active project · 1 paused not shown$/);
 
+  // Machines: one row per machine with its done count, and a busy-time share bar with a text legend.
+  await tab(page, 'machines');
+  const machine = (id) => page.locator(`.sx-machines .sx-tr[data-machine="${id}"]`);
+  assert.equal(await machine('mac1').locator('.sx-td-name strong').textContent(), 'Test MacBook');
+  assert.equal(await machine('controller').locator('.sx-td-name strong').textContent(), 'This server');
+  assert.equal(await machine('mac1').locator('[data-label="Done"]').textContent(), '1');
+  assert.equal(await machine('controller').locator('[data-label="Done"]').textContent(), '10');
+  assert.match(await page.locator('.sx-card', { hasText: 'Busy time by machine' }).locator('.sx-legend').textContent(), /This server \d+%.*Test MacBook \d+%/);
+  assert.equal(await page.locator('#sxTabs [role=tab]').count(), 5);
+  await page.locator('#sxTabs [data-tab="machines"]').focus();
+  await page.keyboard.press('ArrowRight');
+  assert.equal(await page.locator('#sxTabs [data-tab="overview"]').getAttribute('aria-selected'), 'true', 'arrow keys wrap across five tabs');
+
   // Ranges re-slice: nothing in the seeded data is in the last 24 hours but the newest few tasks.
   await tab(page, 'overview');
   await page.locator('#sxRange [data-range="24h"]').click();
@@ -178,7 +196,7 @@ test('desktop: Overview leads with shipped tasks; every tab renders the seeded w
 
 test('375×667: a bottom sheet with nothing sticking out sideways on any tab', { skip, timeout: 60000 }, async () => {
   const { ctx, page, errors } = await open({ width: 375, height: 667 }, true);
-  for (const id of ['overview', 'you', 'agents', 'projects']) {
+  for (const id of ['overview', 'you', 'agents', 'projects', 'machines']) {
     await tab(page, id);
     const m = await page.evaluate(() => {
       const panel = document.querySelector('#statsModal .modal-panel'), r = panel.getBoundingClientRect();
@@ -193,6 +211,8 @@ test('375×667: a bottom sheet with nothing sticking out sideways on any tab', {
     assert.deepEqual(m.wide, [], `${id}: content sticks out of the panel`);
     assert.ok(m.pageW <= m.vw && m.bodyW <= m.bodyCW, `${id}: scrolls sideways ${JSON.stringify(m)}`);
     assert.ok(m.headH < 80, `${id}: title and buttons stay on one line (${m.headH}px)`);
+    const small = await page.evaluate(() => Math.min(...[...document.querySelectorAll('#sxTabs button, #sxBody .sx-table *')].map((e) => parseFloat(getComputedStyle(e).fontSize))));
+    assert.ok(small >= 11, `${id}: ${small}px type`);
   }
   // UI-REVIEW #27: the pinned part above the scrolling body (grabber, title, tabs + range chip) stays short, the tabs and
   // the chip share one row, and the subtitle scrolls with the body.
@@ -203,6 +223,12 @@ test('375×667: a bottom sheet with nothing sticking out sideways on any tab', {
   });
   assert.ok(pin.pinned < 120, `pinned header is ${pin.pinned}px`);
   assert.equal(pin.chipTop, pin.tabsTop, 'tabs and range chip on one row');
+  const tabTops = await page.locator('#sxTabs [role=tab]').evaluateAll((bs) => bs.map((b) => b.offsetTop));
+  assert.equal(new Set(tabTops).size, 1, `five tabs on one row ${tabTops}`);
+  const clipped = await page.locator('#sxTabs').evaluate((t) => [t, ...t.children].filter((e) => e.scrollWidth > e.clientWidth + 0.5).map((e) => e.textContent));
+  assert.deepEqual(clipped, [], 'every tab label fits at 375pt');
+  await tab(page, 'machines');
+  assert.ok(await page.locator('.sx-machines .sx-tr[data-machine="mac1"]').isVisible());
   assert.equal(pin.subInBody, true, 'the subtitle scrolls with the body');
   assert.equal(await page.locator('#sxRange').isVisible(), false, 'range buttons wait behind the chip');
   await tab(page, 'overview');

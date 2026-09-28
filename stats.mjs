@@ -1,7 +1,8 @@
 // Stats: one read-only snapshot of everything the owner and the orchestrator have done, for the Stats sheet
 // (public/stats.js). The server only collects; ranges, local-time buckets and insights are the browser's job, so
 // every timestamp here is epoch ms and nothing is formatted.
-//   GET /api/stats → { at, since, projects, tasks, runs, chat, you, owner, checks, moves, windows, limits, commits, machine }
+//   GET /api/stats → { at, since, projects, tasks, runs, chat, you, owner, checks, moves, windows, limits, commits, machine, nodes }
+//   nodes: [{id, name, os, status, lastSeen}], the paired worker machines (tasks[].node / runs[].node point at their ids)
 // Sources: the orchestrator DB (own read-only connection), chat logs (<DATA>/logs/<convo>.jsonl), usage.jsonl,
 // minutes.jsonl and each project's git log (cached per HEAD). Missing sources give empty lists, never an error.
 import fs from 'node:fs';
@@ -142,7 +143,7 @@ export function createStats({ dataDir, dbFile = path.join(dataDir, 'orchestrator
   }
 
   function fromDb() {
-    const empty = { projects: [], tasks: [], runs: [], events: [] };
+    const empty = { projects: [], tasks: [], runs: [], events: [], nodes: [] };
     if (!fs.existsSync(dbFile)) return empty;
     let db;
     try {
@@ -153,6 +154,7 @@ export function createStats({ dataDir, dbFile = path.join(dataDir, 'orchestrator
         tasks: all('SELECT id, project_id, kind, title, status, urgency, source, origin, attempts, continuations, created_at, started_at, finished_at, agent, model, ran_agent, ran_model, commit_sha, moves, node_id, effort FROM tasks'),
         runs: all('SELECT id, task_id, purpose, outcome, agent, node_id, effort, input_tokens, output_tokens, cache_read_tokens, num_turns, started_at, finished_at, log_path FROM runs'),
         events: all('SELECT ts, level, project_id, task_id, message FROM events'),
+        nodes: all('SELECT id, name, os, status, last_seen FROM nodes'),
       };
     } catch (e) { log(`db: ${e.message}`); return empty; }
     finally { try { db?.close(); } catch {} }
@@ -179,7 +181,7 @@ export function createStats({ dataDir, dbFile = path.join(dataDir, 'orchestrator
   }
 
   async function build() {
-    const { projects, tasks, runs, events } = fromDb();
+    const { projects, tasks, runs, events, nodes } = fromDb();
     const usage = readRecords(path.join(dataDir, 'metrics', 'usage.jsonl'));
     const projByPath = new Map(projects.map((p) => [p.path, p.id]));
     const taskById = new Map(tasks.map((t) => [t.id, t]));
@@ -251,6 +253,7 @@ export function createStats({ dataDir, dbFile = path.join(dataDir, 'orchestrator
       limits: usage.filter((r) => r.kind === 'limit').map((r) => ({ t: r.t, agent: r.agent, status: r.status, window: r.window || null, resetsAt: r.resetsAt ? r.resetsAt * 1000 : null })),
       commits: commits.sort((a, b) => a.t - b.t),
       machine,
+      nodes: nodes.map((n) => ({ id: n.id, name: n.name, os: n.os || null, status: n.status || null, lastSeen: ms(n.last_seen) })),
     };
   }
 

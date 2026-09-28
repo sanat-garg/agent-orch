@@ -13,3 +13,7 @@ test/compute-only.test.mjs's test 'the scheduler never places plan (the chat's p
 ## Done when
 
 `npm test -- test/compute-only.test.mjs` passes
+
+## Result — done (check passed) (2026-09-28 14:09)
+
+AGENT-ORCH-STATUS: done — compute-only tests pass; Linux-only /proc/systemd checks now skipped on macOS

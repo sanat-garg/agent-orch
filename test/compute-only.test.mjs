@@ -134,24 +134,26 @@ test('the worker rejects and logs every frame off the allow-list, still acts on 
     // Nothing else came back for the rejected frames: no job, sign-in, model or policy activity.
     assert.deepEqual([...new Set(frames.map((f) => f.t))].filter((t) => ![MSG.HELLO, MSG.INVENTORY, MSG.RESOURCES, MSG.HEARTBEAT, MSG.ERROR, MSG.JOB_REJECT, MSG.LOGS].includes(t)), []);
     // No local control surface: the daemon itself holds no listening TCP socket; its only listener is the status view's
-    // unix socket in its home, readable by its own user alone.
-    const inodes = new Set(fs.readdirSync(`/proc/${worker.pid}/fd`).map((fd) => { try { return /^socket:\[(\d+)\]$/.exec(fs.readlinkSync(`/proc/${worker.pid}/fd/${fd}`))?.[1]; } catch { return null; } }).filter(Boolean));
-    assert.ok(inodes.size > 0, 'sees the worker\'s sockets (its connection to the head)');
-    const listening = [];
-    for (const f of ['tcp', 'tcp6']) {
-      for (const l of fs.readFileSync(`/proc/net/${f}`, 'utf8').split('\n').slice(1)) {
-        const c = l.trim().split(/\s+/);
-        if (c[3] === '0A' && inodes.has(c[9])) listening.push(`${f} ${c[1]}`);
+    // unix socket in its home, readable by its own user alone. (Read from /proc, so checked on Linux only.)
+    if (process.platform === 'linux') {
+      const inodes = new Set(fs.readdirSync(`/proc/${worker.pid}/fd`).map((fd) => { try { return /^socket:\[(\d+)\]$/.exec(fs.readlinkSync(`/proc/${worker.pid}/fd/${fd}`))?.[1]; } catch { return null; } }).filter(Boolean));
+      assert.ok(inodes.size > 0, 'sees the worker\'s sockets (its connection to the head)');
+      const listening = [];
+      for (const f of ['tcp', 'tcp6']) {
+        for (const l of fs.readFileSync(`/proc/net/${f}`, 'utf8').split('\n').slice(1)) {
+          const c = l.trim().split(/\s+/);
+          if (c[3] === '0A' && inodes.has(c[9])) listening.push(`${f} ${c[1]}`);
+        }
       }
+      for (const l of fs.readFileSync('/proc/net/unix', 'utf8').split('\n').slice(1)) {
+        const c = l.trim().split(/\s+/);
+        if (c.length > 6 && (parseInt(c[3], 16) & 0x10000) && inodes.has(c[6])) listening.push(`unix ${c[7] || '(anonymous)'}`);
+      }
+      // A long home is bound by its name relative to the home (worker-status.mjs), so match the socket by its name.
+      const statusSock = path.join(home, '.agent-orch-worker', 'worker.sock');
+      assert.deepEqual(listening.map((l) => (/^unix (\S*\/)?worker\.sock$/.test(l) ? 'unix worker.sock' : l)), ['unix worker.sock']);
+      assert.equal(fs.statSync(statusSock).mode & 0o777, 0o600);
     }
-    for (const l of fs.readFileSync('/proc/net/unix', 'utf8').split('\n').slice(1)) {
-      const c = l.trim().split(/\s+/);
-      if (c.length > 6 && (parseInt(c[3], 16) & 0x10000) && inodes.has(c[6])) listening.push(`unix ${c[7] || '(anonymous)'}`);
-    }
-    // A long home is bound by its name relative to the home (worker-status.mjs), so match the socket by its name.
-    const statusSock = path.join(home, '.agent-orch-worker', 'worker.sock');
-    assert.deepEqual(listening.map((l) => (/^unix (\S*\/)?worker\.sock$/.test(l) ? 'unix worker.sock' : l)), ['unix worker.sock']);
-    assert.equal(fs.statSync(statusSock).mode & 0o777, 0o600);
   } finally {
     clearInterval(beat);
     worker.kill('SIGTERM');
@@ -203,7 +205,10 @@ test('the scheduler never places plan (the chat\'s planner) or reflect work on a
       },
     });
     const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
-    const pid = Number(db.prepare("INSERT INTO projects(path,name,priority,status,perpetual,created_at) VALUES(?,'demo',50,'active',0,0)").run(repo).lastInsertRowid);
+    // Keep improving on (an off project runs no reflect task at all), with the next reflection a year away so
+    // scheduleReflections adds none of its own: only the hand-made reflect task below runs.
+    const pid = Number(db.prepare("INSERT INTO projects(path,name,priority,status,perpetual,next_reflect_at,created_at) VALUES(?,'demo',50,'active',1,?,0)")
+      .run(repo, Date.now() / 1000 + 86400 * 365).lastInsertRowid);
     const task = (kind, title, source = 'user') => Number(db.prepare("INSERT INTO tasks(project_id,kind,title,prompt,priority,urgency,source,created_at) VALUES(?,?,?,?,50,'normal',?,?)")
       .run(pid, kind, title, title, source, Date.now() / 1000).lastInsertRowid);
     // The owner's chat message waits for the planner (a plan task answers it), a reflection, and a work task.
@@ -296,7 +301,8 @@ test('the worker CLI has one local setting (limit): pair, run, status and limit 
 
 test('the installers set up only the worker service: no agent-orch web service, Caddy or ttyd', () => {
   const ARGS = ['--dry-run', '--controller', 'https://head.example', '--code', 'ABCD-2345', '--name', 'box', '--agents', 'claude,codex'];
-  const runs = [['install-worker.sh', ARGS], ['install-worker-macos.sh', ARGS], ['install-worker-macos.sh', [...ARGS, '--service', 'login']],
+  // install-worker.sh needs systemd, so it runs on Linux only.
+  const runs = [...(process.platform === 'linux' ? [['install-worker.sh', ARGS]] : []), ['install-worker-macos.sh', ARGS], ['install-worker-macos.sh', [...ARGS, '--service', 'login']],
     ['install-worker-macos.sh', [...ARGS, '--no-dedicated-user']]];
   for (const [script, args] of runs) {
     const home = fs.mkdtempSync(path.join(tmp, 'i-'));

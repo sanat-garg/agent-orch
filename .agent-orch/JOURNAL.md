@@ -1125,3 +1125,7 @@ head slots from hardware, integrators reserved, workers-first delegation tested
 ## 2026-09-28 14:06 — #363 Integrate #315: AUDIT #50: bv_open honours a url only when the socket may drive [done (check passed)]
 
 Merge conflict resolved; browser-live tests pass; #50 marked Fixed
+
+## 2026-09-28 14:09 — #408 Fix the failing compute-only scheduler test: its project must have Keep improving on for its reflect task to run [done (check passed)]
+
+compute-only tests pass; Linux-only /proc/systemd checks now skipped on macOS

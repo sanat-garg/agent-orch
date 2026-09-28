@@ -7182,6 +7182,7 @@ function openSettings() {
   $('settingsModal').hidden = false;
   renderSettings();
   loadGatePatterns();
+  loadRigorLevels();
   $('settingsModal').querySelector('.icon-btn[data-close]').focus();
 }
 function closeSettings() {
@@ -7258,6 +7259,7 @@ function renderSettings() {
   $('stProject').hidden = !p;
   if (!p) return;
   $('stProjectTitle').textContent = `This project · ${p.path.split('/').pop()}`;
+  renderRigor();
   // Keep improving (projects.perpetual): live from the project pushes, not flipped while a save is in flight.
   if (!PERP.saving) $('stPerpetual').checked = !!p.perpetual;
   // Never overwrite what the owner is typing (renderSettings runs on every state push).
@@ -7373,6 +7375,109 @@ $('stParallel').addEventListener('change', (e) => { saveParallel({ maxTasks: e.t
 $('stServerTasks').addEventListener('change', (e) => { saveParallel({ parallelTasks: Number(e.target.value) }); e.target.blur(); });
 $('stRapid').addEventListener('change', async (e) => { await saveParallel({ rapidDevelopment: e.target.checked }); e.target.blur(); renderSettings(); });
 $('stApplyUpdates').addEventListener('change', async (e) => { await saveParallel({ applyUpdates: e.target.value }); e.target.blur(); renderSettings(); });
+// Rigor (projects.rigor 1-5, #779): how much process the chat planner and reflection put into this project's tasks. Five
+// segments (a radiogroup: arrow keys, Home/End) name the levels (GET /api/orch/rigor-levels); the selected one shows its
+// name, summary and the example task that level writes. Moving previews; a click, a pointer release or a pause after the
+// arrows saves (PATCH the project {rigor}). Pushes don't move it while the owner is on it or a save is in flight.
+const RIGOR = { levels: null, loading: null, failed: false, preview: null, saving: 0, timer: null, drag: false, expanded: false };
+const RIGOR_DEFAULT = 3; // a project from before rigor existed (the migration sets those to 3)
+function loadRigorLevels() {
+  if (RIGOR.levels || RIGOR.loading) return RIGOR.loading;
+  RIGOR.loading = api('/api/orch/rigor-levels', 'GET', undefined, false)
+    .then((d) => { RIGOR.levels = Array.isArray(d) ? d : d.levels || []; RIGOR.failed = false; })
+    .catch(() => { RIGOR.failed = true; })
+    .finally(() => { RIGOR.loading = null; renderRigor(); });
+  return RIGOR.loading;
+}
+const rigorLevel = (n) => RIGOR.levels?.find((l) => Number(l.level) === n);
+const rigorLabel = (n) => (rigorLevel(n)?.name ? `${n} · ${rigorLevel(n).name}` : `Level ${n}`);
+function rigorSaved() { const r = Number(O.project?.rigor); return r >= 1 && r <= 5 ? r : RIGOR_DEFAULT; }
+function renderRigor() {
+  if (!O.project || $('settingsModal').hidden) return;
+  const box = $('stRigor');
+  if (!RIGOR.saving && !RIGOR.timer && !RIGOR.drag && !box.contains(document.activeElement)) RIGOR.preview = null;
+  const n = RIGOR.preview ?? rigorSaved(), l = rigorLevel(n);
+  for (const b of box.querySelectorAll('[data-level]')) {
+    const lv = Number(b.dataset.level), on = lv === n;
+    b.setAttribute('aria-checked', String(on));
+    b.tabIndex = on ? 0 : -1;
+    b.setAttribute('aria-label', rigorLabel(lv));
+    b.title = rigorLevel(lv)?.summary || '';
+    b.querySelector('.rg-name').textContent = rigorLevel(lv)?.name || '';
+  }
+  $('stRigorName').textContent = rigorLabel(n);
+  $('stRigorSummary').textContent = l?.summary || (RIGOR.failed ? 'Couldn\'t load the level descriptions' : RIGOR.levels ? '' : 'Loading…');
+  const ex = l?.example;
+  $('stRigorExample').hidden = !ex;
+  if (!ex) return;
+  $('stRigorExTitle').textContent = ex.title || '';
+  $('stRigorExDone').textContent = ex.done_when || '';
+  // The prompt shows its first 4 lines; the button appears only when there is more.
+  const pr = $('stRigorExPrompt'), more = $('stRigorExMore');
+  pr.textContent = ex.prompt || '';
+  pr.classList.remove('open');
+  const long = pr.scrollHeight > pr.clientHeight + 1;
+  pr.classList.toggle('open', long && RIGOR.expanded);
+  more.hidden = !long;
+  more.textContent = RIGOR.expanded ? 'Show less' : 'Show full prompt';
+  more.setAttribute('aria-expanded', String(long && RIGOR.expanded));
+}
+function rigorPreview(n) {
+  if (n === (RIGOR.preview ?? rigorSaved())) return;
+  RIGOR.preview = n;
+  renderRigor();
+}
+// The project's fields (PATCH /api/orch/project/:id); a server from before that route takes the same body as a POST.
+async function patchProject(id, body) {
+  const url = `/api/orch/project/${id}`;
+  try { return await api(url, 'PATCH', body, false); } catch (e) {
+    if (!/\((404|405)\)$/.test(e.message)) throw e;
+    return api(url, 'POST', body);
+  }
+}
+async function saveRigor(n) {
+  clearTimeout(RIGOR.timer); RIGOR.timer = null;
+  const p = O.project;
+  if (!p || !(n >= 1 && n <= 5)) return;
+  if (n === rigorSaved()) { renderRigor(); return; }
+  RIGOR.preview = n;
+  RIGOR.saving++;
+  try {
+    await patchProject(p.id, { rigor: n });
+    if (O.project?.id === p.id) O.project.rigor = n;
+    toast(`Rigor set to ${rigorLabel(n)}: applies to new planning and reflection`, { kind: 'success' });
+  } catch (err) { toast(err.message, { kind: 'error' }); RIGOR.preview = null; }
+  finally { RIGOR.saving--; renderRigor(); }
+}
+{
+  const box = $('stRigor');
+  const at = (x) => { const r = box.getBoundingClientRect(); return Math.min(5, Math.max(1, Math.floor(((x - r.left) / r.width) * 5) + 1)); };
+  box.addEventListener('pointerdown', (e) => {
+    const b = e.target.closest('[data-level]');
+    if (!b || e.button) return;
+    RIGOR.drag = true;
+    box.setPointerCapture?.(e.pointerId);
+    rigorPreview(Number(b.dataset.level));
+  });
+  box.addEventListener('pointermove', (e) => { if (RIGOR.drag) rigorPreview(at(e.clientX)); });
+  box.addEventListener('pointerup', () => { if (!RIGOR.drag) return; RIGOR.drag = false; saveRigor(RIGOR.preview ?? rigorSaved()); });
+  box.addEventListener('pointercancel', () => { RIGOR.drag = false; RIGOR.preview = null; renderRigor(); }); // e.g. the sheet scrolls instead
+  // Enter/Space (a click with no pointer: detail 0); pointer clicks already saved on release.
+  box.addEventListener('click', (e) => { const b = e.target.closest('[data-level]'); if (b && e.detail === 0) saveRigor(Number(b.dataset.level)); });
+  box.addEventListener('keydown', (e) => {
+    const step = { ArrowLeft: -1, ArrowDown: -1, ArrowRight: 1, ArrowUp: 1 }[e.key];
+    const cur = RIGOR.preview ?? rigorSaved();
+    const n = e.key === 'Home' ? 1 : e.key === 'End' ? 5 : step ? Math.min(5, Math.max(1, cur + step)) : 0;
+    if (!n) return;
+    e.preventDefault();
+    rigorPreview(n);
+    box.querySelector(`[data-level="${n}"]`).focus();
+    clearTimeout(RIGOR.timer);
+    RIGOR.timer = setTimeout(() => saveRigor(n), 700);
+  });
+  box.addEventListener('focusout', (e) => { if (RIGOR.timer && !box.contains(e.relatedTarget)) saveRigor(RIGOR.preview); });
+  $('stRigorExMore').addEventListener('click', () => { RIGOR.expanded = !RIGOR.expanded; renderRigor(); });
+}
 // Keep improving: off means this project never reflects (queued reflections are cancelled; a running one's tasks are dropped).
 const PERP = { saving: false };
 $('stPerpetual').addEventListener('change', async (e) => {

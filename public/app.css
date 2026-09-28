@@ -1272,6 +1272,35 @@ label.st-row, label.st-text { cursor: pointer; }
 .snd-hint { flex-basis: 100%; color: var(--muted); font-size: 12px; }
 .mc-group > .snd-add { padding: 6px 0 8px; }
 @media (pointer: coarse) { .snd-add input[type=url] { height: 44px; font-size: 16px; } .snd-add .btn.small { height: 44px; } }
+/* Rigor (#779): five segments with the level names, the selected level's name + summary, then its example task. */
+.st-rigor { flex-wrap: wrap; row-gap: 8px; }
+.st-rigor .st-text { flex-basis: 100%; }
+.rg-seg { flex-basis: 100%; display: grid; grid-template-columns: repeat(5, 1fr); gap: 3px; padding: 3px; background: var(--raised); border: 1px solid var(--border); border-radius: 10px; touch-action: pan-y; user-select: none; -webkit-user-select: none; }
+.rg-seg button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; min-width: 0; min-height: 40px; padding: 4px 2px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font: inherit; cursor: pointer; }
+.rg-seg button b { font-size: 14px; font-weight: 650; line-height: 1.1; }
+.rg-seg .rg-name { font-size: 11px; line-height: 1.2; text-align: center; overflow-wrap: anywhere; }
+.rg-seg .rg-name:empty { display: none; }
+.rg-seg button:hover { color: var(--text); }
+.rg-seg button[aria-checked="true"] { background: var(--accent-strong); color: var(--accent-text); box-shadow: 0 1px 2px rgba(0,0,0,.14); }
+.rg-seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.rg-now { flex-basis: 100%; font-size: 13.5px; }
+.rg-now strong { display: block; font-weight: 600; }
+.rg-now small { display: block; color: var(--muted); font-size: 12.5px; line-height: 1.35; }
+.rg-now small:empty { display: none; }
+.rg-ex { flex-basis: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); font-size: 13px; }
+.rg-ex[hidden] { display: none; }
+.rg-ex-head { font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
+.rg-ex-title { margin-top: 3px; font-weight: 600; }
+.rg-ex-prompt { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); font-size: 12.5px; line-height: 1.45;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden; }
+.rg-ex-prompt.open { display: block; -webkit-line-clamp: none; line-clamp: none; }
+.rg-ex-more { margin-top: 2px; padding: 2px 0; border: 0; background: none; color: var(--accent-ink); font: inherit; font-size: 12.5px; font-weight: 550; cursor: pointer; }
+.rg-ex-more[hidden] { display: none; }
+.rg-ex-done { margin-top: 8px; display: flex; gap: 8px; align-items: baseline; font-size: 12.5px; }
+.rg-ex-done > span:first-child { flex: none; font-weight: 600; }
+.rg-ex-done > span:last-child { min-width: 0; overflow-wrap: anywhere; color: var(--muted); }
+@media (max-width: 600px) { .rg-seg .rg-name { display: none; } }
+@media (pointer: coarse) { .rg-seg button { min-height: 44px; } .rg-ex-more { min-height: 44px; } }
 /* Reflection models (#508): the hint, then a checkbox per model grouped by agent (columns where they fit). */
 .st-reflect { flex-wrap: wrap; row-gap: 8px; }
 .st-reflect .st-text { flex-basis: 100%; }

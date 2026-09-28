@@ -521,6 +521,24 @@
       <div id="stProject" hidden>
         <h3 class="st-sec" id="stProjectTitle">This project</h3>
         <p class="st-hint">Only for the open project</p>
+        <div class="st-row st-rigor">
+          <span class="st-text" id="stRigorLabel"><strong>Rigor</strong><small id="stRigorHint">Used by the chat planner and reflection for this project. Lower = fewer, simpler tasks focused on working features.</small></span>
+          <div class="rg-seg" id="stRigor" role="radiogroup" aria-labelledby="stRigorLabel" aria-describedby="stRigorHint">
+            <button type="button" role="radio" data-level="1" aria-checked="false" tabindex="-1"><b>1</b><span class="rg-name"></span></button>
+            <button type="button" role="radio" data-level="2" aria-checked="false" tabindex="-1"><b>2</b><span class="rg-name"></span></button>
+            <button type="button" role="radio" data-level="3" aria-checked="false" tabindex="-1"><b>3</b><span class="rg-name"></span></button>
+            <button type="button" role="radio" data-level="4" aria-checked="false" tabindex="-1"><b>4</b><span class="rg-name"></span></button>
+            <button type="button" role="radio" data-level="5" aria-checked="false" tabindex="-1"><b>5</b><span class="rg-name"></span></button>
+          </div>
+          <div class="rg-now" aria-live="polite"><strong id="stRigorName"></strong><small id="stRigorSummary"></small></div>
+          <div class="rg-ex" id="stRigorExample" hidden>
+            <div class="rg-ex-head">Example task at this level</div>
+            <div class="rg-ex-title" id="stRigorExTitle"></div>
+            <p class="rg-ex-prompt" id="stRigorExPrompt"></p>
+            <button type="button" class="rg-ex-more" id="stRigorExMore" aria-expanded="false" aria-controls="stRigorExPrompt" hidden>Show full prompt</button>
+            <div class="rg-ex-done"><span>Done when</span><span id="stRigorExDone"></span></div>
+          </div>
+        </div>
         <label class="st-row">
           <span class="st-text"><strong>Keep improving</strong><small id="stPerpetualHint">When the queue runs low, look at the project and queue the next most valuable steps</small></span>
           <input type="checkbox" class="st-switch" id="stPerpetual" name="perpetual" role="switch" aria-describedby="stPerpetualHint">

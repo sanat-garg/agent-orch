@@ -13,3 +13,20 @@ UI for the per-project rigor level (public/app.js, public/index.html, app.css), 
 ## Done when
 
 `node --test test/ui-rigor*.test.mjs` passes (current level shown, example updates per step, save PATCHes rigor, 5 named steps)
+
+## Result — done (check passed) (2026-09-28 23:24)
+
+I built the Rigor control under Settings → This project, and all 5 tests in `node --test test/ui-rigor.test.mjs` pass in a real browser here (none skipped).
+
+- **Control:** five segments labelled 1–5 with the level names. The selected level shows as e.g. "2 · Working product" with its one-line summary, and the hint text is the one you specified.
+- **Example card:** "Example task at this level" shows the title, the first 4 lines of the prompt with a "Show full prompt" toggle, and the done_when. It updates as you click, drag or use the arrow keys (Home/End also work).
+- **Saving:** a click or releasing a drag saves at once; with the arrow keys it saves after a short pause. Each save shows the toast "Rigor set to 2 · Working product: applies to new planning and reflection". Picking the level it already has saves nothing.
+- **Phones and themes:** steps are 44px tall on touch screens. Screenshots are in `.agent-orch/shots/rigor-desktop-light.png`, `rigor-desktop-dark.png` and `rigor-phone.png`.
+
+Decisions for you:
+- **How it saves:** today's project endpoint only takes POST, and the backend task (#778) that adds rigor hasn't landed yet. So it sends PATCH `{rigor}` as the contract says, and if the server answers with a plain 404 or 405 it sends the same body as a POST. One test covers that fallback. This way it works however #778 wires the route; the fallback is easy to drop once the PATCH route is in.
+- **Projects without a level:** if the project payload has no `rigor` yet, the slider shows 3, matching the planned migration for existing projects.
+
+In the neighbouring tests I ran, `test/ui-static.test.mjs` has one failure ("the sidebar gear opens Settings…", an assertion about the "Restarting once idle" text). It fails the same way without my changes, so it was already broken.
+
+AGENT-ORCH-STATUS: done — Rigor slider with example card saves per project

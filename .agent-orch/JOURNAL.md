@@ -1644,3 +1644,6 @@ CONTEXT.md conflict resolved; download backend and UI tests pass
 ## 2026-09-28 23:22 — #780 Downloads never save an error as a .txt file; show the error instead [done (check passed)]
 
 downloads preflight via check=1, failures toast instead of saving
+## 2026-09-28 23:24 — #779 Settings: Rigor slider (5 levels) with an example prompt for each [done (check passed)]
+
+Rigor slider with example card saves per project

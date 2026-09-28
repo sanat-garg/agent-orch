@@ -92,6 +92,11 @@ EOF
 }
 
 # ---------------------------------------------------------------- worker stage (runs AS the worker account)
+# These functions go to the worker account's own bash as text (declare -f, see main). macOS's /bin/bash is 3.2, and its
+# declare -f reprints a here-document piped into a command (`cat <<EOF | cmd`) with the pipe after EOF, which no bash
+# can parse back ("syntax error near unexpected token `|'"): so nothing in this file pipes a here-document; feed it
+# straight in (`cmd <<EOF`). test/install-scripts.test.mjs checks both.
+WORKER_FUNCS=(say die run tty_run node_major ensure_node ensure_gh ensure_checkout install_agents pair worker_stage node_path)
 # Everything here uses $HOME, so the same functions serve the dedicated user (via sudo -u … -H) and --no-dedicated-user.
 
 node_major() { command -v node >/dev/null && node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0; }
@@ -293,7 +298,7 @@ install_status_window() { # install_status_window OWNER NODE WORKER-HOME
     printf '%s ALL=(%s) NOPASSWD: %s\n' "$1" "$WUSER" "$STATUS_BIN" | write_root "$STATUS_SUDOERS" 0440 check
   fi
   if ((SELF)); then run mkdir -p "$ohome/Library/LaunchAgents"; else run sudo -u "$1" mkdir -p "$ohome/Library/LaunchAgents"; fi
-  cat <<EOF | write "$plistf"
+  write "$plistf" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -406,8 +411,8 @@ $(env_keys "$HOME" "$(worker_path "$node_bin" "$HOME")")
     HOME="$whome" worker_stage
     node_bin="$(HOME="$whome" node_path)"
   else
-    sudo -u "$WUSER" -H bash -c "set -euo pipefail; $vars; $(declare -f); cd; worker_stage"
-    node_bin="$(sudo -u "$WUSER" -H bash -c "set -euo pipefail; $vars; $(declare -f); cd; node_path" </dev/null)"
+    sudo -u "$WUSER" -H bash -c "set -euo pipefail; $vars; $(declare -f "${WORKER_FUNCS[@]}"); cd; worker_stage"
+    node_bin="$(sudo -u "$WUSER" -H bash -c "set -euo pipefail; $vars; $(declare -f "${WORKER_FUNCS[@]}"); cd; node_path" </dev/null)"
   fi
   [[ "$node_bin" == /* ]] || die "the worker stage didn't report a node binary"
 

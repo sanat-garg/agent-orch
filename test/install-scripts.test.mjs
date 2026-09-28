@@ -24,6 +24,32 @@ test('both scripts pass bash -n', () => {
   for (const s of [LINUX, MAC]) execFileSync('bash', ['-n', s]);
 });
 
+// macOS's /bin/bash is 3.2. The installer hands the worker stage's functions (WORKER_FUNCS) to the worker account's bash
+// as text (declare -f), and 3.2 reprints `cat <<EOF | cmd` with the pipe after EOF, which no bash parses back (on a real
+// Mac: "bash: -c: line 208: syntax error near unexpected token `|'"). So no here-document may feed a pipe, the text must
+// parse again, and the worker stage must run from it alone (every function it calls is in the list).
+// CW_BASH32=/path/to/bash-3.2 (or /bin/bash on a Mac) repeats this with the real 3.2.
+test('macos: the worker stage survives the declare -f hand-over (bash 3.2 on macOS)', () => {
+  const code = (s) => fs.readFileSync(s, 'utf8').split('\n').filter((l) => !l.trim().startsWith('#')).join('\n'); // comments may quote the pattern
+  for (const s of [LINUX, MAC]) assert.doesNotMatch(code(s), /<<-?\s*['"]?\w+['"]?[^\n]*\|/, `${path.basename(s)}: a here-document feeds a pipe`);
+  const body = fs.readFileSync(MAC, 'utf8').replace(/\nmain "\$@"\s*$/, '\n');
+  const shells = ['bash', process.env.CW_BASH32, process.platform === 'darwin' ? '/bin/bash' : null].filter(Boolean);
+  for (const sh of shells) {
+    const dumps = execFileSync(sh, ['-c', `${body}\ndeclare -f; echo '#---'; declare -f "\${WORKER_FUNCS[@]}"`], { encoding: 'utf8' });
+    for (const part of dumps.split('#---')) execFileSync(sh, ['-n'], { input: part }); // throws on a syntax error
+    // Exactly what main runs as the worker account (here in dry-run, as this user, in a temp HOME).
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-install-'));
+    try {
+      const script = `${body}\nREPO=sanat-garg/agent-orch CONTROLLER=https://head.example CODE=ABCD-2345 NAME=box AGENTS=claude DRY=1\n` +
+        `vars="$(declare -p REPO LABEL CONTROLLER CODE NAME AGENTS DRY)"\n` +
+        `exec ${sh} -c "set -euo pipefail; $vars; $(declare -f "\${WORKER_FUNCS[@]}"); cd; worker_stage; node_path"`;
+      const r = spawnSync(sh, ['-c', script], { encoding: 'utf8', env: { ...process.env, HOME: home, NVM_DIR: path.join(home, 'nvm') } });
+      assert.equal(r.status, 0, `${sh}: ${r.stderr}`);
+      assert.match(r.stdout, /worker\.mjs pair --controller https:\/\/head\.example --code ABCD-2345/);
+    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+  }
+});
+
 test('linux --dry-run: clones, pairs and writes a systemd unit with Restart=always and MemoryHigh', () => {
   const r = dry(LINUX, ARGS);
   assert.equal(r.status, 0, r.stderr);

@@ -3623,8 +3623,9 @@ function machineControls(n) {
     pw.title = 'When this Mac takes tasks on battery or when hot, whether it stays awake for them, and the RAM kept for you';
   }
   const moving = n.used ? ` Its ${plural(n.used, 'running task')} go${n.used === 1 ? 'es' : ''} back to the queue now.` : '';
-  // Update: an outdated worker, or one whose update failed, pulls the latest agent-orch and restarts once idle.
-  if (!n.local && n.connected && (n.update?.state === 'failed' || (n.outdated && !n.update))) {
+  // Update: a worker behind this server's agent-orch (outdated ones update on their own), or one whose update failed,
+  // pulls the latest agent-orch and restarts once idle.
+  if (!n.local && n.connected && (n.update?.state === 'failed' || ((n.outdated || n.behind > 0) && !n.update))) {
     const up = btn('Update', 'update', async () => {
       try { await api(`/api/cluster/nodes/${encodeURIComponent(n.id)}/update`, 'POST'); toast(`${n.name} updates itself once its running tasks finish`); } catch (e) { toast(e.message, { kind: 'error' }); }
       loadMachines();

@@ -1,5 +1,5 @@
 // The Machines view's cluster diagram on laptop/desktop widths (app.js caCard, caCardLayout): each machine wears a small
-// card beside its node (name, status, build; CPU/RAM; every running task), placed so no card overlaps another card, a
+// card beside its node (name, status, build; every running task; usage only on the node's rings, #498), placed so no card overlaps another card, a
 // machine or a link, re-laid out when a machine joins. An isolated server (CW_NO_ORCHESTRATOR=1, temp data dir) with
 // seeded nodes: a VPS and three Macs dial in over the cluster socket, one Mac runs 6 tasks, the head an integrator and
 // a work task. A task row opens its drawer, a card's header or gear the machine's side panel (where its settings now
@@ -144,9 +144,9 @@ async function assertLayout(page, count) {
   assert.equal(g.cards.length, count);
   assert.deepEqual(new Set(g.cards.map((c) => c.node)), new Set(g.plates.map((p) => p.node)), 'a card for every machine');
   for (const c of g.cards) {
-    assert.ok(c.r - c.l <= 221, `at most 220px wide: ${JSON.stringify(c)}`);
+    assert.ok(c.r - c.l <= 301, `at most 300px wide: ${JSON.stringify(c)}`);
     const plate = g.plates.find((p) => p.node === c.node);
-    assert.ok(gapBetween(c, plate) <= 90, `anchored beside its machine: ${JSON.stringify({ c, plate })}`);
+    if (c.node !== 'controller') assert.ok(gapBetween(c, plate) <= 90, `anchored beside its machine: ${JSON.stringify({ c, plate })}`); // the head's sits past the star's links
     for (const d of g.cards) if (d !== c) assert.ok(!overlap(c, d), `cards overlap: ${JSON.stringify([c, d])}`);
     for (const p of g.plates) assert.ok(!overlap(c, p), `a card covers a machine: ${JSON.stringify([c, p])}`);
     for (const pts of g.links) assert.ok(!pts.some(([x, y]) => x > c.l && x < c.r && y > c.t && y < c.b), `a card covers a link: ${JSON.stringify(c)}`);
@@ -164,13 +164,15 @@ for (const [width, height] of [[1440, 900], [1280, 800]]) {
     assert.deepEqual((await studio.locator('.cc-task').evaluateAll((els) => els.map((e) => Number(e.dataset.task)))).sort((a, b) => a - b), [...busy].sort((a, b) => a - b));
     assert.doesNotMatch(await studio.textContent(), /\+\s*\d|more/);
     assert.deepEqual(await page.locator('#caWrap .ca-more').evaluateAll((els) => els.map((e) => e.textContent).filter(Boolean)), []);
-    assert.match(await studio.locator(`.cc-task[data-task="${busy[0]}"] .cc-t`).textContent(), new RegExp(`^#${busy[0]} Files ops · Claude$`));
+    assert.equal(await studio.locator(`.cc-task[data-task="${busy[0]}"] .cc-id`).textContent(), `#${busy[0]}`);
+    assert.equal(await studio.locator(`.cc-task[data-task="${busy[0]}"] .cc-t`).textContent(), 'Files ops');
+    assert.match(await studio.locator(`.cc-task[data-task="${busy[0]}"] .cc-am`).textContent(), /^Claude · /);
     assert.match(await studio.locator(`.cc-task[data-task="${busy[0]}"] .e`).textContent(), /^\d+m$/);
-    // Header: status dot, name, build; one line of CPU and RAM.
+    // Header: status dot, name, build; no CPU/RAM on the card.
     assert.equal(await studio.locator('.cc-open .dot.on').count(), 1);
     assert.equal(await studio.locator('.cc-name').textContent(), 'studio-mac');
     assert.equal(await studio.locator('.cc-build').textContent(), 'v4.12');
-    assert.deepEqual(await studio.locator('.cc-m').evaluateAll((els) => els.map((e) => [e.querySelector('.k').textContent, /^\d+%$/.test(e.querySelector('.v').textContent)])), [['CPU', true], ['RAM', true]]);
+    assert.equal(await studio.locator('.cc-m').count(), 0);
     assert.equal(await studio.locator('button.as-btn[data-act="assign"]').textContent(), 'Assign task', 'every machine card keeps Assign task');
     // The head: its integrator in a group of its own, then its work.
     const head = page.locator('#caWrap .cc.head');

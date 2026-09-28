@@ -1561,3 +1561,6 @@ conflicts resolved; Browser "Don't allow" section kept, allowlist tests pass
 ## 2026-09-28 18:47 — #497 Task card progress: timeline-style strip, proportional to time, premium muted colours [done (check passed)]
 
 Cards and drawer share one proportional, muted 2px phase bar
+## 2026-09-28 18:47 — #498 Machines graph on desktop: star layout, bigger machine cards with every task and its progress [done (check passed)]
+
+Desktop Machines graph is a star with task-listing cards and usage rings

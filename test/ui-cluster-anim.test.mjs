@@ -191,8 +191,9 @@ test('the diagram: the head in the middle, a node per worker with its state, and
   const drain = node(W.studio.node).locator('.ca-drain');
   assert.equal(await drain.evaluate((c) => getComputedStyle(c).opacity), '1');
   assert.equal(await drain.evaluate((c) => getComputedStyle(c).stroke), await resolved(page, '--warn'));
-  // Gauges: CPU (mean of the cores) and RAM in the theme's accent, in words on its card too (from 768px).
-  assert.deepEqual(await page.locator(`#caWrap .cc[data-node="${W.vps.node}"] .cc-m .v`).allTextContents(), ['51%', '50%']);
+  // Gauges: CPU (mean of the cores) and RAM in the theme's accent, exact in the rings' tooltip, never on its card (#498).
+  assert.match(await node(W.vps.node).locator('title').textContent(), /CPU 5[01](\.\d)?% \(ring\)\nRAM 50\.0%/);
+  assert.equal(await page.locator(`#caWrap .cc[data-node="${W.vps.node}"] .cc-m`).count(), 0);
   assert.equal(await node(W.gpu.node).locator('.ca-gauge').first().evaluate((c) => getComputedStyle(c).stroke), await resolved(page, '--accent'));
   assert.match(await node(W.vps.node).getAttribute('aria-label'), /^build-vps: Online, CPU 51% · RAM 50%, 1 task running\. Show details$/);
   // Running tasks are rows on their machine's card; their chips rest hidden at the card's edge by the machine (drawn as

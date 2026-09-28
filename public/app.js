@@ -4989,8 +4989,9 @@ async function patchNode(n, body) {
 // chip. Offline machines turn grey with a dashed link, asleep Macs wear a moon and draining ones an amber ring. The loop
 // runs only while something moves, the Machines view is open, the diagram in view and the page visible (at most 60 fps),
 // and never reads layout; with reduced motion every change is a static swap. Colours are theme variables (app.css .ca-*).
-// From 768px (CA_WIDE) each machine wears a small HTML card beside its node instead of labels and chips (caCard): name,
-// status and build, CPU/RAM, then every task running there (the head's split into Integrating and Work). A card sits
+// From 768px (CA_WIDE) the diagram is a star and each machine wears an HTML card beside its node instead of labels and
+// chips (caCard): full name, status and build, then every task running there (the head's split into Integrating and
+// Work); usage is only the node's rings (CPU its border, RAM a thin ring inside). A card sits
 // outward from the head and is nudged until it clears the other cards, the machines and the links (caPlace*); chips
 // still travel the links and fade into the card. Phones keep the labels, the chips and the card list under the diagram.
 const SVGNS = 'http://www.w3.org/2000/svg';
@@ -5007,7 +5008,7 @@ const CA_TONE = { running: 'run', checking: 'check', committing: 'check', finish
 // nodes: id → view (its group, place, link); chips: task id → chip; anims: what moves now; seen: node id → its newest
 // reading's time; status: task id → its last pushed status; emit: node id → particle throttle; ready: the first
 // snapshot since the Machines view opened is drawn (later changes animate).
-const CC_W = 220, CC_GAP = 12; // a machine card's width and its distance from its machine
+const CC_W = 272, CC_GAP = 12; // a machine card's width and its distance from its machine
 CA_WIDE.addEventListener('change', () => { if (mxOpen()) renderMachines(); }); // cards ↔ the phone's list
 const CA = { wrap: null, svg: null, layer: null, cards: false, g: {}, w: 0, h: 0, list: false, key: '', head: null, nodes: new Map(), chips: new Map(), anims: new Set(),
   seen: new Map(), status: new Map(), emit: new Map(), raf: 0, last: 0, ready: false, inView: true, asked: 0, mark: null, markPath: null, markAnim: null, markTimer: 0 };
@@ -5096,10 +5097,10 @@ function caNode(n) {
   v.focus = sv('circle', { class: 'ca-focus' }, g);
   v.drain = sv('circle', { class: 'ca-drain' }, g);
   v.plate = sv('circle', { class: 'ca-plate' }, g);
-  v.cpuT = sv('circle', { class: 'ca-track' }, g);
-  v.cpu = sv('circle', { class: 'ca-gauge', transform: 'rotate(-90)' }, g);
-  v.ramT = sv('circle', { class: 'ca-track' }, g);
-  v.ram = sv('circle', { class: 'ca-gauge', transform: 'rotate(-90)' }, g);
+  v.cpuT = sv('circle', { class: 'ca-track', 'data-k': 'cpu' }, g);
+  v.cpu = sv('circle', { class: 'ca-gauge', 'data-k': 'cpu', transform: 'rotate(-90)' }, g);
+  v.ramT = sv('circle', { class: 'ca-track', 'data-k': 'ram' }, g);
+  v.ram = sv('circle', { class: 'ca-gauge', 'data-k': 'ram', transform: 'rotate(-90)' }, g);
   v.icon = sv('g', { class: 'ca-icon' }, g);
   v.moon = sv('g', { class: 'ca-moon' }, g); // SF Symbols style moon.fill on a badge
   sv('circle', { r: 9 }, v.moon);
@@ -5163,10 +5164,11 @@ function caLayout() {
   caSeats(false); // resting chips move to their new seats at once; travelling ones land there
 }
 // The card layout's places. Narrow (< 820px): a list, the head on top, each card right of its machine and each row as
-// tall as its card. Wide enough for every card side by side (four in the Machines window at 1440px): one row. Otherwise caLayout's ellipse, each card outward from the head (beside a machine to the left or right,
-// growing away from the head's row; above or below one near the top or bottom; the head's toward its widest gap),
-// nudged further out until it clears the cards placed before it, every machine and every link. An ellipse too wide
-// for the view shrinks and tries again.
+// tall as its card. Otherwise a star (#498): the head in the centre and the workers evenly spaced on a circle around
+// it (odd counts start at the top, even ones straddle it), each card on its machine's outer side (beside one to the
+// left or right, growing away from the head's row; above or below one near the top or bottom; the head's toward its
+// widest gap), nudged further out until it clears the cards placed before it, every machine and every link. A circle
+// too wide for the view shrinks and tries again.
 function caCardLayout(W, head, workers) {
   const all = [head, ...workers], size = (v, w) => { v.card.style.width = `${w}px`; v.cw = w; v.ch = v.card.offsetHeight; };
   if (CA.list) {
@@ -5179,47 +5181,30 @@ function caCardLayout(W, head, workers) {
     }
     CA.h = y + 4;
     for (const v of workers) v.poly = caPoly(caElbow(v, head, 28));
-  } else if (all.length * (CC_W + 12) - 12 <= W - 16) {
-    // Every card fits side by side: one row of cards, each under its machine, the head second from the left and
-    // raised, its links a bus along its row that drops into each worker (rounded corners).
-    const k = all.length, g = k > 1 ? Math.min(40, (W - 16 - k * CC_W) / (k - 1)) : 0, x0 = (W - k * CC_W - (k - 1) * g) / 2, hi = Math.min(1, k - 1);
-    const cols = [...workers];
-    cols.splice(hi, 0, head);
-    Object.assign(head, { r: 34, y: 42, side: 'below' });
-    cols.forEach((v, i) => { v.x = x0 + i * (CC_W + g) + CC_W / 2; if (v !== head) Object.assign(v, { r: 26, y: 118, side: 'below' }); size(v, CC_W); });
-    const top = 118 + 26 + CC_GAP;
-    for (const v of all) { v.cl = v.x - CC_W / 2; v.ct = top; }
-    CA.h = Math.round(top + Math.max(...all.map((v) => v.ch)) + 12);
-    for (const v of workers) {
-      const s = Math.sign(head.x - v.x), rc = 12, pts = [[v.x, v.y], [v.x, head.y + rc]];
-      for (let i = 1; i <= 6; i++) { const a = (Math.PI / 2) * (i / 6); pts.push([v.x + s * rc * (1 - Math.cos(a)), head.y + rc - rc * Math.sin(a)]); }
-      pts.push([head.x, head.y]);
-      v.poly = caPoly(pts);
-    }
   } else {
     for (const v of all) size(v, CC_W);
     const n = workers.length;
-    let rx = Math.max(140, Math.min(W / 2 - CC_W - 26 - CC_GAP - 12, n <= 1 ? 250 : 170 + 45 * n)), box;
+    let rad = Math.max(120, Math.min((W / 2 - CC_W - 26 - CC_GAP - 12) / (n > 2 ? 0.72 : 1), n <= 1 ? 250 : 150 + 40 * n)), box;
     for (let tries = 0; tries < 8; tries++) {
-      const ry = Math.max(100, Math.min(170, rx * 0.5)), angles = [];
+      const angles = [];
       Object.assign(head, { r: 34, x: 0, y: 0 });
       workers.forEach((v, i) => {
         const a = n === 1 ? 0 : -Math.PI / 2 + (2 * Math.PI / n) * (i + (n % 2 ? 0 : 0.5)), c = Math.cos(a), s = Math.sin(a);
         angles.push(a);
-        Object.assign(v, { r: 26, x: rx * c, y: ry * s, side: c > 0.3 ? 'right' : c < -0.3 ? 'left' : s < 0 ? 'above' : 'below', up: s < -0.05 });
+        Object.assign(v, { r: 26, x: rad * c, y: rad * s, side: c > 0.3 ? 'right' : c < -0.3 ? 'left' : s < 0 ? 'above' : 'below', up: s < -0.05 });
       });
       // The head's card: below, right, left or above, whichever is furthest from every link.
       const gap = (a) => Math.min(Infinity, ...angles.map((b) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)))));
       head.side = [['below', Math.PI / 2], ['right', 0], ['left', Math.PI], ['above', -Math.PI / 2]].reduce((best, s) => (gap(s[1]) > gap(best[1]) + 0.01 ? s : best))[0];
       head.up = head.side === 'above';
       const placed = [];
-      for (const v of all) placed.push(caCardSpot(v, placed, all, head));
+      for (const v of [...workers, head]) placed.push(caCardSpot(v, placed, all, head)); // the head's last: workers' stay by their machines
       box = [Infinity, -Infinity, Infinity, -Infinity];
       for (const v of all) for (const [l, r, t, b] of [[v.x - v.r - 8, v.x + v.r + 8, v.y - v.r - 8, v.y + v.r + 8], [v.cl, v.cl + v.cw, v.ct, v.ct + v.ch]]) {
         box = [Math.min(box[0], l), Math.max(box[1], r), Math.min(box[2], t), Math.max(box[3], b)];
       }
-      if (box[1] - box[0] <= W - 16 || rx <= 140) break;
-      rx = Math.max(140, rx - (box[1] - box[0] - W + 16) / 2 - 4);
+      if (box[1] - box[0] <= W - 16 || rad <= 120) break;
+      rad = Math.max(120, rad - (box[1] - box[0] - W + 16) / 2 - 4);
     }
     const dx = Math.round(W / 2 - (box[0] + box[1]) / 2), dy = Math.round(12 - box[2]);
     for (const v of all) { v.x += dx; v.y += dy; v.cl += dx; v.ct += dy; }
@@ -5241,7 +5226,7 @@ function caCardSpot(v, placed, all, head) {
   const dir = v.up ? -1 : 1, hits = (l, t) => {
     const rr = l + cw, bb = t + ch;
     if (placed.some(([a, b, c, d]) => l < b + 8 && rr > a - 8 && t < d + 8 && bb > c - 8)) return true;
-    if (all.some((u) => Math.hypot(u.x - Math.max(l, Math.min(rr, u.x)), u.y - Math.max(t, Math.min(bb, u.y))) < u.r + 6)) return true;
+    if (all.some((u) => l < u.x + u.r + 6 && rr > u.x - u.r - 6 && t < u.y + u.r + 6 && bb > u.y - u.r - 6)) return true; // the machine's square, rings and all
     return all.some((u) => {
       if (u === head) return false;
       const len = Math.hypot(head.x - u.x, head.y - u.y), k = Math.ceil(len / 4);
@@ -5257,21 +5242,23 @@ function caCardSpot(v, placed, all, head) {
 }
 // Integrators and reflection take the head's reserved slots: its card lists them under Integrating.
 const caIntegrating = (t) => !!t.integrates || (t.kind !== 'work' && t.kind !== 'plan');
-// A machine's card: its header (status dot, name, build; it opens the machine's detail, as does the gear, where its
-// settings live), CPU and RAM, then every task running there as a row ('#412 Files ops · Claude' and how long it has
-// run; a click opens its drawer), the head's under Integrating and Work. Past about 8 rows the list scrolls. Rebuilt on
-// every snapshot, keeping focus and the list's scroll.
+// A machine's card: its header (status dot, full name, build; it opens the machine's detail, as does the gear, where its
+// settings live), then every task running there as a mini card (#412, title; agent · model and how long it has run;
+// its progress strip; a click opens its drawer), the head's under Integrating and Work. Past about 8 tasks the list
+// scrolls. No CPU/RAM here: that's the node's rings. Rebuilt on every snapshot, keeping focus and the list's scroll.
 function caCard(v) {
   const n = v.n, st = nodeState(n), card = (v.card ||= el('div', 'cc'));
   if (card.parentNode !== CA.layer) CA.layer.append(card);
   card.dataset.node = n.id;
   card.className = `cc${n.local ? ' head' : ''}${!n.connected || !n.enabled ? ' away' : ''}${v.placed ? ' moves' : ''}`; // placed once: later moves glide
   const a = document.activeElement, focus = card.contains(a) ? a.dataset.task || a.dataset.act || a.className : null, scroll = card.querySelector('.cc-tasks')?.scrollTop || 0;
+  card.title = ''; // usage lives on the node's rings (their tooltip), never on the card
   const top = el('div', 'cc-head'), open = el('button', 'cc-open'), gear = el('button', 'cc-gear'), ver = fmtVersion(n.build);
   open.type = gear.type = 'button';
   const dot = el('span', `dot ${st.dot}`);
   dot.title = st.label;
   open.append(dot, el('span', 'cc-name', n.name));
+  open.classList.toggle('long', n.name.length > 22); // a long name gets the row to itself (≤ 2 lines); status and build go under it
   if (st.label !== 'Online') open.append(el('span', 'cc-st', st.label));
   const old = !n.local && (n.behind > 0 || (n.behind == null && n.build && VER.running?.build && n.build < VER.running.build)); // as machineCard's tag
   if (ver) {
@@ -5283,21 +5270,13 @@ function caCard(v) {
   gear.setAttribute('aria-label', `${n.name} settings`);
   gear.title = 'Settings and details';
   top.append(open, gear);
-  const meters = el('div', 'cc-meters');
-  for (const [k, pct] of [['CPU', caCpu(n)], ['RAM', caRam(n)]]) {
-    const m = el('span', 'cc-m'), bar = el('i', `cc-bar${pct >= 90 ? ' crit' : pct >= 75 ? ' warn' : ''}`), fill = el('b');
-    fill.style.width = `${pct == null ? 0 : Math.max(2, Math.min(100, pct))}%`;
-    bar.append(fill);
-    m.append(el('span', 'k', k), bar, el('span', 'v', pct == null ? '–' : `${Math.round(pct)}%`));
-    meters.append(m);
-  }
   const list = el('div', 'cc-tasks'), tasks = n.tasks || [], hd = n.head;
   if (hd) {
     const integ = tasks.filter(caIntegrating), work = tasks.filter((t) => !caIntegrating(t));
     list.append(el('div', 'cc-grp', `Integrating ${integ.length}/${hd.reserved}`), ...integ.map(ccRow), el('div', 'cc-grp', `Work ${hd.workUsed}/${hd.work}`), ...work.map(ccRow));
   } else if (tasks.length) list.append(...tasks.map(ccRow));
   else list.append(el('p', 'cc-idle', n.connected && n.enabled && !n.draining ? 'Idle' : 'Nothing running'));
-  card.replaceChildren(top, meters, list, renderAssignButton(n)); // the owner's rule: every machine card keeps Assign task
+  card.replaceChildren(top, list, renderAssignButton(n)); // the owner's rule: every machine card keeps Assign task
   list.scrollTop = scroll;
   if (focus) [...card.querySelectorAll('button')].find((b) => (b.dataset.task || b.dataset.act || b.className) === focus)?.focus({ preventScroll: true });
 }
@@ -5306,9 +5285,14 @@ function ccRow(t) {
   b.type = 'button';
   b.dataset.task = t.id;
   if (!wait) e.dataset.started = t.started_at;
-  b.append(el('span', 'cc-t', `#${t.id} ${displayTitle(t)} · ${shortLabel(t.agent)}`), e);
+  const top = el('span', 'cc-l1'), sub = el('span', 'cc-l2');
+  top.append(el('span', 'cc-id', `#${t.id}`), el('span', 'cc-t', displayTitle(t)));
+  sub.append(el('span', 'cc-am', `${shortLabel(t.agent)} · ${modelName(t.agent, t.model)}`), e);
+  b.append(top, sub);
   b.title = [`#${t.id} ${displayTitle(t)}`, t.project, `${shortLabel(t.agent)} · ${modelName(t.agent, t.model)}`,
     t.phase && t.phase !== 'running' ? PHASE_DOING[t.phase] : '', wait ? `waiting for ${t.waiting_for}` : ''].filter(Boolean).join(' · ');
+  const full = { ...(O.tasks.get(t.id) || {}), ...t, status: 'running' }; // the queue's copy may lag the machine's phase
+  syncPhaseStrip(b, full, taskState(full)); // the shared progress strip, quieter here (app.css .cc-task .tc-strip)
   return b;
 }
 // A machine's extent around its centre [left, right, top, bottom]: glyph, labels, two chip seats and a '+N'.
@@ -5332,7 +5316,7 @@ function caShape(v) {
   const r = v.r;
   v.g.setAttribute('transform', `translate(${v.x} ${v.y})`);
   for (const [c, rad] of [[v.plate, r], [v.halo, r], [v.drain, r + 4.5], [v.focus, r + 8]]) c.setAttribute('r', rad);
-  v.rc = r - 4; v.rr = r - 10;
+  [v.rc, v.rr] = CA.cards ? [r, r - 4.5] : [r - 4, r - 10]; // cards: CPU is the node's border, RAM a thin ring inside
   for (const c of [v.cpuT, v.cpu]) c.setAttribute('r', v.rc);
   for (const c of [v.ramT, v.ram]) c.setAttribute('r', v.rr);
   v.moon.setAttribute('transform', `translate(${(r * 0.74).toFixed(1)} ${(-r * 0.74).toFixed(1)})`);
@@ -5375,7 +5359,9 @@ function caPaint(v) {
   const tasks = n.tasks?.length || 0;
   const label = `${n.name}${n.local ? ' (this server, the head)' : ''}: ${st.label}${pct ? `, ${pct}` : ''}, ${tasks ? `${plural(tasks, 'task')} running` : 'nothing running'}. Show details`;
   v.g.setAttribute('aria-label', label);
-  v.title.textContent = label;
+  const mem = n.inventory?.mem, gb = (b) => (b / 2 ** 30).toFixed(1); // the rings' exact numbers
+  const exact = [cpu != null && `CPU ${cpu.toFixed(1)}% (ring)`, ram != null && `RAM ${ram.toFixed(1)}%${mem ? `, ${gb(mem - n.resources.memAvailable)} of ${gb(mem)} GB` : ''} (inner ring)`].filter(Boolean);
+  v.title.textContent = CA.cards && exact.length ? `${n.name}: ${st.label}\n${exact.join('\n')}` : label;
 }
 
 // ---- links: polylines from a worker's centre to the head's

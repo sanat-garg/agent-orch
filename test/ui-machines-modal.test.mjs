@@ -1,6 +1,6 @@
 // The Machines window on a desktop (#480) against an isolated server (CW_NO_ORCHESTRATOR=1, temp data dir) with the head
 // and three fake workers: at 1440×900 it is a wide window with a margin and a backdrop (not full screen), titled
-// 'Machines', its four machine cards side by side in one row, and the head's KPIs and charts (#serverDetails) show only
+// 'Machines', its four machine cards around the star (#498), and the head's KPIs and charts (#serverDetails) show only
 // once the head is clicked in the graph, in its side panel. Esc and the backdrop close it.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -111,12 +111,12 @@ test('desktop 1440×900: a wide window titled Machines, four cards in a row, the
   assert.equal((await page.locator('#mxTitle').textContent()).trim(), 'Machines');
   assert.equal(await page.locator('#mxModal [role="dialog"]').first().getAttribute('aria-labelledby'), 'mxTitle');
 
-  // The four machines' cards side by side in one row, none overlapping, all inside the window.
+  // The four machines' cards around the star, none overlapping, all inside the window.
   await page.waitForFunction(() => document.querySelectorAll('#caWrap .cc').length === 4 && [...document.querySelectorAll('#caWrap .cc')].every((c) => c.getAnimations().length === 0));
   const cards = (await page.locator('#caWrap .cc').evaluateAll((els) => els.map((e) => { const r = e.getBoundingClientRect(); return { l: r.left, r: r.right, t: r.top, b: r.bottom }; })))
     .sort((a, b) => a.l - b.l);
-  assert.equal(new Set(cards.map((c) => Math.round(c.t))).size, 1, `one row: ${JSON.stringify(cards)}`);
-  for (let i = 1; i < cards.length; i++) assert.ok(cards[i].l >= cards[i - 1].r, `side by side: ${JSON.stringify(cards)}`);
+  for (const a of cards) for (const b of cards) if (a !== b) assert.ok(!(a.l < b.r && a.r > b.l && a.t < b.b && a.b > b.t), `no overlap: ${JSON.stringify(cards)}`);
+  cards.sort((a, b) => a.r - b.r);
   const main = await box(page, '#mxMain');
   assert.ok(cards[0].l >= main.l && cards[3].r <= main.r && cards[0].l >= panel.l, `inside the window: ${JSON.stringify({ cards, main })}`);
   assert.equal(await page.locator('#caWrap .cc [data-act="assign"]').count(), 4, 'Assign task stays');

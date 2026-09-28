@@ -13,3 +13,7 @@ Redesign the Machines window's graph for desktop/Mac (≥ 768px; phones keep the
 ## Done when
 
 `node --test test/ui-machines-star*.test.mjs` passes (even radial layout, no overlap, all tasks with progress strips, no CPU/RAM text on cards, usage rings present)
+
+## Result — done (check passed) (2026-09-28 18:47)
+
+AGENT-ORCH-STATUS: done — Desktop Machines graph is a star with task-listing cards and usage rings

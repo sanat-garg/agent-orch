@@ -13,3 +13,7 @@ In the Claude usage/limits card (the sidebar usage card and the Usage window's w
 ## Done when
 
 `node --test test/ui-pace-line*.test.mjs` passes (marker at elapsed %, grey under / dark orange over, none without a reset)
+
+## Result — done (check passed) (2026-09-28 18:13)
+
+AGENT-ORCH-STATUS: done — Usage bars show pace markers; usage charts show dashed pace diagonals

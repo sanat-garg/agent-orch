@@ -3882,6 +3882,23 @@ $('miniMachine').addEventListener('focusin', () => { MINI.hold.add('focus'); min
 $('miniMachine').addEventListener('focusout', (e) => { if (!$('miniMachine').contains(e.relatedTarget)) { MINI.hold.delete('focus'); miniArm(); } });
 
 // ----- plan usage -----
+// Ideal pace: the share of a window's time already gone (1 h into a 5 h window = 20%). Usage over it (burning faster
+// than time) marks dark orange, at or under it grey; no known future reset = no mark. test/ui-pace-line.test.mjs.
+const paceWinMs = (w) => (/five_hour|(^|-)5h$|^5-hour$/.test(w || '') ? 5 * 3600e3 : 7 * 864e5);
+const resetMs = (r) => (typeof r === 'number' ? (r < 1e12 ? r * 1000 : r) : r ? new Date(r).getTime() : NaN);
+function paceMark(pct, resetsAt, lenMs, now = Date.now()) {
+  const end = resetMs(resetsAt);
+  if (pct == null || !(end > now)) return null;
+  const ideal = Math.max(0, Math.min(100, ((lenMs - (end - now)) * 100) / lenMs)), over = pct > ideal;
+  return { ideal, over, tip: `Pace: ${Math.round(ideal)}% by now · you're at ${Math.round(pct)}% (${Math.round(Math.abs(pct - ideal))}% ${over ? 'over' : 'under'})` };
+}
+function setPace(bar, m) {
+  let p = bar.querySelector('.pace');
+  if (!m) { p?.remove(); return; }
+  if (!p) bar.append(p = el('b', 'pace'));
+  p.style.left = `${m.ideal}%`;
+  p.className = m.over ? 'pace over' : 'pace';
+}
 function fmtReset(iso) {
   if (!iso) return '';
   const t = new Date(iso), mins = Math.round((t - Date.now()) / 60e3);
@@ -3976,7 +3993,9 @@ function renderUsage(fresh = false) {
     blurSwap(lab, w?.label || (i ? 'Weekly' : '5-hour'));
     blurSwap(val, w?.pct != null ? fmtPct(w.pct) : '–', fresh);
     setBar(bar.firstElementChild, w?.pct ?? 0);
-    row.title = [w?.tip, w?.resetsAt ? fmtReset(w.resetsAt) : ''].filter(Boolean).join('\n');
+    const pace = w ? paceMark(w.pct, w.resetsAt, paceWinMs(w.id || w.label)) : null;
+    setPace(bar, pace);
+    row.title = [w?.tip, w?.resetsAt ? fmtReset(w.resetsAt) : '', pace?.tip].filter(Boolean).join('\n');
   });
   let note;
   if (id === 'claude' && !u?.updatedAt) note = 'Checking plan limits…';
@@ -6333,7 +6352,8 @@ function usageChips(a) {
     const s = a.status.windows[w], reset = s.resetsAt ? s.resetsAt * 1000 : null;
     const c = el('span', `ug-chip ${reset && reset <= now ? '' : level(s.pct)[0]}`,
       reset && reset <= now ? `${winLabel(w)} · reset ${fmtWhen(reset)}` : `${winLabel(w)} ${Math.round(s.pct)}% · ${reset ? `resets ${fmtWhen(reset)}` : 'reset time unknown'}${s.stale ? ' · stale' : ''}`);
-    c.title = `Read ${fmtWhen(s.t)}${s.stale ? ' (older than the window)' : ''}`;
+    const pace = s.stale ? null : paceMark(s.pct, reset, paceWinMs(w), now);
+    c.title = `Read ${fmtWhen(s.t)}${s.stale ? ' (older than the window)' : ''}${pace ? `\n${pace.tip}` : ''}`;
     box.append(c);
   }
   return box;
@@ -6377,7 +6397,7 @@ function usageChart(host, cls, extra) {
 // Window % over time: stepped lines (a reading holds until the next one, and drops to 0 at its reset),
 // a dashed 100% line and a marker at every reset.
 function usageLineChart(host, wins, from, to) {
-  const c = usageChart(host, 'ug-line', '<line class="cap"/><g class="resets"></g><g class="lines"></g>');
+  const c = usageChart(host, 'ug-line', '<line class="cap"/><g class="resets"></g><g class="paces"></g><g class="lines"></g>');
   const names = Object.keys(wins).sort(byWin);
   const series = names.map((n) => wins[n]);
   const resets = new Map(); // ms -> window names
@@ -6412,6 +6432,18 @@ function usageLineChart(host, wins, from, to) {
       rg.append(dense ? ns('line', { class: 'reset tick', x1: x(r), x2: x(r), y1: h - 6, y2: h })
         : ns('line', { class: 'reset', x1: x(r), x2: x(r), y1: 4, y2: h }), ns('circle', { class: 'reset-dot', cx: x(r), cy: dense ? h - 1 : 4, r: dense ? 1.5 : 2.5 }));
     }
+    // Each window's ideal pace: a faint dashed diagonal from 0 at its start to 100% at its reset.
+    const ag = svg.querySelector('.paces');
+    ag.replaceChildren();
+    series.forEach((pts, i) => {
+      const len = paceWinMs(names[i]);
+      for (const r of new Set(pts.map((p) => p.resetsAt * 1000).filter(Boolean))) {
+        const t0 = Math.max(from, r - len), t1 = Math.min(to, r);
+        if (t1 <= t0) continue;
+        const v = (t) => ((t - (r - len)) / len) * 100;
+        ag.append(ns('line', { class: 'pace', x1: x(t0), y1: y(v(t0)), x2: x(t1), y2: y(v(t1)), style: `stroke:${SERIES[i % SERIES.length]}` }));
+      }
+    });
     series.forEach((pts, i) => {
       if (!pts.length) return;
       let d = '', prev = 0;

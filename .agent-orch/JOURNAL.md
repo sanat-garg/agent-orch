@@ -1502,3 +1502,6 @@ conflicts resolved; mobile Machines tests pass; ui-machines test 5 still fails
 ## 2026-09-28 18:11 — #483 Files backend: upload files and folders [done (check passed)]
 
 Streamed, login-protected Files upload endpoint works; its tests pass
+## 2026-09-28 18:13 — #482 Claude limits card: an ideal-pace line on each usage bar [done (check passed)]
+
+Usage bars show pace markers; usage charts show dashed pace diagonals

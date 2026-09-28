@@ -35,6 +35,7 @@
   --focus: rgba(201, 100, 66, 0.28);
   --chart-2: #3b6fa0;
   --chart-3: #6a8f3a;
+  --pace-over: #c2410c;
   --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
   --scroll: rgba(0, 0, 0, 0.18);
   --scroll-hover: rgba(0, 0, 0, 0.34);
@@ -76,6 +77,7 @@
     --focus: rgba(217, 119, 87, 0.35);
     --chart-2: #7eaed8;
     --chart-3: #a3c77a;
+    --pace-over: #f08a3c;
     --scroll: rgba(255, 255, 255, 0.14);
     --scroll-hover: rgba(255, 255, 255, 0.3);
     color-scheme: dark;
@@ -1053,6 +1055,10 @@ label.mc-row { cursor: pointer; }
 .ms-bar i { display: block; height: 100%; width: 0; border-radius: 3px; background: var(--accent); transition: width .6s ease; }
 .ms-bar i.warn { background: var(--warn); }
 .ms-bar i.crit { background: var(--danger); }
+/* Ideal pace: where usage would be if spread evenly over the window; grey while under it, dark orange when over. */
+.ms-bar { position: relative; }
+.ms-bar .pace { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--muted); box-shadow: 0 0 0 1px var(--panel); pointer-events: none; }
+.ms-bar .pace.over { background: var(--pace-over); }
 .ms-val { text-align: right; font-variant-numeric: tabular-nums; color: var(--text); }
 .ms-sep { height: 1px; background: var(--border); margin: 4px 0 3px; }
 .ms-note { font-size: 11.5px; color: var(--faint); line-height: 1.45; white-space: pre-line; }
@@ -1669,6 +1675,7 @@ details.dr-more[open] > summary { margin-bottom: 12px; }
 .ug-chart .cap { stroke: var(--faint); stroke-width: 1; stroke-dasharray: 4 4; }
 .ug-chart .reset { stroke: var(--border-strong); stroke-width: 1; stroke-dasharray: 2 3; }
 .ug-chart .reset-dot { fill: var(--faint); }
+.ug-chart .pace { stroke-width: 1; stroke-dasharray: 3 4; opacity: .45; fill: none; }
 .ug-chart .reset.tick { stroke: var(--faint); stroke-dasharray: none; }
 .ug-chart rect.in { fill: var(--chart-2); }
 .ug-chart rect.out { fill: var(--accent); }

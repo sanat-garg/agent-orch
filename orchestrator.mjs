@@ -35,7 +35,7 @@ import { extractCommand, runCheck, toolLine } from './taskrun.mjs';
 import { gcRetention } from './retention.mjs';
 import { APPLY_UPDATES } from './rolling.mjs';
 import { pushBranch, pushedBase } from './github.mjs';
-import { commitAll, ensureWorktree, fetchMain, isMerged, listWorktrees, mergeBack, parkWorktree, pruneOrphanWorktrees, removeWorktree, repoInfo, startIntegration, taskBranch, unresolvedFiles, worktreesRoot } from './worktrees.mjs';
+import { commitAll, ensureWorktree, fetchMain, integrateBranch, isMerged, listWorktrees, markersIn, mergeBack, parkWorktree, pruneOrphanWorktrees, removeWorktree, repoInfo, startIntegration, taskBranch, unresolvedFiles, worktreesRoot } from './worktrees.mjs';
 
 // ---------------------------------------------------------------- config
 
@@ -51,6 +51,7 @@ const CFG = {
   memLowPauseSec: 30,           // MemAvailable under MEM.pauseBelow this long → pause the newest running task
   maxAttempts: 3,               // non-limit failures before a task is marked failed
   maxContinuations: 4,          // times a worker may say "not finished yet"
+  maxIntegrators: 3,            // integrators queued for one task whose landing keeps conflicting, before the owner is alerted
   resetBufferSec: 20,           // added after a reported reset time
   usageClearTrustSec: 900,      // a Claude limit hit this soon after /usage cleared one keeps its block until the reset
   unknownResetBackoffSec: [300, 600, 1200, 1800, 3600],
@@ -353,15 +354,15 @@ function ownerHandoffPrompt(project, task, environment, { from, texts, tools, st
   if (tools.length) parts.push('', '## Its last tool calls', ...tools.map((t) => `- ${t}`));
   return taskBody(task, [`Project: ${project.name} (${project.path})`, environment, '', ...parts, '']);
 }
-// A requeued task that lost its machine (and so its session) starts with a handoff prompt.
-const lostHandoff = (task) => task.kind === 'work' && !task.session_id && /^\[lost\]/.test(task.last_error || '');
-// Compute-only workers (BRIEF goal 11): work tasks are the only thing a worker ever runs. Plan tasks (the owner's chat
-// with the planner), reflection, review checkpoints and integrators (they need the controller's conflicted worktree)
-// stay on the controller.
-export const remoteWork = (task) => task?.kind === 'work' && !task.integrates;
-// Controller-only work that holds a head slot (plan tasks hold none): integrators and reflection. It takes the head's
-// reserved slots first, so it never waits behind ordinary work (#384).
-export const controllerOnly = (task) => !!task && task.kind !== 'plan' && !remoteWork(task);
+// A requeued task that lost its machine (and so its session) starts with a handoff prompt (an integrator just starts over).
+const lostHandoff = (task) => task.kind === 'work' && !task.integrates && !task.session_id && /^\[lost\]/.test(task.last_error || '');
+// Compute-only workers (BRIEF goal 11): work tasks are the only thing a worker ever runs, integrators included (#435: the
+// worker merges the task's branch into the main branch and pushes agent-orch/integrate-<id>, which the head lands). Plan
+// tasks (the owner's chat with the planner), reflection and review checkpoints stay on the controller.
+export const remoteWork = (task) => task?.kind === 'work';
+// Work that takes the head's reserved slots first, so it never waits behind ordinary work (#384): integrators (on the
+// head while one is free, else on a worker) and controller-only reflection. Plan tasks hold no slot.
+export const reservedWork = (task) => !!task && task.kind !== 'plan' && (!remoteWork(task) || !!task.integrates);
 // The controller's hardware, read live: CFG.hardware (tests) or its cores and MemTotal.
 function readHardware() {
   let h = null;
@@ -992,9 +993,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // NULL = the reflector decides what matters most. reflectPrompt puts it first.
   if (!db.prepare('PRAGMA table_info(projects)').all().some((c) => c.name === 'reflect_direction')) db.exec('ALTER TABLE projects ADD COLUMN reflect_direction TEXT');
   // tasks.worktree: the task's live git worktree (worktrees.mjs), NULL once merged or parked. tasks.integrates: the
-  // 'needs_integration' task whose worktree this integrator task resolves and merges.
+  // 'needs_integration' task whose worktree this integrator task resolves and merges; tasks.conflicts: JSON [file] that
+  // conflicted when it was queued (a worker's integrator job carries them).
   if (!db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === 'worktree')) db.exec('ALTER TABLE tasks ADD COLUMN worktree TEXT');
   if (!db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === 'integrates')) db.exec('ALTER TABLE tasks ADD COLUMN integrates INTEGER');
+  if (!db.prepare('PRAGMA table_info(tasks)').all().some((c) => c.name === 'conflicts')) db.exec('ALTER TABLE tasks ADD COLUMN conflicts TEXT');
   // Multi-dependencies (#156): task_deps(task_id, depends_on) holds every prerequisite; a task starts once ALL are done.
   // tasks.depends_on stays the first one (single-dep readers and older rows); all_deps is the union of both.
   // tasks.files: JSON [path or glob] the task will modify (parallel.mjs); NULL = everything, so it runs alone.
@@ -1435,18 +1438,18 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const h = headSlots();
     try { cluster?.setLocalCapacity?.({ cores: h.cores, mem: h.mem, maxSlots: h.total }); } catch (e) { console.error('[orchestrator] controller node update failed', e); }
   }
-  // The head's own runs, read from the DB so a claim not yet started counts: controller-only ones and ordinary work.
+  // The head's own runs, read from the DB so a claim not yet started counts: reserved-slot ones (reservedWork) and ordinary work.
   function headLoad() {
     const rows = qa("SELECT kind, integrates FROM tasks WHERE status='running' AND kind!='plan' AND COALESCE(node_id, :l)=:l", { l: LOCAL_NODE });
-    const only = rows.filter(controllerOnly).length;
+    const only = rows.filter(reservedWork).length;
     return { only, work: rows.length - only };
   }
-  // Work slots in use: ordinary work plus controller-only runs beyond the reserved slots.
+  // Work slots in use: ordinary work plus reserved-slot runs beyond the reserved slots.
   const headWorkUsed = (load = headLoad()) => load.work + Math.max(0, load.only - headSlots().reserved);
-  // May the head start `task` now? 'reserved': a controller-only task takes a reserved slot (no pacing, owner cap or
+  // May the head start `task` now? 'reserved': an integrator or reflection takes a reserved slot (no pacing, owner cap or
   // per-agent limit holds it back); 'work': a work slot is free (`slots`: slotCount, after pacing and the memory floor); null.
   function headFree(task, slots, load = headLoad()) {
-    if (controllerOnly(task) && load.only < headSlots().reserved) return 'reserved';
+    if (reservedWork(task) && load.only < headSlots().reserved) return 'reserved';
     return headWorkUsed(load) < slots ? 'work' : null;
   }
 
@@ -1615,35 +1618,40 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // A worker with feature 'git' clones and pushes through the head's git endpoint (cluster-git.mjs), so it needs neither
   // GitHub access nor a GitHub remote; an older one needs the project's GitHub remote.
   const headGit = (n) => (n?.features || []).includes('git');
-  // Work tasks may run remotely (remoteWork); plan/reflect tasks, integrators and tasks with a live worktree here (a
-  // verify-failed or interrupted run keeps it) stay on the controller.
+  // Work tasks may run remotely (remoteWork); plan/reflect tasks and tasks with a live worktree here (a verify-failed or
+  // interrupted run keeps it) stay on the controller, and so does an integrator that already ran here (its merge is
+  // under way in the task's worktree).
   const remoteCapable = (task, project) => !!cluster && remoteWork(task) && !task.worktree
-    && (isBrowserTask(task) || worktreeCapable(project));
+    && (isBrowserTask(task) || worktreeCapable(project)) && !(task.integrates && task.node_id === LOCAL_NODE);
+  // A worker that can run an integrator: it merges through the head's git endpoint (the task's branch is only here).
+  const integrateWorker = (n) => headGit(n) && (n.features || []).includes('integrate');
   // Whether node n can check out the task's project: through the head (feature 'git'), else from its GitHub remote.
   const canClone = (n, task, project) => isBrowserTask(task) || headGit(n) || !!remoteRepo(project);
-  // The scheduler's assertion: anything but a work task bound for a worker is a bug. It throws before the claim is
-  // recorded (the tick logs it and the task stays queued) and before runRemote sends a single frame.
+  // The scheduler's assertion: anything but a work task (integrators included) bound for a worker is a bug. It throws
+  // before the claim is recorded (the tick logs it and the task stays queued) and before runRemote sends a single frame.
   function assertPlacement(task, nodeId) {
     if (nodeId && nodeId !== LOCAL_NODE && !remoteWork(task)) {
-      throw new Error(`placement bug: #${task.id} is ${task.integrates ? 'an integrator' : `a ${task.kind}`} task; only work tasks run on workers (${nodeId})`);
+      throw new Error(`placement bug: #${task.id} is a ${task.kind} task; only work tasks run on workers (${nodeId})`);
     }
   }
   const localAgentOk = (agent) => (agent === 'claude' ? onSubscription() : agentStatus(agent) === true && !(kvTime(`agent_auth_failed:${agent}`) > now()));
   // Where a claimed task runs: the free worker with the most headroom (the node that last ran it first), else the
   // controller when it has a free slot (localFree: headFree's answer for this task). Ordinary work goes to the workers
   // first: the controller takes it only once every worker is at its target or none is online, and with the owner's
-  // controllerWork off it leaves it to the workers while one could run it (it waits for one to free up). A controller-only
-  // task in a reserved slot ignores the owner's cap and pacing (cap), so integration never waits behind work. null = not now.
+  // controllerWork off it leaves it to the workers while one could run it (it waits for one to free up). A task in a
+  // reserved slot ignores the owner's cap and pacing (cap), so integration never waits behind work: an integrator takes one
+  // on the head while one is free, else it is placed like ordinary work (#435). null = not now.
   // A browser task (browser.mjs) goes only to a worker that reports browserCapable, or to the controller when the owner
   // allows it (controllerBrowser), and never while another task uses the same profile (Chromium locks it).
   function place(task, agent, { localFree, localOk, cap }) {
     if (task.kind === 'plan') return localOk ? LOCAL_NODE : null;
-    if (localFree !== 'reserved' && workEverywhere() >= cap) return null;
+    if (task.integrates && localFree === 'reserved' && localOk && !localDraining() && localAgentOk(agent)) return LOCAL_NODE;
+    if ((localFree !== 'reserved' || task.integrates) && workEverywhere() >= cap) return null;
     const browser = needsBrowser(task);
     if (isBrowserTask(task) && browserHeld(task.run_on, identityOf(task))) return null;
     if (browser && profileBusy(task)) return null;
     const project = getProject(task.project_id), remote = remoteCapable(task, project);
-    const fits = (n) => (!browser || browserWorker(n)) && canClone(n, task, project);
+    const fits = (n) => (!browser || browserWorker(n)) && canClone(n, task, project) && (!task.integrates || integrateWorker(n));
     // Pinned by the owner (run_on): only that machine, waiting for it. A worker pin only binds a task that can run remotely.
     const pin = task.kind === 'work' && task.run_on && (task.run_on === LOCAL_NODE || remote || isBrowserTask(task)) ? task.run_on : null;
     if (remote && pin !== LOCAL_NODE) {
@@ -1681,10 +1689,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       const fallbacks = r.kind === 'work' ? (parseFallbacks(r.fallbacks) || []).filter((f) => listedModel(f.agent, f.model) && `${f.agent}/${f.model}` !== `${primary.agent}/${primary.model}`) : [];
       return { task: r, options: [primary, ...fallbacks] };
     });
-    // Controller-only work (integrators first) goes ahead of the rest on its own route: it has its reserved head slots.
-    const only = ready.filter((r) => controllerOnly(r.task)).sort((a, b) => !!b.task.integrates - !!a.task.integrates);
+    // Integrators and reflection go ahead of the rest on their own route (integrators first): they have reserved head slots.
+    const only = ready.filter((r) => reservedWork(r.task)).sort((a, b) => !!b.task.integrates - !!a.task.integrates);
     const picks = [...only.filter((r) => delegator.hasUsage(r.options[0].agent, r.options[0].model)).map((r) => ({ task: r.task, ...r.options[0], spilled: false })),
-      ...spreadAssign(ready.filter((r) => !controllerOnly(r.task)), {
+      ...spreadAssign(ready.filter((r) => !reservedWork(r.task)), {
         slotsFree: (a) => Math.max(0, slotsFor(a) - runningOn(a)) + workerSlots(a),
         hasUsage: (a, m) => delegator.hasUsage(a, m),
       })];
@@ -2756,7 +2764,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   function rapidQueue(project = null) {
     const c = capacityView();
     const rows = qa(RUNNABLE + " AND t.kind='work'", { now: now() }).filter((r) => projectReady(getProject(r.project_id).path));
-    const headOnly = (r) => controllerOnly(r) || (!c.controller && (!!r.worktree || r.run_on === LOCAL_NODE));
+    const headOnly = (r) => reservedWork(r) || (!c.controller && (!!r.worktree || r.run_on === LOCAL_NODE));
     const running = q1("SELECT COUNT(*) AS n FROM tasks WHERE status='running' AND kind='work' AND integrates IS NULL").n;
     const ready = rows.filter((r) => !headOnly(r)).length, hs = headSlots(), only = headLoad().only;
     return { ...rapidQueueTarget(Math.min(c.max, c.cap ?? Infinity), running, ready), hotFiles: project ? hotFiles(project.id) : [],
@@ -2996,7 +3004,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // ---- remote runs: a work task on a worker (job.offer → job.start → job.event* → job.check → job.done). The worker
   // checks out the project's repo at the base sha on agent-orch/task-<id> and pushes that branch, through the head's git
   // endpoint (feature 'git': the branch lands straight in this repo) or else GitHub (fetched from origin); finishWork
-  // merges it here exactly like a local worktree.
+  // merges it here exactly like a local worktree. An integrator (feature 'integrate', through the head only) works on
+  // agent-orch/integrate-<id>: the base sha with the integrated task's branch merged in (job.start.integrate).
   async function runRemote(task, project, signal) {
     const nodeId = nodeOf(task.id), n = nodesNow().find((x) => x.id === nodeId), name = n?.name || nodeId;
     assertPlacement(task, nodeId);
@@ -3007,14 +3016,16 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       checkNodeFailures(nodeId, res);
       return res;
     }
-    const repo = isBrowserTask(task) ? null : remoteRepo(project), viaHead = !isBrowserTask(task) && headGit(n);
+    const repo = isBrowserTask(task) || task.integrates ? null : remoteRepo(project), viaHead = !isBrowserTask(task) && headGit(n);
     if (!repo && !viaHead && !isBrowserTask(task)) throw new Error(`${project.name} has no GitHub remote for ${name} to clone`);
+    const branch = task.integrates ? integrateBranch(task.id) : taskBranch(task.id);
     const route = routeFor(task, project);
     const baseSha = isBrowserTask(task) ? null : await remoteBase(task, project, running.get(task.id)?.prevNode, !viaHead);
     const resume = task.session_id && lastRunAgent(task.id) === route.agent && lastRunNode(task.id) === nodeId ? task.session_id : null;
     const where = `a checkout of ${repo || project.name} on the worker machine ${name}`;
     const env = `Environment (cluster worker ${name}, ${n?.os || 'unknown'}/${n?.arch || 'unknown'}): a machine that runs agent-orch tasks; ` +
-      `install whatever the task needs.\nYou are in ${where}, on branch ${taskBranch(task.id)}. The orchestrator pushes and merges it when you finish.`;
+      `install whatever the task needs.\nYou are in ${where}, on branch ${branch}` + (task.integrates ? `: the main branch at ${baseSha.slice(0, 8)}, with ` +
+      `${taskBranch(task.integrates)} being merged into it (its conflicted files hold the <<<<<<< markers)` : '') + '. The orchestrator pushes and merges it when you finish.';
     const prompt = isBrowserTask(task) ? task.prompt : resume ? resumePrompt(task) : lostHandoff(task) ? handoffPrompt({ ...project, path: where }, task, env, await handoffInfo(task, project))
       : workerTaskPrompt({ ...project, path: where }, task, env);
     const effort = taskEffort(task, project, route);
@@ -3027,7 +3038,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const res = await remoteJob(task.id, nodeId, name, { runId, logPath }, {
       title: task.title, prompt, systemAppend: withBrowser(task, isBrowserTask(task) ? BROWSER_TASK_SYSTEM : resume ? null : withPersona(WORKER_SYSTEM, project)) || undefined, agent: route.agent, model: route.model || undefined, effort: effort || undefined,
       ...(needsBrowser(task) && { capabilities: ['browser'], identity: identityOf(task), gate: (({ patterns, ttlMs }) => ({ patterns, ttlMs }))(gateSettings()) }),
-      ...(isBrowserTask(task) ? { execution: 'browser' } : { repo: repo || undefined, gitUrl: viaHead ? gitPath(project.id) : undefined, baseSha, branch: taskBranch(task.id), doneWhen: task.done_when || undefined }), resume: resume || undefined,
+      ...(isBrowserTask(task) ? { execution: 'browser' } : { repo: repo || undefined, gitUrl: viaHead ? gitPath(project.id) : undefined, baseSha, branch, doneWhen: task.done_when || undefined }), resume: resume || undefined,
+      ...(task.integrates && { integrate: { branch: taskBranch(task.integrates), files: parseJsonList(task.conflicts) } }),
       timeouts: { taskSec: CFG.taskTimeoutSec, verifySec: CFG.verifyTimeoutSec, installSec: 900 }, autonomous: isBrowserTask(task) || !!project.autonomous,
       ext: cluster.extHash?.() || undefined, // the worker fetches this extension bundle first unless it has it
     }, signal);
@@ -3485,12 +3497,17 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       } else if (!ok) return verifyFailed(task, project, res, command, output);
       else checked = ' (check passed)';
     }
-    if (remote) { wt = await remoteWorktree(task, project, remote.sha); dir = wt.cwd; }
+    if (remote && task.integrates) {
+      const got = await integrationWorktree(task, project, remote.sha);
+      if (got.left) return verifyFailed(task, project, res, 'resolve every merge conflict', `Still conflicted: ${got.left.join(', ')}`);
+      ({ wt } = got); dir = wt.cwd;
+    } else if (remote) { wt = await remoteWorktree(task, project, remote.sha); dir = wt.cwd; }
     recordResult(dir, task, `done${checked}`, res.text);
     let sha;
     if (wt) {
       const message = `agent-orch #${tid}: ${task.title}`;
       let merged = await mergeTask(task, project, wt, message);
+      if (remote && task.integrates) await serialGit(project.path, () => git(project.path, ['branch', '-D', integrateBranch(tid)]).catch(() => {}));
       if (merged.conflict && !task.integrates) {
         // Rapid-mode overlaps meet here. The other task's merge may just have landed (or be landing: merges are
         // serialised), so the rebase gets one automatic retry before an integrator is queued.
@@ -3502,13 +3519,15 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         recordMergeOutcomes(project, task, merged.conflict ? [...new Set([...first, ...merged.conflict])] : first);
       } else if (!task.integrates) recordMergeOutcomes(project, task, []);
       if (merged.conflict) {
-        // An integrator whose base moved on again just goes another round in the same worktree.
+        // A worker's integrator whose result no longer rebases onto the main branch: another integrator, a bounded number
+        // of times. A local one whose base moved on again just goes another round in the same worktree.
+        if (remote && task.integrates) return reintegrate(task, project, res, wt, merged.conflict);
         if (task.integrates) return verifyFailed(task, project, res, `merge ${wt.info.branch} again`, `${wt.info.branch} changed meanwhile; conflicts in: ${merged.conflict.join(', ')}`);
         return needsIntegration(task, project, res, wt, merged.conflict);
       }
       sha = merged.sha;
       // Merged: a branch a worker pushed (this run's, or a lost run's WIP this one continued) is done.
-      if (remote || task.wip_sha) await git(project.path, ['push', '-q', 'origin', '--delete', taskBranch(tid)]).catch(() => {});
+      if (!task.integrates && (remote || task.wip_sha)) await git(project.path, ['push', '-q', 'origin', '--delete', taskBranch(tid)]).catch(() => {});
       // An integrator's owner is the one that ran on a worker or pushed WIP, so its branch goes too.
       const owner = task.integrates && getTask(task.integrates);
       if (owner && ((owner.node_id && owner.node_id !== LOCAL_NODE) || owner.wip_sha)) {
@@ -3517,17 +3536,64 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     } else sha = await gitCommit(project.path, `agent-orch #${tid}: ${task.title}`);
     if (!updateTask(tid, { status: 'done', finished_at: now(), result: res.text, session_id: res.sessionId, verify_output: null, commit_sha: sha || null }, true)) return;
     logEvent(`✔ #${tid} done${checked}: ${task.title}${sha ? ` (commit ${sha})` : ''}`, { projectId: project.id, taskId: tid });
-    if (task.integrates && updateTask(task.integrates, { status: 'done', finished_at: now(), commit_sha: sha || null, result: `Merged by integrator #${tid}.` })) {
-      logEvent(`✔ #${task.integrates} merged by integrator #${tid}`, { projectId: project.id, taskId: task.integrates });
+    const on = remote ? ` on ${nodeName(remote.node)}` : '';
+    if (task.integrates && updateTask(task.integrates, { status: 'done', finished_at: now(), commit_sha: sha || null, result: `Merged by integrator #${tid}${on}.` })) {
+      logEvent(`✔ #${task.integrates} merged by integrator #${tid}${on}`, { projectId: project.id, taskId: task.integrates });
     }
   }
 
+  // A worker's integrator (#435) pushed agent-orch/integrate-<id> through the head: the main branch as it started from,
+  // with the task's branch merged in and resolved. Unless conflict markers are left in it, it becomes the task's branch
+  // (it holds all of that branch's work) in the task's worktree here, so mergeTask lands it like any other: a fast-forward
+  // when the main branch hasn't moved, else its squash rebased onto the new tip. { wt } or { left: [files still conflicted] }.
+  async function integrationWorktree(task, project, sha) {
+    const b = integrateBranch(task.id), owner = task.integrates;
+    if (!sha) throw new Error(`the worker reported no pushed commit for ${b}`);
+    const wt = await serialGit(project.path, async () => {
+      const info = await repoInfo(project.path);
+      const tip = (await git(info.top, ['rev-parse', '--verify', '-q', `refs/heads/${b}`]).catch(() => '')).trim();
+      if (tip !== sha) throw new Error(`${b} is at ${tip.slice(0, 8) || 'nothing'}, not the reported ${sha.slice(0, 8)}`);
+      const left = await markersIn(info.top, (await git(info.top, ['merge-base', sha, info.branch])).trim(), sha);
+      if (left.length) return { left };
+      const w = { ...(await ensureWorktree(info, owner)), info, owner };
+      await git(w.dir, ['reset', '-q', '--hard', sha]);
+      return w;
+    });
+    if (wt.left) return wt;
+    taskWts.set(task.id, wt);
+    run('UPDATE tasks SET worktree=:w WHERE id=:id', { w: wt.dir, id: owner });
+    return { wt };
+  }
+  // A worker's integrator whose result conflicts with the main branch again (it moved on meanwhile and the rebase onto it
+  // conflicted): the task's branch keeps the resolution so far and another integrator takes it from there, up to
+  // CFG.maxIntegrators for one task. Past that the owner is alerted and the task fails with its integrator.
+  async function reintegrate(task, project, res, wt, files) {
+    const tid = task.id, owner = getTask(task.integrates), branch = wt.info.branch, node = nodeName(res.remote.node);
+    const count = q1('SELECT COUNT(*) AS n FROM tasks WHERE integrates=:o', { o: owner.id })?.n || 0;
+    if (count >= CFG.maxIntegrators) {
+      notifyOwner({ title: 'Integration needs you', body: `#${owner.id} ${owner.title}: still conflicts with ${branch} after ${count} integrators (${files.join(', ')})`, tag: `task-${owner.id}`, url: taskUrl(owner.id) });
+      logEvent(`✖ #${owner.id} still conflicts with ${branch} in ${files.join(', ')} after ${count} integrators; it needs you`, { level: 'error', projectId: project.id, taskId: owner.id });
+      return fail(task, project, 'integration', `${branch} kept moving while ${count} integrators resolved #${owner.id}; it still conflicts in: ${files.join(', ')}`);
+    }
+    if (!updateTask(tid, { status: 'done', finished_at: now(), result: res.text, session_id: res.sessionId, verify_output: null }, true)) return;
+    const iid = queueIntegrator(owner, project, wt, files);
+    updateTask(tid, { result: `Resolved on ${node}, but ${branch} moved on meanwhile and conflicts again in: ${files.join(', ')}. Integrator #${iid} takes over.` });
+    logEvent(`⚠ #${owner.id}: integrator #${tid}'s result conflicts with ${branch} again in ${files.join(', ')}; queued integrator #${iid} (${count + 1} of ${CFG.maxIntegrators})`,
+      { level: 'warn', projectId: project.id, taskId: owner.id });
+  }
+
   // The rebase onto the main branch conflicted: keep the worktree, mark the task and queue an integrator for it.
+  const conflictNote = (wt, files) => `Its branch ${wt.branch} conflicts with ${wt.info.branch} in: ${files.join(', ')}. The work is kept in ${wt.dir}.`;
   function needsIntegration(task, project, res, wt, files) {
     const tid = task.id, branch = wt.info.branch;
-    const note = `Its branch ${wt.branch} conflicts with ${branch} in: ${files.join(', ')}. The work is kept in ${wt.dir}.`;
-    if (!updateTask(tid, { status: 'needs_integration', finished_at: now(), result: note, session_id: res.sessionId, verify_output: null }, true)) return;
+    if (!updateTask(tid, { status: 'needs_integration', finished_at: now(), result: conflictNote(wt, files), session_id: res.sessionId, verify_output: null }, true)) return;
     notifyOwner({ title: 'Needs integration', body: `#${tid} ${task.title}: conflicts in ${files.join(', ')}`, tag: `task-${tid}`, url: taskUrl(tid) });
+    const iid = queueIntegrator(task, project, wt, files);
+    logEvent(`⚠ #${tid} needs integration: conflicts with ${branch} in ${files.join(', ')}; queued integrator #${iid}`, { level: 'warn', projectId: project.id, taskId: tid });
+  }
+  // An integrator for `task` (waiting in 'needs_integration'), whose worktree `wt` conflicts with the main branch in `files`.
+  function queueIntegrator(task, project, wt, files) {
+    const tid = task.id, branch = wt.info.branch;
     const prompt = `Task #${tid} ("${task.title}") finished in its own git worktree, but its branch \`${wt.branch}\` conflicts with ` +
       `\`${branch}\`, which changed meanwhile (conflicting files: ${files.join(', ')}). You are in that worktree, and the orchestrator ` +
       `has started merging \`${branch}\` into it: the conflicted files contain <<<<<<< markers. Resolve every conflict so both ` +
@@ -3535,9 +3601,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       `Task #${tid}'s instructions were:\n\n${task.prompt}`;
     const iid = addTask(project.id, { title: `Integrate #${tid}: ${task.title}`.slice(0, 200), prompt, source: task.source, priority: task.priority + 10,
       doneWhen: task.done_when, agent: task.agent, model: task.model, origin: task.origin, fallbacks: parseFallbacks(task.fallbacks), files: parseFiles(task.files) });
-    run('UPDATE tasks SET integrates=:t WHERE id=:id', { t: tid, id: iid });
-    updateTask(tid, { result: `${note} Integrator #${iid} merges it.` });
-    logEvent(`⚠ #${tid} needs integration: conflicts with ${branch} in ${files.join(', ')}; queued integrator #${iid}`, { level: 'warn', projectId: project.id, taskId: tid });
+    run('UPDATE tasks SET integrates=:t, conflicts=:c WHERE id=:id', { t: tid, c: JSON.stringify(files), id: iid });
+    updateTask(tid, { result: `${conflictNote(wt, files)} Integrator #${iid} merges it.` });
+    return iid;
   }
 
   async function verifyFailed(task, project, res, command, output) {
@@ -3868,6 +3934,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (!n.local) {
       if (!remoteWork(task)) return `#${task.id} is ${task.integrates ? 'an integrator' : `a ${task.kind} task`}; it runs only on the controller`;
       if (!remoteCapable(task, project)) return task.worktree ? `#${task.id} has its checkout on the controller` : `${project.name} can't run on a worker (no git checkout)`;
+      if (task.integrates && !integrateWorker(n)) return `${nodeWhere(n)} can't run integrators (update it)`;
       if (!canClone(n, task, project)) return `${nodeWhere(n)} can't clone ${project.name} (no GitHub remote)`;
       if (needsBrowser(task) && !browserWorker(n)) return `${nodeWhere(n)} has no browser for #${task.id}`;
       if (isBrowserTask(task) && !n.features?.includes('browser-task')) return `${nodeWhere(n)} can't run browser tasks (update it)`;
@@ -4250,7 +4317,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     isRunning: (id) => running.has(Number(id)), logEvent, attachCluster, detectHardware,
     // The head's git endpoint (cluster-git.mjs): a project's checkout, and the tasks node nodeId may push to in it now.
     gitRepo: (pid) => getProject(Number(pid))?.path || null,
-    pushableTasks: (nodeId, pid) => [...running].filter(([, r]) => r.node === nodeId && r.projectId === Number(pid)).map(([id]) => id),
+    // An integrator there pushes agent-orch/integrate-<id> (never the branch it merges); any other task its own task branch.
+    pushableTasks: (nodeId, pid) => [...running].filter(([, r]) => r.node === nodeId && r.projectId === Number(pid)).map(([id]) => (getTask(id)?.integrates ? integrateBranch(id) : id)),
     gateSettings, setGateSettings, decideApproval, taskActions, pendingApprovals: () => approvals.pending().map(({ args, ...a }) => a),
     scheduleReflections, // tests: run a reflection scheduling step without starting agents
     claimNext, // tests: claims the next task and its node, as one tick step would (without starting it)

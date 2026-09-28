@@ -1197,6 +1197,10 @@ http gate proxy re-initializes after a stale-session 404 and retries
 ## 2026-09-28 14:24 — #385 Integrate #374: Files tab ui: a Changed view with +/− counts and a coloured diff in Quick Look [done (check passed)]
 
 merge resolved; Changed view, context menu and Ask in chat all pass
+
+## 2026-09-28 14:42 — #435 Integrators run on workers too, so merges use Mac capacity [done (check passed)]
+
+integrators run on workers; head lands, rebases, caps re-integration at 3
 ## 2026-09-28 14:25 — #429 cluster-git.mjs: a push is checked from its first pkt-lines and streamed into git, never buffered whole; git is killed when the client goes away [done (check passed)]
 
 Pushes now stream into git after the ref check; dropped clients kill git
@@ -1287,6 +1291,13 @@ Merged main again; Done-when and Machines browser tests pass
 
 merge conflicts resolved; custom-sound and machine-settings tests pass
 
+## 2026-09-28 14:59 — #448 Integrate #435: Integrators run on workers too, so merges use Mac capacity [done (check passed)]
+
+merge conflicts resolved; worker-integration tests and main's rapid/integrator tests pass
+
+## 2026-09-28 14:59 — #448 Integrate #435: Integrators run on workers too, so merges use Mac capacity [verify failed (1)]
+
+Command: merge main again
 ## 2026-09-28 14:42 — #446 Integrate #426: Rolling restart: new server code goes live within minutes, even when busy [done (check passed)]
 
 merge conflicts resolved; rolling-restart, version, and UI tests pass
@@ -1334,3 +1345,7 @@ Sign out moved to Connections; version shows under logo
 ## 2026-09-28 15:14 — #452 Orchestrator bar status: 'Running X · Queue Y' [done (check passed)]
 
 orchestrator bar shows Running X · Queue Y; tests pass
+
+## 2026-09-28 15:16 — #448 Integrate #435: Integrators run on workers too, so merges use Mac capacity [done (check passed)]
+
+CONTEXT.md conflict resolved; worker-integration tests pass 5/5

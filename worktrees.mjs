@@ -12,9 +12,12 @@ import { retryGit, transientGit } from './taskrun.mjs';
 const execFileP = promisify(execFile);
 export const GIT_ID = ['-c', 'user.name=agent-orch Orchestrator', '-c', 'user.email=orchestrator@agent-orch.local'];
 export const taskBranch = (id) => `agent-orch/task-${id}`;
+// An integrator's branch on a worker (#435): the main branch with the integrated task's branch merged in and resolved.
+export const integrateBranch = (id) => `agent-orch/integrate-${id}`;
 const BRANCH_RE = /^agent-orch\/task-(\d+)$/;
-// Every task appends to JOURNAL.md; a union merge keeps both sides instead of calling that a conflict.
-const ATTRIBUTES = ['.agent-orch/JOURNAL.md merge=union'];
+// Every task appends to JOURNAL.md; a union merge keeps both sides instead of calling that a conflict (here and in a
+// worker's cache, where integrators merge).
+export const MERGE_ATTRIBUTES = ['.agent-orch/JOURNAL.md merge=union'];
 
 // Other sessions and auto-commits share the main tree, so a lock race or network blip is retried (retryGit; tests may
 // set `retryOptions.sleep`). Anything else fails at once, and the last failure is thrown as git reported it.
@@ -123,10 +126,12 @@ async function prepareRepo(top) {
     const missing = lines.filter((l) => !have.split('\n').includes(l));
     if (missing.length) fs.appendFileSync(file, (have && !have.endsWith('\n') ? '\n' : '') + missing.join('\n') + '\n');
   };
-  add(path.join(common, 'info', 'attributes'), ATTRIBUTES);
+  add(path.join(common, 'info', 'attributes'), MERGE_ATTRIBUTES);
   add(path.join(common, 'info', 'exclude'), ['node_modules']);
 }
 
+const CONFLICT_RE = /^<{7}(?: |$)[\s\S]*?^>{7}(?: |$)/m;
+const markerFiles = (check) => check.split('\n').map((l) => /^(.+?):\d+: leftover conflict marker/.exec(l)?.[1]).filter(Boolean);
 // Files that still hold a conflict block: a `<<<<<<< ` line followed later by a `>>>>>>> ` line, checked in files
 // unmerged in the index or flagged by `git diff --check`. An agent resolves a file by editing it, without `git add`, so
 // the index alone can't tell; a lone `=======` line (a setext heading underline) never counts.
@@ -134,10 +139,20 @@ export async function unresolvedFiles(dir) {
   const files = new Set((await git(dir, ['ls-files', '-u'])).split('\n').map((l) => l.split('\t')[1]).filter(Boolean));
   let check = '';
   try { await git(dir, ['diff', 'HEAD', '--check']); } catch (e) { check = e.stdout || ''; }
-  for (const l of check.split('\n')) { const m = /^(.+?):\d+: leftover conflict marker/.exec(l); if (m) files.add(m[1]); }
+  for (const f of markerFiles(check)) files.add(f);
   return [...files].filter((f) => {
-    try { return /^<{7}(?: |$)[\s\S]*?^>{7}(?: |$)/m.test(fs.readFileSync(path.join(dir, f), 'utf8')); } catch { return false; }
+    try { return CONFLICT_RE.test(fs.readFileSync(path.join(dir, f), 'utf8')); } catch { return false; }
   });
+}
+
+// The same test on commits: files still holding a conflict block in `tip` among the lines added since `base`. A worker's
+// integrator pushes its resolution committed, so neither the index nor the working tree can tell.
+export async function markersIn(top, base, tip) {
+  let check = '';
+  try { await git(top, ['diff', '--check', base, tip]); } catch (e) { check = e.stdout || ''; }
+  const left = [];
+  for (const f of new Set(markerFiles(check))) if (CONFLICT_RE.test(await git(top, ['show', `${tip}:${f}`]).catch(() => ''))) left.push(f);
+  return left;
 }
 
 // An integrator's worktree starts by merging the main branch in; the conflicted files are left for the agent.

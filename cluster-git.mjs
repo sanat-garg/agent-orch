@@ -3,12 +3,13 @@
 // access; the head merges their task branches locally and pushes main to GitHub itself. `git http-backend` runs as a CGI
 // per request (no deps). Auth: the node's bearer token (the worker's cache clone sends it as an http.extraHeader), never
 // the owner's session. Fetch: any ref (uploadpack.allowFilter and allowAnySHA1InWant for the worker's blob-less clone).
-// Push: the command list is read here before git sees the pack, and only refs/heads/agent-orch/task-<id> of tasks the
-// head has on that node right now pass; anything else (main, another task's branch) is refused with 403. A push is
-// never held whole: only its command list (up to MAX_PUSH_PREFIX) is buffered, then the rest streams into git (a gzipped
-// one, which git itself never sends, is buffered up to MAX_GZIP_PUSH). A client that goes away kills its git.
+// Push: the command list is read here before git sees the pack, and only the branches of tasks the head has on that node
+// right now pass (refs/heads/agent-orch/task-<id>, or agent-orch/integrate-<id> for an integrator there, #435); anything
+// else (main, another task's branch, the branch an integrator merges) is refused with 403. A push is never held whole:
+// only its command list (up to MAX_PUSH_PREFIX) is buffered, then the rest streams into git (a gzipped one, which git
+// itself never sends, is buffered up to MAX_GZIP_PUSH). A client that goes away kills its git.
 //   createClusterGit({ node(headers) → node row | null, repo(projectId) → project dir | null,
-//     pushable(nodeId, projectId) → task ids, log }) → { handle(req, res) → Promise<status> }
+//     pushable(nodeId, projectId) → [task id (its task branch) or branch name], log }) → { handle(req, res) → Promise<status> }
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { spawn, execFile } from 'node:child_process';
@@ -111,7 +112,7 @@ export function createClusterGit({ node, repo, pushable, log = () => {} }) {
         log(`node ${row.id}: unreadable push to project ${pid} refused`);
         return refuse(400, 'agent-orch: unreadable push\n');
       }
-      const mine = new Set([...pushable(row.id, pid)].map((id) => `refs/heads/agent-orch/task-${id}`));
+      const mine = new Set([...pushable(row.id, pid)].map((b) => `refs/heads/${typeof b === 'number' ? `agent-orch/task-${b}` : b}`));
       const bad = refs.filter((r) => !mine.has(r));
       if (bad.length) {
         log(`node ${row.id}: push to ${bad.join(', ')} in project ${pid} refused`);

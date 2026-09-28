@@ -51,7 +51,7 @@ import { cpuPercent, createResources, readSystem, registerPid, withOwner } from 
 import { helperOut, runHelper } from './helpers.mjs';
 import { autoTasks, createKeepAwake, effectivePolicy, intake as intakeOf, readPower, reserveBytes, wantsAwake } from './power.mjs';
 import { MEM } from './parallel.mjs';
-import { GIT_ID, commitAll, taskBranch } from './worktrees.mjs';
+import { GIT_ID, MERGE_ATTRIBUTES, commitAll, taskBranch } from './worktrees.mjs';
 import { isBrowserTask } from './browser-task.mjs';
 import { extractCommand, runCheck, toolLine } from './taskrun.mjs';
 import { JOB_ENV, workerHome } from './role.mjs';
@@ -980,7 +980,9 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     startedAt: Date.now(), activity: null, activityAt: 0,
     phase: null, progress: { tools: 0, files: new Set(), last: '' }, progressSig: '', progressAt: 0,
     cache: null, env: {},
-    dir: isBrowserTask(spec) ? path.join(home, 'browser-tasks', String(spec.job)) : path.join(dirs.worktrees, `${cacheName(spec.repo || spec.gitUrl).split('__').pop()}-task-${spec.job}`),
+    // An integrator's job (job.start.integrate) works on agent-orch/integrate-<id>, every other on agent-orch/task-<id>.
+    branch: spec.integrate ? spec.branch : taskBranch(spec.job),
+    dir: isBrowserTask(spec) ? path.join(home, 'browser-tasks', String(spec.job)) : path.join(dirs.worktrees, `${cacheName(spec.repo || spec.gitUrl).split('__').pop()}-${spec.integrate ? 'integrate' : 'task'}-${spec.job}`),
     sessionId: spec.resume || null, pushed: null, remoteStart: null, stop: null, lock: Promise.resolve(),
   });
 
@@ -998,10 +1000,10 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     await runTurn(job, spec.prompt, spec.resume || null);
   }
 
-  // The controller's extensions (job.start.ext) → cache fetch → worktree on agent-orch/task-<id> (from the pushed branch
-  // when it exists, else baseSha) → install.
+  // The controller's extensions (job.start.ext) → cache fetch → worktree on the job's branch (from the pushed branch
+  // when it exists, else baseSha; an integrator's then merges the integrated task's branch in) → install.
   async function setup(job) {
-    const { spec } = job, branch = taskBranch(job.id);
+    const { spec } = job, { branch } = job;
     job.state = 'setup';
     try {
       await syncExt(spec.ext).catch((e) => { throw new Error(`could not get the controller's skills and MCP servers: ${e.message}`); });
@@ -1029,6 +1031,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
             await git(job.cache, ['fetch', '-q', 'origin', spec.baseSha], { env: job.env });
           }
           await git(job.cache, ['worktree', 'add', '-q', '-f', '-B', branch, job.dir, start]);
+          if (spec.integrate && !job.remoteStart) await startMerge(job);
         }
       });
       job.pushed ??= job.remoteStart || null;
@@ -1049,6 +1052,21 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       emit(job, MSG.JOB_DONE, { job: job.id, outcome: 'setup_failed', text });
       return false;
     }
+  }
+
+  // An integrator's job (#435): the integrated task's branch (fetched from the head with the rest) is merged into the fresh
+  // worktree without committing, and its conflicts are left for the agent, as on the head. The head lands the pushed result.
+  async function startMerge(job) {
+    const { integrate } = job.spec, src = `refs/remotes/origin/${integrate.branch}`;
+    if (!(await gitOk(job.cache, ['rev-parse', '--verify', '-q', src]))) throw new Error(`${integrate.branch} is not on ${job.spec.gitUrl || 'origin'}`);
+    const attrs = path.join(job.cache, 'info', 'attributes'), have = fs.existsSync(attrs) ? fs.readFileSync(attrs, 'utf8').split('\n') : [];
+    const missing = MERGE_ATTRIBUTES.filter((l) => !have.includes(l));
+    if (missing.length) { fs.mkdirSync(path.dirname(attrs), { recursive: true }); fs.appendFileSync(attrs, `\n${missing.join('\n')}\n`); }
+    const clean = await gitOk(job.dir, [...GIT_ID, 'merge', '--no-ff', '--no-commit', src], { env: job.env });
+    const conflicts = (await git(job.dir, ['diff', '--name-only', '--diff-filter=U'])).split('\n').filter(Boolean);
+    if (!clean && !conflicts.length) throw new Error(`merging ${integrate.branch} failed`);
+    log(`job ${job.id}: merging ${integrate.branch} into ${job.spec.baseSha.slice(0, 8)}: ${conflicts.length ? `conflicts in ${conflicts.join(', ')}` : 'no conflicts'}` +
+      (integrate.files?.length ? ` (the head saw ${integrate.files.join(', ')})` : ''));
   }
 
   // job.start.install (the controller's choice) or, by default, `npm ci` / `npm install` when package.json exists.
@@ -1240,7 +1258,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       await commitAll(job.dir, message);
       const sha = (await git(job.dir, ['rev-parse', 'HEAD'])).trim();
       if (sha === job.pushed) return sha;
-      const branch = taskBranch(job.id);
+      const { branch } = job;
       if (final) setPhase(job, 'pushing');
       for (let i = 0; ; i++) {
         try {
@@ -1290,7 +1308,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       await gitOk(job.cache, ['worktree', 'remove', '--force', job.dir]);
       fs.rmSync(job.dir, { recursive: true, force: true });
       await gitOk(job.cache, ['worktree', 'prune']);
-      await gitOk(job.cache, ['branch', '-D', taskBranch(job.id)]);
+      await gitOk(job.cache, ['branch', '-D', job.branch]);
     });
     await pruneCaches().catch((e) => log(`cache prune failed: ${e.message}`, 'warn'));
   }
@@ -1351,7 +1369,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     await runTurn(job, msg.prompt || RESUME_PROMPT, job.sessionId);
   }
 
-  // ---- leftovers from a previous run: push what's in stale worktrees (never forced), drop them, prune old caches
+  // ---- leftovers from a previous run: push what's in stale task worktrees (never forced; an integrator's is just dropped,
+  // it starts over), drop them, prune old caches
   async function sweepLeftovers() {
     for (const name of fs.readdirSync(dirs.worktrees)) {
       const dir = path.join(dirs.worktrees, name), id = Number(/-task-(\d+)$/.exec(name)?.[1]);

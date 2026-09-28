@@ -47,6 +47,13 @@ test('validate rejects missing and malformed fields', () => {
   // The head's git endpoint (feature 'git') stands in for a GitHub repo; one of the two is needed.
   assert.equal(validate(start({ repo: undefined, gitUrl: '/api/cluster/git/3.git' })), null);
   assert.match(validate(start({ repo: undefined })), /needs repo or gitUrl/);
+  // An integrator's job (feature 'integrate'): its own agent-orch/integrate-<job> branch, merging a task's branch.
+  const integ = (over) => start({ job: 9, branch: 'agent-orch/integrate-9', integrate: { branch: 'agent-orch/task-4', files: ['a.js'] }, ...over });
+  assert.equal(validate(integ()), null);
+  assert.match(validate(integ({ branch: 'agent-orch/integrate-8' })), /bad integrate/);
+  assert.match(validate(integ({ integrate: { branch: 'main' } })), /bad integrate/);
+  assert.match(validate(integ({ integrate: { branch: 'agent-orch/task-4', files: 'a.js' } })), /bad integrate/);
+  assert.match(validate(integ({ integrate: undefined })), /integrate branch needs integrate/);
   assert.match(validate(frame(MSG.JOB_DONE, { job: 3, outcome: 'great', text: '' })), /bad outcome/);
   assert.match(validate(frame(MSG.JOB_REJECT, { job: 3, reason: 'meh' })), /bad reason/);
   assert.match(validate(frame(MSG.INVENTORY, { node: 'n', name: 'x', os: 'windows', arch: 'x64', cores: 1, mem: 1, agents: [], versions: {} })), /bad os/);
@@ -192,6 +199,6 @@ test('worker reports: job.phase, job.error, node.error, logs, node.update, and t
   // hello and welcome name their features; each newer type is sent only to a peer that lists its feature.
   assert.equal(validate(frame(MSG.HELLO, { node: 'n', protocol: 1, version: '1', jobs: [], sha: SHA, features: FEATURE_LIST }), { from: 'w' }), null);
   assert.equal(validate(frame(MSG.WELCOME, { node: 'n', protocol: 1, heartbeatMs: 1, wipPushMs: 1, graceMs: 1, features: FEATURE_LIST }), { from: 'c' }), null);
-  assert.deepEqual(FEATURE_LIST, ['phases', 'errors', 'logs', 'update', 'policy', 'creds', 'approvals', 'screen', 'ext', 'ping', 'cap', 'browser-task', 'git']);
+  assert.deepEqual(FEATURE_LIST, ['phases', 'errors', 'logs', 'update', 'policy', 'creds', 'approvals', 'screen', 'ext', 'ping', 'cap', 'browser-task', 'git', 'integrate']);
   for (const [t, f] of Object.entries(FEATURES)) assert.ok(SCHEMA[t] && FEATURE_LIST.includes(f), t);
 });

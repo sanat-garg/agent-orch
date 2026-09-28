@@ -164,7 +164,8 @@ test('the worker rejects and logs every frame off the allow-list, still acts on 
 });
 
 test('the scheduler never places plan (the chat\'s planner) or reflect work on a worker, only work tasks', { timeout: 120_000 }, async () => {
-  assert.deepEqual([{ kind: 'work' }, { kind: 'plan' }, { kind: 'reflect' }, { kind: 'review' }, { kind: 'work', integrates: 3 }].map(remoteWork), [true, false, false, false, false]);
+  // Integrators are work too (#435): a worker merges and the head lands the result.
+  assert.deepEqual([{ kind: 'work' }, { kind: 'plan' }, { kind: 'reflect' }, { kind: 'review' }, { kind: 'work', integrates: 3 }].map(remoteWork), [true, false, false, false, true]);
   // The project: a git repo whose origin is a GitHub URL (a local bare repo under it, via url.insteadOf in HOME), so a
   // work task in it can go to the worker.
   const home = dir('s-home'), dataDir = dir('s-data'), repo = dir('s-demo'), origin = path.join(tmp, 's-origin.git'), url = 'https://github.com/test-owner/demo.git';

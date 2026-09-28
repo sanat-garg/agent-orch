@@ -70,7 +70,8 @@ export const FEATURES = { 'job.phase': 'phases', 'job.error': 'errors', 'node.er
   'screen.req': 'screen', 'screen.res': 'screen', 'screen.input': 'screen', 'screen.frame': 'screen', 'screen.state': 'screen', 'ext.sync': 'ext',
   ping: 'ping', pong: 'ping' };
 // Feature 'git' (no frame type): the worker fetches and pushes through job.start.gitUrl, so it needs no GitHub access.
-export const FEATURE_LIST = [...new Set([...Object.values(FEATURES), 'cap', 'browser-task', 'git'])];
+// Feature 'integrate' (no frame type): the worker runs integrator jobs (job.start.integrate).
+export const FEATURE_LIST = [...new Set([...Object.values(FEATURES), 'cap', 'browser-task', 'git', 'integrate'])];
 // Compute-only workers (BRIEF goal 11): the only frames a worker acts on, all from the head it dialled. Connection
 // upkeep; jobs (job.*, plus git.credential for their pushes); remote sign-in driven from the head's Connections (login.*);
 // model and limit refreshes; its log tail; self-update; the node's policy (max tasks, power), which like draining is
@@ -142,8 +143,11 @@ const S = {
     // gitUrl: the head's git endpoint for the project (gitPath; a path is resolved against the URL the worker paired
     // with). A worker with feature 'git' fetches and pushes there, and falls back to `repo` (GitHub) only when the head's
     // endpoint is unreachable; a project with no GitHub remote sends no repo, only to such workers.
+    // integrate (feature 'integrate', #435): an integrator's job, {branch: the integrated task's branch, files: its conflicting
+    // files}. branch is then agent-orch/integrate-<job>: made from baseSha (the main branch) with integrate.branch merged in
+    // uncommitted, conflicts left for the agent; the head lands it.
     execution: 'str?', repo: 'repo?', gitUrl: 'str?', baseSha: 'sha?', branch: 'branch?', doneWhen: 'str?', resume: 'str?',
-    timeouts: 'obj', autonomous: 'bool?', tools: 'arr?', install: 'arr?', capabilities: 'arr?', identity: 'str?', ext: 'hash?',
+    timeouts: 'obj', autonomous: 'bool?', tools: 'arr?', install: 'arr?', capabilities: 'arr?', identity: 'str?', ext: 'hash?', integrate: 'obj?',
   },
   'job.event': { job: 'int', from: 'int', events: 'events' },
   'job.check': { job: 'int', command: 'str', output: 'str', pass: 'bool', code: 'int?' },
@@ -217,7 +221,7 @@ const S = {
 export const SCHEMA = S;
 
 const SHA_RE = /^[0-9a-f]{40}$/, HASH_RE = /^[0-9a-f]{64}$/;
-const BRANCH_RE = /^agent-orch\/task-\d+$/;
+const BRANCH_RE = /^agent-orch\/(task|integrate)-\d+$/;
 // Plain https or ssh GitHub-style URLs; never credentials embedded in the URL.
 const REPO_RE = /^(https:\/\/[^\s/@:]+(?::\d+)?\/[\w.\-/]+|git@[\w.-]+:[\w.\-/]+)$/;
 export const isRepoUrl = (v) => typeof v === 'string' && REPO_RE.test(v);
@@ -262,6 +266,9 @@ export function validate(msg, { from } = {}) {
     if (msg.execution === 'browser') {
       if (!msg.capabilities?.includes('browser') || !msg.identity) return 'job.start: browser execution needs capability and identity';
     } else if (!(msg.repo || msg.gitUrl) || !msg.baseSha || !msg.branch) return 'job.start: git execution needs repo or gitUrl, baseSha and branch';
+    if (msg.integrate != null && (msg.execution === 'browser' || msg.branch !== `agent-orch/integrate-${msg.job}` || !/^agent-orch\/task-\d+$/.test(msg.integrate.branch)
+      || !(msg.integrate.files == null || (Array.isArray(msg.integrate.files) && msg.integrate.files.every((f) => typeof f === 'string'))))) return 'job.start: bad integrate';
+    if (msg.integrate == null && msg.branch?.startsWith('agent-orch/integrate-')) return 'job.start: an integrate branch needs integrate';
   }
   if (msg.t !== MSG.GIT_CREDENTIAL && msg.t !== MSG.AGENT_CREDENTIAL) {
     const bad = secretKeys({ ...msg, events: undefined });

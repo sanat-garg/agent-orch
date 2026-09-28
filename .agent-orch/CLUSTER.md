@@ -127,8 +127,17 @@ verify-failed prompt, same as the local flow) or `job.cancel`. The controller ke
   task (`tasks.wip_sha`). Unchanged trees skip the commit.
 - **Merge back**: on a passing `job.done`/`job.check`, the controller has `agent-orch/task-<id>` in the project repo
   (pushed through the head; else fetched from origin), checks the tip equals `job.done.sha`, and runs the existing path: `mergeTask` (squash, rebase, ff-only, push)
-  under `serialGit`. A rebase conflict marks the task `needs_integration` and queues an integrator task exactly as
-  today; the integrator is just another job and may run on any node, starting from the pushed branch. After the
+  under `serialGit`. A rebase conflict marks the task `needs_integration` and queues an integrator task (`tasks.conflicts`
+  = the files). **Integrators (#435)** take a free reserved head slot first (in the task's worktree there, as before),
+  else go to a worker with features `git` + `integrate` like any work task: `job.start.integrate {branch: agent-orch/task-<N>,
+  files}` with `branch: agent-orch/integrate-<id>`; the worker fetches both through the head, makes that branch from
+  `baseSha` (main), merges the task branch in uncommitted (JOURNAL.md union-merged) and the agent resolves it with the
+  head integrator's prompt; after its check it pushes the integrate branch (the head's push rule allows exactly that
+  branch for an integrator on that node). The head refuses a tip with conflict markers still in it (`markersIn`,
+  verify-failed), else resets the task's worktree to it and runs `mergeTask`: fast-forward if main hasn't moved, else
+  the squash is rebased onto the new main; if that conflicts again another integrator is queued (from the task's branch,
+  which now holds the resolution), at most `CFG.maxIntegrators` (3), then the owner is alerted ('Integration needs you')
+  and the task fails with its integrator. The owner's result reads `Merged by integrator #<id> on <node>.` After the
   merge, the controller deletes the remote branch and sends nothing further; the worker removes its worktree when it
   gets the `ack` for its final `job.done`, and prunes cached repos unused for 14 days.
 - **Disk hygiene** (worker.mjs `pruneCaches`, at start and after every job's worktree is removed): an `npm ci` result
@@ -243,7 +252,8 @@ controller appends a project's persona to `job.start.systemAppend`.
 Workers report richly; the controller keeps what the owner needs and acts on it.
 
 - **Features**: `hello.features` / `welcome.features` list what each side reads (`FEATURES` in cluster-protocol.mjs:
-  phases, errors, logs, update, policy, plus `cap` for the reject reason `cap`). A peer sends a newer frame type only
+  phases, errors, logs, update, policy, plus `cap` for the reject reason `cap`, `git` for the head's git endpoint and
+  `integrate` for integrator jobs). A peer sends a newer frame type only
   when the other side lists its feature, so a worker
   updated ahead of the controller's running code (or behind it) never trips the invalid-frame limit. Fields added to
   existing frames (the telemetry on `resources`, `hello.sha`) need no flag.
@@ -338,7 +348,7 @@ UI runs on it, and it takes work only from the head.
   the protocol later is refused until it is put on the list, and the list may never hold a chat-, prompt-, planner- or
   settings-like type (test/compute-only.test.mjs).
 - **The head sends nothing else**: the hub's `send` throws for a type off the list. Only work tasks go to workers
-  (orchestrator `remoteWork`: kind `work`, not an integrator); plan tasks (the owner's chat with the planner),
+  (orchestrator `remoteWork`: kind `work`, integrators included); plan tasks (the owner's chat with the planner),
   reflection and review checkpoints stay on the controller, and `assertPlacement` throws if that ever breaks: in
   `claimNext` before the claim is recorded, and in `runRemote` before any frame goes out.
 - **Nothing of the head runs there**: worker.mjs loads no server.mjs, orchestrator.mjs, cluster.mjs or runtimes.mjs (what

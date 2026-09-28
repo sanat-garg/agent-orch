@@ -13,3 +13,7 @@ Gap: in orchestrator.mjs, the merged-task cleanup near line 3152 (`if (remote ||
 ## Done when
 
 `npm test -- test/integrator-fail.test.mjs` passes and `! git ls-remote --heads origin agent-orch/task-258 | grep -q task-258`
+
+## Result — done (check passed) (2026-09-28 05:47)
+
+AGENT-ORCH-STATUS: done — integrator merges delete owner's origin branch; task-258 removed

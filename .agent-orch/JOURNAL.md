@@ -818,3 +818,7 @@ code pills clone across lines, 44pt touch tool rows, system-font times
 ## 2026-09-28 05:45 — #275 Fix the duplicate dragMove in app.js (sidebar project drag is dead) and guard top-level names [done (check passed)]
 
 Queue drag is now qDragMove, so sidebar project drag works; test blocks duplicate names
+
+## 2026-09-28 05:47 — #276 Integrator merge deletes the integrated task's branch from origin; remove the stale task-258 branch [done (check passed)]
+
+integrator merges delete owner's origin branch; task-258 removed

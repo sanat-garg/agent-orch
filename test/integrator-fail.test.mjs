@@ -14,7 +14,7 @@ const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' 
 // A temp git repo (worktrees on). The fake query writes `WRITE <file> <text>` lines into its cwd after the scenario
 // releases a named WAIT gate; integrator prompts follow globalThis.INTEG: 'fail' (never finishes), 'hold' (runs until
 // aborted) or 'ok' (resolves like a worker).
-async function scenario(body, { config = {} } = {}) {
+async function scenario(body, { config = {}, origin = false } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cw-integ-'))), repo = path.join(root, 'proj');
   const dataDir = path.join(root, 'data');
   fs.mkdirSync(repo);
@@ -22,6 +22,11 @@ async function scenario(body, { config = {} } = {}) {
   git(repo, 'config', 'user.email', 't@t'); git(repo, 'config', 'user.name', 't');
   fs.writeFileSync(path.join(repo, 'README.md'), 'x\n');
   git(repo, 'add', '-A'); git(repo, 'commit', '-qm', 'init');
+  if (origin) { // a temp bare repo stands in for GitHub
+    git(root, 'init', '-q', '--bare', 'origin.git');
+    git(repo, 'remote', 'add', 'origin', path.join(root, 'origin.git'));
+    git(repo, 'push', '-q', 'origin', 'main');
+  }
   try {
     const script = `import { createOrchestrator } from ${url('orchestrator.mjs')};
       import { setModelCatalog } from ${url('agents.mjs')};
@@ -70,6 +75,7 @@ async function scenario(body, { config = {} } = {}) {
         await until(() => byTitle(title).status === 'needs_integration');
       };
       const branchExists = (id) => { try { execFileSync('git', ['rev-parse', '--verify', '-q', 'refs/heads/agent-orch/task-' + id], { cwd: repo }); return true; } catch { return false; } };
+      const onOrigin = (id) => execFileSync('git', ['ls-remote', '--heads', 'origin', 'agent-orch/task-' + id], { cwd: repo, encoding: 'utf8' }).trim() !== '';
       const events = (id) => db.prepare('SELECT message FROM events WHERE task_id=:id ORDER BY id').all({ id }).map((e) => e.message);
       const out = await (async () => { ${body} })();
       console.log(JSON.stringify(out));
@@ -132,5 +138,27 @@ describe('integrator failure releases its owner', { concurrency: true, timeout: 
     assert.equal(r.now.d.status, 'cancelled');
     assert.equal(r.now.d.result, `cancelled with #${r.now.c.id}`);
     assert.equal(r.branch, true);
+  });
+
+  test("an integrator's merge deletes the branch its owner pushed as WIP from origin", async () => {
+    const r = await scenario(`
+      INTEG = 'ok';
+      await plan([{ title: 'E', prompt: 'WAIT E\\nWRITE README.md E', files: ['README.md'] }]);
+      await until(() => byTitle('E')?.status === 'running' && byTitle('E').worktree);
+      const eid = byTitle('E').id;
+      // Stand in for a worker that pushed E's WIP to origin before E came back here.
+      execFileSync('git', ['push', '-q', 'origin', 'main:refs/heads/agent-orch/task-' + eid], { cwd: repo });
+      db.prepare('UPDATE tasks SET wip_sha=:s WHERE id=:id').run({ s: execFileSync('git', ['rev-parse', 'main'], { cwd: repo, encoding: 'utf8' }).trim(), id: eid });
+      const pushed = onOrigin(eid);
+      fs.writeFileSync(path.join(repo, 'README.md'), 'main\\n');
+      execFileSync('git', ['commit', '-qam', 'main change'], { cwd: repo });
+      released.add('E');
+      await until(() => byTitle('E').status === 'done');
+      const integ = integratorOf(eid);
+      return { pushed, integ: integ.status, merged: byTitle('E').result, gone: !onOrigin(eid) };`, { origin: true });
+    assert.equal(r.pushed, true);
+    assert.equal(r.integ, 'done');
+    assert.match(r.merged, /^Merged by integrator #/);
+    assert.equal(r.gone, true, "the integrated task's branch is deleted from origin");
   });
 });

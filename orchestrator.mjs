@@ -3150,6 +3150,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       sha = merged.sha;
       // Merged: a branch a worker pushed (this run's, or a lost run's WIP this one continued) is done.
       if (remote || task.wip_sha) await git(project.path, ['push', '-q', 'origin', '--delete', taskBranch(tid)]).catch(() => {});
+      // An integrator's owner is the one that ran on a worker or pushed WIP, so its branch goes too.
+      const owner = task.integrates && getTask(task.integrates);
+      if (owner && ((owner.node_id && owner.node_id !== LOCAL_NODE) || owner.wip_sha)) {
+        await git(project.path, ['push', '-q', 'origin', '--delete', taskBranch(owner.id)]).catch(() => {});
+      }
     } else sha = await gitCommit(project.path, `agent-orch #${tid}: ${task.title}`);
     if (!updateTask(tid, { status: 'done', finished_at: now(), result: res.text, session_id: res.sessionId, verify_output: null, commit_sha: sha || null }, true)) return;
     logEvent(`✔ #${tid} done${checked}: ${task.title}${sha ? ` (commit ${sha})` : ''}`, { projectId: project.id, taskId: tid });

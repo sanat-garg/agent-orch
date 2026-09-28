@@ -621,6 +621,7 @@ the same origin. `run-on` accepts only a string or null naming a known node.
   next reconnect it gets the long-lived `sk-ant-oat01-…` token and the ChatGPT `auth.json` again, plus every rotation.
 - **Fix:** Refuse the upgrade for `enabled=0` rows (e.g. 403), or skip disabled nodes in `syncNode`, `shareTargets`
   and `sendExt`.
+- **Fixed** (task #295): `handleUpgrade` refuses `enabled=0` rows with 403; disabling a connected node sends `job.cancel {reason:'disabled'}` for its jobs and closes it (4003 `disabled`; the worker reports both); `wireAgentShare`, `shareTargets`, welcome's `sendExt` and `syncExt` skip disabled nodes; test/cluster.test.mjs.
 
 ### 46. [low] Any paired worker can overwrite the head's Codex sign-in with junk tokens (agent-share.mjs:80-90)
 - **What:** `fromWorker` adopts a worker's `auth.json` if it parses as a ChatGPT login with the head's `account_id` and a
@@ -674,6 +675,7 @@ the same origin. `run-on` accepts only a string or null naming a known node.
 - **Failure:** An audit line with `"screenshot":"../../../.ssh/id_ed25519"` makes the worker read that file and send it
   base64-encoded to the head as an `image` event. A multi-GB file is read into memory and gives an oversized frame.
 - **Fix:** `if (!MEDIA_ID_RE.test(id)) return;` in `image()`, as approvals.mjs does.
+- **Fixed** (task #295): worker.mjs imports `MEDIA_ID_RE` from media.mjs (node builtins only, allowed for workers) and `image()` returns for any other id; test/approval-gate.test.mjs asserts the guard.
 
 ### 52. [low] Workers pair with and talk to an `http://` head (worker.mjs:175-185, :712-716)
 - **What:** `pair()` stores any origin, and `wsUrl()` then uses `ws:`. Over plain http, the node token, the shared

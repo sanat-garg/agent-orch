@@ -881,3 +881,7 @@ restart preflights HEAD; failed boot stays up; README has StartLimitIntervalSec=
 ## 2026-09-28 08:52 — #294 AUDIT #40: the browser classifier treats Enter, submit and common outbound buttons as outbound [done (check passed)]
 
 Browser gate now holds Enter, submit, Post-style and nameless buttons
+
+## 2026-09-28 08:56 — #295 AUDIT #45 and #51: the hub refuses disabled nodes and shares nothing with them; the worker gate reads only MEDIA_ID_RE screenshot ids [done (check passed)]
+
+disabled nodes refused, sign-ins withheld; worker screenshot ids now validated

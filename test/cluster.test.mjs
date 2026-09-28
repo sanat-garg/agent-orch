@@ -5,12 +5,15 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { PROTOCOL_VERSION, WS_PATH, PAIR_PATH, CLAIM_PATH, EXT_PATH, createSender, extBundleError } from '../cluster-protocol.mjs';
+import { createCluster } from '../cluster.mjs';
+import { createAgentShare, wireAgentShare, shareTargets } from '../agent-share.mjs';
 import { waitFor } from './helpers/wait.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -35,9 +38,9 @@ async function pair(name = 'worker-1', kind = 'linux') {
   return r.json();
 }
 // Opens the worker socket; resolves {ws, frames} or rejects with the HTTP status of a refused upgrade.
-function connect(headers) {
+function connect(headers, url = base) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(base.replace('http', 'ws') + WS_PATH, { headers });
+    const ws = new WebSocket(url.replace('http', 'ws') + WS_PATH, { headers });
     const frames = [];
     ws.on('message', (d) => frames.push(JSON.parse(d)));
     ws.on('open', () => resolve({ ws, frames }));
@@ -45,11 +48,11 @@ function connect(headers) {
     ws.on('error', reject);
   });
 }
-async function helloed({ node, token }, features) {
-  const c = await connect({ authorization: `Bearer ${token}` });
+async function helloed({ node, token }, features, url = base, jobs = []) {
+  const c = await connect({ authorization: `Bearer ${token}` }, url);
   const send = createSender('w');
   c.send = (t, f) => c.ws.send(send(t, f));
-  c.send('hello', { node, protocol: PROTOCOL_VERSION, version: 'test', jobs: [], ...(features ? { features } : {}) });
+  c.send('hello', { node, protocol: PROTOCOL_VERSION, version: 'test', jobs, ...(features ? { features } : {}) });
   await waitFor(() => c.frames.find((f) => f.t === 'welcome'), { timeout: 5000 });
   return c;
 }
@@ -220,6 +223,47 @@ test('revoking a node closes its socket and its token stops working', async () =
   assert.equal((await done).code, 4003);
   assert.equal(await nodeOf(w.node), undefined);
   await assert.rejects(connect({ authorization: `Bearer ${w.token}` }), { status: 401 });
+});
+
+test('disabling a node closes its socket, refuses its token with 403 and stops sharing sign-ins with it', async () => {
+  const w = await pair('to-disable');
+  const c = await helloed(w);
+  const done = closed(c.ws);
+  assert.equal((await (await api(`/api/cluster/nodes/${w.node}`, { method: 'PATCH', body: { enabled: false } })).json()).node.status, 'disabled');
+  assert.equal((await done).code, 4003);
+  await assert.rejects(connect({ authorization: `Bearer ${w.token}` }), { status: 403 });
+  assert.equal((await api(`/api/cluster/nodes/${w.node}`, { method: 'PATCH', body: { enabled: true } })).status, 200);
+  (await helloed(w)).ws.close();
+
+  // An in-process hub with the real agent-share wiring: a disabled node is no share target and gets no credential.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-cluster-share-'));
+  const hub = createCluster({ dbFile: path.join(tmp, 'hub.db'), heartbeatMs: HEARTBEAT_MS });
+  const share = createAgentShare({ dataDir: path.join(tmp, 'data'), home: path.join(tmp, 'home'), send: (id, f) => hub.send(id, f), targets: shareTargets(hub) });
+  wireAgentShare(hub, share);
+  const server = http.createServer((_req, res) => { res.writeHead(404); res.end(); });
+  server.on('upgrade', (req, socket, head) => hub.handleUpgrade(req, socket, head));
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${server.address().port}`;
+  try {
+    share.setClaudeToken(`sk-ant-oat01-${'x'.repeat(40)}`);
+    const n = hub.claim({ code: hub.createPairing().code, name: 'mac', os: 'darwin', arch: 'arm64' });
+    const creds = (x) => x.frames.filter((f) => f.t === 'agent.credential' && f.agent === 'claude' && f.value);
+    const x = await helloed(n, ['creds'], url, [{ job: 7, state: 'running', next: 0 }]);
+    await waitFor(() => creds(x).length, { timeout: 5000 });
+    assert.deepEqual(shareTargets(hub)(), [n.node]);
+    const gone = closed(x.ws);
+    assert.equal(hub.update(n.node, { enabled: false }).node.status, 'disabled');
+    assert.equal((await gone).code, 4003);
+    assert.deepEqual(x.frames.filter((f) => f.t === 'job.cancel').map((f) => [f.job, f.reason]), [[7, 'disabled']], 'its jobs are cancelled before the close');
+    assert.deepEqual(shareTargets(hub)(), []);
+    await assert.rejects(connect({ authorization: `Bearer ${n.token}` }, url), { status: 403 });
+    const before = creds(x).length;
+    share.setClaudeToken(`sk-ant-oat01-${'y'.repeat(40)}`);
+    assert.equal(creds(x).length, before, 'a rotation is not sent to it');
+  } finally {
+    share.close(); hub.close(); server.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('health API: telemetry series per node, a log tail fetched over the socket, and Update once idle', async () => {

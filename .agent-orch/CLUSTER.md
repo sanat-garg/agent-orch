@@ -40,8 +40,8 @@ supply the CPU/RAM. They do not supply quota (see the caveat at the end).
   the `pairings` table (hashes, uses, the node ids that claimed them, revoked_at), so a controller restart keeps them.
 - **Auth**: every connection sends `Authorization: Bearer <token>` on the upgrade request (`bearerToken`). The
   controller compares its sha256 against the node's stored hash (`secretMatches`, constant time) and refuses the
-  upgrade (401) for unknown or revoked nodes before any frame is read. The session cookie is not accepted here, and the
-  node token is not accepted anywhere else.
+  upgrade (401) for unknown or revoked nodes and (403) for disabled ones before any frame is read. The session cookie
+  is not accepted here, and the node token is not accepted anywhere else.
 - **Frames**: one JSON text message each, `{t, seq, ts, ...fields}`, at most `MAX_FRAME` (1 MB). `seq` counts up
   per sender per connection; `re` names the frame a reply answers. Every frame is checked with `decode(raw, {from})`;
   an invalid frame gets an `error` reply and is dropped (repeat offenders are disconnected).
@@ -208,7 +208,9 @@ controller appends a project's persona to `job.start.systemAppend`.
   (the next event index is read back from its run log) and waits one grace period for its node's `hello`, then the
   job continues in the same run. Without a hub they are requeued.
 - **Draining** a node (PATCH `draining`): it takes no new jobs; running ones finish there. **Disabling** or removing it
-  moves its jobs now: `job.cancel {reason:'disabled'}` and a reassignment as after the grace period.
+  moves its jobs now: `job.cancel {reason:'disabled'}` and a reassignment as after the grace period. Disabling also
+  closes its socket (code 4003, reason `disabled`) and refuses its token (403) until it is enabled again, so it gets
+  no shared sign-ins or extension hashes.
 - **Sleep/wake**: the worker's 5 s clock firing more than `SLEEP_JUMP_MS` (30 s) late means the machine slept; it
   drops its (dead) socket, reconnects at once and reports `wake`. The controller keeps `nodes.slept_at/slept_ms` and
   logs it.

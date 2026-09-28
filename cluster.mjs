@@ -290,6 +290,15 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     }
     const keys = Object.keys(set);
     if (keys.length) db.prepare(`UPDATE nodes SET ${keys.map((k) => `${k}=?`).join(', ')} WHERE id=?`).run(...keys.map((k) => set[k]), id);
+    // Disabled: its jobs are cancelled (they move elsewhere) and its socket closes; handleUpgrade refuses it until re-enabled.
+    const dc = set.enabled === 0 && conns.get(id);
+    if (dc) {
+      const jobs = new Set([...(dc.hello?.jobs || []).map((j) => j.job), ...(parse(row.resources)?.running || [])]);
+      for (const job of jobs) if (Number.isInteger(job)) try { dc.send(MSG.JOB_CANCEL, { job, reason: 'disabled' }); } catch {}
+      conns.delete(id); dc.closing = true; dc.ws.close(4003, 'disabled');
+      gone(id, false);
+      log(`disabled node ${id}; closed its connection`);
+    }
     setStatus(get(id), id === LOCAL_NODE || conns.has(id));
     // Its worker enforces the policy and the task cap too: tell it now (one that predates node.policy reads it at its next welcome).
     if ((set.policy !== undefined || set.max_slots !== undefined) && conns.get(id)?.hello?.features?.includes('policy')) {
@@ -326,10 +335,11 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     if (!row) return { status: 401, error: 'this machine is not paired with this head' };
     return { node: row.id, name: row.name };
   }
-  // Unknown or revoked tokens are refused before any frame is read.
+  // Unknown or revoked tokens are refused before any frame is read; a disabled node gets 403 (and none of the head's sign-ins).
   function handleUpgrade(req, socket, head) {
     const row = tokenNode(req.headers);
     if (!row) return deny(socket, 401, 'Unauthorized');
+    if (!row.enabled) return deny(socket, 403, 'Forbidden');
     wss.handleUpgrade(req, socket, head, (ws) => attach(ws, row.id));
   }
 
@@ -342,7 +352,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     const i = extInfo();
     try { if (i) c.send(MSG.EXT_SYNC, { hash: i.hash, bytes: i.bytes }); } catch (e) { log(`ext.sync failed: ${e.message}`); }
   }
-  function syncExt() { for (const c of conns.values()) if (c.hello) sendExt(c); }
+  function syncExt() { for (const [id, c] of conns) if (c.hello && get(id)?.enabled) sendExt(c); }
   const gzip = promisify(zlib.gzip);
   async function handleExt(req, res) {
     const reply = (status, body = '', headers = {}) => { res.writeHead(status, { 'Cache-Control': 'no-store', ...headers }); res.end(body); };
@@ -400,7 +410,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
           touch({ away: null });
           c.send(MSG.WELCOME, { node: id, protocol: PROTOCOL_VERSION, heartbeatMs, wipPushMs, graceMs: nodeGrace(row), features: FEATURE_LIST, policy: wirePolicy(row), ...queuedFor(id) });
           helloUpdate(id, row, c.hello.sha);
-          sendExt(c);
+          if (row.enabled) sendExt(c);
           changed();
           break;
         }

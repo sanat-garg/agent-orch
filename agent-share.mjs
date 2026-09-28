@@ -97,16 +97,16 @@ export function createAgentShare({ dataDir, home = os.homedir(), send, targets =
   return { syncNode, setClaudeToken, fromWorker, checkCodex, status, hasClaude: () => !!saved.claude, close: () => clearInterval(timer) };
 }
 
-// The hub side: every worker that reads agent.credential ('creds') gets the shared sign-ins as it connects, and a
-// worker's refreshed Codex copy goes to fromWorker. `cluster` is createCluster's hub.
+// The hub side: every enabled worker that reads agent.credential ('creds') gets the shared sign-ins as it connects, and
+// a worker's refreshed Codex copy goes to fromWorker. `cluster` is createCluster's hub (which refuses disabled nodes too).
 export function wireAgentShare(cluster, share, log = () => {}) {
   return cluster.onMessage((id, msg) => {
-    if (msg.t === 'hello' && msg.features?.includes('creds')) share.syncNode(id);
+    if (msg.t === 'hello' && msg.features?.includes('creds')) { if (cluster.node(id)?.enabled) share.syncNode(id); }
     else if (msg.t === 'agent.credential') {
       const r = share.fromWorker(id, msg);
       if (r.ignored) log(`ignored a codex sign-in from ${id}: ${r.ignored}`);
     }
   });
 }
-// The workers connected now that read agent.credential.
-export const shareTargets = (cluster) => () => cluster.listNodes().filter((n) => !n.local && n.connected && n.features?.includes('creds')).map((n) => n.id);
+// The enabled workers connected now that read agent.credential.
+export const shareTargets = (cluster) => () => cluster.listNodes().filter((n) => !n.local && n.enabled && n.connected && n.features?.includes('creds')).map((n) => n.id);

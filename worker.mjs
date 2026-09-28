@@ -56,6 +56,7 @@ import { createJobUsage, createWrappers, heldBy, probeLimiter } from './worker-c
 import { request as statusRequest, serveStatus, statusCli } from './worker-status.mjs';
 import { ensureBrowser, needsBrowser, normIdentity } from './browser.mjs';
 import { APPROVAL_TTL_MS, hostGate, patternsWith } from './gate.mjs';
+import { MEDIA_ID_RE } from './media.mjs';
 import { createLiveBrowsers, screenOp } from './browser-live.mjs';
 
 const execFileP = promisify(execFile);
@@ -682,7 +683,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   function connState(t) {
     if (stopping) return { state: 'stopping', since: t };
     if (live()) return { state: 'connected', since: connectedAt };
-    const refused = /refused this node token/.test(connError || '');
+    const refused = REFUSED_RE.test(connError || '');
     return { state: !refused && t - downSince < graceMs ? 'reconnecting' : 'offline', since: downSince, retryAt: reconnectTimer ? retryAt : null, error: connError };
   }
   function snapshot() {
@@ -709,6 +710,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   }
 
   // ---- connection: dial out, hello, reconnect with backoff forever
+  const REFUSED_RE = /refused this node token|disabled this machine/; // the head turned this machine away (401/403)
   function wsUrl() {
     const u = new URL(WS_PATH, config.controller);
     u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -729,7 +731,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
         jobs: allJobs().map((j) => ({ job: j.id, state: held.has(j.id) ? 'done' : j.state, next: evEnd(j), ...(j.pushed ? { sha: j.pushed } : {}) })) }));
     });
     sock.on('unexpected-response', (_req, res) => {
-      connError = res.statusCode === 401 ? 'the controller refused this node token (revoked?): pair again' : `connection refused: HTTP ${res.statusCode}`;
+      connError = res.statusCode === 401 ? 'the controller refused this node token (revoked?): pair again'
+        : res.statusCode === 403 ? 'the owner disabled this machine on the controller (Machines → Enable lets it back in)' : `connection refused: HTTP ${res.statusCode}`;
       log(connError, 'warn');
       sock.terminate();
     });
@@ -744,14 +747,14 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
         nodeError('exception', `handling ${msg.t} failed: ${e.message}`, { stack: e.stack });
       });
     });
-    sock.on('error', (e) => { if (!/refused this node token/.test(connError || '')) connError = `connection error: ${e.message}`; log(`connection error: ${e.message}`, 'warn'); });
+    sock.on('error', (e) => { if (!REFUSED_RE.test(connError || '')) connError = `connection error: ${e.message}`; log(`connection error: ${e.message}`, 'warn'); });
     sock.on('close', (code, reason) => {
       if (ws !== sock) return;
       ws = null; welcomed = false;
       clearInterval(beat); beat = null;
       for (const j of allJobs()) if (j.attached) { j.attached = false; j.detachedAt = Date.now(); }
       screens?.release(); // nobody watches any more, and no take-over outlives its viewer
-      if (connectedAt) { log(`disconnected (${code}${reason?.length ? ` ${reason}` : ''})`); downSince = Date.now(); connError ??= `disconnected (${code})`; }
+      if (connectedAt) { log(`disconnected (${code}${reason?.length ? ` ${reason}` : ''})`); downSince = Date.now(); connError ??= code === 4003 ? `the controller ${reason?.length ? reason : 'revoked'} this machine` : `disconnected (${code})`; }
       if (connectedAt && Date.now() - connectedAt > 60_000) attempt = 0;
       connectedAt = 0;
       if (stopping) return;
@@ -1044,7 +1047,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     const waiters = new Map(), sent = new Set();
     let held = 0;
     const image = (id) => {
-      if (!id || sent.has(id)) return;
+      if (!MEDIA_ID_RE.test(id || '') || sent.has(id)) return; // a content hash, never a path (both files are the run's)
       sent.add(id);
       try {
         const data = fs.readFileSync(path.join(dir, 'shots', id)).toString('base64');

@@ -19,3 +19,7 @@ Tests: in test/cluster.test.mjs add a case that PATCHes a node `enabled:false`, 
 ## Done when
 
 `npm test -- test/cluster.test.mjs test/agent-share.test.mjs test/compute-only.test.mjs` passes and `grep -q 'MEDIA_ID_RE' worker.mjs`
+
+## Result — done (check passed) (2026-09-28 08:56)
+
+AGENT-ORCH-STATUS: done — disabled nodes refused, sign-ins withheld; worker screenshot ids now validated

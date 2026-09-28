@@ -195,4 +195,10 @@ test('cluster frames: held calls and audit lines ride job.event; the answer is j
   assert.match(validate({ t: 'job.approval', seq: 1, ts: 1, job: 3, id: 'x', decision: 'approve' }, { from: 'w' }), /may not be sent by the worker/);
   assert.equal(FEATURES['job.approval'], 'approvals');
   assert.ok(WORKER_ACCEPTS.includes('job.approval'));
+  // The worker sends a screenshot only for a content-hash id, never a path from the run's question file or audit line.
+  const src = fs.readFileSync(new URL('../worker.mjs', import.meta.url), 'utf8');
+  assert.match(src, /import \{ MEDIA_ID_RE \} from '\.\/media\.mjs';/);
+  assert.match(src, /const image = \(id\) => \{\n\s+if \(!MEDIA_ID_RE\.test\(id \|\| ''\)/);
+  const { MEDIA_ID_RE } = await import('../media.mjs');
+  assert.ok(!MEDIA_ID_RE.test('../x') && !MEDIA_ID_RE.test(`../${'a'.repeat(64)}.png`));
 });

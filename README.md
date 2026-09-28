@@ -568,3 +568,8 @@ the repo was restarted with fresh history.
   port 3000 or 7682 directly.
 - **GitHub.** Repos that the orchestrator creates are private, and each gets a `.gitignore` that excludes `.env*`,
   keys and build output.
+- **Web Push.** Notifications to the home-screen app are signed with a VAPID key pair that `push.mjs` makes on first
+  start with node:crypto and keeps in `data/push-vapid.json` (mode 0600); subscribed devices are in
+  `data/push-subscriptions.json`. Both live under `data/`, which is never tracked. Payloads are end-to-end encrypted
+  (aes128gcm, RFC 8291), so the push service only sees ciphertext. Deleting the key file makes a new pair and
+  every device has to subscribe again.

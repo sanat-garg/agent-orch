@@ -13,3 +13,7 @@ New feature (BRIEF goal 6, mobile-first PWA): notifications that reach the owner
 ## Done when
 
 `npm test -- test/push.test.mjs test/server.test.mjs` passes and `grep -n "'/api/push/key'" server.mjs` prints a line
+
+## Result — done (check passed) (2026-09-28 10:58)
+
+AGENT-ORCH-STATUS: done — Web Push backend and /api/push routes built; both test files pass

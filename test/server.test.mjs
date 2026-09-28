@@ -478,3 +478,29 @@ test('PATCH/DELETE /api/orch/messages/:id edit and retract a saved message only 
     fs.rmSync(proj, { recursive: true, force: true });
   }
 });
+
+test('/api/push: the VAPID key, subscribing a validated PushSubscription and unsubscribing', async () => {
+  const ok = await fetch(base + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: PASSWORD }) });
+  const cookie = ok.headers.get('set-cookie').split(';')[0];
+  await ok.arrayBuffer();
+  const call = async (m, p, body) => {
+    const r = await fetch(base + p, { method: m, headers: { cookie, 'content-type': 'application/json' }, body: body && JSON.stringify(body) });
+    return { status: r.status, body: JSON.parse(await r.text()) };
+  };
+  let r = await call('GET', '/api/push/key');
+  assert.equal(r.status, 200);
+  assert.equal(Buffer.from(r.body.key, 'base64url').length, 65);
+  assert.equal(r.body.subscribed, 0);
+  const ecdh = crypto.createECDH('prime256v1');
+  ecdh.generateKeys();
+  const sub = { endpoint: 'https://web.push.apple.com/test-device', keys: { p256dh: ecdh.getPublicKey('base64url'), auth: crypto.randomBytes(16).toString('base64url') } };
+  assert.equal((await call('POST', '/api/push/subscribe', { ...sub, endpoint: 'http://web.push.apple.com/x' })).status, 400);
+  assert.equal((await call('POST', '/api/push/subscribe', { ...sub, keys: { p256dh: 'x' } })).status, 400);
+  r = await call('POST', '/api/push/subscribe', sub);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.subscribed, 1);
+  assert.equal((await call('GET', '/api/push/key')).body.subscribed, 1);
+  assert.equal((await call('DELETE', '/api/push/subscribe', {})).status, 400);
+  r = await call('DELETE', '/api/push/subscribe', { endpoint: sub.endpoint });
+  assert.deepEqual(r.body, { ok: true, removed: 1, subscribed: 0 });
+});

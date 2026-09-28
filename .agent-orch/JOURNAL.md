@@ -889,3 +889,7 @@ disabled nodes refused, sign-ins withheld; worker screenshot ids now validated
 ## 2026-09-28 09:01 — #296 UI-REVIEW #20 and #22: phone fields at 16px and 44pt touch targets on Stats, Skills, Files, Machines, Browser, drawer and queue cards [done (check passed)]
 
 Touch devices get 16px fields and 44pt targets, tests pass
+
+## 2026-09-28 10:58 — #304 Web Push backend without a new dependency: push.mjs with VAPID keys, subscriptions, aes128gcm and send; /api/push routes [done (check passed)]
+
+Web Push backend and /api/push routes built; both test files pass

@@ -26,6 +26,7 @@ import { createCluster } from './cluster.mjs';
 import { WS_PATH, PAIR_PATH, CLAIM_PATH, WHOAMI_PATH, EXT_PATH } from './cluster-protocol.mjs';
 import { createRemoteLogins } from './remote-login.mjs';
 import { createExtensions } from './extensions.mjs';
+import { createPush, checkSub } from './push.mjs';
 import { createAgentShare, wireAgentShare, shareTargets } from './agent-share.mjs';
 import { saveUpload, readUpload, placeUploads, attachmentView, attachmentNote, claudeImageBlocks, MAX_UPLOAD_BYTES, MAX_ATTACHMENTS } from './uploads.mjs';
 import { headRefusal } from './role.mjs';
@@ -724,6 +725,8 @@ setMcpSource((agent, run) => ext.mcpRun(agent, run)); // every runAgentCli run (
 ext.onChange((kind) => { for (const ws of allClients) send(ws, { t: 'ext', kind }); });
 // A chat's persona as its system-prompt block (null: none, or deleted), and the MCP servers Claude chats get.
 const personaOf = (convo) => ext.personaPrompt(convo.persona);
+// Web Push to the owner's home-screen app (push.mjs): VAPID keys and subscribed devices under DATA.
+const push = createPush({ dataDir: DATA, log: (m) => console.log(`[push] ${m}`) });
 const mcpSet = () => JSON.stringify(ext.mcpFor('claude'));
 
 function send(ws, msg) { if (ws.readyState === 1) ws.send(JSON.stringify(msg)); }
@@ -1697,6 +1700,19 @@ async function handleRequest(req, res) {
   if (p === '/api/settings/sound' && req.method === 'DELETE') {
     fs.rmSync(SOUND_FILE, { force: true });
     return json(res, 200, { ok: true, sound: { custom: false, at: null } });
+  }
+  // Web Push: the VAPID key for the browser's applicationServerKey; POST a PushSubscription JSON, DELETE {endpoint}.
+  if (p === '/api/push/key' && req.method === 'GET') return json(res, 200, { key: push.publicKey(), subscribed: push.count() });
+  if (p === '/api/push/subscribe' && req.method === 'POST') {
+    const body = await readBody(req);
+    const error = checkSub(body);
+    if (error) return json(res, 400, { error });
+    return json(res, 200, { ok: true, subscribed: push.subscribe({ ...body, ua: req.headers['user-agent'] }) });
+  }
+  if (p === '/api/push/subscribe' && req.method === 'DELETE') {
+    const { endpoint } = await readBody(req);
+    if (typeof endpoint !== 'string' || !endpoint) return json(res, 400, { error: 'Expected endpoint' });
+    return json(res, 200, { ok: true, removed: push.unsubscribe(endpoint), subscribed: push.count() });
   }
   if (p === '/api/orch/parallel' && req.method === 'PUT') {
     const result = orch.setParallelSettings(await readBody(req));

@@ -13,3 +13,7 @@ In the task drawer (the side panel; public/app.js, the 'What happened' media and
 ## Done when
 
 `node --test test/ui-final-screen*.test.mjs` passes (last screenshot as Final screen, newest-first thumbnails, live Current screen, timestamp ordering)
+
+## Result — done (check passed) (2026-09-28 19:21)
+
+AGENT-ORCH-STATUS: done — browser task screens now show latest first, ordered by time

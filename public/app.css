@@ -1879,6 +1879,11 @@ pre.copy-cmd:hover::after { opacity: .7; }
 #drBody .shot .shot-missing { padding: 4px; font-size: 11px; }
 #drBody .shot figcaption { display: none; }
 .dr-shots-head { margin: 12px 0 6px; font-size: 12.5px; color: var(--muted); }
+/* A browser task's latest screen (screenStrip): full width, the whole page at its own aspect ratio; earlier ones as tiles. */
+.screens .shot.shot-final, #drBody .shot.shot-final { width: 100%; max-width: 720px; margin-bottom: 4px; }
+.shot.shot-final button, #drBody .shot.shot-final button { height: auto; aspect-ratio: auto; }
+.shot.shot-final img { height: auto; max-height: 70vh; }
+.screens .screen-head { color: var(--text); font-weight: 600; }
 /* Lightbox: opens in Fit (.fit: the whole image, contained in the view, never upscaled, no scrollbars); the header
    toggle or a double-click/tap switches to Actual size (natural pixels, scrolling or mouse-drag panning both ways when
    larger than the view). Pinch-zoom stays allowed. */

@@ -1100,12 +1100,35 @@ function shotGrid(imgs = []) {
   for (const img of imgs) g.append(shotNode(img));
   return g;
 }
+// Screenshots oldest first by their event time (at/ts, then a remote run's seq i), never by media id; ties keep log
+// order. A screen seen twice (same media id) counts at its latest time.
+function shotsByTime(list) {
+  const time = (s) => Number(s.at ?? s.ts) || 0;
+  const sorted = list.map((s, n) => ({ s, n })).sort((a, b) => time(a.s) - time(b.s)
+    || (a.s.i != null && b.s.i != null ? a.s.i - b.s.i : 0) || a.n - b.n).map((x) => x.s);
+  const last = new Map(sorted.map((s, n) => [s.id, n]));
+  return sorted.filter((s, n) => last.get(s.id) === n);
+}
+// A browser task's screens: the latest one large (label: 'Final screen' once finished, 'Current screen' while running),
+// fit to the width, then the earlier ones as thumbnails, newest first. Click opens the lightbox (fitted).
+function screenStrip(list, label, max = Infinity) {
+  const shots = shotsByTime(list);
+  const box = el('div', 'screens');
+  if (!shots.length) return box;
+  const last = shots.at(-1), rest = shots.slice(0, -1).reverse().slice(0, max - 1);
+  const fig = shotNode(last);
+  fig.classList.add('shot-final');
+  box.append(el('div', 'dr-shots-head screen-head', label), fig);
+  if (rest.length) box.append(el('div', 'dr-shots-head', `Earlier · ${rest.length}`), shotGrid(rest));
+  return box;
+}
+const screenLabel = (status) => (['done', 'failed', 'cancelled'].includes(status) ? 'Final screen' : status === 'running' ? 'Current screen' : 'Last screen');
 // Prev/next goes through every image of the chat, or of the whole task in the drawer.
 function openShot(fig) {
   let list;
   const panel = fig.closest('.rv-panel, .act-list, .bx-act');
   if (panel) list = [...panel.querySelectorAll('.shot')].map((f) => ({ id: f.dataset.id, name: f.dataset.name, w: +f.dataset.w || 0, h: +f.dataset.h || 0 }));
-  else if (fig.closest('#drBody') && O.detail) list = O.detail.runs.flatMap((r) => r.entries.filter((e) => e.k === 'image'));
+  else if (fig.closest('#drBody') && O.detail) list = shotsByTime(O.detail.runs.flatMap((r) => r.entries.filter((e) => e.k === 'image')));
   else list = [...$('messages').querySelectorAll('.shot')].map((f) => ({ id: f.dataset.id, name: f.dataset.name, w: +f.dataset.w || 0, h: +f.dataset.h || 0 }));
   const seen = new Set();
   list = list.filter((i) => i.id && !seen.has(i.id) && seen.add(i.id));
@@ -6868,7 +6891,7 @@ function reviewPanel(t) {
     d.append(ul);
     p.append(d);
   } else if (r.task) p.append(el('div', 'muted', r.commit ? 'Changed files are loading…' : 'No commit recorded for this task.'));
-  if (r.shots?.length) p.append(shotGrid(r.shots.slice(-4)));
+  if (r.shots?.length) p.append(screenStrip(r.shots, 'Final screen', 4));
   const row = el('div', 'rv-actions');
   const ok = el('button', 'btn small primary', 'Approve & continue');
   const change = el('button', 'btn small', 'Request changes');
@@ -7736,9 +7759,11 @@ function renderDrawer(fromLive = false) {
   } else {
     s3.append(el('div', 'out-live', t.status === 'running' ? 'Starting…' : 'Nothing yet. It starts when an agent picks it up.'));
   }
-  // Every screenshot, oldest first, as a compact gallery (the drawer's .shots are small tiles; see app.css).
+  // A browser task: its latest screen large, earlier ones newest first (screenStrip). Others: every screenshot, oldest
+  // first, as a compact gallery (the drawer's .shots are small tiles; see app.css).
   const shots = d.runs.flatMap((r) => r.entries.filter((e) => e.k === 'image'));
-  if (shots.length) s3.append(el('div', 'dr-shots-head', `Screenshots · ${shots.length}`), shotGrid(shots));
+  if (shots.length && t.browser) s3.append(screenStrip(shots, screenLabel(t.status)));
+  else if (shots.length) s3.append(el('div', 'dr-shots-head', `Screenshots · ${shots.length}`), shotGrid(shots));
   if (t.status === 'running') {
     const live = el('div', 'out-live');
     live.append(el('span', 'spark'), document.createTextNode('Working…'));

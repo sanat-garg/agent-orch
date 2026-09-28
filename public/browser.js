@@ -678,8 +678,8 @@ function bxRenderActivity() {
     box.append(ol);
     ol.scrollTop = ol.scrollHeight;
   } else if (bxLive(t)) box.append(el('div', 'bx-empty muted', t.status === 'queued' ? 'Starting soon…' : 'Getting started…'));
-  const shots = steps.filter((s) => s.mediaId).map((s) => ({ id: s.mediaId, name: bxStep(s) }));
-  if (shots.length) box.append(shotGrid(shots));
+  const shots = steps.filter((s) => s.mediaId).map((s) => ({ id: s.mediaId, name: bxStep(s), ts: s.ts }));
+  if (shots.length) box.append(screenStrip(shots, screenLabel(t.status)));
   const mcp = bxMcpLine(t.mcp);
   if (mcp) box.append(el('div', 'bx-mcp muted', mcp));
   if (t.resultText) {

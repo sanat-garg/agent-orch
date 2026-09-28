@@ -3984,9 +3984,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   function taskShots(taskId) {
     const out = new Map();
     for (const r of qa('SELECT log_path FROM runs WHERE task_id=:t ORDER BY id', { t: taskId })) {
-      try { for (const e of parseJsonl(fs.readFileSync(r.log_path, 'utf8'))) if (e.k === 'image' && e.id) out.set(e.id, { id: e.id, name: e.name, w: e.w, h: e.h }); } catch {}
+      try { for (const e of parseJsonl(fs.readFileSync(r.log_path, 'utf8'))) if (e.k === 'image' && e.id) { out.delete(e.id); out.set(e.id, { id: e.id, name: e.name, w: e.w, h: e.h, at: e.at ?? null }); } } catch {}
     }
-    return [...out.values()].slice(-12);
+    // In time order (the review receipt shows the last one as the Final screen), not by media id.
+    return [...out.values()].sort((a, b) => (a.at || 0) - (b.at || 0)).slice(-12);
   }
   async function changedFiles(project, sha) {
     if (!sha) return [];

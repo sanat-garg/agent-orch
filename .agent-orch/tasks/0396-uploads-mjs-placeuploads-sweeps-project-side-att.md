@@ -13,3 +13,7 @@ uploads.mjs `placeUploads(dataDir, ids, cwd)` copies each attachment into `<cwd>
 ## Done when
 
 `npm test -- test/attachments.test.mjs` && `grep -q 'export function sweepProjectUploads' uploads.mjs`
+
+## Result — done (check passed) (2026-09-28 13:52)
+
+AGENT-ORCH-STATUS: done — placeUploads now removes project attachment copies over 30 days old; tests pass

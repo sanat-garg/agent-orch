@@ -1066,3 +1066,7 @@ expiry notes show each row's own window; overdue rows expire at boot
 ## 2026-09-28 13:08 — #368 Ping button for worker machines: round-trip plus an on-Mac network self-check [done (check passed)]
 
 Ping per worker card and Ping all work; ping tests pass
+
+## 2026-09-28 13:52 — #396 uploads.mjs: placeUploads sweeps project-side attachment copies older than 30 days [done (check passed)]
+
+placeUploads now removes project attachment copies over 30 days old; tests pass

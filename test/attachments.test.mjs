@@ -11,7 +11,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
-import { saveUpload, readUpload, placeUploads, attachmentNote, claudeImageBlocks, safeName, MAX_UPLOAD_BYTES, INLINE_IMAGE_BYTES } from '../uploads.mjs';
+import { saveUpload, readUpload, placeUploads, sweepProjectUploads, attachmentNote, claudeImageBlocks, safeName, MAX_UPLOAD_BYTES, INLINE_IMAGE_BYTES, PROJECT_UPLOADS_MAX_AGE_MS } from '../uploads.mjs';
 import { runAgentCli } from '../agents.mjs';
 import { isolatedPath } from './helpers/isolated-path.mjs';
 
@@ -82,6 +82,25 @@ test('placeUploads copies them into the project, git-ignored; the note and Claud
     assert.deepEqual(Buffer.from(blocks[0].source.data, 'base64'), png());
     assert.equal(blocks[0].source.media_type, 'image/png');
     assert.deepEqual(claudeImageBlocks([{ ...files[1], size: INLINE_IMAGE_BYTES + 1 }]), [], 'too big to inline: read from its path');
+  } finally { for (const d of [data, project]) fs.rmSync(d, { recursive: true, force: true }); }
+});
+
+test('placeUploads sweeps project copies older than 30 days, except the ones it is placing', () => {
+  const data = tmp('cw-up-'), project = tmp('cw-up-p-');
+  const dir = path.join(project, '.agent-orch', 'uploads');
+  try {
+    assert.deepEqual(sweepProjectUploads(project), [], 'no folder yet');
+    const resent = saveUpload(data, Buffer.from('old but sent again'), { name: 'resent.txt' });
+    placeUploads(data, [resent.id], project);
+    const oldCopy = path.join(dir, 'deadbeef-stale.txt'), fresh = path.join(dir, 'cafef00d-fresh.txt'), sub = path.join(dir, 'olddir');
+    fs.writeFileSync(oldCopy, 'stale'); fs.writeFileSync(fresh, 'fresh'); fs.mkdirSync(sub);
+    const old = (Date.now() - PROJECT_UPLOADS_MAX_AGE_MS - 60_000) / 1000;
+    const resentCopy = path.join(dir, `${resent.id.slice(0, 8)}-resent.txt`);
+    for (const f of [oldCopy, resentCopy, path.join(dir, '.gitignore'), sub]) fs.utimesSync(f, old, old);
+    const files = placeUploads(data, [resent.id], project);
+    assert.equal(files[0].path, resentCopy);
+    assert.ok(!fs.existsSync(oldCopy), 'the old copy is swept');
+    for (const f of [resentCopy, fresh, path.join(dir, '.gitignore'), sub]) assert.ok(fs.existsSync(f), f);
   } finally { for (const d of [data, project]) fs.rmSync(d, { recursive: true, force: true }); }
 });
 

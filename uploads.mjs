@@ -2,6 +2,8 @@
 // Each upload is stored at <DATA>/uploads/<id>/<name> with meta.json; images also go into the media store (media.mjs)
 // so chat can show them. On send, placeUploads copies them into <project>/.agent-orch/uploads/, which ignores itself in
 // git (never pushed), so every agent reads them by absolute path; the message carries the list (attachmentNote).
+// Those project copies are a convenience: each placeUploads first sweeps ones older than PROJECT_UPLOADS_MAX_AGE_MS
+// (sweepProjectUploads), except the ones being placed; a swept copy is re-copied from <DATA>/uploads when sent again.
 // Images also go to the agent directly: Claude as image blocks, Codex with -i.
 
 import fs from 'node:fs';
@@ -13,6 +15,7 @@ export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 export const MAX_ATTACHMENTS = 10;
 export const UPLOAD_ID_RE = /^[a-f0-9]{24}$/;
 export const PROJECT_UPLOADS = path.join('.agent-orch', 'uploads');
+export const PROJECT_UPLOADS_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 // Largest image sent inline to Claude (the API's per-image limit); bigger ones are read from their path.
 export const INLINE_IMAGE_BYTES = 5 * 1024 * 1024;
 
@@ -59,7 +62,9 @@ export const attachmentView = (u) => ({ id: u.id, name: u.name, size: u.size, ty
 export function placeUploads(dataDir, ids, cwd) {
   const out = [];
   const dir = path.join(cwd, PROJECT_UPLOADS);
-  for (const id of [...new Set(ids || [])].slice(0, MAX_ATTACHMENTS)) {
+  const want = [...new Set(ids || [])].slice(0, MAX_ATTACHMENTS);
+  sweepProjectUploads(cwd, { keep: want });
+  for (const id of want) {
     const u = readUpload(dataDir, id);
     if (!u) continue;
     fs.mkdirSync(dir, { recursive: true });
@@ -70,6 +75,27 @@ export function placeUploads(dataDir, ids, cwd) {
     out.push({ ...u, path: dest });
   }
   return out;
+}
+
+// Deletes plain files in <cwd>/.agent-orch/uploads/ older than maxAgeMs (by mtime), except the .gitignore and copies of
+// the ids in keep (name starts with <id8>-); never directories or symlinks. Returns the removed names; a missing folder
+// or a file that can't be read or removed is skipped.
+export function sweepProjectUploads(cwd, { maxAgeMs = PROJECT_UPLOADS_MAX_AGE_MS, keep = [] } = {}) {
+  const dir = path.join(cwd, PROJECT_UPLOADS);
+  const prefixes = keep.filter(Boolean).map((id) => `${String(id).slice(0, 8)}-`);
+  const cutoff = Date.now() - maxAgeMs, removed = [];
+  let names;
+  try { names = fs.readdirSync(dir); } catch { return removed; }
+  for (const name of names) {
+    if (name === '.gitignore' || prefixes.some((p) => name.startsWith(p))) continue;
+    try {
+      const file = path.join(dir, name), st = fs.lstatSync(file);
+      if (!st.isFile() || st.mtimeMs >= cutoff) continue;
+      fs.unlinkSync(file);
+      removed.push(name);
+    } catch { /* one bad file never stops the sweep */ }
+  }
+  return removed;
 }
 
 const fmtSize = (n) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`);

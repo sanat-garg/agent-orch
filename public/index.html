@@ -47,20 +47,19 @@
     <div class="sr-only" id="rankLive" aria-live="polite"></div>
     <div class="mini-stats">
       <div class="ms-machine" id="miniMachine">
-        <button class="ms-server" id="miniStats" aria-haspopup="dialog" title="Open server details">
+        <button class="ms-server" id="miniStats" aria-haspopup="dialog" title="Open all machines">
           <span class="ms-slide" id="miniSlide">
             <span class="ms-head">
               <span class="live-dot" id="miniLive"></span>
               <span class="ms-os" id="miniOs" aria-hidden="true"></span>
               <span class="ms-title"><span id="hostName">Oracle VM</span><small id="miniRole"> (head)</small></span>
-              <span class="ms-open">Details<svg viewBox="0 0 24 24" width="12" height="12"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></span>
+              <span class="ms-open">Machines<svg viewBox="0 0 24 24" width="12" height="12"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></span>
             </span>
             <span class="ms-row"><span>CPU</span><span class="ms-bar"><i id="miniCpuBar"></i></span><span class="ms-val" id="miniCpu">–</span></span>
             <span class="ms-row"><span>RAM</span><span class="ms-bar"><i id="miniMemBar"></i></span><span class="ms-val" id="miniMem">–</span></span>
             <span class="ms-foot"><span id="miniTasks"></span><span id="miniOff"></span></span>
           </span>
         </button>
-        <div class="ms-dots" id="miniDots" role="group" aria-label="Machines" hidden></div>
       </div>
       <div class="ms-usage" id="usageCard" role="button" tabindex="0" aria-haspopup="dialog" title="Open usage over time">
         <div class="ms-head">

@@ -13,3 +13,7 @@ Adjust the rotating sidebar usage card (#miniStats, from #380 'Sidebar usage car
 ## Done when
 
 `node --test test/ui-mini-rotate*.test.mjs` passes (click opens the all-machines view with no node selected, no dots rendered, rotation still cycles)
+
+## Result — done (check passed) (2026-09-28 15:02)
+
+AGENT-ORCH-STATUS: done — card opens all-machines window, dots gone, tests pass

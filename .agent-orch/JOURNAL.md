@@ -1313,3 +1313,6 @@ Conflict resolved; version tests and UI static tests pass
 ## 2026-09-28 14:57 — #444 Assign API: list a machine's runnable tasks and start one on it immediately [done (check passed)]
 
 assign API lists runnable tasks and starts them immediately
+## 2026-09-28 15:02 — #447 Sidebar usage card: tap opens the all-machines window; no page dots [done (check passed)]
+
+card opens all-machines window, dots gone, tests pass

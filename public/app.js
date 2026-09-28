@@ -3594,10 +3594,10 @@ function setBar(bar, pct) {
 }
 // ----- the sidebar machine card -----
 // Rotates through the head, then every online worker (MC.nodes, GET /api/cluster/nodes), MINI_MS each with a cross-fade;
-// offline workers are skipped and counted ('+1 offline'). Hover or focus holds it; a dot jumps; a click opens the machine
-// shown (Server details for the head, a worker's node detail). id: the machine wanted, shown: the one painted.
+// offline workers are skipped and counted ('+1 offline'). Hover or focus holds it. A click (Enter/Space) opens the
+// all-machines window (openMachines), never the machine shown. id: the machine wanted, shown: the one painted.
 // test/ui-mini-rotate.test.mjs runs this block (from `const MINI` to miniClick) in Node.
-const MINI = { id: null, shown: null, host: '', timer: null, hold: new Set(), fading: false, fetch: null, dots: '' };
+const MINI = { id: null, shown: null, host: '', timer: null, hold: new Set(), fading: false, fetch: null };
 const MINI_MS = 5000;
 function miniMachines(nodes, host) {
   const head = nodes.find((n) => n.local) || { id: 'controller', local: true, name: host };
@@ -3610,10 +3610,10 @@ function miniNext(list, id, step = 1) {
   const at = list.findIndex((n) => n.id === id);
   return at < 0 ? list[0].id : list[(at + step + list.length) % list.length].id;
 }
-// Forward one machine (the timer), or to `id` (a dot); either way the new one gets its full MINI_MS.
-function miniGo(step, id) {
+// Forward one machine (the timer); the new one gets its full MINI_MS.
+function miniGo(step) {
   const { list } = miniMachines(MC.nodes, MINI.host);
-  MINI.id = id ?? miniNext(list, miniShown(list).id, step);
+  MINI.id = miniNext(list, miniShown(list).id, step);
   miniArm();
   miniRender();
 }
@@ -3624,27 +3624,10 @@ function miniArm() {
   MINI.timer = setTimeout(() => miniGo(1), MINI_MS);
 }
 function miniClick() {
-  const n = miniShown(miniMachines(MC.nodes, MINI.host).list);
-  if (n.local) return openServer();
-  closeSidebar();
-  openNode(n.id);
+  openMachines();
 }
 function miniRender() {
   const { list } = miniMachines(MC.nodes, MINI.host), n = miniShown(list);
-  const key = list.map((m) => m.id).join(' ');
-  if (key !== MINI.dots) {
-    MINI.dots = key;
-    $('miniDots').hidden = list.length < 2;
-    $('miniDots').replaceChildren(...list.map((m) => {
-      const b = el('button', 'ms-dot');
-      b.type = 'button';
-      b.dataset.id = m.id;
-      b.setAttribute('aria-label', `Show ${m.name}${m.local ? ' (head)' : ''}`);
-      b.addEventListener('click', () => miniGo(0, m.id));
-      return b;
-    }));
-  }
-  for (const b of $('miniDots').children) b.setAttribute('aria-current', String(b.dataset.id === n.id));
   if (list.length < 2 || MINI.hold.size) { clearTimeout(MINI.timer); MINI.timer = null; } else if (!MINI.timer) miniArm();
   if (MINI.fading) return; // the fade's end paints the newest numbers
   if (MINI.shown && MINI.shown !== n.id && !reduceMotion.matches) {
@@ -3672,12 +3655,13 @@ function miniPaint() {
     $('miniLive').hidden = !n.local; // the head's pulse is its live stream; a worker's numbers are its latest reading
     $('miniOs').innerHTML = OS_ICON[n.os] || OS_ICON.linux;
     $('miniOs').title = OS_NAME[n.os] || n.os || '';
-    $('miniStats').title = n.local ? 'Open server details' : `Open ${n.name}'s details`;
   }
   const running = n.tasks?.length;
   $('miniTasks').textContent = running == null ? '' : running ? `${plural(running, 'task')} running` : 'Idle';
   $('miniOff').textContent = offline ? `+${offline} offline` : '';
   $('miniOff').title = offline ? MC.nodes.filter((m) => !m.local && m.enabled && !m.connected).map((m) => m.name).join(', ') : '';
+  $('miniStats').setAttribute('aria-label', `Machine usage: ${n.name || MINI.host}, CPU ${cpu == null ? 'unknown' : fmtPct(cpu)}, `
+    + `RAM ${mem == null ? 'unknown' : fmtPct(mem)}${offline ? `, ${offline} offline` : ''}. Open all machines`);
 }
 // With Server details closed only this card reads the machines: at most every 10 s, and not while the page is hidden.
 function miniFetch() {
@@ -3911,10 +3895,15 @@ function parkServerDetails() {
   $('sdStash').append($('serverDetails'));
   if (was) { send({ t: 'metrics_sub', on: false }); caFlush(); }
 }
-// The sidebar card (and anything else that shows "this server") opens the controller's node detail.
+// Anything that shows "this server" opens the controller's node detail.
 function openServer() {
   closeSidebar();
   openNode(MC.nodes.find((n) => n.local)?.id || 'controller');
+}
+// The all-machines window: for now this server's window at its Machines section (every machine's card and usage).
+function openMachines() {
+  openServer();
+  $('mcTitle').closest('.mc-sec').scrollIntoView({ block: 'start' });
 }
 function renderRangePicker() {
   document.querySelectorAll('#rangePicker button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.range === M.range)));

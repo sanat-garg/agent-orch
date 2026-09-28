@@ -1,9 +1,9 @@
 // The sidebar machine card (app.js MINI) rotating through the head and every online worker, with fake nodes.
 // In Node: app.js's rotation block (from `const MINI` to miniClick) with mock timers: the order (head first, offline and
-// disabled workers skipped, offline ones counted), a step every MINI_MS, a hold while hovered/focused, a dot's jump
-// (which restarts the full interval), one machine without a timer, and the click opening the machine shown.
+// disabled workers skipped, offline ones counted), a step every MINI_MS, a hold while hovered/focused, one machine
+// without a timer, and the click opening the all-machines window (never the machine shown).
 // In a browser: boots server.mjs (CW_NO_ORCHESTRATOR=1, temp data dir) with GET /api/cluster/nodes answered by the same
-// fake nodes, then checks the card's rotation, dots, fixed height, hover hold, the click and reduced motion. The browser
+// fake nodes, then checks the card's rotation (with no page dots), label, fixed height, hover hold, the click and reduced motion. The browser
 // part skips when Playwright's Chromium can't launch.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -15,6 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
+import { macChromiumEnv } from './helpers/mac-chromium.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const GB = 2 ** 30;
@@ -41,9 +42,9 @@ const appJs = fs.readFileSync(path.join(ROOT, 'public/app.js'), 'utf8');
 const block = appJs.match(/^const MINI = .*?^function miniClick\(\) \{.*?^}$/ms)[0];
 function load(nodes) {
   const calls = [], MC = { nodes };
-  const mini = new Function('MC', 'miniRender', 'openServer', 'openNode', 'closeSidebar',
+  const mini = new Function('MC', 'miniRender', 'openMachines',
     `${block}\nreturn { MINI, MINI_MS, miniMachines, miniShown, miniNext, miniGo, miniArm, miniClick };`)(
-    MC, () => calls.push('render'), () => calls.push('server'), (id) => calls.push(`node:${id}`), () => calls.push('closeSidebar'));
+    MC, () => calls.push('render'), (...a) => calls.push(['machines', ...a]));
   return Object.assign(mini, { MC, calls, shown: () => mini.miniShown(mini.miniMachines(MC.nodes, 'Oracle VM').list).name });
 }
 
@@ -78,19 +79,21 @@ test('each machine shows for MINI_MS, wrapping back to the head; hover/focus hol
   assert.equal(m.shown(), 'build-vps', 'moves on once released');
 });
 
-test('a dot jumps to its machine, which then gets its full interval', (t) => {
+test('each step paints and gets its full interval; a worker that goes offline hands back to the head', (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const m = load(NODES);
   m.miniArm();
-  t.mock.timers.tick(3000);
-  m.miniGo(0, 'n-mac');
-  assert.equal(m.shown(), 'studio-mac');
-  assert.ok(m.calls.includes('render'), 'the jump paints');
+  t.mock.timers.tick(5000);
+  assert.equal(m.shown(), 'build-vps');
+  assert.ok(m.calls.includes('render'), 'the step paints');
   t.mock.timers.tick(4999);
-  assert.equal(m.shown(), 'studio-mac');
+  assert.equal(m.shown(), 'build-vps');
   t.mock.timers.tick(1);
-  assert.equal(m.shown(), 'oracle-vm', 'then on to the next (wrapping)');
-  m.miniGo(0, 'n-vps');
+  assert.equal(m.shown(), 'studio-mac');
+  t.mock.timers.tick(5000);
+  assert.equal(m.shown(), 'oracle-vm', 'wrapping');
+  t.mock.timers.tick(5000);
+  assert.equal(m.shown(), 'build-vps');
   // A shown worker that goes offline: the card falls back to the head.
   m.MC.nodes = NODES.map((n) => (n.id === 'n-vps' ? { ...n, connected: false } : n));
   assert.equal(m.shown(), 'oracle-vm');
@@ -107,21 +110,24 @@ test('one machine: no rotation', (t) => {
   assert.equal(m.shown(), 'oracle-vm');
 });
 
-test('a click opens the machine shown: Server details for the head, the node detail for a worker', () => {
+test('a click opens the all-machines window with no machine selected, whichever machine is shown', () => {
   const m = load(NODES);
   m.miniClick();
-  assert.deepEqual(m.calls, ['server']);
+  assert.deepEqual(m.calls, [['machines']], 'openMachines() with no node');
   m.calls.length = 0;
-  m.miniGo(0, 'n-mac');
+  m.miniGo(2); // studio-mac
+  assert.equal(m.shown(), 'studio-mac');
   m.miniClick();
-  assert.deepEqual(m.calls.filter((c) => c !== 'render'), ['closeSidebar', 'node:n-mac']);
+  assert.deepEqual(m.calls.filter((c) => c !== 'render'), [['machines']], "never the shown machine's detail");
   clearTimeout(m.MINI.timer);
 });
 
 // ---- in a browser
 const PASSWORD = 'mini-rotate-password';
 let browser, noBrowser = false;
-try { browser = await chromium.launch(); } catch (e) { noBrowser = `cached Chromium unavailable: ${e.message.split('\n')[0]}`; }
+const macEnv = macChromiumEnv(); // Chromium on the MacBook worker's LaunchDaemon needs a shim (helpers/mac-chromium.mjs)
+try { browser = await chromium.launch(macEnv.DYLD_INSERT_LIBRARIES
+  ? { executablePath: macEnv.AGENT_ORCH_BROWSER_PATH, env: { ...process.env, DYLD_INSERT_LIBRARIES: macEnv.DYLD_INSERT_LIBRARIES } } : {}); } catch (e) { noBrowser = `cached Chromium unavailable: ${e.message.split('\n')[0]}`; }
 let child, base, dataDir, cookie;
 const freePort = () => new Promise((resolve, reject) => {
   const s = net.createServer().listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); });
@@ -169,65 +175,71 @@ async function openApp(ctxOpts, nodes) {
   await page.goto(`${base}/`);
   return { ctx, page, errors };
 }
-const shown = (page) => page.evaluate(() => [document.getElementById('hostName').textContent,
-  [...document.querySelectorAll('#miniDots .ms-dot')].findIndex((d) => d.getAttribute('aria-current') === 'true')]);
+const shown = (page) => page.locator('#hostName').textContent();
+const noDots = async (page) => assert.equal(await page.locator('#miniDots, .mini-stats .ms-dot, #miniMachine > :not(#miniStats)').count(), 0, 'no page dots');
 
-test('UI: the card rotates head → workers with dots, keeps its size, holds on hover, and a click opens the shown machine', { skip: noBrowser, timeout: 90000 }, async () => {
+test('UI: the card rotates head → workers without dots, keeps its size, holds on hover, and a click opens all machines', { skip: noBrowser, timeout: 90000 }, async () => {
   const { ctx, page, errors } = await openApp({}, () => NODES);
-  await page.locator('#miniDots .ms-dot').nth(2).waitFor({ timeout: 20000 });
-  assert.equal(await page.locator('#miniDots .ms-dot').count(), 3, 'a dot per online machine');
-  assert.deepEqual(await shown(page), ['oracle-vm', 0]);
+  await page.locator('#miniOff', { hasText: '+1 offline' }).waitFor({ timeout: 20000 });
+  await noDots(page);
+  assert.equal(await shown(page), 'oracle-vm');
   assert.equal(await page.locator('#miniRole').isVisible(), true, 'the head says so');
-  assert.equal(await page.locator('#miniOff').textContent(), '+1 offline');
   assert.equal(await page.locator('#miniTasks').textContent(), '1 task running');
   const card = page.locator('#miniMachine'), h0 = (await card.boundingBox()).height;
   await page.mouse.move(640, 880); // well away from the card
   await page.locator('#hostName', { hasText: 'build-vps' }).waitFor({ timeout: 8000 });
-  assert.deepEqual(await shown(page), ['build-vps', 1]);
   await page.locator('#miniTasks', { hasText: '2 tasks running' }).waitFor();
   assert.match(await page.locator('#miniMem').textContent(), /^18\/24 GB$/);
   assert.equal(await page.locator('#miniRole').isVisible(), false);
   assert.equal(await page.locator('#miniOs svg').count(), 1, 'an OS icon');
+  assert.equal(await page.locator('#miniStats').getAttribute('aria-label'), 'Machine usage: build-vps, CPU 60%, RAM 75%, 1 offline. Open all machines');
   assert.equal((await card.boundingBox()).height, h0, 'the card keeps its height');
   await page.locator('#hostName', { hasText: 'studio-mac' }).waitFor({ timeout: 8000 });
-  assert.deepEqual(await shown(page), ['studio-mac', 2]);
+  assert.equal((await card.boundingBox()).height, h0, 'the card keeps its height');
   await page.locator('#hostName', { hasText: 'oracle-vm' }).waitFor({ timeout: 8000 });
-  assert.deepEqual(await shown(page), ['oracle-vm', 0], 'wraps back to the head');
+  await page.locator('#hostName', { hasText: 'build-vps' }).waitFor({ timeout: 8000 });
+  await noDots(page);
 
-  // A dot jumps (the pointer then rests on the card, which holds it there).
-  await page.locator('#miniDots .ms-dot').nth(2).click();
-  await page.locator('#hostName', { hasText: 'studio-mac' }).waitFor({ timeout: 2000 });
+  // Hovering holds the machine shown.
+  await page.locator('#miniStats').hover();
   await page.waitForTimeout(6500);
-  assert.deepEqual(await shown(page), ['studio-mac', 2], 'held while hovered');
+  assert.equal(await shown(page), 'build-vps', 'held while hovered');
 
+  // The click opens the all-machines window (this server's window at its Machines section), not build-vps's detail.
   await page.locator('#miniStats').click();
-  await page.locator('#nodeModal:not([hidden])').waitFor();
-  assert.equal(await page.locator('#ndTitle').textContent(), 'studio-mac');
-  assert.equal(await page.locator('#ndBody #serverDetails').count(), 0, "a worker's detail, not this server's");
+  await page.locator('#nodeModal:not([hidden]) #ndBody #serverDetails').waitFor();
+  assert.notEqual(await page.locator('#ndTitle').textContent(), 'build-vps');
+  await page.locator('#mMachines .mc-node').nth(4).waitFor({ timeout: 10000 });
+  assert.equal(await page.locator('#mMachines .mc-node').count(), NODES.length, 'every machine listed');
+  await page.waitForFunction(() => { // scrolled to the Machines section
+    const s = document.getElementById('mcTitle').getBoundingClientRect(), b = document.getElementById('ndBody').getBoundingClientRect();
+    return s.top >= b.top - 1 && s.top < b.top + 120;
+  });
   await page.keyboard.press('Escape');
   await page.locator('#nodeModal').waitFor({ state: 'hidden' });
-  await page.locator('#miniDots .ms-dot').first().click();
-  await page.locator('#hostName', { hasText: 'oracle-vm' }).waitFor({ timeout: 2000 });
-  await page.locator('#miniStats').click();
-  await page.locator('#nodeModal:not([hidden]) #ndBody #serverDetails').waitFor(); // the head: this server's details
-  assert.equal(await page.locator('#ndTitle').textContent(), 'oracle-vm');
+
+  // Enter on the focused card opens it too.
+  await page.locator('#miniStats').focus();
+  await page.keyboard.press('Enter');
+  await page.locator('#nodeModal:not([hidden]) #ndBody #serverDetails').waitFor();
   await ctx.close();
   assert.deepEqual(errors, []);
 });
 
-test('UI: reduced motion switches without a fade; one machine shows no dots', { skip: noBrowser, timeout: 60000 }, async () => {
+test('UI: reduced motion switches without a fade; one machine never rotates', { skip: noBrowser, timeout: 60000 }, async () => {
   let nodes = NODES;
   const { ctx, page, errors } = await openApp({ reducedMotion: 'reduce' }, () => nodes);
-  await page.locator('#miniDots .ms-dot').nth(2).waitFor({ timeout: 20000 });
-  await page.locator('#miniDots .ms-dot').nth(1).click();
-  assert.deepEqual(await page.evaluate(() => [document.getElementById('miniSlide').classList.contains('out'), document.getElementById('hostName').textContent]),
-    [false, 'build-vps'], 'no cross-fade');
+  await page.locator('#miniOff', { hasText: '+1 offline' }).waitFor({ timeout: 20000 });
+  await page.mouse.move(640, 880);
+  await page.waitForFunction(() => document.getElementById('hostName').textContent === 'build-vps', null, { timeout: 8000, polling: 'raf' });
+  assert.equal(await page.locator('#miniSlide').evaluate((e) => e.classList.contains('out')), false, 'no cross-fade');
   assert.equal(await page.locator('#miniSlide').evaluate((e) => getComputedStyle(e).transitionDuration), '0s');
 
   nodes = [HEAD, NODES[2]];
   await page.reload();
   await page.locator('#miniOff', { hasText: '+1 offline' }).waitFor({ timeout: 20000 });
-  assert.equal(await page.locator('#miniDots').isHidden(), true, 'no dots for one machine');
+  await noDots(page);
+  await page.waitForTimeout(6000);
   assert.equal(await page.locator('#hostName').textContent(), 'oracle-vm');
   await ctx.close();
   assert.deepEqual(errors, []);

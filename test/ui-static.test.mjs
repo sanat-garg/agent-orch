@@ -183,9 +183,10 @@ test('server details live in the controller node detail: charts, Running here, T
   assert.match(indexHtml, /id="nodeModal"[\s\S]*?id="ndBack"[\s\S]*?id="ndBody"[\s\S]*?id="machineModal"/, 'Add machine stacks above the node detail');
   assert.match(appJs, /function renderServerDetails\(container\) \{/);
   assert.match(appJs, /tile\('load', 'Load average'\),\n\s*\);/);
-  // The sidebar card opens the machine it shows: this server's details for the head (#380's rotation).
+  // The sidebar card opens the all-machines window, not the machine it shows (#447).
   assert.match(appJs, /\$\('miniStats'\)\.addEventListener\('click', miniClick\);/);
-  assert.match(appJs, /function miniClick\(\) \{[^}]*if \(n\.local\) return openServer\(\);/);
+  assert.match(appJs, /function miniClick\(\) \{\n\s*openMachines\(\);\n\}/);
+  assert.match(appJs, /function openMachines\(\) \{\n\s*openServer\(\);/);
   assert.match(appJs, /function openServer\(\) \{\n\s*closeSidebar\(\);\n\s*openNode\(/);
   assert.deepEqual([...appJs.matchAll(/^  \['(\w+)', '[^']+', \(s/gm)].map((m) => m[1]), ['cpu', 'mem', 'disk', 'net', 'load'], "a worker's tiles in the head's order");
   assert.match(appCss, /\.m-top-scroll \{ max-height: 320px; overflow-y: auto;/, 'the list scrolls inside a capped height');

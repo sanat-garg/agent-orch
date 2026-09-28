@@ -147,7 +147,8 @@ test('context menu: copy then paste into a folder, cut (dimmed) then paste as mo
   await openFiles(page);
   await menu(page, rowSel('README.md'));
   const labels = await page.$$eval('#fxMenu .cm-opt', (bs) => bs.map((b) => [b.dataset.act, b.disabled]));
-  assert.deepEqual(labels, [['open', false], ['copy', false], ['cut', false], ['paste', true], ['zip', false], ['path', false], ['ask', false]], 'no Extract for a non-zip; Paste waits for the clipboard');
+  assert.deepEqual(labels, [['open', false], ['copy', false], ['cut', false], ['paste', true], ['zip', false], ['rename', false], ['newfile', true], ['newdir', true], ['delete', false], ['path', false], ['ask', false]],
+    'no Extract for a non-zip; Paste waits for the clipboard; New file/folder only on a folder or the background');
   assert.match(await page.textContent('#fxMenu [data-act="copy"]'), /(⌘|Ctrl\+)C/);
   await page.keyboard.press('Escape');
   assert.equal(await page.locator('#fxMenu').count(), 0, 'Esc closes it');

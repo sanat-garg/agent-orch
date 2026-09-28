@@ -14,3 +14,7 @@ Goal: the Files tab's context menu (public/files.js, the cmenu built around `FX.
 ## Done when
 
 `npm test -- test/ui-files-manage.test.mjs` passes and `grep -c "api/files/rename" public/files.js` prints at least 1
+
+## Result — done (check passed) (2026-09-28 15:06)
+
+AGENT-ORCH-STATUS: done — Files menu has Rename, New file/folder and Delete; tests pass

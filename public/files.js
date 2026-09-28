@@ -7,9 +7,12 @@
 // Ask in chat (Quick Look's header, a Contents hit's trailing button, Shift+Enter on a row) puts `path[:line]` into the composer. Loaded after
 // app.js and uses its helpers ($, el, api, store, md, currentConvo, toast, copyToClipboard).
 // Selection: click, ⌘/Ctrl-click, Shift-click ranges, ⌘A. A context menu (right-click, long-press, a row's ⋯, Shift+F10) offers
-// Open, Copy/Cut/Paste (⌘C ⌘X ⌘V), Compress to ZIP, Extract here, Copy path and Ask in chat. The clipboard is app-internal
+// Open, Copy/Cut/Paste (⌘C ⌘X ⌘V), Compress to ZIP, Extract here, Rename… (F2), New file…/New folder…, Delete (Delete or
+// Backspace, after an in-page confirm), Copy path and Ask in chat. The clipboard is app-internal
 // (project-relative paths plus copy|cut) and outlives folder changes; pasting POSTs /api/files/copy or /move {paths, dest},
 // and /zip {paths, dest} and /unzip {path, dest} make and extract archives (cid rides in the query like every files route).
+// Rename and New edit a name in place (FX.edit, redrawn by every render): POST /api/files/rename {path, name},
+// /api/files/new {dir, name, type}; Delete POSTs /api/files/delete {paths}.
 const FX = {
   cid: null, path: '', data: null, err: '', seq: 0, qseq: 0, fseq: 0, cseq: 0, find: null, changed: null, back: [], fwd: [], sel: null, filter: '', rows: [],
   view: ['list', 'changed'].includes(store.get('cw.files.view')) ? store.get('cw.files.view') : 'icons',
@@ -19,6 +22,7 @@ const FX = {
   expanded: new Set(), kids: new Map(), built: false, ql: null,
   picked: new Set(), anchor: null, // the selection (FX.sel is its lead row) and the Shift-click anchor
   root: null, clip: null, menu: null, press: 0, // root: the project key; clip: {mode: 'copy'|'cut', paths, root}
+  edit: null, // a name being typed: {kind: 'rename', rel, value} | {kind: 'new', type: 'file'|'dir', dir, value}
 };
 const FX_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 const fxKeys = (k) => (FX_MAC ? `⌘${k}` : `Ctrl+${k}`);
@@ -157,7 +161,7 @@ function filesShow() {
   const cid = currentConvo()?.id || null;
   if (cid !== FX.cid) {
     const root = currentConvo()?.cwd || cid;
-    Object.assign(FX, { cid, root, path: (root && store.get('cw.files.path.' + root)) || '', back: [], fwd: [], sel: null, picked: new Set(), anchor: null, filter: '', data: null, err: '', find: null, changed: null });
+    Object.assign(FX, { cid, root, path: (root && store.get('cw.files.path.' + root)) || '', back: [], fwd: [], sel: null, picked: new Set(), anchor: null, filter: '', data: null, err: '', find: null, changed: null, edit: null });
     FX.expanded.clear(); FX.kids.clear();
     $('fxFilter').value = ''; $('fxFindBar').hidden = true;
   }
@@ -188,7 +192,7 @@ async function fxLoad(focus = false) {
 }
 function fxGo(rel, { push = true } = {}) {
   if (push && rel !== FX.path) { FX.back.push(FX.path); FX.fwd = []; }
-  FX.path = rel; FX.sel = null; FX.picked.clear(); FX.filter = ''; FX.find = null; $('fxFilter').value = ''; $('fxFindBar').hidden = true;
+  FX.path = rel; FX.sel = null; FX.picked.clear(); FX.filter = ''; FX.edit = null; FX.find = null; $('fxFilter').value = ''; $('fxFindBar').hidden = true;
   FX.expanded.clear(); FX.kids.clear();
   store.set('cw.files.path.' + FX.root, rel);
   fxLoad(true);
@@ -312,10 +316,11 @@ function fxRender() {
   };
   add(d.entries, FX.path, 0);
   fxPrune();
-  if (!FX.rows.length) main.append(fxEmpty(FX.filter ? 'No matches' : 'This folder is empty', FX.filter ? `Nothing here is named like “${FX.filter}”.` : d.entries.length ? 'It only has hidden files (⌘⇧. shows them).' : ''));
+  if (!FX.rows.length && FX.edit?.kind !== 'new') main.append(fxEmpty(FX.filter ? 'No matches' : 'This folder is empty', FX.filter ? `Nothing here is named like “${FX.filter}”.` : d.entries.length ? 'It only has hidden files (⌘⇧. shows them).' : ''));
   else if (FX.view === 'icons') main.append(fxIcons());
   else main.append(fxList());
   fxPathBar();
+  fxEditMount();
 }
 // Drops picks that left the listing; a lead set elsewhere (a revealed result, the folder just backed out of) becomes the selection.
 function fxPrune() {
@@ -473,19 +478,19 @@ function optionFor(r, i, cls) {
   o.title = r.e.name;
   if (fxIsCut(r.rel)) o.classList.add('fx-cut');
   o.addEventListener('click', (ev) => {
-    if (ev.target.closest('.fx-disc, .fx-ask, .fx-more')) return;
+    if (ev.target.closest('.fx-disc, .fx-ask, .fx-more, .fx-edit')) return;
     if (Date.now() - FX.press < 1000) return; // the click that ends a long-press
     const mod = ev.metaKey || ev.ctrlKey;
     fxSelect(r.rel, ev.shiftKey && !fxFlat() ? 'range' : mod && !fxFlat() ? 'toggle' : null);
     if (touch() && !mod && !ev.shiftKey) fxOpen(r);
   });
-  o.addEventListener('dblclick', (ev) => { if (!touch() && !ev.target.closest('.fx-more')) fxOpen(r); });
+  o.addEventListener('dblclick', (ev) => { if (!touch() && !ev.target.closest('.fx-more, .fx-edit')) fxOpen(r); });
   if (fxFlat()) return o;
   // Long-press (touch) opens the context menu where the finger is.
   let t = 0, at = null;
   const stop = () => { clearTimeout(t); t = 0; };
   o.addEventListener('pointerdown', (ev) => {
-    if (ev.pointerType !== 'touch' || ev.target.closest('.fx-disc, .fx-more')) return;
+    if (ev.pointerType !== 'touch' || ev.target.closest('.fx-disc, .fx-more, .fx-edit')) return;
     at = { x: ev.clientX, y: ev.clientY };
     t = setTimeout(() => { t = 0; FX.press = Date.now(); fxMenuOpen(r, at.x, at.y); }, 500);
   });
@@ -510,6 +515,7 @@ function fxIcons() {
   g.setAttribute('role', 'listbox');
   g.setAttribute('aria-label', `${FX.data.name}, ${FX.rows.length} items`);
   g.tabIndex = 0;
+  if (FX.edit?.kind === 'new') g.append(fxNewRow('fx-item'));
   FX.rows.forEach((r, i) => {
     const o = optionFor(r, i, 'fx-item');
     o.append(iconFor(r.e, r.rel, true), el('span', 'fx-name', r.e.name), fxMoreBtn(r));
@@ -532,6 +538,7 @@ function fxList() {
   t.setAttribute('role', 'tree');
   t.setAttribute('aria-label', `${FX.data.name}, ${FX.rows.length} items`);
   t.tabIndex = 0;
+  if (FX.edit?.kind === 'new') t.append(fxNewRow('fx-row'));
   FX.rows.forEach((r, i) => {
     const o = optionFor(r, i, 'fx-row');
     o.setAttribute('aria-level', String(r.depth + 1));
@@ -612,7 +619,8 @@ function fxSelect(rel, how = null) {
 }
 const fxPickedRows = () => FX.rows.filter((r) => FX.picked.has(r.rel));
 function fxFocus(selectFirst) {
-  const c = $('fxMain').querySelector('[role="listbox"], [role="tree"]');
+  const c = $('fxMain').querySelector('[role="listbox"], [role="tree"]'), field = $('fxMain').querySelector('.fx-edit');
+  if (field) return field.focus({ preventScroll: true }); // a name being typed keeps the focus through refreshes
   if (!c) return;
   if (selectFirst && !FX.sel && FX.rows[0]) fxSelect(FX.rows[0].rel);
   c.focus({ preventScroll: true });
@@ -645,7 +653,9 @@ function fxKey(e) {
     e.preventDefault();
     const o = $('fxMain').querySelector(`#fx-o-${i}`), k2 = (o || e.currentTarget).getBoundingClientRect();
     fxMenuOpen(cur || null, k2.left + 24, o ? k2.bottom : k2.top + 24);
-  } else if (FX.find && (e.key === 'Escape' || e.key === 'Backspace' || (mod && e.key === 'ArrowUp'))) { e.preventDefault(); fxFindExit(true); $('fxFilter').focus(); }
+  } else if (!fxFlat() && e.key === 'F2' && !mod) { e.preventDefault(); if (FX.picked.size === 1 && cur) fxRenameStart(cur); }
+  else if (!fxFlat() && (e.key === 'Delete' || e.key === 'Backspace') && !mod && FX.picked.size) { e.preventDefault(); fxConfirmDelete(fxPickedRows()); }
+  else if (FX.find && (e.key === 'Escape' || e.key === 'Backspace' || (mod && e.key === 'ArrowUp'))) { e.preventDefault(); fxFindExit(true); $('fxFilter').focus(); }
   else if ((FX.find || changed) && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) e.preventDefault();
   else if (changed && (e.key === 'Backspace' || ((mod || e.altKey) && e.key === 'ArrowUp'))) e.preventDefault(); // no folder to go up from
   else if ((mod || e.altKey) && e.key === 'ArrowUp') { e.preventDefault(); fxUp(); }
@@ -703,6 +713,136 @@ async function fxUnzip(r) {
   const res = await fxOp('unzip', { path: r.rel, dest: fxParent(r.rel) }, `Extracting “${r.e.name}”…`);
   if (res) toast(`Extracted “${r.e.name}”${fxMade(res).length ? ` to ${fxLabel(fxMade(res))}` : ''}`, { kind: 'success' });
 }
+// Rename and New: the name is typed in place. Enter or leaving the field saves, Esc cancels; a refused name keeps the
+// field open (the toast says why). The renamed or created entry ends up selected.
+function fxRenameStart(r) {
+  if (!r || fxFlat()) return;
+  fxSelect(r.rel);
+  FX.edit = { kind: 'rename', rel: r.rel, name: r.e.name, dir: r.e.dir, value: r.e.name, fresh: true };
+  fxRender();
+}
+// `dir`: the folder it goes in (the one shown, or a folder row's); its row sits at the top of the listing.
+function fxNewStart(type, dir) {
+  if (fxFlat() || !FX.data) return;
+  FX.edit = { kind: 'new', type, dir, value: '', fresh: true };
+  fxRender();
+  $('fxMain').scrollTop = 0;
+}
+function fxNewRow(cls) {
+  const o = el('div', `${cls} fx-new`), e = { name: '', dir: FX.edit.type === 'dir' };
+  if (cls === 'fx-item') { o.append(iconFor(e, '', true), el('span', 'fx-name')); return o; }
+  const name = el('span', 'fx-c name'), nm = el('span', 'fx-n');
+  nm.append(el('span', 'fx-nt'));
+  name.append(el('span', 'fx-disc-sp'), iconFor(e, '', false), nm);
+  o.append(name);
+  return o;
+}
+// Puts the field for FX.edit where the name shows (called by every render of a folder).
+function fxEditMount() {
+  const ed = FX.edit, main = $('fxMain');
+  if (!ed) return;
+  const i = ed.kind === 'rename' ? FX.rows.findIndex((r) => r.rel === ed.rel) : -1;
+  const spot = ed.kind === 'new' ? main.querySelector('.fx-new :is(.fx-nt, .fx-name)') : i >= 0 && main.querySelector(`#fx-o-${i} :is(.fx-nt, .fx-name)`);
+  if (!spot) { FX.edit = null; return; }
+  const f = el('input', 'fx-edit');
+  Object.assign(f, { type: 'text', value: ed.value, readOnly: !!ed.busy, autocomplete: 'off', spellcheck: false });
+  f.setAttribute('autocapitalize', 'off');
+  f.setAttribute('autocorrect', 'off');
+  f.setAttribute('enterkeyhint', 'done');
+  f.setAttribute('aria-label', ed.kind === 'rename' ? `Rename ${ed.name}` : ed.type === 'dir' ? 'New folder name' : 'New file name');
+  f.placeholder = ed.kind === 'new' ? (ed.type === 'dir' ? 'Folder name' : 'File name') : '';
+  f.addEventListener('input', () => { ed.value = f.value; });
+  f.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); fxEditCommit(); }
+    else if (e.key === 'Escape') { e.preventDefault(); fxEditCancel(); }
+  });
+  // Leaving the field saves, unless a redraw just moved the focus to its replacement (or the window lost focus).
+  f.addEventListener('blur', () => setTimeout(() => { if (FX.edit === ed && !ed.busy && !document.activeElement?.classList.contains('fx-edit')) fxEditCommit(); }));
+  spot.replaceWith(f);
+  f.focus({ preventScroll: true });
+  f.scrollIntoView({ block: 'nearest' });
+  if (ed.fresh) {
+    ed.fresh = false;
+    const dot = ed.kind === 'rename' && !ed.dir ? f.value.lastIndexOf('.') : -1; // Finder selects the name, not the extension
+    f.setSelectionRange(0, dot > 0 ? dot : f.value.length);
+  }
+}
+function fxEditCancel() {
+  FX.edit = null;
+  fxRender();
+  fxFocus();
+}
+async function fxEditCommit() {
+  const ed = FX.edit;
+  if (!ed || ed.busy) return;
+  const name = ed.value.trim();
+  if (!name || (ed.kind === 'rename' && name === ed.name)) return fxEditCancel();
+  ed.busy = true;
+  const field = $('fxMain').querySelector('.fx-edit');
+  if (field) field.readOnly = true;
+  const res = ed.kind === 'rename' ? await fxOp('rename', { path: ed.rel, name }) : await fxOp('new', { dir: ed.dir, name, type: ed.type });
+  if (FX.edit !== ed) return;
+  if (!res) { ed.busy = false; ed.fresh = true; return; } // fxOp's refresh puts the field back
+  FX.edit = null;
+  let rel;
+  if (ed.kind === 'rename') {
+    rel = typeof res.to === 'string' ? res.to : join(fxParent(ed.rel), name);
+    for (const k of [...FX.expanded]) if (k === ed.rel || k.startsWith(ed.rel + '/')) { FX.expanded.delete(k); FX.expanded.add(rel + k.slice(ed.rel.length)); }
+  } else {
+    rel = typeof res.created === 'string' ? res.created : join(ed.dir, name);
+    if (ed.dir !== FX.path && FX.view === 'list') FX.expanded.add(ed.dir); // shown in place, under its folder
+    else if (ed.dir !== FX.path) { toast(`Created “${name}” in “${fxFolderName(ed.dir)}”`, { kind: 'success' }); rel = ed.dir; }
+  }
+  FX.sel = rel; FX.picked = new Set([rel]); FX.anchor = rel; // the refresh fxOp started selects it
+}
+// Delete: an in-page confirm (a sheet on phones), then /api/files/delete; the next row down takes the selection.
+function fxConfirmDelete(rows) {
+  const paths = rows.map((r) => r.rel);
+  if (!paths.length || $('fxConfirm')) return;
+  const back = document.activeElement;
+  const m = el('div', 'modal sheet fx-confirm');
+  m.id = 'fxConfirm';
+  m.innerHTML = `
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-panel fx-cf-panel" role="alertdialog" aria-modal="true" aria-labelledby="fxCfTitle" aria-describedby="fxCfText">
+      <span class="sheet-grip" aria-hidden="true"></span>
+      <h2 id="fxCfTitle"></h2>
+      <p class="m-sub" id="fxCfText">This can't be undone.</p>
+      <div class="fx-cf-acts"><button type="button" class="btn" data-close>Cancel</button><button type="button" class="btn fx-cf-del" id="fxCfDel">Delete</button></div>
+    </div>`;
+  m.querySelector('h2').textContent = `Delete ${fxLabel(paths)}?`;
+  const close = (ok) => {
+    m.remove();
+    if (ok) fxDelete(paths);
+    else if (back?.isConnected) back.focus({ preventScroll: true }); else fxFocus();
+  };
+  m.addEventListener('click', (e) => { if (e.target.closest('[data-close]')) close(false); else if (e.target.closest('#fxCfDel')) close(true); });
+  m.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Escape') { e.preventDefault(); close(false); }
+    else if (e.key === 'Tab') { // the two buttons are all there is
+      e.preventDefault();
+      const bs = [...m.querySelectorAll('.fx-cf-acts .btn')];
+      bs[(bs.indexOf(document.activeElement) + 1) % bs.length].focus();
+    }
+  });
+  document.body.append(m);
+  m.querySelector('.fx-cf-acts [data-close]').focus(); // not the destructive one (HIG)
+}
+async function fxDelete(paths) {
+  const gone = (rel) => paths.some((p) => rel === p || rel.startsWith(p + '/'));
+  const at = FX.rows.findIndex((r) => gone(r.rel));
+  const next = FX.rows.slice(at + 1).find((r) => !gone(r.rel)) || FX.rows.slice(0, Math.max(0, at)).reverse().find((r) => !gone(r.rel));
+  if (FX.ql && gone(FX.ql.r.rel)) fxClosePreview();
+  const res = await fxOp('delete', { paths }, paths.length > 1 ? `Deleting ${fxLabel(paths)}…` : '');
+  if (!res) return;
+  if (FX.clip) FX.clip.paths = FX.clip.paths.filter((p) => !gone(p));
+  const deleted = Array.isArray(res.deleted) ? res.deleted : [], skipped = Array.isArray(res.skipped) ? res.skipped : [];
+  FX.sel = next?.rel ?? null; FX.picked = new Set(FX.sel ? [FX.sel] : []); FX.anchor = FX.sel;
+  if (skipped.length) toast(`Couldn't delete ${skipped.map((x) => `“${String(x.path).split('/').pop()}” (${x.reason})`).join(', ')}`, { kind: 'error' });
+  else if (deleted.length) toast(`Deleted ${fxLabel(deleted)}`, { kind: 'success', duration: 2500 });
+}
 // What an operation made, as project paths, from whatever the server named ({path} | {paths} | {name} | {dest}).
 function fxMade(res) {
   if (Array.isArray(res?.paths)) return res.paths.filter((p) => typeof p === 'string');
@@ -750,6 +890,12 @@ function fxMenuOpen(r, x, y) {
     ['zip', 'Compress to ZIP', '', !!rows.length, () => fxZip(rows)],
     ...(zip ? [['unzip', 'Extract here', '', true, () => fxUnzip(rows[0])]] : []),
     '-',
+    ['rename', 'Rename…', 'F2', rows.length === 1 && !!r, () => fxRenameStart(r)],
+    ['newfile', 'New file…', '', !r || r.e.dir, () => fxNewStart('file', dest)],
+    ['newdir', 'New folder…', '', !r || r.e.dir, () => fxNewStart('dir', dest)],
+    '-',
+    ['delete', 'Delete', FX_MAC ? '⌫' : 'Del', !!rows.length, () => fxConfirmDelete(rows)],
+    '-',
     ['path', paths.length > 1 ? 'Copy paths' : 'Copy path', '', !!rows.length, async () => {
       toast((await copyToClipboard(paths.join('\n'))) ? `${paths.length > 1 ? 'Paths' : 'Path'} copied` : "Couldn't copy", { duration: 2000 });
     }],
@@ -767,7 +913,8 @@ function fxMenuOpen(r, x, y) {
     b.setAttribute('role', 'menuitem');
     b.append(el('span', 'cm-l', label));
     if (keys) b.append(el('span', 'cm-h', keys));
-    b.onclick = () => { fxMenuClose(act !== 'open' && act !== 'ask'); run(); };
+    if (act === 'delete') b.classList.add('fx-danger');
+    b.onclick = () => { fxMenuClose(!['open', 'ask', 'rename', 'newfile', 'newdir', 'delete'].includes(act)); run(); };
     m.append(b);
   }
   m.addEventListener('keydown', (e) => {

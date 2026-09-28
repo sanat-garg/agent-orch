@@ -1320,3 +1320,7 @@ card opens all-machines window, dots gone, tests pass
 ## 2026-09-28 15:05 — #455 Plain-language refill status instead of 'Workers: 19 free · 12 ready → topping up' [done (check passed)]
 
 Queue now shows plain-language refill status with an explanation popover
+
+## 2026-09-28 15:06 — #419 Files tab ui: Rename, New file, New folder and Delete in the context menu [done (check passed)]
+
+Files menu has Rename, New file/folder and Delete; tests pass

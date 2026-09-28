@@ -3,13 +3,13 @@
   --fx-folder: #7cc3f5; --fx-folder-back: #5aa9e6; --fx-folder-line: rgba(255, 255, 255, .45);
   --fx-page: #ffffff; --fx-page-line: #cfcbbf; --fx-page-fold: #f0eee6; --fx-page-text: #6b675e;
   --fx-sel: var(--accent-fill, #b4553a); --fx-sel-text: var(--accent-text, #fff); --fx-sel-idle: rgba(120, 116, 106, .2);
-  --fx-stripe: rgba(0, 0, 0, .028);
+  --fx-stripe: rgba(0, 0, 0, .028); --fx-danger-text: #fff;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --fx-folder: #62b0ea; --fx-folder-back: #4a98d6; --fx-folder-line: rgba(255, 255, 255, .3);
     --fx-page: #3a3834; --fx-page-line: #5a5750; --fx-page-fold: #2c2b28; --fx-page-text: #b3afa5;
-    --fx-sel-idle: rgba(255, 255, 255, .12); --fx-stripe: rgba(255, 255, 255, .03);
+    --fx-sel-idle: rgba(255, 255, 255, .12); --fx-stripe: rgba(255, 255, 255, .03); --fx-danger-text: #4a0e0b;
   }
 }
 
@@ -151,6 +151,19 @@ a.fx-ql-file { color: var(--text); text-decoration: none; }
 .fx-menu .cm-opt::after { display: none; }
 .fx-menu .cm-h { margin-left: 16px; }
 .fx-menu .cm-opt:disabled .cm-h { opacity: .6; }
+.fx-menu .cm-opt.fx-danger:not(:disabled) .cm-l { color: var(--danger); }
+/* a name typed in place (Rename, New file/folder) */
+.fx-edit { min-width: 0; height: 22px; padding: 0 5px; border: 1px solid var(--accent); border-radius: 5px; outline: 0; background: var(--panel);
+  color: var(--text); font: inherit; font-size: 13px; box-shadow: 0 0 0 3px var(--focus); user-select: text; -webkit-user-select: text; }
+.fx-row .fx-edit { flex: 1; margin-right: 8px; }
+.fx-item .fx-edit { width: 100%; font-size: 12.5px; text-align: center; }
+.fx-edit[readonly] { opacity: .6; }
+/* the Delete confirm: a small alert (a bottom sheet on phones) with a red Delete */
+.modal-panel.fx-cf-panel { width: min(400px, 100%); padding: 20px 20px 16px; }
+.fx-cf-panel h2 { margin: 0; font-size: 17px; overflow-wrap: anywhere; }
+.fx-cf-acts { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.btn.fx-cf-del { background: var(--danger); border-color: var(--danger); color: var(--fx-danger-text); }
+.btn.fx-cf-del:hover { border-color: var(--danger); filter: brightness(1.08); }
 /* zip/unzip in progress: a slim indeterminate bar over the path bar */
 .fx-busy { display: flex; align-items: center; gap: 10px; min-height: 28px; padding: 0 12px; border-top: 1px solid var(--border); flex: none;
   font-size: 12px; color: var(--muted); }
@@ -216,6 +229,8 @@ a.fx-ql-file { color: var(--text); text-decoration: none; }
   .fx-more { width: 44px; height: 44px; opacity: 1; }
   .fx-item .fx-more { width: 32px; height: 32px; top: 0; right: 0; }
   .fx-menu .cm-opt { min-height: 44px; font-size: 15px; }
+  .fx-edit, .fx-item .fx-edit { height: 34px; font-size: 16px; } /* 16px: no zoom on focus in iOS Safari */
+  .fx-cf-acts .btn { height: 44px; min-width: 88px; }
   .fx-ql .icon-btn { min-width: 44px; min-height: 44px; }
 }
 /* phones: the search takes its own row; the list is one column with size and date under the name (like Files on iOS) */
@@ -249,4 +264,11 @@ a.fx-ql-file { color: var(--text); text-decoration: none; }
   .modal-panel.fx-ql-panel { width: 100%; height: 100dvh; max-height: none; border-radius: 0; padding-top: env(safe-area-inset-top); }
   .fx-ql-body { border-radius: 0; padding-bottom: env(safe-area-inset-bottom); }
   .fx-md-doc { padding: 16px 16px 32px; }
+}
+/* the Delete confirm is a bottom sheet here (.modal.sheet), with full-width buttons */
+@media (max-width: 800px) {
+  .modal.fx-confirm { padding: 0; }
+  .modal-panel.fx-cf-panel { width: 100%; padding: 0 20px max(16px, env(safe-area-inset-bottom)); }
+  .fx-cf-panel h2 { margin-top: 14px; }
+  .fx-cf-acts .btn { flex: 1; }
 }

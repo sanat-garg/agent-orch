@@ -454,7 +454,7 @@ document.addEventListener('keydown', (e) => {
 }, true);
 
 // ----- the Browser tab: its profile, the prompt box and the agent's activity
-const BX = { sel: null, tasks: [], err: '', pin: null, ap: new Map(), sending: false, timer: 0 }; // ap: task id → held approvals
+const BX = { sel: null, tasks: [], err: '', pin: null, ap: new Map(), sending: false, timer: 0, more: false }; // ap: task id → held approvals; more: every earlier prompt shows
 const bxProfiles = () => (BV.data?.nodes || []).filter((n) => n.capable).flatMap((n) => n.profiles.map((p) => ({ n, p })));
 function bxShow() {
   bwLoad(); // fresh profiles; bxRenderPicker opens the chosen one once they are in
@@ -483,7 +483,7 @@ function bxSelect(node, identity, name) {
   const same = BX.sel && bvKey(BX.sel.node, BX.sel.identity) === bvKey(node, identity);
   BX.sel = { node, identity, name: name || node };
   store.set('cw.bx', bvKey(node, identity));
-  if (!same) { BX.tasks = []; BX.pin = null; BX.err = ''; }
+  if (!same) { BX.tasks = []; BX.pin = null; BX.err = ''; BX.more = false; }
   bxRenderPicker();
   bxOpenSel();
   bxRenderActivity();
@@ -541,12 +541,13 @@ function bxOnOrch(msg) {
   const mine = BX.tasks.some((t) => t.id === id) || (msg.t === 'otask' && msg.task.browser === BX.sel.identity && (msg.task.node || msg.task.run_on || 'controller') === BX.sel.node);
   if (mine) bxSoon();
 }
-// The task the panel follows: the one just sent, else a running one, else a queued one, else the newest.
-function bxShown() {
+// The task the panel follows: the pinned one (just sent, or tapped in Earlier prompts), else the latest: a running one,
+// else a queued one, else the newest.
+function bxLatest() {
   const ts = BX.tasks;
-  return ts.find((t) => t.id === BX.pin) || ts.find((t) => t.status === 'running') || ts.find((t) => t.status === 'queued')
-    || ts.reduce((a, t) => (!a || t.id > a.id ? t : a), null);
+  return ts.find((t) => t.status === 'running') || ts.find((t) => t.status === 'queued') || ts.reduce((a, t) => (!a || t.id > a.id ? t : a), null);
 }
+const bxShown = () => BX.tasks.find((t) => t.id === BX.pin) || bxLatest();
 const bxLive = (t) => t && ['running', 'queued'].includes(t.status);
 function bxRenderBusy() {
   const s = BV.st, t = bxShown(), m = BVM.tab;
@@ -568,13 +569,19 @@ function bxRenderActivity() {
     return;
   }
   const head = el('div', 'bx-head');
-  const st = el('span', `bx-st ${t.status}`);
-  st.append(el('span', `dot ${t.status === 'running' ? 'wait' : t.status === 'done' ? 'on' : t.status === 'failed' ? 'warn' : ''}`), el('span', '', BX_STATUS[t.status] || t.status));
+  const st = bxDot(t);
+  st.append(el('span', '', BX_STATUS[t.status] || t.status));
   const title = el('button', 'link-btn bx-title', `#${t.id} ${t.title || ''}`);
   title.type = 'button';
   title.title = 'Open the task';
   title.onclick = () => showTask(t.id);
   head.append(st, title);
+  if (t !== bxLatest()) {
+    const back = el('button', 'link-btn bx-back', 'Back to latest');
+    back.type = 'button';
+    back.onclick = () => { BX.pin = null; bxRenderActivity(); };
+    head.append(back);
+  }
   if (bxLive(t)) {
     const stop = el('button', 'btn small danger', 'Stop');
     stop.type = 'button';
@@ -606,6 +613,51 @@ function bxRenderActivity() {
     r.innerHTML = md(t.resultText);
     box.append(r);
   }
+  bxRenderEarlier(box, t);
+}
+// A status dot in a .bx-st span (the head adds the status's words).
+function bxDot(t) {
+  const st = el('span', `bx-st ${t.status}`);
+  st.append(el('span', `dot ${t.status === 'running' ? 'wait' : t.status === 'done' ? 'on' : t.status === 'failed' ? 'warn' : ''}`));
+  st.title = BX_STATUS[t.status] || t.status;
+  return st;
+}
+// Earlier prompts: the profile's other tasks, newest first (8, then Show more). A row shows that task above;
+// Ask again puts its prompt back in the box, unsent.
+function bxRenderEarlier(box, shown) {
+  const rest = BX.tasks.filter((t) => t !== shown).sort((a, b) => b.id - a.id);
+  if (!rest.length) return;
+  const sec = el('section', 'bx-earlier');
+  sec.append(el('h3', '', 'Earlier prompts'));
+  const ul = el('ul');
+  for (const t of BX.more ? rest : rest.slice(0, 8)) {
+    const li = el('li', 'bx-erow');
+    const row = el('button', 'bx-ebtn');
+    row.type = 'button';
+    row.title = t.title || '';
+    const ts = t.finishedAt ?? t.finished_at ?? t.startedAt ?? t.created_at ?? t.createdAt; // seconds
+    row.append(bxDot(t), el('span', 'bx-eid', `#${t.id}`), el('span', 'bx-etitle', t.title || ''));
+    if (ts) row.append(el('span', 'bx-etime muted', relTime(ts < 1e12 ? ts * 1000 : ts)));
+    row.onclick = () => { BX.pin = t.id; bxRenderActivity(); };
+    const again = el('button', 'link-btn bx-again', 'Ask again');
+    again.type = 'button';
+    again.title = 'Put this prompt back in the box';
+    again.onclick = () => {
+      bxIn.value = t.prompt || t.title || '';
+      bxIn.dispatchEvent(new Event('input')); // grows the box and runs bxSyncSend()
+      bxIn.focus();
+    };
+    li.append(row, again);
+    ul.append(li);
+  }
+  sec.append(ul);
+  if (!BX.more && rest.length > 8) {
+    const more = el('button', 'link-btn bx-more', 'Show more');
+    more.type = 'button';
+    more.onclick = () => { BX.more = true; bxRenderActivity(); };
+    sec.append(more);
+  }
+  box.append(sec);
 }
 
 // The prompt box: Enter sends on a desktop (Shift+Enter is a new line); a phone's return key is a new line.

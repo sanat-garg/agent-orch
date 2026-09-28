@@ -107,7 +107,26 @@
 .bx-result > :first-child { margin-top: 0; }
 .bx-result > :last-child { margin-bottom: 0; }
 .bx-empty { font-size: 13px; }
-@media (pointer: coarse) { .bx-bar select { height: 44px; font-size: 16px; } }
+.bx-back.link-btn { flex: none; }
+/* Earlier prompts (browser.js bxRenderEarlier): 36px rows, each a button to show that task plus Ask again. */
+.bx-earlier { margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--border); }
+.bx-earlier h3 { margin: 0 0 4px; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.bx-earlier ul { list-style: none; margin: 0; padding: 0; }
+.bx-erow { display: flex; align-items: center; gap: 4px; min-height: 36px; border-radius: 8px; }
+.bx-erow:hover { background: var(--panel); }
+.bx-ebtn { flex: 1; min-width: 0; height: 36px; display: flex; align-items: center; gap: 8px; padding: 0 8px; border: 0; border-radius: 8px;
+  background: none; color: var(--text); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.bx-ebtn:focus-visible, .bx-again:focus-visible { outline: 2px solid var(--focus); }
+.bx-eid { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+.bx-etitle { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bx-etime { flex: none; font-size: 12px; }
+.bx-again.link-btn { flex: none; font-size: 12px; white-space: nowrap; }
+.bx-more.link-btn { margin-top: 2px; font-size: 12.5px; }
+@media (pointer: coarse) {
+  .bx-bar select { height: 44px; font-size: 16px; }
+  .bx-erow, .bx-ebtn { min-height: 44px; }
+  .bx-again.link-btn, .bx-more.link-btn, .bx-back.link-btn { min-height: 44px; min-width: 44px; }
+}
 @media (max-width: 800px) {
   .bx-bar { padding: 8px 8px 4px; }
   .bx-bar .icon-btn { width: 44px; height: 44px; }

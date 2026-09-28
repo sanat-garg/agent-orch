@@ -996,3 +996,6 @@ Conflicts resolved; phone range chip and heatmap tests both pass
 ## 2026-09-28 12:36 — #350 Verifier AUDIT #65/#66: runner word boundaries, path-like snippets skipped, 2>&1, env prefixes and a leading cd accepted [done (check passed)]
 
 Verifier accepts env/cd prefixes and 2>&1, and skips file names
+## 2026-09-28 12:36 — #354 Browser tab ui: an Earlier prompts list under the activity panel with tap-to-show and Ask again [done (check passed)]
+
+Browser tab lists earlier prompts with show, Back to latest and Ask again

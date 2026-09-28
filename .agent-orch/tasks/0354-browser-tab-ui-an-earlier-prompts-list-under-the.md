@@ -13,3 +13,7 @@ Feature in public/browser.js and public/browser.css only (app.js, app.css, index
 ## Done when
 
 `npm test -- test/ui-browser-view.test.mjs test/ui-static.test.mjs` passes and `grep -q 'bx-earlier' public/browser.js` and `grep -q 'bx-earlier' public/browser.css`
+
+## Result — done (check passed) (2026-09-28 12:36)
+
+AGENT-ORCH-STATUS: done — Browser tab lists earlier prompts with show, Back to latest and Ask again

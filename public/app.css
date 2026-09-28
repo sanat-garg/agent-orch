@@ -35,15 +35,16 @@
   --focus: rgba(201, 100, 66, 0.28);
   --chart-2: #3b6fa0;
   --chart-3: #6a8f3a;
-  /* Task phase colours (the cards' phase strip, app.js STRIP, and its legend in the Queue sheet). */
-  --ph-queued: #a8a398;
-  --ph-prep: #2f6fdb;
-  --ph-agent: #c96442;
-  --ph-check: #7d4fc4;
-  --ph-ship: #1d8a86;
-  --ph-done: #2e7d4f;
-  --ph-failed: #c62f26;
-  --ph-limit: #c98a00;
+  /* Task phase colours (app.js phaseBar: the cards' phase strip and the drawer's Timeline; the Queue sheet's legend):
+     muted and desaturated so the strip stays quiet (slate, steel blue, clay, dusty violet, sage, soft green, brick, ochre). */
+  --ph-queued: #a3a7ad;
+  --ph-prep: #7d95b0;
+  --ph-agent: #c4876c;
+  --ph-check: #9a8ab3;
+  --ph-ship: #7ea69c;
+  --ph-done: #8fb08a;
+  --ph-failed: #b86b62;
+  --ph-limit: #c4a466;
   --pace-over: #c2410c;
   --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
   --scroll: rgba(0, 0, 0, 0.18);
@@ -86,14 +87,14 @@
     --focus: rgba(217, 119, 87, 0.35);
     --chart-2: #7eaed8;
     --chart-3: #a3c77a;
-    --ph-queued: #7c786f;
-    --ph-prep: #6ea8ff;
-    --ph-agent: #d97757;
-    --ph-check: #b596f0;
-    --ph-ship: #4fc4bd;
-    --ph-done: #7fcf99;
-    --ph-failed: #f28b82;
-    --ph-limit: #f0c46c;
+    --ph-queued: #6f747b;
+    --ph-prep: #6d85a0;
+    --ph-agent: #b67a60;
+    --ph-check: #8a7ba3;
+    --ph-ship: #6f968c;
+    --ph-done: #7a9c76;
+    --ph-failed: #a8615a;
+    --ph-limit: #b09358;
     --pace-over: #f08a3c;
     --scroll: rgba(255, 255, 255, 0.14);
     --scroll-hover: rgba(255, 255, 255, 0.3);
@@ -1350,15 +1351,21 @@ label.st-row, label.st-text { cursor: pointer; }
 .notice.moved { cursor: pointer; }
 .tcard .chev { color: var(--faint); flex: none; }
 /* The phase strip (app.js syncPhaseStrip): a segmented bar just above the card's lower border. */
-.tcard:has(> .tc-strip) { position: relative; padding-bottom: 13px; }
-.tc-strip { position: absolute; left: 10px; right: 10px; bottom: 4px; height: 3px; display: flex; gap: 2px; }
-.tc-strip i { flex: 1; border-radius: 2px; background: var(--ph); opacity: .18; }
-.tc-strip i.past { opacity: 1; }
-.tc-strip i.cur, .tc-strip i.limit { opacity: 1; animation: tc-pulse 1.6s ease-in-out infinite; }
-.tc-strip i.limit, .tc-strip[data-state="limit"] i.past { --ph: var(--ph-limit); }
-.tc-strip i.failed { opacity: 1; --ph: var(--ph-failed); }
-.tc-strip i.stopped { opacity: .6; }
-.tc-strip[data-state="failed"] i.past, .tc-strip[data-state="stopped"] i.past { opacity: .55; }
+/* A phase bar (app.js phaseBar), the same on cards and in the drawer's Timeline: segments as wide as each step's time,
+   rounded ends, the live step with a slow shimmer (none under reduced motion). */
+.ph-bar { display: flex; overflow: hidden; border-radius: 99px; }
+.ph-bar i { flex: 1 1 0; min-width: 3px; background-color: var(--ph, var(--ph-queued)); }
+.ph-bar i.bad { --ph: var(--ph-failed); }
+.ph-bar i.limit { --ph: var(--ph-limit); }
+.ph-bar i.stopped { opacity: .5; }
+.ph-bar i.cur, .ph-bar i.limit { background-image: linear-gradient(90deg, transparent, rgb(255 255 255 / .38), transparent);
+  background-size: 50% 100%; background-repeat: no-repeat; animation: ph-shimmer 2.8s ease-in-out infinite; }
+@keyframes ph-shimmer { from { background-position: -100% 0; } to { background-position: 200% 0; } }
+@media (prefers-reduced-motion: reduce) { .ph-bar i.cur, .ph-bar i.limit { animation: none; background-image: none; } }
+/* On a card: a 2px line just above its bottom border, dimmed until the card is hovered or selected. */
+.tcard:has(> .tc-strip) { position: relative; padding-bottom: 9px; }
+.tc-strip { position: absolute; left: 10px; right: 10px; bottom: 3px; height: 2px; opacity: .5; transition: opacity .15s; }
+.tcard:hover > .tc-strip, .tcard:focus-visible > .tc-strip, .tcard.active > .tc-strip { opacity: 1; }
 [data-tone="queued"] { --ph: var(--ph-queued); }
 [data-tone="prep"] { --ph: var(--ph-prep); }
 [data-tone="agent"] { --ph: var(--ph-agent); }
@@ -1367,11 +1374,9 @@ label.st-row, label.st-text { cursor: pointer; }
 [data-tone="done"] { --ph: var(--ph-done); }
 [data-tone="failed"] { --ph: var(--ph-failed); }
 [data-tone="limit"] { --ph: var(--ph-limit); }
-@keyframes tc-pulse { 50% { opacity: .45; } }
-@media (prefers-reduced-motion: reduce) { .tc-strip i.cur, .tc-strip i.limit { animation: none; } }
 .tc-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; font-size: 11.5px; color: var(--muted); }
 .tc-legend .lg { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
-.tc-legend i { width: 12px; height: 3px; border-radius: 2px; background: var(--ph); }
+.tc-legend i { width: 12px; height: 2px; border-radius: 99px; background: var(--ph); }
 
 /* status glyph: one shape per state */
 .tc-glyph { position: relative; width: 22px; height: 22px; flex: none; border-radius: 50%; display: grid; place-items: center; }
@@ -1500,14 +1505,7 @@ label.st-row, label.st-text { cursor: pointer; }
 /* A remote run's timeline (app.js timelineSection): one thin bar of steps sized by their time with 2px surface gaps;
    done steps neutral (--tl-done: >= 3:1 on the drawer in both themes), the step in progress in the running blue, the
    step it failed in red. The step list under it carries every value in text. */
-.tl-bar { --tl-done: #8a867c; display: flex; gap: 2px; height: 6px; margin: 2px 0 8px; }
-@media (prefers-color-scheme: dark) { .tl-bar { --tl-done: #7c786f; } }
-.tl-bar i { min-width: 3px; background: var(--tl-done); }
-.tl-bar i:first-child { border-radius: 3px 0 0 3px; }
-.tl-bar i:last-child { border-radius: 0 3px 3px 0; }
-.tl-bar i:only-child { border-radius: 3px; }
-.tl-bar i.cur { background: var(--run); animation: pulse 1.6s ease-in-out infinite; }
-.tl-bar i.bad { background: var(--danger); }
+.tl-bar { height: 4px; margin: 4px 0 8px; }
 .tl-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .tl-steps li { display: inline-flex; align-items: baseline; gap: 5px; }
 .tl-steps .n { color: var(--text); }

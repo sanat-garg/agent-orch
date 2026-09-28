@@ -2798,6 +2798,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const project = getProject(task.project_id);
     // A remote task always has its own checkout, so it shares its project like a worktree task.
     running.set(task.id, { abort, kind: task.kind, only: reservedWork(task), projectId: task.project_id, startedAt: now(), node, prevNode, adopt, assigned,
+      // phaseLog: [[phase, ms]] every step this run has been on (the cards' proportional phase strip); a remote job starts
+      // in its worker's queue, a local one with the agent.
+      phaseLog: [[node !== LOCAL_NODE ? 'queued' : 'running', Date.now()]],
       wt: task.kind === 'work' && !isBrowserTask(task) && (node !== LOCAL_NODE || worktreeCapable(project)), agent: adopt?.agent || routeNow(task, project).agent });
     pushState();
     execute(task, abort.signal)
@@ -3273,7 +3276,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         if (p) e.progress = { tools: Number.isFinite(p.tools) ? p.tools : 0, files: Number.isFinite(p.files) ? p.files : 0, last: String(p.last || '').slice(0, 200) };
         if (msg.outcome) e.outcome = msg.outcome;
         const r = running.get(id);
-        if (r && list.at(-1) === e && r.phase !== msg.phase) { r.phase = msg.phase; r.phaseAt = e.at; pushTask(id); }
+        if (r && list.at(-1) === e && r.phase !== msg.phase) { r.phase = msg.phase; r.phaseAt = e.at; logPhase(r, msg.phase, e.at); pushTask(id); }
         saveRun('phases');
       };
       // job.error: kept on the run (the latest 20; a repeat of the last one counts up) and logged on the task.
@@ -4217,6 +4220,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       // The step a running task is on (a worker's job.phase, or this server's check/merge; null = the agent) and since
       // when (ms): the cards' phase strip.
       phase: running.get(t.id)?.phase || null, phase_at: running.get(t.id)?.phaseAt || null,
+      // phase_log: [[phase, ms]] each step of the current run so far, oldest first (null when it isn't running).
+      phase_log: running.get(t.id)?.phaseLog || null,
       // Held browser/connector calls waiting for the owner (the approval gate): the task shows 'Awaiting approval'.
       approvals: t.status === 'running' ? approvals.pending(t.id).map(({ args, ...a }) => a) : [],
     };
@@ -4351,7 +4356,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const r = running.get(id);
     if (!r || r.phase === phase) return;
     Object.assign(r, { phase, phaseAt: Date.now() });
+    logPhase(r, phase, r.phaseAt);
     pushTask(id);
+  }
+  function logPhase(r, phase, at) {
+    if (!r.phaseLog || r.phaseLog.at(-1)?.[0] === phase) return;
+    r.phaseLog.push([phase, at]);
+    if (r.phaseLog.length > 40) r.phaseLog.splice(1, r.phaseLog.length - 40);
   }
   function pushTask(id) {
     const t = taskView(getTask(id));

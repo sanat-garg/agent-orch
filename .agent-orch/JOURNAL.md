@@ -1557,3 +1557,7 @@ Sidebar footer has no Machines button; usage card opens Machines
 ## 2026-09-28 18:37 — #495 Integrate #476: Browser permissions: allow everything except the owner's deny list [done (check passed)]
 
 conflicts resolved; Browser "Don't allow" section kept, allowlist tests pass
+
+## 2026-09-28 18:47 — #497 Task card progress: timeline-style strip, proportional to time, premium muted colours [done (check passed)]
+
+Cards and drawer share one proportional, muted 2px phase bar

@@ -13,3 +13,7 @@ Redo the phase strip on task cards (from #479/#487; public/app.js taskCard, app.
 ## Done when
 
 `node --test test/ui-phase-strip*.test.mjs` passes (proportional widths, muted palette vars for both themes, ≤2px, shared with drawer Timeline)
+
+## Result — done (check passed) (2026-09-28 18:47)
+
+AGENT-ORCH-STATUS: done — Cards and drawer share one proportional, muted 2px phase bar

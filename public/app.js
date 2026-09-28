@@ -6766,62 +6766,74 @@ function fillCard(b, id) {
   if (b.isConnected) { syncReviewPanel(b, t); syncApprovalPanels(b, t); }
   else queueMicrotask(() => { if (b.isConnected) { syncReviewPanel(b, O.tasks.get(id)); syncApprovalPanels(b, O.tasks.get(id)); } });
 }
-// The phase strip along a card's bottom edge: the job's steps (the drawer Timeline's phases) as coloured segments, done
-// ones filled, the current one pulsing, later ones faint; a failed task's step in red, a limit wait in amber. The step
-// comes from the task view (phase: a worker's job.phase or this server's check/merge; none while running = the agent).
-const STRIP = [['queued', 'Queued'], ['cloning', 'Cloning'], ['installing', 'Installing'], ['running', 'Running agent'], ['checking', 'Checking'],
-  ['committing', 'Committing'], ['pushing', 'Pushing'], ['merging', 'Merging'], ['done', 'Done']];
-const STRIP_OF = { fetching: 'cloning' };
+// The phase strip along a card's bottom edge, drawn by phaseBar like the drawer's Timeline: one segment per step of the
+// task's latest run, each as wide as the time it took (the queue wait, then the run's phase_log from the server), the step
+// in progress growing live; a failed task's last step in brick, a limit wait in ochre, a done task capped in green,
+// nothing drawn for steps still to come. Its hover title lists the steps with their times ('Agent 4m 12s · Checking 38s').
+const PHASE_LABEL = { queued: 'Queued', cloning: 'Cloning', fetching: 'Fetching', installing: 'Installing', running: 'Agent', checking: 'Checking',
+  committing: 'Committing', pushing: 'Pushing', merging: 'Merging', done: 'Done' };
 const STRIP_LEGEND = [['queued', 'Queued'], ['prep', 'Preparing'], ['agent', 'Agent'], ['check', 'Checking'], ['ship', 'Pushing / merging'],
   ['done', 'Done'], ['failed', 'Failed'], ['limit', 'Waiting on limit']];
-const stripTone = (k) => ({ cloning: 'prep', installing: 'prep', running: 'agent', checking: 'check', committing: 'ship', pushing: 'ship', merging: 'ship' })[k] || k;
+const stripTone = (k) => ({ cloning: 'prep', fetching: 'prep', installing: 'prep', running: 'agent', checking: 'check', committing: 'ship', pushing: 'ship', merging: 'ship' })[k] || k;
 function stripDur(sec) {
   sec = Math.max(0, Math.round(sec));
   return sec < 60 || sec >= 3600 ? fmtDur(sec) : `${Math.floor(sec / 60)}m ${sec % 60}s`;
 }
-// Where a task is on the strip: {at: index of its step, state: 'cur' | 'failed' | 'limit' | 'stopped' | 'done', since}.
-function stripState(t, s) {
-  const idx = (k) => Math.max(0, STRIP.findIndex(([x]) => x === (STRIP_OF[k] || k)));
-  const nowMs = Date.now(), started = (t.started_at || 0) * 1000;
-  switch (t.status) {
-    case 'running': {
-      const ph = t.phase && t.phase !== 'done' ? t.phase : t.phase === 'done' ? 'checking' : 'running';
-      return { at: idx(ph), state: t.waiting_for || s.cls.includes('awaiting') ? 'limit' : 'cur', since: t.phase_at || started || nowMs };
-    }
-    case 'done': return { at: STRIP.length - 1, state: 'done', since: (t.finished_at || 0) * 1000 || nowMs, took: t.finished_at && t.started_at ? t.finished_at - t.started_at : null };
-    case 'failed': return { at: idx(t.phase || (t.has_verify_failure ? 'checking' : t.started_at ? 'running' : 'queued')), state: 'failed', since: (t.finished_at || 0) * 1000 || nowMs };
-    case 'needs_integration': return { at: idx('merging'), state: 'limit', since: (t.finished_at || 0) * 1000 || nowMs };
-    case 'paused': return { at: idx(t.phase || 'running'), state: 'stopped', since: started || nowMs };
-    case 'cancelled': return { at: idx(t.phase || (t.started_at ? 'running' : 'queued')), state: 'stopped', since: (t.finished_at || 0) * 1000 || nowMs };
-    default: return { at: 0, state: s.cls === 'limited' ? 'limit' : 'cur', since: (t.created_at || 0) * 1000 || nowMs };
+const PH_LOG = new Map(); // task id → the phase_log last seen while it ran (a finished task's view carries none)
+// A task's strip: [{phase, ms, cls, since}], oldest first (since: the live step's virtual start, for the ticker).
+function stripSegs(t, s) {
+  const nowMs = Date.now(), created = (t.created_at || 0) * 1000, started = (t.started_at || 0) * 1000;
+  const live = t.status === 'running', waiting = live && (t.waiting_for || s.cls.includes('awaiting'));
+  if (!started || t.status === 'queued') {
+    const cls = t.status === 'queued' ? (s.cls === 'limited' ? 'limit' : 'cur') : 'stopped';
+    return [{ phase: 'queued', ms: Math.max(0, nowMs - created), cls, since: t.status === 'queued' ? created || nowMs : null }];
   }
+  if (t.phase_log?.length) PH_LOG.set(t.id, t.phase_log);
+  const fin = (t.finished_at || 0) * 1000, end = live || t.status === 'paused' || !fin ? nowMs : fin;
+  let log = (live && t.phase_log) || PH_LOG.get(t.id);
+  if (!log?.length || log[0][1] < started - 5000) log = [['running', started]]; // none seen, or an earlier run's
+  const segs = created && started > created ? [{ phase: 'queued', ms: started - created }] : [];
+  log.forEach(([phase, at], n) => {
+    const ms = Math.max(0, (n + 1 < log.length ? log[n + 1][1] : end) - at);
+    if (segs.at(-1)?.phase === phase) segs.at(-1).ms += ms;
+    else segs.push({ phase, ms });
+  });
+  const last = segs.at(-1);
+  if (live) Object.assign(last, { cls: waiting ? 'limit' : 'cur', since: nowMs - last.ms });
+  else if (t.status === 'failed') last.cls = 'bad';
+  else if (t.status === 'paused' || t.status === 'cancelled') last.cls = 'stopped';
+  else if (t.status === 'needs_integration') segs.push({ phase: 'merging', ms: Math.max(0, nowMs - end), cls: 'limit', since: end });
+  else if (t.status === 'done') segs.push({ phase: 'done', ms: 0 });
+  return segs;
 }
-function stripTitle(st) {
-  const name = STRIP[st.at][1], ago = stripDur((Date.now() - st.since) / 1000);
-  if (st.state === 'done') return st.took != null ? `Done · took ${stripDur(st.took)}` : 'Done';
-  if (st.state === 'failed') return `Failed while ${name.toLowerCase()} · ${ago} ago`;
-  if (st.state === 'stopped') return `Stopped at ${name.toLowerCase()}`;
-  if (st.state === 'limit') return `${name} · waiting · ${ago}`;
-  return `${name} · ${ago}`;
+// One phase bar, the cards' strip and the drawer's Timeline alike: segs [{phase, ms, cls, since}] as segments sized by
+// time and coloured by phase (--ph-* via data-tone); a live one (since) keeps growing with the ticker below.
+function phaseBar(bar, segs, name = (p) => PHASE_LABEL[p] || p) {
+  const timed = segs.filter((g) => g.phase !== 'done'), dur = (g) => `${name(g.phase)} ${stripDur(g.ms / 1000)}`;
+  bar.classList.add('ph-bar');
+  bar.replaceChildren(...segs.map((g) => {
+    const i = el('i', g.cls || '');
+    i.dataset.phase = g.phase;
+    i.dataset.tone = stripTone(g.phase);
+    i.style.flexGrow = String(Math.max(1, g.ms));
+    if (g.since != null) i.dataset.since = g.since;
+    i.title = g.phase === 'done' ? 'Done' : dur(g);
+    return i;
+  }));
+  bar.title = timed.map(dur).join(' · ');
+  bar.setAttribute('role', 'img');
+  bar.setAttribute('aria-label', `Time per step: ${timed.map(dur).join(', ')}`);
+  return bar;
 }
 function syncPhaseStrip(b, t, s) {
   let bar = b.querySelector(':scope > .tc-strip');
   if (t.kind === 'review') { bar?.remove(); return; } // a checkpoint never runs
   if (!bar) {
-    bar = el('span', 'tc-strip');
-    bar.setAttribute('role', 'img');
-    for (const [k] of STRIP) { const i = el('i'); i.dataset.phase = k; i.dataset.tone = stripTone(k); bar.append(i); }
-    bar.addEventListener('pointerenter', () => { if (bar._st) bar.title = stripTitle(bar._st); }); // the time, fresh on hover
-    b.append(bar);
+    bar = b.appendChild(el('span', 'tc-strip'));
+    bar.addEventListener('pointerenter', () => bar._redo?.()); // the live step's time, fresh on hover
   }
-  const st = stripState(t, s);
-  bar._st = st;
-  bar.dataset.state = st.state;
-  [...bar.children].forEach((i, n) => {
-    i.className = n < st.at ? 'past' : n > st.at ? '' : st.state === 'done' ? 'past' : st.state;
-  });
-  bar.title = stripTitle(st);
-  bar.setAttribute('aria-label', `Progress: ${bar.title}`);
+  bar._redo = () => phaseBar(bar, stripSegs(t, s));
+  bar._redo();
 }
 // The legend of the strip's colours (the Queue sheet's header).
 function phaseLegend() {
@@ -7558,8 +7570,8 @@ function section(title) {
   return s;
 }
 
-// A remote run's timeline (job.phase from its worker): one thin bar whose segments take each step's share of the time
-// (a 2px gap between them; the step in progress in the running blue, done ones neutral, the step it failed in red),
+// A remote run's timeline (job.phase from its worker): one phaseBar (the cards' strip, a little taller) whose segments
+// take each step's share of the time in its phase colour (the step it failed in brick),
 // then the same steps as text, which carries every value (the bar's hover titles only repeat it; a step cut short when
 // the run stopped says so), the latest progress hints while the agent runs, and the errors the worker reported with
 // their stderr or stack. The step in progress counts up live (the ticker below).
@@ -7572,23 +7584,19 @@ function timelineSection(run, live) {
   const steps = phases.filter((p) => p.phase !== 'done'), end = phases.find((p) => p.phase === 'done');
   const ms = (p) => p.ms ?? Math.max(0, Date.now() - p.at);
   if (steps.length) {
-    const bar = el('div', 'tl-bar'), list = el('ol', 'tl-steps');
+    const list = el('ol', 'tl-steps'), segs = [];
     steps.forEach((p, i) => {
       const last = i === steps.length - 1, cur = live && !end && last && p.ms == null;
       const bad = last && end && end.outcome !== 'ok';
-      const seg = el('i', cur ? 'cur' : bad ? 'bad' : ''), name = PHASE_NAME[p.phase] || p.phase;
-      seg.style.flex = `${Math.max(1, ms(p))} 0 3px`;
-      seg.title = `${name} · ${fmtDur(ms(p) / 1000)}${p.cut ? ' · stopped' : ''}`;
+      const name = PHASE_NAME[p.phase] || p.phase;
+      segs.push({ phase: p.phase, ms: ms(p), cls: cur ? 'cur' : bad ? 'bad' : '', since: cur ? p.at : null });
       const li = el('li', cur ? 'cur' : bad ? 'bad' : ''), time = el('span', 't', `${fmtDur(ms(p) / 1000)}${cur ? '…' : p.cut ? ' · stopped' : ''}`);
-      if (cur) { time.dataset.since = p.at; seg.dataset.since = p.at; }
+      if (cur) time.dataset.since = p.at;
       li.append(el('span', 'n', name), time);
-      bar.append(seg);
       list.append(li);
     });
     if (end) list.append(el('li', end.outcome === 'ok' ? 'end' : 'end bad', end.outcome === 'ok' ? 'Done' : OUTCOME_TEXT[end.outcome] || end.outcome.replace(/_/g, ' ')));
-    bar.setAttribute('role', 'img');
-    bar.setAttribute('aria-label', `Time per step: ${steps.map((p) => `${PHASE_NAME[p.phase] || p.phase} ${fmtDur(ms(p) / 1000)}`).join(', ')}`);
-    c.append(bar, list);
+    c.append(phaseBar(el('div', 'tl-bar'), segs, (k) => PHASE_NAME[k] || k), list);
   }
   const hint = steps.findLast((p) => p.progress)?.progress;
   if (hint && (live || hint.tools)) {
@@ -7604,10 +7612,10 @@ function timelineSection(run, live) {
   }
   return c;
 }
-// The step in progress counts up while its drawer is open: its time, and its segment's share of the bar.
+// The step in progress grows on every phase bar (cards and the drawer), and counts up in an open drawer's step list.
 setInterval(() => {
+  for (const n of document.querySelectorAll('.ph-bar i[data-since]')) n.style.flexGrow = String(Math.max(1, Date.now() - Number(n.dataset.since)));
   if (!O.drawer) return;
-  for (const n of document.querySelectorAll('#drBody .tl-bar i[data-since]')) n.style.flexGrow = String(Math.max(1, Date.now() - Number(n.dataset.since)));
   for (const n of document.querySelectorAll('#drBody .tl-steps [data-since]')) n.textContent = `${fmtDur((Date.now() - Number(n.dataset.since)) / 1000)}…`;
 }, 1000);
 

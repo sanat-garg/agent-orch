@@ -72,7 +72,7 @@ export const FEATURES = { 'job.phase': 'phases', 'job.error': 'errors', 'node.er
 // Feature 'update-now' also means the worker honours node.update.mode 'now' (Update all, #458).
 // Feature 'git' (no frame type): the worker fetches and pushes through job.start.gitUrl, so it needs no GitHub access.
 // Feature 'integrate' (no frame type): the worker runs integrator jobs (job.start.integrate).
-export const FEATURE_LIST = [...new Set([...Object.values(FEATURES), 'cap', 'browser-task', 'git', 'integrate'])];
+export const FEATURE_LIST = [...new Set([...Object.values(FEATURES), 'cap', 'browser-task', 'mcp-start', 'git', 'integrate'])];
 // Compute-only workers (BRIEF goal 11): the only frames a worker acts on, all from the head it dialled. Connection
 // upkeep; jobs (job.*, plus git.credential for their pushes); remote sign-in driven from the head's Connections (login.*);
 // model and limit refreshes; its log tail; self-update; the node's policy (max tasks, power), which like draining is
@@ -91,7 +91,8 @@ export const WORKER_ACCEPTS = Object.freeze([
 export const AGENT_IDS = ['claude', 'codex'];
 export const OS_KINDS = ['linux', 'darwin'];
 // audit / approval (feature 'approvals'): the approval gate's log lines and held calls on a browser run (gate.mjs).
-export const EVENT_KINDS = ['text', 'tool', 'tool_result', 'result', 'limit', 'image', 'windows', 'audit', 'approval'];
+// mcp (feature 'mcp-start'): a browser run's MCP startup time (agents.mjs browserRun).
+export const EVENT_KINDS = ['text', 'tool', 'tool_result', 'result', 'limit', 'image', 'windows', 'audit', 'approval', 'mcp'];
 // runAgentCli outcomes plus the worker's own: setup_failed (clone/worktree/install), lost (controller gave up on it).
 export const OUTCOMES = ['ok', 'rate_limited', 'auth_error', 'aborted', 'timeout', 'max_turns', 'error', 'empty_response', 'setup_failed', 'lost'];
 // power: its power policy pauses intake (on battery, running hot); sent only to a controller with feature 'policy'.

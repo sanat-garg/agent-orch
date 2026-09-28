@@ -363,7 +363,8 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
   }
   // The servers a run on `agent` gets: Claude → an SDK/--mcp-config mcpServers record, codex → config.toml tables; null for none.
   // run.browser ({identity, outputDir, home?, headed?}, a task with the browser capability) adds the Playwright MCP on
-  // that identity's persistent profile (browser.mjs), replacing an owner server of the same name. run.gate ({dir, task,
+  // that identity's persistent profile (browser.mjs), replacing an owner server of the same name; codex waits its
+  // startupSec for it (startup_timeout_sec). run.gate ({dir, task,
   // patterns, ttlMs, hook}, a task run) puts that server and every connector (stdio or http servers with `outbound` tools)
   // behind the approval gate: gate-proxy.mjs runs or connects to them, from a 0600 config in the run's gate dir, and the run
   // gets a stdio entry for the proxy. gate-proxy.mjs doesn't speak sse, so a gated run leaves out an sse server with
@@ -382,7 +383,7 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
     if (agent === 'codex') {
       const toml = on.map((s) => [`[mcp_servers.${s.name}]`, ...(s.type === 'stdio'
         ? [`command = ${tomlVal(s.command)}`, `args = ${tomlVal(s.args || [])}`, ...(Object.keys(s.env || {}).length ? [`env = ${tomlVal(s.env)}`] : []),
-          ...(s.holdSec ? [`tool_timeout_sec = ${s.holdSec}`] : [])]
+          ...(s.holdSec ? [`tool_timeout_sec = ${s.holdSec}`] : []), ...(s.startupSec ? [`startup_timeout_sec = ${s.startupSec}`] : [])]
         : [`url = ${tomlVal(s.url)}`, ...(Object.keys(s.headers || {}).length ? [`http_headers = ${tomlVal(s.headers)}`] : [])])].join('\n'));
       return `# Written by agent-orch (Settings → Skills & tools) for its codex runs (codex -p ${CODEX_PROFILE}). Changes here are overwritten.\n\n${toml.join('\n\n')}\n`;
     }
@@ -396,7 +397,8 @@ export function createExtensions({ dataDir, home = os.homedir(), claudeDir, code
       ttlMs: g.ttlMs, hook: !!g.hook, upstream: s.type === 'http' ? { url: s.url, headers: s.headers || {} } : { command: s.command, args: s.args || [], env: s.env || {} },
       ...(!s.browser && { connector: { outbound: s.outbound } }) }));
     // codex gives up on a tool call after 60 s by default: a held one waits for the owner (up to the approval TTL).
-    return { name: s.name, type: 'stdio', command: process.execPath, args: [GATE_PROXY, '--config', file], env: {}, holdSec: Math.ceil(((g.ttlMs || 86_400_000) + 900_000) / 1000) };
+    return { name: s.name, type: 'stdio', command: process.execPath, args: [GATE_PROXY, '--config', file], env: {}, holdSec: Math.ceil(((g.ttlMs || 86_400_000) + 900_000) / 1000),
+      ...(s.startupSec && { startupSec: s.startupSec }) };
   }
   // What a run passes (writing the file first when it changed): Claude → the --mcp-config file, codex → the profile name.
   // A browser run gets its own file / profile (named by a hash of its config), and ones a day old are swept.

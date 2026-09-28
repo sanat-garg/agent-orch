@@ -363,7 +363,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   }
   const evEnd = (job) => job.evBase + job.ev.length;
   function pushEvent(job, e) {
-    if (!e || !EVENT_KINDS.includes(e.k)) return;
+    if (!e || !EVENT_KINDS.includes(e.k) || (e.k === 'mcp' && !peer.has('mcp-start'))) return;
     const s = slim(e);
     log.job(job.id, s.k === 'image' ? { ...s, data: undefined } : s);
     if (s.k === 'tool') {
@@ -1127,7 +1127,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
         mcp: ext.mcpRun(spec.agent),
         autonomous: spec.autonomous ?? true, signal: job.ac.signal, onEvent: (e) => pushEvent(job, e), bin,
         env: jobEnv(job), onSpawn: ({ pid, pgid }) => registerPid({ pid, pgid, kind: 'task', id: job.id }),
-        ...(run && { mcp: ext.mcpRun(spec.agent, run), gate: gate.spec }),
+        ...(run && { mcp: ext.mcpRun(spec.agent, run), gate: gate.spec, browser: run.browser }), // browser: pre-warm and MCP retries
       });
     } catch (e) {
       res = { outcome: 'error', text: `agent crashed: ${e?.message || e}` };

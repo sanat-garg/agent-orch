@@ -32,6 +32,7 @@ import { createAgentShare, wireAgentShare, shareTargets } from './agent-share.mj
 import { saveUpload, readUpload, placeUploads, attachmentView, attachmentNote, claudeImageBlocks, MAX_UPLOAD_BYTES, MAX_ATTACHMENTS } from './uploads.mjs';
 import { headRefusal } from './role.mjs';
 import { createBrowserViews, LOCAL as BV_LOCAL } from './browser-view.mjs';
+import { ensurePlaywrightMcp } from './browser.mjs';
 import { searchConvos } from './search.mjs';
 import { createRollingRestart, preflight, readRestartState, serverFile } from './rolling.mjs';
 import { createSounds, MAX_SOUND_BYTES as MAX_CUSTOM_SOUND_BYTES } from './sounds.mjs';
@@ -2370,4 +2371,6 @@ if (process.argv[2] === 'set-password') {
   // Repo links are refreshed from each folder's git origin before serving, so the API never returns a stale one.
   refreshAllRepos().catch((e) => console.error('[github] repo refresh failed', e))
     .finally(() => server.listen(PORT, '127.0.0.1', () => console.log(`agent-orch on 127.0.0.1:${PORT}`)));
+  // Browser runs start only the pinned local @playwright/mcp (never npx at run time): installed here when it's missing.
+  ensurePlaywrightMcp().then((r) => (r.ok ? r.installed && console.log(`[browser] installed ${r.cli}`) : console.error(`[browser] ${r.error}`)), () => {});
 }

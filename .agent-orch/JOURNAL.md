@@ -1121,6 +1121,10 @@ mcp-probe.mjs probes stdio/http MCP servers; 7 tests pass
 ## 2026-09-28 13:55 — #393 extensions.mjs AUDIT #69: http and sse servers keep their outbound list, and a gated run withholds a connector the proxy cannot gate [done (check passed)]
 
 gated runs withhold http outbound connectors; UI tests skipped, no Chromium
+
+## 2026-09-28 14:27 — #400 Browser agent: Playwright MCP starts reliably (pre-warm, longer connect timeout, auto-retry) [done (check passed)]
+
+Browser MCP pre-warms, waits 90s, retries; page test skipped here
 ## 2026-09-28 13:57 — #403 Files backend: copy, move, zip and unzip endpoints with safe paths [done (check passed)]
 
 Files copy/move/zip/unzip endpoints are live, safe and tested
@@ -1258,6 +1262,13 @@ CONTEXT.md conflicts resolved; version tests pass, merge left uncommitted
 
 gate classifies uploads, xy clicks, code URLs outbound; Enter keyed
 
+## 2026-09-28 16:57 — #439 Integrate #400: Browser agent: Playwright MCP starts reliably (pre-warm, longer connect timeout, auto-retry) [done (check passed)]
+
+#400 merged with main; MCP-start tests pass, ready-file race fixed
+
+## 2026-09-28 16:57 — #439 Integrate #400: Browser agent: Playwright MCP starts reliably (pre-warm, longer connect timeout, auto-retry) [verify failed (1)]
+
+Command: merge main again
 ## 2026-09-28 14:27 — #436 Rapid top-up fills every machine's free slots with work it can actually run [done (check passed)]
 
 Rapid top-up now counts worker slots, excluding head-only integrators
@@ -1395,6 +1406,11 @@ Restarts wait only for merges; integrators pause; friendly 404 retry
 merge conflicts resolved; claim-stall and related tests pass
 
 ## 2026-09-28 17:02 — #467 Integrate #453: Fix the post-restart claim stall: 19 free slots, ready tasks, nothing starts [verify failed (1)]
+## 2026-09-28 17:00 — #439 Integrate #400: Browser agent: Playwright MCP starts reliably (pre-warm, longer connect timeout, auto-retry) [done (check passed)]
+
+merged with newest main again; MCP-start and protocol tests pass
+
+## 2026-09-28 17:00 — #439 Integrate #400: Browser agent: Playwright MCP starts reliably (pre-warm, longer connect timeout, auto-retry) [verify failed (2)]
 
 Command: merge main again
 ## 2026-09-28 16:59 — #460 Integrate #438: Files tab: go to parent folders and anywhere on the VPS, still opening on the project [done (check passed)]
@@ -1412,3 +1428,6 @@ phone composer shows only field, send, model pill and '+'
 ## 2026-09-28 17:02 — #467 Integrate #453: Fix the post-restart claim stall: 19 free slots, ready tasks, nothing starts [done (check passed)]
 
 CONTEXT.md conflict resolved; claim-stall tests pass
+## 2026-09-28 17:03 — #439 Integrate #400: Browser agent: Playwright MCP starts reliably (pre-warm, longer connect timeout, auto-retry) [done (check passed)]
+
+re-merged newest main; MCP-start and protocol tests pass

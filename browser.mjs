@@ -70,24 +70,50 @@ export function findBrowser({ env = process.env, home = os.homedir(), platform =
   return candidates.find((p) => p && isExe(p)) || null;
 }
 
-// How to start the pinned @playwright/mcp: its installed cli.js, else npx with the version package.json pins.
+// How long a browser run's MCP client waits for the Playwright MCP to start (Claude's MCP_TIMEOUT, codex's
+// startup_timeout_sec): Claude's 30 s default is too short when the shim has to start Chromium on a 1-core VPS.
+export const MCP_START_MS = 90_000;
+// The owner-readable result of a browser run whose MCP never connected, after its automatic retries (agents.mjs).
+export const MCP_START_FAILED = "Browser tool couldn't start: retried twice";
+
+// The pinned @playwright/mcp's installed cli.js, or null. Runs never fall back to `npx -y` (a download at run time is
+// what made the MCP miss its connect timeout): ensurePlaywrightMcp installs it at boot instead.
+const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
+export function playwrightMcpCli() {
+  try { return path.join(path.dirname(require.resolve('@playwright/mcp/package.json')), 'cli.js'); } catch {}
+  const cli = path.join(APP_DIR, 'node_modules/@playwright/mcp/cli.js');
+  return fs.existsSync(cli) ? cli : null;
+}
 export function playwrightMcpCommand() {
-  try { return { command: process.execPath, args: [path.join(path.dirname(require.resolve('@playwright/mcp/package.json')), 'cli.js')] }; } catch {}
+  const cli = playwrightMcpCli();
+  return cli ? { command: process.execPath, args: [cli] } : null;
+}
+// The pinned MCP is installed (npm install of the version package.json pins, into agent-orch's own node_modules, when
+// it's missing): {ok, cli, installed?, error?}. The head and workers call it at boot.
+export async function ensurePlaywrightMcp({ env = process.env, timeoutMs = 10 * 60_000, signal } = {}) {
+  let cli = playwrightMcpCli();
+  if (cli) return { ok: true, cli };
   let v = 'latest';
-  try { v = JSON.parse(fs.readFileSync(new URL('./package.json', import.meta.url), 'utf8')).dependencies['@playwright/mcp'] || v; } catch {}
-  return { command: 'npx', args: ['-y', `@playwright/mcp@${v}`] };
+  try { v = JSON.parse(fs.readFileSync(path.join(APP_DIR, 'package.json'), 'utf8')).dependencies['@playwright/mcp'] || v; } catch {}
+  const r = await runHelper('npm', ['install', '--no-save', '--no-audit', '--no-fund', `@playwright/mcp@${v}`], { cwd: APP_DIR, env, timeoutMs, signal });
+  cli = playwrightMcpCli();
+  if (cli) return { ok: true, cli, installed: true };
+  return { ok: false, cli: null, error: r.timedOut ? 'installing @playwright/mcp timed out' : `installing @playwright/mcp failed: ${String(r.stderr || r.error?.message || `exit ${r.code}`).trim().split('\n').pop().slice(0, 300)}` };
 }
 
 // The stdio MCP server record for one browser run. outputDir: where screenshots without an explicit name land (the run's
 // .agent-orch/shots/). The profile folder is created 0700 so the first run doesn't race Chromium creating it. The MCP runs
 // behind bin/browser-mcp.mjs, which attaches it to the profile's shared Chromium (the owner's live view, browser-live.mjs)
-// and holds its actions while the owner has taken over; the launch flags below are its fallback.
+// and holds its actions while the owner has taken over; the launch flags below are its fallback. startupSec: how long
+// the MCP client waits for it (codex's startup_timeout_sec; Claude gets MCP_TIMEOUT in its env, agents.mjs).
 export function browserServer({ identity, home = os.homedir(), outputDir, headed = hasDisplay(), executable = findBrowser() } = {}) {
   const profile = profileDir(identity, home);
   fs.mkdirSync(profile, { recursive: true, mode: 0o700 });
-  const { command, args } = playwrightMcpCommand();
+  const mcp = playwrightMcpCommand();
+  if (!mcp) throw new Error("the Playwright MCP (@playwright/mcp) isn't installed on this machine; run npm install in agent-orch's folder");
+  const { command, args } = mcp;
   return {
-    type: 'stdio', command: process.execPath,
+    type: 'stdio', command: process.execPath, startupSec: MCP_START_MS / 1000,
     args: [fileURLToPath(new URL('./bin/browser-mcp.mjs', import.meta.url)), '--identity', normIdentity(identity), '--home', home, '--',
       command, ...args, '--user-data-dir', profile, ...(outputDir ? ['--output-dir', outputDir] : []),
       ...(executable ? ['--executable-path', executable] : ['--browser', process.platform === 'darwin' ? 'chrome' : 'chromium']),
@@ -98,10 +124,12 @@ export function browserServer({ identity, home = os.homedir(), outputDir, headed
 }
 
 // Whether this node can run browser tasks: {capable, executable, headed, error?}. With install, a node without one gets
-// Playwright's Chromium (the playwright-core that @playwright/mcp ships), once.
+// Playwright's Chromium (the playwright-core that @playwright/mcp ships), once, and the pinned MCP when it's missing.
 export async function ensureBrowser({ install = true, env = process.env, home = os.homedir(), timeoutMs = 15 * 60_000, signal } = {}) {
   const found = () => findBrowser({ env, home });
   let executable = found(), error = null;
+  const mcp = install ? await ensurePlaywrightMcp({ env, signal }) : { ok: !!playwrightMcpCli() };
+  if (!mcp.ok) return { capable: false, executable, headed: hasDisplay(env), error: mcp.error || "@playwright/mcp isn't installed" };
   if (!executable && install) {
     let cli = null;
     try { cli = createRequire(require.resolve('@playwright/mcp/package.json')).resolve('playwright-core/cli.js'); } catch {}

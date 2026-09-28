@@ -19,7 +19,7 @@ import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { AGENTS, isAgent, agentEfforts, agentStatus, clampEffort, codexExhausted, codexLatestSnapshot, isMissingSession, limitScope, limitScopes, modelCatalog, modelNames, runAgentCli, toolInputSummary, windowLabel } from './agents.mjs';
 import { SHOTS_DIR, mediaCollector } from './media.mjs';
-import { BROWSER_SYSTEM, needsBrowser, normIdentity, parseCapabilities } from './browser.mjs';
+import { BROWSER_SYSTEM, MCP_START_FAILED, needsBrowser, normIdentity, parseCapabilities } from './browser.mjs';
 import { BROWSER_TASK_SYSTEM, browserTaskStatus, browserSteps, isBrowserTask } from './browser-task.mjs';
 import { APPROVAL_TTL_MS, DEFAULT_PATTERNS, patternsWith } from './gate.mjs';
 import { createApprovals } from './approvals.mjs';
@@ -1982,7 +1982,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   // ---- running a coding agent (agents.mjs; Claude Code through the SDK)
   // Task drawer Output entries: public messages, commands and tool results (logged as k:'result').
-  const logEntryOf = (e) => (e.k === 'tool_result' ? { ...e, k: 'result' } : e.k === 'text' || e.k === 'tool' ? e : null);
+  // mcp: a browser run's MCP startup ({ok, ms, warmMs, attempt}, agents.mjs browserRun).
+  const logEntryOf = (e) => (e.k === 'tool_result' ? { ...e, k: 'result' } : e.k === 'text' || e.k === 'tool' || e.k === 'mcp' ? e : null);
 
   // The task drawers watching a task get each new run entry (orun), and a remote run's phases/errors as they change.
   function toWatchers(taskId, runId, e) {
@@ -3568,6 +3569,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     }
     // Stopped by the owner (pause/handoff) and the agent exited with an error on the way out: no attempt is spent.
     if (stopIntents.has(tid)) return requeueIfRunning(tid, { session_id: res.sessionId || task.session_id });
+    // The browser tool never started, after the run's own retries (agents.mjs browserRun): the owner is told as is.
+    if (res.errorCode === 'mcp_connect_failed' || res.text === MCP_START_FAILED) return fail(task, project, 'browser', MCP_START_FAILED);
     // max_turns, timeout, error: retry with bounded attempts, resuming the same session.
     const attempts = task.attempts + 1;
     const detail = String(res.text || res.stderr || res.outcome).trim();
@@ -4298,8 +4301,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       for (const a of approvals.forTask(t.id)) entries.push({ k: 'approval', at: a.at / 1000,
         label: `${a.action} (${a.status})`, mediaId: a.screenshot });
       entries.sort((a, b) => a.at - b.at);
+      const mcp = entries.filter((e) => e.k === 'mcp');
       return { id: t.id, title: t.title, status: t.status, startedAt: t.started_at, finishedAt: t.finished_at,
-        resultText: t.result, steps: browserSteps(entries) };
+        resultText: t.result, steps: browserSteps(entries),
+        // The browser tool's startup on the latest run: {ok, ms, warmMs, attempt} (the activity panel's details).
+        mcp: mcp.length ? (({ ok, ms, warmMs, attempt }) => ({ ok, ms: ms ?? null, warmMs: warmMs ?? null, attempt: attempt ?? 1 }))(mcp.at(-1)) : null };
     });
   }
   function stopBrowserTask(id) {

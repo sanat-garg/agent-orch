@@ -16,6 +16,8 @@ import { toolResultImages } from './media.mjs';
 import { APPROVAL_TTL_MS, ask, isBrowserRead } from './gate.mjs';
 import { toEpochSec } from './usage.mjs';
 import { runHelper, runHelperSync, helperOut, claudeHelperSpawn, killGroup, singleFlight } from './helpers.mjs';
+import { MCP_SERVER, MCP_START_MS, MCP_START_FAILED, normIdentity } from './browser.mjs';
+import { warmBrowser, closeChrome, readMcpReady, liveHome } from './browser-live.mjs';
 
 const HOME = os.homedir();
 
@@ -192,6 +194,9 @@ const mcpOf = (agent, own, browser, gate) => {
   try { return browser || gate ? mcpSource(agent, { ...(browser && { browser }), ...(gate && { gate }) }) : mcpSource(agent); } catch (e) { console.error('[agents] mcp source failed', e); return null; }
 };
 const holdMs = (gate) => (gate?.ttlMs || APPROVAL_TTL_MS) + 15 * 60_000;
+// A browser run's Claude waits for its MCP (blocking startup, up to MCP_START_MS; the CLI's defaults are non-blocking and
+// 30 s) instead of starting its first turn without the browser tools.
+export const MCP_START_ENV = { MCP_TIMEOUT: String(MCP_START_MS), MCP_CONNECT_TIMEOUT_MS: String(MCP_START_MS), MCP_CONNECTION_NONBLOCKING: '0' };
 // The approval gate's permission hook for Claude runs: before the CLI dispatches a call to a gated MCP server (one that
 // gate-proxy.mjs runs for this run: <dir>/proxy-<server>.json), the proxy checks it through the gate dir, holding an
 // outbound call until the owner answers. A denial reaches the model as the owner's reason; an allowed call then runs
@@ -215,6 +220,8 @@ async function runClaude({ model, prompt, cwd, resume, systemAppend, signal, onE
   mcp = mcpOf('claude', mcp, browser, gate);
   // A held MCP call waits for the owner: the CLI must not time it out first.
   if (gate) env = { ...env, MCP_TOOL_TIMEOUT: String(holdMs(gate)) };
+  if (browser) env = { ...env, ...MCP_START_ENV };
+  let mcpDown = false;
   const ac = new AbortController();
   let aborted = false;
   const onAbort = () => { aborted = true; ac.abort(); };
@@ -241,6 +248,8 @@ async function runClaude({ model, prompt, cwd, resume, systemAppend, signal, onE
     });
     for await (const m of it) {
       if (m.session_id) res.sessionId = m.session_id;
+      // The browser run's MCP didn't connect: stop before the agent spends a turn without its browser (browserRun retries).
+      if (browser && m.type === 'system' && m.subtype === 'init' && (m.mcp_servers || []).some((x) => x.name === MCP_SERVER && x.status === 'failed')) { mcpDown = true; break; }
       if (m.type === 'rate_limit_event' && m.rate_limit_info) res.limits.push(m.rate_limit_info);
       if (m.type === 'assistant' && m.error) res.errorCode = m.error;
       if (m.type === 'result') result = m;
@@ -255,8 +264,10 @@ async function runClaude({ model, prompt, cwd, resume, systemAppend, signal, onE
     if (!aborted) res.stderr += `\n${e?.message || e}`;
   } finally {
     signal?.removeEventListener('abort', onAbort);
+    if (mcpDown) ac.abort();
   }
   if (aborted) res.outcome = 'aborted';
+  else if (mcpDown) Object.assign(res, { outcome: 'error', errorCode: 'mcp_connect_failed', text: `The ${MCP_SERVER} MCP server failed to connect` });
   else classifyClaude(res, result);
   return res;
 }
@@ -788,8 +799,52 @@ export function runAgentCli(opts) {
     if (e.k === 'tool') tools.push(e.name || 'tool');
     opts.onEvent?.(e);
   };
-  const run = () => a.run({ ...opts, onEvent });
+  const run = () => (opts.browser ? browserRun(a, opts, onEvent) : a.run({ ...opts, onEvent }));
   return (opts.onSpawn ? spawnHook.run(opts.onSpawn, run) : run()).then((res) => finishEmpty(res, { agent: a, lastText, tools, onEvent }));
+}
+
+// A browser run (opts.browser {identity, home?}): the profile's Chromium is started or found first (browser-live.mjs
+// warmBrowser), so the Playwright MCP only has to attach, and its startup time (run start → the MCP's initialize
+// answer, from the shim's ready file) goes to onEvent as {k: 'mcp', ok, ms, warmMs, attempt}. A run whose MCP failed to
+// connect, before any browser call, restarts that Chromium and runs again up to BROWSER_RETRIES times, then ends with
+// MCP_START_FAILED instead of the agent's own words.
+export const BROWSER_RETRIES = 2;
+const MCP_FAIL_TEXT = /(?:playwright|\bMCP\b|tool server)[^\n]{0,160}?(?:failed to (?:connect|start)|CONNECT_TIMEOUT|connection timed? ?out)/i;
+const MCP_FAIL_CODEX = new RegExp(`MCP client for \`?${MCP_SERVER}\`? (?:failed to start|timed out)`, 'i'); // codex's stderr
+export const mcpStartFailed = (res) => res?.errorCode === 'mcp_connect_failed'
+  || (!['aborted', 'rate_limited', 'auth_error'].includes(res?.outcome) && (MCP_FAIL_TEXT.test(res?.text || '') || MCP_FAIL_CODEX.test(res?.stderr || '')));
+async function browserRun(agent, opts, onEvent) {
+  const identity = normIdentity(opts.browser.identity), home = opts.browser.home || liveHome();
+  let own = null;
+  try {
+    for (let attempt = 1; ; attempt++) {
+      const t0 = Date.now();
+      let warmMs = null, calls = 0, ms = null;
+      try {
+        const w = await warmBrowser({ identity, home, restart: attempt > 1 });
+        if (w.own) own = w.own;
+        warmMs = w.ms;
+      } catch (e) { console.error(`[agents] browser ${identity}: pre-warm failed (${e.message}); its MCP starts Chromium itself`); }
+      const ready = () => {
+        const r = ms == null && readMcpReady(identity, home);
+        if (!r || r.readyAt < t0) return;
+        ms = r.readyAt - t0;
+        console.log(`[agents] browser ${identity}: MCP ready in ${ms} ms (attempt ${attempt})`);
+        try { onEvent({ k: 'mcp', server: MCP_SERVER, ok: true, ms, warmMs, attempt }); } catch {}
+      };
+      const poll = setInterval(ready, 250);
+      let res;
+      try {
+        res = await agent.run({ ...opts, onEvent: (e) => { if (e.k === 'tool' && String(e.name || '').startsWith(`mcp__${MCP_SERVER}__`)) calls++; onEvent(e); } });
+      } finally { clearInterval(poll); }
+      ready();
+      if (calls || opts.signal?.aborted || !mcpStartFailed(res)) return res;
+      const why = String(res.text || res.stderr || '').trim().split('\n')[0].slice(0, 300);
+      console.error(`[agents] browser ${identity}: MCP failed to connect (attempt ${attempt}): ${why}`);
+      try { onEvent({ k: 'mcp', server: MCP_SERVER, ok: false, warmMs, attempt, error: why }); } catch {}
+      if (attempt > BROWSER_RETRIES) return { ...res, outcome: 'error', errorCode: 'mcp_connect_failed', text: MCP_START_FAILED, detail: res.text };
+    }
+  } finally { if (own) await closeChrome(own).catch(() => {}); }
 }
 export function finishEmpty(res, { agent, lastText, tools, onEvent }) {
   if (res?.outcome !== 'ok' || String(res.text || '').trim()) return res;

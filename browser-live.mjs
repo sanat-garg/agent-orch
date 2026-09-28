@@ -51,6 +51,12 @@ export const liveHome = () => process.env.AGENT_ORCH_BROWSER_HOME || os.homedir(
 const controlDir = (home) => path.join(browserRoot(home), 'control');
 export const takeoverFile = (identity, home = liveHome()) => path.join(controlDir(home), `${normIdentity(identity)}.takeover`);
 export const activeFile = (identity, home = liveHome()) => path.join(controlDir(home), `${normIdentity(identity)}.active`);
+// When the profile's MCP shim last finished its MCP handshake: {pid, startedAt, readyAt} (epoch ms; agents.mjs reads it
+// to log each browser run's MCP startup time).
+export const mcpReadyFile = (identity, home = liveHome()) => path.join(controlDir(home), `${normIdentity(identity)}.mcp.json`);
+export function readMcpReady(identity, home = liveHome()) {
+  try { const m = JSON.parse(fs.readFileSync(mcpReadyFile(identity, home), 'utf8')); return Number.isFinite(m.readyAt) ? m : null; } catch { return null; }
+}
 export const takenOver = (identity, home = liveHome()) => fs.existsSync(takeoverFile(identity, home));
 export function setTakeover(identity, on, home = liveHome()) {
   const f = takeoverFile(identity, home);
@@ -117,6 +123,27 @@ export async function launchChrome({ identity, home = liveHome(), executable = f
   }
   child.kill('SIGKILL');
   throw new Error('Chromium did not start in time');
+}
+// Pre-warm (agents.mjs, before a browser run's agent starts): the profile's Chromium runs and its DevTools endpoint
+// answers /json/version, so the run's MCP only has to attach. restart closes the running one first (a retry after the
+// MCP failed to connect). → {port, ws, own (a Chromium started here, for the caller to close) | null, ms}.
+export async function warmBrowser({ identity, home = liveHome(), executable, headless, restart = false, timeoutMs } = {}) {
+  const t0 = Date.now();
+  if (restart) await closeProfile(identity, home);
+  const ep = await endpointFor(identity, home);
+  if (ep) return { ...ep, own: null, ms: Date.now() - t0 };
+  const own = await launchChrome({ identity, home, executable, headless, timeoutMs });
+  return { port: own.port, ws: own.ws, own, ms: Date.now() - t0 };
+}
+// Closes whichever Chromium has the profile open (started here or by another process) and waits until it's gone.
+export async function closeProfile(identity, home = liveHome(), ms = 15_000) {
+  const ep = await endpointFor(identity, home);
+  if (!ep) return false;
+  try { const c = await cdpConnect(ep.ws); await Promise.race([c.send('Browser.close').catch(() => {}), c.closed]); c.close(); } catch {}
+  const lock = path.join(profileDir(identity, home), 'SingletonLock'), deadline = Date.now() + ms;
+  const held = () => { try { fs.lstatSync(lock); return true; } catch { return false; } };
+  while (Date.now() < deadline && (await probe(ep.port) || held())) await new Promise((r) => setTimeout(r, 200));
+  return true;
 }
 // Closes Chromium gracefully (so it writes its cookies out), then kills it.
 export async function closeChrome(chrome, ms = 8000) {

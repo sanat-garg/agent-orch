@@ -633,12 +633,22 @@ function bxRenderActivity() {
   } else if (bxLive(t)) box.append(el('div', 'bx-empty muted', t.status === 'queued' ? 'Starting soon…' : 'Getting started…'));
   const shots = steps.filter((s) => s.mediaId).map((s) => ({ id: s.mediaId, name: bxStep(s) }));
   if (shots.length) box.append(shotGrid(shots));
+  const mcp = bxMcpLine(t.mcp);
+  if (mcp) box.append(el('div', 'bx-mcp muted', mcp));
   if (t.resultText) {
     const r = el('div', 'bx-result');
     r.innerHTML = md(t.resultText);
     box.append(r);
   }
   bxRenderEarlier(box, t);
+}
+// Details: how long the browser tool took to start on the latest run (and how many tries it needed), or that it didn't.
+function bxMcpLine(m) {
+  if (!m) return '';
+  const dur = (ms) => (ms < 10_000 ? `${(ms / 1000).toFixed(1)}s` : fmtDur(ms / 1000));
+  const tries = m.attempt > 1 ? ` (try ${m.attempt} of 3)` : '';
+  if (!m.ok) return `Browser tool didn't start${tries}${m.attempt < 3 ? ', retrying' : ''}`;
+  return `Browser tool started in ${dur(m.ms)}${m.warmMs != null ? ` (browser ready in ${dur(m.warmMs)})` : ''}${tries}`;
 }
 // A status dot in a .bx-st span (the head adds the status's words).
 function bxDot(t) {

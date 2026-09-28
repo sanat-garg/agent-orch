@@ -253,8 +253,9 @@ controller appends a project's persona to `job.start.systemAppend`.
 Workers report richly; the controller keeps what the owner needs and acts on it.
 
 - **Features**: `hello.features` / `welcome.features` list what each side reads (`FEATURES` in cluster-protocol.mjs:
-  phases, errors, logs, update, policy, plus `cap` for the reject reason `cap`, `git` for the head's git endpoint and
-  `integrate` for integrator jobs). A peer sends a newer frame type only
+  phases, errors, logs, update, policy, plus `cap` for the reject reason `cap`, `git` for the head's git endpoint,
+  `integrate` for integrator jobs and `mcp-start` for `job.event` entries of kind `mcp`, a browser run's MCP startup
+  time). A peer sends a newer frame type only
   when the other side lists its feature, so a worker
   updated ahead of the controller's running code (or behind it) never trips the invalid-frame limit. Fields added to
   existing frames (the telemetry on `resources`, `hello.sha`) need no flag.

@@ -1099,3 +1099,7 @@ Files tab: folder navigation, multi-select, clipboard and ZIP menu (browser test
 ## 2026-09-28 14:02 — #410 health.mjs: a kept-but-stale model list is reported as an error with both dates, not as healthy (re-run of #376) [done (check passed)]
 
 stale model list now shows as warning error with dates
+
+## 2026-09-28 14:02 — #409 taskrun.mjs: transientGit and retryGit retry git ref-lock and network failures with backoff (root cause of #328/#359/#376) [done (check passed)]
+
+transientGit and retryGit exported from taskrun.mjs, tests pass

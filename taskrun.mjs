@@ -1,6 +1,7 @@
 // What running one task needs on any node, shared by the controller's orchestrator (orchestrator.mjs) and a worker
 // (worker.mjs), so a worker never loads the orchestrator (planner, reflection, scheduler): the done-when check
-// (extractCheck / extractCommand → runCheck → checkUnavailable) and a tool call in one line (toolLine). No deps beyond node built-ins.
+// (extractCheck / extractCommand → runCheck → checkUnavailable), a tool call in one line (toolLine), and retrying git's
+// transient failures (transientGit: is this stderr a lock race or a network blip; retryGit: rerun with backoff). No deps beyond node built-ins.
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -137,4 +138,31 @@ export function runCheck(command, cwd, env, timeoutSec, signal, shell = 'bash') 
     child.on('close', (code) => { killGroup(); finish(code === 0, out || (code === 0 ? '(no output)' : `exit ${code}`), code); });
     if (signal) { if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true }); }
   });
+}
+
+// A git failure worth retrying: a ref/index/config lock held by a concurrent git (a sibling worktree's fetch shares the
+// bare cache's refs; two pushes to GitHub's main at once) or a network blip. Conflicts, auth failures, non-fast-forward
+// rejections and a missing remote ref are never transient: retrying them only delays the real error.
+const GIT_PERMANENT = /\bCONFLICT\b|Merge conflict|Automatic merge failed|Authentication failed|Permission denied|non-fast-forward|\[rejected\]|couldn't find remote ref/i;
+const GIT_TRANSIENT = /cannot lock ref|Unable to create '.*index\.lock'|could not lock config file|remote rejected .* cannot lock ref|failed to lock|early EOF|RPC failed|Connection reset|Could not resolve host|Connection timed out|the remote end hung up unexpectedly|fatal: unable to access .*\b(503|502|429)\b/i;
+export function transientGit(text) {
+  const t = String(text || '');
+  return !GIT_PERMANENT.test(t) && GIT_TRANSIENT.test(t);
+}
+
+// Resolves fn(attempt) (attempt = 0, 1, …). A throw whose `stderr || message` is transientGit waits
+// backoffMs * 2^attempt (plus up to 50% jitter) and tries again, `attempts` tries in all; any other error is rethrown
+// at once, and the last failure is rethrown unchanged. sleep(ms) is injectable for tests.
+export function retryGit(fn, { attempts = 4, backoffMs = 400, jitter = true, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  const run = async (attempt) => {
+    try {
+      return await fn(attempt);
+    } catch (e) {
+      if (attempt + 1 >= attempts || !transientGit(e?.stderr || e?.message)) throw e;
+      const base = backoffMs * 2 ** attempt;
+      await sleep(Math.round(base + (jitter ? Math.random() * base * 0.5 : 0)));
+      return run(attempt + 1);
+    }
+  };
+  return run(0);
 }

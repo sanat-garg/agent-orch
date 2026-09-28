@@ -13,3 +13,7 @@ Three recent tasks failed on transient git errors, not on their work: a worker's
 ## Done when
 
 `npm test -- test/git-retry.test.mjs` passes and `grep -c 'export function retryGit' taskrun.mjs` prints 1
+
+## Result — done (check passed) (2026-09-28 14:02)
+
+AGENT-ORCH-STATUS: done — transientGit and retryGit exported from taskrun.mjs, tests pass

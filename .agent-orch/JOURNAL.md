@@ -1431,3 +1431,10 @@ CONTEXT.md conflict resolved; claim-stall tests pass
 ## 2026-09-28 17:03 — #439 Integrate #400: Browser agent: Playwright MCP starts reliably (pre-warm, longer connect timeout, auto-retry) [done (check passed)]
 
 re-merged newest main; MCP-start and protocol tests pass
+## 2026-09-28 17:02 — #465 Machine settings rows: label and hint lay out cleanly next to their controls [done (check passed)]
+
+settings rows fixed, 4 layout tests pass, shots saved
+
+## 2026-09-28 17:05 — #470 Integrate #465: Machine settings rows: label and hint lay out cleanly next to their controls [done (check passed)]
+
+conflict resolved, 4 row-layout tests pass, before/after shots saved

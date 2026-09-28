@@ -656,9 +656,11 @@ code, pre, kbd { font-family: var(--mono); }
   .ua-cli input { width: 22px; height: 22px; }
   .ua-go, .ua-retry { min-height: 44px; }
 }
-/* Machine settings (app.js machineSettings): a gear disclosure at the foot of each card; each row is a label and a
-   one-line hint on the left and one control on the right, the same height throughout; removing sits apart in red. */
-.mc-set { margin-top: auto; padding-top: 4px; border-top: 1px solid var(--border); }
+/* Machine settings (app.js machineSettings): a gear disclosure at the foot of each card; each row is two columns, the
+   label over its hint (wrapping normally, never squeezed below 12rem) and one control beside it (at most 55%). Under 420px
+   of settings width a wide control (the sound picker, the parallel-tasks choice) drops below the text at full width; a
+   switch or a single button stays beside it. Removing sits apart in red. */
+.mc-set { margin-top: auto; padding-top: 4px; border-top: 1px solid var(--border); container-type: inline-size; }
 .mc-set > summary { display: flex; align-items: center; gap: 8px; min-height: 36px; list-style: none; cursor: pointer; border-radius: 8px;
   color: var(--muted); font-size: 13px; font-weight: 550; }
 .mc-set > summary::-webkit-details-marker { display: none; }
@@ -669,22 +671,27 @@ code, pre, kbd { font-family: var(--mono); }
 .mc-set > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .mc-group { margin-top: 8px; }
 .mc-group h5 { margin: 0; font-size: 11.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
-.mc-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+.mc-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; min-height: 48px; padding: 8px 0; border-bottom: 1px solid var(--border); }
 .mc-group > .mc-row:last-child, .mc-danger .mc-row { border-bottom: 0; }
 label.mc-row { cursor: pointer; }
-.mc-rt { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.mc-rl { color: var(--text); font-size: 13px; font-weight: 550; }
-.mc-rh { color: var(--muted); font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }
-.mc-row > :last-child { flex: none; }
+.mc-rt { display: flex; flex-direction: column; gap: 2px; flex: 1 1 12rem; min-width: 0; }
+.mc-rl { color: var(--text); font-size: 15px; font-weight: 600; line-height: 1.3; }
+.mc-rh { color: var(--muted); font-size: 13px; line-height: 1.35; overflow-wrap: break-word; }
+.mc-row > :last-child { flex: 0 1 auto; min-width: 0; max-width: 55%; }
 .mc-row .btn.small { height: 30px; min-width: 72px; padding: 0 12px; font-size: 12.5px; }
 .mc-row .seg-sm button { height: 28px; min-width: 30px; padding: 0 9px; }
 .mc-auto { color: var(--text); font-size: 12.5px; font-weight: 550; cursor: help; }
-.mc-sound-pick { display: flex; align-items: center; gap: 6px; }
-.mc-sound-pick select { height: 30px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; font-size: 12.5px; padding: 0 6px; }
+.mc-sound-pick { display: flex; flex-wrap: nowrap; align-items: center; gap: 6px; }
+.mc-sound-pick select { flex: 1 1 auto; min-width: 0; max-width: 100%; text-overflow: ellipsis; height: 30px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; font-size: 12.5px; padding: 0 6px; }
 .mc-danger { margin-top: 10px; padding: 0 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--danger-soft); }
 .mc-danger .mc-rl, .mc-danger .btn.danger { color: var(--danger); }
 .mc-danger .btn.danger { border-color: var(--danger); background: var(--panel); }
-@media (max-width: 600px) { .mc-row:has(.seg-sm, .mc-sound-pick) { flex-wrap: wrap; } .mc-row:has(.seg-sm, .mc-sound-pick) .mc-rt { flex-basis: 100%; } }
+.mc-sound-pick .btn { flex: none; white-space: nowrap; }
+@container (max-width: 420px) {
+  .mc-row:has(> .seg-sm, > .mc-sound-pick) > .mc-rt { flex-basis: 100%; }
+  .mc-row > :is(.seg-sm, .mc-sound-pick) { flex: 1 1 100%; max-width: 100%; }
+  .mc-row > .seg-sm button { flex: 1; }
+}
 @media (pointer: coarse) { .mc-set > summary { min-height: 44px; } .mc-row .seg-sm button, .mc-row .btn.small { height: 44px; min-width: 44px; }
   .mc-sound-pick select { height: 44px; font-size: 16px; } }
 .am-body { display: flex; flex-direction: column; gap: 10px; }

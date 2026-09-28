@@ -451,9 +451,82 @@ const rankedConvos = () => state.convos.filter((c) => c.project)
   .sort((a, b) => (a.project.position ?? Infinity) - (b.project.position ?? Infinity) || a.project.id - b.project.id || b.updatedAt - a.updatedAt);
 const rankedProjectIds = (convos = rankedConvos()) => [...new Set(convos.map((c) => c.project.id))];
 
+// Chat search: typing (debounced) asks GET /api/convos?q= (search.mjs) and #convoList shows the matches in place of
+// the list until the field is cleared or Escape. `seq` drops answers to queries the owner has already typed past.
+const chatSearch = { q: '', results: null, timer: 0, seq: 0 };
+$('chatSearch').addEventListener('input', () => {
+  clearTimeout(chatSearch.timer);
+  const q = $('chatSearch').value.trim();
+  if (q.length < 2) { // search.mjs needs 2 characters; until then the normal list
+    chatSearch.seq++;
+    if (chatSearch.results) { Object.assign(chatSearch, { q: '', results: null }); renderConvoList(); }
+    return;
+  }
+  chatSearch.timer = setTimeout(() => runChatSearch(q), 250);
+});
+$('chatSearch').addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !$('chatSearch').value) return;
+  e.preventDefault(); e.stopPropagation();
+  $('chatSearch').value = '';
+  $('chatSearch').dispatchEvent(new Event('input'));
+});
+async function runChatSearch(q) {
+  const seq = ++chatSearch.seq;
+  let results;
+  try { results = await api(`/api/convos?q=${encodeURIComponent(q)}`); } catch (e) {
+    if (seq === chatSearch.seq) toast(`Search failed: ${e.message}`, { kind: 'error' });
+    return;
+  }
+  if (seq !== chatSearch.seq) return;
+  Object.assign(chatSearch, { q, results });
+  renderConvoList();
+}
+// `text` into `node` with every query term wrapped in <mark> (text nodes only, so nothing is parsed as HTML).
+function markTerms(node, text, q) {
+  const terms = q.toLowerCase().split(/\s+/).filter(Boolean), low = text.toLowerCase();
+  let i = 0;
+  for (;;) {
+    let at = -1, len = 0;
+    for (const t of terms) {
+      const j = low.indexOf(t, i);
+      if (j >= 0 && (at < 0 || j < at || (j === at && t.length > len))) { at = j; len = t.length; }
+    }
+    if (at < 0) break;
+    if (at > i) node.append(text.slice(i, at));
+    node.append(el('mark', null, text.slice(at, at + len)));
+    i = at + len;
+  }
+  if (i < text.length) node.append(text.slice(i));
+  return node;
+}
+function renderChatSearch(nav) {
+  nav.textContent = '';
+  if (!chatSearch.results.length) {
+    const p = el('p', 'group-label', 'No chats match');
+    p.style.textTransform = 'none';
+    nav.append(p);
+    return;
+  }
+  for (const r of chatSearch.results) {
+    const c = state.convos.find((x) => x.id === r.id);
+    const b = el('div', 'convo search-hit' + (r.id === state.cid ? ' active' : ''));
+    b.tabIndex = 0;
+    b.setAttribute('role', 'button');
+    b.dataset.cid = r.id;
+    b.append(markTerms(el('span', 'ct'), r.title || (c ? folderName(c.cwd) : 'Chat'), chatSearch.q));
+    if (r.hits[0]) b.append(markTerms(el('span', 'cs'), r.hits[0].snippet, chatSearch.q));
+    b.append(el('span', 'cm', relTime(r.at || c?.updatedAt || Date.now())));
+    const open = () => { openConvo(r.id); closeSidebar(); setView('chat'); };
+    b.addEventListener('click', open);
+    b.addEventListener('keydown', (e) => { if (e.target === b && e.key === 'Enter') open(); });
+    nav.append(b);
+  }
+}
+
 function renderConvoList() {
   if (drag.active) { drag.stale = true; return; } // re-rendering would pull the lifted card out from under the pointer
   const nav = $('convoList');
+  if (chatSearch.results) return renderChatSearch(nav);
   const focused = document.activeElement?.closest?.('#convoList .convo')?.dataset.cid;
   nav.textContent = '';
   if (!state.convos.length) {

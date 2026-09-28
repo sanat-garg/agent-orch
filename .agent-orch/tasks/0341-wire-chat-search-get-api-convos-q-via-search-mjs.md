@@ -14,3 +14,7 @@ User feature (BRIEF goal 3): the search backend exists (search.mjs `searchConvos
 ## Done when
 
 `node --test test/search-api.test.mjs` and `grep -q 'searchConvos' server.mjs`
+
+## Result — done (check passed) (2026-09-28 12:29)
+
+AGENT-ORCH-STATUS: done — Sidebar chat search now calls GET /api/convos?q=; tests pass

@@ -961,3 +961,6 @@ Closing Skills & tools opened from Settings reopens Settings
 ## 2026-09-28 12:27 — #339 github.mjs: push to an existing origin without asking gh; tests with a local bare remote [done (check passed)]
 
 existing origins push without gh; repoOf handles all URL forms
+## 2026-09-28 12:29 — #341 Wire chat search: GET /api/convos?q= via search.mjs and a search field above the chat list [done (check passed)]
+
+Sidebar chat search now calls GET /api/convos?q=; tests pass

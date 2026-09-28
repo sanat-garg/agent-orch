@@ -31,6 +31,7 @@ import { createAgentShare, wireAgentShare, shareTargets } from './agent-share.mj
 import { saveUpload, readUpload, placeUploads, attachmentView, attachmentNote, claudeImageBlocks, MAX_UPLOAD_BYTES, MAX_ATTACHMENTS } from './uploads.mjs';
 import { headRefusal } from './role.mjs';
 import { createBrowserViews, LOCAL as BV_LOCAL } from './browser-view.mjs';
+import { searchConvos } from './search.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -1563,7 +1564,12 @@ async function handleRequest(req, res) {
   if (p === '/api/metrics') {
     return json(res, 200, await metrics(Number(url.searchParams.get('since')) || 0));
   }
-  if (p === '/api/convos' && req.method === 'GET') return json(res, 200, convos.map(publicConvo));
+  if (p === '/api/convos' && req.method === 'GET') {
+    // ?q= searches titles and messages (search.mjs); without it, the plain list.
+    const q = url.searchParams.get('q');
+    if (q?.trim()) return json(res, 200, await searchConvos({ logsDir: LOGS, convos, q: q.slice(0, 200), limit: 20 }));
+    return json(res, 200, convos.map(publicConvo));
+  }
   if (p === '/api/convos' && req.method === 'POST') {
     const body = await readBody(req);
     try {

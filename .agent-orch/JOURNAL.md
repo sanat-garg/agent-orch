@@ -1102,6 +1102,10 @@ gated runs withhold http outbound connectors; UI tests skipped, no Chromium
 ## 2026-09-28 13:57 — #403 Files backend: copy, move, zip and unzip endpoints with safe paths [done (check passed)]
 
 Files copy/move/zip/unzip endpoints are live, safe and tested
+
+## 2026-09-28 14:01 — #392 Stats ui: a Why tasks failed card on Overview with a count per reason and the last tasks of each [done (check passed)]
+
+failures card added; UI tests skip here: no browser launches
 ## 2026-09-28 14:01 — #404 Files tab: open the project folder, browse folders, right-click copy/cut/paste/zip/unzip [done (check passed)]
 
 Files tab: folder navigation, multi-select, clipboard and ZIP menu (browser tests skip here)
@@ -1171,3 +1175,7 @@ merge resolved; Changed view, context menu and Ask in chat all pass
 ## 2026-09-28 14:25 — #429 cluster-git.mjs: a push is checked from its first pkt-lines and streamed into git, never buffered whole; git is killed when the client goes away [done (check passed)]
 
 Pushes now stream into git after the ref check; dropped clients kill git
+
+## 2026-09-28 14:25 — #416 Integrate #392: Stats ui: a Why tasks failed card on Overview with a count per reason and the last tasks of each [done (check passed)]
+
+CONTEXT.md conflict resolved; ui-stats tests pass

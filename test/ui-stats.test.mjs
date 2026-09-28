@@ -19,7 +19,7 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PASSWORD = 'stats-ui-password';
 let browser, skip = false;
 try { browser = await chromium.launch(); } catch (e) { skip = `cached Chromium unavailable: ${e.message.split('\n')[0]}`; }
-let child, base, dataDir, cookie;
+let child, base, dataDir, cookie, failedIds;
 
 const freePort = () => new Promise((resolve, reject) => {
   const s = net.createServer().listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); });
@@ -82,6 +82,11 @@ before(async () => {
       created, created + 60, status === 'done' ? created + 1500 + i * 60 : created + 100, agent, model, agent, model, i === 0 ? 'mac1' : i === 1 ? 'controller' : null).lastInsertRowid);
     if (status === 'done') addR.run(id, i === 7 ? 'rate_limited' : 'ok', agent, created + 60, created + 1500 + i * 60, i === 0 ? 'mac1' : i === 1 ? 'controller' : null);
   }
+  // Two failures for "Why tasks failed" (task 6 above is a plain cancel): a setup failure and a cancel cascading from #3.
+  const addF = db.prepare("INSERT INTO tasks (project_id, kind, title, prompt, status, result, created_at, finished_at) VALUES (?, 'work', ?, 'x', ?, ?, ?, ?)");
+  const setupId = Number(addF.run(pid, 'Worktree that would not lock', 'failed', 'setup failed: cannot lock ref', s - 3 * 3600, s - 2 * 3600).lastInsertRowid);
+  const cascadeId = Number(addF.run(pid, 'Follow-up of task three', 'cancelled', 'cancelled with #3', s - 3 * 3600, s - 3600).lastInsertRowid);
+  failedIds = [cascadeId, setupId];
   db.prepare("INSERT INTO events (ts, level, project_id, message) VALUES (?, 'info', ?, ?)").run(s - 7200, pid, '#3 moved before #2');
   db.close();
   const r = await fetch(base + '/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: PASSWORD }) });
@@ -149,6 +154,15 @@ test('desktop: Overview leads with shipped tasks; every tab renders the seeded w
   assert.doesNotMatch(await heat.textContent(), /h\/h/, 'no "h/h" unit');
   await page.locator('.sx-heat-c[data-tip]').first().hover();
   assert.equal(await page.locator('#sxTip').isVisible(), true);
+  // Why tasks failed: a bar per reason in plain words, then the latest failures with their reason under the title.
+  const why = page.locator('.sx-card', { hasText: 'Why tasks failed' });
+  assert.match(await why.locator('.sx-card-sub').textContent(), /^No one reason stands out: 3 failures across 3 reasons\.$/);
+  const whyBars = await why.locator('.sx-bar-name').allTextContents();
+  assert.ok(whyBars.includes('Setup failed') && whyBars.includes('Cancelled with a failed prerequisite') && whyBars.includes('Cancelled'), whyBars.join());
+  assert.deepEqual(await why.locator('.sx-bar-val').allTextContents(), ['1', '1', '1']);
+  const rows = await why.locator('.sx-td-name').evaluateAll((ns) => ns.map((n) => [n.querySelector('strong').textContent, n.querySelector('small').textContent]));
+  assert.equal(rows.length, 3);
+  assert.deepEqual(rows.slice(0, 2), [[`#${failedIds[0]} Follow-up of task three`, 'cancelled with #3'], [`#${failedIds[1]} Worktree that would not lock`, 'setup failed: cannot lock ref']]);
 
   await tab(page, 'you');
   assert.equal(await page.locator('.sx-tile .sx-value').first().textContent(), '12');
@@ -185,6 +199,7 @@ test('desktop: Overview leads with shipped tasks; every tab renders the seeded w
   await page.locator('#sxRange [data-range="24h"]').click();
   assert.equal(await page.locator('#sxRange [data-range="24h"]').getAttribute('aria-pressed'), 'true');
   assert.ok(Number(await page.locator('.sx-hero-num strong').textContent()) < 11);
+  assert.match(await page.locator('.sx-card', { hasText: 'Why tasks failed' }).locator('.sx-card-sub').textContent(), /^No one reason stands out: 2 failures across 2 reasons\.$/);
   await page.locator('#sxRange [data-range="all"]').click();
 
   await page.keyboard.press('Escape');

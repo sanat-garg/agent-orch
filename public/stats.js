@@ -628,8 +628,43 @@
     else sp.append(empty(m.shipped.length ? 'Too many days to show; pick a shorter range.' : 'Nothing shipped in this range.'));
     out.push(sp);
 
+    out.push(failuresCard(c));
     out.push(records(c, m));
     return out;
+  }
+
+  // Why tasks failed or were cancelled in this range (tasks[].why from stats.mjs failureWhy): a bar per kind, then the latest three.
+  // WHY[kind] = [bar label, the kind in "Most failures were …"].
+  const WHY = {
+    check: ['Done-when check failed', 'failed done-when checks'], setup: ['Setup failed', 'setup failures'],
+    blocked: ['Blocked by an unfinished task', 'blocked prerequisites'], 'gave-up': ['Gave up after several sessions', 'tasks that gave up'],
+    push: ['Push failed', 'failed pushes'], browser: ['Browser tool failed', 'browser tool failures'],
+    cascade: ['Cancelled with a failed prerequisite', 'cancelled with a failed prerequisite'], cancelled: ['Cancelled', 'cancellations'], other: ['Other', 'other errors'],
+  };
+  const whyLabel = (k) => WHY[k]?.[0] || k;
+  function failuresCard(c) {
+    const failed = c.tasks.filter((t) => t.why && c.inR(t.finished)).sort((a, b) => b.finished - a.finished || b.id - a.id);
+    const kinds = top(countBy(failed, (t) => t.why.kind));
+    const sub = !kinds.length ? 'Failed and cancelled tasks, by reason'
+      : kinds.length === 1 ? `${failed.length === 1 ? 'The one failure' : `All ${num(failed.length)} failures`}: ${whyLabel(kinds[0][0]).toLowerCase()}.`
+        : kinds[0][1] === kinds[1][1] ? `No one reason stands out: ${plural(failed.length, 'failure')} across ${kinds.length} reasons.`
+          : `Most failures were ${WHY[kinds[0][0]]?.[1] || kinds[0][0]} (${kinds[0][1]} of ${failed.length}).`;
+    const r = card('Why tasks failed', sub);
+    if (!failed.length) { r.append(empty('Nothing failed in this range.')); return r; }
+    r.append(bars(kinds.map(([k, v]) => ({ label: whyLabel(k), v, tip: `${plural(v, 'task')}\n${whyLabel(k)}` })), { color: 'var(--danger)' }));
+    r.append(el('p', 'sx-sub', 'Latest'));
+    const list = el('div', 'sx-models');
+    for (const t of failed.slice(0, 3)) {
+      const row = el('div', 'sx-model'), name = el('div', 'sx-td-name'), txt = el('span');
+      const why = el('small', '', t.why.text || whyLabel(t.why.kind));
+      why.style.overflowWrap = 'anywhere'; // long refs and paths wrap on phones
+      txt.append(el('strong', '', `#${t.id} ${t.title}`), why);
+      name.append(txt);
+      row.append(name);
+      list.append(row);
+    }
+    r.append(list);
+    return r;
   }
 
   function records(c, m) {

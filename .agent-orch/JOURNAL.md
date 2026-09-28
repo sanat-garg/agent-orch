@@ -719,3 +719,7 @@ Branch on main; check passes 427/427 in worktree
 ## 2026-09-28 02:00 — #254 Land the bash 3.2 fix for the macOS worker installer [done (check passed)]
 
 macOS installer, bash 3.2 build script and non-skipping test pass
+
+## 2026-09-28 02:22 — #255 Design computer-work agents: connectors, browser, approvals (AGENTIC.md) [done]
+
+AGENTIC.md covers connectors, browser, safety, task shape and rollout

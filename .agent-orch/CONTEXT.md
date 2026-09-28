@@ -1,6 +1,6 @@
 # Project Context
 
-_Durable knowledge for every session. History: JOURNAL.md. Bug backlog: AUDIT.md. Mobile HIG findings: UI-REVIEW.md. Cluster design: CLUSTER.md. CLI flags and stream formats: AGENTS.md._
+_Durable knowledge for every session. History: JOURNAL.md. Bug backlog: AUDIT.md. Mobile HIG findings: UI-REVIEW.md. Cluster design: CLUSTER.md. Computer-work agents (goal 12: gate, connectors, browser, approvals): AGENTIC.md. CLI flags and stream formats: AGENTS.md._
 
 ## Architecture (head)
 - `server.mjs`: node:http + `ws`; login/sessions (cookie `__Host-cw_session` over HTTPS, `cw_session` on http), chat via the Agent SDK `query()`, serves `public/`. PORT 3000. Chat runtimes end only via `retireRuntime` (runtimes.mjs). Refuses to start on a paired worker (role.mjs) unless `AGENT_ORCH_WORKER_JOB` is set.

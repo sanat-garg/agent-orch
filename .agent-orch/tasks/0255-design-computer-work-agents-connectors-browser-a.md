@@ -13,3 +13,7 @@ Write .agent-orch/AGENTIC.md, the design for BRIEF goal 12 (agents doing office 
 ## Done when
 
 .agent-orch/AGENTIC.md exists with sections Connectors, Browser, Safety, Task shape and Rollout, each connector naming its auth method and read/write scope
+
+## Result — done (2026-09-28 02:22)
+
+AGENT-ORCH-STATUS: done — AGENTIC.md covers connectors, browser, safety, task shape and rollout

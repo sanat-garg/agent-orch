@@ -13,3 +13,7 @@ New module mcp-probe.mjs (plain node ESM, node built-ins only, no deps; header c
 ## Done when
 
 `npm test -- test/mcp-probe.test.mjs` && `node --check mcp-probe.mjs`
+
+## Result — done (check passed) (2026-09-28 13:54)
+
+AGENT-ORCH-STATUS: done — mcp-probe.mjs probes stdio/http MCP servers; 7 tests pass

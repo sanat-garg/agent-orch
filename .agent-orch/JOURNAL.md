@@ -1083,3 +1083,6 @@ stats tasks carry classified `why`; snapshot has `failures` summary
 ## 2026-09-28 13:54 — #388 Fix the failing worker-cap test: nodeCap keeps a worker's CPU and max-tasks cap when the owner set max slots [done (check passed)]
 
 owner-set worker slots now keep the worker's CPU cap
+## 2026-09-28 13:54 — #394 mcp-probe.mjs: probe an MCP server over stdio or streamable http and report its tools or the error [done (check passed)]
+
+mcp-probe.mjs probes stdio/http MCP servers; 7 tests pass

@@ -924,3 +924,7 @@ Metrics cpu clipped, reads bounded to 8 MB, approvals capped per run
 ## 2026-09-28 11:45 — #320 UI-REVIEW #27: Stats tabs and the range chip share one row on phones and the subtitle scrolls with the body [done (check passed)]
 
 Phone Stats header pins tabs and range chip in one row
+
+## 2026-09-28 11:46 — #329 push.mjs: drop subscriptions that fail for good and honour Retry-After [done (check passed)]
+
+push drops repeatedly rejected devices and honours Retry-After pauses

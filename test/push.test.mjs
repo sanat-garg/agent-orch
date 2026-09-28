@@ -1,5 +1,6 @@
 // push.mjs (Web Push): aes128gcm payloads decrypt with the receiver's keys (RFC 8291 done here in reverse), the VAPID
-// JWT verifies with the public key, a 410 drops the device, and the key pair survives a restart. No network.
+// JWT verifies with the public key, a 410 or three 403s drop the device, a 429 pauses it for its Retry-After, and the key
+// pair survives a restart. No network.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -7,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { createPush, checkSub, TTL, RECORD_SIZE } from '../push.mjs';
+import { createPush, checkSub, retryAfterMs, TTL, RECORD_SIZE } from '../push.mjs';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-push-'));
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -39,13 +40,13 @@ function decrypt(body, { ecdh, auth }) {
   assert.equal(plain[end], 2, 'last-record delimiter');
   return JSON.parse(plain.subarray(0, end).toString());
 }
-// A fake push service: records each request and answers with `status`.
+// A fake push service: records each request and answers with `status` ({code, headers}).
 async function fakeService(status) {
   const reqs = [];
   const srv = http.createServer((req, res) => {
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
-    req.on('end', () => { reqs.push({ headers: req.headers, url: req.url, body: Buffer.concat(chunks) }); res.writeHead(status.code); res.end(); });
+    req.on('end', () => { reqs.push({ headers: req.headers, url: req.url, body: Buffer.concat(chunks) }); res.writeHead(status.code, status.headers || {}); res.end(); });
   });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   after(() => srv.close());
@@ -82,7 +83,7 @@ test('send encrypts per RFC 8291 and signs a VAPID JWT for the endpoint origin',
   push.subscribe({ endpoint: `${svc.url}/push/1`, keys: rx.keys, ua: 'iPhone' }); // same endpoint: replaced, not added
   assert.equal(push.count(), 1);
   const msg = { title: 'Task #7 done', body: 'Merged ✓', tag: 'task-7', url: '/#task-7', badge: 3 };
-  assert.deepEqual(await push.send(msg), { sent: 1, removed: 0, failed: 0 });
+  assert.deepEqual(await push.send(msg), { sent: 1, removed: 0, failed: 0, skipped: 0 });
   const [r] = svc.reqs;
   assert.equal(r.url, '/push/1');
   assert.equal(r.headers['content-encoding'], 'aes128gcm');
@@ -106,10 +107,10 @@ test('send encrypts per RFC 8291 and signs a VAPID JWT for the endpoint origin',
 
   // A 500 is a failure that keeps the device; a 410 means it's gone.
   status.code = 500;
-  assert.deepEqual(await push.send(msg), { sent: 0, removed: 0, failed: 1 });
+  assert.deepEqual(await push.send(msg), { sent: 0, removed: 0, failed: 1, skipped: 0 });
   assert.equal(push.count(), 1);
   status.code = 410;
-  assert.deepEqual(await push.send(msg), { sent: 0, removed: 1, failed: 0 });
+  assert.deepEqual(await push.send(msg), { sent: 0, removed: 1, failed: 0, skipped: 0 });
   assert.equal(push.count(), 0);
   assert.equal(createPush({ dataDir: path.join(tmp, 'send') }).count(), 0, 'the removal is saved');
 });
@@ -118,8 +119,85 @@ test('send never throws: unreachable endpoints and an unsubscribe', async () => 
   const push = createPush({ dataDir: path.join(tmp, 'down') });
   const rx = receiver();
   push.subscribe({ endpoint: 'http://127.0.0.1:1/x', keys: rx.keys });
-  assert.deepEqual(await push.send({ title: 't' }), { sent: 0, removed: 0, failed: 1 });
+  assert.deepEqual(await push.send({ title: 't' }), { sent: 0, removed: 0, failed: 1, skipped: 0 });
   assert.equal(push.unsubscribe('http://127.0.0.1:1/x'), 1);
   assert.equal(push.unsubscribe('http://127.0.0.1:1/x'), 0);
-  assert.deepEqual(await push.send({ title: 't' }), { sent: 0, removed: 0, failed: 0 });
+  assert.deepEqual(await push.send({ title: 't' }), { sent: 0, removed: 0, failed: 0, skipped: 0 });
+});
+
+test('three permanent rejections in a row drop the device; a 2xx in between resets the count', async () => {
+  const status = { code: 403 };
+  const svc = await fakeService(status);
+  const logs = [];
+  const dir = path.join(tmp, 'fails');
+  const push = createPush({ dataDir: dir, log: (m) => logs.push(m) });
+  push.subscribe({ endpoint: `${svc.url}/p`, keys: receiver().keys });
+  const stored = () => JSON.parse(fs.readFileSync(path.join(dir, 'push-subscriptions.json'), 'utf8'))[0];
+  assert.deepEqual(await push.send({ title: 't' }), { sent: 0, removed: 0, failed: 1, skipped: 0 });
+  assert.deepEqual(await push.send({ title: 't' }), { sent: 0, removed: 0, failed: 1, skipped: 0 });
+  assert.equal(stored().fails, 2, 'the count is saved');
+  status.code = 201;
+  assert.deepEqual(await push.send({ title: 't' }), { sent: 1, removed: 0, failed: 0, skipped: 0 });
+  assert.equal(stored().fails, 0);
+  status.code = 400;
+  assert.deepEqual(await push.send({ title: 't' }), { sent: 0, removed: 0, failed: 1, skipped: 0 });
+  status.code = 401;
+  assert.deepEqual(await push.send({ title: 't' }), { sent: 0, removed: 0, failed: 1, skipped: 0 });
+  assert.equal(push.count(), 1, 'two rejections after the reset keep the device');
+  push.subscribe({ endpoint: `${svc.url}/p`, keys: receiver().keys });
+  assert.equal(stored().fails, 0, 're-subscribing clears the count');
+  status.code = 403;
+  assert.deepEqual(await push.send({ title: 't' }), { sent: 0, removed: 0, failed: 1, skipped: 0 });
+  assert.deepEqual(await push.send({ title: 't' }), { sent: 0, removed: 0, failed: 1, skipped: 0 });
+  assert.deepEqual(await push.send({ title: 't' }), { sent: 0, removed: 1, failed: 0, skipped: 0 });
+  assert.equal(push.count(), 0);
+  assert.equal(createPush({ dataDir: dir }).count(), 0, 'the removal is saved');
+  assert.ok(logs.some((l) => /403 \(removed after 3/.test(l)), logs.join('\n'));
+  assert.equal(svc.reqs.length, 8);
+});
+
+test('a 429 pauses the device for its Retry-After: sends skip it without a request, then it goes through', async () => {
+  const status = { code: 429, headers: { 'Retry-After': '2' } };
+  const svc = await fakeService(status);
+  const dir = path.join(tmp, 'retry');
+  const push = createPush({ dataDir: dir });
+  push.subscribe({ endpoint: `${svc.url}/p`, keys: receiver().keys });
+  const t0 = Date.now();
+  assert.deepEqual(await push.send({ title: 't' }), { sent: 0, removed: 0, failed: 1, skipped: 0 });
+  const until = JSON.parse(fs.readFileSync(path.join(dir, 'push-subscriptions.json'), 'utf8'))[0].pausedUntil;
+  assert.ok(until >= t0 + 2000 && until <= Date.now() + 2000, 'pausedUntil is saved');
+  status.code = 201; status.headers = {};
+  assert.deepEqual(await push.send({ title: 't' }), { sent: 0, removed: 0, failed: 0, skipped: 1 });
+  assert.equal(svc.reqs.length, 1, 'a paused device costs no request');
+  assert.equal(push.count(), 1);
+  await new Promise((r) => setTimeout(r, until - Date.now() + 50));
+  assert.deepEqual(await push.send({ title: 't' }), { sent: 1, removed: 0, failed: 0, skipped: 0 });
+  assert.equal(svc.reqs.length, 2);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'push-subscriptions.json'), 'utf8'))[0].pausedUntil, 0);
+});
+
+test('a 503 pause is lifted by re-subscribing', async () => {
+  const status = { code: 503 };
+  const svc = await fakeService(status);
+  const push = createPush({ dataDir: path.join(tmp, 'resub') });
+  const keys = receiver().keys;
+  push.subscribe({ endpoint: `${svc.url}/p`, keys });
+  assert.deepEqual(await push.send({ title: 't' }), { sent: 0, removed: 0, failed: 1, skipped: 0 });
+  assert.deepEqual(await push.send({ title: 't' }), { sent: 0, removed: 0, failed: 0, skipped: 1 });
+  push.subscribe({ endpoint: `${svc.url}/p`, keys });
+  status.code = 201;
+  assert.deepEqual(await push.send({ title: 't' }), { sent: 1, removed: 0, failed: 0, skipped: 0 });
+});
+
+test('retryAfterMs reads seconds or an HTTP date, defaults to 60 s and caps at 1 h', () => {
+  const now = Date.parse('2026-09-28T12:00:00Z');
+  assert.equal(retryAfterMs('2', now), 2000);
+  assert.equal(retryAfterMs(' 120 ', now), 120_000);
+  assert.equal(retryAfterMs('Mon, 28 Sep 2026 12:00:30 GMT', now), 30_000);
+  assert.equal(retryAfterMs('Mon, 28 Sep 2026 11:00:00 GMT', now), 0);
+  assert.equal(retryAfterMs(undefined, now), 60_000);
+  assert.equal(retryAfterMs('soon', now), 60_000);
+  assert.equal(retryAfterMs('-5', now), 60_000);
+  assert.equal(retryAfterMs('99999', now), 3600_000);
+  assert.equal(retryAfterMs('Tue, 29 Sep 2026 12:00:00 GMT', now), 3600_000);
 });

@@ -13,3 +13,7 @@ push.mjs createPush(...).send posts to every device; a 404/410 removes the devic
 ## Done when
 
 `npm test -- test/push.test.mjs test/push-events.test.mjs` passes and `grep -n 'pausedUntil' push.mjs` prints a line.
+
+## Result — done (check passed) (2026-09-28 11:46)
+
+AGENT-ORCH-STATUS: done — push drops repeatedly rejected devices and honours Retry-After pauses

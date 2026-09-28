@@ -1,9 +1,13 @@
 // Web Push with no dependency: VAPID (RFC 8292) ES256 JWTs and aes128gcm payloads (RFC 8291 / RFC 8188) on node:crypto,
 // so notifications reach the owner's phone while the app is closed. The VAPID key pair is made once and kept in
-// <dataDir>/push-vapid.json (0600); subscribed devices in <dataDir>/push-subscriptions.json [{endpoint, keys, ua, addedAt}].
+// <dataDir>/push-vapid.json (0600); subscribed devices in <dataDir>/push-subscriptions.json
+// [{endpoint, keys, ua, addedAt, fails, pausedUntil}].
 //   createPush({dataDir, log}) → { publicKey(), subscribe(sub), unsubscribe(endpoint), count(), send(msg) }
-// send({title, body, tag, url, badge}) posts to every device and resolves {sent, removed, failed}; it never throws. A 404
-// or 410 from a push service means the device is gone, so that subscription is dropped.
+// send({title, body, tag, url, badge}) posts to every device and resolves {sent, removed, failed, skipped}; it never throws.
+// A 404 or 410 means the device is gone, so that subscription is dropped. 400/401/403/413 (bad subscription, VAPID
+// mismatch, payload too large) count as `fails`; a 2xx resets it and the third in a row drops the device. A 429 or 503
+// pauses the device until its Retry-After (seconds or an HTTP date; 60 s when missing, at most 1 h), and sends meanwhile
+// skip it without a network call. subscribe() clears both for a re-subscribed endpoint.
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -15,6 +19,18 @@ export const JWT_TTL_S = 12 * 3600;
 export const RECORD_SIZE = 4096;
 const SUBJECT = 'mailto:owner@localhost';
 const TIMEOUT_MS = 15_000;
+export const MAX_FAILS = 3;
+const PERMANENT = new Set([400, 401, 403, 413]);
+const RETRY_DEFAULT_MS = 60_000, RETRY_MAX_MS = 3600_000;
+
+// A Retry-After header (delta seconds or an HTTP date) → ms to wait: 60 s when missing or unparsable, capped at 1 h.
+export function retryAfterMs(h, now = Date.now()) {
+  const v = String(h ?? '').trim();
+  let ms = NaN;
+  if (/^\d+$/.test(v)) ms = Number(v) * 1000;
+  else if (/[a-z]/i.test(v)) { const t = Date.parse(v); if (Number.isFinite(t)) ms = Math.max(0, t - now); }
+  return Number.isFinite(ms) ? Math.min(ms, RETRY_MAX_MS) : RETRY_DEFAULT_MS;
+}
 
 const b64u = (b) => Buffer.from(b).toString('base64url');
 const unb64u = (s) => Buffer.from(String(s), 'base64url');
@@ -76,7 +92,7 @@ export function createPush({ dataDir, log = () => {} }) {
     const sig = crypto.sign('sha256', Buffer.from(data), { key: signer, dsaEncoding: 'ieee-p1363' });
     return `vapid t=${data}.${b64u(sig)}, k=${vapid.publicKey}`;
   }
-  // One POST → the status code, or 0 on a network error or timeout.
+  // One POST → {code, retryAfter}: the status code (0 on a network error or timeout) and the Retry-After header.
   function post(sub, body) {
     return new Promise((resolve) => {
       let req;
@@ -84,10 +100,13 @@ export function createPush({ dataDir, log = () => {} }) {
         const u = new URL(sub.endpoint);
         req = (u.protocol === 'https:' ? https : http).request(u, { method: 'POST', timeout: TIMEOUT_MS, headers: {
           'Content-Type': 'application/octet-stream', 'Content-Encoding': 'aes128gcm', 'Content-Length': body.length,
-          TTL: String(TTL), Urgency: 'high', Authorization: authorization(sub.endpoint) } }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode)); res.on('error', () => resolve(res.statusCode)); });
-      } catch { return resolve(0); }
+          TTL: String(TTL), Urgency: 'high', Authorization: authorization(sub.endpoint) } }, (res) => {
+          const done = () => resolve({ code: res.statusCode, retryAfter: res.headers['retry-after'] });
+          res.resume(); res.on('end', done); res.on('error', done);
+        });
+      } catch { return resolve({ code: 0 }); }
       req.on('timeout', () => req.destroy(new Error('timeout')));
-      req.on('error', () => resolve(0));
+      req.on('error', () => resolve({ code: 0 }));
       req.end(body);
     });
   }
@@ -97,7 +116,7 @@ export function createPush({ dataDir, log = () => {} }) {
     count: () => subs.length,
     subscribe(sub) {
       const s = { endpoint: String(sub.endpoint), keys: { p256dh: String(sub.keys.p256dh), auth: String(sub.keys.auth) },
-        ua: String(sub.ua || '').slice(0, 300), addedAt: Date.now() };
+        ua: String(sub.ua || '').slice(0, 300), addedAt: Date.now(), fails: 0, pausedUntil: 0 };
       subs = [...subs.filter((x) => x.endpoint !== s.endpoint), s];
       save();
       log(`subscribed ${new URL(s.endpoint).host} (${subs.length} device${subs.length === 1 ? '' : 's'})`);
@@ -110,19 +129,33 @@ export function createPush({ dataDir, log = () => {} }) {
       return n - subs.length;
     },
     async send({ title, body, tag, url, badge } = {}) {
-      const r = { sent: 0, removed: 0, failed: 0 };
+      const r = { sent: 0, removed: 0, failed: 0, skipped: 0 };
+      let dirty = false;
       try {
         const payload = JSON.stringify({ title: String(title || 'agent-orch').slice(0, 200), body: String(body || '').slice(0, 1000), tag, url, badge });
         await Promise.all(subs.map(async (sub) => {
-          let code = 0;
-          try { code = await post(sub, encrypt(payload, sub.keys.p256dh, sub.keys.auth)); } catch {}
+          if ((sub.pausedUntil || 0) > Date.now()) { r.skipped++; return; }
+          let code = 0, retryAfter;
+          try { ({ code, retryAfter } = await post(sub, encrypt(payload, sub.keys.p256dh, sub.keys.auth))); } catch {}
           const host = (() => { try { return new URL(sub.endpoint).host; } catch { return '?'; } })();
-          if (code >= 200 && code < 300) r.sent++;
-          else if (code === 404 || code === 410) { r.removed++; subs = subs.filter((x) => x.endpoint !== sub.endpoint); }
-          else r.failed++;
-          log(`send "${String(title || '').slice(0, 60)}" → ${host}: ${code || 'network error'}${code === 404 || code === 410 ? ' (removed)' : ''}`);
+          const drop = () => { r.removed++; dirty = true; subs = subs.filter((x) => x.endpoint !== sub.endpoint); };
+          let note = '';
+          if (code >= 200 && code < 300) {
+            r.sent++;
+            if (sub.fails || sub.pausedUntil) { sub.fails = 0; sub.pausedUntil = 0; dirty = true; }
+          } else if (code === 404 || code === 410) { drop(); note = ' (removed)'; }
+          else if (PERMANENT.has(code)) {
+            sub.fails = (sub.fails || 0) + 1; dirty = true;
+            if (sub.fails >= MAX_FAILS) { drop(); note = ` (removed after ${sub.fails} rejections)`; }
+            else { r.failed++; note = ` (${sub.fails}/${MAX_FAILS})`; }
+          } else if (code === 429 || code === 503) {
+            const wait = retryAfterMs(retryAfter);
+            sub.pausedUntil = Date.now() + wait; dirty = true; r.failed++;
+            note = ` (paused ${Math.round(wait / 1000)} s)`;
+          } else r.failed++;
+          log(`send "${String(title || '').slice(0, 60)}" → ${host}: ${code || 'network error'}${note}`);
         }));
-        if (r.removed) save();
+        if (dirty) save();
       } catch (e) { log(`send failed: ${e.message}`); }
       return r;
     },

@@ -1565,6 +1565,9 @@ Cards and drawer share one proportional, muted 2px phase bar
 
 Desktop Machines graph is a star with task-listing cards and usage rings
 
+## 2026-09-28 18:56 — #500 Browser failover: switch to another machine when one can't open the browser [done (check passed)]
+
+browser views and tasks fail over to capable machines; tests pass
 ## 2026-09-28 18:56 — #499 Browser tab: show only the current task, no history [done (check passed)]
 
 Browser tab shows only the running task; tests pass
@@ -1579,6 +1582,17 @@ Drawer and card phase bars share one renderer with milestone lines
 
 Files list has marquee selection with auto-scroll; all 5 tests pass
 
+## 2026-09-28 18:58 — #504 Integrate #500: Browser failover: switch to another machine when one can't open the browser [done (check passed)]
+
+Merged main with #500 failover; browser-failover, chrome-runner and placement tests pass
+
+## 2026-09-28 18:58 — #504 Integrate #500: Browser failover: switch to another machine when one can't open the browser [verify failed (1)]
+
+Command: merge main again
 ## 2026-09-28 18:57 — #503 Integrate #499: Browser tab: show only the current task, no history [done (check passed)]
 
 CONTEXT.md conflict resolved; browser-view tests pass
+
+## 2026-09-28 18:58 — #504 Integrate #500: Browser failover: switch to another machine when one can't open the browser [done (check passed)]
+
+CONTEXT.md conflict resolved; browser-failover tests pass

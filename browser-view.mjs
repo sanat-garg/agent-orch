@@ -7,17 +7,23 @@
 //   UI → server: bv_open {node, identity, url? (followed only when this socket may drive), thumb?, size?}, bv_close, bv_input {events},
 //   bv_nav {action, url?}, bv_take, bv_handback, bv_size {size: {width, height, dpr}}
 //   server → UI: bv_frame {node, identity, n, data, w, h}, bv_state {node, identity, url, title, active, takeover, reconnecting, agentTab (the view
-//   follows the task's own tab), role, task, closed?, error?, note?}
+//   follows the task's own tab), role, task, closed?, error?, note?}, bv_switch {node, identity, to, name, text}
+// Failover (#500): when a view's machine can't open the browser (launch or CDP attach error), goes offline, or sends no
+// frame within frameMs of opening, and no task holds the profile there, the view moves to browser.mjs nextBrowserNode
+// (skipping machines that failed in the last 10 min) and every viewer gets bv_switch first. Picking a machine by hand
+// (bv_open) still opens it, failed or not.
 // Profiles live on a Mac worker by default (GET /api/browser marks the least-loaded online Mac `default`); the controller
 // is the default only while no Mac is online, and is marked `slow` (a 1-core VPS can't stream a browser well).
 import os from 'node:os';
 import { MSG } from './cluster-protocol.mjs';
 import { createLiveBrowsers, screenOp, activeRun, takenOver, viewSize } from './browser-live.mjs';
-import { findBrowser, normIdentity, IDENTITY_RE } from './browser.mjs';
+import { findBrowser, normIdentity, IDENTITY_RE, failedNodes, nextBrowserNode, chromeNode } from './browser.mjs';
 
 export const LOCAL = 'controller';
 // The machine a profile lives on by default: the least-loaded online Mac that can show a browser, else the controller.
 export function defaultNode(nodes) {
+  const ok = nodes.filter((n) => !n.failed);
+  if (ok.length < nodes.length) nodes = ok.some((n) => n.online && n.capable) ? ok : nodes;
   const macs = nodes.filter((n) => n.mac && n.online && n.capable).sort((a, b) => (a.load ?? 99) - (b.load ?? 99));
   return macs[0] || nodes.find((n) => n.local && n.capable) || nodes.find((n) => n.online && n.capable) || null;
 }
@@ -25,7 +31,8 @@ const BACKLOG = 1024 * 1024; // a viewer this far behind skips frames
 const THUMB_MS = 1000; // task-drawer thumbnails get a frame a second
 
 // cluster(): the hub or null; tasks(): running browser tasks [{id, title, node, identity}]; send(ws, msg).
-export function createBrowserViews({ cluster = () => null, tasks = () => [], send, log = () => {}, local = null, timeoutMs = 60_000 } = {}) {
+// frameMs: how long a new view waits for its first frame before moving on; failed: browser.mjs failedNodes (tests).
+export function createBrowserViews({ cluster = () => null, tasks = () => [], send, log = () => {}, local = null, timeoutMs = 60_000, frameMs = 15_000, failed = failedNodes() } = {}) {
   let mgr = local;
   const localMgr = () => (mgr ??= createLiveBrowsers({ log }));
   const sessions = new Map(); // `${node}/${identity}` → session
@@ -73,7 +80,9 @@ export function createBrowserViews({ cluster = () => null, tasks = () => [], sen
   const sizeViewer = (v, size) => { const z = !v.thumb && viewSize(size); if (z) Object.assign(v, { size: z, sizedAt: Date.now() }); return !!z; };
 
   function onFrame(s, f) {
+    if (sessions.get(s.key) !== s) return;
     s.frame = f;
+    clearTimeout(s.watchdog);
     const now = Date.now();
     for (const [ws, v] of s.viewers) {
       if ((ws.bufferedAmount || 0) > BACKLOG) continue;
@@ -93,7 +102,8 @@ export function createBrowserViews({ cluster = () => null, tasks = () => [], sen
   function end(s) {
     if (sessions.get(s.key) !== s) return;
     sessions.delete(s.key);
-    if (!s.closed) op(s.node, { op: 'stop', identity: s.identity }).catch(() => {});
+    clearTimeout(s.watchdog);
+    if (!s.closed) Promise.resolve(s.ready).catch(() => {}).then(() => op(s.node, { op: 'stop', identity: s.identity })).catch(() => {});
     if (s.state.takeover && !s.closed) op(s.node, { op: 'takeover', identity: s.identity, on: false }).catch(() => {});
   }
 
@@ -105,6 +115,8 @@ export function createBrowserViews({ cluster = () => null, tasks = () => [], sen
     if (!s) {
       s = { key, node, identity, viewers: new Map(), controller: null, state: {}, frame: null, closed: false, error: null, note: null, sized: null };
       sessions.set(key, s);
+      s.watchdog = setTimeout(() => !s.frame && failover(s, `sent no picture for ${frameMs >= 1000 ? `${Math.round(frameMs / 1000)} s` : `${frameMs} ms`}`), frameMs);
+      s.watchdog.unref?.();
       const v = { thumb: !!thumb };
       if (sizeViewer(v, size)) s.sized = JSON.stringify(v.size);
       s.viewers.set(ws, v);
@@ -117,11 +129,14 @@ export function createBrowserViews({ cluster = () => null, tasks = () => [], sen
       if (s.frame) send(ws, { t: 'bv_frame', node, identity, n: s.frame.n, data: s.frame.data, w: s.frame.w, h: s.frame.h });
     }
     try { await s.ready; } catch (e) {
+      if (sessions.get(key) !== s || failover(s, `couldn't open the browser (${e.message})`)) return;
       s.closed = true; s.error = e.message;
       pushState(s);
       sessions.delete(key);
+      clearTimeout(s.watchdog);
       return;
     }
+    if (sessions.get(key) !== s) return; // it moved to another machine meanwhile
     assign(s);
     pushState(s);
     // A url is followed only by a socket that may drive now, like bv_nav: never past a task without take-over.
@@ -138,6 +153,29 @@ export function createBrowserViews({ cluster = () => null, tasks = () => [], sen
     if (!s.viewers.size) return end(s);
     assign(s);
     pushState(s);
+  }
+  const nameOf = (id) => (id === LOCAL ? cluster()?.listNodes().find((n) => n.local)?.name || 'This server' : nodeOf(id)?.name || id);
+  // The machines a view could move to, in nextBrowserNode's shape.
+  function candidates() {
+    const nodes = cluster()?.listNodes() || [{ id: LOCAL, local: true, connected: true }];
+    return nodes.map((n) => ({ id: n.local ? LOCAL : n.id, local: !!n.local, online: !!(n.local || n.connected), capable: screenable(n),
+      mac: (n.local ? n.os || process.platform : n.os) === 'darwin', chrome: chromeNode(n), load: n.local ? null : (n.resources?.load?.[0] ?? 99) / (n.inventory?.cores || 1) }));
+  }
+  // s's machine failed: remember it and move every viewer to the next machine. False (nothing done) when a task holds
+  // the profile there (its browser is the task's) or no other machine can take it.
+  function failover(s, reason) {
+    if (sessions.get(s.key) !== s || s.closed || taskFor(s) || s.state.active) return false;
+    failed.mark(s.node, reason);
+    const next = nextBrowserNode(candidates(), (n) => n.id === s.node || failed.has(n.id));
+    const from = nameOf(s.node);
+    log(`${s.identity} on ${from}: ${reason}; ${next ? `switching to ${nameOf(next.id)}` : 'no other machine'}`);
+    if (!next) return false;
+    const name = nameOf(next.id), viewers = [...s.viewers];
+    const text = `Switched to ${name}: ${from} ${reason}. Signed-in sites may differ on ${name}`;
+    for (const [ws] of viewers) send(ws, { t: 'bv_switch', node: s.node, identity: s.identity, to: next.id, name, reason, text });
+    end(s);
+    for (const [ws, v] of viewers) open(ws, { node: next.id, identity: s.identity, thumb: v.thumb, size: v.size }).catch((e) => send(ws, { t: 'bv_error', node: next.id, identity: s.identity, text: String(e?.message || e) }));
+    return true;
   }
   const canDrive = (s, ws) => s && s.controller === ws && (!(s.state.active || taskFor(s)) || s.state.takeover);
 
@@ -196,7 +234,10 @@ export function createBrowserViews({ cluster = () => null, tasks = () => [], sen
   // Tasks start and end, machines drop: re-check every open view now and then.
   const tick = setInterval(() => {
     for (const s of [...sessions.values()]) {
-      if (s.node !== LOCAL && !nodeOf(s.node)?.connected) { s.closed = true; s.error = 'the machine went offline'; pushState(s); sessions.delete(s.key); continue; }
+      if (s.node !== LOCAL && !nodeOf(s.node)?.connected) {
+        if (failover(s, 'went offline')) continue;
+        s.closed = true; s.error = 'the machine went offline'; pushState(s); sessions.delete(s.key); clearTimeout(s.watchdog); continue;
+      }
       const before = JSON.stringify([...s.viewers.keys()].map((ws) => stateFor(s, ws)));
       if (s.node === LOCAL) s.state.active = !!activeRun(s.identity, localMgr().home);
       assign(s);
@@ -214,7 +255,8 @@ export function createBrowserViews({ cluster = () => null, tasks = () => [], sen
       const mac = (n.local ? n.os || process.platform : n.os) === 'darwin', cores = n.local ? os.cpus().length : n.inventory?.cores;
       const load1 = n.local ? os.loadavg()[0] : n.resources?.load?.[0];
       const base = { id: n.id, name: n.local ? n.name || 'This server' : n.name, local: !!n.local, online: !!n.connected, capable: screenable(n), mac,
-        load: Number.isFinite(load1) && cores > 0 ? Math.round((load1 / cores) * 100) / 100 : null, ...(n.local && !mac && { slow: true }) };
+        load: Number.isFinite(load1) && cores > 0 ? Math.round((load1 / cores) * 100) / 100 : null, ...(n.local && !mac && { slow: true }),
+        ...(failed.has(n.local ? LOCAL : n.id) && { failed: failed.why(n.local ? LOCAL : n.id) }) };
       if (!base.capable) return { ...base, profiles: [], note: n.local ? 'no Chromium or Chrome here' : !n.connected ? 'offline' : !n.features?.includes('screen') ? 'update its worker for the live view' : n.inventory?.browser?.error || 'no browser' };
       try {
         const { profiles } = await op(n.id, { op: 'profiles' });
@@ -241,7 +283,7 @@ export function createBrowserViews({ cluster = () => null, tasks = () => [], sen
     await op(node, { op: 'clear', identity });
     return true;
   }
-  async function closeAll() { clearInterval(tick); sessions.clear(); await mgr?.close(); }
+  async function closeAll() { clearInterval(tick); for (const s of sessions.values()) clearTimeout(s.watchdog); sessions.clear(); await mgr?.close(); }
 
-  return { handle, drop, onCluster, list, profile, isTakenOver, sites, clear, close: closeAll, sessions };
+  return { handle, drop, onCluster, list, profile, isTakenOver, sites, clear, close: closeAll, sessions, failed };
 }

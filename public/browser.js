@@ -77,7 +77,22 @@ function bvOnServer(msg) {
     if (BV.thumb?.key === k) bvThumbState(msg);
   } else if (msg.t === 'bv_error') {
     if (inView) toast(msg.text, { kind: 'warn' });
-  }
+  } else if (msg.t === 'bv_switch') bvSwitched(msg, k, inView);
+}
+// The server moved a view to another machine (its browser failed where it was): follow it there, with its notice.
+function bvSwitched(msg, k, inView) {
+  const w = BV.want.get(k), to = bvKey(msg.to, msg.identity);
+  if (w) { BV.want.delete(k); BV.want.set(to, { ...w, node: msg.to }); }
+  if (BV.thumb?.key === k) Object.assign(BV.thumb, { key: to, node: msg.to });
+  if (BX.sel && bvKey(BX.sel.node, BX.sel.identity) === k) BX.sel = { ...BX.sel, node: msg.to, name: msg.name };
+  if (!inView) return;
+  Object.assign(BV.view, { node: msg.to, name: msg.name });
+  BV.st = null;
+  BV.view.m.wait.hidden = false;
+  BV.view.m.wait.textContent = msg.text;
+  bvRenderState();
+  toast(msg.text, { kind: 'warn' });
+  bwLoad();
 }
 
 // ----- the Browser sheet

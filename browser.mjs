@@ -83,6 +83,27 @@ export const MCP_START_MS = 90_000;
 // The owner-readable result of a browser run whose MCP never connected, after its automatic retries (agents.mjs).
 export const MCP_START_FAILED = "Browser tool couldn't start: retried twice";
 
+// ---- Failover (#500): a machine whose browser couldn't start, attach or stream is skipped for FAILED_MS, and the view or
+// task moves to the next capable machine. A run result that means "the browser is unavailable here", not "the task failed":
+export const FAILED_MS = 10 * 60_000;
+const UNAVAILABLE_RE = /MCP server failed to connect|browser (?:launch|failed to (?:start|launch))|(?:couldn't|could not|failed to) (?:start|launch|connect to) (?:the )?(?:browser|chromium|chrome)|chrome extension (?:is )?(?:unavailable|not (?:connected|installed|available|found))|claude in chrome (?:is )?(?:unavailable|not (?:connected|installed|available))/i;
+export const browserUnavailable = (res) => !!res && res.outcome !== 'ok'
+  && (res.errorCode === 'mcp_connect_failed' || res.text === MCP_START_FAILED || UNAVAILABLE_RE.test(`${res.text || ''}\n${res.detail || ''}`));
+// The machines whose browser failed lately: mark(id, why), has(id), why(id). now: a clock (tests).
+export function failedNodes({ ttlMs = FAILED_MS, now = Date.now } = {}) {
+  const m = new Map();
+  const get = (id) => { const f = m.get(id); if (f && f.until <= now()) m.delete(id); return m.get(id) || null; };
+  return { mark: (id, why) => m.set(id, { until: now() + ttlMs, why: String(why || 'browser unavailable') }), has: (id) => !!get(id), why: (id) => get(id)?.why || null, clear: (id) => m.delete(id) };
+}
+// The next machine to run a profile's browser on: online, capable and not skipped; a Chrome-capable node first (#496),
+// then Macs, then other workers, the head last; the least loaded within each. nodes: [{id, local, online, capable, mac, chrome, load}].
+export function nextBrowserNode(nodes, skip = () => false) {
+  const rank = (n) => (n.local ? 3 : n.chrome ? 0 : n.mac ? 1 : 2);
+  return nodes.filter((n) => n.online && n.capable && !skip(n)).sort((a, b) => rank(a) - rank(b) || (a.load ?? 99) - (b.load ?? 99))[0] || null;
+}
+// Whether a cluster node reports Claude in Chrome (#496's 'chrome' capability).
+export const chromeNode = (n) => !!(n?.features?.includes('chrome') || n?.inventory?.chrome === true || n?.inventory?.browser?.chrome === true);
+
 // The pinned @playwright/mcp's installed cli.js, or null. Runs never fall back to `npx -y` (a download at run time is
 // what made the MCP miss its connect timeout): ensurePlaywrightMcp installs it at boot instead.
 const APP_DIR = path.dirname(fileURLToPath(import.meta.url));

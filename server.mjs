@@ -944,7 +944,7 @@ if (cluster) {
 }
 // The owner's live browser views (Browser sheet, task drawers): profiles on this server or on workers (browser-view.mjs).
 const browserViews = createBrowserViews({ cluster: () => cluster || null, tasks: () => orch?.browserTasks() || [], send: (ws, m) => send(ws, m),
-  log: (m) => console.log(`[browser] ${m}`) });
+  log: (m) => console.log(`[browser] ${m}`), failed: orch?.browserFailed });
 orch?.attachBrowserViews(browserViews);
 if (cluster) cluster.onMessage((id, msg) => browserViews.onCluster(id, msg));
 if (cluster) remoteLogins = createRemoteLogins({ cluster, local: () => connections.list(),

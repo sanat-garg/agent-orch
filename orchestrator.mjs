@@ -19,7 +19,7 @@ import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { AGENTS, isAgent, agentEfforts, agentStatus, clampEffort, codexExhausted, codexLatestSnapshot, isMissingSession, limitScope, limitScopes, modelCatalog, modelNames, runAgentCli, toolInputSummary, windowLabel } from './agents.mjs';
 import { SHOTS_DIR, mediaCollector } from './media.mjs';
-import { BROWSER_SYSTEM, MCP_START_FAILED, needsBrowser, normIdentity, parseCapabilities } from './browser.mjs';
+import { BROWSER_SYSTEM, MCP_START_FAILED, needsBrowser, normIdentity, parseCapabilities, browserUnavailable, failedNodes, nextBrowserNode, chromeNode, findBrowser, FAILED_MS } from './browser.mjs';
 import { BROWSER_TASK_SYSTEM, browserTaskStatus, browserSteps, isBrowserTask } from './browser-task.mjs';
 import { browserRoute, chromeCapable, runnerLabel } from './chrome.mjs';
 import { APPROVAL_TTL_MS, DEFAULT_PATTERNS } from './gate.mjs';
@@ -47,6 +47,8 @@ const CFG = {
   hardware: null,               // {cores, mem} or a function returning it: the controller's hardware (tests); null = os.cpus() and MemTotal
   hardwareMs: 600_000,          // re-detected this often, so a resized VPS applies without a restart
   agentSlots: 'auto',                // concurrent tasks per connected account (or map by agent)
+  browserSwitches: 2,           // a browser task whose browser couldn't start moves to another machine at most this often (#500)
+  browserFailedMs: FAILED_MS,   // and the machine it failed on is skipped by unpinned browser tasks this long
   meminfo: process.env.AGENT_ORCH_MEMINFO || '/proc/meminfo', // the memory guard's source (tests point it at a fixture)
   memCheckMs: 5000,             // memory guard interval while tasks run
   memLowPauseSec: 30,           // MemAvailable under MEM.pauseBelow this long → pause the newest running task
@@ -1673,12 +1675,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (browser && profileBusy(task)) return no('its browser profile is in use');
     const project = getProject(task.project_id), remote = remoteCapable(task, project);
     // Pinned by the owner (run_on): only that machine, waiting for it. A worker pin only binds a task that can run remotely.
-    const route = browser ? browserRoute(nodesNow(), { agent }) : null;
+    // A machine whose browser failed lately (#500) is left out of the Chrome route, so a failover pin isn't undone.
+    const route = browser ? browserRoute(nodesNow().filter((n) => !browserFailed.has(n.id)), { agent }) : null;
     let pin = task.kind === 'work' && task.run_on && (task.run_on === LOCAL_NODE || remote || isBrowserTask(task)) ? task.run_on : null;
     if (route?.mode === 'chrome' && isBrowserTask(task) && !route.nodes.includes(pin)) pin = null;
     const chromeIds = route?.mode === 'chrome' && (!pin || route.nodes.includes(pin)) ? new Set(route.nodes) : null;
     const browserOk = (n) => (chromeIds ? chromeIds.has(n.id) : browserWorker(n));
-    const macOnly = browser && !chromeIds && !pin && remote && workerNodes(agent).some((n) => n.os === 'darwin' && browserWorker(n) && canClone(n, task, project));
+    const macOnly = browser && !chromeIds && !pin && remote && workerNodes(agent).some((n) => n.os === 'darwin' && browserWorker(n) && !browserFailed.has(n.id) && canClone(n, task, project));
     const fits = (n) => (!browser || browserOk(n)) && (!macOnly || n.os === 'darwin') && canClone(n, task, project) && (!task.integrates || integrateWorker(n))
       && (browser || !n.inventory?.chromeRunner);
     const cands = [], skips = [];
@@ -1688,6 +1691,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       for (const n of nodesNow()) {
         if (n.local || (pin && n.id !== pin)) continue;
         weigh(n.id, workerSkip(n, agent, task.id) || (!browser && n.inventory?.chromeRunner ? 'a Chrome runner: browser tasks only'
+          : browser && !pin && browserFailed.has(n.id) ? `its browser failed lately (${browserFailed.why(n.id)})`
           : browser && !browserOk(n) ? (chromeIds ? `browser tasks use Chrome on ${route.name}` : 'no browser for browser tasks')
           : macOnly && n.os !== 'darwin' ? 'browser tasks run on a Mac while one is online'
           : !canClone(n, task, project) ? 'cannot clone this project'
@@ -1701,6 +1705,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         : browser && chromeIds ? `browser tasks use Chrome on ${route.name}`
         : browser && !settings.controllerBrowser && pin !== LOCAL_NODE ? 'browser tasks run on workers (Settings)'
           : browser && macOnly ? 'browser tasks run on a Mac while one is online'
+          : browser && !pin && browserFailed.has(LOCAL_NODE) ? `its browser failed lately (${browserFailed.why(LOCAL_NODE)})`
           : remote && !pin && !settings.controllerWork && workerNodes(agent).some(fits) ? 'leaves work tasks to the workers (Settings)'
             : cpu?.saturated ? `CPU saturated (${cpu.text})`
               : !localFree ? `full (${nodeLoad(LOCAL_NODE)}/${slots} running)`
@@ -1722,6 +1727,27 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // A worker that can run a browser task: it has a browser, and its approval gate can ask the head (feature 'approvals').
   const browserWorker = (n) => n.inventory?.browser?.capable === true && (n.features || []).includes('approvals');
   const identityOf = (task) => (needsBrowser(task) ? normIdentity(task.browser_identity) : null);
+  // Browser failover (#500): machines whose browser couldn't start lately (shared with the live view, browser-view.mjs).
+  const browserFailed = failedNodes({ ttlMs: CFG.browserFailedMs });
+  // A browser run ended because its browser couldn't start or connect on its machine: remember that machine and requeue
+  // the task pinned to the next capable one (browser.mjs nextBrowserNode), at most CFG.browserSwitches times. False: no
+  // move (out of switches, or no other machine), so it fails as before.
+  function browserFailover(task, project, res) {
+    const from = res.remote?.node || task.node_id || LOCAL_NODE, moves = Number(kvGet(`browser_moves:${task.id}`) || 0);
+    browserFailed.mark(from, 'browser unavailable');
+    if (moves >= CFG.browserSwitches) return false;
+    const agent = task.ran_agent || routeNow(task, project).agent, settings = parallelSettings();
+    const nodes = workerNodes(agent).filter((n) => n.enabled !== false && !n.draining && browserWorker(n) && (!isBrowserTask(task) || n.features?.includes('browser-task')))
+      .map((n) => ({ id: n.id, online: true, capable: true, mac: n.os === 'darwin', chrome: chromeNode(n), load: (n.resources?.load?.[0] ?? 99) / (n.inventory?.cores || 1) }));
+    if (settings.controllerBrowser && localAgentOk(agent) && findBrowser()) nodes.push({ id: LOCAL_NODE, local: true, online: true, capable: true });
+    const next = nextBrowserNode(nodes, (n) => n.id === from || browserFailed.has(n.id));
+    if (!next) return false;
+    kvSet(`browser_moves:${task.id}`, moves + 1);
+    const to = next.id === LOCAL_NODE ? 'this server' : nodeName(next.id), was = from === LOCAL_NODE ? 'this server' : nodeName(from);
+    requeueIfRunning(task.id, { run_on: next.id, session_id: null, not_before: 0, last_error: `[browser] unavailable on ${was}: ${String(res.detail || res.text || '').slice(0, 1500)}` });
+    logEvent(`#${task.id} moved to ${to}: browser unavailable on ${was}. Signed-in sites may differ on ${to}`, { level: 'warn', projectId: project.id, taskId: task.id });
+    return true;
+  }
   // The profile lock: a claimed (running) task already uses this identity. Read from the DB, so a claim not yet started counts.
   const profileBusy = (task) => qa("SELECT id, kind, capabilities, browser_identity FROM tasks WHERE status='running' AND capabilities IS NOT NULL AND id!=:id", { id: task.id })
     .some((r) => r.kind === 'work' && identityOf(r) === identityOf(task));
@@ -3600,6 +3626,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     }
     // Stopped by the owner (pause/handoff) and the agent exited with an error on the way out: no attempt is spent.
     if (stopIntents.has(tid)) return requeueIfRunning(tid, { session_id: res.sessionId || task.session_id });
+    // The browser couldn't start or connect on that machine: another capable one gets it (#500).
+    if (task.kind === 'work' && needsBrowser(task) && browserUnavailable(res) && browserFailover(task, project, res)) return;
     // The browser tool never started, after the run's own retries (agents.mjs browserRun): the owner is told as is.
     if (res.errorCode === 'mcp_connect_failed' || res.text === MCP_START_FAILED) return fail(task, project, 'browser', MCP_START_FAILED);
     // max_turns, timeout, error: retry with bounded attempts, resuming the same session.
@@ -4512,7 +4540,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
 
   return {
-    createBrowserTask, listBrowserTasks, stopBrowserTask, attachBrowserViews, browserRunner,
+    createBrowserTask, listBrowserTasks, stopBrowserTask, attachBrowserViews, browserFailed, browserRunner,
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
     planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, insertCheckpoint, approveCheckpoint, requestChanges, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setTaskRunOn, assignable, assignTask, setReflectFallbacks, setReflectSettings, syncConvoModel, pauseTask, resumeTask, handoffTask, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
     drain, undrain, chatPlanning, applyUpdates: () => parallelSettings().applyUpdates,

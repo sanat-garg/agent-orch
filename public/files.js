@@ -1,7 +1,8 @@
 'use strict';
 // ---------- Files: a Finder-style, read-only browser of the open chat's project (server: files.mjs) ----------
 // Icon and list views (list folders open in place with disclosure triangles), back/forward, a path bar, a name filter,
-// hidden files on request (⌘⇧.), project-wide search by name or inside files (Enter in the search field; Names | Contents), and Quick Look (Space or double-click) for text, Markdown and images. Loaded after
+// hidden files on request (⌘⇧.), project-wide search by name or inside files (Enter in the search field; Names | Contents), and Quick Look (Space or double-click) for text, Markdown and images.
+// Ask in chat (Quick Look's header, a Contents hit's trailing button, Shift+Enter on a row) puts `path[:line]` into the composer. Loaded after
 // app.js and uses its helpers ($, el, api, store, md, currentConvo).
 const FX = {
   cid: null, path: '', data: null, err: '', seq: 0, qseq: 0, fseq: 0, find: null, back: [], fwd: [], sel: null, filter: '', rows: [],
@@ -214,6 +215,20 @@ function fxReveal(r) {
   FX.sel = r.rel;
 }
 const join = (a, b) => (a ? `${a}/${b}` : b);
+const ICON_ASK = '<svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
+// `rel[:line]` into the composer at the caret (spaced from its neighbours), then back to the chat with the caret after it.
+function fxAskAbout(rel, line) {
+  const input = $('input'), ref = line ? `${rel}:${line}` : rel, v = input.value;
+  const a = input.selectionStart ?? v.length, b = input.selectionEnd ?? a;
+  const before = v.slice(0, a), after = v.slice(b);
+  const text = `${before && !/\s$/.test(before) ? ' ' : ''}${ref}${/^\s/.test(after) ? '' : ' '}`;
+  input.value = before + text + after;
+  input.dispatchEvent(new Event('input', { bubbles: true })); // the composer resizes
+  fxClosePreview();
+  document.querySelector('.seg button[data-view="chat"]')?.click(); // app.js setView('chat'), like the Vibecode tab
+  input.focus({ preventScroll: true });
+  input.setSelectionRange(a + text.length, a + text.length);
+}
 function fxSorted(entries) {
   const { key, dir } = FX.sort;
   const val = (e) => (key === 'size' ? e.size ?? -1 : key === 'date' ? e.mtime : key === 'kind' ? kindOf(e) : e.name);
@@ -317,7 +332,12 @@ function fxFoundLines(main) {
       }
       const o = optionFor(r, i, 'fx-row fx-hit');
       o.title = `${r.file}:${r.hit.line}`;
-      o.append(el('span', 'fx-hl', String(r.hit.line)), fxMarked(el('span', 'fx-ht'), r.hit.text, q));
+      const ask = el('button', 'fx-ask');
+      ask.type = 'button'; ask.tabIndex = -1; ask.innerHTML = ICON_ASK;
+      ask.title = 'Ask in chat (⇧Enter)';
+      ask.setAttribute('aria-label', `Ask in chat about ${r.file}:${r.hit.line}`);
+      ask.onclick = (ev) => { ev.stopPropagation(); fxAskAbout(r.file, r.hit.line); };
+      o.append(el('span', 'fx-hl', String(r.hit.line)), fxMarked(el('span', 'fx-ht'), r.hit.text, q), ask);
       group.append(o);
     });
     fxActive(t);
@@ -350,7 +370,7 @@ function optionFor(r, i, cls) {
   o.setAttribute('role', FX.view === 'list' && !FX.find ? 'treeitem' : 'option');
   o.setAttribute('aria-selected', String(r.rel === FX.sel));
   o.title = r.e.name;
-  o.addEventListener('click', (ev) => { if (ev.target.closest('.fx-disc')) return; fxSelect(r.rel); if (touch()) fxOpen(r); });
+  o.addEventListener('click', (ev) => { if (ev.target.closest('.fx-disc, .fx-ask')) return; fxSelect(r.rel); if (touch()) fxOpen(r); });
   o.addEventListener('dblclick', () => { if (!touch()) fxOpen(r); });
   return o;
 }
@@ -480,6 +500,7 @@ function fxKey(e) {
   if (FX.find && (e.key === 'Escape' || e.key === 'Backspace' || (mod && e.key === 'ArrowUp'))) { e.preventDefault(); fxFindExit(true); $('fxFilter').focus(); }
   else if (FX.find && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) e.preventDefault();
   else if (mod && e.key === 'ArrowUp') { e.preventDefault(); fxUp(); }
+  else if (e.shiftKey && e.key === 'Enter') { if (cur) { e.preventDefault(); fxAskAbout(cur.file || cur.rel, cur.hit?.line); } }
   else if ((mod && e.key === 'ArrowDown') || e.key === 'Enter') { if (cur) { e.preventDefault(); fxOpen(cur); } }
   else if (e.key === ' ') { e.preventDefault(); if (FX.ql) fxClosePreview(); else if (cur && !cur.e.dir) fxPreview(cur); }
   else if (e.key === 'Backspace') { e.preventDefault(); fxUp(); }
@@ -511,6 +532,7 @@ function fxQuickLook() {
         <div class="seg-sm fx-md" id="fxQLMode" role="radiogroup" aria-label="Show" hidden>
           <button type="button" role="radio" data-mode="preview">Preview</button><button type="button" role="radio" data-mode="source">Source</button>
         </div>
+        <button type="button" class="icon-btn" id="fxQLAsk" aria-label="Ask in chat" title="Ask in chat">${ICON_ASK}</button>
         <a class="icon-btn" id="fxQLOpen" target="_blank" rel="noopener" aria-label="Open in a new tab" title="Open in a new tab"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
         <button type="button" class="icon-btn" data-close aria-label="Close"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
       </div>
@@ -518,6 +540,7 @@ function fxQuickLook() {
     </div>`;
   document.body.append(m);
   m.addEventListener('click', (e) => { if (e.target.closest('[data-close]')) fxClosePreview(); });
+  $('fxQLAsk').onclick = () => { const r = FX.ql?.r; if (r) fxAskAbout(r.file || r.rel, r.hit?.line); };
   m.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', () => { store.set('cw.files.md', b.dataset.mode); if (FX.ql) fxPreview(FX.ql.r); }));
   m.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' || (e.key === ' ' && !e.target.closest('button, a'))) { e.preventDefault(); e.stopPropagation(); fxClosePreview(); }

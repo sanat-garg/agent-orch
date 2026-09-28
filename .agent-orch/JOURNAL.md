@@ -1052,3 +1052,7 @@ retention keeps referenced approval and review shots, prunes stale uploads
 ## 2026-09-28 13:01 — #373 files.mjs: GET /api/files/changed lists git-changed files and /api/files/diff serves one file's diff [done (check passed)]
 
 Changed-files and per-file diff routes added and tested
+
+## 2026-09-28 13:03 — #375 Files tab ui: Ask in chat puts path:line into the composer from Quick Look and a Contents hit [done (check passed)]
+
+Ask in chat inserts path[:line] from Files, tested

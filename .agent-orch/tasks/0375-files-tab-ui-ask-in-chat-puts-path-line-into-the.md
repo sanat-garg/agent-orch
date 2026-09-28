@@ -13,3 +13,7 @@ Feature in public/files.js and public/files.css only (app.js is held by other wo
 ## Done when
 
 `npm test -- test/ui-files.test.mjs test/ui-static.test.mjs` passes and `grep -q 'fxAskAbout' public/files.js`
+
+## Result — done (check passed) (2026-09-28 13:03)
+
+AGENT-ORCH-STATUS: done — Ask in chat inserts path[:line] from Files, tested

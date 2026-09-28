@@ -92,7 +92,15 @@
 .fx-lfile { display: flex; align-items: center; gap: 6px; height: 28px; padding: 6px 8px 0; font-size: 12.5px; font-weight: 600; color: var(--text); }
 .fx-lfile .fx-ico { width: 18px; height: 16px; }
 .fx-lgroup + .fx-lgroup { margin-top: 6px; }
-.fx-found .fx-row.fx-hit { grid-template-columns: 56px minmax(0, 1fr); background: none; }
+.fx-found .fx-row.fx-hit { grid-template-columns: 56px minmax(0, 1fr) auto; background: none; }
+/* a hit's trailing Ask in chat button: shown on hover or selection (always on touch) */
+.fx-ask { display: grid; place-items: center; width: 26px; height: 22px; margin-right: 4px; padding: 0; border: 0; border-radius: 6px; background: none;
+  color: var(--muted); cursor: pointer; opacity: 0; }
+.fx-ask svg { width: 15px; height: 15px; }
+.fx-hit:hover .fx-ask, .fx-hit[aria-selected="true"] .fx-ask, .fx-ask:focus-visible { opacity: 1; }
+.fx-ask:hover { background: var(--raised); color: var(--text); }
+.fx-rows:focus .fx-row[aria-selected="true"] .fx-ask { color: inherit; }
+.fx-rows:focus .fx-row[aria-selected="true"] .fx-ask:hover { background: rgba(255, 255, 255, .2); }
 .fx-hl { padding: 0 8px; text-align: right; color: var(--faint); font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; }
 .fx-ht { min-width: 0; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: pre; font-family: var(--mono); font-size: 12.5px; }
 .fx-row.fx-hit[aria-selected="true"] { background: var(--fx-sel-idle); }
@@ -151,6 +159,8 @@
   .btn.small.fx-find-btn { height: 44px; }
   .fx-mode button { min-height: 44px; min-width: 44px; }
   .fx-search input { font-size: 16px; } /* UI-REVIEW #20 */
+  .fx-ask { width: 44px; height: 44px; margin-right: 0; opacity: 1; }
+  .fx-ql .icon-btn { min-width: 44px; min-height: 44px; }
 }
 /* phones: the search takes its own row; the list is one column with size and date under the name (like Files on iOS) */
 @media (max-width: 640px) {
@@ -166,15 +176,16 @@
   .fx-row { height: 56px; border-radius: 10px; }
   .fx-row:nth-child(even) { background: none; }
   .fx-row .fx-ico { width: 30px; height: 28px; }
-  .fx-found .fx-row.fx-hit { grid-template-columns: 44px minmax(0, 1fr); height: 44px; }
+  .fx-found .fx-row.fx-hit { grid-template-columns: 44px minmax(0, 1fr) auto; height: 44px; }
   .fx-sub { display: block; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .fx-rows:focus .fx-row[aria-selected="true"] .fx-sub { color: inherit; opacity: .85; }
   .fx-path { padding-bottom: env(safe-area-inset-bottom); }
   .fx-ql { padding: 0; }
-  .fx-ql .m-head { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 4px 6px; align-items: center; padding: 12px 8px 10px 16px; }
+  .fx-ql .m-head { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 4px 6px; align-items: center; padding: 12px 8px 10px 16px; }
   .fx-ql .m-head > div:first-child { grid-area: 1 / 1; }
-  #fxQLOpen { grid-area: 1 / 2; }
-  .fx-ql .m-head > [data-close] { grid-area: 1 / 3; }
+  #fxQLAsk { grid-area: 1 / 2; }
+  #fxQLOpen { grid-area: 1 / 3; }
+  .fx-ql .m-head > [data-close] { grid-area: 1 / 4; }
   .fx-md { grid-area: 2 / 1 / 3 / -1; justify-self: start; }
   .fx-ql .icon-btn { min-width: 44px; min-height: 44px; }
   .modal-panel.fx-ql-panel { width: 100%; height: 100dvh; max-height: none; border-radius: 0; padding-top: env(safe-area-inset-top); }

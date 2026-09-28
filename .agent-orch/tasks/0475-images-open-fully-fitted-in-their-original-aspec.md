@@ -13,3 +13,9 @@ Screenshots in the task drawer (and chat) open in the lightbox at 'Actual size' 
 ## Done when
 
 `node --test test/ui-lightbox-fit*.test.mjs` passes (fit default without overflow, aspect preserved, no upscaling, toggle works, thumbnails contain)
+
+## Result — done (check passed) (2026-09-28 18:00)
+
+I've checked the screenshots: fit mode looks right on desktop and phone. Now I'm finishing up.
+
+AGENT-ORCH-STATUS: done — Lightbox opens fitted; thumbnails contain; fit tests pass

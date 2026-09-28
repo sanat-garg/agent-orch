@@ -1480,3 +1480,7 @@ Command: node --test test/browser-shared*.test.mjs
 ## 2026-09-28 17:52 — #473 Integrate #348: One shared browser per profile: agents attach to the live view, self-healing, run on a Mac [done (check passed)]
 
 viewer follows agent's new tab after restart; tests pass
+
+## 2026-09-28 18:00 — #475 Images open fully fitted in their original aspect ratio, with no scrolling [done (check passed)]
+
+Lightbox opens fitted; thumbnails contain; fit tests pass

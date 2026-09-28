@@ -1,6 +1,6 @@
 // Screenshots in a real browser: boots server.mjs (CW_NO_ORCHESTRATOR=1, temp data dir) on a spare port with a chat whose
 // log holds images of very different sizes. Every thumbnail is the same fixed 160×100 box (two per row on phones), and the
-// lightbox always shows the image at its natural pixel size (no fit option), scrolling when larger.
+// lightbox's Actual size shows the image at its natural pixel size, scrolling when larger (Fit, the default: ui-lightbox-fit).
 // Skips when Playwright's Chromium can't launch. CW_SHOTS_KEEP=1 leaves the server running for bin/shot.mjs.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -13,14 +13,19 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
+import { findBrowser } from '../browser.mjs';
 import { saveMedia } from '../media.mjs';
+import { macChromiumEnv } from './helpers/mac-chromium.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PASSWORD = 'shots-ui-password';
 const CID = 'chat-shots';
 const SIZES = [[2400, 1500], [390, 2400], [900, 180], [120, 80], [1280, 800]];
 let browser, skip = false;
-try { browser = await chromium.launch(); } catch (e) { skip = `cached Chromium unavailable: ${e.message.split('\n')[0]}`; }
+try {
+  const env = { ...process.env, ...macChromiumEnv() }; // the MacBook worker's LaunchDaemon needs a shim (helpers/mac-chromium.mjs)
+  browser = await chromium.launch({ env }).catch(() => chromium.launch({ env, executablePath: findBrowser({ env }) }));
+} catch (e) { skip = `cached Chromium unavailable: ${e.message.split('\n')[0]}`; }
 let child, base, dataDir, cookie, imgs, taskId;
 const GALLERY = 12;
 
@@ -116,27 +121,27 @@ const boxes = (page) => page.locator('#messages .shots .shot button').evaluateAl
   return { w: Math.round(r.width), h: Math.round(r.height), top: Math.round(r.top) };
 }));
 
-test('desktop: every thumbnail is the same 160×100 box; the lightbox always shows actual size, with no fit option', { skip, timeout: 60000 }, async () => {
+test('desktop: every thumbnail is the same 160×100 box; the lightbox at Actual size shows natural pixels', { skip, timeout: 60000 }, async () => {
   const { ctx, page, errors } = await open({ width: 1280, height: 800 });
   const b = await boxes(page);
   assert.deepEqual(b.map(({ w, h }) => [w, h]), SIZES.map(() => [160, 100]));
   const grid = await page.locator('#messages .shots').evaluate((g) => { const s = getComputedStyle(g); return [s.display, s.flexWrap, s.columnGap]; });
   assert.deepEqual(grid, ['flex', 'wrap', '8px']);
-  assert.deepEqual(await page.locator('#messages .shot img').first().evaluate((i) => [getComputedStyle(i).objectFit, getComputedStyle(i).objectPosition]), ['cover', '50% 0%']);
+  assert.equal(await page.locator('#messages .shot img').first().evaluate((i) => getComputedStyle(i).objectFit), 'contain');
 
-  // The 2400×1500 image: natural size, larger than the view, so the view scrolls both ways. There is no fit toggle.
+  // The 2400×1500 image at Actual size: natural size, larger than the view, so the view scrolls both ways.
   await page.locator('#messages .shot button').first().click();
   const lb = page.locator('#lightbox');
   await lb.waitFor();
+  await page.locator('#lbZoom').click();
   await page.waitForFunction(() => document.querySelector('#lbImg').complete && document.querySelector('#lbImg').naturalWidth);
   const img = () => page.locator('#lbImg').evaluate((i) => [i.offsetWidth, i.offsetHeight]); // layout size (the panel's rise animation scales)
   assert.deepEqual(await img(), [2400, 1500]);
   assert.match(await page.locator('#lbSub').innerText(), /^2400 × 1500 px · 1 of 5/);
-  assert.equal(await page.locator('#lightbox').getByText(/Fit to|Actual size/).count(), 0, 'no fit option');
   const scroll = await page.locator('#lbView').evaluate((v) => { v.scrollTo(300, 200); return [v.scrollLeft, v.scrollTop]; });
   assert.deepEqual(scroll, [300, 200]);
 
-  // Every image is at its own pixel size: small ones are never upscaled, tall/wide ones never shrunk; prev/next and Esc work.
+  // Actual size holds while paging; every image is at its own pixel size: small ones are never upscaled, tall/wide ones never shrunk; prev/next and Esc work.
   for (let i = 1; i < SIZES.length; i++) {
     await page.keyboard.press('ArrowRight');
     await page.waitForFunction((w) => document.querySelector('#lbImg').naturalWidth === w && document.querySelector('#lbImg').complete, SIZES[i][0]);
@@ -149,13 +154,14 @@ test('desktop: every thumbnail is the same 160×100 box; the lightbox always sho
   await page.keyboard.press('Escape');
   assert.equal(await lb.isHidden(), true);
   await page.locator('#messages .shot button').nth(1).click();
+  await page.locator('#lbZoom').click();
   await page.waitForFunction(() => document.querySelector('#lbImg').naturalWidth === 390 && document.querySelector('#lbImg').complete);
   assert.deepEqual(await img(), [390, 2400]);
   assert.deepEqual(errors, []);
   await ctx.close();
 });
 
-test('phone: thumbnails are two per row filling the width at 16:10; the lightbox scrolls a large image', { skip, timeout: 60000 }, async () => {
+test('phone: thumbnails are two per row filling the width at 16:10; the lightbox at Actual size scrolls a large image', { skip, timeout: 60000 }, async () => {
   const { ctx, page, errors } = await open({ width: 390, height: 844 }, true);
   const b = await boxes(page);
   assert.equal(new Set(b.map((x) => `${x.w}×${x.h}`)).size, 1, JSON.stringify(b));
@@ -165,6 +171,7 @@ test('phone: thumbnails are two per row filling the width at 16:10; the lightbox
   const row = await page.locator('#messages .shots').evaluate((g) => g.getBoundingClientRect().width);
   assert.ok(Math.abs(b[0].w * 2 + 8 - row) <= 2, `${b[0].w} ×2 + 8 vs ${row}`);
   await page.locator('#messages .shot button').nth(1).tap();
+  await page.locator('#lbZoom').tap();
   await page.waitForFunction(() => document.querySelector('#lbImg').naturalWidth === 390);
   const [w, h, sh, ch] = await page.locator('#lbView').evaluate((v) => [v.querySelector('img').offsetWidth, v.querySelector('img').offsetHeight, v.scrollHeight, v.clientHeight]);
   assert.deepEqual([w, h], [390, 2400]);

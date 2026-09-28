@@ -1106,11 +1106,12 @@ function openShot(fig) {
   list = list.filter((i) => i.id && !seen.has(i.id) && seen.add(i.id));
   LB.list = list;
   LB.lastFocus = document.activeElement;
+  setShotZoom('fit'); // every opening starts fitted; a switch to Actual size lasts until the lightbox closes
   showShot(Math.max(0, list.findIndex((i) => i.id === fig.dataset.id)));
   $('lightbox').hidden = false;
   $('lightbox').querySelector('[data-close].icon-btn').focus();
 }
-const LB = { list: [], i: 0, lastFocus: null, size: '' };
+const LB = { list: [], i: 0, lastFocus: null, size: '', zoom: 'fit', tap: null };
 function showShot(i) {
   const n = LB.list.length;
   if (!n) return;
@@ -1127,6 +1128,20 @@ function showShot(i) {
   $('lbView').scrollTo(0, 0);
   $('lbPrev').hidden = $('lbNext').hidden = n < 2;
 }
+// Fit: the whole image in the view (object-fit: contain, never upscaled, no scrollbars). Actual size: natural pixels,
+// scrolling/panning (pinch-zoom on phones). At (x, y) (a double-click/tap), actual size keeps that image point under it.
+function setShotZoom(zoom, at) {
+  const v = $('lbView'), im = $('lbImg');
+  const r = at && im.getBoundingClientRect();
+  LB.zoom = zoom;
+  v.classList.toggle('fit', zoom === 'fit');
+  $('lbZoom').textContent = zoom === 'fit' ? 'Actual size' : 'Fit';
+  $('lbZoom').setAttribute('aria-pressed', String(zoom !== 'fit'));
+  if (zoom === 'fit' || !r?.width || !im.naturalWidth) { v.scrollTo(0, 0); return; }
+  const fx = (at.x - r.left) / r.width, fy = (at.y - r.top) / r.height, vr = v.getBoundingClientRect();
+  v.scrollTo(im.offsetLeft + fx * im.offsetWidth - (at.x - vr.left), im.offsetTop + fy * im.offsetHeight - (at.y - vr.top));
+}
+const toggleShotZoom = (at) => setShotZoom(LB.zoom === 'fit' ? 'actual' : 'fit', at);
 function shotCaption() {
   const n = LB.list.length;
   $('lbSub').textContent = [LB.size, n > 1 ? `${LB.i + 1} of ${n} · use ← → to browse` : ''].filter(Boolean).join(' · ');
@@ -1144,7 +1159,7 @@ $('lbImg').addEventListener('error', () => { if ($('lbImg').getAttribute('src'))
 // Mouse drag pans a large image (touch scrolls natively, and pinch-zoom stays allowed).
 $('lbView').addEventListener('pointerdown', (e) => {
   const v = $('lbView');
-  if (e.pointerType !== 'mouse' || e.button !== 0) return;
+  if (e.pointerType !== 'mouse' || e.button !== 0 || LB.zoom === 'fit') return;
   const x = e.clientX + v.scrollLeft, y = e.clientY + v.scrollTop;
   v.setPointerCapture(e.pointerId);
   v.classList.add('panning');
@@ -1155,6 +1170,19 @@ $('lbView').addEventListener('pointerdown', (e) => {
   v.addEventListener('pointercancel', up);
   e.preventDefault();
 });
+// Double-click (mouse) or double-tap (touch, where dblclick is unreliable) toggles Fit ↔ Actual size.
+$('lbView').addEventListener('dblclick', (e) => { if (!LB.tap) toggleShotZoom({ x: e.clientX, y: e.clientY }); });
+$('lbView').addEventListener('pointerup', (e) => {
+  if (e.pointerType === 'mouse' || !e.isPrimary) return;
+  const now = Date.now(), t = LB.tap;
+  if (t && now - t.at < 350 && Math.hypot(e.clientX - t.x, e.clientY - t.y) < 30) {
+    LB.tap = { at: now, x: NaN, y: NaN }; // a third tap starts over
+    toggleShotZoom({ x: e.clientX, y: e.clientY });
+  } else LB.tap = { at: now, x: e.clientX, y: e.clientY };
+  clearTimeout(LB.tapTimer);
+  LB.tapTimer = setTimeout(() => { LB.tap = null; }, 600); // swallows the synthetic dblclick a double-tap may also fire
+});
+$('lbZoom').addEventListener('click', () => toggleShotZoom());
 $('lbPrev').addEventListener('click', () => showShot(LB.i - 1));
 $('lbNext').addEventListener('click', () => showShot(LB.i + 1));
 $('lightbox').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeShot(); });

@@ -2736,7 +2736,97 @@ const DEFAULT_TASK_SOUND = '/sounds/task-done.mp3';
 const taskSound = new Audio(DEFAULT_TASK_SOUND);
 taskSound.preload = 'auto';
 taskSound.volume = 0.6;
-const completionSound = { synced: false, statuses: new Map(), done: new Set(), lastPlayed: -Infinity, unlocking: null };
+// window/heard: the current 3 s burst (its start and the machines already queued in it); busyUntil: when the sound playing
+// now ends (performance.now ms), so a burst plays each machine's sound in turn; nodes: the machines, oldest first (MC.nodes).
+const completionSound = { synced: false, statuses: new Map(), done: new Set(), window: -Infinity, heard: new Set(), queue: [], draining: false,
+  busyUntil: -Infinity, unlocking: null, ctx: null, nodes: [] };
+// Each machine's finish sound, so the owner can tell by ear where a task finished. 'chime' is the MP3 above (the controller's
+// default); the others are synthesized with Web Audio: notes [Hz, start s, length s, peak gain, glide-to Hz].
+const MACHINE_SOUNDS = {
+  chime: { label: 'Chime' },
+  bell: { label: 'Bell', type: 'sine', notes: [[1318.5, 0, 0.9, 0.2], [3639, 0, 0.35, 0.04]] },
+  marimba: { label: 'Marimba', type: 'sine', notes: [[523.3, 0, 0.3, 0.24], [784, 0.13, 0.4, 0.22]] },
+  pop: { label: 'Pop', type: 'sine', notes: [[280, 0, 0.16, 0.26, 900], [420, 0.18, 0.14, 0.18, 1200]] },
+  glass: { label: 'Glass', type: 'sine', notes: [[1760, 0, 0.7, 0.12], [2637, 0.09, 0.6, 0.08]] },
+  rise: { label: 'Rise', type: 'triangle', notes: [[523.3, 0, 0.28, 0.16], [659.3, 0.11, 0.28, 0.16], [784, 0.22, 0.45, 0.16]] },
+  'two-tone': { label: 'Two-tone', type: 'sine', notes: [[784, 0, 0.4, 0.2], [523.3, 0.26, 0.55, 0.2]] },
+};
+const SYNTH_SOUNDS = Object.keys(MACHINE_SOUNDS).filter((k) => k !== 'chime');
+const HEAD_NODE = 'controller';
+// Defaults: the controller keeps the chime; each worker, oldest first, starts at a hash of its id across the synthesized
+// sounds and steps past ones an older worker already has (while any are left), so workers differ and a new one never
+// changes another's. The owner's pick (node.sound, saved on the head) wins.
+function soundHash(id) {
+  let h = 2166136261;
+  for (const ch of String(id)) h = Math.imul(h ^ ch.codePointAt(0), 16777619) >>> 0;
+  return h;
+}
+function defaultMachineSounds(ids) {
+  const out = new Map(), used = new Set();
+  for (const id of ids) {
+    if (id === HEAD_NODE) { out.set(id, 'chime'); continue; }
+    let i = soundHash(id) % SYNTH_SOUNDS.length;
+    for (let n = 0; n < SYNTH_SOUNDS.length && used.has(SYNTH_SOUNDS[i]); n++) i = (i + 1) % SYNTH_SOUNDS.length;
+    used.add(SYNTH_SOUNDS[i]);
+    out.set(id, SYNTH_SOUNDS[i]);
+  }
+  return out;
+}
+function setMachineSounds(nodes) { completionSound.nodes = (nodes || []).map((n) => ({ id: n.id, sound: n.sound ?? null })); }
+function machineDefaultSound(id) {
+  const ids = completionSound.nodes.map((n) => n.id);
+  return defaultMachineSounds(ids.includes(id) ? ids : [...ids, id]).get(id); // a machine paired since: it is the newest
+}
+function machineSound(id) {
+  const pick = completionSound.nodes.find((n) => n.id === id)?.sound;
+  return MACHINE_SOUNDS[pick] ? pick : machineDefaultSound(id);
+}
+// The machine a task ran on: run.node_id (task.node). Integrations and the head's own tasks sound like the head.
+const taskSoundNode = (t) => (t.integrates || !t.node ? HEAD_NODE : t.node);
+function audioCtx() {
+  const Ctx = globalThis.AudioContext || globalThis.webkitAudioContext;
+  if (!completionSound.ctx && Ctx) try { completionSound.ctx = new Ctx(); } catch {}
+  return completionSound.ctx;
+}
+// Starts one sound; returns how long it lasts (ms).
+function playSound(key) {
+  const s = MACHINE_SOUNDS[key] || MACHINE_SOUNDS.chime;
+  if (!s.notes) { void playTaskSound(); return Math.min(Number.isFinite(taskSound.duration) ? taskSound.duration : 1.5, 3) * 1000; }
+  void playNotes(s);
+  return Math.max(...s.notes.map(([, at, len]) => at + len)) * 1000;
+}
+async function playNotes(s) {
+  const ctx = audioCtx();
+  if (!ctx) return;
+  try {
+    if (ctx.state === 'suspended') await ctx.resume();
+    const t0 = ctx.currentTime + 0.02;
+    for (const [hz, at, len, peak, glide] of s.notes) {
+      const osc = ctx.createOscillator(), gain = ctx.createGain(), start = t0 + at;
+      osc.type = s.type;
+      osc.frequency.setValueAtTime(hz, start);
+      if (glide) osc.frequency.exponentialRampToValueAtTime(glide, start + len * 0.6);
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.linearRampToValueAtTime(peak, start + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + len);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(start);
+      osc.stop(start + len + 0.05);
+    }
+  } catch {} // no audio device, or the browser still holds audio back
+}
+// A burst's sounds play one after another, never over each other.
+async function drainMachineSounds() {
+  if (completionSound.draining) return;
+  completionSound.draining = true;
+  try {
+    while (completionSound.queue.length) {
+      const wait = completionSound.busyUntil - performance.now();
+      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+      completionSound.busyUntil = performance.now() + playSound(completionSound.queue.shift()) + 150;
+    }
+  } finally { completionSound.draining = false; }
+}
 function resetCompletionSync() {
   completionSound.synced = false;
   completionSound.statuses.clear();
@@ -2752,6 +2842,7 @@ function unlockTaskSound() {
   document.removeEventListener('pointerdown', unlockTaskSound);
   document.removeEventListener('keydown', unlockTaskSound);
   taskSound.muted = true;
+  audioCtx()?.resume?.().catch(() => {}); // created and resumed inside the gesture, so later synthesized sounds may play
   completionSound.unlocking = (async () => {
     try { await taskSound.play(); } catch {}
     taskSound.pause();
@@ -2771,6 +2862,7 @@ function setSoundInfo(sound) {
   $('stSoundReset').hidden = !sound?.custom;
 }
 api('/api/settings').then((d) => setSoundInfo(d.sound)).catch(() => {});
+api('/api/cluster/nodes').then((d) => setMachineSounds(d.nodes)).catch(() => {}); // each machine's sound (Machines refreshes it)
 $('stSoundUpload').addEventListener('click', () => $('stSoundFile').click());
 $('stSoundFile').addEventListener('change', async (e) => {
   const f = e.target.files[0];
@@ -2809,10 +2901,13 @@ function observeTaskCompletion(t) {
     if (!completionSound.synced || !previous || previous === 'done' || !['work', 'reflect'].includes(t.kind)) return;
   }
   if (!$('stSound').checked) return; // plays whether this tab is focused or in the background
-  const now = performance.now();
-  if (now - completionSound.lastPlayed < 3000) return;
-  completionSound.lastPlayed = now;
-  void playTaskSound();
+  // Several finishing within 3 s: each machine's sound once, in turn.
+  const now = performance.now(), node = taskSoundNode(t);
+  if (now - completionSound.window >= 3000) { completionSound.window = now; completionSound.heard.clear(); }
+  if (completionSound.heard.has(node)) return;
+  completionSound.heard.add(node);
+  completionSound.queue.push(machineSound(node));
+  void drainMachineSounds();
 }
 
 // ---------- WebSocket ----------
@@ -3528,6 +3623,7 @@ async function loadMachines() {
   if (MC.loading) return;
   MC.loading = true;
   try { MC.nodes = (await api('/api/cluster/nodes')).nodes || []; MC.at = Date.now(); } catch { return; } finally { MC.loading = false; }
+  setMachineSounds(MC.nodes);
   renderMachines();
 }
 // Coalesces bursts (task updates, pushes) into one read while Server details is open.
@@ -3776,7 +3872,7 @@ function machineControls(n) {
     ctl.append(b);
     return b;
   };
-  ctl.append(slots);
+  ctl.append(slots, machineSoundPicker(n));
   btn('Rename', 'rename', () => {
     const name = prompt(`Rename ${n.name}`, n.name)?.trim();
     if (name && name !== n.name) patchNode(n, { name });
@@ -3818,6 +3914,29 @@ function machineControls(n) {
     }, ' danger');
   }
   return ctl;
+}
+// 'Finish sound: [Bell ▾] ▶ Test': the sound its finished tasks play, saved on the head (node.sound) for every device.
+// Choosing its default again stores null, so it keeps following the default.
+function machineSoundPicker(n) {
+  const row = el('span', 'mc-slots mc-sound'), lab = el('label', '', 'Finish sound'), pick = el('span', 'mc-sound-pick'), sel = el('select');
+  const def = machineDefaultSound(n.id), id = `mcSound-${n.id}`;
+  lab.htmlFor = sel.id = id;
+  sel.dataset.act = 'sound';
+  for (const [k, s] of Object.entries(MACHINE_SOUNDS)) {
+    const o = el('option', '', `${k === 'chime' && $('stSoundName').textContent === 'Your MP3' ? 'Your MP3' : s.label}${k === def ? ' (default)' : ''}`);
+    o.value = k;
+    sel.append(o);
+  }
+  sel.value = machineSound(n.id);
+  sel.addEventListener('change', () => patchNode(n, { sound: sel.value === def ? null : sel.value }));
+  const test = el('button', 'btn small', '▶ Test');
+  test.type = 'button';
+  test.dataset.act = 'sound-test';
+  test.setAttribute('aria-label', `Test ${n.name}'s finish sound`);
+  test.addEventListener('click', () => playSound(sel.value));
+  pick.append(sel, test);
+  row.append(lab, pick);
+  return row;
 }
 async function patchNode(n, body) {
   try { await api(`/api/cluster/nodes/${encodeURIComponent(n.id)}`, 'PATCH', body); } catch (e) { toast(e.message, { kind: 'error' }); }

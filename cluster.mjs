@@ -157,9 +157,12 @@ const DROP_REASONS = { sleep: 'asleep', dns: 'dns', network: 'network' };
 // drain_reason/drained_at: why and when auto-health drained it (NULL when the owner did); drain_kind: which rule did
 // ('disk' | 'drops'; NULL for the owner and for task failures), so only a disk drain lifts itself; health_ack: when the owner last
 // undrained it (older evidence no longer counts); last_error: JSON of its last node.error {at, kind, message, stack, stderr}.
-// policy: JSON of the owner's power-policy settings (power.mjs; NULL = the defaults for its OS).
+// policy: JSON of the owner's power-policy settings (power.mjs; NULL = the defaults for its OS). sound: the owner's pick of
+// its task-finished sound (NODE_SOUNDS; NULL = the UI's default for it: the chime on the controller, else a hash of its id).
 const COLUMNS = [['grace_ms', 'INTEGER'], ['away', 'TEXT'], ['slept_at', 'INTEGER'], ['slept_ms', 'INTEGER'],
-  ['drain_reason', 'TEXT'], ['drained_at', 'INTEGER'], ['health_ack', 'INTEGER'], ['last_error', 'TEXT'], ['policy', 'TEXT'], ['drain_kind', 'TEXT']];
+  ['drain_reason', 'TEXT'], ['drained_at', 'INTEGER'], ['health_ack', 'INTEGER'], ['last_error', 'TEXT'], ['policy', 'TEXT'], ['drain_kind', 'TEXT'], ['sound', 'TEXT']];
+// The finish sounds a node can have (public/app.js MACHINE_SOUNDS): 'chime' is /sounds/task-done.mp3 (or the owner's MP3).
+export const NODE_SOUNDS = ['chime', 'bell', 'marimba', 'pop', 'glass', 'rise', 'two-tone'];
 
 const statusOf = (row, connected) => (!row.enabled ? 'disabled' : !connected ? 'offline' : row.draining ? 'draining' : 'online');
 const parse = (s) => { try { return s ? JSON.parse(s) : null; } catch { return null; } };
@@ -272,6 +275,7 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
       sha, behind, outdated: behind != null && behind > outdatedAfter,
       update: u ? { state: u.state, by: u.by, at: u.at, target: u.target ?? null, error: u.error ?? null } : null,
       policy: isLocal ? null : effectivePolicy(row.os, parse(row.policy)),
+      sound: row.sound ?? null, // null = its default (the UI picks it)
     };
   }
   function listNodes() {
@@ -361,6 +365,10 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
     if (slots !== undefined) {
       if (slots !== null && !(Number.isInteger(slots) && slots >= 1 && slots <= 16)) return { status: 400, error: 'maxSlots must be null (Auto) or an integer 1-16' };
       set.max_slots = slots ?? 0;
+    }
+    if (body.sound !== undefined) {
+      if (body.sound !== null && !NODE_SOUNDS.includes(body.sound)) return { status: 400, error: `sound must be null (its default) or one of ${NODE_SOUNDS.join(', ')}` };
+      set.sound = body.sound;
     }
     // Power policy (power.mjs): the keys given replace those settings; null goes back to the defaults for its OS.
     if (body.policy !== undefined) {

@@ -559,12 +559,16 @@ code, pre, kbd { font-family: var(--mono); }
 .mc-ctl .btn.small { height: 30px; padding: 0 10px; font-size: 12.5px; }
 .mc-ctl .btn[aria-pressed="true"] { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
 .mc-ctl .seg-sm button { height: 26px; padding: 0 9px; }
+.mc-sound-pick { display: flex; align-items: center; gap: 6px; }
+.mc-sound select { height: 30px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; font-size: 12.5px; padding: 0 6px; }
 @media (pointer: coarse), (max-width: 700px) {
   .mc-ctl .btn.small { height: 44px; padding: 0 12px; }
   .mc-ctl .seg-sm button { height: 38px; min-width: 38px; }
   .mc-ctl .btn.small { flex: 1; }
 }
 @media (pointer: coarse) { .mc-ctl .seg-sm button { height: 44px; min-width: 44px; } } /* UI-REVIEW #22 */
+@media (pointer: coarse) { .mc-sound select { height: 44px; font-size: 16px; } }
+.mc-ctl .mc-sound .btn.small { flex: none; }
 .am-body { display: flex; flex-direction: column; gap: 10px; }
 .am-os { margin: 0; color: var(--text); font-weight: 600; font-size: 13.5px; }
 .am-cmd { margin: 4px 0 0; padding: 9px 30px 9px 10px; border-radius: 9px; background: var(--code-bg); border: 1px solid var(--border);

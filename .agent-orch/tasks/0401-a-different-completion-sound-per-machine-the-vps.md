@@ -13,3 +13,7 @@ The owner wants a different task-completion sound for each machine, so they can 
 ## Done when
 
 `node --test test/ui-sound-machines*.test.mjs` passes (distinct stable defaults, per-node choice persisted, the event plays the machine's sound)
+
+## Result — done (check passed) (2026-09-28 14:03)
+
+AGENT-ORCH-STATUS: done — per-machine finish sounds work and tests pass; no screenshots (Chromium won't launch)

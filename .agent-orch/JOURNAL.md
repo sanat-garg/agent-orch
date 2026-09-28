@@ -1103,3 +1103,7 @@ stale model list now shows as warning error with dates
 ## 2026-09-28 14:02 — #409 taskrun.mjs: transientGit and retryGit retry git ref-lock and network failures with backoff (root cause of #328/#359/#376) [done (check passed)]
 
 transientGit and retryGit exported from taskrun.mjs, tests pass
+
+## 2026-09-28 14:03 — #401 A different completion sound per machine (the VPS and each worker) [done (check passed)]
+
+per-machine finish sounds work and tests pass; no screenshots (Chromium won't launch)

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Controller for the cluster e2e test (test/cluster-e2e.test.mjs): the orchestrator plus the cluster hub on a local HTTP
 // server, like server.mjs wires them (with this $HOME's skills and subagents and <dataDir>'s MCP servers as the
-// extension bundle). Prints {base, code} (a pairing code), waits for a worker with codex to come online,
+// extension bundle, and each project's git endpoint for workers). Prints {base, code} (a pairing code), waits for a worker with codex to come online,
 // queues two tasks in the project at argv[3] (one for codex, which only the worker has, and one for Claude, run here by
 // a fake SDK query), waits for both to finish and prints the resulting rows as JSON.
 //   node cluster-controller.mjs <dataDir> <project>
@@ -14,7 +14,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { createOrchestrator } from '../../orchestrator.mjs';
 import { createCluster } from '../../cluster.mjs';
 import { createExtensions } from '../../extensions.mjs';
-import { CLAIM_PATH, EXT_PATH } from '../../cluster-protocol.mjs';
+import { createClusterGit } from '../../cluster-git.mjs';
+import { CLAIM_PATH, EXT_PATH, GIT_PATH } from '../../cluster-protocol.mjs';
 
 const [dataDir, repo] = process.argv.slice(2);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -31,14 +32,17 @@ const o = createOrchestrator({
   config: { pollMs: 100, meminfo: new URL('./meminfo-ample', import.meta.url).pathname, footprint: { claude: 1, codex: 1 }, offerMs: 10_000 },
   query, dataDir, claudeEnv: { PATH: process.env.PATH }, getLimits: () => [], onSubscription: () => true,
   broadcast() {}, emitChat() {}, convoExists: () => false,
-  // server.mjs pushes every merge to GitHub (syncGit); here origin is the test's bare repo.
+  // server.mjs pushes every merge to GitHub (syncGit); here origin is the test's bare repo (none in cluster-git-e2e).
   onCommit: (dir) => { promisify(execFile)('git', ['push', '-q', 'origin', 'HEAD:main'], { cwd: dir }).catch((e) => console.error('push failed', e.message)); },
 });
 // Test homes may sit on a small /tmp: no low-disk auto-drain here.
 const cluster = createCluster({ dbFile: path.join(dataDir, 'orchestrator', 'agent-orch.db'), heartbeatMs: 500, health: { diskMinBytes: 0 }, ext: createExtensions({ dataDir }) });
 o.attachCluster(cluster);
+const git = createClusterGit({ node: cluster.tokenNode, repo: o.gitRepo, pushable: o.pushableTasks, log: (m) => console.error(`[cluster-git] ${m}`) });
 const server = http.createServer(async (req, res) => {
   if (req.url === EXT_PATH && req.method === 'GET') return cluster.handleExt(req, res);
+  // CW_TEST_HEAD_GIT_DOWN: the head's git endpoint is unreachable (the worker falls back to GitHub).
+  if (req.url.startsWith(`${GIT_PATH}/`)) return process.env.CW_TEST_HEAD_GIT_DOWN ? (res.writeHead(502), res.end()) : git.handle(req, res);
   if (req.url !== CLAIM_PATH || req.method !== 'POST') { res.writeHead(404); return res.end(); }
   let body = '';
   for await (const c of req) body += c;
@@ -53,6 +57,8 @@ out({ base: `http://127.0.0.1:${server.address().port}`, code: cluster.createPai
 const until = async (f, ms) => { for (const end = Date.now() + ms; Date.now() < end; await sleep(100)) { const v = f(); if (v) return v; } return null; };
 const worker = await until(() => cluster.listNodes().find((n) => !n.local && n.status === 'online' && n.inventory?.agents?.some((a) => a.id === 'codex' && a.signedIn)), 30_000);
 if (!worker) { out({ error: 'no worker came online' }); process.exit(1); }
+// The worker may be a loaded laptop: no RAM reserve for its owner here (power.mjs reserveGB), only the claim floor.
+cluster.update(worker.id, { policy: { reserveGB: 0 } });
 
 const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
 const pid = Number(db.prepare("INSERT INTO projects(path,name,priority,status,perpetual,created_at) VALUES(?,?,50,'active',0,0)").run(repo, 'demo').lastInsertRowid);

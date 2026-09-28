@@ -101,9 +101,18 @@ verify-failed prompt, same as the local flow) or `job.cancel`. The controller ke
 
 ## Code movement
 
-- **GitHub is the transport for code**; frames never carry file contents. Every project already has a private repo on
-  `origin` (github.mjs). `job.start.repo` is its clone URL (https or ssh, never with credentials inside the URL).
-- **Cache clone**: `~/.agent-orch-worker/repos/<owner>__<repo>.git`, a bare clone (`--filter=blob:none`) fetched
+- **The head is the transport for code** (#345, feature `git`); frames never carry file contents. cluster-git.mjs
+  serves each project's repo over git smart HTTP (`git http-backend` as a CGI) at `/api/cluster/git/<projectId>.git`
+  (`job.start.gitUrl`, resolved against the URL the worker paired with), authenticated by the node's bearer token,
+  which the worker's cache clone sends as `http.<url>.extraHeader` from an included 0600 `agent-orch-auth.config`
+  (never global, never in argv). Fetch: any ref. Push: the head reads the receive-pack command list first and refuses
+  (403) any ref but `refs/heads/agent-orch/task-<id>` of tasks it has running on that node now. So task branches land
+  straight in the head's repo, workers need no GitHub access, and projects with no GitHub remote can run on workers;
+  the head pushes merged main to GitHub itself. **Fallback**: when the head's endpoint fails (or for a worker without
+  feature `git`), the worker uses `job.start.repo`, the project's GitHub clone URL (https or ssh, never with
+  credentials inside the URL), with its own login, and the head fetches the branch from origin before merging.
+- **Cache clone**: `~/.agent-orch-worker/repos/head-git__<projectId>.git` (from the head) or `<owner>__<repo>.git`
+  (from GitHub), a bare clone (`--filter=blob:none`, lazy blobs from the same source) fetched
   before each job. **Per task**: a worktree `~/.agent-orch-worker/worktrees/<repo>-task-<id>` on branch
   `agent-orch/task-<id>`, created from `baseSha` (the controller's main-branch head when it started the job), or from
   `origin/agent-orch/task-<id>` when that branch exists (a resumed or reassigned task). Same naming as worktrees.mjs.
@@ -113,11 +122,11 @@ verify-failed prompt, same as the local flow) or `job.cancel`. The controller ke
   failed setup ends the job with `job.done {outcome: 'setup_failed'}`, which the controller treats like a crash
   (bounded retries, maybe on another node).
 - **WIP pushes**: every `wipPushMs` (10 min) while the agent runs, and at every `job.done`/pause/cancel, the worker
-  commits everything (`agent-orch #<id> (wip)`, using `GIT_ID`) and pushes `agent-orch/task-<id>` to origin
-  (`--force-with-lease` against its last push), then sends `job.wip {sha}`. The controller stores the last `sha` per
+  commits everything (`agent-orch #<id> (wip)`, using `GIT_ID`) and pushes `agent-orch/task-<id>` to its cache's
+  origin, the head or GitHub (`--force-with-lease` against its last push), then sends `job.wip {sha}`. The controller stores the last `sha` per
   task (`tasks.wip_sha`). Unchanged trees skip the commit.
-- **Merge back**: on a passing `job.done`/`job.check`, the controller fetches `agent-orch/task-<id>` into the project
-  repo, checks the tip equals `job.done.sha`, and runs the existing path: `mergeTask` (squash, rebase, ff-only, push)
+- **Merge back**: on a passing `job.done`/`job.check`, the controller has `agent-orch/task-<id>` in the project repo
+  (pushed through the head; else fetched from origin), checks the tip equals `job.done.sha`, and runs the existing path: `mergeTask` (squash, rebase, ff-only, push)
   under `serialGit`. A rebase conflict marks the task `needs_integration` and queues an integrator task exactly as
   today; the integrator is just another job and may run on any node, starting from the pushed branch. After the
   merge, the controller deletes the remote branch and sends nothing further; the worker removes its worktree when it

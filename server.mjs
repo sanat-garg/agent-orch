@@ -23,7 +23,8 @@ import { createStats } from './stats.mjs';
 import { healthRow } from './health.mjs';
 import { createResources, registerPid, withOwner, readSystem, cpuPercent } from './resources.mjs';
 import { createCluster } from './cluster.mjs';
-import { WS_PATH, PAIR_PATH, CLAIM_PATH, WHOAMI_PATH, EXT_PATH } from './cluster-protocol.mjs';
+import { WS_PATH, PAIR_PATH, CLAIM_PATH, WHOAMI_PATH, EXT_PATH, GIT_PATH } from './cluster-protocol.mjs';
+import { createClusterGit } from './cluster-git.mjs';
 import { createRemoteLogins } from './remote-login.mjs';
 import { createExtensions } from './extensions.mjs';
 import { createPush, checkSub } from './push.mjs';
@@ -885,6 +886,8 @@ function resourcesPush() { resourcesTimer ??= setTimeout(() => { resourcesTimer 
 if (cluster) ext.onChange((kind) => { if (kind !== 'personas') cluster.syncExt(); });
 // The scheduler places work on online workers through the hub (orchestrator.mjs `place`/`runRemote`).
 if (cluster && !NO_ORCH) orch.attachCluster(cluster);
+// Workers clone and push each project through here (GIT_PATH), with their node token; this head then pushes to GitHub.
+const clusterGit = cluster && createClusterGit({ node: cluster.tokenNode, repo: orch.gitRepo, pushable: orch.pushableTasks, log: (m) => console.log(`[cluster-git] ${m}`) });
 // Workers get the head's Claude token and Codex sign-in when they connect and whenever either changes; a worker whose
 // Codex copy refreshed itself sends it back and the head keeps the newest (agent-share.mjs).
 if (cluster) {
@@ -1478,6 +1481,14 @@ async function handleRequest(req, res) {
     const r = cluster.claim(await readBody(req));
     if (r.status === 401) recordFailure(ip);
     return r.error ? json(res, r.status, { error: r.error }) : json(res, 200, r);
+  }
+  // A worker's git clone, fetch or push of a project (smart HTTP, its node token; no session).
+  if (p.startsWith(`${GIT_PATH}/`)) {
+    if (!clusterGit) return json(res, 503, { error: 'cluster unavailable' });
+    const ip = clientIp(req), wait = lockedFor(ip);
+    if (wait) return json(res, 429, { error: 'locked', retryInSec: Math.ceil(wait / 1000) });
+    if ((await clusterGit.handle(req, res)) === 401) recordFailure(ip);
+    return;
   }
   // A worker fetches the extension bundle with its node token (no session).
   if (p === EXT_PATH && req.method === 'GET') return cluster ? cluster.handleExt(req, res) : json(res, 503, { error: 'cluster unavailable' });

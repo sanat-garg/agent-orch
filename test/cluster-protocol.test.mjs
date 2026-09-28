@@ -44,6 +44,9 @@ test('validate rejects missing and malformed fields', () => {
   assert.match(validate(start({ agent: 'copilot' })), /bad agent/);
   assert.match(validate(start({ baseSha: 'abc' })), /bad baseSha/);
   assert.match(validate(start({ branch: 'main' })), /bad branch/);
+  // The head's git endpoint (feature 'git') stands in for a GitHub repo; one of the two is needed.
+  assert.equal(validate(start({ repo: undefined, gitUrl: '/api/cluster/git/3.git' })), null);
+  assert.match(validate(start({ repo: undefined })), /needs repo or gitUrl/);
   assert.match(validate(frame(MSG.JOB_DONE, { job: 3, outcome: 'great', text: '' })), /bad outcome/);
   assert.match(validate(frame(MSG.JOB_REJECT, { job: 3, reason: 'meh' })), /bad reason/);
   assert.match(validate(frame(MSG.INVENTORY, { node: 'n', name: 'x', os: 'windows', arch: 'x64', cores: 1, mem: 1, agents: [], versions: {} })), /bad os/);
@@ -189,6 +192,6 @@ test('worker reports: job.phase, job.error, node.error, logs, node.update, and t
   // hello and welcome name their features; each newer type is sent only to a peer that lists its feature.
   assert.equal(validate(frame(MSG.HELLO, { node: 'n', protocol: 1, version: '1', jobs: [], sha: SHA, features: FEATURE_LIST }), { from: 'w' }), null);
   assert.equal(validate(frame(MSG.WELCOME, { node: 'n', protocol: 1, heartbeatMs: 1, wipPushMs: 1, graceMs: 1, features: FEATURE_LIST }), { from: 'c' }), null);
-  assert.deepEqual(FEATURE_LIST, ['phases', 'errors', 'logs', 'update', 'policy', 'creds', 'approvals', 'screen', 'ext', 'ping', 'cap', 'browser-task']);
+  assert.deepEqual(FEATURE_LIST, ['phases', 'errors', 'logs', 'update', 'policy', 'creds', 'approvals', 'screen', 'ext', 'ping', 'cap', 'browser-task', 'git']);
   for (const [t, f] of Object.entries(FEATURES)) assert.ok(SCHEMA[t] && FEATURE_LIST.includes(f), t);
 });

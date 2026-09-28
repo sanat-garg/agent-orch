@@ -967,6 +967,10 @@ Closing Skills & tools opened from Settings reopens Settings
 ## 2026-09-28 12:27 — #339 github.mjs: push to an existing origin without asking gh; tests with a local bare remote [done (check passed)]
 
 existing origins push without gh; repoOf handles all URL forms
+
+## 2026-09-28 12:45 — #345 Workers fetch and push code through the head, so no GitHub access is needed [done (check passed)]
+
+workers now clone and push through the head; cluster-git tests pass
 ## 2026-09-28 12:29 — #341 Wire chat search: GET /api/convos?q= via search.mjs and a search field above the chat list [done (check passed)]
 
 Sidebar chat search now calls GET /api/convos?q=; tests pass
@@ -1130,6 +1134,13 @@ Merge conflict resolved; browser-live tests pass; #50 marked Fixed
 
 compute-only tests pass; Linux-only /proc/systemd checks now skipped on macOS
 
+## 2026-09-28 14:16 — #364 Integrate #345: Workers fetch and push code through the head, so no GitHub access is needed [done (check passed)]
+
+Merge conflicts resolved; cluster-git, worker and cluster tests pass
+
+## 2026-09-28 14:16 — #364 Integrate #345: Workers fetch and push code through the head, so no GitHub access is needed [verify failed (1)]
+
+Command: merge main again
 ## 2026-09-28 14:15 — #421 worktrees.mjs: git operations retry lock races and network blips through retryGit [done (check passed)]
 
 worktrees.mjs git calls retry lock races; conflicts never retried
@@ -1144,3 +1155,6 @@ Login subtitle now says "Sign in to agent-orch"; tests pass
 ## 2026-09-28 14:16 — #422 retention.mjs AUDIT #63 (head half): sweep finished screen-prompt workspaces under browser-tasks/ [done (check passed)]
 
 gcRetention now sweeps finished and orphaned browser-task workspaces, tests pass
+## 2026-09-28 14:16 — #364 Integrate #345: Workers fetch and push code through the head, so no GitHub access is needed [done (check passed)]
+
+CONTEXT.md conflict resolved; cluster-git tests pass

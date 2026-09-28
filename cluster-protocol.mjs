@@ -18,6 +18,10 @@ export const CLAIM_PATH = '/api/cluster/claim'; // worker: POST {code, name, os,
 export const WHOAMI_PATH = '/api/cluster/me';
 export const EXT_PATH = '/api/cluster/ext'; // worker: GET with its bearer token → the extension bundle (gzip JSON)
 export const EXT_MAX_BYTES = 32 << 20; // file bytes (skills + subagents) per bundle; the controller leaves out the rest
+// Git smart HTTP (cluster-git.mjs, feature 'git'): each project's repo at GIT_PATH/<projectId>.git, for paired workers'
+// bearer tokens only. Fetch any ref; push only agent-orch/task-<id> of tasks the head has on that node right now.
+export const GIT_PATH = '/api/cluster/git';
+export const gitPath = (projectId) => `${GIT_PATH}/${projectId}.git`;
 export const HEARTBEAT_MS = 10_000;
 export const HEARTBEAT_MISSES = 3; // no frame for 3 heartbeats = disconnected (the grace period starts then)
 export const GRACE_MS = { mac: 5 * 60_000, vps: 2 * 60_000 };
@@ -65,7 +69,8 @@ export const FEATURES = { 'job.phase': 'phases', 'job.error': 'errors', 'node.er
   'node.policy': 'policy', 'agent.credential': 'creds', 'job.approval': 'approvals',
   'screen.req': 'screen', 'screen.res': 'screen', 'screen.input': 'screen', 'screen.frame': 'screen', 'screen.state': 'screen', 'ext.sync': 'ext',
   ping: 'ping', pong: 'ping' };
-export const FEATURE_LIST = [...new Set([...Object.values(FEATURES), 'cap', 'browser-task'])];
+// Feature 'git' (no frame type): the worker fetches and pushes through job.start.gitUrl, so it needs no GitHub access.
+export const FEATURE_LIST = [...new Set([...Object.values(FEATURES), 'cap', 'browser-task', 'git'])];
 // Compute-only workers (BRIEF goal 11): the only frames a worker acts on, all from the head it dialled. Connection
 // upkeep; jobs (job.*, plus git.credential for their pushes); remote sign-in driven from the head's Connections (login.*);
 // model and limit refreshes; its log tail; self-update; the node's policy (max tasks, power), which like draining is
@@ -132,7 +137,10 @@ const S = {
     // ext: the controller's extension bundle hash; the worker fetches the bundle first unless it already has that one.
     job: 'int', title: 'str', prompt: 'str', systemAppend: 'str?', agent: 'agent', model: 'str?', effort: 'str?', account: 'str?',
     // Feature browser-task: execution='browser' uses a plain workspace and omits the git fields.
-    execution: 'str?', repo: 'repo?', baseSha: 'sha?', branch: 'branch?', doneWhen: 'str?', resume: 'str?',
+    // gitUrl: the head's git endpoint for the project (gitPath; a path is resolved against the URL the worker paired
+    // with). A worker with feature 'git' fetches and pushes there, and falls back to `repo` (GitHub) only when the head's
+    // endpoint is unreachable; a project with no GitHub remote sends no repo, only to such workers.
+    execution: 'str?', repo: 'repo?', gitUrl: 'str?', baseSha: 'sha?', branch: 'branch?', doneWhen: 'str?', resume: 'str?',
     timeouts: 'obj', autonomous: 'bool?', tools: 'arr?', install: 'arr?', capabilities: 'arr?', identity: 'str?', ext: 'hash?',
   },
   'job.event': { job: 'int', from: 'int', events: 'events' },
@@ -250,7 +258,7 @@ export function validate(msg, { from } = {}) {
     if (msg.execution != null && msg.execution !== 'browser') return 'job.start: bad execution';
     if (msg.execution === 'browser') {
       if (!msg.capabilities?.includes('browser') || !msg.identity) return 'job.start: browser execution needs capability and identity';
-    } else if (!msg.repo || !msg.baseSha || !msg.branch) return 'job.start: git execution needs repo, baseSha and branch';
+    } else if (!(msg.repo || msg.gitUrl) || !msg.baseSha || !msg.branch) return 'job.start: git execution needs repo or gitUrl, baseSha and branch';
   }
   if (msg.t !== MSG.GIT_CREDENTIAL && msg.t !== MSG.AGENT_CREDENTIAL) {
     const bad = secretKeys({ ...msg, events: undefined });

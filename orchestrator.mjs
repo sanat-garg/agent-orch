@@ -28,7 +28,7 @@ import { DELEGATE_CFG, createDelegator, parseFallbacks } from './delegate.mjs';
 import { filesOverlap, headTarget, parseFiles, spreadAssign, readMemInfo, taskSlots, MEM } from './parallel.mjs';
 import { registerPid, withOwner } from './resources.mjs';
 import { LOCAL_NODE, HEALTH, awayNote } from './cluster.mjs';
-import { MSG, graceMs, isRepoUrl } from './cluster-protocol.mjs';
+import { MSG, gitPath, graceMs, isRepoUrl } from './cluster-protocol.mjs';
 import { autoTasks, reserveBytes } from './power.mjs';
 import { CPU_PER_TASK, FOOTPRINT, GB, capSlots, capTasks, localCap } from './cap.mjs';
 import { extractCommand, runCheck, toolLine } from './taskrun.mjs';
@@ -1541,10 +1541,15 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     repoCache.set(project.path, { at: Date.now(), url });
     return url;
   }
+  // A worker with feature 'git' clones and pushes through the head's git endpoint (cluster-git.mjs), so it needs neither
+  // GitHub access nor a GitHub remote; an older one needs the project's GitHub remote.
+  const headGit = (n) => (n?.features || []).includes('git');
   // Work tasks may run remotely (remoteWork); plan/reflect tasks, integrators and tasks with a live worktree here (a
   // verify-failed or interrupted run keeps it) stay on the controller.
   const remoteCapable = (task, project) => !!cluster && remoteWork(task) && !task.worktree
-    && (isBrowserTask(task) || (worktreeCapable(project) && !!remoteRepo(project)));
+    && (isBrowserTask(task) || worktreeCapable(project));
+  // Whether node n can check out the task's project: through the head (feature 'git'), else from its GitHub remote.
+  const canClone = (n, task, project) => isBrowserTask(task) || headGit(n) || !!remoteRepo(project);
   // The scheduler's assertion: anything but a work task bound for a worker is a bug. It throws before the claim is
   // recorded (the tick logs it and the task stays queued) and before runRemote sends a single frame.
   function assertPlacement(task, nodeId) {
@@ -1566,18 +1571,19 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const browser = needsBrowser(task);
     if (isBrowserTask(task) && browserHeld(task.run_on, identityOf(task))) return null;
     if (browser && profileBusy(task)) return null;
-    const remote = remoteCapable(task, getProject(task.project_id));
+    const project = getProject(task.project_id), remote = remoteCapable(task, project);
+    const fits = (n) => (!browser || browserWorker(n)) && canClone(n, task, project);
     // Pinned by the owner (run_on): only that machine, waiting for it. A worker pin only binds a task that can run remotely.
     const pin = task.kind === 'work' && task.run_on && (task.run_on === LOCAL_NODE || remote || isBrowserTask(task)) ? task.run_on : null;
     if (remote && pin !== LOCAL_NODE) {
-      const free = freeWorkers(agent, task.id).filter((n) => (!browser || browserWorker(n)) && (!isBrowserTask(task) || n.features?.includes('browser-task')) && (!pin || n.id === pin))
+      const free = freeWorkers(agent, task.id).filter((n) => fits(n) && (!isBrowserTask(task) || n.features?.includes('browser-task')) && (!pin || n.id === pin))
         .sort((a, b) => (b.id === task.node_id) - (a.id === task.node_id) || headroom(b, agent) - headroom(a, agent));
       if (free.length) return free[0].id;
     }
     if (pin && pin !== LOCAL_NODE) return null;
     if (!localOk || !localFree || localDraining() || !localAgentOk(agent) || (localFree !== 'reserved' && slotsFor(agent) - runningOn(agent) <= 0)) return null;
     if (browser && !parallelSettings().controllerBrowser && pin !== LOCAL_NODE) return null;
-    if (remote && !pin && !parallelSettings().controllerWork && workerNodes(agent).some((n) => !browser || browserWorker(n))) return null;
+    if (remote && !pin && !parallelSettings().controllerWork && workerNodes(agent).some(fits)) return null;
     return LOCAL_NODE;
   }
   // A worker that can run a browser task: it has a browser, and its approval gate can ask the head (feature 'approvals').
@@ -2845,8 +2851,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
 
   // ---- remote runs: a work task on a worker (job.offer → job.start → job.event* → job.check → job.done). The worker
-  // checks out the project's GitHub repo at the base sha on agent-orch/task-<id> and pushes that branch; finishWork
-  // fetches it and merges it here exactly like a local worktree.
+  // checks out the project's repo at the base sha on agent-orch/task-<id> and pushes that branch, through the head's git
+  // endpoint (feature 'git': the branch lands straight in this repo) or else GitHub (fetched from origin); finishWork
+  // merges it here exactly like a local worktree.
   async function runRemote(task, project, signal) {
     const nodeId = nodeOf(task.id), n = nodesNow().find((x) => x.id === nodeId), name = n?.name || nodeId;
     assertPlacement(task, nodeId);
@@ -2857,12 +2864,12 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       checkNodeFailures(nodeId, res);
       return res;
     }
-    const repo = isBrowserTask(task) ? null : remoteRepo(project);
-    if (!repo && !isBrowserTask(task)) throw new Error(`${project.name} has no GitHub remote for a worker to clone`);
+    const repo = isBrowserTask(task) ? null : remoteRepo(project), viaHead = !isBrowserTask(task) && headGit(n);
+    if (!repo && !viaHead && !isBrowserTask(task)) throw new Error(`${project.name} has no GitHub remote for ${name} to clone`);
     const route = routeFor(task, project);
-    const baseSha = isBrowserTask(task) ? null : await remoteBase(task, project, running.get(task.id)?.prevNode);
+    const baseSha = isBrowserTask(task) ? null : await remoteBase(task, project, running.get(task.id)?.prevNode, !viaHead);
     const resume = task.session_id && lastRunAgent(task.id) === route.agent && lastRunNode(task.id) === nodeId ? task.session_id : null;
-    const where = `a checkout of ${repo} on the worker machine ${name}`;
+    const where = `a checkout of ${repo || project.name} on the worker machine ${name}`;
     const env = `Environment (cluster worker ${name}, ${n?.os || 'unknown'}/${n?.arch || 'unknown'}): a machine that runs agent-orch tasks; ` +
       `install whatever the task needs.\nYou are in ${where}, on branch ${taskBranch(task.id)}. The orchestrator pushes and merges it when you finish.`;
     const prompt = isBrowserTask(task) ? task.prompt : resume ? resumePrompt(task) : lostHandoff(task) ? handoffPrompt({ ...project, path: where }, task, env, await handoffInfo(task, project))
@@ -2877,7 +2884,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const res = await remoteJob(task.id, nodeId, name, { runId, logPath }, {
       title: task.title, prompt, systemAppend: withBrowser(task, isBrowserTask(task) ? BROWSER_TASK_SYSTEM : resume ? null : withPersona(WORKER_SYSTEM, project)) || undefined, agent: route.agent, model: route.model || undefined, effort: effort || undefined,
       ...(needsBrowser(task) && { capabilities: ['browser'], identity: identityOf(task), gate: (({ patterns, ttlMs }) => ({ patterns, ttlMs }))(gateSettings()) }),
-      ...(isBrowserTask(task) ? { execution: 'browser' } : { repo, baseSha, branch: taskBranch(task.id), doneWhen: task.done_when || undefined }), resume: resume || undefined,
+      ...(isBrowserTask(task) ? { execution: 'browser' } : { repo: repo || undefined, gitUrl: viaHead ? gitPath(project.id) : undefined, baseSha, branch: taskBranch(task.id), doneWhen: task.done_when || undefined }), resume: resume || undefined,
       timeouts: { taskSec: CFG.taskTimeoutSec, verifySec: CFG.verifyTimeoutSec, installSec: 900 }, autonomous: isBrowserTask(task) || !!project.autonomous,
       ext: cluster.extHash?.() || undefined, // the worker fetches this extension bundle first unless it has it
     }, signal);
@@ -3164,21 +3171,23 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       const info = await repoInfo(project.path);
       if (!info) return;
       const b = taskBranch(task.id);
-      if (!(await listWorktrees(info.top)).some((w) => w.id === task.id)) await git(info.top, ['fetch', '-q', 'origin', `+refs/heads/${b}:refs/heads/${b}`]);
+      if (!(await listWorktrees(info.top)).some((w) => w.id === task.id)) await fetchTaskBranch(info.top, b, task.wip_sha);
       sha = (await git(info.top, ['rev-parse', `refs/heads/${b}`])).trim();
       stat = (await git(info.top, ['diff', '--stat', (await git(info.top, ['merge-base', info.branch, b])).trim(), b])).trim();
     }).catch(() => {});
     return { node: nodeName(last?.node_id || task.node_id), sha, stat, texts, tools };
   }
 
-  // The base a worker starts from: the main branch's head, pushed to origin first when origin lacks it. A task whose
-  // last run was here and left its branch (a retried task) pushes that branch too, so the worker continues from it.
-  function remoteBase(task, project, prevNode) {
+  // The base a worker starts from: the main branch's head. For a worker that clones from GitHub (github), it is pushed
+  // to origin first when origin lacks it, and a task whose last run was here and left its branch (a retried task) pushes
+  // that branch too, so the worker continues from it; a worker that clones through the head finds both here.
+  function remoteBase(task, project, prevNode, github = true) {
     return serialGit(project.path, async () => {
       const info = await repoInfo(project.path);
       if (!info) throw new Error('not on a git branch');
       await commitNow(project.path, `agent-orch: uncommitted changes before #${task.id}`);
       const sha = (await git(info.top, ['rev-parse', info.branch])).trim();
+      if (!github) return sha;
       const has = (args) => git(info.top, args).then(() => true, () => false);
       if (!(await has(['merge-base', '--is-ancestor', sha, `refs/remotes/origin/${info.branch}`]))) await git(info.top, ['push', '-q', 'origin', `${info.branch}:refs/heads/${info.branch}`]);
       const b = taskBranch(task.id);
@@ -3191,9 +3200,15 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return serialGit(project.path, async () => {
       const info = await repoInfo(project.path);
       if (!info || (await listWorktrees(info.top)).some((w) => w.id === task.id)) return;
-      const b = taskBranch(task.id);
-      await git(info.top, ['fetch', '-q', 'origin', `+refs/heads/${b}:refs/heads/${b}`]);
+      await fetchTaskBranch(info.top, taskBranch(task.id), task.wip_sha);
     }).catch(() => {});
+  }
+  // A worker's task branch: pushed through the head, it is already here (at `sha`, the last one the worker reported);
+  // pushed to GitHub, it is fetched from origin. A failed fetch keeps a branch that is already here.
+  async function fetchTaskBranch(top, b, sha) {
+    const local = await git(top, ['rev-parse', '--verify', '-q', `refs/heads/${b}`]).then((s) => s.trim(), () => '');
+    if (local && local === sha) return;
+    await git(top, ['fetch', '-q', 'origin', `+refs/heads/${b}:refs/heads/${b}`]).catch((e) => { if (!local) throw e; });
   }
   // A finished remote run: fetch its branch (it must be at the sha the worker reported) and check it out as the task's
   // worktree here, so the existing merge path (mergeTask, needs_integration) takes over.
@@ -3202,9 +3217,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (!sha) throw new Error(`the worker reported no pushed commit for ${b}`);
     await serialGit(project.path, async () => {
       const info = await repoInfo(project.path);
-      await git(info.top, ['fetch', '-q', 'origin', `+refs/heads/${b}:refs/heads/${b}`]);
+      await fetchTaskBranch(info.top, b, sha);
       const tip = (await git(info.top, ['rev-parse', `refs/heads/${b}`])).trim();
-      if (tip !== sha) throw new Error(`${b} on origin is at ${tip.slice(0, 8)}, not the reported ${sha.slice(0, 8)}`);
+      if (tip !== sha) throw new Error(`${b} is at ${tip.slice(0, 8)}, not the reported ${sha.slice(0, 8)}`);
     });
     const wt = await taskWorktree(task, project);
     if (!wt) throw new Error(`couldn't check out ${b} from origin`);
@@ -3932,6 +3947,14 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       AND id NOT IN (SELECT MAX(id) FROM runs WHERE task_id IN (SELECT value FROM json_each(:k)) GROUP BY task_id)`, { t: now(), k: JSON.stringify(adoptable) });
     if (orphans) logEvent(`requeued ${orphans} interrupted task(s) after a restart`);
     cleanupWorktrees(); // per-project merge lock: a claim in the same project waits for it
+    // #345: workers push through the head now, so a work task that failed on a worker's push to GitHub gets one more go
+    // (once per database).
+    if (kvGet('retried_push_failed') !== '1') {
+      kvSet('retried_push_failed', 1);
+      const ids = qa(`SELECT DISTINCT t.id FROM tasks t JOIN runs r ON r.task_id=t.id WHERE t.status='failed' AND t.kind='work'
+        AND (r.errors LIKE '%"push_failed"%' OR t.result LIKE '%no pushed commit%')`).map((r) => r.id);
+      for (const id of ids) taskAction(id, 'retry');
+    }
     retentionGc();
     reconcileCodexLimit();
     detectHardware();
@@ -3977,6 +4000,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     // A sidebar chat's project rank ({id, position, priority}), or null when its folder has no orchestrator project.
     projectRank: (cwd) => q1('SELECT id, position, priority FROM projects WHERE path=:p', { p: cwd }) ?? null,
     isRunning: (id) => running.has(Number(id)), logEvent, attachCluster, detectHardware,
+    // The head's git endpoint (cluster-git.mjs): a project's checkout, and the tasks node nodeId may push to in it now.
+    gitRepo: (pid) => getProject(Number(pid))?.path || null,
+    pushableTasks: (nodeId, pid) => [...running].filter(([, r]) => r.node === nodeId && r.projectId === Number(pid)).map(([id]) => id),
     gateSettings, setGateSettings, decideApproval, taskActions, pendingApprovals: () => approvals.pending().map(({ args, ...a }) => a),
     scheduleReflections, // tests: run a reflection scheduling step without starting agents
     claimNext, // tests: claims the next task and its node, as one tick step would (without starting it)

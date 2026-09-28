@@ -811,5 +811,5 @@ export function createCluster({ dbFile, local = () => ({}), heartbeatMs = HEARTB
 
   return { listNodes, node, createPairing, pairing, revokePairing, claim, whoami, update, revoke, handleUpgrade, send, onMessage, isConnected: (id) => conns.has(id), version: () => version, close,
     autoDrain, requestUpdate, logsTail, request, ping, nodeEvents, metrics: metricsOf, setBusy: (fn) => { busy = fn; }, setUpNext: (fn) => { upNext = fn; }, health,
-    handleExt, syncExt, extHash: () => extInfo()?.hash || null, setLocalCapacity };
+    handleExt, syncExt, extHash: () => extInfo()?.hash || null, setLocalCapacity, tokenNode };
 }

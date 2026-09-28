@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // agent-orch worker daemon (BRIEF goal 11; design: .agent-orch/CLUSTER.md, wire format: cluster-protocol.mjs). Runs on
 // extra machines, dials OUT to the controller over WSS (no inbound port), reports its inventory and resources, and runs
-// the jobs it is given in local checkouts of the project's GitHub repo with the same adapters as the controller. It
+// the jobs it is given in local checkouts of the project's repo with the same adapters as the controller, cloned from and
+// pushed to the head's git endpoint (cluster-git.mjs; GitHub only when the head's is unreachable). It
 // reports richly: each job's phases with progress hints, health telemetry every heartbeat, structured errors, its log
 // tail on request, and it updates itself (git pull + service restart) when the controller asks while it is idle. On a
 // Mac it follows its power policy from the controller (power.mjs): no new jobs on low battery or when hot, and awake
@@ -20,7 +21,8 @@
 // Everything lives in ~/.agent-orch-worker (AGENT_ORCH_WORKER_HOME overrides): config.json (0600: the pairing and the
 // cap), worker.sock (the status socket, 0600), repos/ (bare cache clones), worktrees/, deps/ (node_modules by lockfile
 // hash), npm-cache/, run/ (each job's wrapper scripts and pids), logs/, extensions/ (the head's MCP servers, 0600, and synced.json:
-// the skills and subagents it wrote into ~/.claude and ~/.codex). git and gh use the machine's own login.
+// the skills and subagents it wrote into ~/.claude and ~/.codex). The head's git endpoint takes the node token (repos/head-*
+// caches); GitHub, the fallback, uses the machine's own git and gh login.
 // Disk hygiene (pruneCaches, at start and after every job's worktree is removed): a deps/<hash> no worktree's
 // node_modules links to and unused for DEPS_TTL_MS (3 days) is deleted, npm-cache/ goes whole once over 300 MB, and
 // repos/ caches go after 14 idle days.
@@ -929,27 +931,44 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   // own tests or screenshots, when the project is agent-orch) is a throwaway instance, not a head (role.mjs).
   const jobEnv = (job) => ({ ...withOwner(process.env, 'task', job.id), [JOB_ENV]: String(job.id) });
 
-  // Bare cache clone (blob-less), fetched before each job; remote branches land in refs/remotes/origin/*.
+  // Where a job's code comes from, in order: the head's git endpoint (job.start.gitUrl, cluster-git.mjs), then, when that
+  // is unreachable, the project's GitHub repo with this machine's own login. Each source has its own bare cache clone
+  // (blob-less: lazy blob fetches go back to the same source) with origin = that source.
   const cacheDir = (repo) => path.join(dirs.repos, `${cacheName(repo)}.git`);
-  // One git operation on a cache (and the worktrees made from it) at a time: jobs set up or pushing in parallel would
+  function sources(spec) {
+    const head = spec.gitUrl && new URL(spec.gitUrl, config.controller).href;
+    return [
+      ...(head ? [{ kind: 'head', url: head, dir: path.join(dirs.repos, `head-${cacheName(head)}.git`), env: {} }] : []),
+      ...(spec.repo ? [{ kind: 'github', url: spec.repo, dir: cacheDir(spec.repo), env: gitAuthEnv(spec.repo) }] : []),
+    ];
+  }
+  // The head's endpoint takes this node's bearer token as an http.<url>.extraHeader: from the environment for the first
+  // clone, then from agent-orch-auth.config (0600), included by that cache's own config only (never global, never argv).
+  const headerEnv = (url) => ({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: `http.${url}.extraHeader`, GIT_CONFIG_VALUE_0: `Authorization: Bearer ${config.token}` });
+  async function headAuth(dir, url) {
+    fs.writeFileSync(path.join(dir, 'agent-orch-auth.config'), `[http "${url}"]\n\textraHeader = Authorization: Bearer ${config.token}\n`, { mode: 0o600 });
+    await git(dir, ['config', 'include.path', 'agent-orch-auth.config']);
+  }
+  // One git operation on a cache dir (and the worktrees made from it) at a time: jobs set up or pushing in parallel would
   // otherwise race on its refs and config ("cannot lock ref 'refs/remotes/origin/main'", "could not set remote.origin.url").
   const cacheLocks = new Map();
-  function withCache(repo, fn) {
-    const key = cacheDir(repo), run = (cacheLocks.get(key) || Promise.resolve()).then(fn);
+  function withCache(key, fn) {
+    const run = (cacheLocks.get(key) || Promise.resolve()).then(fn);
     const tail = run.catch(() => {});
     cacheLocks.set(key, tail);
     tail.then(() => { if (cacheLocks.get(key) === tail) cacheLocks.delete(key); });
     return run;
   }
-  async function ensureCache(repo) {
-    const dir = cacheDir(repo), env = gitAuthEnv(repo);
+  // Bare cache clone, fetched before each job; remote branches land in refs/remotes/origin/*.
+  async function ensureCache({ kind, url, dir, env }) {
     if (!fs.existsSync(path.join(dir, 'HEAD'))) {
       fs.rmSync(dir, { recursive: true, force: true });
-      await git(dirs.repos, ['clone', '--bare', '--filter=blob:none', '-q', repo, dir], { env });
+      await git(dirs.repos, ['clone', '--bare', '--filter=blob:none', '-q', url, dir], { env: kind === 'head' ? headerEnv(url) : env });
       await git(dir, ['config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*']);
       fs.appendFileSync(path.join(dir, 'info', 'exclude'), '\nnode_modules\n');
     }
-    await git(dir, ['remote', 'set-url', 'origin', repo]);
+    if (kind === 'head') await headAuth(dir, url);
+    await git(dir, ['remote', 'set-url', 'origin', url]);
     await git(dir, ['fetch', '-q', '--prune', 'origin'], { env });
     const now = new Date();
     try { fs.utimesSync(dir, now, now); } catch {}
@@ -960,8 +979,8 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     id: spec.job, spec, state: 'setup', ac: null, ev: [], evBase: 0, sent: 0, ctl: [], ctlSent: 0, attached: true, detachedAt: 0,
     startedAt: Date.now(), activity: null, activityAt: 0,
     phase: null, progress: { tools: 0, files: new Set(), last: '' }, progressSig: '', progressAt: 0,
-    cache: null, env: isBrowserTask(spec) ? {} : gitAuthEnv(spec.repo),
-    dir: isBrowserTask(spec) ? path.join(home, 'browser-tasks', String(spec.job)) : path.join(dirs.worktrees, `${cacheName(spec.repo).split('__').pop()}-task-${spec.job}`),
+    cache: null, env: {},
+    dir: isBrowserTask(spec) ? path.join(home, 'browser-tasks', String(spec.job)) : path.join(dirs.worktrees, `${cacheName(spec.repo || spec.gitUrl).split('__').pop()}-task-${spec.job}`),
     sessionId: spec.resume || null, pushed: null, remoteStart: null, stop: null, lock: Promise.resolve(),
   });
 
@@ -987,9 +1006,17 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
     try {
       await syncExt(spec.ext).catch((e) => { throw new Error(`could not get the controller's skills and MCP servers: ${e.message}`); });
       if (isBrowserTask(spec)) { fs.mkdirSync(job.dir, { recursive: true }); return true; }
-      setPhase(job, fs.existsSync(path.join(cacheDir(spec.repo), 'HEAD')) ? 'fetching' : 'cloning');
-      await withCache(spec.repo, async () => {
-        job.cache = await ensureCache(spec.repo);
+      const srcs = sources(spec);
+      setPhase(job, fs.existsSync(path.join(srcs[0].dir, 'HEAD')) ? 'fetching' : 'cloning');
+      let failed = null;
+      for (const src of srcs) {
+        try { job.cache = await withCache(src.dir, () => ensureCache(src)); job.env = src.env; break; } catch (e) {
+          failed ??= e;
+          if (src !== srcs.at(-1)) log(`job ${job.id}: the head's git endpoint failed (${String(e.stderr || e.message).trim().split('\n').pop()}); using ${srcs.at(-1).url}`, 'warn');
+        }
+      }
+      if (!job.cache) throw failed;
+      await withCache(job.cache, async () => {
         const remote = `refs/remotes/origin/${branch}`;
         job.remoteStart = (await gitOk(job.cache, ['rev-parse', '--verify', '-q', remote])) ? (await git(job.cache, ['rev-parse', remote])).trim() : '';
         if (fs.existsSync(path.join(job.dir, '.git'))) {
@@ -1217,7 +1244,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       if (final) setPhase(job, 'pushing');
       for (let i = 0; ; i++) {
         try {
-          await withCache(job.spec.repo, () => git(job.dir, [...GIT_ID, 'push', '-q', `--force-with-lease=refs/heads/${branch}:${job.pushed || ''}`, 'origin', `HEAD:refs/heads/${branch}`], { env: job.env }));
+          await withCache(job.cache, () => git(job.dir, [...GIT_ID, 'push', '-q', `--force-with-lease=refs/heads/${branch}:${job.pushed || ''}`, 'origin', `HEAD:refs/heads/${branch}`], { env: job.env }));
           break;
         } catch (e) {
           const why = String(e.stderr || e.message).trim().split('\n').pop();
@@ -1248,7 +1275,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
 
   // The task branch's tip on origin ('' when it has none), fetched into the cache.
   function branchTip(job, branch) {
-    return withCache(job.spec.repo, async () => {
+    return withCache(job.cache, async () => {
       const remote = `refs/remotes/origin/${branch}`;
       await git(job.cache, ['fetch', '-q', '--prune', 'origin', `+refs/heads/${branch}:${remote}`], { env: job.env }).catch(async (e) => {
         if (!/couldn't find remote ref/i.test(String(e.stderr || e.message))) throw e;
@@ -1259,7 +1286,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
   }
   async function dropWorktree(job) {
     if (!job.cache) return;
-    await withCache(job.spec.repo, async () => {
+    await withCache(job.cache, async () => {
       await gitOk(job.cache, ['worktree', 'remove', '--force', job.dir]);
       fs.rmSync(job.dir, { recursive: true, force: true });
       await gitOk(job.cache, ['worktree', 'prune']);

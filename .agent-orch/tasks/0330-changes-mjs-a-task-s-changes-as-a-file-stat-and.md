@@ -13,3 +13,7 @@ New module changes.mjs (the backend of a future task drawer 'Changes' section; t
 ## Done when
 
 `npm test -- test/changes.test.mjs` passes and `grep -n 'export async function taskChanges' changes.mjs` prints a line.
+
+## Result — done (check passed) (2026-09-28 11:47)
+
+AGENT-ORCH-STATUS: done — changes.mjs taskChanges returns branch/commit/none diffs; tests pass

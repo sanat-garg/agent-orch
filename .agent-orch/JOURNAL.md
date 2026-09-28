@@ -928,3 +928,7 @@ Phone Stats header pins tabs and range chip in one row
 ## 2026-09-28 11:46 — #329 push.mjs: drop subscriptions that fail for good and honour Retry-After [done (check passed)]
 
 push drops repeatedly rejected devices and honours Retry-After pauses
+
+## 2026-09-28 11:47 — #330 changes.mjs: a task's changes as a file stat and a capped patch, from its merged commit or live branch [done (check passed)]
+
+changes.mjs taskChanges returns branch/commit/none diffs; tests pass

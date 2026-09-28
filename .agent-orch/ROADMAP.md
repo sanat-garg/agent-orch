@@ -3,83 +3,90 @@
 _Maintained by the orchestrator's reflection loop._
 
 ## Assessment
-_2026-09-28 11:55 (reflect #337)._ Main is clean at 2301754. Since #333 six more tasks landed (#322 chat search backend, #326,
-#329, #330 task changes module, #332 pinch-zoom, #336 worker-status tests). For this reflection the free modules' tests were
-run to a log (approval-gate-run, worktree, media, attachments, github, helper-kill): 29 of 29 pass. No full-suite run (owner:
-keep suite runs minimal). Nothing is known broken on main.
+_2026-09-28 12:30 (reflect #346)._ Main is clean at 4575531. Since #337 landed #321 (Skills & tools back to Settings) and
+#331 (Files find); #338–#341 (gate-proxy loophole, github push, digest, chat search wiring) and the owner's #344/#345
+(placement on every machine, git through the head) are queued. For this reflection the tests of the modules touched below
+were run to a log (verify, push, worktree, browser-task, ui-browser-view): 33 of 33 pass, none skipped. No full-suite run
+(owner: keep suite runs minimal). Nothing is known broken on main.
 
-**The push is in flight, not done.** Three tasks still wait for their queued integrators: #299 (owner caps → #314), #302
-(controller slots 1–16 → #311) and #305 (push UI + service worker → #312); #301 (measured AIMD concurrency, urgent) waits on
-#299; #319's integrator is #334. With #315–#335 they hold orchestrator.mjs, parallel.mjs, cluster.mjs, worker.mjs,
-resources.mjs, capacity.mjs, server.mjs, app.js, app.css, index.html, sw.js, gate.mjs, agent-share.mjs, browser-view.mjs,
-files.mjs, retention.mjs, taskrun.mjs, cluster-protocol.mjs, public/stats|files|ext.*, README.md, AUDIT.md, UI-REVIEW.md and
-CONTEXT.md. New features that need server.mjs or app.js can only be queued behind those; this reflection (target: 4 tasks)
-queues three in files nobody holds plus one feature wiring that waits its turn:
-- **Gate loophole (verified):** gate-proxy.mjs classifies with an empty snapshot when `browser_snapshot` errors or times out
-  (60 s). `classify('browser_click', {target:'e3', element:'the blue button'})` with no snapshot → `draft`, so a click on a
-  real "Send" button passes when the page can't be read; only the agent's own description is checked. gate.mjs is held by
-  #317, so the fix lives in the proxy: a page that can't be read makes element tools, key presses and dialogs outbound.
-- **github.mjs blocks pushes on `gh api user`.** `createRepo` throws "GitHub is not linked" before it looks for an existing
-  origin, so a transient gh/network failure stops every push of an already-created repo. Only one test covers the module.
-- **Chat search is built (#322) but not reachable.** Wire `GET /api/convos?q=` and a sidebar search field.
-- **A "Today" digest backend** (what finished, failed or needs the owner since they last looked) for the Queue's top, as a
-  pure module with tests, wired once server.mjs/app.js are free.
+**The push is in flight.** #299, #302, #305 and #319 wait for integrators #314, #311, #312 and #334; #301 (measured
+concurrency) waits on #299; #344/#345 are the owner's urgent placement and head-git work. Together with #315–#317, #323,
+#328, #335 and #338–#341 they hold orchestrator.mjs, cluster.mjs, worker.mjs, server.mjs, parallel.mjs, resources.mjs,
+capacity.mjs, cluster-git.mjs, taskrun.mjs, gate.mjs, gate-proxy.mjs, agent-share.mjs, browser-view.mjs, retention.mjs,
+github.mjs, digest.mjs, public/app.js|app.css|index.html|sw.js|stats.*, README.md, AUDIT.md, UI-REVIEW.md and CONTEXT.md.
+So this reflection queues work in files nobody holds, taking the owner's direction (features on what exists, reliability
+with tests) and AUDIT round 7's own priority order:
+- **The verifier (round 7 #64–#66, its priority 1).** Verified again today: a fenced block passes when only its last line
+  passes; `` `node_modules` `` becomes a command (`node_modules && npm test` exits 127, "command not found", accepted
+  unverified); `CI=1 npm test` and `npm test 2>&1 | grep …` are refused, which leaves the task with no check at all.
+  Two small taskrun.mjs tasks (they serialise behind #335 through `files`).
+- **push.mjs #53:** an unreadable VAPID key file is replaced by a new pair (every device then fails with 403 forever) and
+  a bad PEM throws at server boot. Generate only on ENOENT; otherwise log and turn push off.
+- **worktrees.mjs #62:** a symlinked worktrees root makes every reuse delete the worktree's uncommitted work.
+- **browser-task.mjs #58:** status by phrase match calls bookings "failed" and CAPTCHA blocks "done". Ask for the marker
+  on the last line and trust it first (the orchestrator half, routing failures through `fail()`, waits for orchestrator.mjs).
+- **Feature: earlier prompts in the Browser tab.** BX.tasks already holds the profile's recent screen prompts, but the panel
+  shows one. A compact list with tap-to-show and "Ask again" makes the tab a history, not a single slot.
+- An AUDIT ledger task marks those five fixed once they land (AUDIT.md is held by #315–#317 until then).
 
-Goals 1–8, 10 and 11 of the brief are met. Goal 9 (rapid mode) lands with the integrators above plus #301. Goal 12 has its
-foundations (browser tasks, screen prompts, the approval gate, AGENTIC.md) and waits for the owner. Goal 6's silence when the
-app is closed is closed on the backend (#304/#306); the phone side is #305/#312.
+Goals 1–8, 10 and 11 of the brief are met. Goal 9 lands with #311/#314, #301 and the owner's #344/#345. Goal 12 has its
+foundations and waits for the owner. Goal 6's push notifications are backend-complete (#304/#306); the phone side is #312.
 
-Open ledgers: AUDIT round 6 has 11 open findings (#38, #39, #41, #42, #44, #46–#50, #52); #41, #42 (halves outside
-cluster.mjs), #46, #49 and #50 are queued or running (#315–#318); round 7 is being written (#324). UI-REVIEW round 2 has 15
-open rows; #23 (integrator #334) and #33 (#321) are in flight, #18 landed (#332).
+Open ledgers: AUDIT round 6 has 11 open findings (#38, #39, #41, #42, #44, #46–#50, #52), of which #41/#42/#46/#49/#50 are
+queued (#315–#318 partly landed). Round 7 (#53–#67): #61 is #328, #53/#58/#62/#64/#65/#66 are queued by this reflection;
+#54–#57, #59, #60, #63 and #67 need orchestrator.mjs/server.mjs/worker.mjs and wait. UI-REVIEW round 2 has 14 open rows;
+#23 (integrator #334) is in flight, #18 and #33 landed.
 
 Things the owner should know:
-- **`autoRestart` is still off** (kv `parallel_settings` = `{"controllerWork":true}`). AUDIT #43's preflight is live, so it is
-  safe to turn on in gear → Settings. Until a restart the live server does not run #300/#303/#304/#306/#308/#309/#322/#327/
-  #329/#330 (push routes, screen prompts, the Browser tab's prompt box, rapid top-up, the verifier fix, search, changes).
+- **`autoRestart` is still off** (kv `parallel_settings` = `{"controllerWork":true}`). AUDIT #43's preflight is live, so it
+  is safe to turn on in gear → Settings. Until a restart the live server does not run anything merged since 2026-09-27
+  (push routes, screen prompts, the Browser tab's prompt box, rapid top-up, the verifier fixes, search, changes).
 - **Push notifications work only in the home-screen app on iPhone**, after #312 lands and the server restarts.
 - **AUDIT #38 (high) stays open by design:** approvals are a log and a speed bump until AGENTIC.md's run sandbox. Keep
   connectors with outbound tools out of the MCP list until then.
 - Task #96 ("Answer owner's message", project soham) waits because that project is paused. By design.
 
-## Next (queued by #337)
-1. gate-proxy.mjs: a snapshot that errors or times out makes element tools, key presses and dialogs outbound (held), with a
-   `snapshotMs` config for tests; the fixture gains `FAKE_MCP_SNAPSHOT=error|hang`; a new test/gate-proxy.test.mjs also
-   covers the hook ticket path (a pre-checked call is forwarded without a second snapshot).
-2. github.mjs: an existing origin is pushed without asking gh; only creating a repo needs the gh sign-in; tests with a local
-   bare remote (repoOf, unpushed, push ok, push failure surfaces the last stderr line).
-3. digest.mjs: `digest({dbFile, since, now})` → tasks finished/failed/needing the owner since `since`, per project, with
-   one-line results; tests on a temp DB.
-4. Wire chat search (after #322): `GET /api/convos?q=` using search.mjs, a search field above the chat list, results open the
-   chat; test/search-api.test.mjs. Runs once #311/#312/#314 free server.mjs and app.js.
-Still queued from #310–#333: #315–#321, #323, #324, #328, #331, #334, #335 (AUDIT #41/#42/#46/#49/#50, UI-REVIEW #23/#33,
-Files find, retention, README, AUDIT round 7, verifier substitution fix).
+## Next (queued by #346)
+1. taskrun.mjs, AUDIT #64: every line of a fenced Done-when block and every `;`-separated part of a snippet must pass (joined
+   with ` && `; the grep "prints nothing" rewrite keeps its own `; test $? -eq 1`).
+2. taskrun.mjs, AUDIT #65/#66 (extractor half): runner names need a word boundary, path-like snippets are not commands,
+   `2>&1`, env prefixes, a leading `cd <dir> &&` and up to three `&&` are accepted. The other half (a refused snippet fails
+   the task instead of merging unchecked; 127 accepted only for a missing first word) lives in orchestrator.mjs: later.
+3. push.mjs, AUDIT #53: a key pair is generated only on ENOENT; a bad file or PEM disables push without overwriting or
+   throwing; `checkSub` rejects a p256dh that is not on the curve; an https `sub`.
+4. worktrees.mjs, AUDIT #62: the worktrees root is resolved through realpath so a symlinked root still matches git's list.
+5. browser-task.mjs, AUDIT #58: the last-line `AGENT-ORCH-STATUS: done|failed` marker decides; the phrase heuristic applies
+   only to the last paragraph of a reply without a marker.
+6. Browser tab: an "Earlier prompts" list under the activity panel with tap-to-show and "Ask again".
+7. AUDIT ledger: mark #53, #58 (module half), #62, #64, #65/#66 (extractor half) once 1–5 land.
+Still queued from earlier reflections: #315–#317, #323, #328, #334, #335, #338–#341; integrators #311, #312, #314; the
+owner's #301, #344, #345.
 
 ## Later
-Once the integrators (#311–#314, #334) and #301 land, in this order:
-- Wire the digest: `GET /api/orch/digest?since=` in server.mjs; a "Since you were away" group at the top of the Queue
-  (app.js) that remembers the last open time in localStorage.
-- Wire task changes: `GET /api/orch/task/:id/changes` in server.mjs using changes.mjs; a "Changes" section in the task drawer
-  with collapsible files (app.js, app.css).
-- Browser tab: an "Earlier prompts" list under the activity panel (BX.tasks already holds them) with tap-to-show and "Ask
-  again" (public/browser.js).
-- Settings "Send a test notification" button (`POST /api/push/test`, server.mjs + app.js).
-- UI-REVIEW #25: a "Needs you" group at the top of the Queue (pending approvals, review checkpoints, paused tasks, chat
-  permission prompts) with a count the app badge reuses (shares the digest's needs-you query).
-- Retry a failed task from the drawer with an optional note (a fresh task that cites the failure), instead of re-planning.
+Once the integrators (#311–#314, #334), #301 and #344/#345 free orchestrator.mjs, server.mjs and app.js, in this order:
+- AUDIT #66's other half: a refused Done-when snippet fails the task ("Done-when check was refused: …") instead of merging
+  unchecked; #65's 127 rule (accept only when the command's first word is absent from PATH before the check runs).
+- AUDIT #58's other half: screen-prompt failures go through `fail()` (push + event); a reply without a marker shows as
+  "Unclear" in the Browser tab.
+- AUDIT #57: a resumed screen prompt gets "Continue; check the page for what is already done"; a lost one fails with its
+  steps so far instead of re-running. AUDIT #56: refuse a screen prompt for a node `place` could never pick (409).
+- AUDIT #60: back off rapid top-up after a reflection that added nothing ready; never top up past an `awaiting_review`
+  checkpoint; a stale 5 h reading counts as cautious; split `requested` across perpetual projects.
+- AUDIT #54/#55: keep the newest dropped push per tag and send it after the minute; a global push budget with a summary;
+  generic push bodies; badge and checkpoints only for active projects with a chat.
+- AUDIT #59: `GET /api/browser/tasks` without steps plus `GET /api/browser/tasks/:id`; cached steps for finished tasks.
+- AUDIT #63: delete screen-prompt workspaces on done/failed/cancelled (controller and worker) and sweep `browser-tasks/`
+  at boot. AUDIT #67: the shared Claude token only in Claude runs' env; back up a worker's own Codex auth.json.
+- Wire the digest (#340): `GET /api/orch/digest?since=`; a "Since you were away" group at the top of the Queue.
+- Wire task changes (#330): `GET /api/orch/task/:id/changes`; a "Changes" section in the task drawer.
+- Settings "Send a test notification" (`POST /api/push/test`).
+- UI-REVIEW #25 "Needs you" group at the top of the Queue with a count the app badge reuses.
+- Retry a failed task from the drawer with an optional note.
 - Goal 9 follow-ups: an emergency guard on workers (pause the newest job near OOM, as the controller does).
-- UI-REVIEW #18's second half: a "Phone size" toggle that re-emulates the viewport at the stage size (browser-live.mjs,
-  `mobile: true`, dsf 2–3) only while the owner is in control.
-- AUDIT #39: worker half (a worker job whose synced MCP list has a connector with `outbound` tools opens the gate) and
-  controller half (planner and reflection runs never get an ungated outbound connector).
-- AUDIT #44: the restart drain waits only for local runs and, for a run held on an approval, a capped time.
-- AUDIT #47 and #48: `revoke()` clears `tasks.run_on` with a task event; a remote task whose worker ran no check fails
-  verification instead of merging as "check unavailable".
-- AUDIT #42, cluster half: a per-connection frame budget, version sha only from `hello`, a cached gzipped extension bundle.
-- AUDIT #52: workers refuse an `http://` head unless loopback or `--insecure`. AUDIT #41's other half: Chromium sandbox
-  (`AGENT_ORCH_BROWSER_SANDBOX=1`) where the kernel allows.
-- gate-proxy.mjs: a forwarded call whose upstream never answers blocks the chain for good; a per-call ceiling (the approval
-  TTL) that answers the client with an error and moves on.
+- UI-REVIEW #18's second half: a "Phone size" toggle that re-emulates the viewport at the stage size.
+- AUDIT #39, #44, #47, #48, #42 (cluster half), #52, #41 (Chromium sandbox): as listed in AUDIT.md.
+- gate-proxy.mjs: a per-call ceiling (the approval TTL) so a forwarded call whose upstream never answers can't block the
+  chain for good.
 - UI-REVIEW #30 and #28: the off switch track gets its own ≥ 3:1 token and 51×31 on touch; dark mode gets `--seg-on`.
 - UI-REVIEW round 2, remaining: #19 and round 1 #9 fallback editor as an edge-to-edge sheet (owner's decision); #21
   swipe-to-dismiss; #24 plain-language approvals; #26 Machines as one sheet; #29 an in-app confirm sheet for the
@@ -96,5 +103,6 @@ Other:
 - Split public/app.js (~7k lines) into native ESM modules, guarded by test/ui-static.test.mjs.
 - AUDIT #34's lasting fix is a hostname under a domain the owner controls (owner's decision).
 - Reflections: run the needed tests to a log file first and emit the task block in the final message; never end the turn
-  waiting on a background job (#297 lost its plan that way). Check which files queued integrators hold before queuing.
+  waiting on a background job (#297 lost its plan that way). Check which files queued integrators hold before queuing;
+  when AUDIT.md is held, queue the code fixes without it and one ledger task `after` them.
   A task that adds a FEATURE or MSG must update test/cluster-protocol.test.mjs's expected lists (#308 missed it).

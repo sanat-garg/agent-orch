@@ -794,3 +794,7 @@ Phone task cards wrap titles to two lines; chip moved below
 ## 2026-09-28 05:05 — #267 UI-REVIEW #5: 44pt touch targets for chips, small buttons and icon buttons on touch screens [done (check passed)]
 
 touch screens get 44pt targets; target and keyboard tests pass
+
+## 2026-09-28 05:18 — #269 README docs: browser capability, approval gate, audit log, live browser view and worker extension sync [done (check passed)]
+
+README documents browser tasks, approval gate, audit, live view, sync

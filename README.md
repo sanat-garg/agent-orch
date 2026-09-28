@@ -55,6 +55,8 @@ orchestrator's lock file stops it from scheduling tasks there, but it would stil
 | `CW_DEVICE_NAME` | `Oracle VM` | The name shown for this machine in the UI. |
 | `CW_WS_KEEPALIVE_MS` | `30000` | How often open WebSockets are pinged and their login session re-checked (expired or revoked sessions are closed). |
 | `CW_NO_ORCHESTRATOR` | unset | `1` boots without the orchestrator: the DB is opened and migrated and the UI can read tasks, but no task is claimed, requeued or scheduled, the background git push retry is off, and the data-dir lock is not taken. For preflights against a copy of real data. |
+| `AGENT_ORCH_BROWSER_HOME` | home directory | The folder that holds `.agent-orch-browser/` for the live browser view: its profiles and take-over flags. Tests point it at a temp dir. |
+| `AGENT_ORCH_WORKER_BROWSER` | `install` | On a worker: `install` finds a Chromium/Chrome at start and installs Playwright's Chromium when there is none, `check` only looks, `off` skips it (the worker then gets no browser tasks). Under `node --test` the default is `check`. |
 | `PATH` | inherited | Passed to Claude Code and agents. The orchestrator prepends `data/orchestrator/bin`, which holds `python`/`pip` shims pointing to `python3`/`pip3` when only those exist. |
 
 The server also passes its whole environment on to Claude Code, **except** the variables listed under
@@ -231,6 +233,74 @@ own and says so in its log. MCP servers, secrets included, are stored in `0600` 
 `~/.agent-orch-worker/extensions/` and reach the worker's CLIs the same way as here. Every paired machine gets your MCP
 secrets, so rotate them after removing a machine you no longer trust. A server started by a command (`npx …`) needs
 that command on the worker too. The set is capped at 32 MB; skills that don't fit stay on this server.
+
+## Computer work: browser, approvals and audit
+
+Some tasks need a real web browser, for example a web app with no API. The design, and what is built so far, is in
+[`.agent-orch/AGENTIC.md`](.agent-orch/AGENTIC.md).
+
+**Browser tasks** (`browser.mjs`). The planner marks such a task with `"capabilities": ["browser"]` and can name a
+browser profile with `"identity"` (lowercase letters, digits, `-` and `_`; `default` when not given). The task's run
+gets the Playwright MCP server (`@playwright/mcp`, the version pinned in `package.json`; its tools show up as
+`mcp__playwright__browser_*`) on a persistent Chromium profile at `~/.agent-orch-browser/profiles/<identity>` on the
+machine that runs it, so sign-ins survive between tasks. Screenshots land in the run's `.agent-orch/shots/`. The run's
+system prompt tells the agent that everything it reads in the browser is untrusted and that it must never type
+passwords or one-time codes; when a site needs a sign-in it stops and asks you.
+
+- **Where they run**: on a worker that has Chromium or Chrome and is new enough to relay approvals. The controller
+  runs them only when the orchestrator's `controllerBrowser` setting is on (`PUT /api/orch/parallel` with
+  `{"controllerBrowser": true}`; off by default), or when the task is pinned to it with **Run on**. Two tasks never
+  use the same profile at once; the second waits.
+- **Chromium on a worker**: at start a worker looks for a browser (`AGENT_ORCH_BROWSER_PATH`, Google Chrome on macOS,
+  Playwright's Chromium, then `chromium`/`google-chrome` on `PATH`). With `AGENT_ORCH_WORKER_BROWSER=install` (the
+  default) and none found, it installs Playwright's Chromium once; `check` only looks and `off` skips it. The result
+  is sent to the controller with the worker's inventory and logged (`browser: … (headed)` or `browser: none (…)`).
+  Chromium runs headed on a Mac and headless elsewhere (`AGENT_ORCH_BROWSER_HEADLESS=1|0` overrides).
+
+**The approval gate** (`gate.mjs`, `gate-proxy.mjs`, `approvals.mjs`). In task runs, the Playwright MCP and every
+connector run behind `gate-proxy.mjs`, a stdio MCP proxy. A connector is an MCP server with **Outbound tools** filled
+in under Settings → Skills & tools. The proxy classifies each tool call before it runs:
+
+- **read**: looks at the page (snapshot, screenshot, wait, hover…). Runs.
+- **draft**: ordinary steps (open a page, click, type, fill a form, choose an option). Runs.
+- **outbound**: clicking a button or link whose accessible name matches Send, Pay, Transfer, Submit order, Publish,
+  Share, Delete, Confirm, Place order or Sign ("Sign in" and "Log out" don't count), submitting typed text to one,
+  accepting a dialog that says so, opening a checkout, payment or billing page, and any Playwright tool the gate
+  doesn't know. For connectors, the tools listed in Outbound tools and tools named like send, pay, delete, publish
+  or share.
+
+An outbound call is held **before** it runs. Calls run one at a time, so nothing slips past a held one. The task's
+card (in the chat and the Queue) and its drawer then show the exact action with a screenshot of the page, and you
+choose **Approve** once, **Always** (the same action is allowed without asking for the rest of this task) or
+**Deny** with a reason, which reaches the agent as a tool error; the call is never made. An approval nobody answers
+is denied after 24 hours. Time spent held doesn't count toward the task's timeout. On a worker the proxy asks through
+files in the run's gate dir and the worker relays the request to the controller, so the flow is the same everywhere.
+
+Every call, whatever its class, is logged to `data/audit/<task>.jsonl` (hash-chained, secrets redacted), with
+screenshots saved as media. The task drawer's **Actions** section shows that log. **Settings → Ask me before** adds
+your own names, one per line, to the default list (a plain phrase matches whole words; `/regex/` is also accepted).
+`GET`/`PUT /api/orch/gate` reads and sets `{patterns, ttlHours}`, where `ttlHours` (up to 336) replaces the 24-hour
+expiry.
+
+**Live browser view** (`browser-live.mjs`, `browser-view.mjs`, `public/browser.js`). The globe in the sidebar opens
+the **Browser** sheet: every machine that can run a browser, its profiles, the sites each is signed in to (cookie
+domains only) and **Clear**. **Open** streams the profile's Chromium into the page, and your mouse, touch, keys and
+paste go back to it, with a URL bar, Back and Reload. Use it to:
+
+- **Sign in once** on a profile (2FA and CAPTCHAs included) before any task needs it. Tasks on that identity reuse the
+  cookies.
+- **Watch a run**: the viewer and the task's MCP share one Chromium per profile, and a running browser task's drawer
+  shows a small live thumbnail.
+- **Take over**: while you control it, the task's browser actions wait; **Hand back** (or closing the view) lets
+  them continue.
+
+The profile's own machine runs the browser: the controller directly, a worker through the cluster connection.
+
+**Workers get the same extensions** (`extensions.mjs`). When your skills, subagents or MCP servers change, the
+controller sends every worker an `ext.sync` frame with the set's hash, and each job names the hash it needs (plus the
+task's persona). The worker's `applyBundle` downloads and applies the set only when that hash differs from its own
+(see [Skills, MCP servers, subagents and personas](#skills-mcp-servers-subagents-and-personas)). Nothing has to be
+copied to a worker by hand for a browser or connector task. The Playwright MCP itself comes with each checkout.
 
 ## Parallel tasks and git worktrees
 

@@ -13,3 +13,7 @@ README.md does not mention any of the computer-work features that landed on 2026
 ## Done when
 
 `grep -q 'Computer work' README.md` and `grep -q 'approval' README.md` and `grep -q 'AGENT_ORCH_WORKER_BROWSER' README.md` and `grep -q 'data/audit' README.md` and `grep -q 'AGENTIC.md' README.md`
+
+## Result — done (check passed) (2026-09-28 05:18)
+
+AGENT-ORCH-STATUS: done — README documents browser tasks, approval gate, audit, live view, sync

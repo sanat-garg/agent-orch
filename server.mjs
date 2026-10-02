@@ -2342,6 +2342,8 @@ function handleUpgrade(req, socket, head) {
 
 wss.on('connection', (ws, req) => {
   allClients.add(ws);
+  // Without a listener a bad frame crashes the server: Caddy 2.6 sends an unmasked close frame on every reload.
+  ws.on('error', (e) => console.error('[ws] client socket error:', e.message));
   let current = null;
   const token = sessionToken(req);
   const alive = setInterval(() => {

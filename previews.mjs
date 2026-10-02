@@ -383,11 +383,12 @@ export function createPreviews({
       const port = prev?.port || (await pickPort(dir));
       if (prev) await stop(dir); // while store[dir] still names the old host (its process tag)
       store[dir] = { slug: c.slug, domain: c.domain, port, pid: null };
+      save(); // before the reload, so the entry survives if this process dies during it
       try { await applyCaddy(); } catch (err) {
         if (prev) { store[dir] = prev; queueDeploy(dir); } else delete store[dir];
+        save();
         return { error: err.message };
       }
-      save();
       if (prev) fs.rmSync(logFile(prev), { force: true });
       queueDeploy(dir);
       onChange(dir);
@@ -423,7 +424,8 @@ export function createPreviews({
     },
     // Boot: make sure Caddy has every preview, kill what an earlier run left behind, then start them all.
     async startAll() {
-      if (Object.keys(store).length) await applyCaddy().catch((err) => log(err.message));
+      // Also when the store is empty but the include isn't, so hosts orphaned by a crash are dropped.
+      if (Object.keys(store).length || readOr(includeFile)) await applyCaddy().catch((err) => log(err.message));
       await Promise.all(Object.keys(store).map((dir) => queueDeploy(dir)));
     },
     async stopAll() { await Promise.all(Object.keys(store).map((dir) => stop(dir))); },

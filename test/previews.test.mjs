@@ -33,6 +33,7 @@ function setup({ ports = [45100 + Math.floor(Math.random() * 400), 45599] } = {}
     if (c === 'install') fs.copyFileSync(a[2], a[3]);
     else if (c === 'cp') fs.copyFileSync(a[1], a[2]);
     else if (c === 'rm') fs.rmSync(a[1], { force: true });
+    else if (c === 'systemctl') bad.savedAtReload = fs.readFileSync(path.join(tmp, 'data', 'previews.json'), 'utf8');
     else if (c === 'caddy' && bad.fail) return { code: 1, stdout: '', stderr: 'INFO using config\nError: adapting config: bad thing' };
     return { code: 0, stdout: '', stderr: '' };
   };
@@ -90,6 +91,8 @@ test('caddy: include generated, import added once with a backup, validate failur
     assert.equal(main.split(`import ${includeFile}`).length, 2);
     assert.equal(fs.readFileSync(`${caddyfile}.bak-agent-orch`, 'utf8'), OWNER_CADDY);
     assert.ok(calls.includes('systemctl reload caddy'));
+    // Saved before the reload: a Caddy reload once crashed the server mid-request and lost the entry.
+    assert.match(bad.savedAtReload, /"slug": "alpha"/);
 
     await pv.addDomain('example.dev');
     assert.equal((await pv.set(b, 'beta', 'example.dev')).ok, true);
@@ -105,6 +108,7 @@ test('caddy: include generated, import added once with a backup, validate failur
     assert.match(f.error, /rolled back.*bad thing/);
     assert.equal(fs.readFileSync(includeFile, 'utf8'), before);
     assert.equal(pv.view(c), null);
+    assert.doesNotMatch(fs.readFileSync(path.join(tmp, 'data', 'previews.json'), 'utf8'), /gamma/);
     assert.equal(calls.filter((x) => x.startsWith('systemctl')).length, reloads);
     bad.fail = false;
 

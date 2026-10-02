@@ -100,7 +100,7 @@ test('new project: no address unless added; it checks live and is posted', { ski
     await addBtn.click();
     // Two domains: a picker, and the choice is posted with the slug.
     await slug.fill('My Todo');
-    await page.locator('.preview-line select.pv-domain').selectOption('example.dev');
+    await page.locator('.preview-line select.pv-domain').selectOption('.example.dev');
     await page.waitForFunction(() => /my-todo\.example\.dev is free/.test(document.getElementById('pvDraftCheck').textContent));
     let posted = null;
     await page.route('**/api/convos', (route) => {
@@ -143,8 +143,24 @@ test('sidebar manager: every project, domains, and a slug change PUTs (desktop a
       assert.equal(await notes.locator('input.pv-slug').inputValue(), '');
       const add = notes.locator('button', { hasText: 'Add' });
       assert.equal(await add.isDisabled(), true);
+      // A tap anywhere in the address box (not just on the typed text) focuses the slug.
+      await notes.locator('.pv-https').click();
+      assert.equal(await notes.locator('input.pv-slug').evaluate((n) => n === document.activeElement), true);
       await notes.locator('input.pv-slug').fill('my-notes');
       assert.equal(await add.isEnabled(), true);
+      // The bare domain (no subdomain): the slug box goes away and Add PUTs '@'.
+      let bare = null;
+      await page.route('**/api/convos/c1/preview', (route) => {
+        bare = route.request().postDataJSON();
+        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true }) });
+      });
+      await notes.locator('select.pv-domain').selectOption('@example.dev');
+      assert.equal(await notes.locator('input.pv-slug').isHidden(), true);
+      await page.waitForFunction(() => /✓ example\.dev is free/.test(document.querySelector('.pv-row[data-cid="c1"] .pv-check').textContent));
+      await add.click();
+      await page.waitForFunction(() => document.querySelector('.toast')?.textContent.includes('https://example.dev'));
+      assert.deepEqual(bare, { slug: '@', domain: 'example.dev' });
+      await page.locator('.toast').evaluateAll((ts) => ts.forEach((t) => t.remove()));
       assert.deepEqual(await page.locator('.pv-dname').allTextContents(), ['greygoose.baby', 'example.dev']);
       // A rename: the live check, then Save PUTs the slug and domain.
       let put = null;

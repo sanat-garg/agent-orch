@@ -1,4 +1,4 @@
-// Live previews: each project can be served at https://<slug>.<domain>, on any of the owner's domains (each with wildcard
+// Live previews: each project can be served at https://<slug>.<domain> (or the bare domain: slug APEX '@'), on any of the owner's domains (each with wildcard
 // DNS to this head; the list lives in previews.json, first = default). The head runs the project's main tree and Caddy
 // proxies the subdomain to it:
 //   - Caddy: agent-orch owns ONE file, /etc/caddy/agent-orch-previews.caddy, regenerated from previews.json, and adds
@@ -24,6 +24,7 @@ import { spawn, execFile } from 'node:child_process';
 
 export const PORTS = [4400, 4999];
 export const RESERVED = ['www', 'files', 'shell', 'api', 'admin', 'mail', 'smtp', 'imap', 'ftp', 'ns1', 'ns2', 'mx', 'cdn', 'static', 'app', 'agent-orch'];
+export const APEX = '@'; // the slug for the bare domain itself (https://<domain>, no subdomain)
 const LOG_LINES = 200;
 const HEALTH_MS = 30000;
 const INSTALL_MS = 10 * 60000;
@@ -32,6 +33,8 @@ const INSTALL_MS = 10 * 60000;
 export function normalizeSlug(s) {
   return String(s || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '');
 }
+
+export const hostName = (slug, domain) => (slug === APEX ? domain : `${slug}.${domain}`);
 
 // Hostnames under `domain` that the Caddyfile already serves (the owner's own sites): their first label is taken.
 export function caddySubdomains(text, domain) {
@@ -55,7 +58,7 @@ export function caddySubdomains(text, domain) {
 // The include file Caddy imports: one site block per preview ({slug, domain, port}).
 export function renderCaddy(entries) {
   const head = '# Managed by agent-orch (previews.mjs): live previews. Regenerated on every change; edits here are overwritten.\n';
-  return head + entries.map((e) => [`${e.slug}.${e.domain}`, e.port]).sort((a, b) => a[0].localeCompare(b[0]))
+  return head + entries.map((e) => [hostName(e.slug, e.domain), e.port]).sort((a, b) => a[0].localeCompare(b[0]))
     .map(([host, port]) => `\n${host} {\n\tencode gzip\n\treverse_proxy 127.0.0.1:${port}\n}\n`).join('');
 }
 // A bare hostname such as example.com (lowercase, at least two labels).
@@ -134,8 +137,8 @@ export function createPreviews({
   const save = () => { fs.writeFileSync(file + '.tmp', JSON.stringify({ domains: domainList, entries: store }, null, 2)); fs.renameSync(file + '.tmp', file); };
   const live = new Map(); // dir -> { status, kind, error, updatedAt, child, server, gen, timer, crashes, head, busy }
   const st = (dir) => { if (!live.has(dir)) live.set(dir, { status: 'stopped', gen: 0, crashes: 0 }); return live.get(dir); };
-  const url = (slug, d) => `https://${slug}.${d}`;
-  const hostOf = (e) => `${e.slug}.${e.domain}`;
+  const url = (slug, d) => `https://${hostName(slug, d)}`;
+  const hostOf = (e) => hostName(e.slug, e.domain);
   const logFile = (e) => path.join(logDir, `${hostOf(e)}.log`);
 
   function setStatus(dir, status, extra = {}) {
@@ -147,15 +150,15 @@ export function createPreviews({
   }
 
   function check(raw, dir = null, dom = null) {
-    const slug = normalizeSlug(raw), d = dom || store[dir]?.domain || domainList[0];
+    const apex = String(raw || '').trim() === APEX, slug = apex ? APEX : normalizeSlug(raw), d = dom || store[dir]?.domain || domainList[0];
     const bad = (error) => ({ ok: false, slug, domain: d, url: slug ? url(slug, d) : null, error });
     if (!domainList.includes(d)) return bad(`${d} isn't one of your preview domains.`);
-    if (slug.length < 3) return bad('Use at least 3 letters or digits.');
+    if (!apex && slug.length < 3) return bad('Use at least 3 letters or digits.');
     if (dir && forbid.some((f) => path.resolve(dir) === f || path.resolve(dir).startsWith(f + path.sep))) return bad("agent-orch can't preview its own folder.");
     if (RESERVED.includes(slug)) return bad('That name is reserved.');
     let caddy = '';
     try { caddy = fs.readFileSync(caddyfile, 'utf8'); } catch {}
-    if (caddySubdomains(caddy, d).has(slug)) return bad('Already used by another site on this server.');
+    if (caddySubdomains(caddy, d).has(apex ? '' : slug)) return bad('Already used by another site on this server.');
     const owner = Object.entries(store).find(([k, e]) => e.slug === slug && e.domain === d && k !== dir);
     if (owner) return bad(`Taken by ${path.basename(owner[0])}.`);
     return { ok: true, slug, domain: d, url: url(slug, d) };

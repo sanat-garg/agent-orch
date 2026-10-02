@@ -1,17 +1,18 @@
 'use strict';
 // ---------- Live previews (server: previews.mjs) ----------
-// Each project can be served at https://<slug>.<domain>. Three places:
+// Each project can be served at https://<slug>.<domain>, or the bare domain (slug APEX '@'). Three places:
 //   - the new-project screen offers an address (none unless the owner adds one; typed, checked live),
 //   - the chat header links to the open project's preview with a status dot,
 //   - the sidebar's "Live previews" manager lists every project's address and status (set, move, restart, logs, remove)
 //     and the owner's domains (add, remove, make default).
 // Loaded after app.js and uses its helpers ($, el, api, toast, state, currentConvo, closeSidebar, coarse).
 (() => {
-  const PV = { domains: [], list: [], loaded: false, draft: { slug: '', skip: true, domain: null, check: null }, timer: 0, seq: 0,
+  const APEX = '@';
+  const PV = { domains: [], list: [], loaded: false, draft: { slug: '', skip: true, domain: null, apex: false, check: null }, timer: 0, seq: 0,
     lastFocus: null, logsOpen: new Set() };
   const STATUS = { running: 'Live', building: 'Deploying…', waiting: 'Waiting for code', error: 'Error', stopped: 'Stopped' };
   const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '');
-  const host = (v) => `${v.slug}.${v.domain}`;
+  const host = (v) => (v.slug === APEX ? v.domain : `${v.slug}.${v.domain}`);
   const dot = (status) => { const d = el('span', `pv-dot ${status || 'stopped'}`); d.setAttribute('aria-hidden', 'true'); return d; };
   const statusText = (v) => (v.status === 'error' && v.error ? `Error: ${v.error}` : v.status === 'waiting' ? v.error || STATUS.waiting : STATUS[v.status] || v.status);
 
@@ -23,16 +24,29 @@
   }
   const defaultDomain = () => PV.domains[0]?.domain || 'greygoose.baby';
 
-  // A domain picker: plain text with one domain, a select with several.
-  function domainPicker(value, onChange, label = 'Domain') {
-    if (PV.domains.length < 2) return el('span', 'pv-suffix', `.${value || defaultDomain()}`);
+  // The domain part: a subdomain of each domain (".example.com") or the bare domain itself. onChange(domain, apex).
+  function domainPicker(value, apex, onChange, label = 'Domain') {
     const s = document.createElement('select');
     s.className = 'pv-domain';
     s.setAttribute('aria-label', label);
-    for (const d of PV.domains) { const o = document.createElement('option'); o.value = d.domain; o.textContent = `.${d.domain}`; s.append(o); }
-    s.value = value || defaultDomain();
-    s.addEventListener('change', () => onChange(s.value));
+    for (const d of PV.domains) for (const a of [false, true]) {
+      const o = document.createElement('option');
+      o.value = `${a ? APEX : '.'}${d.domain}`;
+      o.textContent = a ? `${d.domain} (no subdomain)` : `.${d.domain}`;
+      s.append(o);
+    }
+    s.value = `${apex ? APEX : '.'}${value || defaultDomain()}`;
+    const fitSelect = () => { s.style.width = `${(s.selectedOptions[0]?.textContent.length || 10) + 3}ch`; };
+    fitSelect();
+    s.addEventListener('change', () => { fitSelect(); onChange(s.value.slice(1), s.value[0] === APEX); });
     return s;
+  }
+  // The address box is a label: a tap anywhere in it (not just on the typed text) focuses the slug.
+  function addrBox(input, picker, apex) {
+    const addr = el('label', 'pv-addr');
+    input.hidden = apex;
+    addr.append(el('span', 'pv-https', 'https://'), input, picker);
+    return addr;
   }
   // Debounced availability check: cb({ok, url, error}).
   function checker() {
@@ -40,7 +54,7 @@
     return (slug, domain, cid, cb) => {
       clearTimeout(t);
       const n = ++seq;
-      if (!norm(slug)) return cb(null);
+      if (slug !== APEX && !norm(slug)) return cb(null);
       t = setTimeout(async () => {
         const q = new URLSearchParams({ slug, ...(domain && { domain }), ...(cid && { cid }) });
         try { const r = await api(`/api/previews/check?${q}`); if (n === seq) cb(r); } catch (e) { if (n === seq) cb({ ok: false, error: e.message }); }
@@ -87,10 +101,8 @@
       input.setAttribute('aria-describedby', 'pvDraftCheck');
       input.addEventListener('input', () => { d.slug = input.value; fit(input); runDraftCheck(); });
       input.addEventListener('blur', () => { if (d.slug && norm(d.slug) !== d.slug) { d.slug = norm(d.slug); input.value = d.slug; } });
-      const lbl = el('label', 'pv-lbl', 'Live preview');
-      lbl.htmlFor = 'pvDraftSlug';
-      const addr = el('span', 'pv-addr');
-      addr.append(el('span', 'pv-https', 'https://'), input);
+      const lbl = el('span', 'pv-lbl', 'Live preview');
+      const addr = addrBox(input, el('span'), d.apex);
       const check = el('span', 'pv-check');
       check.id = 'pvDraftCheck';
       check.setAttribute('aria-live', 'polite');
@@ -101,8 +113,13 @@
       line.replaceChildren(lbl, addr, skip, check);
     }
     const addr = line.querySelector('.pv-addr');
-    addr.querySelector('.pv-suffix, .pv-domain')?.remove();
-    addr.append(domainPicker(d.domain, (v) => { d.domain = v; runDraftCheck(); }));
+    addr.lastElementChild.replaceWith(domainPicker(d.domain, d.apex, (v, apex) => {
+      Object.assign(d, { domain: v, apex });
+      input.hidden = apex;
+      runDraftCheck();
+      if (!apex) input.focus();
+    }));
+    input.hidden = d.apex;
     if (document.activeElement !== input) input.value = d.slug;
     fit(input);
     runDraftCheck();
@@ -110,18 +127,18 @@
   function runDraftCheck() {
     const d = PV.draft, box = $('pvDraftCheck');
     if (!box) return;
-    const key = `${norm(d.slug)}|${d.domain}`;
+    const slug = d.apex ? APEX : d.slug, key = `${d.apex ? APEX : norm(slug)}|${d.domain}`;
     if (d.check?.key === key) return renderCheck(box, d.check.r);
-    draftCheck(d.slug, d.domain, null, (r) => { d.check = { key, r }; if ($('pvDraftCheck')) renderCheck($('pvDraftCheck'), r); });
-    if (!norm(d.slug)) renderCheck(box, null);
+    draftCheck(slug, d.domain, null, (r) => { d.check = { key, r }; if ($('pvDraftCheck')) renderCheck($('pvDraftCheck'), r); });
+    if (!d.apex && !norm(slug)) renderCheck(box, null);
   }
   // What the new project posts: {slug, domain}, or nothing (skipped or empty).
   function draftPick() {
-    const d = PV.draft, slug = norm(d.slug);
+    const d = PV.draft, slug = d.apex ? APEX : norm(d.slug);
     return PV.loaded && !d.skip && slug ? { slug, domain: d.domain || defaultDomain() } : {};
   }
   // Once the project exists, the next new project starts without one again.
-  const resetDraft = () => { PV.draft = { slug: '', skip: true, domain: null, check: null }; };
+  const resetDraft = () => { PV.draft = { slug: '', skip: true, domain: null, apex: false, check: null }; };
 
   // ---- The chat header link (and its row in the phone header's menu).
   function renderHeader() {
@@ -196,34 +213,40 @@
       row.append(el('div', 'pv-url', v.url));
       return row;
     }
-    const ed = { slug: v?.slug || '', domain: v?.domain || defaultDomain() };
+    const ed = { domain: v?.domain || defaultDomain(), apex: v?.slug === APEX };
+    const slugOf = () => (ed.apex ? APEX : norm(input.value));
     const line = el('div', 'pv-edit');
     const input = document.createElement('input');
-    input.className = 'pv-slug'; input.value = ed.slug; input.placeholder = 'my-app'; input.autocomplete = 'off'; input.spellcheck = false; input.autocapitalize = 'none';
+    input.className = 'pv-slug'; input.value = v && !ed.apex ? v.slug : ''; input.placeholder = 'my-app'; input.autocomplete = 'off'; input.spellcheck = false; input.autocapitalize = 'none';
     input.setAttribute('aria-label', `${c.title} live preview address`);
-    const addr = el('span', 'pv-addr');
-    addr.append(el('span', 'pv-https', 'https://'), input, domainPicker(ed.domain, (d) => { ed.domain = d; changed(); }, `${c.title} domain`));
+    const addr = addrBox(input, domainPicker(ed.domain, ed.apex, (d, apex) => {
+      Object.assign(ed, { domain: d, apex });
+      input.hidden = apex;
+      changed();
+      if (!apex) input.focus();
+    }, `${c.title} domain`), ed.apex);
     const save = el('button', 'btn small primary', v ? 'Save' : 'Add');
     save.type = 'button';
     const check = el('div', 'pv-check');
     check.setAttribute('aria-live', 'polite');
     const rowCheck = checker();
     const changed = () => {
-      const same = v && norm(input.value) === v.slug && ed.domain === v.domain;
+      const same = v && slugOf() === v.slug && ed.domain === v.domain;
       save.hidden = !!same;
-      if (!v) save.disabled = !norm(input.value);
-      if (same || !norm(input.value)) return renderCheck(check, null);
-      rowCheck(input.value, ed.domain, c.id, (r) => renderCheck(check, r));
+      if (!v) save.disabled = !slugOf();
+      if (same || !slugOf()) return renderCheck(check, null);
+      rowCheck(ed.apex ? APEX : input.value, ed.domain, c.id, (r) => renderCheck(check, r));
     };
     fit(input);
     input.addEventListener('input', () => { fit(input); changed(); });
     input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); save.click(); } });
     save.onclick = async () => {
-      if (!norm(input.value)) return input.focus(); // empty: Remove takes an address offline
+      const slug = slugOf();
+      if (!slug) return input.focus(); // empty: Remove takes an address offline
       save.disabled = true;
       try {
-        await api(`/api/convos/${c.id}/preview`, 'PUT', { slug: norm(input.value), domain: ed.domain });
-        toast(`Live preview: https://${norm(input.value)}.${ed.domain}`);
+        await api(`/api/convos/${c.id}/preview`, 'PUT', { slug, domain: ed.domain });
+        toast(`Live preview: https://${host({ slug, domain: ed.domain })}`);
         await load(); input.blur(); render();
       } catch (e) { renderCheck(check, { ok: false, error: e.message }); } finally { save.disabled = false; }
     };

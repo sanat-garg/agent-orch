@@ -55,7 +55,7 @@ test('slug and domain normalisation', () => {
   assert.deepEqual([...caddySubdomains(OWNER_CADDY, 'greygoose.baby')].sort(), ['', 'fretbook']);
 });
 
-test('check: too short, reserved, owner sites, duplicates, own folder, unknown domain', async () => {
+test('check: too short, reserved, owner sites, duplicates, own folder, unknown domain, bare domain', async () => {
   const { pv, tmp, cleanup } = setup();
   try {
     assert.match(pv.check('ab').error, /at least 3/);
@@ -73,6 +73,12 @@ test('check: too short, reserved, owner sites, duplicates, own folder, unknown d
     // The same name on another domain is free.
     await pv.addDomain('example.dev');
     assert.equal(pv.check('my-shop', b, 'example.dev').ok, true);
+    // '@' = the bare domain: fine unless an owner site (or another project) already serves it.
+    assert.match(pv.check('@', b).error, /another site/);
+    assert.deepEqual(pv.check(' @ ', b, 'example.dev'), { ok: true, slug: '@', domain: 'example.dev', url: 'https://example.dev' });
+    assert.equal((await pv.set(b, '@', 'example.dev')).url, 'https://example.dev');
+    assert.match(pv.check('@', a, 'example.dev').error, /Taken by b/);
+    assert.match(renderCaddy([{ slug: '@', domain: 'example.dev', port: 7 }]), /\nexample\.dev \{\n\tencode gzip\n\treverse_proxy 127\.0\.0\.1:7\n/);
   } finally { await cleanup(); }
 });
 

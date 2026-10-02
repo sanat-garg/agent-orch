@@ -121,12 +121,15 @@ function syncPhoneHeader() {
 phoneHeader.addEventListener('change', syncPhoneHeader);
 syncPhoneHeader();
 function openViewMenu() {
-  const m = $('viewMenu'), repo = $('repoLink'), item = $('viewMenuRepo');
-  $('viewMenuMore').hidden = repo.hidden;
+  const m = $('viewMenu'), repo = $('repoLink'), item = $('viewMenuRepo'), pv = $('previewLink'), pvItem = $('viewMenuPreview');
+  $('viewMenuMore').hidden = repo.hidden && pv.hidden;
+  item.hidden = repo.hidden;
   if (!repo.hidden) {
     item.replaceChildren(repo.querySelector('svg').cloneNode(true), $('repoText').textContent);
     item.classList.toggle('warn', repo.classList.contains('warn'));
   }
+  pvItem.hidden = pv.hidden;
+  if (!pv.hidden) pvItem.replaceChildren(...[...pv.childNodes].map((n) => n.cloneNode(true)));
   m.hidden = false;
   $('viewBtn').setAttribute('aria-expanded', 'true');
   const r = $('viewBtn').getBoundingClientRect();
@@ -147,6 +150,7 @@ $('viewMenu').addEventListener('click', (e) => {
   closeViewMenu();
   if (b.dataset.view) setView(b.dataset.view);
   else if (b.id === 'viewMenuRepo') $('repoLink').click();
+  else if (b.id === 'viewMenuPreview') $('previewLink').click();
 });
 $('viewMenu').addEventListener('keydown', (e) => {
   const items = [...$('viewMenu').querySelectorAll('button')].filter((b) => b.offsetParent);
@@ -858,11 +862,12 @@ function draftSlug() {
   return state.draft.type === 'new' ? slugify(state.draft.name) || slugify($('input').value, true) : '';
 }
 function updateHeader() {
-  if (['term', 'browser'].includes($('app').dataset.view)) { $('repoLink').hidden = true; return; }
+  if (['term', 'browser'].includes($('app').dataset.view)) { $('repoLink').hidden = true; $('previewLink').hidden = true; return; }
   $('title').textContent = currentTitle();
   $('cwdLabel').textContent = currentCwdLabel();
   document.title = `${currentTitle()} · agent-orch`;
   renderRepoLink();
+  window.Previews?.renderHeader();
 }
 function renderRepoLink() {
   const c = currentConvo(), a = $('repoLink');
@@ -905,6 +910,7 @@ function updateFolderChip() {
     pick.classList.toggle('new', isNew);
     pick.querySelector('.pp-name').textContent = projectLabel();
   }
+  window.Previews?.renderDraft(); // the new project's live preview address follows its name (previews.js)
 }
 function setModeUI(mode) {
   $('mode').value = mode;
@@ -1838,9 +1844,11 @@ $('composer').addEventListener('submit', async (e) => {
     try {
       const d = state.draft;
       const c = await api('/api/convos', 'POST', d.type === 'new'
-        ? { newProject: { name: d.name, fromText: text || ATT.list[0]?.name.replace(/\.[^.]+$/, '') || '' }, mode: state.draftMode }
+        ? { newProject: { name: d.name, fromText: text || ATT.list[0]?.name.replace(/\.[^.]+$/, '') || '', ...window.Previews?.draftPick() }, mode: state.draftMode }
         : { folder: d.path, mode: state.draftMode });
       state.draft = { type: 'new', name: '' }; // the next new chat starts its own project again
+      window.Previews?.resetDraft();
+      if (c.previewError) toast(`Live preview not set up: ${c.previewError}`, { kind: 'error' });
       if (!state.convos.find((x) => x.id === c.id)) state.convos.unshift(c);
       openConvo(c.id);
       // The draft effort rides on set_model, so the server checks it against the agent it was picked for.
@@ -3258,6 +3266,7 @@ function onServer(msg) {
   }
   if (msg.t === 'version') return onVersion(msg.running);
   if (msg.t === 'ext') return window.Ext?.changed(msg.kind); // skills/MCP/subagents/personas changed (ext.js)
+  if (msg.t === 'previews') return window.Previews?.changed(true); // a live preview or domain changed (previews.js)
   if (msg.t === 'convos') {
     const drChat = O.detail?.project?.convo_id, effortOf = () => state.convos.find((c) => c.id === drChat)?.effort ?? null;
     const drEffort = drChat ? effortOf() : null;
@@ -3271,6 +3280,7 @@ function onServer(msg) {
     fbRender();
     renderEff();
     window.Ext?.renderChip(); // the persona chip follows the chat's persona
+    window.Previews?.renderHeader();
     if (drChat && O.drawer && effortOf() !== drEffort) renderDrawer(true); // its Effort row follows the chat's live effort
     renderUsage();
     if (!state.cid) splash.need.delete('history'); // no chat open (or it was deleted): nothing more to wait for

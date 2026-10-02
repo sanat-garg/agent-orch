@@ -37,6 +37,7 @@ import { searchConvos } from './search.mjs';
 import { createRollingRestart, preflight, readRestartState, serverFile } from './rolling.mjs';
 import { createSounds, MAX_SOUND_BYTES as MAX_CUSTOM_SOUND_BYTES } from './sounds.mjs';
 import { createVersion, formatVersion } from './version.mjs';
+import { createPreviews } from './previews.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -224,7 +225,8 @@ function checkFallbacks(v) {
 function publicConvo(c) {
   const rt = runtimes.get(c.id);
   // project: its orchestrator project's {id, position, priority} (the sidebar's drag order), null for a plain chat.
-  return { ...c, fallbacks: c.fallbacks ?? null, effort: c.effort ?? null, persona: c.persona ?? null, busy: !!rt?.busy || planning.has(c.id) || agentTurns.has(c.id), project: orch?.projectRank(c.cwd) ?? null };
+  return { ...c, fallbacks: c.fallbacks ?? null, effort: c.effort ?? null, persona: c.persona ?? null, busy: !!rt?.busy || planning.has(c.id) || agentTurns.has(c.id), project: orch?.projectRank(c.cwd) ?? null,
+    preview: previews.view(c.cwd) };
 }
 const planning = new Set(); // convo ids with an orchestrator planner turn in progress
 const agentTurns = new Map(); // convo id -> AbortController of a running non-Claude chat turn
@@ -766,6 +768,20 @@ const allClients = new Set();
 
 // ---------- Skills, MCP servers, subagents and personas (extensions.mjs; Settings → Skills & tools) ----------
 const ext = createExtensions({ dataDir: DATA });
+
+// ---------- Live previews (previews.mjs): https://<slug>.<domain> per project, served from its main tree via Caddy ----------
+// Status changes reach every client as the chats' `preview` field plus {t:'previews'} (the Live previews manager refetches).
+let previewPush = null;
+const previews = createPreviews({ dataDir: DATA, forbid: [ROOT], log: (m) => console.log(`[previews] ${m}`),
+  onChange: () => {
+    clearTimeout(previewPush);
+    previewPush = setTimeout(() => { broadcastConvos(); for (const ws of allClients) send(ws, { t: 'previews' }); }, 150);
+  } });
+// The line every agent working on the project gets (chat, planner and task runs).
+const previewNote = (dir) => {
+  const v = previews.view(dir);
+  return v ? `Live preview: ${v.url} (served from this project's main branch, redeployed after each commit/merge; web apps must listen on process.env.PORT, static sites need an index.html or a build script that outputs dist/).` : '';
+};
 setMcpSource((agent, run) => ext.mcpRun(agent, run)); // every runAgentCli run (tasks, planner, non-Claude chats) reads the list as it starts
 ext.onChange((kind) => { for (const ws of allClients) send(ws, { t: 'ext', kind }); });
 // A chat's persona as its system-prompt block (null: none, or deleted), and the MCP servers Claude chats get.
@@ -826,7 +842,7 @@ const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
   // Read at every task session boundary: tasks follow the chat's live effort, never a snapshot.
   convoEffort: (cid) => findConvo(cid)?.effort ?? null,
   // The chat's persona (extensions.mjs) as a system-prompt block, appended to its project's planner and task runs.
-  convoPersona: (cid) => ext.personaPrompt(findConvo(cid)?.persona),
+  convoPersona: (cid) => { const c = findConvo(cid); return [ext.personaPrompt(c?.persona), c && previewNote(c.cwd)].filter(Boolean).join('\n\n') || null; },
   refreshUsage: () => refreshUsage().catch((e) => console.error('[usage] refresh failed', e)),
   onCommit: (dir) => syncGit(dir).catch((e) => console.error('[github] sync failed', dir, e)),
   projectReady: (dir) => gh.status().linked && !!convos.find((c) => c.cwd === dir)?.repo,
@@ -980,6 +996,7 @@ async function setupRepo(convo) {
 async function syncGit(dir, message) {
   const c = convos.find((x) => x.cwd === dir);
   if (!c || !fs.existsSync(dir)) return;
+  previews.redeploy(dir); // a no-op unless HEAD moved (or the folder changed what it serves)
   const r = message ? await gh.commitAndPush(dir, message) : await gh.push(dir);
   if (r.repo && r.repo.full !== c.repo?.full) { c.repo = r.repo; orch?.refreshProjects(); }
   // error (the chat's sticky 'not pushed') only once pushes have failed for 10 min or origin diverged; the queue retries a race.
@@ -1357,14 +1374,14 @@ function personaSwitch(convo, text) {
 // Every chat session starts knowing the project's durable memory, shared with the orchestrator, and the chat's persona.
 function chatSystemAppend(convo) {
   orch.initMemory(convo.cwd);
-  const mem = orch.readMemory(convo.cwd), persona = personaOf(convo);
+  const mem = orch.readMemory(convo.cwd), persona = personaOf(convo), live = previewNote(convo.cwd);
   return `This project keeps durable memory in .agent-orch/, shared with the project's orchestrator:
 - .agent-orch/BRIEF.md: what the project is, its goals and definition of done
 - .agent-orch/CONTEXT.md: architecture, conventions, decisions, gotchas
 When you learn a durable fact a future session needs, update .agent-orch/CONTEXT.md in a line or two (edit existing lines; it is not a log).
 After each of your replies, changes are committed and pushed to the project's GitHub repo automatically, so don't run git commit or git push yourself.
 This is the owner's disposable server and you have full access: run any command without asking, and install whatever you need (passwordless sudo, e.g. \`sudo apt-get install -y …\`, plus npm and pip).
-${SHOT_HINT}
+${SHOT_HINT}${live ? `\n${live}` : ''}
 
 Current .agent-orch/BRIEF.md:
 ${mem.brief || '(empty)'}
@@ -1588,7 +1605,7 @@ async function handleRequest(req, res) {
 
   if (VENDOR[p]) return serveFile(res, path.join(ROOT, VENDOR[p]));
   if (p === '/' || p === '/index.html') return serveFile(res, path.join(PUBLIC, 'index.html'));
-  if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css' || p === '/browser.js' || p === '/browser.css') return serveFile(res, path.join(PUBLIC, p));
+  if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css' || p === '/browser.js' || p === '/browser.css' || p === '/previews.js' || p === '/previews.css') return serveFile(res, path.join(PUBLIC, p));
   // The Files view: listing, preview, download (a file, or a zip streamed on the fly), upload, and copy/move/zip/unzip over the whole disk, opening on the chat's project (files.mjs).
   if (handleFiles(req, res, url, { rootFor: (cid) => findConvo(cid)?.cwd || null, json, readBody })) return;
 
@@ -1674,6 +1691,9 @@ async function handleRequest(req, res) {
       const cwd = body.newProject
         ? uniqueProjectDir(slugify(body.newProject.name) || slugify(body.newProject.fromText, true) || 'project')
         : safeCwd(body.folder);
+      // newProject.slug (+ domain): its live preview address, checked before anything is created.
+      const slug = body.newProject?.slug ? String(body.newProject.slug) : '', domain = body.newProject?.domain || null;
+      if (slug) { const ok = previews.check(slug, cwd, domain); if (!ok.ok) return json(res, 400, { error: `Live preview: ${ok.error}` }); }
       const existing = convos.find((c) => c.cwd === cwd);
       if (existing) { // one chat per project
         if (await refreshRepo(existing)) { saveConvos(); broadcastConvos(); orch?.refreshProjects(); }
@@ -1689,8 +1709,49 @@ async function handleRequest(req, res) {
       saveConvos();
       broadcastConvos();
       setupRepo(c).catch((e) => console.error('[github] setup failed', c.cwd, e));
-      return json(res, 200, c);
+      const pv = slug ? await previews.set(cwd, slug, domain) : null;
+      return json(res, 200, { ...publicConvo(c), ...(pv?.error && { previewError: pv.error }) });
     } catch (e) { return json(res, 400, { error: e.message }); }
+  }
+  // Live previews: the manager's list (every project's address and status) and the owner's domains.
+  if (p === '/api/previews' && req.method === 'GET') {
+    const list = previews.list().map((v) => { const c = convos.find((x) => x.cwd === v.dir); return { ...v, cid: c?.id || null, title: c?.title || path.basename(v.dir) }; });
+    return json(res, 200, { domains: previews.domains(), previews: list });
+  }
+  // ?slug=&domain=&cid= (cid: the chat whose project would take it, so its own address counts as free).
+  if (p === '/api/previews/check' && req.method === 'GET') {
+    const c = findConvo(url.searchParams.get('cid') || '');
+    return json(res, 200, previews.check(url.searchParams.get('slug') || '', c?.cwd || null, url.searchParams.get('domain') || null));
+  }
+  if (p === '/api/previews/domains' && req.method === 'POST') {
+    const body = await readBody(req);
+    const r = body.default ? previews.setDefaultDomain(body.domain) : await previews.addDomain(body.domain);
+    return json(res, r.error ? 400 : 200, r);
+  }
+  const pdm = p.match(/^\/api\/previews\/domains\/([\w.-]+)$/);
+  if (pdm && req.method === 'DELETE') {
+    const r = previews.removeDomain(pdm[1]);
+    return json(res, r.error ? 400 : 200, r);
+  }
+  // A chat's project preview: PUT {slug, domain} sets or moves it ('' removes it), restart redeploys, logs = last 200 lines.
+  const pvm = p.match(/^\/api\/convos\/([\w-]+)\/preview(?:\/(restart|logs))?$/);
+  if (pvm) {
+    const c = findConvo(pvm[1]);
+    if (!c) return json(res, 404, { error: 'No such chat' });
+    if (!pvm[2] && req.method === 'PUT') {
+      const body = await readBody(req);
+      const r = String(body.slug || '').trim() ? await previews.set(c.cwd, String(body.slug), body.domain || null) : await previews.remove(c.cwd);
+      return json(res, r.error ? 400 : 200, r.error ? r : { ok: true, preview: previews.view(c.cwd) });
+    }
+    if (pvm[2] === 'restart' && req.method === 'POST') {
+      if (!previews.view(c.cwd)) return json(res, 404, { error: 'This project has no live preview' });
+      previews.restart(c.cwd);
+      return json(res, 200, { ok: true });
+    }
+    if (pvm[2] === 'logs' && req.method === 'GET') {
+      const text = previews.logs(c.cwd);
+      return text == null ? json(res, 404, { error: 'This project has no live preview' }) : json(res, 200, { text });
+    }
   }
   const m = p.match(/^\/api\/convos\/([\w-]+)$/);
   if (m) {
@@ -1703,6 +1764,7 @@ async function handleRequest(req, res) {
       planQueue.delete(c.id);
       orch.abortPlan(c.id);
       orch.detachConvo(c.id); // its project's background work pauses; the folder and tasks are kept
+      previews.remove(c.cwd).catch((e) => console.error('[previews] remove failed', c.cwd, e)); // frees its address
       convos = convos.filter((x) => x.id !== c.id);
       saveConvos();
       fs.rmSync(logPath(c.id), { force: true });
@@ -2427,6 +2489,8 @@ if (process.argv[2] === 'set-password') {
   // Repo links are refreshed from each folder's git origin before serving, so the API never returns a stale one.
   refreshAllRepos().catch((e) => console.error('[github] repo refresh failed', e))
     .finally(() => server.listen(PORT, '127.0.0.1', () => console.log(`agent-orch on 127.0.0.1:${PORT}`)));
+  // Live previews: Caddy gets every saved one and each restarts (an earlier run's processes are stopped first).
+  if (!NO_ORCH) previews.startAll().catch((e) => console.error('[previews] start failed', e));
   // Browser runs start only the pinned local @playwright/mcp (never npx at run time): installed here when it's missing.
   ensurePlaywrightMcp().then((r) => (r.ok ? r.installed && console.log(`[browser] installed ${r.cli}`) : console.error(`[browser] ${r.error}`)), () => {});
 }

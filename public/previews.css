@@ -1,0 +1,76 @@
+/* Live previews (previews.js): the new-project address field, the header link and the sidebar manager. */
+.side-link {
+  display: flex; align-items: center; gap: 8px; width: 100%; height: 36px; margin-top: 6px; padding: 0 12px;
+  border: 0; border-radius: 10px; background: none; color: var(--muted); cursor: pointer; font: inherit; font-size: 14px; font-weight: 550;
+}
+.side-link:hover { background: var(--raised); color: var(--text); }
+@media (pointer: coarse) { .side-link { min-height: 44px; } }
+
+.pv-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--faint); }
+.pv-dot.running { background: var(--ok); }
+.pv-dot.building { background: var(--warn); animation: pv-pulse 1.2s ease-in-out infinite; }
+.pv-dot.error { background: var(--danger); }
+@keyframes pv-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .pv-dot.building { animation: none; } }
+
+/* New project: "Live preview  https://[slug].greygoose.baby  Skip" under "Project". */
+.preview-line { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px 10px; margin: -6px auto 18px; max-width: 560px; color: var(--muted); font-size: 14px; }
+.preview-line[hidden] { display: none; }
+.pv-addr {
+  display: inline-flex; align-items: center; min-width: 0; max-width: 100%; height: 38px; padding: 0 4px 0 10px;
+  border: 1px solid var(--border-strong); border-radius: 10px; background: var(--panel); color: var(--muted); font-size: 14px;
+}
+.pv-addr:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus); }
+.pv-https { color: var(--faint); }
+.pv-slug { min-width: 4ch; max-width: 100%; border: 0; outline: 0; background: none; color: var(--text); font: inherit; font-weight: 600; padding: 0 1px; }
+.pv-slug::placeholder { color: var(--faint); font-weight: 400; }
+.pv-suffix { color: var(--muted); padding-right: 6px; white-space: nowrap; }
+.pv-domain { border: 0; background: none; color: var(--muted); font: inherit; padding: 0 2px; max-width: 18ch; cursor: pointer; }
+.pv-skip { border: 0; background: none; color: var(--muted); font: inherit; font-size: 13px; text-decoration: underline; cursor: pointer; padding: 0 4px; min-height: 32px; }
+.pv-skip:hover { color: var(--text); }
+.pv-none { color: var(--faint); }
+.preview-line .pv-check { flex-basis: 100%; text-align: center; }
+.pv-check { font-size: 12.5px; color: var(--muted); min-height: 1.2em; overflow-wrap: anywhere; }
+.pv-check.ok { color: var(--ok); }
+.pv-check.bad { color: var(--danger); }
+@media (pointer: coarse) { .pv-skip { min-height: 44px; } .pv-addr { height: 44px; } }
+
+/* Header link (next to the GitHub repo link). */
+.pv-link { gap: 6px; }
+.pv-link span:last-child { overflow: hidden; text-overflow: ellipsis; }
+#viewMenuPreview { display: flex; align-items: center; gap: 8px; }
+
+/* The manager sheet. */
+.modal-panel.pvm { width: min(620px, 100%); }
+.pv-sec { margin-bottom: 20px; }
+.pv-sec h3 { margin: 4px 0 8px; font-size: 13px; font-weight: 650; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.pv-hint, .pv-empty { margin: 0 0 10px; font-size: 13px; color: var(--muted); }
+.pv-row { padding: 12px; margin-bottom: 8px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
+.pv-row.unset { background: none; }
+.pv-top { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; min-width: 0; }
+.pv-name { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pv-status { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: 12.5px; color: var(--muted); }
+.pv-status span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; }
+.pv-edit { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pv-edit .pv-addr { flex: 1; height: 36px; }
+.pv-url { font-size: 13px; color: var(--muted); }
+.pv-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.pv-acts a.btn { text-decoration: none; color: var(--text); }
+.pv-row .pv-check:empty { display: none; }
+.pv-row .pv-check { margin-top: 6px; }
+.pv-logs { margin: 8px 0 0; max-height: 260px; overflow: auto; padding: 10px; border-radius: 8px; background: var(--code-bg); font: 12px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.pv-domain-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.pv-dname { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.pv-dcount { font-size: 12.5px; color: var(--muted); }
+.pv-default { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: var(--accent-soft); color: var(--accent-ink); }
+.pv-add { display: flex; gap: 8px; margin-top: 12px; }
+.pv-add input { flex: 1; min-width: 0; height: 32px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--panel); color: inherit; font: inherit; }
+@media (max-width: 800px) {
+  .modal-panel.pvm { width: 100%; }
+  .pv-status span:last-child { max-width: 160px; }
+}
+@media (pointer: coarse) {
+  .pv-acts .btn.small, .pv-edit .btn.small, .pv-add .btn.small, .pv-domain-row .btn.small { min-height: 44px; }
+  .pv-edit .pv-addr, .pv-add input { height: 44px; }
+  .pv-slug, .pv-add input { font-size: 16px; } /* iOS zooms into smaller inputs */
+}

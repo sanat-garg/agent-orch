@@ -268,7 +268,7 @@ test('phones get 16px body copy and 12px-minimum metadata (UI-REVIEW #7)', () =>
 test('top-level function names are unique across the classic public/*.js scripts (a later one silently wins)', () => {
   const seen = new Map();
   const dups = [];
-  for (const f of ['app.js', 'files.js', 'stats.js', 'ext.js', 'browser.js']) {
+  for (const f of ['app.js', 'files.js', 'stats.js', 'ext.js', 'browser.js', 'previews.js']) {
     for (const m of read(`public/${f}`).matchAll(/^(?:async )?function\s*\*?\s*([\w$]+)\s*\(/gm)) {
       if (seen.has(m[1])) dups.push(`${m[1]} (${seen.get(m[1])}, ${f})`);
       else seen.set(m[1], f);

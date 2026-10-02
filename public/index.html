@@ -14,6 +14,7 @@
 <link rel="stylesheet" href="/files.css">
 <link rel="stylesheet" href="/stats.css">
 <link rel="stylesheet" href="/ext.css">
+<link rel="stylesheet" href="/previews.css">
 <link rel="stylesheet" href="/browser.css">
 <link rel="preload" href="/mascot.png" as="image">
 </head>
@@ -41,6 +42,10 @@
     <button class="new-chat" id="newChat">
       <svg viewBox="0 0 24 24" width="18" height="18"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
       New project
+    </button>
+    <button type="button" class="side-link" id="previewsBtn" aria-haspopup="dialog" title="Every project's live preview address, and your domains">
+      <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3.5 12h17M12 3.5c2.4 2.5 3.4 5.3 3.4 8.5s-1 6-3.4 8.5c-2.4-2.5-3.4-5.3-3.4-8.5s1-6 3.4-8.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+      Live previews
     </button>
     <div class="side-search" role="search">
       <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
@@ -109,6 +114,7 @@
           <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.7c-2.78.6-3.37-1.34-3.37-1.34-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.89 1.53 2.34 1.09 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.56-1.11-4.56-4.95 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.65 0 0 .84-.27 2.75 1.02a9.5 9.5 0 0 1 5 0c1.91-1.3 2.75-1.02 2.75-1.02.55 1.38.2 2.4.1 2.65.64.7 1.03 1.59 1.03 2.68 0 3.85-2.34 4.7-4.57 4.94.36.31.68.92.68 1.85v2.74c0 .27.18.58.69.48A10 10 0 0 0 12 2z"/></svg>
           <span id="repoText">GitHub</span>
         </a>
+        <a class="repo-link pv-link" id="previewLink" target="_blank" rel="noopener" hidden></a>
       </div>
       <div class="seg" role="tablist" aria-label="View">
         <button role="tab" data-view="chat" aria-selected="true">
@@ -139,6 +145,7 @@
         <button type="button" role="menuitemradio" data-view="browser" aria-checked="false"><svg class="vm-check" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>Browser</button>
         <div class="vm-more" id="viewMenuMore" role="group" aria-label="More">
           <button type="button" role="menuitem" id="viewMenuRepo"></button>
+          <button type="button" role="menuitem" id="viewMenuPreview" hidden></button>
         </div>
       </div>
     </header>
@@ -369,6 +376,23 @@
       </button>
     </div>
     <div class="aw-body" id="awayBody"></div>
+  </div>
+</div>
+
+<div class="modal sheet" id="previewsModal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-panel pvm" role="dialog" aria-modal="true" aria-labelledby="pvTitle">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <div class="m-head">
+      <div>
+        <h2 id="pvTitle">Live previews</h2>
+        <p class="m-sub">Each project's live address. It runs from the project's main branch and redeploys after every merge.</p>
+      </div>
+      <button class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="m-body" id="pvBody"></div>
   </div>
 </div>
 
@@ -855,5 +879,6 @@
 <script src="/stats.js"></script>
 <script src="/ext.js"></script>
 <script src="/browser.js"></script>
+<script src="/previews.js"></script>
 </body>
 </html>

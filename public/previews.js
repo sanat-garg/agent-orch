@@ -1,13 +1,13 @@
 'use strict';
 // ---------- Live previews (server: previews.mjs) ----------
 // Each project can be served at https://<slug>.<domain>. Three places:
-//   - the new-project screen asks for the address (prefilled from the project name, checked live; Skip = none),
+//   - the new-project screen offers an address (none unless the owner adds one; typed, checked live),
 //   - the chat header links to the open project's preview with a status dot,
 //   - the sidebar's "Live previews" manager lists every project's address and status (set, move, restart, logs, remove)
 //     and the owner's domains (add, remove, make default).
-// Loaded after app.js and uses its helpers ($, el, api, toast, state, currentConvo, draftSlug, closeSidebar, coarse).
+// Loaded after app.js and uses its helpers ($, el, api, toast, state, currentConvo, closeSidebar, coarse).
 (() => {
-  const PV = { domains: [], list: [], loaded: false, draft: { slug: '', edited: false, skip: false, domain: null, check: null }, timer: 0, seq: 0,
+  const PV = { domains: [], list: [], loaded: false, draft: { slug: '', skip: true, domain: null, check: null }, timer: 0, seq: 0,
     lastFocus: null, logsOpen: new Set() };
   const STATUS = { running: 'Live', building: 'Deploying…', waiting: 'Waiting for code', error: 'Error', stopped: 'Stopped' };
   const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '');
@@ -64,7 +64,6 @@
     if (!show) { if (line) line.hidden = true; return; }
     const d = PV.draft;
     if (!d.domain || !PV.domains.some((x) => x.domain === d.domain)) d.domain = defaultDomain();
-    if (!d.edited) d.slug = norm(draftSlug());
     if (!line) {
       line = el('div', 'preview-line');
       empty.querySelector('.project-line')?.after(line);
@@ -86,7 +85,7 @@
       input.placeholder = 'my-app';
       input.setAttribute('aria-label', 'Live preview address');
       input.setAttribute('aria-describedby', 'pvDraftCheck');
-      input.addEventListener('input', () => { d.edited = true; d.slug = input.value; fit(input); runDraftCheck(); });
+      input.addEventListener('input', () => { d.slug = input.value; fit(input); runDraftCheck(); });
       input.addEventListener('blur', () => { if (d.slug && norm(d.slug) !== d.slug) { d.slug = norm(d.slug); input.value = d.slug; } });
       const lbl = el('label', 'pv-lbl', 'Live preview');
       lbl.htmlFor = 'pvDraftSlug';
@@ -97,7 +96,7 @@
       check.setAttribute('aria-live', 'polite');
       const skip = el('button', 'pv-skip', 'Skip');
       skip.type = 'button';
-      skip.title = 'No live preview for this project (you can add one later from Live previews in the sidebar)';
+      skip.title = 'No live preview for this project (add or change one anytime from Live previews in the sidebar)';
       skip.onclick = () => { d.skip = true; renderDraft(); };
       line.replaceChildren(lbl, addr, skip, check);
     }
@@ -121,8 +120,8 @@
     const d = PV.draft, slug = norm(d.slug);
     return PV.loaded && !d.skip && slug ? { slug, domain: d.domain || defaultDomain() } : {};
   }
-  // Once the project exists, the next new project starts with a fresh address.
-  const resetDraft = () => { PV.draft = { slug: '', edited: false, skip: false, domain: null, check: null }; };
+  // Once the project exists, the next new project starts without one again.
+  const resetDraft = () => { PV.draft = { slug: '', skip: true, domain: null, check: null }; };
 
   // ---- The chat header link (and its row in the phone header's menu).
   function renderHeader() {
@@ -173,6 +172,7 @@
   function projectsSection() {
     const sec = el('section', 'pv-sec');
     sec.append(el('h3', '', 'Projects'));
+    sec.append(el('p', 'pv-hint', 'No project gets an address unless you add one. Change or remove it anytime.'));
     const byCid = new Map(PV.list.filter((v) => v.cid).map((v) => [v.cid, v]));
     const convos = [...state.convos].sort((a, b) => (byCid.has(b.id) - byCid.has(a.id)) || (b.updatedAt - a.updatedAt));
     if (!convos.length) sec.append(el('p', 'pv-empty', 'No projects yet. Start one with New project.'));
@@ -196,10 +196,10 @@
       row.append(el('div', 'pv-url', v.url));
       return row;
     }
-    const ed = { slug: v?.slug || norm(c.title || (c.cwd || '').split('/').pop()), domain: v?.domain || defaultDomain() };
+    const ed = { slug: v?.slug || '', domain: v?.domain || defaultDomain() };
     const line = el('div', 'pv-edit');
     const input = document.createElement('input');
-    input.className = 'pv-slug'; input.value = ed.slug; input.autocomplete = 'off'; input.spellcheck = false; input.autocapitalize = 'none';
+    input.className = 'pv-slug'; input.value = ed.slug; input.placeholder = 'my-app'; input.autocomplete = 'off'; input.spellcheck = false; input.autocapitalize = 'none';
     input.setAttribute('aria-label', `${c.title} live preview address`);
     const addr = el('span', 'pv-addr');
     addr.append(el('span', 'pv-https', 'https://'), input, domainPicker(ed.domain, (d) => { ed.domain = d; changed(); }, `${c.title} domain`));
@@ -211,13 +211,15 @@
     const changed = () => {
       const same = v && norm(input.value) === v.slug && ed.domain === v.domain;
       save.hidden = !!same;
-      if (same) return renderCheck(check, null);
+      if (!v) save.disabled = !norm(input.value);
+      if (same || !norm(input.value)) return renderCheck(check, null);
       rowCheck(input.value, ed.domain, c.id, (r) => renderCheck(check, r));
     };
     fit(input);
     input.addEventListener('input', () => { fit(input); changed(); });
     input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); save.click(); } });
     save.onclick = async () => {
+      if (!norm(input.value)) return input.focus(); // empty: Remove takes an address offline
       save.disabled = true;
       try {
         await api(`/api/convos/${c.id}/preview`, 'PUT', { slug: norm(input.value), domain: ed.domain });
@@ -227,7 +229,7 @@
     };
     line.append(addr, save);
     row.append(line, check);
-    if (!v) { save.hidden = false; return row; }
+    if (!v) { save.hidden = false; save.disabled = true; return row; }
     save.hidden = true;
     const acts = el('div', 'pv-acts');
     const openA = el('a', 'btn small', 'Open ↗');

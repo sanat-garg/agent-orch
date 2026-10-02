@@ -47,6 +47,7 @@
 .pv-hint, .pv-empty { margin: 0 0 10px; font-size: 13px; color: var(--muted); }
 .pv-row { padding: 12px; margin-bottom: 8px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
 .pv-row.unset { background: none; }
+.pv-row .btn:disabled { opacity: .45; cursor: default; }
 .pv-top { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; min-width: 0; }
 .pv-name { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pv-status { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: 12.5px; color: var(--muted); }

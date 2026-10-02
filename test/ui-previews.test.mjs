@@ -1,6 +1,6 @@
 // Live previews UI (public/previews.js): boots server.mjs (CW_NO_ORCHESTRATOR=1, temp data dir, so no preview starts and
 // Caddy is never touched) with one project that has a preview and two domains. Checks the new-project address field
-// (prefilled from the message, live availability states, posts the slug), the chat header link with its status, and the
+// (none by default and never guessed, live availability states, posts the slug), the chat header link with its status, and the
 // sidebar manager (projects with their addresses, domains, a slug change PUTs) on desktop and a 390px phone.
 // Writes go through page.route mocks. Skips when Playwright's Chromium can't launch.
 import { test, before, after } from 'node:test';
@@ -73,13 +73,19 @@ async function open(hash = '', mobile = false) {
   return { ctx, page, errors };
 }
 
-test('new project: the address prefills from the message, checks live, and is posted', { skip }, async () => {
+test('new project: no address unless added; it checks live and is posted', { skip }, async () => {
   const { ctx, page, errors } = await open();
   try {
     const slug = page.locator('#pvDraftSlug'), check = page.locator('#pvDraftCheck');
-    await slug.waitFor();
+    const addBtn = page.locator('.preview-line .pv-skip', { hasText: 'Add a live preview address' });
+    // Nothing by default, even with a message that names the project.
+    await addBtn.waitFor();
     await page.locator('#input').fill('Build a todo app with dark mode');
-    await assert.doesNotReject(page.waitForFunction(() => document.getElementById('pvDraftSlug').value === 'todo-app-dark-mode'));
+    assert.equal(await page.locator('.preview-line .pv-none').textContent(), 'None');
+    assert.equal(await slug.count(), 0);
+    await addBtn.click();
+    assert.equal(await slug.inputValue(), '', 'not guessed from the project name');
+    await slug.fill('todo-app-dark-mode');
     await page.waitForFunction(() => /todo-app-dark-mode\.greygoose\.baby is free/.test(document.getElementById('pvDraftCheck').textContent));
     assert.match(await check.getAttribute('class'), /\bok\b/);
     // Taken by another project, reserved, and an owner site already in the Caddyfile.
@@ -88,10 +94,10 @@ test('new project: the address prefills from the message, checks live, and is po
     assert.match(await check.getAttribute('class'), /\bbad\b/);
     await slug.fill('www');
     await page.waitForFunction(() => /reserved/.test(document.getElementById('pvDraftCheck').textContent));
-    // Skip hides the field (nothing would be posted); it can come back.
+    // Skip hides the field again (nothing would be posted); it can come back.
     await page.locator('.preview-line .pv-skip').click();
     assert.equal(await page.locator('#pvDraftSlug').count(), 0);
-    await page.locator('.preview-line .pv-skip', { hasText: 'Add a live preview address' }).click();
+    await addBtn.click();
     // Two domains: a picker, and the choice is posted with the slug.
     await slug.fill('My Todo');
     await page.locator('.preview-line select.pv-domain').selectOption('example.dev');
@@ -133,8 +139,12 @@ test('sidebar manager: every project, domains, and a slug change PUTs (desktop a
       assert.equal(await demo.locator('input.pv-slug').inputValue(), 'demo-site');
       assert.match(await demo.locator('.pv-status').textContent(), /Stopped/);
       assert.equal(await demo.locator('a.btn').getAttribute('href'), 'https://demo-site.greygoose.baby');
-      assert.equal(await notes.locator('input.pv-slug').inputValue(), 'notes');
-      assert.equal(await notes.locator('button', { hasText: 'Add' }).isVisible(), true);
+      // No address guessed for a project without one; Add waits for a typed slug.
+      assert.equal(await notes.locator('input.pv-slug').inputValue(), '');
+      const add = notes.locator('button', { hasText: 'Add' });
+      assert.equal(await add.isDisabled(), true);
+      await notes.locator('input.pv-slug').fill('my-notes');
+      assert.equal(await add.isEnabled(), true);
       assert.deepEqual(await page.locator('.pv-dname').allTextContents(), ['greygoose.baby', 'example.dev']);
       // A rename: the live check, then Save PUTs the slug and domain.
       let put = null;

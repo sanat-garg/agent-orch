@@ -173,32 +173,29 @@ function sameOrigin(req) {
 // ---------- conversations ----------
 let convos = readJSON('convos.json', []);
 const saveConvos = () => writeJSON('convos.json', convos);
-// One chat per project: fold any older chats for the same folder into the newest one.
-(function oneChatPerProject() {
-  const byCwd = new Map();
-  for (const c of [...convos].sort((a, b) => a.createdAt - b.createdAt)) {
-    if (!byCwd.has(c.cwd)) byCwd.set(c.cwd, []);
-    byCwd.get(c.cwd).push(c);
-  }
+// A project folder can have several chats. Each is named after its folder unless renamed (a project's extra chats are
+// named from their first message, so they count as renamed).
+(function normalizeChats() {
   let changed = false;
-  for (const [cwd, list] of byCwd) {
-    const keep = list.reduce((a, b) => (b.updatedAt > a.updatedAt ? b : a));
-    const merged = list.map((c) => { try { return fs.readFileSync(path.join(DATA, 'logs', `${c.id}.jsonl`), 'utf8'); } catch { return ''; } }).join('');
-    if (list.length > 1) {
-      fs.writeFileSync(path.join(DATA, 'logs', `${keep.id}.jsonl`), merged);
-      for (const c of list) if (c !== keep) fs.rmSync(path.join(DATA, 'logs', `${c.id}.jsonl`), { force: true });
-      convos = convos.filter((c) => c === keep || c.cwd !== cwd);
-      changed = true;
-    }
-    const name = path.basename(cwd);
-    if (keep.title !== name && !keep.renamed) { keep.title = name; changed = true; }
+  for (const c of convos) {
+    const name = path.basename(c.cwd);
+    if (c.title !== name && !c.renamed) { c.title = name; changed = true; }
     // Full access by default on this disposable server (Plan mode and Orchestrator Mode are kept).
-    if (!keep.fullAccess && ['default', 'acceptEdits', undefined].includes(keep.mode)) { keep.mode = 'bypassPermissions'; changed = true; }
-    if (!keep.fullAccess) { keep.fullAccess = true; changed = true; }
+    if (!c.fullAccess && ['default', 'acceptEdits', undefined].includes(c.mode)) { c.mode = 'bypassPermissions'; changed = true; }
+    if (!c.fullAccess) { c.fullAccess = true; changed = true; }
   }
   if (changed) writeJSON('convos.json', convos);
 })();
 const findConvo = (id) => convos.find((c) => c.id === id);
+// A project folder's main chat: its orchestrator project's chat, else its oldest. Only the main chat carries the
+// project's priority (sidebar order), orchestrator notes, task fallbacks/effort and the Live previews row; the folder's
+// other chats are plain conversations beside it (same code, same task queue).
+function mainChatId(cwd) {
+  const same = convos.filter((c) => c.cwd === cwd);
+  const owner = orch?.projectChat?.(cwd);
+  if (owner && same.some((c) => c.id === owner)) return owner;
+  return same.reduce((a, b) => (b.createdAt < a.createdAt ? b : a), same[0])?.id ?? null;
+}
 const stats = createStats({ dataDir: DATA, convos: () => convos, log: (m) => console.log(`[stats] ${m}`) });
 const logPath = (id) => path.join(LOGS, `${id}.jsonl`);
 function appendLog(id, ev) { fs.appendFileSync(logPath(id), JSON.stringify(ev) + '\n'); }
@@ -224,9 +221,11 @@ function checkFallbacks(v) {
 }
 function publicConvo(c) {
   const rt = runtimes.get(c.id);
-  // project: its orchestrator project's {id, position, priority} (the sidebar's drag order), null for a plain chat.
-  return { ...c, fallbacks: c.fallbacks ?? null, effort: c.effort ?? null, persona: c.persona ?? null, busy: !!rt?.busy || planning.has(c.id) || agentTurns.has(c.id), project: orch?.projectRank(c.cwd) ?? null,
-    preview: previews.view(c.cwd) };
+  // project: its orchestrator project's {id, position, priority} (the sidebar's drag order) on the folder's main chat
+  // (mainId: that chat's id), null for a plain chat and for a project's other chats.
+  const mainId = mainChatId(c.cwd);
+  return { ...c, fallbacks: c.fallbacks ?? null, effort: c.effort ?? null, persona: c.persona ?? null, busy: !!rt?.busy || planning.has(c.id) || agentTurns.has(c.id),
+    mainId, project: mainId === c.id ? orch?.projectRank(c.cwd) ?? null : null, preview: previews.view(c.cwd) };
 }
 const planning = new Set(); // convo ids with an orchestrator planner turn in progress
 const agentTurns = new Map(); // convo id -> AbortController of a running non-Claude chat turn
@@ -989,6 +988,7 @@ async function setupRepo(convo) {
   } catch (e) {
     convo.git = { ...(convo.git || {}), error: e.message };
   }
+  shareRepoState(convo);
   saveConvos();
   broadcastConvos();
   orch?.refreshProjects();
@@ -1001,15 +1001,26 @@ async function syncGit(dir, message) {
   if (r.repo && r.repo.full !== c.repo?.full) { c.repo = r.repo; orch?.refreshProjects(); }
   // error (the chat's sticky 'not pushed') only once pushes have failed for 10 min or origin diverged; the queue retries a race.
   c.git = { pushedAt: r.ok ? Date.now() : c.git?.pushedAt || null, error: r.warn ? r.error : null, unpushed: r.ok ? 0 : await gh.unpushed(dir) };
+  shareRepoState(c);
   saveConvos();
   broadcastConvos();
+}
+// Repo and push state belong to the folder: copy them onto the folder's other chats.
+function shareRepoState(c) {
+  for (const x of convos) {
+    if (x === c || x.cwd !== c.cwd) continue;
+    if (c.repo) x.repo = c.repo; else delete x.repo;
+    if (c.git) x.git = c.git;
+  }
 }
 // Anything that couldn't be pushed (offline, GitHub down, not linked yet) is retried.
 if (!NO_ORCH) setInterval(async () => {
   try {
     if (!gh.status().linked && !(await gh.refresh()).linked) return;
+    const seen = new Set();
     for (const c of convos) {
-      if (!fs.existsSync(c.cwd)) continue;
+      if (seen.has(c.cwd) || !fs.existsSync(c.cwd)) continue;
+      seen.add(c.cwd); // once per folder, however many chats it has
       if (!c.repo) await setupRepo(c);
       else if (c.git?.error || (await gh.unpushed(c.cwd)) > 0) await syncGit(c.cwd);
     }
@@ -1695,9 +1706,16 @@ async function handleRequest(req, res) {
       const slug = body.newProject?.slug ? String(body.newProject.slug) : '', domain = body.newProject?.domain || null;
       if (slug) { const ok = previews.check(slug, cwd, domain); if (!ok.ok) return json(res, 400, { error: `Live preview: ${ok.error}` }); }
       const existing = convos.find((c) => c.cwd === cwd);
-      if (existing) { // one chat per project
-        if (await refreshRepo(existing)) { saveConvos(); broadcastConvos(); orch?.refreshProjects(); }
-        return json(res, 200, existing);
+      if (existing) { // another chat in an existing project: same folder and repo, named from its first message
+        if (await refreshRepo(existing)) shareRepoState(existing);
+        const title = String(body.title || '').replace(/\s+/g, ' ').trim().slice(0, 60) || 'New chat';
+        const c = { id: crypto.randomUUID(), title, renamed: true, cwd, mode: MODES.includes(body.mode) ? body.mode : 'bypassPermissions', model: '',
+          fullAccess: true, createdAt: Date.now(), updatedAt: Date.now(), ...(existing.repo && { repo: existing.repo }), ...(existing.git && { git: existing.git }) };
+        convos.unshift(c);
+        saveConvos();
+        broadcastConvos();
+        orch?.refreshProjects();
+        return json(res, 200, publicConvo(c));
       }
       // Mandatory protocol: every project lives in a GitHub repo, so GitHub must be linked first.
       if (!gh.status().linked && !(await gh.refresh()).linked) {
@@ -1715,7 +1733,7 @@ async function handleRequest(req, res) {
   }
   // Live previews: the manager's list (every project's address and status) and the owner's domains.
   if (p === '/api/previews' && req.method === 'GET') {
-    const list = previews.list().map((v) => { const c = convos.find((x) => x.cwd === v.dir); return { ...v, cid: c?.id || null, title: c?.title || path.basename(v.dir) }; });
+    const list = previews.list().map((v) => { const c = findConvo(mainChatId(v.dir)); return { ...v, cid: c?.id || null, title: c?.title || path.basename(v.dir) }; });
     return json(res, 200, { domains: previews.domains(), previews: list });
   }
   // ?slug=&domain=&cid= (cid: the chat whose project would take it, so its own address counts as free).
@@ -1763,8 +1781,11 @@ async function handleRequest(req, res) {
       agentTurns.get(c.id)?.abort();
       planQueue.delete(c.id);
       orch.abortPlan(c.id);
-      orch.detachConvo(c.id); // its project's background work pauses; the folder and tasks are kept
-      previews.remove(c.cwd).catch((e) => console.error('[previews] remove failed', c.cwd, e)); // frees its address
+      // The project's next oldest chat becomes its main chat; with none left, its background work pauses (the folder and
+      // tasks are kept) and its live preview address is freed.
+      const heir = convos.filter((x) => x.id !== c.id && x.cwd === c.cwd).sort((a, b) => a.createdAt - b.createdAt)[0];
+      orch.detachConvo(c.id, heir?.id || null);
+      if (!heir) previews.remove(c.cwd).catch((e) => console.error('[previews] remove failed', c.cwd, e));
       convos = convos.filter((x) => x.id !== c.id);
       saveConvos();
       fs.rmSync(logPath(c.id), { force: true });

@@ -191,7 +191,7 @@
     sec.append(el('h3', '', 'Projects'));
     sec.append(el('p', 'pv-hint', 'No project gets an address unless you add one. Change or remove it anytime.'));
     const byCid = new Map(PV.list.filter((v) => v.cid).map((v) => [v.cid, v]));
-    const convos = [...state.convos].sort((a, b) => (byCid.has(b.id) - byCid.has(a.id)) || (b.updatedAt - a.updatedAt));
+    const convos = state.convos.filter((c) => !c.mainId || c.mainId === c.id).sort((a, b) => (byCid.has(b.id) - byCid.has(a.id)) || (b.updatedAt - a.updatedAt));
     if (!convos.length) sec.append(el('p', 'pv-empty', 'No projects yet. Start one with New project.'));
     for (const c of convos) sec.append(projectRow(c, byCid.get(c.id)));
     // Previews whose chat is gone (kept until removed here).

@@ -2791,6 +2791,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       // A new project joins the bottom of the owner's order (and so gets the lowest priority).
       if (projectsOrdered()) { applyProjectOrder(projectsInOrder()); p = getProject(p.id); }
       else broadcast({ t: 'oprojects', order: projectOrderView() });
+    } else if (p.convo_id && p.convo_id !== convo.id && convoExists(p.convo_id)) {
+      // Another chat of the same folder: the project keeps its main chat (and its model).
     } else if (p.convo_id !== convo.id || (convo.model || null) !== p.model) {
       run('UPDATE projects SET convo_id=:c, model=:m WHERE id=:id', { c: convo.id, m: convo.model || null, id: p.id });
       p = getProject(p.id);
@@ -4431,8 +4433,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     }
     return null;
   }
-  function detachConvo(convoId) {
+  // A deleted chat: its project moves to `heirId` (another chat of the folder) when given, else pauses.
+  function detachConvo(convoId, heirId = null) {
     for (const p of qa('SELECT * FROM projects WHERE convo_id=:c', { c: convoId })) {
+      if (heirId) { updateProject(p.id, { convo_id: heirId }); continue; }
       updateProject(p.id, { status: 'paused', convo_id: null });
       pauseProject(p.id);
     }
@@ -4757,6 +4761,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     prepareRestart, resumeAfterRestart, restartBlocker, stateView, machines, browserTasks, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, reconcileClaudeLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     // A sidebar chat's project rank ({id, position, priority}), or null when its folder has no orchestrator project.
     projectRank: (cwd) => q1('SELECT id, position, priority FROM projects WHERE path=:p', { p: cwd }) ?? null,
+    projectChat: (cwd) => q1('SELECT convo_id FROM projects WHERE path=:p', { p: cwd })?.convo_id ?? null,
     isRunning: (id) => running.has(Number(id)), logEvent, attachCluster, detectHardware,
     // The head's git endpoint (cluster-git.mjs): a project's checkout, and the tasks node nodeId may push to in it now.
     gitRepo: (pid) => getProject(Number(pid))?.path || null,

@@ -514,6 +514,11 @@ function folderName(cwd) {
 const rankedConvos = () => state.convos.filter((c) => c.project)
   .sort((a, b) => (a.project.position ?? Infinity) - (b.project.position ?? Infinity) || a.project.id - b.project.id || b.updatedAt - a.updatedAt);
 const rankedProjectIds = (convos = rankedConvos()) => [...new Set(convos.map((c) => c.project.id))];
+// A project folder can have several chats: its main chat (mainId === id) holds the project's place in the list and
+// the folder's other chats sit indented under it, newest first.
+const isSubChat = (c) => !!c.mainId && c.mainId !== c.id && state.convos.some((x) => x.id === c.mainId);
+const subChats = (c) => state.convos.filter((x) => x.mainId === c.id && x.id !== c.id).sort((a, b) => b.updatedAt - a.updatedAt);
+const familyUpdated = (c) => Math.max(c.updatedAt, ...subChats(c).map((x) => x.updatedAt));
 
 // Chat search: typing (debounced) asks GET /api/convos?q= (search.mjs) and #convoList shows the matches in place of
 // the list until the field is cleared or Escape. `seq` drops answers to queries the owner has already typed past.
@@ -605,21 +610,22 @@ function renderConvoList() {
     label.append(el('span', 'rank-hint', 'Drag to set priority'));
     label.title = 'Drag projects to set priority (Alt+↑/↓ with the keyboard): the top one runs first';
     nav.append(label);
-    for (const c of ranked) nav.append(convoItem(c, true));
+    for (const c of ranked) { nav.append(convoItem(c, true)); for (const s of subChats(c)) nav.append(convoItem(s, false, true)); }
   }
   const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
-  const sorted = state.convos.filter((c) => !c.project).sort((a, b) => b.updatedAt - a.updatedAt);
+  const sorted = state.convos.filter((c) => !c.project && !isSubChat(c)).map((c) => [c, familyUpdated(c)]).sort((a, b) => b[1] - a[1]);
   let lastGroup = '';
-  for (const c of sorted) {
-    const group = c.updatedAt >= dayStart ? 'Today' : c.updatedAt >= dayStart - 6 * 864e5 ? 'This week' : 'Older';
+  for (const [c, at] of sorted) {
+    const group = at >= dayStart ? 'Today' : at >= dayStart - 6 * 864e5 ? 'This week' : 'Older';
     if (group !== lastGroup) { nav.append(el('div', 'group-label', group)); lastGroup = group; }
     nav.append(convoItem(c, false));
+    for (const s of subChats(c)) nav.append(convoItem(s, false, true));
   }
   if (focused) nav.querySelector(`.convo[data-cid="${CSS.escape(focused)}"]`)?.focus();
 }
 
-function convoItem(c, rankable) {
-  const b = el('div', 'convo' + (c.id === state.cid ? ' active' : ''));
+function convoItem(c, rankable, sub = false) {
+  const b = el('div', 'convo' + (sub ? ' sub' : '') + (c.id === state.cid ? ' active' : ''));
   b.tabIndex = 0;
   b.setAttribute('role', 'button');
   b.dataset.cid = c.id;
@@ -637,7 +643,7 @@ function convoItem(c, rankable) {
   meta.append(document.createTextNode(bits.join(' · ')));
   b.append(meta);
   const more = el('button', 'more');
-  more.setAttribute('aria-label', 'Project options');
+  more.setAttribute('aria-label', sub ? 'Chat options' : 'Project options');
   more.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16"><circle cx="5" cy="12" r="1.8" fill="currentColor"/><circle cx="12" cy="12" r="1.8" fill="currentColor"/><circle cx="19" cy="12" r="1.8" fill="currentColor"/></svg>';
   more.addEventListener('click', (e) => { e.stopPropagation(); convoMenu(c, more); });
   b.append(more);
@@ -673,7 +679,7 @@ function nudgeProject(c, dir) {
 function applyProjectOrder(order) {
   const byId = new Map(order.map((r) => [r.id, r])), byPath = new Map(order.filter((r) => r.path).map((r) => [r.path, r]));
   for (const c of state.convos) {
-    const r = (c.project && byId.get(c.project.id)) || byPath.get(c.cwd);
+    const r = (c.project && byId.get(c.project.id)) || (!isSubChat(c) && byPath.get(c.cwd));
     if (!r) continue;
     c.project = { id: r.id, position: r.position, priority: r.priority ?? c.project?.priority ?? null };
   }
@@ -785,22 +791,28 @@ function dropCard(commit) {
 }
 
 function convoMenu(c, anchor) {
-  document.querySelector('.menu')?.remove();
-  const m = el('div', 'menu');
+  document.querySelector('.menu.convo-menu')?.remove(); // never the header's View menu (also .menu)
+  const m = el('div', 'menu convo-menu');
+  const sub = isSubChat(c), others = state.convos.filter((x) => x.cwd === c.cwd && x.id !== c.id).length;
+  const fresh = el('button', '', 'New chat in this project');
   const rename = el('button', '', 'Rename');
   const del = el('button', 'danger', 'Delete');
+  fresh.onclick = () => { m.remove(); closeSidebar(); setView('chat'); applyDraft({ type: 'folder', path: c.cwd }); };
   rename.onclick = async () => {
     m.remove();
-    const title = prompt('Rename project (the folder keeps its name)', c.title);
+    const title = prompt(sub ? 'Rename chat' : 'Rename project (the folder keeps its name)', c.title);
     if (title && title.trim()) await api(`/api/convos/${c.id}`, 'PATCH', { title });
   };
   del.onclick = async () => {
     m.remove();
-    if (!confirm(`Remove "${c.title}" and its chat from the sidebar? The folder and its GitHub repo are kept.`)) return;
+    const what = sub ? `Delete the chat "${c.title}"? The project and its other chats are kept.`
+      : others ? `Delete "${c.title}"'s main chat? Its ${others === 1 ? 'other chat takes' : `oldest other chat takes`} over as the project's main chat; the folder and its GitHub repo are kept.`
+        : `Remove "${c.title}" and its chat from the sidebar? The folder and its GitHub repo are kept.`;
+    if (!confirm(what)) return;
     await api(`/api/convos/${c.id}`, 'DELETE');
     if (state.cid === c.id) openConvo(null);
   };
-  m.append(rename, del);
+  m.append(fresh, rename, del);
   document.body.append(m);
   const r = anchor.getBoundingClientRect();
   m.style.top = `${Math.min(r.bottom + 4, innerHeight - 100)}px`;
@@ -1845,7 +1857,7 @@ $('composer').addEventListener('submit', async (e) => {
       const d = state.draft;
       const c = await api('/api/convos', 'POST', d.type === 'new'
         ? { newProject: { name: d.name, fromText: text || ATT.list[0]?.name.replace(/\.[^.]+$/, '') || '', ...window.Previews?.draftPick() }, mode: state.draftMode }
-        : { folder: d.path, mode: state.draftMode });
+        : { folder: d.path, mode: state.draftMode, title: text || ATT.list[0]?.name || '' }); // title: a project's extra chat is named from it
       state.draft = { type: 'new', name: '' }; // the next new chat starts its own project again
       window.Previews?.resetDraft();
       if (c.previewError) toast(`Live preview not set up: ${c.previewError}`, { kind: 'error' });
@@ -1886,7 +1898,10 @@ $('composer').addEventListener('submit', async (e) => {
 $('messages').addEventListener('click', (e) => {
   if (e.target.closest('[data-open-picker]')) openPicker();
   const r = e.target.closest('.recent-projects button[data-path]');
-  if (r) chooseFolder(r.dataset.path);
+  if (!r) return;
+  // "Continue a recent project": its main chat when it has one (New chat in this project starts another).
+  const main = state.convos.find((c) => c.cwd === r.dataset.path && !isSubChat(c));
+  if (main) { openConvo(main.id); setView('chat'); } else chooseFolder(r.dataset.path);
 });
 
 // ---------- composer menus (mode, effort; the model pill opens the fallback sheet) ----------
@@ -2742,12 +2757,8 @@ function applyDraft(draft) {
   updateHeader();
   input.focus();
 }
-// One chat per project: an existing project opens its chat instead of starting another.
-const chooseFolder = (p) => {
-  const existing = state.convos.find((c) => c.cwd === p);
-  if (existing) { closePicker(); openConvo(existing.id); setView('chat'); return; }
-  applyDraft({ type: 'folder', path: p });
-};
+// Picking a project (new or with chats already) starts a new chat in it; its other chats stay in the sidebar.
+const chooseFolder = (p) => applyDraft({ type: 'folder', path: p });
 const chooseNew = (name) => applyDraft({ type: 'new', name: name.trim() });
 
 function projectMeta(p) {
@@ -9096,7 +9107,7 @@ async function showAway(since) {
     name.style.cssText = 'font-size:15px;color:var(--text);font-weight:600;text-decoration:none';
     name.onclick = (e) => {
       e.preventDefault();
-      const c = state.convos.find((x) => x.cwd === g.path);
+      const c = state.convos.find((x) => x.cwd === g.path && !isSubChat(x)); // the project's main chat
       $('awayModal').hidden = true;
       if (c) { openConvo(c.id); setView('chat'); }
     };

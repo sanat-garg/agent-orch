@@ -126,9 +126,48 @@ export function createGitHub({ env, log, alert = () => {}, now = Date.now }) {
     return push(dir);
   }
 
-  return { refresh, status: () => status, ensureRepo, push, commitAndPush, unpushed, remoteOf };
+  // The signed-in account's repos (its own and its orgs'), newest push first, for New project → Import from GitHub.
+  async function listRepos() {
+    if (!status.linked) await refresh();
+    if (!status.linked) throw new Error('GitHub is not linked');
+    const fields = ['nameWithOwner', 'description', 'isPrivate', 'isFork', 'pushedAt'];
+    const r = await run('gh', ['repo', 'list', '--limit', '200', '--json', fields.join(',')], opts());
+    if (!r.ok) throw new Error(r.err.split('\n').pop() || 'could not list your GitHub repos');
+    const orgs = await run('gh', ['api', 'user/orgs', '--jq', '.[].login'], opts());
+    const lists = await Promise.all((orgs.ok ? orgs.out.split('\n').filter(Boolean).slice(0, 10) : []).map((o) =>
+      run('gh', ['repo', 'list', o, '--limit', '100', '--json', fields.join(',')], opts()).then((x) => (x.ok ? JSON.parse(x.out) : []))));
+    return [JSON.parse(r.out || '[]'), ...lists].flat()
+      .map((x) => ({ full: x.nameWithOwner, description: x.description || '', private: !!x.isPrivate, fork: !!x.isFork, pushedAt: x.pushedAt || null }))
+      .sort((x, y) => String(y.pushedAt).localeCompare(String(x.pushedAt)));
+  }
+  // Clones a repo into `dir` (which must not exist): GitHub through gh (private repos use the gh sign-in), any other git url with git.
+  async function clone(spec, dir) {
+    const full = parseRepoSpec(spec);
+    if (!full) throw new Error('Give a GitHub repo as owner/name or its URL');
+    const r = full.url
+      ? await run('git', ['clone', '-q', full.url, dir], { ...opts(), timeout: 900000 })
+      : await run('gh', ['repo', 'clone', full.full, dir, '--', '-q'], { ...opts(), timeout: 900000 });
+    if (!r.ok) {
+      fs.rmSync(dir, { recursive: true, force: true });
+      const why = r.err.split('\n').filter(Boolean).pop() || 'clone failed';
+      throw new Error(/not found|could not resolve|repository .* does not exist/i.test(why) ? `Can't find ${full.full || full.url}, or this GitHub account can't see it` : why);
+    }
+    log(`cloned ${full.full || full.url} into ${dir}`);
+    return full.url ? repoOf(full.url) : { full: full.full, url: `https://github.com/${full.full}` };
+  }
+
+  return { refresh, status: () => status, ensureRepo, push, commitAndPush, unpushed, remoteOf, listRepos, clone };
 }
 
+// What the owner typed to import: owner/name or a GitHub url → {full}; another https/ssh git url → {url, full: null}; else null.
+export function parseRepoSpec(spec) {
+  const t = String(spec || '').trim().replace(/\/+$/, '');
+  const gh = repoOf(t) || repoOf(t.replace(/^(?:https?:\/\/)?(?:www\.)?github\.com\//i, 'https://github.com/').replace(/^(https:\/\/github\.com\/[^/]+\/[^/]+)\/.*$/, '$1'));
+  if (gh) return { full: gh.full };
+  if (/^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/.test(t) && !/^\.+$/.test(t.split('/')[1])) return { full: t.replace(/\.git$/, '') };
+  if (/^(?:https:\/\/|ssh:\/\/|git@)[^\s'"]+$/.test(t) && !t.startsWith('-')) return { url: t, full: null };
+  return null;
+}
 // owner/name of a GitHub remote url: git@github.com:o/r.git, https://github.com/o/r(.git), ssh://git@github.com/o/r.
 // Any other host gives null; push() still works for those remotes, it just runs git.
 export function repoOf(url) {

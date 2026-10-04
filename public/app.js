@@ -2806,7 +2806,10 @@ function renderProjectList() {
   const current = currentConvo()?.cwd || (state.draft.type === 'folder' ? state.draft.path : null);
   const shown = pk.projects.filter((p) => !q || p.name.toLowerCase().includes(q) || (slug && p.name.includes(slug)));
   const exact = slug && pk.projects.some((p) => p.name === slug);
-  if (!exact) {
+  if (GH_URL.test(raw)) { // a pasted repo URL: import it rather than name a project after it
+    list.append(pkItem({ name: `Import ${raw.replace(/^(?:https?:\/\/)?(?:www\.)?github\.com\/|^git@github\.com:|\.git$/gi, '')}` },
+      { create: true, meta: 'Clone this GitHub repo into a new project', onUse: () => openGhImport(raw) }));
+  } else if (!exact) {
     const fromMsg = slugify($('input').value, true);
     list.append(pkItem(
       { name: raw ? `Create "${slug || raw}"` : 'New project' },
@@ -2837,6 +2840,7 @@ async function openPicker() {
   $('pickerTitle').textContent = 'Choose a project';
   $('pkProjects').hidden = false;
   $('pkBrowse').hidden = true;
+  $('pkGithub').hidden = true;
   $('pkSearch').value = state.draft.type === 'new' ? state.draft.name : '';
   $('pickerModal').hidden = false;
   $('pkSearch').focus();
@@ -2894,16 +2898,92 @@ $('pkBack').addEventListener('click', () => {
 });
 $('pkUseHere').addEventListener('click', () => chooseFolder(pk.browsePath));
 
+// ---------- import from GitHub (the picker's third pane) ----------
+// Lists the account's repos (GET /api/github/repos, re-read on every open); any owner/name or URL typed in gets an
+// "Import …" row. Picking clones it into ~/workspace (POST /api/projects/import) and picks that folder for the next chat.
+const GH_URL = /^(?:https?:\/\/)?(?:www\.)?github\.com\/[\w.-]+\/[\w.-]+|^git@github\.com:/i;
+const GHI = { repos: null, error: null, busy: false };
+function ghTyped(raw) {
+  if (GH_URL.test(raw)) return raw.replace(/^(?:https?:\/\/)?(?:www\.)?github\.com\/|^git@github\.com:/i, '').split('/').slice(0, 2).join('/').replace(/\.git$/, '');
+  if (/^[\w-]+\/[\w.-]+$/.test(raw)) return raw;
+  return /^(?:https:\/\/|ssh:\/\/|git@)\S+$/.test(raw) ? raw : null; // another git host: cloned with git
+}
+async function openGhImport(prefill = '') {
+  $('pkProjects').hidden = true;
+  $('pkBrowse').hidden = true;
+  $('pkGithub').hidden = false;
+  $('pickerTitle').textContent = 'Import from GitHub';
+  $('pkGhSearch').value = prefill;
+  $('pkGhSearch').focus();
+  renderGhImport();
+  try { GHI.repos = (await api('/api/github/repos')).repos; GHI.error = null; } catch (e) { GHI.error = e.message; }
+  if (!$('pkGithub').hidden) renderGhImport();
+}
+function ghImportRow(r, spec, typed = false) {
+  const meta = typed ? 'Clone this repo into a new project'
+    : [r.description, r.fork && 'fork', r.pushedAt && `pushed ${relTime(Date.parse(r.pushedAt))}`].filter(Boolean).join(' · ');
+  const row = pkItem({ name: typed ? `Import ${r.full}` : r.full }, { create: typed, meta, onUse: () => importRepo(spec, row) });
+  if (!typed) row.querySelector('.fi').innerHTML = $('repoLink').querySelector('svg').outerHTML;
+  if (!typed && r.private) row.append(el('span', 'tag', 'private'));
+  return row;
+}
+function renderGhImport() {
+  if (GHI.busy) return; // keep the row that says "Cloning…"
+  const raw = $('pkGhSearch').value.trim(), q = raw.toLowerCase(), typed = ghTyped(raw);
+  const list = $('pkGhList');
+  list.textContent = '';
+  const repos = GHI.repos || [];
+  const same = (r) => typed && r.full.toLowerCase() === typed.toLowerCase();
+  const shown = repos.filter((r) => !q || same(r) || r.full.toLowerCase().includes(q) || r.description.toLowerCase().includes(q));
+  if (typed && !repos.some(same)) list.append(ghImportRow({ full: typed }, raw, true));
+  for (const r of shown.slice(0, 100)) list.append(ghImportRow(r, r.full));
+  list.classList.toggle('error', !!GHI.error && !list.children.length);
+  if (!list.children.length) {
+    list.append(el('div', 'pk-empty', GHI.error || (!GHI.repos ? 'Loading your repos…'
+      : raw ? 'No matching repos. Paste owner/name or a URL to import any repo you can see.' : 'No repos on this GitHub account yet.')));
+  }
+  pk.kb = list.querySelector('.pk-item') ? 0 : -1;
+  list.querySelector('.pk-item')?.classList.add('kb');
+}
+async function importRepo(spec, row) {
+  if (GHI.busy) return;
+  GHI.busy = true;
+  row.classList.add('busy');
+  const meta = row.querySelector('.fd'), was = meta.textContent;
+  meta.textContent = 'Cloning…';
+  try {
+    const r = await api('/api/projects/import', 'POST', { repo: spec });
+    GHI.busy = false;
+    loadProjects();
+    chooseFolder(r.path);
+    toast(r.existing ? `${r.repo?.full || r.name} is already the project ${r.name}: your next message starts a chat there`
+      : `Imported ${r.repo?.full || spec} into ~/workspace/${r.name}. Send a message to start working on it.`);
+  } catch (e) {
+    GHI.busy = false;
+    row.classList.remove('busy');
+    meta.textContent = was;
+    toast(`Couldn't import: ${e.message}`, { kind: 'error' });
+  }
+}
+$('pkGhBtn').addEventListener('click', () => openGhImport());
+$('pkGhSearch').addEventListener('input', renderGhImport);
+$('pkGhBack').addEventListener('click', () => {
+  $('pickerTitle').textContent = 'Choose a project';
+  $('pkGithub').hidden = true;
+  $('pkProjects').hidden = false;
+  $('pkSearch').focus();
+});
+
 // Arrow keys move through the visible list; Enter picks (projects) or opens (browse).
 $('pickerModal').addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closePicker(); return; }
-  const list = $('pkBrowse').hidden ? $('pkList') : $('pkBrowseList');
+  const list = !$('pkGithub').hidden ? $('pkGhList') : $('pkBrowse').hidden ? $('pkList') : $('pkBrowseList');
   const rows = [...list.querySelectorAll('.pk-item')];
   if (!rows.length || !['ArrowDown', 'ArrowUp', 'Enter'].includes(e.key)) return;
   if (e.key === 'Enter') {
     if (e.target.closest('form')) return;
     // Enter in the search box picks the top match.
-    const idx = pk.kb >= 0 ? pk.kb : e.target === $('pkSearch') ? 0 : -1;
+    const idx = pk.kb >= 0 ? pk.kb : e.target === $('pkSearch') || e.target === $('pkGhSearch') ? 0 : -1;
     if (idx < 0) return;
     e.preventDefault();
     rows[idx].click();
@@ -3837,6 +3917,7 @@ function miniPaint() {
   const put = (node, text) => { if (swap) { clearTimeout(node._swap); node._next = null; node.classList.remove('blur-out'); node.textContent = text; } else blurSwap(node, text); };
   put($('miniCpu'), cpu == null ? '–' : fmtPct(cpu));
   put($('miniMem'), memText);
+  $('miniSum').textContent = `CPU ${cpu == null ? '–' : fmtPct(cpu)} · RAM ${mem == null ? '–' : fmtPct(mem)}`;
   setBar($('miniCpuBar'), cpu ?? 0);
   setBar($('miniMemBar'), mem ?? 0);
   if (swap || $('hostName').textContent !== (n.name || MINI.host)) { // also the head renamed once its node row arrives
@@ -3978,6 +4059,9 @@ function renderUsage(fresh = false) {
     setPace(bar, pace);
     row.title = [w?.tip, w?.resetsAt ? fmtReset(w.resetsAt) : '', pace?.tip].filter(Boolean).join('\n');
   });
+  // The folded card's one line: the first two windows ("5h 31% · Wk 12%").
+  const short = (l) => ({ '5-hour': '5h', Weekly: 'Wk' })[l] || l;
+  $('usSum').textContent = windows.slice(0, 2).map((w, i) => `${short(w?.label || (i ? 'Weekly' : '5-hour'))} ${w?.pct != null ? fmtPct(w.pct) : '–'}`).join(' · ');
   let note;
   if (id === 'claude' && !u?.updatedAt) note = 'Checking plan limits…';
   else if (!u?.available) note = id === 'claude'
@@ -6633,6 +6717,21 @@ $('usageRange').addEventListener('click', (e) => {
   renderUsageModal();
   loadUsageHistory();
 });
+// Short windows (app.css max-height) can fold the server and usage cards to one line each; remembered per browser.
+function msFold(folded) {
+  $('miniStatsCard').classList.toggle('folded', folded);
+  $('msFold').setAttribute('aria-expanded', String(!folded));
+  const label = `${folded ? 'Expand' : 'Collapse'} server and usage`;
+  $('msFold').setAttribute('aria-label', label);
+  $('msFold').title = label;
+}
+msFold(store.get('cw.statsFolded') === '1');
+$('msFold').addEventListener('click', (e) => {
+  e.stopPropagation(); // not the card's own click (open usage)
+  const folded = !$('miniStatsCard').classList.contains('folded');
+  store.set('cw.statsFolded', folded ? '1' : '0');
+  msFold(folded);
+});
 // The sidebar usage card opens the window; its refresh button only refreshes.
 const usageCard = document.querySelector('.ms-usage');
 usageCard.addEventListener('click', (e) => { if (!e.target.closest('#usRefresh')) openUsage(); });
@@ -6669,7 +6768,7 @@ function fmtDur(sec) {
   return `${Math.floor(sec / 3600)}h ${Math.round((sec % 3600) / 60)}m`;
 }
 const displayTitle = (t) => (t.kind === 'reflect' ? 'Finding the next improvements' : t.kind === 'plan' ? 'Answering your saved message' : t.title);
-const kindLabel = (t) => (t.kind === 'reflect' ? 'Reflection' : t.kind === 'plan' ? 'Planner' : t.kind === 'review' ? 'Review break' : t.source === 'reflection' ? 'Task · from reflection' : 'Task');
+const kindLabel = (t) => (t.kind === 'reflect' ? 'Reflection' : t.kind === 'plan' ? 'Planner' : t.kind === 'review' ? 'Review break' : t.source === 'reflection' ? 'Task · from reflection' : t.source === 'schedule' ? 'Task · scheduled' : 'Task');
 
 function taskState(t) {
   const nowS = Date.now() / 1000;
@@ -7119,6 +7218,7 @@ function onOrch(msg) {
     for (const r of msg.order || []) { const t = O.tasks.get(r.id); if (t) t.position = r.position; }
     if (msg.project_id === O.project?.id) scheduleQueue();
   } else if (msg.t === 'oproject') {
+    window.Schedules?.changed(); // its schedules ride on the project (schedules.js)
     const c = currentConvo();
     if (msg.project && c && msg.project.path === c.cwd) {
       O.project = msg.project;

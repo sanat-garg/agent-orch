@@ -10,7 +10,7 @@ import net from 'node:net';
 import { WebSocketServer } from 'ws';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createOrchestrator, parseJsonl, SHOT_HINT, rigorLevelsView } from './orchestrator.mjs';
-import { createGitHub } from './github.mjs';
+import { createGitHub, parseRepoSpec } from './github.mjs';
 import { retireRuntime, chatIdle, whenIdle } from './runtimes.mjs';
 import { AGENTS, isAgent, agentEfforts, clampEffort, runAgentCli, clearLoginCache, isMissingSession, modelCatalog, claudeWindows, fetchLimits, agentVersion, readVersion, windowLabel, setMcpSource } from './agents.mjs';
 import { createModelStore } from './models.mjs';
@@ -38,6 +38,7 @@ import { createRollingRestart, preflight, readRestartState, serverFile } from '.
 import { createSounds, MAX_SOUND_BYTES as MAX_CUSTOM_SOUND_BYTES } from './sounds.mjs';
 import { createVersion, formatVersion } from './version.mjs';
 import { createPreviews } from './previews.mjs';
+import { describeCron, nextRun, validTz } from './cron.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -245,6 +246,7 @@ function slugify(text, fromMessage = false) {
   const keep = fromMessage ? words.filter((w) => !STOP_WORDS.has(w)) : words;
   return (keep.length ? keep : words).slice(0, fromMessage ? 4 : 8).join('-').replace(/[^a-z0-9.-]/g, '').replace(/-+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 40);
 }
+const importing = new Map(); // repo → its running clone, so a double tap clones once
 function uniqueProjectDir(slug) {
   let dir = path.join(WORKSPACE, slug);
   for (let n = 2; fs.existsSync(dir); n++) dir = path.join(WORKSPACE, `${slug}-${n}`);
@@ -2149,6 +2151,27 @@ async function handleRequest(req, res) {
     const s = Date.now() - gh.status().checkedAt > 15000 ? await gh.refresh() : gh.status();
     return json(res, 200, s);
   }
+  // New project → Import from GitHub: the account's repos to pick from (the owner can also type any owner/name or URL).
+  if (p === '/api/github/repos' && req.method === 'GET') {
+    try { return json(res, 200, { repos: await gh.listRepos() }); } catch (e) { return json(res, 400, { error: e.message, github: gh.status().linked }); }
+  }
+  // {repo: owner/name | url} → cloned into a new ~/workspace folder, returned as {path, name, repo}; the UI then picks that
+  // folder for the next chat. A repo a project already has returns that project ({existing: true}) instead of a second copy.
+  if (p === '/api/projects/import' && req.method === 'POST') {
+    const body = await readBody(req);
+    const spec = parseRepoSpec(body.repo);
+    if (!spec) return json(res, 400, { error: 'Give a GitHub repo as owner/name or its URL' });
+    if (!gh.status().linked && !(await gh.refresh()).linked) return json(res, 409, { error: 'Link GitHub first: every project gets its own GitHub repo.', github: false });
+    const key = (spec.full || spec.url).toLowerCase();
+    const have = spec.full && convos.find((c) => c.repo?.full?.toLowerCase() === key && fs.existsSync(c.cwd));
+    if (have) return json(res, 200, { path: have.cwd, name: path.basename(have.cwd), repo: have.repo, existing: true });
+    if (!importing.has(key)) {
+      const name = (spec.full || spec.url).split(/[/:]/).pop().replace(/\.git$/, '');
+      const dir = uniqueProjectDir(slugify(name) || 'project');
+      importing.set(key, gh.clone(spec.full || spec.url, dir).then((repo) => ({ path: dir, name: path.basename(dir), repo })).finally(() => importing.delete(key)));
+    }
+    try { return json(res, 200, await importing.get(key)); } catch (e) { return json(res, 400, { error: e.message }); }
+  }
   // Opens a terminal with GitHub's sign-in already started; the owner finishes it in their browser.
   if (p === '/api/github/link' && req.method === 'POST') {
     await tmux(['kill-session', '-t', '=github']);
@@ -2243,6 +2266,41 @@ async function handleRequest(req, res) {
   // Rigor levels 1-5 (#778) the owner picks per project ({rigor} in the project fields below), each with an example
   // task for the same sample request.
   if (p === '/api/orch/rigor-levels' && req.method === 'GET') return json(res, 200, rigorLevelsView());
+  // Schedules (orchestrator saveSchedule, cron.mjs): GET lists a project's (?tz= records the owner's browser zone, used
+  // for schedules the planner makes), POST {title, prompt, cron, tz, done_when?, enabled?, agent?, model?} adds one,
+  // PATCH/DELETE /api/orch/schedules/:id edit or remove one, POST …/:id/run queues its task now (409 while the last runs).
+  if (p === '/api/orch/schedules' && req.method === 'GET') {
+    orch.noteOwnerTz(url.searchParams.get('tz'));
+    return json(res, 200, orch.allSchedules());
+  }
+  // ?cron=&tz= → {when, next: [epoch s × 3]} or {error}: the editor's live check of what the owner typed.
+  if (p === '/api/orch/cron-preview' && req.method === 'GET') {
+    const cron = url.searchParams.get('cron') || '', tz = validTz(url.searchParams.get('tz')) || orch.ownerTz(), next = [];
+    try {
+      for (let at = Date.now(), n; next.length < 3 && (n = nextRun(cron, at, tz)) != null; at = n) next.push(n / 1000);
+    } catch (e) { return json(res, 200, { error: e.message }); }
+    return json(res, 200, next.length ? { when: describeCron(cron), next, tz } : { error: 'That never comes round: check the day and month' });
+  }
+  const osch = p.match(/^\/api\/orch\/projects\/(\d+)\/schedules$/);
+  if (osch && req.method === 'GET') {
+    orch.noteOwnerTz(url.searchParams.get('tz'));
+    return json(res, 200, { schedules: orch.listSchedules(osch[1]), tz: orch.ownerTz() });
+  }
+  if (osch && req.method === 'POST') {
+    const body = await readBody(req);
+    orch.noteOwnerTz(body.tz);
+    const r = orch.saveSchedule(Number(osch[1]), body);
+    return json(res, r.error ? r.status : 200, r);
+  }
+  const osc = p.match(/^\/api\/orch\/schedules\/(\d+)(\/run)?$/);
+  if (osc && (req.method === 'PATCH' || req.method === 'DELETE' || (osc[2] && req.method === 'POST'))) {
+    const id = Number(osc[1]);
+    let r;
+    if (osc[2]) r = orch.runScheduleNow(id);
+    else if (req.method === 'DELETE') r = orch.deleteSchedule(id);
+    else r = orch.editSchedule(id, await readBody(req));
+    return json(res, r.error ? r.status : 200, r);
+  }
   // The project's fields (perpetual, autonomous, priority, mode, status, rigor, reflectDirection, removeRoute).
   const op = p.match(/^\/api\/orch\/project\/(\d+)$/);
   if (op && (req.method === 'POST' || req.method === 'PATCH')) {

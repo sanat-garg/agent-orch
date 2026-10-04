@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
-import { createGitHub, repoOf } from '../github.mjs';
+import { createGitHub, repoOf, parseRepoSpec } from '../github.mjs';
 
 // test/fixtures/gh-stub.mjs stands in for `gh`, linked into a temp bin dir on PATH.
 const STUB = fileURLToPath(new URL('./fixtures/gh-stub.mjs', import.meta.url));
@@ -37,6 +37,14 @@ test('repoOf reads ssh, https and ssh:// GitHub urls and rejects other hosts', (
     'https://token@github.com/o/r.git', 'ssh://git@github.com/o/r', 'ssh://git@github.com/o/r.git']) assert.deepEqual(repoOf(u), want, u);
   for (const u of ['https://gitlab.com/o/r.git', 'git@gitlab.com:o/r.git', 'https://notgithub.com/o/r', '/tmp/bare.git', '', 'https://github.com/o'])
     assert.equal(repoOf(u), null, u);
+});
+
+test('parseRepoSpec (Import from GitHub) takes owner/name, GitHub urls and pages, and other git urls; rejects the rest', () => {
+  for (const t of ['o/r', 'o/r.git', 'https://github.com/o/r', 'github.com/o/r/', 'www.github.com/o/r/tree/main/src',
+    'https://github.com/o/r/pulls', 'git@github.com:o/r.git', ' https://github.com/o/r.git ']) assert.deepEqual(parseRepoSpec(t), { full: 'o/r' }, t);
+  assert.deepEqual(parseRepoSpec('https://gitlab.com/x/y.git'), { url: 'https://gitlab.com/x/y.git', full: null });
+  for (const t of ['', 'hello', 'o/..', '--upload-pack=touch /tmp/x', 'o/r; rm -rf ~', 'file:///etc', '/tmp/bare.git', 'http://example.com/a b'])
+    assert.equal(parseRepoSpec(t), null, t);
 });
 
 // A project whose origin is a local bare repo, with a PATH that has git but no gh.

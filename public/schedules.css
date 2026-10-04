@@ -1,0 +1,52 @@
+/* Schedules (schedules.js): the sidebar sheet listing every project's recurring tasks, and its editor. */
+.side-link + .side-link { margin-top: 0; }
+.modal-panel.scm { width: min(620px, 100%); }
+.sc-top { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
+.sc-top .btn { flex: none; }
+.sc-hint, .sc-empty { margin: 0; font-size: 13px; color: var(--muted); line-height: 1.4; }
+.sc-empty { margin-top: 6px; }
+.sc-sec { margin-bottom: 18px; }
+.sc-sec h3 { margin: 4px 0 8px; font-size: 13px; font-weight: 650; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sc-row { padding: 12px; margin-bottom: 8px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
+.sc-row.off { background: none; }
+.sc-row.off .sc-title, .sc-row.off .sc-when { color: var(--muted); }
+.sc-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.sc-title { flex: 1; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.sc-when { margin-top: 3px; font-size: 13.5px; }
+.sc-cron { font-weight: 550; }
+.sc-meta { margin-top: 3px; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.sc-task { border: 0; padding: 0; background: none; color: var(--accent-ink); font: inherit; cursor: pointer; text-decoration: underline; }
+.sc-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+
+.sc-form { display: flex; flex-direction: column; gap: 14px; }
+.sc-etitle { margin: 0; font-size: 15px; font-weight: 650; }
+.sc-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; cursor: default; }
+.sc-label { font-size: 13px; font-weight: 600; }
+.sc-fhint { font-size: 12px; color: var(--muted); }
+.sc-form input, .sc-form select, .sc-form textarea {
+  min-width: 0; height: 36px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 8px;
+  background: var(--panel); color: var(--text); font: inherit; font-size: 14px;
+}
+.sc-form textarea { height: auto; min-height: 84px; padding: 8px 10px; resize: vertical; line-height: 1.4; }
+.sc-form input:focus, .sc-form select:focus, .sc-form textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus); }
+.sc-form select:disabled { opacity: .7; }
+.sc-repeat, .sc-params { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.sc-params:empty { display: none; }
+.sc-at { color: var(--muted); font-size: 13.5px; }
+.sc-cronin { flex: 1 1 240px; font-family: var(--mono) !important; }
+.sc-days { display: flex; flex-wrap: wrap; gap: 4px; }
+.sc-day { min-width: 42px; height: 34px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--panel); color: var(--muted); font: inherit; font-size: 13px; cursor: pointer; }
+.sc-day.on { background: var(--accent-strong); border-color: var(--accent-strong); color: var(--accent-text); }
+.sc-preview { margin-top: -8px; font-size: 12.5px; color: var(--muted); min-height: 1.2em; }
+.sc-preview.bad, .sc-err { color: var(--danger); }
+.sc-err { font-size: 13px; }
+.sc-err:empty { display: none; }
+.sc-foot { display: flex; justify-content: flex-end; gap: 8px; }
+@media (max-width: 800px) { .modal-panel.scm { width: 100%; } }
+@media (max-width: 600px) { .sc-top { flex-direction: column; } }
+@media (pointer: coarse) {
+  .sc-acts .btn.small, .sc-top .btn.small, .sc-foot .btn { min-height: 44px; }
+  .sc-form input, .sc-form select { height: 44px; font-size: 16px; } /* iOS zooms into smaller inputs */
+  .sc-form textarea { font-size: 16px; }
+  .sc-day { height: 44px; min-width: 44px; }
+}

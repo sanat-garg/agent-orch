@@ -15,6 +15,7 @@
 <link rel="stylesheet" href="/stats.css">
 <link rel="stylesheet" href="/ext.css">
 <link rel="stylesheet" href="/previews.css">
+<link rel="stylesheet" href="/schedules.css">
 <link rel="stylesheet" href="/browser.css">
 <link rel="preload" href="/mascot.png" as="image">
 </head>
@@ -47,13 +48,17 @@
       <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3.5 12h17M12 3.5c2.4 2.5 3.4 5.3 3.4 8.5s-1 6-3.4 8.5c-2.4-2.5-3.4-5.3-3.4-8.5s1-6 3.4-8.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
       Live previews
     </button>
+    <button type="button" class="side-link" id="schedBtn" aria-haspopup="dialog" title="Tasks that run by themselves at set times">
+      <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 7.5V12l3 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Schedules
+    </button>
     <div class="side-search" role="search">
       <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
       <input type="search" id="chatSearch" placeholder="Search chats" aria-label="Search chats" aria-controls="convoList" autocomplete="off" enterkeyhint="search">
     </div>
     <nav class="convo-list" id="convoList" aria-label="Chats"></nav>
     <div class="sr-only" id="rankLive" aria-live="polite"></div>
-    <div class="mini-stats">
+    <div class="mini-stats" id="miniStatsCard">
       <div class="ms-machine" id="miniMachine">
         <button class="ms-server" id="miniStats" aria-haspopup="dialog" title="Open all machines">
           <span class="ms-slide" id="miniSlide">
@@ -61,6 +66,7 @@
               <span class="live-dot" id="miniLive"></span>
               <span class="ms-os" id="miniOs" aria-hidden="true"></span>
               <span class="ms-title"><span id="hostName">Oracle VM</span><small id="miniRole"> (head)</small></span>
+              <span class="ms-sum" id="miniSum"></span>
               <span class="ms-open">Machines<svg viewBox="0 0 24 24" width="12" height="12"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></span>
             </span>
             <span class="ms-row"><span>CPU</span><span class="ms-bar"><i id="miniCpuBar"></i></span><span class="ms-val" id="miniCpu">–</span></span>
@@ -72,9 +78,14 @@
       <div class="ms-usage" id="usageCard" role="button" tabindex="0" aria-haspopup="dialog" title="Open usage over time">
         <div class="ms-head">
           <span class="ms-title" id="usageTitle">Usage</span>
+          <span class="ms-sum" id="usSum"></span>
           <span class="ms-age" id="usAge"></span>
           <button class="ms-refresh" id="usRefresh" aria-label="Refresh Claude usage limits" title="Refresh limits">
             <svg viewBox="0 0 24 24" width="13" height="13"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <!-- Short windows only (app.css max-height): folds both cards to one line each (app.js msFold, store cw.statsFolded). -->
+          <button class="ms-fold" id="msFold" aria-expanded="true" aria-label="Collapse server and usage" title="Collapse server and usage">
+            <svg viewBox="0 0 24 24" width="13" height="13"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
         </div>
         <div class="ms-row" id="usSessionRow"><span>5-hour</span><span class="ms-bar"><i id="usSessionBar"></i></span><span class="ms-val" id="usSession">–</span></div>
@@ -346,7 +357,22 @@
           <input id="pkSearch" placeholder="Search, or type a name for a new project" autocomplete="off" spellcheck="false">
         </div>
         <div class="pk-list" id="pkList" role="listbox" aria-label="Projects"></div>
-        <button class="link-btn pk-browse" id="pkBrowseBtn">Browse other folders…</button>
+        <div class="pk-links">
+          <button class="link-btn pk-browse" id="pkBrowseBtn">Browse other folders…</button>
+          <button class="link-btn pk-browse" id="pkGhBtn">Import from GitHub…</button>
+        </div>
+      </div>
+
+      <!-- Import mode (app.js ghImport): the account's repos, or any owner/name or URL typed in, cloned into ~/workspace -->
+      <div id="pkGithub" hidden>
+        <div class="pk-search">
+          <svg viewBox="0 0 24 24" width="16" height="16"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="M20 20l-4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <input id="pkGhSearch" placeholder="Search your repos, or paste owner/name or a URL" autocomplete="off" spellcheck="false" autocapitalize="off">
+        </div>
+        <div class="pk-list" id="pkGhList" role="listbox" aria-label="GitHub repos"></div>
+        <div class="pk-foot">
+          <button class="link-btn" id="pkGhBack">← Back to projects</button>
+        </div>
       </div>
 
       <!-- Browse mode -->
@@ -393,6 +419,24 @@
       </button>
     </div>
     <div class="m-body" id="pvBody"></div>
+  </div>
+</div>
+
+<!-- Schedules (schedules.js): every project's recurring tasks; the body is the list or, in place of it, the editor. -->
+<div class="modal sheet" id="schedModal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-panel scm" role="dialog" aria-modal="true" aria-labelledby="scTitle">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <div class="m-head">
+      <div>
+        <h2 id="scTitle">Schedules</h2>
+        <p class="m-sub">Tasks that run by themselves at set times, around the clock.</p>
+      </div>
+      <button class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="m-body" id="scBody"></div>
   </div>
 </div>
 
@@ -880,5 +924,6 @@
 <script src="/ext.js"></script>
 <script src="/browser.js"></script>
 <script src="/previews.js"></script>
+<script src="/schedules.js"></script>
 </body>
 </html>

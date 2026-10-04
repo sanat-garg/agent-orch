@@ -1049,13 +1049,26 @@ label.mc-row { cursor: pointer; }
 .ms-usage:hover { background: var(--raised); }
 .ms-usage:focus-visible, .ms-server:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .ms-age { font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
-.ms-refresh {
+.ms-refresh, .ms-fold {
   width: 24px; height: 24px; margin: -4px -4px -4px 0; display: grid; place-items: center; flex: none;
   border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer;
 }
-.ms-refresh:hover { background: var(--raised); color: var(--text); }
+.ms-refresh:hover, .ms-fold:hover { background: var(--raised); color: var(--text); }
 .ms-refresh:disabled { cursor: default; }
 .ms-refresh.spin svg { animation: spin .9s linear infinite; }
+/* Fold (short windows only): each card shrinks to its head line, the numbers moving into .ms-sum (app.js msFold). */
+.ms-fold { display: none; }
+.ms-fold svg { transition: transform .2s ease; }
+.ms-sum { display: none; flex: none; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+@media (max-height: 900px) {
+  .ms-fold { display: grid; }
+  .mini-stats.folded .ms-fold svg { transform: rotate(180deg); }
+  .mini-stats.folded :is(.ms-row, .ms-foot, #usMore, #usNote, .ms-age, .ms-open, #miniRole) { display: none; }
+  .mini-stats.folded .ms-sum { display: inline; }
+  .mini-stats.folded .ms-head { margin-bottom: 0; }
+  .mini-stats.folded .ms-usage .ms-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
+@media (prefers-reduced-motion: reduce) { .ms-fold svg { transition: none; } }
 .ms-head { display: flex; align-items: center; gap: 7px; margin-bottom: 1px; }
 .ms-title { flex: 1; font-weight: 600; color: var(--text); font-size: 12.5px; }
 .ms-open { display: inline-flex; align-items: center; gap: 2px; color: var(--faint); font-size: 11.5px; }
@@ -1208,6 +1221,9 @@ label.mc-row { cursor: pointer; }
 .pk-item .use:hover { border-color: var(--accent); }
 .pk-empty { color: var(--muted); font-size: 14px; text-align: center; padding: 18px 8px; }
 .pk-browse { align-self: flex-start; margin-top: 10px; }
+.pk-links { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0 12px; }
+.pk-item.busy { opacity: .6; pointer-events: none; }
+.pk-list.error .pk-empty { color: var(--danger); }
 .pk-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; margin-bottom: 10px; font-family: var(--mono); font-size: 13px; }
 .pk-crumbs button { border: 0; background: none; padding: 4px 6px; border-radius: 6px; cursor: pointer; color: var(--muted); font: inherit; }
 .pk-crumbs button:hover { background: var(--raised); color: var(--text); }
@@ -2214,8 +2230,8 @@ button.dg-row:disabled { opacity: .6; cursor: progress; }
   .chip, .orch-bar .chip, .btn.small, .cn-btn.btn.small { min-height: 44px; }
   .icon-btn, .send { width: 44px; height: 44px; }
   details.dr-prompt summary { min-height: 44px; line-height: 44px; }
-  #usRefresh { position: relative; }
-  #usRefresh::after, .convo .more::after { content: ''; position: absolute; inset: -10px; }
+  #usRefresh, #msFold { position: relative; }
+  #usRefresh::after, #msFold::after, .convo .more::after { content: ''; position: absolute; inset: -10px; }
 }
 
 /* Phone typography (UI-REVIEW #7, HIG typography: 17pt body, 11pt floor): 16px body copy so it never reads desktop-dense,

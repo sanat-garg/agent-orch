@@ -34,6 +34,7 @@ import { CPU_PER_TASK, GB, capSlots, localCap } from './cap.mjs';
 import { cpuState, pickNode, slotTarget } from './placement.mjs';
 import { extractCommand, runCheck, toolLine } from './taskrun.mjs';
 import { gcRetention } from './retention.mjs';
+import { describeCron, nextRun, parseCron, validTz } from './cron.mjs';
 import { APPLY_UPDATES } from './rolling.mjs';
 import { pushBranch, pushedBase } from './github.mjs';
 import { commitAll, ensureWorktree, fetchMain, integrateBranch, isMerged, listWorktrees, markersIn, mergeBack, parkWorktree, pruneOrphanWorktrees, removeWorktree, repoInfo, startIntegration, taskBranch, unresolvedFiles, worktreesRoot } from './worktrees.mjs';
@@ -113,7 +114,7 @@ const PLANNER_TOOLS = [
   'Bash(git log:*)', 'Bash(git status:*)', 'Bash(git diff:*)', 'Bash(ls:*)', 'Bash(wc:*)',
 ];
 
-const PRIORITY = { plan: 100, user: 60, planner: 50, reflection: 30, reflect: 25 };
+const PRIORITY = { plan: 100, user: 60, schedule: 60, planner: 50, reflection: 30, reflect: 25 };
 const URGENCY = { urgent: 85, normal: 50, background: 20 };
 const URGENCIES = ['urgent', 'normal', 'background'];
 const PREEMPT_MARGIN = 20;
@@ -138,7 +139,8 @@ export const TASKS_FORMAT = `Emit work as a fenced block exactly like this (stri
     "capabilities": ["browser"],
     "identity": "optional browser profile, e.g. xero"}
  ],
- "routes": [{"match": "tests", "agent": "codex", "model": null, "scope": "project"}, {"remove": 3}]}
+ "routes": [{"match": "tests", "agent": "codex", "model": null, "scope": "project"}, {"remove": 3}],
+ "schedules": [{"title": "Daily dependency check", "prompt": "Self-contained instructions for one run.", "cron": "0 9 * * 1-5", "done_when": null}, {"remove": 2}]}
 \`\`\`
 
 **Break work into small, separately verifiable steps. This matters more than anything else here.**
@@ -183,7 +185,14 @@ project), optional \`note\`. A new route with the same match and scope replaces 
 deletes one. A \`plan\` route may only pick a Claude model. Unavailable agents fall back to Claude.
 While a task's agent is at its usage limit, it moves down the owner's fallback list for that chat (or, for
 reflection tasks, the project's list); with an empty list it waits for the reset.
-A block may contain only \`routes\` (with \`"tasks": []\`).`;
+A block may contain only \`routes\` (with \`"tasks": []\`).
+
+**Recurring work.** When the owner wants something done on a timetable ("every morning check the inbox", "run the
+SEO audit every Monday", "back up the database nightly"), save it in \`schedules\` instead of queueing a task: each one
+queues a fresh task at every time its \`cron\` matches (5 fields: minute hour day-of-month month day-of-week, in the
+owner's time zone; e.g. \`0 9 * * *\` daily 09:00, \`*/30 * * * *\` every 30 minutes, \`0 18 * * 1-5\` weekdays 18:00).
+Its \`prompt\` must be self-contained for one run; optional \`done_when\`, \`agent\`, \`model\`. A schedule with the same
+title replaces the old one; \`{"remove": id}\` deletes one. Never set up cron jobs, systemd timers or sleep loops for this.`;
 
 // Rigor (#778, projects.rigor 1-5): how much process the planner and reflection put into the tasks they create. Each
 // level's `guidance` goes into the planner's turn prompt and the reflection prompt, `reflect` into the reflection's
@@ -704,6 +713,20 @@ export function extractTasks(text) {
     routes.push({ match, agent, model, scope: String(r.scope || '').toLowerCase() === 'global' ? 'global' : 'project',
       note: r.note ? String(r.note).slice(0, 300) : null });
   }
+  const schedules = [];
+  for (const s of Array.isArray(payload.schedules) ? payload.schedules : []) {
+    if (!s || typeof s !== 'object') continue;
+    if (s.remove != null) {
+      const id = parseInt(String(s.remove).replace(/^#/, ''), 10);
+      if (id > 0) schedules.push({ remove: id });
+      continue;
+    }
+    if (!s.title || !s.prompt || !s.cron) continue;
+    const agent = normalizeAgent(s.agent);
+    schedules.push({ title: String(s.title).slice(0, 200), prompt: String(s.prompt), cron: String(s.cron).trim(),
+      done_when: s.done_when ? String(s.done_when).slice(0, 2000) : null, agent,
+      model: fitModel(agent, s.model ? String(s.model).trim().slice(0, 100) || null : null, `schedule '${s.title}'`) });
+  }
   let project = null;
   if (payload.project && typeof payload.project === 'object') {
     project = {};
@@ -712,7 +735,7 @@ export function extractTasks(text) {
     if (mode === 'build' || mode === 'maintain') project.mode = mode;
     if (!Object.keys(project).length) project = null;
   }
-  return [clean, { tasks, project, routes, dropped }];
+  return [clean, { tasks, project, routes, schedules, dropped }];
 }
 
 // ---- routing: which agent/model runs a task
@@ -993,6 +1016,11 @@ CREATE TABLE IF NOT EXISTS routes (
   id INTEGER PRIMARY KEY, project_id INTEGER, match TEXT NOT NULL, agent TEXT, model TEXT, note TEXT, created_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL, content TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS schedules (
+  id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL, title TEXT NOT NULL, prompt TEXT NOT NULL, done_when TEXT, cron TEXT NOT NULL,
+  tz TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, agent TEXT, model TEXT, next_run_at REAL, last_run_at REAL, last_task_id INTEGER,
+  runs INTEGER NOT NULL DEFAULT 0, skipped INTEGER NOT NULL DEFAULT 0, created_by TEXT NOT NULL DEFAULT 'owner', created_at REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_run_at);
 `;
 
 const EFFECTIVE_SQL = `(t.priority + (p.priority - 50) / 2 +
@@ -2452,6 +2480,120 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
   // A global route shows in every project's view.
   const pushRoutes = () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); };
+
+  // ---- schedules (cron.mjs): a project's recurring tasks. Every tick queues a work task (source 'schedule') for each
+  // enabled schedule that is due, unless the task from its last run hasn't finished: that run is skipped, never piled
+  // up. Runs missed while the head was down fire once at boot. Times are wall-clock in the schedule's tz (the owner's
+  // browser zone, kv owner_tz). The owner edits them in the Schedules sheet; the planner from chat (payload.schedules).
+  const ownerTz = () => validTz(kvGet('owner_tz')) || validTz(process.env.TZ) || 'UTC';
+  const noteOwnerTz = (tz) => { if (validTz(tz) && tz !== kvGet('owner_tz')) kvSet('owner_tz', tz); };
+  const listSchedules = (projectId) => qa('SELECT * FROM schedules WHERE project_id=:p ORDER BY id', { p: projectId });
+  const getSchedule = (id) => q1('SELECT * FROM schedules WHERE id=:id', { id });
+  const nextAt = (s, after = now()) => { const n = nextRun(s.cron, after * 1000, s.tz); return n == null ? null : n / 1000; };
+  const UNFINISHED = (t) => t && !['done', 'failed', 'cancelled'].includes(t.status);
+  function scheduleView(s) {
+    const last = s.last_task_id ? getTask(s.last_task_id) : null;
+    return { id: s.id, title: s.title, prompt: s.prompt, done_when: s.done_when, cron: s.cron, tz: s.tz, when: describeCron(s.cron),
+      enabled: !!s.enabled, agent: s.agent, model: s.model, next_run_at: s.enabled ? s.next_run_at : null, last_run_at: s.last_run_at,
+      runs: s.runs, skipped: s.skipped, last_task: last ? { id: last.id, status: last.status } : null, created_by: s.created_by };
+  }
+  // fields: {title, prompt, cron, tz, done_when, enabled, agent, model} (an edit changes only those given) → {schedule} | {error, status}.
+  function saveSchedule(projectId, fields = {}, id = null, by = 'owner') {
+    const p = getProject(Number(projectId));
+    if (!p) return { error: 'No such project', status: 404 };
+    const cur = id ? q1('SELECT * FROM schedules WHERE id=:id AND project_id=:p', { id, p: p.id }) : null;
+    if (id && !cur) return { error: 'No such schedule', status: 404 };
+    const has = (k) => fields[k] !== undefined;
+    const v = {
+      title: has('title') ? String(fields.title ?? '').trim().slice(0, 200) : cur?.title,
+      prompt: has('prompt') ? String(fields.prompt ?? '').trim().slice(0, 20000) : cur?.prompt,
+      done_when: has('done_when') ? String(fields.done_when ?? '').trim().slice(0, 2000) || null : cur?.done_when ?? null,
+      cron: has('cron') ? String(fields.cron ?? '').trim().replace(/\s+/g, ' ') : cur?.cron,
+      tz: has('tz') ? validTz(fields.tz) : cur?.tz || ownerTz(),
+      enabled: has('enabled') ? (fields.enabled ? 1 : 0) : cur?.enabled ?? 1,
+      agent: has('agent') ? normalizeAgent(fields.agent) : cur?.agent ?? null,
+      model: has('model') ? String(fields.model ?? '').trim().slice(0, 100) || null : cur?.model ?? null,
+    };
+    if (!v.title) return { error: 'Give the schedule a title', status: 400 };
+    if (!v.prompt) return { error: 'Say what the task should do', status: 400 };
+    if (!v.tz) return { error: `Unknown time zone: ${fields.tz}`, status: 400 };
+    try { parseCron(v.cron); } catch (e) { return { error: e.message, status: 400 }; }
+    if (v.model && foreignModel(v.agent, v.model)) v.model = null;
+    v.next_run_at = v.enabled ? nextAt(v) : null;
+    if (v.enabled && v.next_run_at == null) return { error: `${v.cron} never comes round: check the day and month`, status: 400 };
+    if (cur) run(`UPDATE schedules SET ${Object.keys(v).map((k) => `${k}=:${k}`).join(', ')} WHERE id=:id`, { ...v, id: cur.id });
+    else id = Number(run(`INSERT INTO schedules(project_id,${Object.keys(v).join(',')},created_by,created_at) VALUES(:p,${Object.keys(v).map((k) => `:${k}`).join(',')},:by,:c)`,
+      { ...v, p: p.id, by, c: now() }).lastInsertRowid);
+    logEvent(`schedule #${id} ${cur ? 'updated' : 'added'}${by === 'owner' ? '' : ` by the ${by}`}: '${v.title}' (${describeCron(v.cron)}, ${v.tz}${v.enabled ? '' : ', off'})`, { projectId: p.id });
+    pushProject(p.id);
+    return { ok: true, schedule: scheduleView(getSchedule(id)) };
+  }
+  const editSchedule = (id, fields) => { const s = getSchedule(id); return s ? saveSchedule(s.project_id, fields, id) : { error: 'No such schedule', status: 404 }; };
+  function deleteSchedule(id) {
+    const s = getSchedule(id);
+    if (!s) return { error: 'No such schedule', status: 404 };
+    run('DELETE FROM schedules WHERE id=:id', { id });
+    logEvent(`schedule #${id} removed: '${s.title}'`, { projectId: s.project_id });
+    pushProject(s.project_id);
+    return { ok: true };
+  }
+  const schedulePrompt = (s, prev) => `${s.prompt}\n\n(This is a recurring task from a schedule: ${describeCron(s.cron)}, ${s.tz}. It runs again on its own, `
+    + `so do this run's work only and don't set up your own timer or cron job.${prev ? ` The last run was task #${prev.id} (${prev.status}).` : ''})`;
+  // Queues the schedule's task now (manual: the owner's Run now, which keeps the next due time).
+  function fireSchedule(s, manual = false) {
+    const p = getProject(s.project_id), t = now();
+    if (!p) { run('DELETE FROM schedules WHERE id=:id', { id: s.id }); return { error: 'No such project', status: 404 }; }
+    const prev = s.last_task_id ? getTask(s.last_task_id) : null;
+    const next = manual ? s.next_run_at : nextAt(s, t);
+    if (UNFINISHED(prev)) {
+      if (manual) return { error: `Task #${prev.id} from its last run hasn't finished yet`, status: 409 };
+      run('UPDATE schedules SET next_run_at=:n, skipped=skipped+1 WHERE id=:id', { n: next, id: s.id });
+      logEvent(`schedule #${s.id} '${s.title}' skipped a run: #${prev.id} from its last run is still ${prev.status}`, { projectId: p.id, taskId: prev.id });
+      pushProject(p.id);
+      return { skipped: true };
+    }
+    const id = addTask(p.id, { title: s.title, prompt: schedulePrompt(s, prev), kind: 'work', source: 'schedule', doneWhen: s.done_when, agent: s.agent, model: s.model,
+      origin: 'chat', fallbacks: parseFallbacks(p.convo_id ? convoFallbacks(p.convo_id) : null) });
+    writeTaskSpec(p.path, getTask(id));
+    run('UPDATE schedules SET last_run_at=:t, last_task_id=:task, runs=runs+1, next_run_at=:n WHERE id=:id', { t, task: id, n: next, id: s.id });
+    logEvent(`schedule #${s.id} '${s.title}' queued #${id}${manual ? ' (Run now)' : ''}`, { projectId: p.id, taskId: id });
+    pushProject(p.id);
+    return { ok: true, task: id };
+  }
+  function runScheduleNow(id) {
+    const s = getSchedule(id);
+    if (!s) return { error: 'No such schedule', status: 404 };
+    const r = fireSchedule(s, true);
+    if (r.ok) setTimeout(tick, 100);
+    return r;
+  }
+  function fireSchedules() {
+    const due = qa('SELECT * FROM schedules WHERE enabled=1 AND next_run_at IS NOT NULL AND next_run_at<=:t ORDER BY next_run_at', { t: now() });
+    for (const s of due) {
+      try { fireSchedule(s); } catch (e) {
+        // A broken row must not refire every tick: push it to its next time and say why.
+        run('UPDATE schedules SET next_run_at=:n WHERE id=:id', { n: (() => { try { return nextAt(s); } catch { return null; } })(), id: s.id });
+        logEvent(`schedule #${s.id} '${s.title}' failed to queue: ${e.message}`, { level: 'warn', projectId: s.project_id });
+      }
+    }
+    return due.length;
+  }
+  // The planner's {title, prompt, cron, done_when?, agent?, model?} adds one (or updates the one with that title); {remove: id} deletes one.
+  function applySchedule(project, s) {
+    if (s.remove) {
+      const cur = q1('SELECT id FROM schedules WHERE id=:id AND project_id=:p', { id: s.remove, p: project.id });
+      return cur ? deleteSchedule(cur.id) : null;
+    }
+    const same = q1('SELECT id FROM schedules WHERE project_id=:p AND lower(title)=lower(:t)', { p: project.id, t: s.title });
+    const r = saveSchedule(project.id, s, same?.id ?? null, 'planner');
+    if (r.error) logEvent(`planner schedule '${s.title}' not saved: ${r.error}`, { level: 'warn', projectId: project.id });
+    return r;
+  }
+  function schedulesText(projectId) {
+    const rows = listSchedules(projectId).map((s) => `  #${s.id} '${s.title}': ${describeCron(s.cron)} (${s.cron}, ${s.tz})${s.enabled ? '' : ' [off]'}`);
+    return `Owner's time zone: ${ownerTz()} (now ${new Date().toLocaleString('en-GB', { timeZone: ownerTz(), dateStyle: 'medium', timeStyle: 'short' })})\n`
+      + `Schedules (recurring tasks):\n${rows.join('\n') || '  (none)'}`;
+  }
   // A non-Claude auth_error marks just that agent unusable for 10 min (kv agent_auth_failed:<id>), and a non-Claude
   // usage limit until its reset (kv blocked_until:<id>), so its routes fall back to Claude.
   const kvTime = (k) => parseFloat(kvGet(k, '0')) || 0;
@@ -2721,6 +2863,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     }
     for (const d of payload.dropped || []) logEvent(`${source} ${d}`, { level: 'warn', projectId: project.id });
     for (const r of payload.routes || []) applyRoute(project, r);
+    // Only the owner's chat makes schedules: reflection never adds recurring work on its own.
+    if (source === 'planner') payload.scheduled = (payload.schedules || []).map((s) => applySchedule(project, s));
+    else if (payload.schedules?.length) logEvent(`${source} schedules ignored: only the chat planner can add them`, { level: 'warn', projectId: project.id });
     // Review checkpoints are owner-only (insertCheckpoint); extractTasks already dropped any the model emitted.
     const ids = [], batch = [];
     for (const t of payload.tasks) {
@@ -2898,7 +3043,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   const setPlannerSession = (project, agent, id) => (agent === 'claude' ? updateProject(project.id, { chat_session_id: id }) : kvSet(`planner_session:${project.id}:${agent}`, id || ''));
 
   async function plannerRun(project, text, convoId, signal, fromChat = false, { agent = 'claude', model = null, origin = { origin: 'chat' } } = {}) {
-    const prompt = plannerTurnPrompt(project, listTasks(project.id, 25), text, `${ENVIRONMENT}\n${routesText(project.id)}\nOwner fallback list (used when a model hits its limit): ${JSON.stringify(origin.fallbacks || [])}`, parallelSettings().rapidDevelopment ? rapidQueue(project) : null);
+    const prompt = plannerTurnPrompt(project, listTasks(project.id, 25), text, `${ENVIRONMENT}\n${routesText(project.id)}\n${schedulesText(project.id)}\nOwner fallback list (used when a model hits its limit): ${JSON.stringify(origin.fallbacks || [])}`, parallelSettings().rapidDevelopment ? rapidQueue(project) : null);
     // Claude streams SDK messages into the chat, so a 'plan' route can only change the Claude planner's model.
     // Other agents show their tool calls as they happen and the reply at the end.
     const route = resolveRoute({ kind: 'plan', title: '' }, project, listRoutes(project.id), () => true);
@@ -2937,6 +3082,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const [, payload] = extractTasks(res.text);
     const ids = queuePayload(getProject(project.id), payload, 'planner', origin);
     if (convoId && ids.length) emitChat(convoId, { t: 'tasks', ids, source: 'planner' });
+    for (const [i, r] of (payload?.scheduled || []).entries()) {
+      const s = payload.schedules[i];
+      if (convoId && (r?.ok || r?.error)) emitChat(convoId, { t: 'notice', text: r.schedule ? `Scheduled: ${r.schedule.title} · ${r.schedule.when}. Edit it under Schedules in the sidebar.`
+        : r.ok ? `Schedule #${s.remove} removed` : `Schedule '${s.title || `#${s.remove}`}' not saved: ${r.error}` });
+    }
     return { res, ids };
   }
 
@@ -2965,6 +3115,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       if (!cluster && adoptable.length) for (const id of adoptable.splice(0)) requeueIfRunning(id);
       armCheckpoints();
       cancelReflections();
+      fireSchedules();
       if (kvGet('paused_all') === '1') return setStall('everything is paused');
       if (!onSubscription()) {
         if (kvGet('announced_auth') !== '1') { kvSet('announced_auth', 1); logEvent('waiting: Claude Code is not signed in with the subscription', { level: 'warn' }); }
@@ -4499,6 +4650,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       // What its work tasks (and so reflection-queued ones) start on: the "primary" the reflection fallbacks back up.
       work_route: (({ agent, model }) => ({ agent, model: model || delegator.defaultModel(agent) }))(intendedRoute({ kind: 'work', title: '', prompt: '' }, p)),
       routes: listRoutes(p.id).map((r) => ({ id: r.id, scope: r.project_id == null ? 'global' : 'project', match: r.match, agent: r.agent, model: r.model, note: r.note })),
+      schedules: listSchedules(p.id).map(scheduleView),
     };
   }
   function stateView() {
@@ -4767,6 +4919,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     gitRepo: (pid) => getProject(Number(pid))?.path || null,
     // An integrator there pushes agent-orch/integrate-<id> (never the branch it merges); any other task its own task branch.
     pushableTasks: (nodeId, pid) => [...running].filter(([, r]) => r.node === nodeId && r.projectId === Number(pid)).map(([id]) => (getTask(id)?.integrates ? integrateBranch(id) : id)),
+    listSchedules: (pid) => listSchedules(Number(pid)).map(scheduleView),
+    // Every project (to pick from) and every schedule, for the Schedules sheet.
+    // Projects without a chat (old ones, the Browser tab's) only show while they have one.
+    allSchedules: () => ({ projects: qa(`SELECT id, name, path, convo_id FROM projects p WHERE convo_id IS NOT NULL OR EXISTS(SELECT 1 FROM schedules s WHERE s.project_id=p.id)
+      ORDER BY position IS NULL, position, priority DESC, id`),
+      schedules: qa('SELECT * FROM schedules ORDER BY project_id, id').map((s) => ({ ...scheduleView(s), project_id: s.project_id })), tz: ownerTz() }), saveSchedule, editSchedule, deleteSchedule, runScheduleNow, noteOwnerTz, ownerTz,
+    fireSchedules, // tests: queue every due schedule now, as a tick would
     gateSettings, setGateSettings, decideApproval, taskActions, pendingApprovals: () => approvals.pending().map(({ args, ...a }) => a),
     scheduleReflections, // tests: run a reflection scheduling step without starting agents
     claimNext, // tests: claims the next task and its node, as one tick step would (without starting it)

@@ -847,6 +847,7 @@ const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
   refreshUsage: () => refreshUsage().catch((e) => console.error('[usage] refresh failed', e)),
   onCommit: (dir) => syncGit(dir).catch((e) => console.error('[github] sync failed', dir, e)),
   projectReady: (dir) => gh.status().linked && !!convos.find((c) => c.cwd === dir)?.repo,
+  projectArchived: (dir) => convos.some((c) => c.cwd === dir && c.archived), // no reflection: see PATCH /api/convos/:id
   disabled: NO_ORCH,
   reap: () => resources.reap({ reason: 'low memory' }),
 });
@@ -1036,7 +1037,7 @@ gh.refresh().then((s) => console.log(`[github] ${s.linked ? `linked as ${s.login
 const planQueue = new Map(); // convo id -> [text]
 async function orchestratorTurn(convo, text, files = []) {
   emit(convo.id, userEvent(text, files));
-  text += attachmentNote(files); // the planner (and the tasks it writes) use the files by path
+  text = takeMergedRecap(convo) + text + attachmentNote(files); // the planner (and the tasks it writes) use the files by path
   if (planning.has(convo.id)) {
     if (!planQueue.has(convo.id)) planQueue.set(convo.id, []);
     planQueue.get(convo.id).push(text);
@@ -1250,7 +1251,7 @@ const takeQueued = (cid) => {
 };
 async function agentChatTurn(convo, text, files = []) {
   emit(convo.id, userEvent(text, files));
-  const msg = { text: text + attachmentNote(files), images: files.filter((f) => f.image).map((f) => f.path) };
+  const msg = { text: takeMergedRecap(convo) + text + attachmentNote(files), images: files.filter((f) => f.image).map((f) => f.path) };
   if (agentTurns.has(convo.id)) {
     if (!agentQueue.has(convo.id)) agentQueue.set(convo.id, []);
     agentQueue.get(convo.id).push(msg);
@@ -1339,14 +1340,15 @@ async function sendUserMessage(convo, text, files = []) {
   if (convo.mode === 'orchestrator') return orchestratorTurn(convo, text, files);
   // Orchestrator-style context control: a session that has grown past the limit is retired, and the next
   // message starts a fresh one carrying the project memory (.agent-orch/) and a recap of the recent chat.
-  let prompt = text + attachmentNote(files);
+  const merged = takeMergedRecap(convo);
+  let prompt = merged + text + attachmentNote(files);
   if (convo.sessionId && (convo.ctxTokens || 0) > CHAT_CONTEXT_LIMIT) {
     retireRuntime(runtimes, convo.id);
     const recap = chatRecap(convo.id);
     convo.sessionId = null;
     convo.ctxTokens = 0;
     emit(convo.id, { t: 'notice', text: 'This chat was getting long, so it continues in a fresh session with the project memory and a recap of the recent conversation. That keeps replies fast and uses less of your plan.' });
-    prompt = `[This conversation continues from an earlier session in this project that grew too long. Recent conversation:]\n${recap}\n\n[New message]\n${text}${attachmentNote(files)}`;
+    prompt = `[This conversation continues from an earlier session in this project that grew too long. Recent conversation:]\n${recap}\n\n${merged || '[New message]\n'}${text}${attachmentNote(files)}`;
   }
   // A persona or MCP servers changed since the session started apply from the next message: a fresh runtime, same session.
   const live = runtimes.get(convo.id);
@@ -1376,6 +1378,54 @@ function chatRecap(cid, budget = 6000) {
     used += line.length;
   }
   return lines.join('\n') || '(no earlier messages)';
+}
+function sendHistory(ws, convo) {
+  const rt = runtimes.get(convo.id);
+  send(ws, {
+    t: 'history', cid: convo.id, events: readLog(convo.id), busy: chatBusy(convo),
+    pending: rt ? [...rt.pending.values()].map((x) => x.req) : [],
+    mode: convo.mode, agent: chatAgent(convo), model: convo.model, cwd: convo.cwd,
+    orch: orch.convoSnapshot(convo),
+  });
+}
+const chatBusy = (c) => !!runtimes.get(c.id)?.busy || planning.has(c.id) || agentTurns.has(c.id);
+// Drops a chat (the caller saves and broadcasts): its session, queues and log go; the project's next oldest chat becomes its
+// main chat; with none left, its background work pauses (the folder and tasks are kept) and its live preview address is freed.
+function removeConvo(c) {
+  retireRuntime(runtimes, c.id);
+  agentQueue.delete(c.id);
+  agentTurns.get(c.id)?.abort();
+  planQueue.delete(c.id);
+  orch.abortPlan(c.id);
+  const heir = convos.filter((x) => x.id !== c.id && x.cwd === c.cwd).sort((a, b) => a.createdAt - b.createdAt)[0];
+  orch.detachConvo(c.id, heir?.id || null);
+  if (!heir) previews.remove(c.cwd).catch((e) => console.error('[previews] remove failed', c.cwd, e));
+  convos = convos.filter((x) => x.id !== c.id);
+  fs.rmSync(logPath(c.id), { force: true });
+}
+// Merges chat `from` into `into` (its project's main chat; the caller saves and broadcasts). Its messages go into `into`'s
+// log as one block where they began, between two notices, so both conversations stay readable; `into`'s agent session
+// never saw them, so its next message carries a recap (takeMergedRecap). Then `from` is removed.
+function mergeChat(from, into) {
+  const theirs = readLog(from.id);
+  if (theirs.length) {
+    const mine = readLog(into.id), start = theirs[0].ts ?? from.createdAt, at = mine.findIndex((e) => (e.ts ?? 0) > start);
+    mine.splice(at < 0 ? mine.length : at, 0, { t: 'notice', text: `Merged in from the chat "${from.title}"`, ts: start },
+      ...theirs, { t: 'notice', text: `End of "${from.title}"`, ts: theirs.at(-1).ts ?? start });
+    fs.writeFileSync(logPath(into.id) + '.tmp', mine.map((e) => JSON.stringify(e) + '\n').join(''));
+    fs.renameSync(logPath(into.id) + '.tmp', logPath(into.id));
+    (into.mergedRecaps ??= []).push({ title: from.title, recap: chatRecap(from.id) });
+  }
+  into.updatedAt = Math.max(into.updatedAt, from.updatedAt);
+  removeConvo(from);
+}
+// What the agent is told, once, before the next message in a chat that others were merged into.
+function takeMergedRecap(convo) {
+  const list = convo.mergedRecaps;
+  if (!list?.length) return '';
+  delete convo.mergedRecaps;
+  saveConvos();
+  return list.map((m) => `[The owner merged another chat of this project, "${m.title}", into this one. Its conversation:]\n${m.recap}\n\n`).join('') + '[New message]\n';
 }
 // A resumed non-Claude session got its system text (and persona) only when it started: a persona picked since is
 // told to it with the next message.
@@ -1710,6 +1760,7 @@ async function handleRequest(req, res) {
       const existing = convos.find((c) => c.cwd === cwd);
       if (existing) { // another chat in an existing project: same folder and repo, named from its first message
         if (await refreshRepo(existing)) shareRepoState(existing);
+        for (const x of convos) if (x.cwd === cwd) delete x.archived; // starting one brings an archived project back
         const title = String(body.title || '').replace(/\s+/g, ' ').trim().slice(0, 60) || 'New chat';
         const c = { id: crypto.randomUUID(), title, renamed: true, cwd, mode: MODES.includes(body.mode) ? body.mode : 'bypassPermissions', model: '',
           fullAccess: true, createdAt: Date.now(), updatedAt: Date.now(), ...(existing.repo && { repo: existing.repo }), ...(existing.git && { git: existing.git }) };
@@ -1773,30 +1824,38 @@ async function handleRequest(req, res) {
       return text == null ? json(res, 404, { error: 'This project has no live preview' }) : json(res, 200, { text });
     }
   }
+  // POST …/merge: a project's other chat goes into its main chat (on the main chat: every other chat of the folder).
+  const mg = p.match(/^\/api\/convos\/([\w-]+)\/merge$/);
+  if (mg && req.method === 'POST') {
+    const c = findConvo(mg[1]);
+    if (!c) return json(res, 404, { error: 'No such chat' });
+    const into = findConvo(mainChatId(c.cwd));
+    const from = into === c ? convos.filter((x) => x.cwd === c.cwd && x !== c) : [c];
+    if (!from.length) return json(res, 400, { error: 'This project has no other chats to merge' });
+    const busy = [into, ...from].find(chatBusy);
+    if (busy) return json(res, 409, { error: `"${busy.title}" is still replying: try again when it has finished` });
+    for (const x of from.sort((a, b) => a.createdAt - b.createdAt)) mergeChat(x, into);
+    saveConvos();
+    broadcastConvos();
+    for (const ws of subscribers.get(into.id) || []) sendHistory(ws, into);
+    return json(res, 200, { ok: true, into: into.id, merged: from.length });
+  }
   const m = p.match(/^\/api\/convos\/([\w-]+)$/);
   if (m) {
     const c = findConvo(m[1]);
     if (!c) return json(res, 404, { error: 'No such chat' });
     if (req.method === 'DELETE') {
-      retireRuntime(runtimes, c.id);
-      agentQueue.delete(c.id);
-      agentTurns.get(c.id)?.abort();
-      planQueue.delete(c.id);
-      orch.abortPlan(c.id);
-      // The project's next oldest chat becomes its main chat; with none left, its background work pauses (the folder and
-      // tasks are kept) and its live preview address is freed.
-      const heir = convos.filter((x) => x.id !== c.id && x.cwd === c.cwd).sort((a, b) => a.createdAt - b.createdAt)[0];
-      orch.detachConvo(c.id, heir?.id || null);
-      if (!heir) previews.remove(c.cwd).catch((e) => console.error('[previews] remove failed', c.cwd, e));
-      convos = convos.filter((x) => x.id !== c.id);
+      removeConvo(c);
       saveConvos();
-      fs.rmSync(logPath(c.id), { force: true });
       broadcastConvos();
       return json(res, 200, { ok: true });
     }
     if (req.method === 'PATCH') {
       const body = await readBody(req);
       if (typeof body.title === 'string' && body.title.trim()) { c.title = body.title.trim().slice(0, 80); c.renamed = true; }
+      // archived (true/false): the whole project folder, all its chats. An archived project sits folded away at the
+      // bottom of the sidebar and gets no reflection; its queued tasks and schedules still run.
+      if (typeof body.archived === 'boolean') for (const x of convos) if (x.cwd === c.cwd) { if (body.archived) x.archived = Date.now(); else delete x.archived; }
       saveConvos();
       broadcastConvos();
       return json(res, 200, c);
@@ -2466,13 +2525,7 @@ wss.on('connection', (ws, req) => {
       if (!convo) return;
       if (!subscribers.has(convo.id)) subscribers.set(convo.id, new Set());
       subscribers.get(convo.id).add(ws);
-      const rt = runtimes.get(convo.id);
-      send(ws, {
-        t: 'history', cid: convo.id, events: readLog(convo.id), busy: !!rt?.busy || planning.has(convo.id) || agentTurns.has(convo.id),
-        pending: rt ? [...rt.pending.values()].map((x) => x.req) : [],
-        mode: convo.mode, agent: chatAgent(convo), model: convo.model, cwd: convo.cwd,
-        orch: orch.convoSnapshot(convo),
-      });
+      sendHistory(ws, convo);
       return;
     }
     if (msg.t === 'owatch') {

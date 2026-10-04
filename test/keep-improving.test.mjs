@@ -34,7 +34,7 @@ async function scenario(body, { live = false } = {}) {
       })();
       const o = createOrchestrator({ disabled: ${!live}, dataDir, claudeEnv: {}, query, config: {pollMs:50, parallelTasks:2,agentSlots:4,meminfo:${JSON.stringify(new URL('./fixtures/meminfo-ample', import.meta.url).pathname)}},
         getLimits: () => [], usageLog: { current: () => [], tokens(){}, windows(){}, limitCleared(){} }, onSubscription: () => true,
-        broadcast() {}, emitChat() {}, convoExists: () => false });
+        broadcast() {}, emitChat() {}, convoExists: () => false, projectArchived: () => !!globalThis.archived });
       o.attachCluster({ listNodes: () => [{ id: 'worker', local: false, status: 'online', connected: true, enabled: true,
         maxSlots: 14, inventory: { cores: 14, agents: [] }, resources: { memAvailable: 40 * 2 ** 30, at: Date.now() } }], onMessage() {}, version: () => 1 });
       const db = new DatabaseSync(dataDir + '/orchestrator/agent-orch.db');
@@ -124,4 +124,16 @@ test('live: a queued reflection of a project that is off never runs; a running o
   assert.match(r.done, /Keep improving was switched off while this reflection ran: its 2 proposed task\(s\) were discarded, not queued/);
   assert.equal(r.work, 0);
   assert.equal(r.later, 0);
+});
+
+test('an archived project gets no reflection, even with Keep improving on; unarchived it does', async () => {
+  const r = await scenario(`
+    o.setParallelSettings({rapidDevelopment:false});
+    db.prepare('UPDATE projects SET perpetual=1').run();
+    globalThis.archived = true;
+    const archived = o.scheduleReflections(), whileArchived = reflections().length;
+    globalThis.archived = false;
+    return {archived, whileArchived, after: o.scheduleReflections(), created: reflections().length};`);
+  assert.deepEqual([r.archived, r.whileArchived], [false, 0]);
+  assert.deepEqual([r.after, r.created], [true, 1]);
 });

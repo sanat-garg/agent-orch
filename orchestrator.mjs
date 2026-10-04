@@ -1054,7 +1054,7 @@ function takeLock(file) {
 }
 
 export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLimits, onSubscription, emitChat, broadcast, convoExists, refreshUsage,
-  convoFallbacks = () => null, convoEffort = () => null, convoPersona = () => null, onCommit = () => {}, projectReady = () => true, disabled = false, usageLog = createUsageLog(dataDir),
+  convoFallbacks = () => null, convoEffort = () => null, convoPersona = () => null, onCommit = () => {}, projectReady = () => true, projectArchived = () => false, disabled = false, usageLog = createUsageLog(dataDir),
   notify = () => {}, codexSnapshot = () => codexLatestSnapshot(), reap = null, config = {} }) {
   Object.assign(CFG, config); // tests tune slots (concurrency, parallelTasks, agentSlots, meminfo, hardware)
   let hw = readHardware(); // the controller's hardware as last detected (detectHardware)
@@ -3319,7 +3319,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const t = now(), rapid = parallelSettings().rapidDevelopment ? rapidQueue() : null;
     for (const p of qa("SELECT * FROM projects WHERE status='active' AND perpetual=1")) {
       if (planningProjects.has(p.id)) continue; // the owner is mid-conversation with the planner
-      if (!projectReady(p.path)) continue;
+      if (!projectReady(p.path) || projectArchived(p.path)) continue; // an archived project is finished: no reflection
       if (rapid) {
         if (!rapid.requested || rapidLimitReason(p)) continue;
         // Persist the spacing across restarts, including empty/failed reflections and manual direction edits.

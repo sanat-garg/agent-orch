@@ -511,7 +511,7 @@ function folderName(cwd) {
 
 // Chats whose folder has an orchestrator project sit on top in the owner's drag order: the top project is the highest
 // priority and the scheduler follows the list (POST /api/orch/projects/reorder). Plain chats follow, newest first.
-const rankedConvos = () => state.convos.filter((c) => c.project)
+const rankedConvos = () => state.convos.filter((c) => c.project && !c.archived)
   .sort((a, b) => (a.project.position ?? Infinity) - (b.project.position ?? Infinity) || a.project.id - b.project.id || b.updatedAt - a.updatedAt);
 const rankedProjectIds = (convos = rankedConvos()) => [...new Set(convos.map((c) => c.project.id))];
 // A project folder can have several chats: its main chat (mainId === id) holds the project's place in the list and
@@ -613,13 +613,32 @@ function renderConvoList() {
     for (const c of ranked) { nav.append(convoItem(c, true)); for (const s of subChats(c)) nav.append(convoItem(s, false, true)); }
   }
   const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
-  const sorted = state.convos.filter((c) => !c.project && !isSubChat(c)).map((c) => [c, familyUpdated(c)]).sort((a, b) => b[1] - a[1]);
+  const sorted = state.convos.filter((c) => !c.project && !c.archived && !isSubChat(c)).map((c) => [c, familyUpdated(c)]).sort((a, b) => b[1] - a[1]);
   let lastGroup = '';
   for (const [c, at] of sorted) {
     const group = at >= dayStart ? 'Today' : at >= dayStart - 6 * 864e5 ? 'This week' : 'Older';
     if (group !== lastGroup) { nav.append(el('div', 'group-label', group)); lastGroup = group; }
     nav.append(convoItem(c, false));
     for (const s of subChats(c)) nav.append(convoItem(s, false, true));
+  }
+  // Archived projects (finished ones; the whole folder, all its chats): folded into one row at the bottom, opened while
+  // the open chat is one of them.
+  const archived = state.convos.filter((c) => c.archived && !isSubChat(c)).sort((a, b) => familyUpdated(b) - familyUpdated(a));
+  if (archived.length) {
+    const open = store.get('cw.archivedOpen') === '1' || !!currentConvo()?.archived;
+    const t = el('button', 'group-label arch-toggle');
+    t.type = 'button';
+    t.setAttribute('aria-expanded', String(open));
+    t.append(el('span', '', `Archived · ${archived.length}`), el('span', 'caret', '›'));
+    t.onclick = () => {
+      store.set('cw.archivedOpen', open ? '0' : '1');
+      renderConvoList();
+      const nt = nav.querySelector('.arch-toggle');
+      nt?.focus({ preventScroll: true });
+      if (!open) nt?.scrollIntoView({ block: 'start', behavior: 'smooth' }); // opened: bring its projects into view
+    };
+    nav.append(t);
+    if (open) for (const c of archived) { nav.append(convoItem(c, false)); for (const s of subChats(c)) nav.append(convoItem(s, false, true)); }
   }
   if (focused) nav.querySelector(`.convo[data-cid="${CSS.escape(focused)}"]`)?.focus();
 }
@@ -796,7 +815,27 @@ function convoMenu(c, anchor) {
   const sub = isSubChat(c), others = state.convos.filter((x) => x.cwd === c.cwd && x.id !== c.id).length;
   const fresh = el('button', '', 'New chat in this project');
   const rename = el('button', '', 'Rename');
+  const merge = el('button', '', sub ? 'Merge into the main chat' : `Merge ${others === 1 ? 'its other chat' : `its ${others} other chats`} into this one`);
+  const archive = el('button', '', c.archived ? 'Unarchive project' : 'Archive project');
   const del = el('button', 'danger', 'Delete');
+  merge.onclick = async () => {
+    m.remove();
+    const main = sub ? state.convos.find((x) => x.id === c.mainId) : c;
+    if (!confirm(sub ? `Merge "${c.title}" into "${main?.title}"? Its messages move into the main chat, where they happened in time, and this chat goes.`
+      : `Merge ${others === 1 ? 'the other chat' : `the ${others} other chats`} of "${c.title}" into it? Their messages move into this chat, where they happened in time, and those chats go.`)) return;
+    try {
+      const r = await api(`/api/convos/${c.id}/merge`, 'POST');
+      toast(`Merged ${r.merged === 1 ? 'a chat' : `${r.merged} chats`} into ${main?.title || 'the main chat'}`, { kind: 'success' });
+      if (state.cid !== r.into) { openConvo(r.into); closeSidebar(); setView('chat'); }
+    } catch (e) { toast(e.message, { kind: 'error' }); }
+  };
+  archive.onclick = async () => {
+    m.remove();
+    try {
+      await api(`/api/convos/${c.id}`, 'PATCH', { archived: !c.archived });
+      toast(c.archived ? `${folderName(c.cwd)} is back in the list` : `${folderName(c.cwd)} archived: it's under Archived at the bottom of the list, with no reflection`, { kind: 'success' });
+    } catch (e) { toast(e.message, { kind: 'error' }); }
+  };
   fresh.onclick = () => { m.remove(); closeSidebar(); setView('chat'); applyDraft({ type: 'folder', path: c.cwd }); };
   rename.onclick = async () => {
     m.remove();
@@ -812,7 +851,7 @@ function convoMenu(c, anchor) {
     await api(`/api/convos/${c.id}`, 'DELETE');
     if (state.cid === c.id) openConvo(null);
   };
-  m.append(fresh, rename, del);
+  m.append(fresh, rename, ...(others ? [merge] : []), archive, del);
   document.body.append(m);
   const r = anchor.getBoundingClientRect();
   m.style.top = `${Math.min(r.bottom + 4, innerHeight - 100)}px`;
@@ -2996,13 +3035,15 @@ $('pickerModal').addEventListener('keydown', (e) => {
 }, true);
 
 // Quick picks under "What should we build?"
-async function renderRecentProjects() {
+// cached: redraw from the last /api/projects answer (the chat list changed, e.g. a project was archived).
+async function renderRecentProjects(cached = false) {
   const box = document.querySelector('.recent-projects');
   if (!box) return;
   updateFolderChip();
-  const projects = (await loadProjects()).slice(0, 5);
-  if (!projects.length || !document.body.contains(box)) return;
+  const projects = (cached && pk.projects ? pk.projects : await loadProjects()).filter((p) => !state.convos.some((c) => c.cwd === p.path && c.archived)).slice(0, 5);
+  if (!document.body.contains(box)) return;
   box.textContent = '';
+  if (!projects.length) return;
   box.append(el('span', 'lbl', 'or continue a recent project'));
   for (const p of projects) {
     const b = el('button');
@@ -3361,8 +3402,13 @@ function onServer(msg) {
   if (msg.t === 'convos') {
     const drChat = O.detail?.project?.convo_id, effortOf = () => state.convos.find((c) => c.id === drChat)?.effort ?? null;
     const drEffort = drChat ? effortOf() : null;
+    const was = state.convos.find((c) => c.id === state.cid);
     state.convos = msg.convos;
-    if (state.cid && !state.convos.find((c) => c.id === state.cid)) openConvo(null);
+    renderRecentProjects(true); // the new-chat screen's "continue a recent project" leaves archived ones out
+    if (state.cid && !state.convos.find((c) => c.id === state.cid)) {
+      const main = was?.mainId && state.convos.find((c) => c.id === was.mainId); // a merged (or deleted) extra chat: its main chat
+      openConvo(main ? main.id : null);
+    }
     renderConvoList();
     updateFolderChip();
     updateHeader();

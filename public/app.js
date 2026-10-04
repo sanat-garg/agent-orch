@@ -612,12 +612,10 @@ function renderConvoList() {
     nav.append(label);
     for (const c of ranked) { nav.append(convoItem(c, true)); for (const s of subChats(c)) nav.append(convoItem(s, false, true)); }
   }
-  const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
-  const sorted = state.convos.filter((c) => !c.project && !c.archived && !isSubChat(c)).map((c) => [c, familyUpdated(c)]).sort((a, b) => b[1] - a[1]);
-  let lastGroup = '';
-  for (const [c, at] of sorted) {
-    const group = at >= dayStart ? 'Today' : at >= dayStart - 6 * 864e5 ? 'This week' : 'Older';
-    if (group !== lastGroup) { nav.append(el('div', 'group-label', group)); lastGroup = group; }
+  // The rest, newest activity first, under one label (no date groups: owner, 2026-10-04).
+  const sorted = state.convos.filter((c) => !c.project && !c.archived && !isSubChat(c)).sort((a, b) => familyUpdated(b) - familyUpdated(a));
+  if (sorted.length) nav.append(el('div', 'group-label', ranked.length ? 'Other projects' : 'Projects'));
+  for (const c of sorted) {
     nav.append(convoItem(c, false));
     for (const s of subChats(c)) nav.append(convoItem(s, false, true));
   }
@@ -648,19 +646,18 @@ function convoItem(c, rankable, sub = false) {
   b.tabIndex = 0;
   b.setAttribute('role', 'button');
   b.dataset.cid = c.id;
-  b.title = tilde(c.cwd);
+  // One compact row: the title, then only what needs attention (busy / tasks running, not pushed). Mode and last
+  // activity go in the tooltip.
+  b.title = `${tilde(c.cwd)} · ${c.mode === 'orchestrator' ? 'Orchestrator' : 'Chat'} · ${relTime(c.updatedAt)}`;
   b.append(el('span', 'ct', c.title || folderName(c.cwd)));
   const meta = el('span', 'cm');
+  if (c.git?.error) meta.append('not pushed');
   if (c.busy) meta.append(el('span', 'busy-dot'));
   else if (c.project && runningProjectIds().has(c.project.id)) {
     const dot = el('span', 'run-dot'); dot.title = 'Tasks running'; dot.setAttribute('role', 'img'); dot.setAttribute('aria-label', 'Tasks running');
     meta.append(dot);
   }
-  const bits = [c.mode === 'orchestrator' ? 'Orchestrator' : 'Chat'];
-  if (c.git?.error) bits.push('not pushed');
-  bits.push(relTime(c.updatedAt));
-  meta.append(document.createTextNode(bits.join(' · ')));
-  b.append(meta);
+  if (meta.childNodes.length) b.append(meta);
   const more = el('button', 'more');
   more.setAttribute('aria-label', sub ? 'Chat options' : 'Project options');
   more.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16"><circle cx="5" cy="12" r="1.8" fill="currentColor"/><circle cx="12" cy="12" r="1.8" fill="currentColor"/><circle cx="19" cy="12" r="1.8" fill="currentColor"/></svg>';
@@ -6763,7 +6760,7 @@ $('usageRange').addEventListener('click', (e) => {
   renderUsageModal();
   loadUsageHistory();
 });
-// Short windows (app.css max-height) can fold the server and usage cards to one line each; remembered per browser.
+// The sidebar can fold the server and usage cards to one line each; remembered per browser.
 function msFold(folded) {
   $('miniStatsCard').classList.toggle('folded', folded);
   $('msFold').setAttribute('aria-expanded', String(!folded));

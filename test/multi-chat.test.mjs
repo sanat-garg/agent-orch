@@ -104,6 +104,11 @@ test('sidebar: other chats nest under the main chat; their menu starts another c
     assert.deepEqual(rows[at], ['c-old', false]);
     assert.deepEqual(rows.slice(at + 1).map(([, sub]) => sub), [true, true], 'both other chats right under it, indented');
     assert.equal(rows[at + 2][0], 'c-new', 'newest first');
+    const labels = await page.locator('#convoList .group-label').allTextContents();
+    assert.ok(!labels.some((l) => /today|this week|older/i.test(l)), `no date groups: ${labels}`);
+    const card = page.locator('.convo[data-cid="c-old"]');
+    assert.equal(await card.locator('.cm').count(), 0, 'an idle card is one row: no mode or age line');
+    assert.ok((await card.boundingBox()).height < 40, 'compact card');
     await page.locator('.convo[data-cid="c-new"] .more').click();
     await page.locator('.menu button', { hasText: 'New chat in this project' }).click();
     assert.equal(await page.evaluate(() => state.cid), null);

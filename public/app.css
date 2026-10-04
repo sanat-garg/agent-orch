@@ -143,21 +143,26 @@ code, pre, kbd { font-family: var(--mono); }
 @media (pointer: coarse) { .side-search input { height: 44px; font-size: 16px; } } /* iOS zooms into smaller inputs */
 .convo-list { position: relative; flex: 1; overflow-y: auto; margin: 12px -4px 8px; padding: 0 4px; }
 .group-label { font-size: 12px; font-weight: 600; color: var(--faint); padding: 12px 8px 4px; text-transform: uppercase; letter-spacing: .04em; }
+/* A sidebar card is one compact row (title, then a status dot or "not pushed"); search hits stack title, snippet and age. */
 .convo {
   position: relative;
-  display: flex; flex-direction: column;
-  width: 100%; padding: 8px 34px 8px 10px;
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: 6px 34px 6px 10px;
   border: 0; border-radius: 8px; background: transparent;
   text-align: left; cursor: pointer;
 }
+.convo.search-hit { flex-direction: column; align-items: stretch; gap: 0; padding-top: 8px; padding-bottom: 8px; }
+.convo.search-hit .ct { flex: none; }
 .convo:hover { background: var(--raised); }
-.convo.sub { margin-left: 14px; width: calc(100% - 14px); padding-top: 6px; padding-bottom: 6px; border-left: 2px solid var(--border); border-radius: 0 8px 8px 0; }
+.convo.sub { margin-left: 14px; width: calc(100% - 14px); padding-top: 4px; padding-bottom: 4px; border-left: 2px solid var(--border); border-radius: 0 8px 8px 0; }
 .convo.active { background: var(--panel); box-shadow: inset 0 0 0 1px var(--border); }
-.convo .ct { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 14px; }
+.convo .ct { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 14px; }
+.convo:not(.search-hit) .cm { flex: none; }
+@media (pointer: coarse) { .convo:not(.search-hit) { min-height: 44px; } } /* HIG touch target */
 .convo .cs { font-size: 12px; color: var(--muted); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .convo mark { background: color-mix(in srgb, var(--accent) 28%, transparent); color: inherit; border-radius: 2px; }
 .convo .cm { font-size: 12px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; gap: 6px; align-items: center; }
-.convo .busy-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+.convo .busy-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
 .convo .run-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--run); animation: pulse 1.2s ease-in-out infinite; }
 .convo .more {
   position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
@@ -1062,18 +1067,14 @@ label.mc-row { cursor: pointer; }
 .ms-refresh:hover, .ms-fold:hover { background: var(--raised); color: var(--text); }
 .ms-refresh:disabled { cursor: default; }
 .ms-refresh.spin svg { animation: spin .9s linear infinite; }
-/* Fold (short windows only): each card shrinks to its head line, the numbers moving into .ms-sum (app.js msFold). */
-.ms-fold { display: none; }
+/* Fold (any window size): each card shrinks to its head line, the numbers moving into .ms-sum (app.js msFold). */
 .ms-fold svg { transition: transform .2s ease; }
 .ms-sum { display: none; flex: none; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
-@media (max-height: 900px) {
-  .ms-fold { display: grid; }
-  .mini-stats.folded .ms-fold svg { transform: rotate(180deg); }
-  .mini-stats.folded :is(.ms-row, .ms-foot, #usMore, #usNote, .ms-age, .ms-open, #miniRole) { display: none; }
-  .mini-stats.folded .ms-sum { display: inline; }
-  .mini-stats.folded .ms-head { margin-bottom: 0; }
-  .mini-stats.folded .ms-usage .ms-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-}
+.mini-stats.folded .ms-fold svg { transform: rotate(180deg); }
+.mini-stats.folded :is(.ms-row, .ms-foot, #usMore, #usNote, .ms-age, .ms-open, #miniRole) { display: none; }
+.mini-stats.folded .ms-sum { display: inline; }
+.mini-stats.folded .ms-head { margin-bottom: 0; }
+.mini-stats.folded .ms-usage .ms-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (prefers-reduced-motion: reduce) { .ms-fold svg { transition: none; } }
 .ms-head { display: flex; align-items: center; gap: 7px; margin-bottom: 1px; }
 .ms-title { flex: 1; font-weight: 600; color: var(--text); font-size: 12.5px; }

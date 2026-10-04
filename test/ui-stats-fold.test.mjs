@@ -1,4 +1,4 @@
-// The sidebar's server + usage cards fold to one line each on short windows (app.js msFold, app.css max-height 900px).
+// The sidebar's server + usage cards fold to one line each at any window size (app.js msFold).
 // Boots server.mjs (CW_NO_ORCHESTRATOR=1, temp data dir): a tall window has no toggle; a short one folds the cards
 // (rows hidden, the one-line summaries shown, the usage window NOT opened), remembers it across a reload, and unfolds.
 // Skips when Playwright's Chromium can't launch.
@@ -57,7 +57,7 @@ after(async () => {
 
 const shown = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s)].map((e) => getComputedStyle(e).display !== 'none'), sel);
 
-test('short windows fold the server and usage cards to one line each, remembered; tall ones never fold', { skip, timeout: 60000 }, async () => {
+test('the server and usage cards fold to one line each at any window size, remembered', { skip, timeout: 60000 }, async () => {
   const [name, value] = cookie.split('=');
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 1000 } });
   await ctx.addCookies([{ name, value, url: base }]);
@@ -66,9 +66,8 @@ test('short windows fold the server and usage cards to one line each, remembered
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto(`${base}/`);
   await page.locator('#app:not([inert]) #input').waitFor();
-  assert.deepEqual(await shown(page, '#msFold'), [false], 'no toggle on a tall window');
+  assert.deepEqual(await shown(page, '#msFold'), [true], 'the toggle shows on a tall window too');
 
-  await page.setViewportSize({ width: 1280, height: 760 });
   const tall = (await page.locator('#miniStatsCard').boundingBox()).height;
   assert.equal(await page.getAttribute('#msFold', 'aria-expanded'), 'true');
   await page.click('#msFold');
@@ -85,9 +84,8 @@ test('short windows fold the server and usage cards to one line each, remembered
   await page.reload();
   await page.locator('#app:not([inert]) #input').waitFor();
   assert.equal(await page.getAttribute('#msFold', 'aria-expanded'), 'false', 'remembered across a reload');
-  await page.setViewportSize({ width: 1280, height: 1000 });
-  assert.deepEqual(await shown(page, '#miniStatsCard .ms-row'), [true, true, true, true], 'a tall window shows the full cards');
   await page.setViewportSize({ width: 1280, height: 760 });
+  assert.deepEqual(await shown(page, '#miniStatsCard .ms-row'), [false, false, false, false], 'still folded on a short window');
   await page.click('#msFold');
   assert.deepEqual(await shown(page, '#miniSum, #usNote'), [false, true], 'unfolded again');
   await ctx.close();

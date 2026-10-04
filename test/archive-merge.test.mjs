@@ -84,8 +84,6 @@ async function page() {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
   await ctx.addCookies([{ name, value, url: base }]);
   const pg = await ctx.newPage();
-  // ~/workspace's folders, as the new-chat screen's "continue a recent project" buttons list them
-  await pg.route('**/api/projects', (r) => r.fulfill({ json: { projects: [{ name: 'notes', path: notes }, { name: 'shop', path: shop }] } }));
   const errors = [];
   pg.on('pageerror', (e) => errors.push(e.message));
   await pg.goto(base + '/');
@@ -124,9 +122,6 @@ test('sidebar: an archived project folds into "Archived · n" at the bottom; the
     assert.equal(await toggle.getAttribute('aria-expanded'), 'false');
     assert.equal(await pg.locator('.convo[data-cid="n1"]').count(), 0, 'folded away');
     assert.equal(await pg.locator('#convoList > *').last().evaluate((n) => n.classList.contains('arch-toggle')), true, 'at the bottom');
-    const recent = () => pg.locator('.recent-projects button').allInnerTexts();
-    await pg.waitForFunction(() => document.querySelectorAll('.recent-projects button').length === 1);
-    assert.deepEqual(await recent(), ['shop'], 'no "continue" button for an archived project');
 
     await toggle.click();
     await pg.locator('.convo[data-cid="n1"]').waitFor();
@@ -135,7 +130,6 @@ test('sidebar: an archived project folds into "Archived · n" at the bottom; the
     await pg.locator('.menu button', { hasText: 'Unarchive project' }).click();
     await toggle.waitFor({ state: 'detached' });
     await pg.locator('.convo[data-cid="n1"]').waitFor();
-    await pg.waitForFunction(() => document.querySelectorAll('.recent-projects button').length === 2);
     assert.deepEqual(errors, []);
   } finally { await ctx.close(); }
 });

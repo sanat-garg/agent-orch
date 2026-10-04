@@ -89,6 +89,27 @@ test('POST /api/convos {folder} adds another chat named from its first message',
   assert.equal(Object.keys(await list()).length, 3);
 });
 
+test('new-chat screen: no recent-project buttons; Import from GitHub opens the picker on its import pane', { skip }, async () => {
+  const [name, value] = cookie.split('=');
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  try {
+    await ctx.addCookies([{ name, value, url: base }]);
+    const page = await ctx.newPage();
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    await page.route('**/api/github/repos', (r) => r.fulfill({ json: { repos: [{ full: 'me/site', description: 'my site' }] } }));
+    await page.goto(base + '/');
+    await page.locator('#app:not([inert]) .empty').waitFor();
+    assert.equal(await page.locator('.empty').getByText(/recent project/i).count(), 0);
+    await page.locator('.empty .gh-import').click();
+    await page.locator('#pkGithub').waitFor();
+    assert.equal(await page.textContent('#pickerTitle'), 'Import from GitHub');
+    assert.equal(await page.isHidden('#pkProjects'), true);
+    await page.locator('#pkGhList', { hasText: 'me/site' }).waitFor();
+    assert.deepEqual(errors, []);
+  } finally { await ctx.close(); }
+});
+
 test('sidebar: other chats nest under the main chat; their menu starts another chat in the folder', { skip }, async () => {
   const [name, value] = cookie.split('=');
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
@@ -105,7 +126,7 @@ test('sidebar: other chats nest under the main chat; their menu starts another c
     assert.deepEqual(rows.slice(at + 1).map(([, sub]) => sub), [true, true], 'both other chats right under it, indented');
     assert.equal(rows[at + 2][0], 'c-new', 'newest first');
     const labels = await page.locator('#convoList .group-label').allTextContents();
-    assert.ok(!labels.some((l) => /today|this week|older/i.test(l)), `no date groups: ${labels}`);
+    assert.ok(!labels.some((l) => /today|this week|older|other projects/i.test(l)), `no date or "other" labels: ${labels}`);
     const card = page.locator('.convo[data-cid="c-old"]');
     assert.equal(await card.locator('.cm').count(), 0, 'an idle card is one row: no mode or age line');
     assert.ok((await card.boundingBox()).height < 40, 'compact card');

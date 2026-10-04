@@ -612,11 +612,11 @@ function renderConvoList() {
     nav.append(label);
     for (const c of ranked) { nav.append(convoItem(c, true)); for (const s of subChats(c)) nav.append(convoItem(s, false, true)); }
   }
-  // The rest, newest activity first, under one label (no date groups: owner, 2026-10-04).
+  // The rest, newest activity first, with no label (no date groups either: owner, 2026-10-04); a gap sets them off.
   const sorted = state.convos.filter((c) => !c.project && !c.archived && !isSubChat(c)).sort((a, b) => familyUpdated(b) - familyUpdated(a));
-  if (sorted.length) nav.append(el('div', 'group-label', ranked.length ? 'Other projects' : 'Projects'));
-  for (const c of sorted) {
+  for (const [i, c] of sorted.entries()) {
     nav.append(convoItem(c, false));
+    if (i === 0 && ranked.length) nav.lastChild.classList.add('after-ranked');
     for (const s of subChats(c)) nav.append(convoItem(s, false, true));
   }
   // Archived projects (finished ones; the whole folder, all its chats): folded into one row at the bottom, opened while
@@ -646,18 +646,16 @@ function convoItem(c, rankable, sub = false) {
   b.tabIndex = 0;
   b.setAttribute('role', 'button');
   b.dataset.cid = c.id;
-  // One compact row: the title, then only what needs attention (busy / tasks running, not pushed). Mode and last
+  // One compact row: the busy / tasks-running dot, the title, then "not pushed" when a push failed. Mode and last
   // activity go in the tooltip.
   b.title = `${tilde(c.cwd)} · ${c.mode === 'orchestrator' ? 'Orchestrator' : 'Chat'} · ${relTime(c.updatedAt)}`;
-  b.append(el('span', 'ct', c.title || folderName(c.cwd)));
-  const meta = el('span', 'cm');
-  if (c.git?.error) meta.append('not pushed');
-  if (c.busy) meta.append(el('span', 'busy-dot'));
+  if (c.busy) b.append(el('span', 'busy-dot'));
   else if (c.project && runningProjectIds().has(c.project.id)) {
     const dot = el('span', 'run-dot'); dot.title = 'Tasks running'; dot.setAttribute('role', 'img'); dot.setAttribute('aria-label', 'Tasks running');
-    meta.append(dot);
+    b.append(dot);
   }
-  if (meta.childNodes.length) b.append(meta);
+  b.append(el('span', 'ct', c.title || folderName(c.cwd)));
+  if (c.git?.error) b.append(el('span', 'cm', 'not pushed'));
   const more = el('button', 'more');
   more.setAttribute('aria-label', sub ? 'Chat options' : 'Project options');
   more.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16"><circle cx="5" cy="12" r="1.8" fill="currentColor"/><circle cx="12" cy="12" r="1.8" fill="currentColor"/><circle cx="19" cy="12" r="1.8" fill="currentColor"/></svg>';
@@ -978,7 +976,6 @@ function openConvo(cid) {
   setBusy(false);
   if (!cid) {
     $('messages').append($('emptyTpl').content.cloneNode(true));
-    renderRecentProjects();
     setModeUI(state.draftMode);
     setPick(state.draftModel);
   }
@@ -1933,11 +1930,7 @@ $('composer').addEventListener('submit', async (e) => {
 });
 $('messages').addEventListener('click', (e) => {
   if (e.target.closest('[data-open-picker]')) openPicker();
-  const r = e.target.closest('.recent-projects button[data-path]');
-  if (!r) return;
-  // "Continue a recent project": its main chat when it has one (New chat in this project starts another).
-  const main = state.convos.find((c) => c.cwd === r.dataset.path && !isSubChat(c));
-  if (main) { openConvo(main.id); setView('chat'); } else chooseFolder(r.dataset.path);
+  if (e.target.closest('[data-open-gh]')) { openPicker(); openGhImport(); } // the picker, switched to its import pane at once
 });
 
 // ---------- composer menus (mode, effort; the model pill opens the fallback sheet) ----------
@@ -3031,27 +3024,6 @@ $('pickerModal').addEventListener('keydown', (e) => {
   rows[pk.kb].scrollIntoView({ block: 'nearest' });
 }, true);
 
-// Quick picks under "What should we build?"
-// cached: redraw from the last /api/projects answer (the chat list changed, e.g. a project was archived).
-async function renderRecentProjects(cached = false) {
-  const box = document.querySelector('.recent-projects');
-  if (!box) return;
-  updateFolderChip();
-  const projects = (cached && pk.projects ? pk.projects : await loadProjects()).filter((p) => !state.convos.some((c) => c.cwd === p.path && c.archived)).slice(0, 5);
-  if (!document.body.contains(box)) return;
-  box.textContent = '';
-  if (!projects.length) return;
-  box.append(el('span', 'lbl', 'or continue a recent project'));
-  for (const p of projects) {
-    const b = el('button');
-    b.type = 'button';
-    b.dataset.path = p.path;
-    b.innerHTML = FOLDER_ICON.replace('width="17" height="17"', 'width="13" height="13"');
-    b.append(document.createTextNode(p.name));
-    box.append(b);
-  }
-}
-
 // ---------- Splash ----------
 // index.html opens on a splash with the app inert behind it. It lifts once the first connection has delivered what the
 // first screen shows: the chat list, and the open chat's history when there is one. While the server is unreachable it
@@ -3401,7 +3373,6 @@ function onServer(msg) {
     const drEffort = drChat ? effortOf() : null;
     const was = state.convos.find((c) => c.id === state.cid);
     state.convos = msg.convos;
-    renderRecentProjects(true); // the new-chat screen's "continue a recent project" leaves archived ones out
     if (state.cid && !state.convos.find((c) => c.id === state.cid)) {
       const main = was?.mainId && state.convos.find((c) => c.id === was.mainId); // a merged (or deleted) extra chat: its main chat
       openConvo(main ? main.id : null);
@@ -3427,7 +3398,7 @@ function onServer(msg) {
     case 'history': {
       applyOrchSnapshot(msg.orch);
       resetMessages();
-      if (!msg.events.length) { $('messages').append($('emptyTpl').content.cloneNode(true)); renderRecentProjects(); }
+      if (!msg.events.length) { $('messages').append($('emptyTpl').content.cloneNode(true)); updateFolderChip(); }
       for (const ev of msg.events) renderEvent(ev, true);
       // Tool calls still running from before a reload.
       for (const req of msg.pending) showPerm(req);

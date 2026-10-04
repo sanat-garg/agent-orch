@@ -143,7 +143,7 @@ code, pre, kbd { font-family: var(--mono); }
 @media (pointer: coarse) { .side-search input { height: 44px; font-size: 16px; } } /* iOS zooms into smaller inputs */
 .convo-list { position: relative; flex: 1; overflow-y: auto; margin: 12px -4px 8px; padding: 0 4px; }
 .group-label { font-size: 12px; font-weight: 600; color: var(--faint); padding: 12px 8px 4px; text-transform: uppercase; letter-spacing: .04em; }
-/* A sidebar card is one compact row (title, then a status dot or "not pushed"); search hits stack title, snippet and age. */
+/* A sidebar card is one compact row (status dot, title, "not pushed"); search hits stack title, snippet and age. */
 .convo {
   position: relative;
   display: flex; align-items: center; gap: 8px;
@@ -153,6 +153,7 @@ code, pre, kbd { font-family: var(--mono); }
 }
 .convo.search-hit { flex-direction: column; align-items: stretch; gap: 0; padding-top: 8px; padding-bottom: 8px; }
 .convo.search-hit .ct { flex: none; }
+.convo.after-ranked { margin-top: 12px; } /* unlabelled projects below Priority order */
 .convo:hover { background: var(--raised); }
 .convo.sub { margin-left: 14px; width: calc(100% - 14px); padding-top: 4px; padding-bottom: 4px; border-left: 2px solid var(--border); border-radius: 0 8px 8px 0; }
 .convo.active { background: var(--panel); box-shadow: inset 0 0 0 1px var(--border); }
@@ -1178,14 +1179,13 @@ label.mc-row { cursor: pointer; }
 .project-pick:hover { border-color: var(--accent); }
 .project-pick .pp-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-pick.new .pp-name { color: var(--accent); }
-.recent-projects { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin: 0 auto 22px; max-width: 600px; }
-.recent-projects:empty { display: none; }
-.recent-projects .lbl { width: 100%; font-size: 12px; color: var(--faint); margin-bottom: 2px; }
-.recent-projects button {
-  display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px;
-  border: 1px solid var(--border); border-radius: 99px; background: var(--raised); cursor: pointer; font-size: 13px;
+.gh-import {
+  display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 14px; margin: 0 auto 22px;
+  border: 1px solid var(--border); border-radius: 99px; background: var(--raised); color: var(--text); cursor: pointer; font-size: 13.5px;
 }
-.recent-projects button:hover { border-color: var(--accent); }
+.gh-import:hover { border-color: var(--accent); }
+.gh-import:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+@media (pointer: coarse) { .gh-import { height: 44px; font-size: 15px; } }
 
 .modal-panel.picker { width: min(620px, 100%); }
 .pk-body { padding: 0 20px 20px; overflow-y: auto; min-height: 0; flex: 1; display: flex; flex-direction: column; }

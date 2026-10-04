@@ -265,10 +265,17 @@ test('phones get 16px body copy and 12px-minimum metadata (UI-REVIEW #7)', () =>
   }
 });
 
+test('every script and stylesheet index.html loads is on the server\'s static list (else it 404s)', () => {
+  const server = read('server.mjs');
+  const assets = [...indexHtml.matchAll(/(?:src|href)="(\/[\w-]+\.(?:js|css))"/g)].map((m) => m[1]);
+  assert.ok(assets.includes('/app.js') && assets.includes('/schedules.css'));
+  assert.deepEqual(assets.filter((a) => !server.includes(`p === '${a}'`)), []);
+});
+
 test('top-level function names are unique across the classic public/*.js scripts (a later one silently wins)', () => {
   const seen = new Map();
   const dups = [];
-  for (const f of ['app.js', 'files.js', 'stats.js', 'ext.js', 'browser.js', 'previews.js']) {
+  for (const f of ['app.js', 'files.js', 'stats.js', 'ext.js', 'browser.js', 'previews.js', 'schedules.js']) {
     for (const m of read(`public/${f}`).matchAll(/^(?:async )?function\s*\*?\s*([\w$]+)\s*\(/gm)) {
       if (seen.has(m[1])) dups.push(`${m[1]} (${seen.get(m[1])}, ${f})`);
       else seen.set(m[1], f);

@@ -72,7 +72,6 @@
   function render() {
     if ($('schedModal').hidden || SC.edit) return;
     const body = $('scBody');
-    if (body.contains(document.activeElement) && document.activeElement.matches('input:not([type=checkbox]), select, textarea')) return;
     const top = el('div', 'sc-top');
     top.append(el('p', 'sc-hint', `Each schedule queues a task in its project at the times you set, in your time zone (${TZ}). You can also ask in chat, e.g. "every weekday at 9, check the inbox".`),
       btn('btn small primary', 'New schedule', () => startEdit(null)));

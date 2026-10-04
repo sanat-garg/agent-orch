@@ -16,6 +16,7 @@
 <link rel="stylesheet" href="/ext.css">
 <link rel="stylesheet" href="/previews.css">
 <link rel="stylesheet" href="/schedules.css">
+<link rel="stylesheet" href="/users.css">
 <link rel="stylesheet" href="/browser.css">
 <link rel="preload" href="/mascot.png" as="image">
 </head>
@@ -93,6 +94,8 @@
         <div class="ms-more" id="usMore"></div>
         <div class="ms-note" id="usNote">Checking plan limits…</div>
       </div>
+      <!-- A non-admin's own share of each weekly limit, against the caps the admin set (users.js, GET /api/me). -->
+      <div class="ms-usage my-usage" id="myUsage" hidden></div>
     </div>
     <div class="side-foot-row">
       <button type="button" class="side-foot" id="connFoot" aria-haspopup="dialog" title="Open connections">
@@ -533,6 +536,23 @@
 
 <div class="toasts" id="toasts" aria-live="polite"></div>
 
+<!-- Users (users.js): the admin's list of accounts, each with its usage of every weekly limit and the caps on it. -->
+<div class="modal sheet" id="usersModal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-panel um" role="dialog" aria-modal="true" aria-labelledby="umTitle">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <div class="m-head">
+      <div>
+        <h2 id="umTitle">Users</h2>
+        <p class="m-sub">Who can sign in, and how much of each weekly limit they may use.</p>
+      </div>
+      <button class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="m-body" id="umBody"></div>
+  </div>
+</div>
 <div class="modal sheet" id="settingsModal" hidden>
   <div class="modal-backdrop" data-close></div>
   <div class="modal-panel st" role="dialog" aria-modal="true" aria-labelledby="stTitle">
@@ -544,16 +564,23 @@
       </button>
     </div>
     <div class="m-body">
+      <h3 class="st-sec">Account</h3>
+      <div class="st-row">
+        <span class="st-text"><strong id="stMeName">Signed in</strong><small id="stMeHint"></small></span>
+        <button type="button" class="btn small" id="stSignOut">Sign out</button>
+      </div>
+      <button type="button" class="st-row st-link admin-only" id="stUsersOpen" aria-haspopup="dialog"><span class="st-text"><strong>Users &amp; usage caps</strong><small id="stUsersHint">Who can sign in, and how much of each weekly limit they may use</small></span><svg class="st-chev" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>
       <h3 class="st-sec">Alerts</h3>
       <p class="st-hint">How agent-orch gets your attention</p>
       <label class="st-row">
         <span class="st-text"><strong>Play a sound when a task finishes</strong><small id="stSoundHint">Choose each machine's sound in Machines</small></span>
         <input type="checkbox" class="st-switch" id="stSound" role="switch" aria-describedby="stSoundHint" checked>
       </label>
-      <label class="st-row">
+      <label class="st-row admin-only">
         <span class="st-text"><strong>Notify this device</strong><small id="stPushHint">A notification when a task needs you, even with agent-orch closed</small></span>
         <input type="checkbox" class="st-switch" id="stPush" role="switch" aria-describedby="stPushHint">
       </label>
+      <div class="admin-only">
       <h3 class="st-sec">Tasks</h3>
       <p class="st-hint">How much runs at once, and what waits for you</p>
       <label class="st-row">
@@ -586,6 +613,7 @@
       <h3 class="st-sec">Agents</h3>
       <p class="st-hint">What your agents know and can use</p>
       <button type="button" class="st-row st-link" data-ext-open="skills"><span class="st-text"><strong>Skills &amp; tools</strong><small id="stExtSummary">Skills, MCP servers, subagents and personas</small></span><svg class="st-chev" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>
+      </div>
       <div id="stProject" hidden>
         <h3 class="st-sec" id="stProjectTitle">This project</h3>
         <p class="st-hint">Only for the open project</p>
@@ -926,5 +954,6 @@
 <script src="/browser.js"></script>
 <script src="/previews.js"></script>
 <script src="/schedules.js"></script>
+<script src="/users.js"></script>
 </body>
 </html>

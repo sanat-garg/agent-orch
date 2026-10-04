@@ -34,7 +34,7 @@ This is plain Node ESM. There is no build step and no framework.
 git clone https://github.com/sanat-garg/agent-orch.git ~/agent-orch
 cd ~/agent-orch
 npm install
-node server.mjs set-password '<password, 8+ chars>'   # writes data/auth.json and signs everyone out
+node server.mjs set-password '<password, 8+ chars>'   # sets the admin's password (data/users.json) and signs everyone out
 PORT=3000 node server.mjs                               # listens on 127.0.0.1:3000
 ```
 
@@ -561,8 +561,9 @@ All runtime state lives in `data/` (or `CW_DATA_DIR`). The JSON state files (`au
 
 | Path | Contents |
 |---|---|
-| `auth.json` | scrypt salt and hash of the login password |
-| `sessions.json` | active login session tokens |
+| `users.json` | the accounts (users.mjs): name, role (admin or user), scrypt salt and hash, usage caps |
+| `auth.json` | the old single-password login; migrated once into the admin account of `users.json` |
+| `sessions.json` | active login session tokens, each with its user (none = the admin, from before users existed) |
 | `convos.json` | the chat list (title, folder, mode, agent, model, agent session id) |
 | `logs/<id>.jsonl` | the transcript of each chat |
 | `metrics/` | `raw.jsonl` and `minutes.jsonl` server metrics |
@@ -591,7 +592,12 @@ the repo was restarted with fresh history.
   permission prompts, and no tool is refused, including edits to this app's own code. Roles are enforced
   by prompt instructions only. New chats also default to `bypassPermissions`. Run this only on a
   disposable server you're willing to hand to an autonomous agent.
-- **Login.** There is a single password, stored as a scrypt hash. Over HTTPS the session cookie is
+- **Login and users.** Each account has a username and a scrypt-hashed password (`users.mjs`). The admin (the
+  original owner; a blank username or `claude` also means the admin) adds users in Settings → Users & usage caps
+  and caps each user's share of every weekly plan window (estimated from their share of the tokens). A user gets
+  only their own chats, projects, tasks, schedules and project files; the terminal, machines, sign-ins, settings,
+  extensions, stats, previews and Browser are the admin's. Agents still run as this server's Linux user with full
+  access, so a user can reach anything through a chat: only give accounts to people you trust with the server. Over HTTPS the session cookie is
   `__Host-cw_session` (`HttpOnly; Secure; SameSite=Lax`, so no other host can set or shadow it); plain-http
   local use gets a non-Secure `cw_session`. It lasts up to 30 days. Every response forbids framing. After 5 failed logins, an IP is locked out for
   15 minutes. POST requests and WebSocket upgrades must be same-origin. `set-password` signs out every

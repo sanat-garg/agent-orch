@@ -7316,7 +7316,7 @@ function openSettings() {
   if ($('settingsModal').hidden) ST.lastFocus = document.activeElement;
   $('settingsModal').hidden = false;
   renderSettings();
-  loadGatePatterns();
+  if (meAdmin()) loadGatePatterns();
   loadRigorLevels();
   $('settingsModal').querySelector('.icon-btn[data-close]').focus();
 }
@@ -9274,7 +9274,18 @@ function routeHash(hash) {
 }
 addEventListener('hashchange', () => routeHash(location.hash.slice(1)));
 
+// Who is signed in (GET /api/me: {user: {id, name, role, caps}, usage}). A non-admin's browser hides the admin's
+// controls (users.css: html[data-role=user]) and skips their requests; users.js renders the rest.
+const me = { user: null, usage: [] };
+const meAdmin = () => me.user?.role !== 'user';
+async function loadMe() {
+  try { Object.assign(me, await api('/api/me')); } catch {}
+  document.documentElement.dataset.role = me.user?.role || 'admin';
+  window.Users?.changed();
+}
+
 (async function boot() {
+  await loadMe();
   await checkStatus();
   const hash = location.hash.slice(1);
   const cid = /^task-\d+$/.test(hash) ? null : hash || null;
@@ -9285,8 +9296,7 @@ addEventListener('hashchange', () => routeHash(location.hash.slice(1)));
   setView(store.get('cw.view') || 'chat');
   setInterval(renderConvoList, 60e3);
   setInterval(() => { if (!document.hidden) pollUpdates(); }, 60e3);
-  refreshGitHub();
-  refreshConnections();
+  if (meAdmin()) { refreshGitHub(); refreshConnections(); }
   const lastSeen = Number(store.get('cw.lastSeen')) || 0;
   if (lastSeen && Date.now() - lastSeen >= AWAY_MIN_MS) showAway(lastSeen);
   markSeen();

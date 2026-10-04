@@ -3,7 +3,8 @@
 //   {t, agent, kind:'window', window, pct, resetsAt, at?}      a plan window reading (dedupe: unchanged within 5 min);
 //     claude: five_hour/seven_day/…, codex: 5h/weekly (from window_minutes);
 //     at = when the reading was taken (epoch ms) if earlier than t, e.g. a polled codex rollout snapshot
-//   {t, agent, kind:'tokens', input, output, cached, source, ref}  one chat turn or task run
+//   {t, agent, kind:'tokens', input, output, cached, source, ref, user?, model?}  one chat turn or task run (user: who
+//     ran it, users.mjs; model: the model id it ran on; both missing on older records)
 //   {t, agent, kind:'limit', status:'hit'|'cleared', resetsAt, window?}
 // `input` is uncached input (Claude: input + cache writes; codex reports input including the cached part).
 
@@ -12,6 +13,7 @@ import path from 'node:path';
 
 export const KEEP_MS = 30 * 86400e3;
 export const DEDUPE_MS = 5 * 60e3;
+export const TOKENS_MS = 8 * 86400e3; // tokens records kept in memory: a weekly window plus a day
 export const MAX_POINTS = 300;
 export const RANGES = { '6h': { ms: 6 * 3600e3, bucket: 15 * 60e3 }, '24h': { ms: 86400e3, bucket: 3600e3 }, '7d': { ms: 7 * 86400e3, bucket: 86400e3 }, '30d': { ms: 30 * 86400e3, bucket: 86400e3 } };
 
@@ -48,16 +50,20 @@ export function readRecords(file, since = 0) {
 
 export function createUsageLog(dataDir, { now = Date.now } = {}) {
   const file = path.join(dataDir, 'metrics', 'usage.jsonl');
-  let state = null; // agent/window -> last window record; agent -> last limit record
+  let state = null; // agent/window -> last window record; agent -> last limit record; the last TOKENS_MS of tokens records
   const load = () => {
     if (state) return state;
-    state = { windows: new Map(), limits: new Map() };
+    state = { windows: new Map(), limits: new Map(), tokens: [] };
     for (const r of readRecords(file)) note(r);
     return state;
   };
   const note = (r) => {
     if (r.kind === 'window') state.windows.set(`${r.agent}\n${r.window}`, r);
     else if (r.kind === 'limit') state.limits.set(r.agent, r);
+    else if (r.kind === 'tokens' && r.t >= now() - TOKENS_MS) {
+      state.tokens.push(r);
+      if (state.tokens[0].t < now() - TOKENS_MS) state.tokens = state.tokens.filter((x) => x.t >= now() - TOKENS_MS);
+    }
   };
   const append = (r) => {
     load();
@@ -87,11 +93,13 @@ export function createUsageLog(dataDir, { now = Date.now } = {}) {
     },
     // An adapter's res.windows ([{window, pct, resetsAt}], e.g. codex '5h'/'weekly').
     windows(agent, list) { return (list || []).map((w) => this.window(agent, w.window, w.pct, w.resetsAt)).filter(Boolean); },
-    tokens(agent, usage, source, ref) {
+    tokens(agent, usage, source, ref, { user = null, model = null } = {}) {
       const u = normUsage(agent, usage);
       if (!u.input && !u.output && !u.cached) return null;
-      return append({ agent, kind: 'tokens', ...u, source, ref: ref ?? null });
+      return append({ agent, kind: 'tokens', ...u, source, ref: ref ?? null, ...(user && { user }), ...(model && { model }) });
     },
+    // Tokens records since `t` (epoch ms, at most TOKENS_MS back), oldest first: users.mjs splits plan windows by them.
+    tokensSince(t) { return load().tokens.filter((r) => r.t >= t); },
     // A repeated hit with the same reset is skipped; 'cleared' is only written while the agent is marked hit.
     limitHit(agent, resetsAt, window) {
       const last = load().limits.get(agent), at = toEpochSec(resetsAt);

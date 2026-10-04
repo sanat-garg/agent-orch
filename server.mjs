@@ -39,6 +39,7 @@ import { createSounds, MAX_SOUND_BYTES as MAX_CUSTOM_SOUND_BYTES } from './sound
 import { createVersion, formatVersion } from './version.mjs';
 import { createPreviews } from './previews.mjs';
 import { describeCron, nextRun, validTz } from './cron.mjs';
+import { createUsers, ADMIN_ID } from './users.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -82,17 +83,8 @@ function writeJSON(file, value) {
 }
 
 // ---------- auth ----------
-export function hashPassword(pw) {
-  const salt = crypto.randomBytes(16).toString('hex');
-  return { salt, hash: crypto.scryptSync(pw, salt, 64).toString('hex') };
-}
-function checkPassword(pw) {
-  const auth = readJSON('auth.json', null);
-  if (!auth) return false;
-  const got = crypto.scryptSync(String(pw), auth.salt, 64);
-  return crypto.timingSafeEqual(got, Buffer.from(auth.hash, 'hex'));
-}
-
+// Accounts live in users.mjs (users.json; the admin is the original owner). A session is {exp, remember, user}: one
+// from before users existed has no user and is the admin's, so those logins carry on.
 let sessions = readJSON('sessions.json', {});
 let sessionsMtime = 0;
 // `set-password` rewrites sessions.json from another process; pick that up so old logins stop working.
@@ -106,11 +98,11 @@ function pruneSessions() {
   const now = Date.now();
   for (const [k, v] of Object.entries(sessions)) if (v.exp < now) delete sessions[k];
 }
-function newSession(remember) {
+function newSession(remember, user) {
   pruneSessions();
   const token = crypto.randomBytes(32).toString('hex');
   const ttl = remember ? SESSION_DAYS * 864e5 : 864e5;
-  sessions[token] = { exp: Date.now() + ttl, remember };
+  sessions[token] = { exp: Date.now() + ttl, remember, user };
   writeJSON('sessions.json', sessions);
   return { token, remember, ttl };
 }
@@ -131,11 +123,20 @@ function sessionToken(req) {
 }
 // Only Caddy on loopback talks to us, so its X-Forwarded-Proto is trustworthy.
 const isHttps = (req) => !!req.socket.encrypted || (req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
-function isAuthed(req) {
+// The signed-in user ({id, name, role, …} from users.mjs), or null; a deleted user's sessions stop working.
+function sessionUser(req) {
   syncSessions();
   const t = sessionToken(req);
   const s = t && sessions[t];
-  return !!(s && s.exp > Date.now());
+  return s && s.exp > Date.now() ? users.get(s.user || ADMIN_ID) : null;
+}
+const isAuthed = (req) => !!sessionUser(req);
+const isAdmin = (u) => u?.role === 'admin';
+// Signs a user out everywhere (deleted, or their password reset), except the session `keep`.
+function dropSessions(userId, keep = null) {
+  let n = 0;
+  for (const [k, v] of Object.entries(sessions)) if ((v.user || ADMIN_ID) === userId && k !== keep) { delete sessions[k]; n++; }
+  if (n) writeJSON('sessions.json', sessions);
 }
 function sessionCookie(req, token, maxAgeSec) {
   const age = maxAgeSec == null ? '' : `; Max-Age=${maxAgeSec}`;
@@ -196,6 +197,70 @@ function mainChatId(cwd) {
   const owner = orch?.projectChat?.(cwd);
   if (owner && same.some((c) => c.id === owner)) return owner;
   return same.reduce((a, b) => (b.createdAt < a.createdAt ? b : a), same[0])?.id ?? null;
+}
+// ---------- users: who owns what ----------
+// A chat belongs to the user who made it (convos[].owner; none = the admin). A project folder belongs to its main
+// chat's owner (none = the admin), and so do its tasks, schedules and files. Admins may open anything; everyone's
+// sidebar lists only their own chats.
+const chatOwner = (c) => c?.owner || ADMIN_ID;
+const ownsConvo = (u, c) => !!c && (isAdmin(u) || chatOwner(c) === u.id);
+function pathOwner(cwd) {
+  const id = cwd && mainChatId(cwd);
+  return id ? chatOwner(findConvo(id)) : ADMIN_ID;
+}
+const ownsPath = (u, cwd) => !!cwd && (isAdmin(u) || pathOwner(cwd) === u.id);
+const NOT_YOURS = 'That belongs to another user', ADMIN_ONLY = 'Only an admin can do that';
+// What a non-admin may use: their own chats, projects, tasks, schedules and files (relative paths inside the project
+// only), the model lists, their own usage and sounds. Machines, sign-ins, settings, extensions, the terminal, stats,
+// GitHub, Browser, approvals and everyone else's work stay the admin's. → an error for a 403, or null.
+const USER_PATHS = new Set(['/api/status', '/api/version', '/api/me', '/api/agents', '/api/convos', '/api/projects', '/api/folders', '/api/uploads',
+  '/api/orch/rigor-levels', '/api/orch/cron-preview', '/api/orch/schedules', '/api/orch/projects/reorder', '/api/metrics', '/api/metrics/history', '/api/away']);
+const absolutePath = (v) => (Array.isArray(v) ? v.some(absolutePath) : typeof v === 'string' && (path.isAbsolute(v) || v.startsWith('~')));
+function userBlocked(req, url, u) {
+  const p = url.pathname;
+  if (!p.startsWith('/api/')) return null; // the app and its static files
+  if (USER_PATHS.has(p)) return null;
+  if ((p === '/api/settings/sound' || p === '/api/sounds') && req.method === 'GET') return null;
+  if (/^\/api\/uploads\/[a-f0-9]{24}$/.test(p) || p.startsWith('/api/media/')) return null;
+  let m;
+  if ((m = p.match(/^\/api\/convos\/([\w-]+)(?:\/|$)/))) return ownsConvo(u, findConvo(m[1])) ? null : NOT_YOURS;
+  if (p.startsWith('/api/files/')) {
+    const q = url.searchParams;
+    if (absolutePath(q.getAll('path')) || absolutePath(q.getAll('dir'))) return 'Only paths inside your project';
+    return !q.has('cid') || ownsConvo(u, findConvo(q.get('cid'))) ? null : NOT_YOURS; // a POST's body is checked in readBody
+  }
+  if ((m = p.match(/^\/api\/orch\/tasks?\/(\d+)(\/[\w-]+)?$/))) return ['/assign', '/run-on'].includes(m[2]) ? ADMIN_ONLY : ownsPath(u, orch.pathOf('task', m[1])) ? null : NOT_YOURS;
+  if ((m = p.match(/^\/api\/orch\/projects?\/(\d+)(\/[\w-]+)?$/))) return ownsPath(u, orch.pathOf('project', m[1])) ? null : NOT_YOURS;
+  if ((m = p.match(/^\/api\/orch\/schedules\/(\d+)(\/run)?$/))) return ownsPath(u, orch.pathOf('schedule', m[1])) ? null : NOT_YOURS;
+  if ((m = p.match(/^\/api\/orch\/messages\/(\d+)$/))) return ownsPath(u, orch.pathOf('message', m[1])) ? null : NOT_YOURS;
+  return ADMIN_ONLY;
+}
+// What a browser may receive: everything for an admin; for anyone else only their own chats, projects and tasks, and
+// nothing about machines, sign-ins, the account's plan usage or other users' work. null = don't send.
+const USER_MSGS = new Set(['status', 'previews', 'models', 'version', 'error', 'myusage']);
+function forClient(ws, msg) {
+  const u = ws.user;
+  if (msg.t === 'convos' && u) return { ...msg, convos: msg.convos.filter((c) => chatOwner(c) === u.id) }; // everyone's sidebar: their own chats
+  if (!u || isAdmin(u)) return msg;
+  if (msg.cid) return ownsConvo(u, findConvo(msg.cid)) ? msg : null;
+  const mine = (cwd) => ownsPath(u, cwd);
+  switch (msg.t) {
+    case 'otask': return mine(orch?.pathOf('task', msg.task?.id)) ? msg : null;
+    case 'oproject': return mine(msg.project?.path) ? msg : null;
+    case 'oorder': return mine(orch?.pathOf('project', msg.project_id)) ? msg : null;
+    case 'olane': return mine(orch?.pathOf('task', msg.taskId)) ? msg : null;
+    case 'oprojects': return { ...msg, order: (msg.order || []).filter((p) => mine(p.path)) };
+    default: return USER_MSGS.has(msg.t) ? msg : null;
+  }
+}
+// A chat turn's user and model, for its token record (usage.mjs) and the cap check.
+const chatModel = (c) => c.model || (modelCatalog(chatAgent(c)).models || []).find((m) => m.default)?.id || null;
+// The admin-set cap the chat's owner has reached for its agent/model, as the chat's error text, or null.
+function capRefusal(c) {
+  const b = users.capBlock(chatOwner(c), chatAgent(c), chatModel(c));
+  if (!b) return null;
+  const when = b.resetsAt ? ` It resets ${new Date(b.resetsAt * 1000).toUTCString().replace(/:\d\d GMT$/, ' UTC')}.` : '';
+  return `You've reached your ${b.cap}% cap of the ${b.label} weekly limit (you've used about ${b.mine}%).${when} Pick another model, or ask your admin to raise the cap.`;
 }
 const stats = createStats({ dataDir: DATA, convos: () => convos, log: (m) => console.log(`[stats] ${m}`) });
 const logPath = (id) => path.join(LOGS, `${id}.jsonl`);
@@ -498,6 +563,7 @@ fs.mkdirSync(METRICS_DIR, { recursive: true });
 const RAW_FILE = path.join(METRICS_DIR, 'raw.jsonl');
 // Per-agent usage history (plan windows, tokens per turn/run, limit events): usage.mjs.
 const usageLog = createUsageLog(DATA);
+const users = createUsers({ dataDir: DATA, usageLog, agents: () => Object.keys(AGENTS) });
 try { usageLog.compact(); } catch (e) { console.error('[usage] compact failed', e); }
 // Every agent's latest plan-limit check (usage.mjs createLimitStore): only when the owner presses refresh on the usage
 // card, for that one agent (each check can start a CLI). Claude goes through refreshUsage (it also feeds the sidebar);
@@ -801,7 +867,12 @@ function notify(n) {
 }
 const mcpSet = () => JSON.stringify(ext.mcpFor('claude'));
 
-function send(ws, msg) { if (ws.readyState === 1) ws.send(JSON.stringify(msg)); }
+// Every message to a browser passes forClient: a non-admin only gets their own chats' and projects' events.
+function send(ws, msg) {
+  if (ws.readyState !== 1) return;
+  const m = forClient(ws, msg);
+  if (m) ws.send(JSON.stringify(m));
+}
 function broadcast(cid, msg) { for (const ws of subscribers.get(cid) || []) send(ws, { cid, ...msg }); }
 function broadcastConvos() {
   const list = convos.map(publicConvo);
@@ -848,6 +919,8 @@ const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
   onCommit: (dir) => syncGit(dir).catch((e) => console.error('[github] sync failed', dir, e)),
   projectReady: (dir) => gh.status().linked && !!convos.find((c) => c.cwd === dir)?.repo,
   projectArchived: (dir) => convos.some((c) => c.cwd === dir && c.archived), // no reflection: see PATCH /api/convos/:id
+  projectUser: (dir) => (dir ? pathOwner(dir) : null),
+  userCap: (dir, agent, model) => users.capBlock(pathOwner(dir), agent, model),
   disabled: NO_ORCH,
   reap: () => resources.reap({ reason: 'low memory' }),
 });
@@ -1205,7 +1278,7 @@ function handleMessage(convo, rt, m) {
     case 'result':
       rt.busy = false;
       if (rt.media) emitShots(cid, rt.media);
-      usageLog.tokens('claude', m.usage, 'chat', cid);
+      usageLog.tokens('claude', m.usage, 'chat', cid, { user: chatOwner(convo), model: chatModel(convo) });
       if (m.subtype === 'success' && !m.is_error) usageLog.limitCleared('claude');
       emit(cid, {
         t: 'result',
@@ -1301,7 +1374,7 @@ async function agentChatTurn(convo, text, files = []) {
     }
     if (res.sessionId) convo.agentSession = { agent, id: res.sessionId, persona: personaOf(convo) };
     emitShots(cid, media);
-    usageLog.tokens(agent, res.usage, 'chat', cid);
+    usageLog.tokens(agent, res.usage, 'chat', cid, { user: chatOwner(convo), model: chatModel(convo) });
     usageLog.windows(agent, res.windows);
     orch.recordLimit(res, agent, convo.model); // blocks/unblocks only this agent (tasks routed to it follow) and logs usage history
     if (res.outcome === 'auth_error') emit(cid, { t: 'error', text: `${a.label} is not signed in on this server. ${a.login}.` });
@@ -1579,7 +1652,7 @@ async function handleRequest(req, res) {
 
   // Caddy asks this before letting a request through to the terminal.
   if (p === '/auth/check') {
-    if (isAuthed(req)) { res.writeHead(200); return res.end(); }
+    if (isAdmin(sessionUser(req))) { res.writeHead(200); return res.end(); }
     res.writeHead(401); return res.end();
   }
 
@@ -1629,14 +1702,15 @@ async function handleRequest(req, res) {
     // Re-check after the await: a parallel burst all passed the first check before any failure was recorded.
     const wait2 = lockedFor(ip);
     if (wait2) return json(res, 429, { error: 'locked', retryInSec: Math.ceil(wait2 / 1000) });
-    if (!checkPassword(body.password || '')) {
+    const who = users.check(body.username, body.password || '');
+    if (!who) {
       const left = recordFailure(ip);
       const w = lockedFor(ip);
       if (w) return json(res, 429, { error: 'locked', retryInSec: Math.ceil(w / 1000) });
       return json(res, 401, { error: 'wrong', attemptsLeft: left });
     }
     attempts.delete(ip);
-    const s = newSession(!!body.remember);
+    const s = newSession(!!body.remember, who.id);
     return json(res, 200, { ok: true }, { 'Set-Cookie': sessionCookie(req, s.token, s.remember ? s.ttl / 1000 : null) });
   }
   if (p === '/api/logout' && req.method === 'POST') {
@@ -1661,16 +1735,55 @@ async function handleRequest(req, res) {
     return serveFile(res, path.join(PUBLIC, p));
   }
 
-  if (!isAuthed(req)) {
+  const me = sessionUser(req);
+  if (!me) {
     if (p.startsWith('/api/')) return json(res, 401, { error: 'Not signed in' });
     res.writeHead(302, { Location: '/login' }); return res.end();
+  }
+  if (!isAdmin(me)) { const why = userBlocked(req, url, me); if (why) return json(res, 403, { error: why }); }
+  // Who is signed in, and their estimated share of each weekly plan window against their caps (users.mjs).
+  if (p === '/api/me' && req.method === 'GET') return json(res, 200, { user: users.view(me), usage: users.usage(me.id) });
+  // Admin: the accounts. GET → {users: [{…, usage, chats}], me}; POST {name, password, role?, caps?} adds one;
+  // PATCH /api/users/:id {password?, role?, caps?: {'<agent>/<window>': pct | null}}; DELETE gives their chats to you.
+  if (p === '/api/users' && req.method === 'GET') {
+    return json(res, 200, { me: me.id, users: users.list().map((u) => ({ ...u, usage: users.usage(u.id), chats: convos.filter((c) => (c.owner || ADMIN_ID) === u.id).length })) });
+  }
+  if (p === '/api/users' && req.method === 'POST') {
+    try { return json(res, 200, { user: users.add(await readBody(req)) }); } catch (e) { return json(res, e.status || 400, { error: e.message }); }
+  }
+  const um = p.match(/^\/api\/users\/([\w-]{1,40})$/);
+  if (um && req.method === 'PATCH') {
+    const body = await readBody(req);
+    if (um[1] === me.id && body.role && body.role !== me.role) return json(res, 409, { error: "You can't change your own role" });
+    try {
+      const u = users.update(um[1], body);
+      if (body.password != null) dropSessions(u.id, sessionToken(req)); // a reset password signs them out elsewhere
+      for (const ws of allClients) if (ws.user?.id === u.id) ws.user = users.get(u.id);
+      return json(res, 200, { user: u });
+    } catch (e) { return json(res, e.status || 400, { error: e.message }); }
+  }
+  if (um && req.method === 'DELETE') {
+    if (um[1] === me.id) return json(res, 409, { error: "You can't delete yourself" });
+    try { users.remove(um[1]); } catch (e) { return json(res, e.status || 400, { error: e.message }); }
+    dropSessions(um[1]);
+    for (const ws of allClients) if (ws.user?.id === um[1]) ws.close(4001, 'signed out');
+    let moved = 0;
+    for (const c of convos) if (c.owner === um[1]) { c.owner = me.id; moved++; }
+    if (moved) { saveConvos(); broadcastConvos(); }
+    return json(res, 200, { ok: true, moved });
   }
 
   if (VENDOR[p]) return serveFile(res, path.join(ROOT, VENDOR[p]));
   if (p === '/' || p === '/index.html') return serveFile(res, path.join(PUBLIC, 'index.html'));
-  if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css' || p === '/browser.js' || p === '/browser.css' || p === '/previews.js' || p === '/previews.css' || p === '/schedules.js' || p === '/schedules.css') return serveFile(res, path.join(PUBLIC, p));
+  if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css' || p === '/browser.js' || p === '/browser.css' || p === '/previews.js' || p === '/previews.css' || p === '/schedules.js' || p === '/schedules.css' || p === '/users.js' || p === '/users.css') return serveFile(res, path.join(PUBLIC, p));
   // The Files view: listing, preview, download (a file, or a zip streamed on the fly), upload, and copy/move/zip/unzip over the whole disk, opening on the chat's project (files.mjs).
-  if (handleFiles(req, res, url, { rootFor: (cid) => findConvo(cid)?.cwd || null, json, readBody })) return;
+  // A user's requests stay inside their own projects: only their chats' roots, and no absolute paths (userBlocked checks the query).
+  const filesBody = isAdmin(me) ? readBody : async (r) => {
+    const b = await readBody(r);
+    if (['path', 'paths', 'dest', 'dir'].some((k) => absolutePath(b[k]))) throw new HttpError(403, 'Only paths inside your project');
+    return b;
+  };
+  if (handleFiles(req, res, url, { rootFor: (cid) => { const c = findConvo(cid); return c && ownsConvo(me, c) ? c.cwd : null; }, json, readBody: filesBody })) return;
 
   if (p === '/api/status') {
     if (!onSubscription() && Date.now() - claudeAuth.checkedAt > 5000) await refreshClaudeAuth();
@@ -1744,8 +1857,9 @@ async function handleRequest(req, res) {
   if (p === '/api/convos' && req.method === 'GET') {
     // ?q= searches titles and messages (search.mjs); without it, the plain list.
     const q = url.searchParams.get('q');
-    if (q?.trim()) return json(res, 200, await searchConvos({ logsDir: LOGS, convos, q: q.slice(0, 200), limit: 20 }));
-    return json(res, 200, convos.map(publicConvo));
+    const own = convos.filter((c) => chatOwner(c) === me.id);
+    if (q?.trim()) return json(res, 200, await searchConvos({ logsDir: LOGS, convos: own, q: q.slice(0, 200), limit: 20 }));
+    return json(res, 200, own.map(publicConvo));
   }
   if (p === '/api/convos' && req.method === 'POST') {
     const body = await readBody(req);
@@ -1756,13 +1870,16 @@ async function handleRequest(req, res) {
         : safeCwd(body.folder);
       // newProject.slug (+ domain): its live preview address, checked before anything is created.
       const slug = body.newProject?.slug ? String(body.newProject.slug) : '', domain = body.newProject?.domain || null;
+      if (slug && !isAdmin(me)) return json(res, 403, { error: 'Live previews: ' + ADMIN_ONLY.toLowerCase() });
       if (slug) { const ok = previews.check(slug, cwd, domain); if (!ok.ok) return json(res, 400, { error: `Live preview: ${ok.error}` }); }
       const existing = convos.find((c) => c.cwd === cwd);
+      // A user opens only their own projects (a folder with no chat is the admin's); a new project is theirs.
+      if (!body.newProject && !isAdmin(me) && !(existing && pathOwner(cwd) === me.id)) return json(res, 403, { error: existing ? NOT_YOURS : 'Start a new project instead' });
       if (existing) { // another chat in an existing project: same folder and repo, named from its first message
         if (await refreshRepo(existing)) shareRepoState(existing);
         for (const x of convos) if (x.cwd === cwd) delete x.archived; // starting one brings an archived project back
         const title = String(body.title || '').replace(/\s+/g, ' ').trim().slice(0, 60) || 'New chat';
-        const c = { id: crypto.randomUUID(), title, renamed: true, cwd, mode: MODES.includes(body.mode) ? body.mode : 'bypassPermissions', model: '',
+        const c = { id: crypto.randomUUID(), owner: pathOwner(cwd), title, renamed: true, cwd, mode: MODES.includes(body.mode) ? body.mode : 'bypassPermissions', model: '',
           fullAccess: true, createdAt: Date.now(), updatedAt: Date.now(), ...(existing.repo && { repo: existing.repo }), ...(existing.git && { git: existing.git }) };
         convos.unshift(c);
         saveConvos();
@@ -1775,7 +1892,7 @@ async function handleRequest(req, res) {
         return json(res, 409, { error: 'Link GitHub first: every project gets its own GitHub repo.', github: false });
       }
       fs.mkdirSync(cwd, { recursive: true });
-      const c = { id: crypto.randomUUID(), title: path.basename(cwd), cwd, mode: MODES.includes(body.mode) ? body.mode : 'bypassPermissions', model: '', createdAt: Date.now(), updatedAt: Date.now() };
+      const c = { id: crypto.randomUUID(), owner: me.id, title: path.basename(cwd), cwd, mode: MODES.includes(body.mode) ? body.mode : 'bypassPermissions', model: '', createdAt: Date.now(), updatedAt: Date.now() };
       convos.unshift(c);
       saveConvos();
       broadcastConvos();
@@ -2240,7 +2357,8 @@ async function handleRequest(req, res) {
   }
   if (p === '/api/away' && req.method === 'GET') {
     const since = Number(url.searchParams.get('since')) || 0;
-    return json(res, 200, { tasks: orch.finishedSince(since / 1000).filter((t) => fs.existsSync(t.path)), repos: Object.fromEntries(convos.filter((c) => c.repo).map((c) => [c.cwd, c.repo.url])) });
+    return json(res, 200, { tasks: orch.finishedSince(since / 1000).filter((t) => ownsPath(me, t.path) && fs.existsSync(t.path)),
+      repos: Object.fromEntries(convos.filter((c) => c.repo && ownsConvo(me, c)).map((c) => [c.cwd, c.repo.url])) });
   }
   // Terminals: each is a tmux session running bash; ttyd attaches a browser tab to one by name.
   if (p === '/api/terminals' && req.method === 'GET') return json(res, 200, { terminals: await listTerminals() });
@@ -2319,7 +2437,15 @@ async function handleRequest(req, res) {
   // Sidebar drag order: POST {ids: [project id, …]}, top (highest priority) first. Sets positions and derives each
   // project's priority from its place (90 → 10); every client gets the new order ('oprojects').
   if (p === '/api/orch/projects/reorder' && req.method === 'POST') {
-    const r = orch.reorderProjects((await readBody(req)).ids);
+    let ids = (await readBody(req)).ids;
+    // A user orders only their own projects, within the places they already hold: everyone else's keep theirs.
+    if (!isAdmin(me)) {
+      if (!Array.isArray(ids) || ids.some((id) => !ownsPath(me, orch.pathOf('project', id)))) return json(res, 403, { error: NOT_YOURS });
+      const all = orch.projectOrder().map((x) => x.id), theirs = all.filter((id) => ownsPath(me, orch.pathOf('project', id)));
+      const next = [...ids, ...theirs.filter((id) => !ids.includes(id))];
+      ids = all.map((id) => (theirs.includes(id) ? next.shift() : id));
+    }
+    const r = orch.reorderProjects(ids);
     return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r);
   }
   // Rigor levels 1-5 (#778) the owner picks per project ({rigor} in the project fields below), each with an example
@@ -2329,8 +2455,9 @@ async function handleRequest(req, res) {
   // for schedules the planner makes), POST {title, prompt, cron, tz, done_when?, enabled?, agent?, model?} adds one,
   // PATCH/DELETE /api/orch/schedules/:id edit or remove one, POST …/:id/run queues its task now (409 while the last runs).
   if (p === '/api/orch/schedules' && req.method === 'GET') {
-    orch.noteOwnerTz(url.searchParams.get('tz'));
-    return json(res, 200, orch.allSchedules());
+    if (isAdmin(me)) orch.noteOwnerTz(url.searchParams.get('tz'));
+    const all = orch.allSchedules(), projects = all.projects.filter((x) => ownsPath(me, x.path)), ids = new Set(projects.map((x) => x.id));
+    return json(res, 200, { ...all, projects, schedules: all.schedules.filter((x) => ids.has(x.project_id)) });
   }
   // ?cron=&tz= → {when, next: [epoch s × 3]} or {error}: the editor's live check of what the owner typed.
   if (p === '/api/orch/cron-preview' && req.method === 'GET') {
@@ -2429,7 +2556,7 @@ async function handleRequest(req, res) {
     }) });
   }
   if (p === '/api/projects') {
-    const list = listFolders(WORKSPACE).map((f) => {
+    const list = listFolders(WORKSPACE).filter((f) => isAdmin(me) || pathOwner(f.path) === me.id).map((f) => {
       const chats = convos.filter((c) => c.cwd === f.path);
       return { ...f, chats: chats.length, lastUsed: Math.max(f.mtime, ...chats.map((c) => c.updatedAt)) };
     });
@@ -2439,12 +2566,16 @@ async function handleRequest(req, res) {
   if (p === '/api/folders') {
     try {
       const dir = safeCwd(url.searchParams.get('path') || WORKSPACE);
+      // A user browses only the workspace's top level (their own projects) and inside those.
+      const top = isAdmin(me) ? null : convos.filter((c) => chatOwner(c) === me.id).map((c) => c.cwd);
+      if (top && dir !== WORKSPACE && !top.some((d) => dir === d || dir.startsWith(d + path.sep))) return json(res, 403, { error: NOT_YOURS });
       const crumbs = [];
       for (let d = dir; ; d = path.dirname(d)) {
         crumbs.unshift({ name: d === HOME ? '~' : path.basename(d), path: d });
         if (d === HOME) break;
       }
-      return json(res, 200, { path: dir, home: HOME, workspace: WORKSPACE, crumbs, folders: listFolders(dir) });
+      const folders = listFolders(dir).filter((f) => !top || dir !== WORKSPACE || top.includes(f.path));
+      return json(res, 200, { path: dir, home: HOME, workspace: WORKSPACE, crumbs: top ? crumbs.filter((c) => c.path.startsWith(WORKSPACE)) : crumbs, folders });
     } catch (e) { return json(res, 400, { error: e.message }); }
   }
 
@@ -2466,7 +2597,7 @@ function handleUpgrade(req, socket, head) {
   // Caddy's forward_auth copies the terminal's WebSocket upgrade headers onto its auth check,
   // so the check arrives here instead of the normal request handler.
   if (p === '/auth/check') {
-    const ok = isAuthed(req) && sameOrigin(req);
+    const ok = isAdmin(sessionUser(req)) && sameOrigin(req);
     socket.end(`HTTP/1.1 ${ok ? '200 OK' : '401 Unauthorized'}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`);
     return;
   }
@@ -2479,6 +2610,7 @@ function handleUpgrade(req, socket, head) {
 }
 
 wss.on('connection', (ws, req) => {
+  ws.user = sessionUser(req); // forClient filters every message by it
   allClients.add(ws);
   // Without a listener a bad frame crashes the server: Caddy 2.6 sends an unmasked close frame on every reload.
   ws.on('error', (e) => console.error('[ws] client socket error:', e.message));
@@ -2487,7 +2619,8 @@ wss.on('connection', (ws, req) => {
   const alive = setInterval(() => {
     syncSessions();
     const s = sessions[token];
-    if (!s || s.exp < Date.now()) ws.close(4001, 'signed out');
+    ws.user = s && users.get(s.user || ADMIN_ID);
+    if (!s || s.exp < Date.now() || !ws.user) ws.close(4001, 'signed out');
     else if (ws.readyState === 1) ws.ping();
   }, Number(process.env.CW_WS_KEEPALIVE_MS) || 30e3);
 
@@ -2508,17 +2641,19 @@ wss.on('connection', (ws, req) => {
   });
 
   function handleMessage(msg) {
-    if (browserViews.handle(ws, msg)) return;
+    const admin = isAdmin(ws.user);
+    if (admin && browserViews.handle(ws, msg)) return;
     if (msg.t === 'metrics_sub') {
       ws.metricsSub = !!msg.on;
       if (ws.metricsSub) metrics(Infinity).then((d) => send(ws, { t: 'mdetail', d })).catch(() => {});
       return;
     }
     if (msg.t === 'usage_refresh') {
+      if (!admin) return;
       refreshUsage().catch((e) => console.error('[usage] refresh failed', e));
       return;
     }
-    const convo = msg.cid && findConvo(msg.cid);
+    const convo = msg.cid && ownsConvo(ws.user, findConvo(msg.cid)) ? findConvo(msg.cid) : null;
     if (msg.t === 'open') {
       if (current) subscribers.get(current)?.delete(ws);
       current = convo ? convo.id : null;
@@ -2529,6 +2664,7 @@ wss.on('connection', (ws, req) => {
       return;
     }
     if (msg.t === 'owatch') {
+      if (msg.on && !admin && !ownsPath(ws.user, orch.pathOf('task', msg.taskId))) return;
       orch.watchTask(ws, Number(msg.taskId) || null, !!msg.on);
       return;
     }
@@ -2539,6 +2675,9 @@ wss.on('connection', (ws, req) => {
         const text = typeof msg.text === 'string' ? msg.text : '';
         const ids = Array.isArray(msg.attachments) ? msg.attachments.filter((x) => typeof x === 'string').slice(0, MAX_ATTACHMENTS) : [];
         if (!text.trim() && !ids.length) break;
+        // A user at an admin-set cap for this chat's model gets no turn (users.mjs); the admin is never capped.
+        const capped = capRefusal(convo);
+        if (capped) { emit(convo.id, { t: 'error', text: capped }); break; }
         let files = [];
         try { files = ids.length ? placeUploads(DATA, ids, convo.cwd) : []; }
         catch (e) { emit(convo.id, { t: 'error', text: `Couldn't attach the files: ${e?.message || e}` }); break; }
@@ -2615,9 +2754,9 @@ wss.on('connection', (ws, req) => {
 if (process.argv[2] === 'set-password') {
   const pw = process.argv[3];
   if (!pw || pw.length < 8) { console.error('Usage: node server.mjs set-password <new password, 8+ chars>'); process.exit(1); }
-  writeJSON('auth.json', hashPassword(pw));
+  users.setAdminPassword(pw);
   writeJSON('sessions.json', {});
-  console.log('Password updated. Everyone has been signed out.');
+  console.log("The admin's password is updated. Everyone has been signed out.");
   process.exit(0);
 } else {
   // Repo links are refreshed from each folder's git origin before serving, so the API never returns a stale one.

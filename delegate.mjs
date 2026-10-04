@@ -17,10 +17,11 @@ export function parseFallbacks(v) {
 }
 
 // Live wiring. agents() → ids; connected(id) → bool (installed, signed in, on the subscription);
-// blockedUntil(id, model) → epoch s | 0; windows(id, model) → [{window, pct}] the agent's plan windows; models(id) →
+// blockedUntil(id, model, task?) → epoch s | 0 (task: the one being placed, so a per-user cap can apply); windows(id, model) → [{window, pct}] the agent's plan windows; models(id) →
 // [{id, default?}]. Any such window ≥ maxWindowPct makes the agent's models unavailable.
 export function createDelegator({ agents, connected, blockedUntil, windows = () => [], models, cfg = DELEGATE_CFG }) {
-  const hasUsage = (id, model) => connected(id) && !blockedUntil(id, model) && !(windows(id, model) || []).some((w) => Number(w.pct) >= cfg.maxWindowPct);
+  // task (optional): whose limits apply, for per-user caps (blockedUntil's third argument).
+  const hasUsage = (id, model, task) => connected(id) && !blockedUntil(id, model, task) && !(windows(id, model) || []).some((w) => Number(w.pct) >= cfg.maxWindowPct);
   const listed = (id, model) => (models(id) || []).some((m) => m.id === model);
   const available = () => agents().filter((a) => connected(a)).flatMap((a) => (models(a) || []).filter((m) => hasUsage(a, m.id)).map((m) => ({ agent: a, model: m.id })));
   // The model a route with no model runs: the agent's default (else its first) model.
@@ -31,7 +32,7 @@ export function createDelegator({ agents, connected, blockedUntil, windows = () 
     const cur = `${current.agent}/${current.model || defaultModel(current.agent)}`;
     const list = parseFallbacks(task.fallbacks) || [];
     for (const [i, f] of list.entries()) {
-      if (`${f.agent}/${f.model}` === cur || !agents().includes(f.agent) || !listed(f.agent, f.model) || !hasUsage(f.agent, f.model)) continue;
+      if (`${f.agent}/${f.model}` === cur || !agents().includes(f.agent) || !listed(f.agent, f.model) || !hasUsage(f.agent, f.model, task)) continue;
       return { agent: f.agent, model: f.model, rank: i + 1, reason: `owner's fallback #${i + 1}` };
     }
     return null;

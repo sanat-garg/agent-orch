@@ -94,7 +94,7 @@ export function fileCapFull(files, runningDecls, capOf) {
 }
 
 // Agent spreading: `ready` work tasks (in queue order) each with `options` = [{agent, model}], its primary first, then
-// its fallbacks. `slotsFree(agent)` → how many more tasks that agent may run now; `hasUsage(agent, model, option)` → bool.
+// its fallbacks. `slotsFree(agent)` → how many more tasks that agent may run now; `hasUsage(agent, model, option, task)` → bool.
 // Every task takes its primary when the primary has a free slot and usage; only a task that would otherwise wait
 // spills to its first fallback that has both. Returns [{task, agent, model, spilled}] for the tasks that can start.
 export function spreadAssign(ready, { slotsFree, hasUsage }) {
@@ -103,11 +103,11 @@ export function spreadAssign(ready, { slotsFree, hasUsage }) {
   const take = (task, o, spilled) => { used.set(o.agent, (used.get(o.agent) || 0) + 1); out.push({ task, agent: o.agent, model: o.model, spilled }); };
   for (const r of ready) {
     const [primary] = r.options;
-    if (primary && free(primary.agent) > 0 && hasUsage(primary.agent, primary.model, primary)) take(r.task, primary, false);
+    if (primary && free(primary.agent) > 0 && hasUsage(primary.agent, primary.model, primary, r.task)) take(r.task, primary, false);
     else waiting.push(r);
   }
   for (const r of waiting) {
-    const o = r.options.slice(1).find((f) => free(f.agent) > 0 && hasUsage(f.agent, f.model, f));
+    const o = r.options.slice(1).find((f) => free(f.agent) > 0 && hasUsage(f.agent, f.model, f, r.task));
     if (o) take(r.task, o, true);
   }
   return out;

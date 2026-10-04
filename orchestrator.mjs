@@ -1055,7 +1055,10 @@ function takeLock(file) {
 
 export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLimits, onSubscription, emitChat, broadcast, convoExists, refreshUsage,
   convoFallbacks = () => null, convoEffort = () => null, convoPersona = () => null, onCommit = () => {}, projectReady = () => true, projectArchived = () => false, disabled = false, usageLog = createUsageLog(dataDir),
-  notify = () => {}, codexSnapshot = () => codexLatestSnapshot(), reap = null, config = {} }) {
+  notify = () => {}, codexSnapshot = () => codexLatestSnapshot(), reap = null, config = {},
+  // Users (users.mjs): projectUser(path) → the id of the user whose project it is (token records carry it); userCap(path,
+  // agent, model) → {window, cap, mine, resetsAt} when that user reached their admin-set cap for agent/model, else null.
+  projectUser = () => null, userCap = () => null }) {
   Object.assign(CFG, config); // tests tune slots (concurrency, parallelTasks, agentSlots, meminfo, hardware)
   let hw = readHardware(); // the controller's hardware as last detected (detectHardware)
   const dir = path.join(dataDir, 'orchestrator');
@@ -1952,7 +1955,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       if (!waitsForLimit(r)) return true;
       if (r.kind === 'reflect') return note(r, reflectWaitNote(r)), false;
       const route = guarded(r, () => routeNow(r, getProject(r.project_id)));
-      if (route) note(r, `${limitName(route.agent, route.model)} is at its usage limit`);
+      const cap = route && capFor(r, route.agent, route.model);
+      if (route) note(r, cap ? capText(cap) : `${limitName(route.agent, route.model)} is at its usage limit`);
       return false;
     }).map((r) => guarded(r, () => {
       const route = routeNow(r, getProject(r.project_id)), primary = { agent: route.agent, model: route.model || delegator.defaultModel(route.agent), primary: true };
@@ -1961,14 +1965,14 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     })).filter(Boolean);
     // Integrators and reflection go ahead of the rest on their own route (integrators first): they have reserved head slots.
     const only = ready.filter((r) => reservedWork(r.task)).sort((a, b) => !!b.task.integrates - !!a.task.integrates);
-    const picks = [...only.filter((r) => delegator.hasUsage(r.options[0].agent, r.options[0].model)).map((r) => ({ task: r.task, ...r.options[0], spilled: false })),
+    const picks = [...only.filter((r) => delegator.hasUsage(r.options[0].agent, r.options[0].model, r.task)).map((r) => ({ task: r.task, ...r.options[0], spilled: false })),
       ...spreadAssign(ready.filter((r) => !reservedWork(r.task)), {
         slotsFree: (a) => Math.max(0, slotsFor(a) - runningOn(a)) + workerSlots(a),
-        hasUsage: (a, m) => delegator.hasUsage(a, m),
+        hasUsage: (a, m, o, task) => delegator.hasUsage(a, m, task),
       })];
     if (why) for (const r of ready) if (!picks.some((p) => p.task.id === r.task.id)) {
       const [o] = r.options;
-      note(r.task, delegator.hasUsage(o.agent, o.model) ? `${agentName(o.agent)} has no free slot (${workersWhy(o.agent, r.task.id)})` : `${o.agent}/${o.model} has no usage left`);
+      note(r.task, delegator.hasUsage(o.agent, o.model, r.task) ? `${agentName(o.agent)} has no free slot (${workersWhy(o.agent, r.task.id)})` : `${o.agent}/${o.model} has no usage left`);
     }
     const load = headLoad();
     for (const pick of picks) {
@@ -2294,7 +2298,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       }
     }
     if (stopped) res.outcome = stopped;
-    usageLog.tokens(agent, res.usage, taskId ? 'task' : 'chat', taskId ?? null);
+    const owner = projectUser(taskId ? getProject(getTask(taskId)?.project_id)?.path : cwd);
+    usageLog.tokens(agent, res.usage, taskId ? 'task' : 'chat', taskId ?? null, { user: owner, model: model || delegator.defaultModel(agent) });
     usageLog.windows(agent, res.windows);
     if (taskId) writeShots();
     if (taskId) writeEntry({ k: 'end', at: now(), outcome: res.outcome, turns: res.numTurns });
@@ -2612,8 +2617,14 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   const waitsForLimit = (task, project) => {
     if (task.kind === 'reflect') return !reflectPicked(task);
     const { agent: a, model } = routeNow(task, project || getProject(task.project_id));
-    return !!blockedUntilFor(a, model) || (task.kind === 'plan' && a !== 'claude' && kvTime(`agent_auth_failed:${a}`) > now());
+    return !!blockedUntilFor(a, model) || !!capFor(task, a, model) || (task.kind === 'plan' && a !== 'claude' && kvTime(`agent_auth_failed:${a}`) > now());
   };
+  // The cap (users.mjs) the task's project owner has reached for agent/model, or null.
+  const capFor = (task, agent, model) => {
+    const p = task && getProject(task.project_id);
+    return p ? userCap(p.path, agent, model || delegator.defaultModel(agent)) : null;
+  };
+  const capText = (c) => `its owner reached their ${c.cap}% cap of the ${c.label || `${c.agent} ${c.window}`} weekly limit`;
   function routeFor(task, project) {
     const r = resolveRoute(task, project, listRoutes(project.id), agentAvailable);
     if (r.dropped) logEvent(`model ${r.dropped} is not a ${r.fellBack || r.agent} model; #${task.id || task.kind} uses the agent's default model`, { level: 'warn', projectId: project.id, taskId: task.id || null });
@@ -2624,7 +2635,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   const delegator = createDelegator({
     agents: () => Object.keys(AGENTS),
     connected: (id) => (id === 'claude' ? onSubscription() : (agentStatus(id) === true || workerNodes(id).length > 0) && !(kvTime(`agent_auth_failed:${id}`) > now())),
-    blockedUntil: (id, model) => blockedUntilFor(id, model),
+    blockedUntil: (id, model, task) => { const c = blockedUntilFor(id, model) ? null : capFor(task, id, model); return blockedUntilFor(id, model) || (c ? c.resetsAt || now() + 3600 : 0); },
     windows: (id) => usageLog.current?.(id) || [],
     models: (id) => modelCatalog(id).models || [],
     cfg: CFG.delegate,
@@ -2671,12 +2682,12 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // Its current pick, when that is still usable.
   function reflectPicked(task) {
     const s = pickState(task);
-    return s.agent && task.agent === s.agent && (task.model || null) === (s.model || null) && reflectUsable(s.agent, s.model) ? s : null;
+    return s.agent && task.agent === s.agent && (task.model || null) === (s.model || null) && reflectUsable(s.agent, s.model) && !capFor(task, s.agent, s.model) ? s : null;
   }
   function reflectPick(task) {
     if (reflectPicked(task)) return true;
     const s = pickState(task), pool = reflectPool(getProject(task.project_id)), tried = Array.isArray(s.tried) ? s.tried : [];
-    const { pick } = pickReflectModel(pool, { usable: reflectUsable, tried, random: CFG.random });
+    const { pick } = pickReflectModel(pool, { usable: (a, m) => reflectUsable(a, m) && !capFor(task, a, m), tried, random: CFG.random });
     if (!pick) return false;
     const next = { agent: pick.agent, model: pick.model, of: pool.length, tried };
     updateTask(task.id, { agent: pick.agent, model: pick.model, session_id: null, reflect_pick: JSON.stringify(next) });
@@ -3687,7 +3698,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       };
       job.done = (msg) => {
         const lim = msg.limits || {};
-        usageLog.tokens(spec.agent, msg.usage || {}, 'task', id);
+        usageLog.tokens(spec.agent, msg.usage || {}, 'task', id, { user: projectUser(project.path), model: spec.model || delegator.defaultModel(spec.agent) });
         usageLog.windows(spec.agent, lim.windows || undefined);
         finish({ outcome: msg.outcome, text: msg.text, usage: msg.usage || {}, sessionId: msg.sessionId || null,
           resetsAt: lim.resetsAt ?? undefined, limitType: lim.limitType ?? undefined, windows: lim.windows ?? undefined,
@@ -4908,6 +4919,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   return {
     createBrowserTask, listBrowserTasks, stopBrowserTask, attachBrowserViews, browserFailed, browserRunner,
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
+    projectOrder: () => projectOrderView(), // [{id, path, position, priority}], highest priority first
     planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, insertCheckpoint, approveCheckpoint, requestChanges, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setTaskRunOn, assignable, assignTask, setReflectFallbacks, setReflectSettings, syncConvoModel, pauseTask, resumeTask, handoffTask, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
     drain, undrain, chatPlanning, applyUpdates: () => parallelSettings().applyUpdates,
     prepareRestart, resumeAfterRestart, restartBlocker, stateView, machines, browserTasks, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, reconcileClaudeLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
@@ -4917,6 +4929,12 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     isRunning: (id) => running.has(Number(id)), logEvent, attachCluster, detectHardware,
     // The head's git endpoint (cluster-git.mjs): a project's checkout, and the tasks node nodeId may push to in it now.
     gitRepo: (pid) => getProject(Number(pid))?.path || null,
+    // The project folder a task, project, schedule or planner message belongs to, or null (server.mjs: a user's own only).
+    pathOf: (kind, id) => {
+      const pid = kind === 'project' ? Number(id) : kind === 'task' ? getTask(Number(id))?.project_id
+        : q1(`SELECT project_id FROM ${kind === 'schedule' ? 'schedules' : 'messages'} WHERE id=:id`, { id: Number(id) })?.project_id;
+      return pid ? getProject(pid)?.path || null : null;
+    },
     // An integrator there pushes agent-orch/integrate-<id> (never the branch it merges); any other task its own task branch.
     pushableTasks: (nodeId, pid) => [...running].filter(([, r]) => r.node === nodeId && r.projectId === Number(pid)).map(([id]) => (getTask(id)?.integrates ? integrateBranch(id) : id)),
     listSchedules: (pid) => listSchedules(Number(pid)).map(scheduleView),

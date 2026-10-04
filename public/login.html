@@ -23,13 +23,16 @@
       </div>
     </div>
 
-    <!-- Lets password managers save this login under a name. -->
-    <input type="text" name="username" autocomplete="username" value="claude" hidden>
+    <!-- Blank = the admin (users.mjs; passwords saved before users existed carry the old hidden name 'claude', also the admin). -->
+    <label for="user">Username</label>
+    <div class="field">
+      <input id="user" name="username" type="text" autocomplete="username" placeholder="admin" autocapitalize="off" autocorrect="off" spellcheck="false">
+    </div>
 
     <label for="pw">Password</label>
     <div class="field">
       <input id="pw" name="password" type="password" autocomplete="current-password"
-             placeholder="Enter your password" autofocus required spellcheck="false">
+             placeholder="Enter your password" required spellcheck="false">
       <button type="button" class="eye" id="eye" aria-label="Show password" title="Show password">
         <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path id="slash" d="M4 4l16 16" stroke="currentColor" stroke-width="1.8" /></svg>
       </button>
@@ -48,14 +51,17 @@
       <span class="spinner" aria-hidden="true"></span>
     </button>
 
-    <p class="foot">Forgot it? SSH in and run<br><code>node ~/agent-orch/server.mjs set-password &lt;new&gt;</code></p>
+    <p class="foot">Forgot it? Ask your admin to reset it. Admins: SSH in and run<br><code>node ~/agent-orch/server.mjs set-password &lt;new&gt;</code></p>
   </form>
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
 $('host').textContent = location.hostname.replace(/\.sslip\.io$/, '').replace(/-/g, '.');
 
-const pw = $('pw'), eye = $('eye'), slash = $('slash');
+const pw = $('pw'), eye = $('eye'), slash = $('slash'), user = $('user');
+// A remembered username goes in for you, and focus starts where there is something to type.
+user.value = localStorage.getItem('cw.loginUser') || '';
+(user.value ? pw : user).focus();
 slash.style.display = 'none';
 eye.addEventListener('click', () => {
   const show = pw.type === 'password';
@@ -100,14 +106,14 @@ $('form').addEventListener('submit', async (e) => {
     const r = await fetch('/api/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: pw.value, remember: $('remember').checked }),
+      body: JSON.stringify({ username: user.value.trim(), password: pw.value, remember: $('remember').checked }),
     });
     const body = await r.json().catch(() => ({}));
-    if (r.ok) { btn.querySelector('.label').textContent = 'Signed in'; location.replace('/'); return; }
+    if (r.ok) { localStorage.setItem('cw.loginUser', user.value.trim()); btn.querySelector('.label').textContent = 'Signed in'; location.replace('/'); return; }
     if (r.status === 429) { btn.classList.remove('loading'); showError(''); return lockout(body.retryInSec || 900); }
     showError(body.attemptsLeft > 0 && body.attemptsLeft < 3
-      ? `That password isn't right. ${body.attemptsLeft} ${body.attemptsLeft === 1 ? 'try' : 'tries'} left before a 15-minute lock.`
-      : "That password isn't right. Try again.");
+      ? `That username or password isn't right. ${body.attemptsLeft} ${body.attemptsLeft === 1 ? 'try' : 'tries'} left before a 15-minute lock.`
+      : "That username or password isn't right. Try again.");
     pw.select();
   } catch {
     showError("Can't reach the server. Check your connection and try again.");

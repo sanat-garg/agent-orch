@@ -1,0 +1,59 @@
+/* Users (users.js): the admin's Users sheet, and what a non-admin sees instead of the admin's controls. */
+
+/* A non-admin (html[data-role=user]) gets their chats, projects, tasks and files; machines, sign-ins, previews, stats,
+   the terminal, the Browser tab, updates and the plan's own usage card are the admin's. */
+html[data-role="user"] :is(.admin-only, #previewsBtn, #statsBtn, #connFoot, #miniMachine, #usageCard, #bannerTerm, #updateBanner, #repoLink, #viewMenuRepo, #previewLink, .preview-line,
+  .seg [data-view="term"], #browserTab, .gh-import, #pkGhBtn, #pkBrowseBtn) { display: none !important; }
+html[data-role="user"] .side-foot-row { justify-content: flex-end; }
+
+/* "Your usage" in the sidebar */
+.ms-usage.my-usage { cursor: default; border-top: 0; }
+.ms-usage.my-usage:hover { background: none; }
+.my-usage .mu-row { grid-template-columns: minmax(56px, auto) 1fr auto; }
+.my-usage .mu-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.my-usage .full .ms-bar i { background: var(--danger); }
+.my-usage .full .ms-val { color: var(--danger); }
+
+/* The Users sheet */
+.modal-panel.um { width: min(640px, 100%); }
+.um-top { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
+.um-top .btn { flex: none; }
+.um-intro, .um-hint { margin: 0; font-size: 13px; color: var(--muted); line-height: 1.4; }
+.um-user { padding: 12px; margin-bottom: 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
+.um-head { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.um-name { font-weight: 650; font-size: 15px; overflow-wrap: anywhere; }
+.um-role { font-size: 11.5px; font-weight: 600; padding: 2px 7px; border-radius: 999px; background: var(--bg); color: var(--muted); border: 1px solid var(--border); }
+.um-role.admin { color: var(--accent-ink); border-color: var(--accent); }
+.um-you { font-size: 12px; color: var(--muted); }
+.um-meta { margin-left: auto; font-size: 12.5px; color: var(--muted); }
+.um-table { display: flex; flex-direction: column; gap: 2px; margin-top: 10px; }
+.um-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-top: 1px solid var(--border); }
+.um-win { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.um-wname { font-size: 13.5px; font-weight: 600; }
+.um-wsub { font-size: 12px; color: var(--muted); }
+.um-bar { position: relative; height: 6px; border-radius: 3px; background: var(--border); overflow: visible; margin-top: 3px; }
+.um-bar i { position: absolute; inset: 0 auto 0 0; border-radius: 3px; background: var(--accent); }
+.um-bar b { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--text); border-radius: 1px; }
+.um-row.full .um-bar i { background: var(--danger); }
+.um-row.full .um-wsub { color: var(--danger); }
+.um-cap { display: flex; align-items: center; gap: 6px; flex: none; cursor: default; }
+.um-capk { font-size: 12.5px; color: var(--muted); }
+.um-cap input { width: 68px; height: 34px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; font-size: 14px; text-align: right; }
+.um-cap input:focus, .um-add input:focus, .um-add select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus); }
+.um-pct { font-size: 13px; color: var(--muted); }
+.um-nocap { flex: none; font-size: 12.5px; color: var(--muted); }
+.um-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.um-err { margin: 6px 0 0; font-size: 13px; color: var(--danger); }
+.um-err:empty { display: none; }
+.um-add { display: flex; flex-direction: column; gap: 12px; padding: 12px; margin-bottom: 14px; border: 1px solid var(--border-strong); border-radius: 12px; }
+.um-etitle { margin: 0; font-size: 15px; font-weight: 650; }
+.um-field { display: flex; flex-direction: column; gap: 5px; cursor: default; }
+.um-label { font-size: 13px; font-weight: 600; }
+.um-add input, .um-add select { height: 36px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--panel); color: var(--text); font: inherit; font-size: 14px; }
+.um-foot { display: flex; justify-content: flex-end; gap: 8px; }
+@media (max-width: 800px) { .modal-panel.um { width: 100%; } }
+@media (max-width: 600px) { .um-top { flex-direction: column; } }
+@media (pointer: coarse) {
+  .um-acts .btn.small, .um-top .btn.small, .um-foot .btn { min-height: 44px; }
+  .um-cap input, .um-add input, .um-add select { height: 44px; font-size: 16px; } /* iOS zooms into smaller inputs */
+}

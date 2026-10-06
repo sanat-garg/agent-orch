@@ -592,6 +592,7 @@ function renderChatSearch(nav) {
   }
 }
 
+let archFoldedFor = null; // the archived chat that was open when the owner folded Archived
 function renderConvoList() {
   if (drag.active) { drag.stale = true; return; } // re-rendering would pull the lifted card out from under the pointer
   const nav = $('convoList');
@@ -612,24 +613,21 @@ function renderConvoList() {
     nav.append(label);
     for (const c of ranked) { nav.append(convoItem(c, true)); for (const s of subChats(c)) nav.append(convoItem(s, false, true)); }
   }
-  // The rest, newest activity first, with no label (no date groups either: owner, 2026-10-04); a gap sets them off.
+  // The rest, newest activity first, with no label (no date groups either: owner, 2026-10-04) and no gap (owner, 2026-10-06).
   const sorted = state.convos.filter((c) => !c.project && !c.archived && !isSubChat(c)).sort((a, b) => familyUpdated(b) - familyUpdated(a));
-  for (const [i, c] of sorted.entries()) {
-    nav.append(convoItem(c, false));
-    if (i === 0 && ranked.length) nav.lastChild.classList.add('after-ranked');
-    for (const s of subChats(c)) nav.append(convoItem(s, false, true));
-  }
+  for (const c of sorted) { nav.append(convoItem(c, false)); for (const s of subChats(c)) nav.append(convoItem(s, false, true)); }
   // Archived projects (finished ones; the whole folder, all its chats): folded into one row at the bottom, opened while
-  // the open chat is one of them.
+  // the open chat is one of them, unless the owner folded it again with that chat open (`archFoldedFor`).
   const archived = state.convos.filter((c) => c.archived && !isSubChat(c)).sort((a, b) => familyUpdated(b) - familyUpdated(a));
   if (archived.length) {
-    const open = store.get('cw.archivedOpen') === '1' || !!currentConvo()?.archived;
+    const open = store.get('cw.archivedOpen') === '1' || (!!currentConvo()?.archived && archFoldedFor !== state.cid);
     const t = el('button', 'group-label arch-toggle');
     t.type = 'button';
     t.setAttribute('aria-expanded', String(open));
     t.append(el('span', '', `Archived · ${archived.length}`), el('span', 'caret', '›'));
     t.onclick = () => {
       store.set('cw.archivedOpen', open ? '0' : '1');
+      archFoldedFor = open ? state.cid : null;
       renderConvoList();
       const nt = nav.querySelector('.arch-toggle');
       nt?.focus({ preventScroll: true });

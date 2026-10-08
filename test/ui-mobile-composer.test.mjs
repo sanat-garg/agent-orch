@@ -93,6 +93,9 @@ const composer = (page) => page.evaluate(() => {
     .map((n) => n.textContent.trim());
   const b = {};
   for (const id of ['input', 'send', 'modelChip', 'plusBtn', 'composer']) b[id] = box(document.getElementById(id));
+  // The field's pill (.box::before) is the textarea's box plus its margins: the text sits inset inside it.
+  const ta = document.getElementById('input'), m = getComputedStyle(ta), px = (k) => parseFloat(m[k]) || 0;
+  b.field = { left: b.input.left - px('marginLeft'), right: b.input.right + px('marginRight'), top: b.input.top - px('marginTop'), bottom: b.input.bottom + px('marginBottom') };
   return { ids: controls.map((n) => n.id), text, b, font: getComputedStyle(document.getElementById('input')).fontSize, width: innerWidth,
     overflow: document.documentElement.scrollWidth - innerWidth, pill: document.getElementById('modelChip').scrollWidth <= document.getElementById('modelChip').clientWidth + 1 };
 });
@@ -106,9 +109,10 @@ test('390px: only the text field, send, the model pill and + are visible', { ski
   assert.deepEqual(c.text, [], 'no labels or hint text');
   for (const id of ['attBtn', 'modeChip', 'effChip', 'personaChip']) assert.equal(await page.locator(`#${id}`).isVisible(), false, `#${id} moved into the + sheet`);
   assert.equal(c.font, '16px', 'a 16px field (no iOS zoom on focus)');
-  const { input, send, modelChip, plusBtn } = c.b;
-  assert.ok(send.left >= input.left && send.right <= input.right && send.top >= input.top && send.bottom <= input.bottom, `send sits inside the field: ${JSON.stringify({ send, input })}`);
-  assert.ok(input.right - send.right <= 8, 'at its right edge');
+  const { input, send, modelChip, plusBtn, field } = c.b;
+  assert.ok(send.left >= field.left && send.right <= field.right + 0.5 && send.top >= field.top - 0.5 && send.bottom <= field.bottom + 0.5, `send sits inside the field: ${JSON.stringify({ send, field })}`);
+  assert.ok(field.right - send.right <= 8, 'at its right edge');
+  assert.ok(input.right <= send.left + 0.5, `the text never runs under send: ${JSON.stringify({ input, send })}`);
   assert.equal(send.w, send.h, 'round');
   assert.ok(send.w >= 44 && plusBtn.w >= 44 && plusBtn.h >= 44 && modelChip.h >= 44, '44pt targets');
   assert.equal(Math.round(plusBtn.top), Math.round(modelChip.top), '+ and the pill share one row');

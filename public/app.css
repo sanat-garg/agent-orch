@@ -1830,16 +1830,22 @@ details.dr-more[open] > summary { margin-bottom: 12px; }
   #plusBtn, #modelChip { border-color: transparent; background: none; color: var(--muted); }
   #plusBtn:active, #modelChip:active, #plusBtn[aria-expanded="true"] { background: var(--raised); color: var(--text); }
   #modelChip { grid-area: model; justify-self: start; max-width: 100%; padding-left: 6px; }
-  /* A box-shadow outline, not a border: autosize() sets the height to scrollHeight, which leaves out borders. */
-  #composer textarea { grid-area: field; max-height: 40dvh; padding: 10px 48px 10px 16px; border-radius: 22px; background: var(--panel);
-    box-shadow: inset 0 0 0 1px var(--border-strong); transition: box-shadow .15s; }
-  #composer textarea:focus { box-shadow: inset 0 0 0 1px var(--accent), 0 0 0 3px var(--focus); }
-  #composer .send { grid-area: field; justify-self: end; align-self: end; margin: 4px; border-radius: 50%; }
+  /* The field's pill is .box::before, sharing the textarea's grid cell; the textarea sits inset in it with no padding,
+     so text scrolled past the top is clipped on a straight edge inside the pill, never sliced by its rounded corners.
+     The height cap follows the space above the keyboard (autosize() caps the same way). */
+  #composer .box::before { content: ''; grid-area: field; align-self: stretch; border-radius: 22px; background: var(--panel);
+    box-shadow: inset 0 0 0 1px var(--border-strong); transition: box-shadow .15s; cursor: text; }
+  #composer .box:has(textarea:focus)::before { box-shadow: inset 0 0 0 1px var(--accent), 0 0 0 3px var(--focus); }
+  #composer textarea { grid-area: field; position: relative; z-index: 1; width: auto; min-width: 0; margin: 10px 48px 10px 16px; padding: 0;
+    max-height: calc((100dvh - var(--kb, 0px)) * .4); overflow-wrap: anywhere; overscroll-behavior: contain; scrollbar-width: none; }
+  #composer textarea::-webkit-scrollbar { display: none; }
+  #composer .send { grid-area: field; position: relative; z-index: 2; justify-self: end; align-self: end; margin: 4px; border-radius: 50%; }
   .modal-panel.ps { width: 100%; }
 }
 @media (max-width: 767px) and (pointer: coarse) {
   #plusBtn { width: 44px; }
-  #composer textarea { padding: 14px 56px 14px 18px; border-radius: 26px; }
+  #composer .box::before { border-radius: 26px; }
+  #composer textarea { margin: 14px 56px 14px 18px; }
 }
 /* The '+' sheet's rows: an icon, the label and, for a composer option, its current value. */
 .modal-panel.ps { width: min(420px, 100%); }

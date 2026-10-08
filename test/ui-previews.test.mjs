@@ -128,26 +128,35 @@ test('the chat header links to the project preview with its status', { skip }, a
   } finally { await ctx.close(); }
 });
 
-test('sidebar manager: every project, domains, and a slug change PUTs (desktop and 390px phone)', { skip }, async () => {
+test('sidebar manager: live cards, Add address, Edit, domains, and slug changes PUT (desktop and 390px phone)', { skip }, async () => {
   for (const mobile of [false, true]) {
     const { ctx, page, errors } = await open('', mobile);
     try {
       if (mobile) await page.locator('#openSidebar').click();
       await page.locator('#previewsBtn').click();
       await page.locator('#pvBody .pv-row[data-cid="c0"]').waitFor();
-      const demo = page.locator('.pv-row[data-cid="c0"]'), notes = page.locator('.pv-row[data-cid="c1"]');
-      assert.equal(await demo.locator('input.pv-slug').inputValue(), 'demo-site');
-      assert.match(await demo.locator('.pv-status').textContent(), /Stopped/);
-      assert.equal(await demo.locator('a.btn').getAttribute('href'), 'https://demo-site.greygoose.baby');
-      // No address guessed for a project without one; Add waits for a typed slug.
-      assert.equal(await notes.locator('input.pv-slug').inputValue(), '');
-      const add = notes.locator('button', { hasText: 'Add' });
+      const demo = page.locator('.pv-row[data-cid="c0"]'), notes = page.locator('.pv-item[data-cid="c1"]');
+      // A live card: its address as a link, the status pill and the actions; no field until Edit.
+      assert.equal(await demo.locator('a.pv-url').textContent(), 'demo-site.greygoose.baby');
+      assert.match(await demo.locator('.pv-pill').textContent(), /Stopped/);
+      assert.equal(await demo.locator('a.pv-act').getAttribute('href'), 'https://demo-site.greygoose.baby');
+      assert.deepEqual(await demo.locator('.pv-act').allTextContents(), ['Open', 'Restart', 'Logs', 'Edit']);
+      assert.equal(await demo.locator('input.pv-slug').count(), 0);
+      // A project without one sits in the "No address" list; Add address opens an empty field and Add waits for a slug.
+      assert.equal(await notes.locator('input.pv-slug').count(), 0);
+      await notes.locator('button', { hasText: 'Add address' }).click();
+      assert.equal(await notes.locator('input.pv-slug').inputValue(), '', 'not guessed from the project name');
+      assert.equal(await notes.locator('input.pv-slug').evaluate((n) => n === document.activeElement), true, 'focused');
+      const add = notes.locator('.pv-ed-acts button', { hasText: 'Add' });
       assert.equal(await add.isDisabled(), true);
       // A tap anywhere in the address box (not just on the typed text) focuses the slug.
+      await notes.locator('input.pv-slug').blur();
       await notes.locator('.pv-https').click();
       assert.equal(await notes.locator('input.pv-slug').evaluate((n) => n === document.activeElement), true);
       await notes.locator('input.pv-slug').fill('my-notes');
       assert.equal(await add.isEnabled(), true);
+      // The typed name is never clipped (the domain gives way first).
+      assert.equal(await notes.locator('input.pv-slug').evaluate((n) => n.scrollWidth <= n.clientWidth), true);
       // The bare domain (no subdomain): the slug box goes away and Add PUTs '@'.
       let bare = null;
       await page.route('**/api/convos/c1/preview', (route) => {
@@ -156,18 +165,32 @@ test('sidebar manager: every project, domains, and a slug change PUTs (desktop a
       });
       await notes.locator('select.pv-domain').selectOption('@example.dev');
       assert.equal(await notes.locator('input.pv-slug').isHidden(), true);
-      await page.waitForFunction(() => /✓ example\.dev is free/.test(document.querySelector('.pv-row[data-cid="c1"] .pv-check').textContent));
+      await page.waitForFunction(() => /✓ example\.dev is free/.test(document.querySelector('.pv-item[data-cid="c1"] .pv-check').textContent));
       await add.click();
       await page.waitForFunction(() => document.querySelector('.toast')?.textContent.includes('https://example.dev'));
       assert.deepEqual(bare, { slug: '@', domain: 'example.dev' });
       await page.locator('.toast').evaluateAll((ts) => ts.forEach((t) => t.remove()));
-      assert.deepEqual(await page.locator('.pv-dname').allTextContents(), ['greygoose.baby', 'example.dev']);
+      assert.deepEqual(await page.locator('#pvBody .pv-sec:last-child .pv-list .pv-name').allTextContents(), ['greygoose.baby', 'example.dev']);
+      // Edit: the current address, Save only once it changes, Cancel puts the actions back.
+      await demo.locator('.pv-act', { hasText: 'Edit' }).click();
+      assert.equal(await demo.locator('input.pv-slug').inputValue(), 'demo-site');
+      assert.equal(await demo.locator('button', { hasText: 'Save' }).isDisabled(), true);
+      assert.equal(await demo.locator('button', { hasText: 'Remove address' }).count(), 1);
+      await demo.locator('button', { hasText: 'Cancel' }).click();
+      assert.equal(await demo.locator('input.pv-slug').count(), 0);
+      // Escape in the field cancels the edit, not the whole sheet.
+      await demo.locator('.pv-act', { hasText: 'Edit' }).click();
+      await demo.locator('input.pv-slug').press('Escape');
+      assert.equal(await demo.locator('input.pv-slug').count(), 0);
+      assert.equal(await page.locator('#previewsModal').isVisible(), true);
+      assert.equal(await demo.locator('.pv-act').count(), 4);
       // A rename: the live check, then Save PUTs the slug and domain.
       let put = null;
       await page.route('**/api/convos/c0/preview', (route) => {
         put = route.request().postDataJSON();
         return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true }) });
       });
+      await demo.locator('.pv-act', { hasText: 'Edit' }).click();
       await demo.locator('input.pv-slug').fill('demo-two');
       await page.waitForFunction(() => /demo-two\.greygoose\.baby is free/.test(document.querySelector('.pv-row[data-cid="c0"] .pv-check').textContent));
       await demo.locator('button', { hasText: 'Save' }).click();
@@ -176,6 +199,10 @@ test('sidebar manager: every project, domains, and a slug change PUTs (desktop a
       // Nothing sticks out sideways on the phone.
       const overflow = await page.evaluate(() => [...document.querySelectorAll('#pvBody *')].filter((n) => n.getBoundingClientRect().right > innerWidth + 1).map((n) => n.className));
       assert.deepEqual(overflow, [], `overflowing: ${overflow}`);
+      if (mobile) {
+        const small = await page.evaluate(() => [...document.querySelectorAll('#pvBody .pv-act, #pvBody .pv-addbtn')].filter((n) => n.getBoundingClientRect().height < 44).map((n) => n.textContent));
+        assert.deepEqual(small, [], `44pt targets: ${small}`);
+      }
       assert.deepEqual(errors, []);
     } finally { await ctx.close(); }
   }

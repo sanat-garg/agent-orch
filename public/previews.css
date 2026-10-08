@@ -22,9 +22,9 @@
 }
 .pv-addr:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus); }
 .pv-https { color: var(--faint); }
-.pv-slug { min-width: 4ch; max-width: 100%; border: 0; outline: 0; background: none; color: var(--text); font: inherit; font-weight: 600; padding: 0 1px; }
+.pv-slug { flex: 0 0 auto; min-width: 4ch; max-width: 65%; border: 0; outline: 0; background: none; color: var(--text); font: inherit; font-weight: 600; padding: 0 1px; }
 .pv-slug::placeholder { color: var(--faint); font-weight: 400; }
-.pv-domain { min-width: 0; max-width: 100%; border: 0; background: none; color: var(--muted); font: inherit; padding: 0 2px; cursor: pointer; text-overflow: ellipsis; }
+.pv-domain { flex: 0 1 auto; min-width: 0; max-width: 100%; border: 0; background: none; color: var(--muted); font: inherit; padding: 0 2px; cursor: pointer; text-overflow: ellipsis; }
 .pv-slug[hidden] + .pv-domain { color: var(--text); font-weight: 600; }
 .pv-skip { border: 0; background: none; color: var(--muted); font: inherit; font-size: 13px; text-decoration: underline; cursor: pointer; padding: 0 4px; min-height: 32px; }
 .pv-skip:hover { color: var(--text); }
@@ -40,38 +40,83 @@
 .pv-link span:last-child { overflow: hidden; text-overflow: ellipsis; }
 #viewMenuPreview { display: flex; align-items: center; gap: 8px; }
 
-/* The manager sheet. */
-.modal-panel.pvm { width: min(620px, 100%); }
-.pv-sec { margin-bottom: 20px; }
-.pv-sec h3 { margin: 4px 0 8px; font-size: 13px; font-weight: 650; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
-.pv-hint, .pv-empty { margin: 0 0 10px; font-size: 13px; color: var(--muted); }
-.pv-row { padding: 12px; margin-bottom: 8px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
-.pv-row.unset { background: none; }
-.pv-row .btn:disabled { opacity: .45; cursor: default; }
-.pv-top { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; min-width: 0; }
-.pv-name { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pv-status { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: 12.5px; color: var(--muted); }
-.pv-status span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; }
-.pv-edit { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.pv-edit .pv-addr { flex: 1; height: 36px; }
-.pv-url { font-size: 13px; color: var(--muted); }
-.pv-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.pv-acts a.btn { text-decoration: none; color: var(--text); }
-.pv-row .pv-check:empty { display: none; }
-.pv-row .pv-check { margin-top: 6px; }
-.pv-logs { margin: 8px 0 0; max-height: 260px; overflow: auto; padding: 10px; border-radius: 8px; background: var(--code-bg); font: 12px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
-.pv-domain-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); }
-.pv-dname { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
-.pv-dcount { font-size: 12.5px; color: var(--muted); }
-.pv-default { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: var(--accent-soft); color: var(--accent-ink); }
-.pv-add { display: flex; gap: 8px; margin-top: 12px; }
-.pv-add input { flex: 1; min-width: 0; height: 32px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--panel); color: inherit; font: inherit; }
-@media (max-width: 800px) {
-  .modal-panel.pvm { width: 100%; }
-  .pv-status span:last-child { max-width: 160px; }
+/* The manager sheet: "Live" cards (name, address link, status pill, Open/Restart/Logs/Edit; the address editor only
+   under Edit), then "No address" and "Domains" as grouped lists. */
+.modal-panel.pvm { width: min(560px, 100%); }
+.pvm .m-head { align-items: flex-start; }
+.pv-sec { margin-bottom: 22px; }
+.pv-sec:last-child { margin-bottom: 4px; }
+.pv-sec h3 { margin: 4px 4px 8px; font-size: 12.5px; font-weight: 650; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.pv-hint, .pv-empty { margin: 8px 4px 0; font-size: 12.5px; color: var(--muted); }
+.pv-empty { margin: 0 4px; }
+.pv-row { padding: 12px 12px 12px 14px; margin-bottom: 10px; overflow: hidden; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); }
+.pv-row .btn:disabled, .pv-act:disabled, .pv-addbtn:disabled { opacity: .45; cursor: default; }
+.pv-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.pv-id { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.pv-name { min-width: 0; font-weight: 600; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pv-url, .pv-sub { min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pv-url { align-self: flex-start; max-width: 100%; color: var(--accent-ink); text-decoration: none; }
+.pv-url:hover { text-decoration: underline; }
+.pv-sub { color: var(--muted); }
+.pv-pill { flex: none; padding: 3px 9px; border-radius: 99px; background: var(--raised); color: var(--muted); font-size: 12px; font-weight: 600; }
+.pv-pill.running { background: color-mix(in srgb, var(--ok) 13%, transparent); color: var(--ok); }
+.pv-pill.building { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+.pv-pill.error { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
+.pv-detail { margin: 6px 0 0; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.pv-detail.bad { color: var(--danger); }
+.pv-detail[hidden] { display: none; }
+/* A toolbar along the card's bottom edge, under a hairline. */
+.pv-acts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2px; margin: 12px -12px -12px -14px; padding: 3px; border-top: 1px solid var(--border); }
+.pv-act {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 0; height: 34px; padding: 0 6px;
+  border: 0; border-radius: 10px; background: none; color: var(--accent-ink);
+  font: inherit; font-size: 13px; font-weight: 600; text-decoration: none; cursor: pointer;
 }
+.pv-act span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pv-act svg { flex: none; }
+.pv-act:hover, .pv-act:active { background: var(--raised); }
+.pv-act[aria-expanded="true"] { background: var(--accent-soft); }
+.pv-logs:not([hidden]) { margin-top: 12px; }
+.pv-act:focus-visible, .pv-addbtn:focus-visible, .pv-remove:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pv-logs { margin: 0; max-height: 260px; overflow: auto; padding: 10px; border-radius: 10px; background: var(--code-bg); font: 12px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.pv-logs[hidden] { display: none; }
+
+/* The address editor (a card's Edit, or a list row's Add address). */
+.pv-editor { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.pv-editor .pv-addr { width: 100%; height: 40px; overflow: hidden; }
+.pv-editor .pv-check:empty { display: none; }
+.pv-ed-acts { display: flex; align-items: center; gap: 8px; }
+.pv-grow { flex: 1; }
+.pv-remove, .pv-addbtn {
+  flex: none; min-height: 32px; padding: 0 8px; border: 0; border-radius: 8px; background: none;
+  color: var(--accent-ink); font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+}
+.pv-remove, .pv-addbtn.danger { color: var(--danger); }
+.pv-remove { padding-left: 0; }
+.pv-addbtn:hover:not(:disabled), .pv-remove:hover { background: var(--raised); }
+
+/* Grouped lists: "No address" projects and the domains. */
+.pv-list { border: 1px solid var(--border); border-radius: 14px; background: var(--panel); overflow: hidden; }
+.pv-item { display: flex; align-items: center; gap: 8px; min-height: 48px; padding: 6px 8px 6px 14px; }
+.pv-item + .pv-item { border-top: 1px solid var(--border); }
+.pv-item > .pv-name { flex: 1; font-weight: 550; }
+.pv-item.editing { flex-direction: column; align-items: stretch; padding: 12px 12px 12px 14px; background: var(--raised); }
+.pv-item.editing .pv-editor { margin-top: 4px; }
+.pv-item.editing .pv-addr { background: var(--panel); }
+.pv-default { flex: none; font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 99px; background: var(--accent-soft); color: var(--accent-ink); }
+.pv-add { display: flex; gap: 8px; margin-top: 10px; }
+.pv-add input { flex: 1; min-width: 0; height: 36px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--panel); color: inherit; font: inherit; }
+.pv-add input:focus { outline: 0; border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus); }
+.pv-add + .pv-check { margin: 6px 4px 0; }
+.pv-add + .pv-check:empty { display: none; }
+@media (max-width: 800px) { .modal-panel.pvm { width: 100%; } }
+/* Phones (HIG): 44pt targets, icon-over-label actions like a toolbar, 16px fields (no iOS zoom). */
 @media (pointer: coarse) {
-  .pv-acts .btn.small, .pv-edit .btn.small, .pv-add .btn.small, .pv-domain-row .btn.small { min-height: 44px; }
-  .pv-edit .pv-addr, .pv-add input { height: 44px; }
-  .pv-slug, .pv-domain, .pv-add input { font-size: 16px; } /* iOS zooms into smaller inputs */
+  .pv-act { flex-direction: column; gap: 2px; height: 50px; font-size: 12px; }
+  .pv-act svg { width: 18px; height: 18px; }
+  .pv-ed-acts .btn.small, .pv-add .btn.small, .pv-remove, .pv-addbtn { min-height: 44px; }
+  .pv-ed-acts .btn.small { padding: 0 16px; }
+  .pv-editor .pv-addr, .pv-add input { height: 44px; }
+  .pv-slug, .pv-domain, .pv-add input { font-size: 16px; }
+  .pv-item { min-height: 52px; }
 }

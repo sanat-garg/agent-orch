@@ -1710,9 +1710,10 @@ function setBusy(b) {
 
 // ---------- composer ----------
 const input = $('input');
+// Capped at 40% of the visible height: with the iOS keyboard up that is the space above it, not the whole screen.
 function autosize() {
   input.style.height = 'auto';
-  input.style.height = Math.min(input.scrollHeight, innerHeight * 0.4) + 'px';
+  input.style.height = Math.min(input.scrollHeight, (window.visualViewport?.height || innerHeight) * 0.4) + 'px';
 }
 // Keyboard-aware layout (UI-REVIEW #2): iOS Safari ignores interactive-widget=resizes-content, so the keyboard height
 // comes from visualViewport. app.css shrinks .app by --kb and, on phones, hides the orch bar while html.kb-open.
@@ -1721,7 +1722,10 @@ let kbFocus = false;
 function syncKeyboard() {
   const vv = window.visualViewport, root = document.documentElement;
   const kb = vv ? Math.max(0, Math.round(innerHeight - vv.height - vv.offsetTop)) : 0;
+  if (kb === syncKeyboard.kb) { root.classList.toggle('kb-open', kb > 0 || kbFocus); return; }
+  syncKeyboard.kb = kb;
   root.style.setProperty('--kb', kb + 'px');
+  if (input.value) autosize(); // the cap follows the space above the keyboard
   root.classList.toggle('kb-open', kb > 0 || kbFocus);
 }
 if (window.visualViewport) for (const ev of ['resize', 'scroll']) visualViewport.addEventListener(ev, syncKeyboard);
@@ -1731,6 +1735,12 @@ function kbAware(f) {
   f.addEventListener('blur', () => { kbFocus = false; syncKeyboard(); });
 }
 kbAware(input);
+// A tap on the pill around the text (.box::before on phones) focuses the field, like a native text field.
+input.closest('.box').addEventListener('click', (e) => {
+  if (e.target !== e.currentTarget || document.activeElement === input) return;
+  const r = input.getBoundingClientRect();
+  if (e.clientY >= r.top - 16 && e.clientY <= r.bottom + 16) input.focus();
+});
 function updateSendButton() {
   const has = !!input.value.trim() || ATT.list.length > 0;
   const stop = state.busy && !has;

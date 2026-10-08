@@ -38,6 +38,7 @@ import { createRollingRestart, preflight, readRestartState, serverFile } from '.
 import { createSounds, MAX_SOUND_BYTES as MAX_CUSTOM_SOUND_BYTES } from './sounds.mjs';
 import { createVersion, formatVersion } from './version.mjs';
 import { createPreviews } from './previews.mjs';
+import { projectWord } from './project-name.mjs';
 import { describeCron, nextRun, validTz } from './cron.mjs';
 import { createUsers, ADMIN_ID } from './users.mjs';
 
@@ -311,6 +312,8 @@ function slugify(text, fromMessage = false) {
   const keep = fromMessage ? words.filter((w) => !STOP_WORDS.has(w)) : words;
   return (keep.length ? keep : words).slice(0, fromMessage ? 4 : 8).join('-').replace(/[^a-z0-9.-]/g, '').replace(/-+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 40);
 }
+// Names a new project shouldn't reuse: ~/workspace's folders and every chat's folder.
+const takenNames = () => [...new Set([...(() => { try { return fs.readdirSync(WORKSPACE); } catch { return []; } })(), ...convos.map((c) => path.basename(c.cwd))].map((n) => n.toLowerCase()))];
 const importing = new Map(); // repo → its running clone, so a double tap clones once
 function uniqueProjectDir(slug) {
   let dir = path.join(WORKSPACE, slug);
@@ -1864,9 +1867,11 @@ async function handleRequest(req, res) {
   if (p === '/api/convos' && req.method === 'POST') {
     const body = await readBody(req);
     try {
-      // A new project gets its own folder under ~/workspace, named by the user or from the first message.
+      // A new project gets its own folder under ~/workspace (= its GitHub repo name): the user's name, else one word Haiku
+      // picks from the first message (project-name.mjs), else the message's first words.
       const cwd = body.newProject
-        ? uniqueProjectDir(slugify(body.newProject.name) || slugify(body.newProject.fromText, true) || 'project')
+        ? uniqueProjectDir(slugify(body.newProject.name) || await projectWord(body.newProject.fromText, { taken: takenNames(), bin: CLAUDE_BIN, env: CLAUDE_ENV, cwd: WORKSPACE })
+          || slugify(body.newProject.fromText, true) || 'project')
         : safeCwd(body.folder);
       // newProject.slug (+ domain): its live preview address, checked before anything is created.
       const slug = body.newProject?.slug ? String(body.newProject.slug) : '', domain = body.newProject?.domain || null;

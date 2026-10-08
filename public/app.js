@@ -892,18 +892,17 @@ const tilde = (p) => (p || '').replace(/^\/home\/[^/]+/, '~');
 function currentCwdLabel() {
   const c = currentConvo();
   if (c) return tilde(c.cwd);
-  return state.draft.type === 'folder' ? tilde(state.draft.path) : `~/workspace/${draftSlug() || '(named from your first message)'}`;
+  return state.draft.type === 'folder' ? tilde(state.draft.path) : `~/workspace/${draftSlug() || '(one-word name picked from your message)'}`;
 }
-// Mirrors the server's slugify so the preview matches the folder that gets created.
-const STOP_WORDS = new Set('a an the and or of for to in on with me my our your i we you it this that please can could would should make build create write add set up setup help need want let using use into from some new small simple quick basic'.split(' '));
-function slugify(text, fromMessage = false) {
+// Mirrors the server's slugify for a typed name, so the preview matches the folder that gets created. Without one the
+// server has Haiku pick a single word from the first message, so there is nothing to preview.
+function slugify(text) {
   if (!text) return '';
-  const words = String(text).toLowerCase().replace(/[^a-z0-9\s._-]/g, ' ').split(/[\s_]+/).filter(Boolean);
-  const keep = fromMessage ? words.filter((w) => !STOP_WORDS.has(w)) : words;
-  return (keep.length ? keep : words).slice(0, fromMessage ? 4 : 8).join('-').replace(/[^a-z0-9.-]/g, '').replace(/-+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 40);
+  return String(text).toLowerCase().replace(/[^a-z0-9\s._-]/g, ' ').split(/[\s_]+/).filter(Boolean).slice(0, 8)
+    .join('-').replace(/[^a-z0-9.-]/g, '').replace(/-+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 40);
 }
 function draftSlug() {
-  return state.draft.type === 'new' ? slugify(state.draft.name) || slugify($('input').value, true) : '';
+  return state.draft.type === 'new' ? slugify(state.draft.name) : '';
 }
 function updateHeader() {
   if (['term', 'browser'].includes($('app').dataset.view)) { $('repoLink').hidden = true; $('previewLink').hidden = true; return; }
@@ -1746,7 +1745,7 @@ function updateSendButton() {
   const stop = state.busy && !has;
   $('send').classList.toggle('stop', stop);
   $('send').setAttribute('aria-label', stop ? 'Stop' : 'Send');
-  $('send').disabled = !stop && !has;
+  $('send').disabled = state.creating || (!stop && !has);
 }
 
 // ---------- attachments (uploads.mjs): the paperclip, paste or drop; many at once, images and any other file ----------
@@ -1894,6 +1893,12 @@ $('composer').addEventListener('submit', async (e) => {
   if (failed.length) { toast(`${failed.map((a) => a.name).join(', ')} didn't upload. Remove ${failed.length === 1 ? 'it' : 'them'} or add ${failed.length === 1 ? 'it' : 'them'} again.`, { kind: 'error' }); return; }
   const attachments = ATT.list.map((a) => a.id);
   if (!state.cid) {
+    if (state.creating) return; // one tap, one project: the server may take a few seconds to name it
+    state.creating = true;
+    updateSendButton();
+    // An unnamed new project waits for Haiku to pick its one-word name (server project-name.mjs).
+    const naming = {};
+    if (state.draft.type === 'new' && !state.draft.name?.trim()) naming.timer = setTimeout(() => (naming.toast = toast('Naming your project…', { duration: 15000 })), 600);
     try {
       const d = state.draft;
       const c = await api('/api/convos', 'POST', d.type === 'new'
@@ -1921,6 +1926,11 @@ $('composer').addEventListener('submit', async (e) => {
       }
       add(n);
       return;
+    } finally {
+      state.creating = false;
+      updateSendButton();
+      clearTimeout(naming.timer);
+      naming.toast?.close();
     }
   }
   if (!send({ t: 'send', cid: state.cid, text, ...(attachments.length && { attachments }) })) {
@@ -2832,8 +2842,8 @@ async function loadProjects() {
   try { pk.projects = (await api('/api/projects')).projects; } catch { pk.projects = []; }
   return pk.projects;
 }
-// First row is always "new project": named from the typed text, or from the first message when
-// the box is empty. Below it, existing projects that match what's typed.
+// First row is always "new project": named from the typed text, or (box empty) a one-word name the server
+// has Haiku pick from the first message. Below it, existing projects that match what's typed.
 function renderProjectList() {
   const raw = $('pkSearch').value.trim();
   const q = raw.toLowerCase();
@@ -2847,12 +2857,11 @@ function renderProjectList() {
     list.append(pkItem({ name: `Import ${raw.replace(/^(?:https?:\/\/)?(?:www\.)?github\.com\/|^git@github\.com:|\.git$/gi, '')}` },
       { create: true, meta: 'Clone this GitHub repo into a new project', onUse: () => openGhImport(raw) }));
   } else if (!exact) {
-    const fromMsg = slugify($('input').value, true);
     list.append(pkItem(
       { name: raw ? `Create "${slug || raw}"` : 'New project' },
       {
         create: true,
-        meta: raw ? `~/workspace/${slug}` : fromMsg ? `Named from your message: ${fromMsg}` : 'Named from your first message',
+        meta: raw ? `~/workspace/${slug}` : 'Gets a one-word name picked from your message',
         onUse: () => chooseNew(raw),
       },
     ));

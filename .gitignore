@@ -26,3 +26,6 @@ data/
 
 # Agent screenshots (stored in data/media/)
 .agent-orch/shots/
+
+# Playwright MCP page snapshots
+.playwright-mcp/

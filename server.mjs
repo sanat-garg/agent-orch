@@ -39,6 +39,7 @@ import { createSounds, MAX_SOUND_BYTES as MAX_CUSTOM_SOUND_BYTES } from './sound
 import { createVersion, formatVersion } from './version.mjs';
 import { createPreviews } from './previews.mjs';
 import { projectWord } from './project-name.mjs';
+import { createCredentials } from './credentials.mjs';
 import { describeCron, nextRun, validTz } from './cron.mjs';
 import { createUsers, ADMIN_ID } from './users.mjs';
 
@@ -223,6 +224,7 @@ function userBlocked(req, url, u) {
   if (USER_PATHS.has(p)) return null;
   if ((p === '/api/settings/sound' || p === '/api/sounds') && req.method === 'GET') return null;
   if (/^\/api\/uploads\/[a-f0-9]{24}$/.test(p) || p.startsWith('/api/media/')) return null;
+  if (/^\/api\/credentials(\/[\w-]{1,40})?$/.test(p)) return null; // everyone's own; the routes only touch me.id's
   let m;
   if ((m = p.match(/^\/api\/convos\/([\w-]+)(?:\/|$)/))) return ownsConvo(u, findConvo(m[1])) ? null : NOT_YOURS;
   if (p.startsWith('/api/files/')) {
@@ -567,6 +569,7 @@ const RAW_FILE = path.join(METRICS_DIR, 'raw.jsonl');
 // Per-agent usage history (plan windows, tokens per turn/run, limit events): usage.mjs.
 const usageLog = createUsageLog(DATA);
 const users = createUsers({ dataDir: DATA, usageLog, agents: () => Object.keys(AGENTS) });
+const credentials = createCredentials({ dataDir: DATA }); // each user's own service logins and keys (credentials.mjs)
 try { usageLog.compact(); } catch (e) { console.error('[usage] compact failed', e); }
 // Every agent's latest plan-limit check (usage.mjs createLimitStore): only when the owner presses refresh on the usage
 // card, for that one agent (each check can start a CLI). Claude goes through refreshUsage (it also feeds the sidebar);
@@ -1748,6 +1751,20 @@ async function handleRequest(req, res) {
   if (p === '/api/me' && req.method === 'GET') return json(res, 200, { user: users.view(me), usage: users.usage(me.id) });
   // Admin: the accounts. GET → {users: [{…, usage, chats}], me}; POST {name, password, role?, caps?} adds one;
   // PATCH /api/users/:id {password?, role?, caps?: {'<agent>/<window>': pct | null}}; DELETE gives their chats to you.
+  // Credentials (credentials.mjs): the signed-in user's services and their logins/keys, for the sidebar's Credentials sheet.
+  if (p === '/api/credentials' && req.method === 'GET') {
+    try { return json(res, 200, { services: credentials.list(me.id) }); } catch (e) { return json(res, e.status || 500, { error: e.message }); }
+  }
+  if (p === '/api/credentials' && req.method === 'POST') {
+    try { return json(res, 200, { service: credentials.add(me.id, await readBody(req)) }); } catch (e) { return json(res, e.status || 400, { error: e.message }); }
+  }
+  const crm = p.match(/^\/api\/credentials\/([\w-]{1,40})$/);
+  if (crm && req.method === 'PUT') {
+    try { return json(res, 200, { service: credentials.update(me.id, crm[1], await readBody(req)) }); } catch (e) { return json(res, e.status || 400, { error: e.message }); }
+  }
+  if (crm && req.method === 'DELETE') {
+    try { credentials.remove(me.id, crm[1]); return json(res, 200, { ok: true }); } catch (e) { return json(res, e.status || 400, { error: e.message }); }
+  }
   if (p === '/api/users' && req.method === 'GET') {
     return json(res, 200, { me: me.id, users: users.list().map((u) => ({ ...u, usage: users.usage(u.id), chats: convos.filter((c) => (c.owner || ADMIN_ID) === u.id).length })) });
   }
@@ -1773,12 +1790,13 @@ async function handleRequest(req, res) {
     let moved = 0;
     for (const c of convos) if (c.owner === um[1]) { c.owner = me.id; moved++; }
     if (moved) { saveConvos(); broadcastConvos(); }
+    try { credentials.reown(um[1], me.id); } catch (e) { console.error('[credentials] not moved', um[1], e.message); }
     return json(res, 200, { ok: true, moved });
   }
 
   if (VENDOR[p]) return serveFile(res, path.join(ROOT, VENDOR[p]));
   if (p === '/' || p === '/index.html') return serveFile(res, path.join(PUBLIC, 'index.html'));
-  if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css' || p === '/browser.js' || p === '/browser.css' || p === '/previews.js' || p === '/previews.css' || p === '/schedules.js' || p === '/schedules.css' || p === '/users.js' || p === '/users.css') return serveFile(res, path.join(PUBLIC, p));
+  if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css' || p === '/browser.js' || p === '/browser.css' || p === '/previews.js' || p === '/previews.css' || p === '/schedules.js' || p === '/schedules.css' || p === '/users.js' || p === '/users.css' || p === '/credentials.js' || p === '/credentials.css') return serveFile(res, path.join(PUBLIC, p));
   // The Files view: listing, preview, download (a file, or a zip streamed on the fly), upload, and copy/move/zip/unzip over the whole disk, opening on the chat's project (files.mjs).
   // A user's requests stay inside their own projects: only their chats' roots, and no absolute paths (userBlocked checks the query).
   const filesBody = isAdmin(me) ? readBody : async (r) => {

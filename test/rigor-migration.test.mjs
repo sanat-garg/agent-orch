@@ -55,8 +55,8 @@ test('migration: existing projects → 3; a new project → 2; projectAction set
     assert.ok(out.bad.every(Boolean), JSON.stringify(out.bad));
     assert.deepEqual(out.set, { ok: true });
     assert.equal(out.after, 5);
-    assert.match(out.prompts[0], /Rigor: 2 · Working product/);
-    assert.match(out.prompts[1], /Rigor: 5 · Enterprise/);
+    assert.match(out.prompts[0], /Rigor: 2 · Ship it/);
+    assert.match(out.prompts[1], /Rigor: 5 · Hardened/);
     // Migrating again leaves a project's chosen level alone.
     const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
     db.prepare("UPDATE projects SET rigor=1 WHERE name='old-a'").run();
@@ -112,9 +112,10 @@ test('GET /api/orch/rigor-levels: 5 levels, examples for the same request; needs
   await anon.arrayBuffer();
   const { status, body } = await call('GET', '/api/orch/rigor-levels');
   assert.equal(status, 200);
-  assert.deepEqual(body.map((l) => [l.level, l.name]), [[1, 'Just make it work'], [2, 'Working product'], [3, 'Balanced'], [4, 'Thorough'], [5, 'Enterprise']]);
+  assert.deepEqual(body.map((l) => [l.level, l.name]), [[1, 'Sketch'], [2, 'Ship it'], [3, 'Solid'], [4, 'Robust'], [5, 'Hardened']]);
   for (const l of body) {
-    assert.ok(l.summary);
+    assert.ok(l.summary && l.use);
+    assert.deepEqual(l.dials.map((d) => d.key), ['tests', 'errors', 'security', 'care', 'focus']);
     assert.match(l.example.title, /contact form/i);
     assert.ok(l.example.prompt && l.example.done_when);
   }

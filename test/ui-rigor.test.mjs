@@ -1,7 +1,7 @@
 // Settings → This project → Rigor (#779) in a real browser against server.mjs (temporary HOME, data and port; no
 // orchestrator). GET /api/orch/rigor-levels and the project's PATCH are mocked with page.route, and the open project is
 // set on the page (O.project) the way a project push would:
-// - the 5 steps render with their names and the project's level is the checked one ('4 · Thorough' + its summary);
+// - the 5 steps render with their names and the project's level is the checked one ('4 · Robust' + its summary, what it's best for and its dial meters);
 // - moving (click, drag, arrow keys) updates the 'Example task at this level' card: title, a 4-line prompt excerpt
 //   (expandable) and done_when;
 // - a click / release saves PATCH {rigor} with the toast; arrows save after a pause; an old server's 404 falls back to POST;
@@ -21,9 +21,10 @@ import { macChromiumEnv } from './helpers/mac-chromium.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PASSWORD = 'rigor-ui-password';
-const NAMES = ['Just make it work', 'Working product', 'Balanced', 'Thorough', 'Enterprise'];
+const NAMES = ['Sketch', 'Ship it', 'Solid', 'Robust', 'Hardened'];
 const LEVELS = NAMES.map((name, i) => ({
-  level: i + 1, name, summary: `Summary of level ${i + 1}`,
+  level: i + 1, name, summary: `Summary of level ${i + 1}`, use: `use ${i + 1}`,
+  dials: [{ key: 'tests', label: 'Tests', value: i > 3 ? 4 : i, text: `tests ${i + 1}` }, { key: 'security', label: 'Security', value: i > 2 ? i - 2 : 0, text: `security ${i + 1}` }],
   example: {
     title: `Add a contact form (level ${i + 1})`,
     prompt: Array.from({ length: 3 + i * 2 }, (_, k) => `L${i + 1} prompt line ${k + 1}`).join('\n'),
@@ -109,13 +110,19 @@ test('the 5 steps render with their names, the hint, and the project\'s level ch
   const steps = await page.$$eval('#stRigor [role="radio"]', (bs) => bs.map((b) => [b.querySelector('b').textContent, b.querySelector('.rg-name').textContent, b.getAttribute('aria-label')]));
   assert.deepEqual(steps, NAMES.map((n, i) => [String(i + 1), n, `${i + 1} · ${n}`]));
   assert.equal(await page.getAttribute('#stRigor', 'role'), 'radiogroup');
-  assert.equal(await page.textContent('#stRigorHint'), 'Used by the chat planner and reflection for this project. Lower = fewer, simpler tasks focused on working features.');
+  assert.equal(await page.textContent('#stRigorHint'), 'Used by the chat planner and reflection for this project. Each step adds a notch of testing, error handling and care; security work starts at 4.');
   assert.equal(await page.textContent('#stRigorExample .rg-ex-head'), 'Example task at this level');
-  assert.deepEqual(await state(page), { checked: ['4'], focusable: ['4'], name: '4 · Thorough', summary: 'Summary of level 4',
+  assert.deepEqual(await state(page), { checked: ['4'], focusable: ['4'], name: '4 · Robust', summary: 'Summary of level 4',
     title: 'Add a contact form (level 4)', prompt: LEVELS[3].example.prompt, done: 'done when 4' });
   // A project without a level yet (a server from before rigor) shows 3, like the migration.
   await page.evaluate(() => { O.project = { ...O.project, rigor: undefined }; renderSettings(); });
-  assert.equal((await state(page)).name, '3 · Balanced');
+  assert.equal((await state(page)).name, '3 · Solid');
+  // What it's best for, and each dial as a 4-notch meter with its text.
+  await page.evaluate(() => { O.project = { ...O.project, rigor: 4 }; renderSettings(); });
+  assert.equal(await page.textContent('#stRigorUse'), 'Best for: use 4');
+  assert.deepEqual(await page.$$eval('#stRigorDials li', (ls) => ls.map((li) => [li.dataset.dial, li.querySelector('.rg-dial-k').textContent,
+    li.querySelectorAll('.rg-meter i.on').length, li.querySelectorAll('.rg-meter i').length, li.querySelector('.rg-dial-v').textContent])),
+  [['tests', 'Tests', 3, 4, 'tests 4'], ['security', 'Security', 1, 4, 'security 4']]);
   assert.deepEqual(saves, [], 'showing saves nothing');
   assert.deepEqual(errors, []);
   await ctx.close();
@@ -160,9 +167,9 @@ test('a click saves PATCH {rigor} with the toast; arrows preview and save after 
   await page.click('#stRigor [data-level="2"]');
   await until(async () => (await toasts(page)).length, 'the toast');
   assert.deepEqual(saves, [{ method: 'PATCH', body: { rigor: 2 } }]);
-  assert.deepEqual(await toasts(page), ['Rigor set to 2 · Working product: applies to new planning and reflection']);
+  assert.deepEqual(await toasts(page), ['Rigor set to 2 · Ship it: applies to new planning and reflection']);
   assert.equal(await page.evaluate(() => O.project.rigor), 2);
-  assert.equal((await state(page)).name, '2 · Working product');
+  assert.equal((await state(page)).name, '2 · Ship it');
   // A push with the saved level keeps it.
   await page.evaluate(() => { O.project = { ...O.project, rigor: 2 }; renderSettings(); });
   assert.deepEqual((await state(page)).checked, ['2']);
@@ -174,7 +181,7 @@ test('a click saves PATCH {rigor} with the toast; arrows preview and save after 
   assert.deepEqual([s.checked, s.focusable, s.title], [['3'], ['3'], 'Add a contact form (level 3)']);
   assert.equal(await page.evaluate(() => document.activeElement.dataset.level), '3');
   await page.keyboard.press('End');
-  assert.equal((await state(page)).name, '5 · Enterprise');
+  assert.equal((await state(page)).name, '5 · Hardened');
   await page.keyboard.press('ArrowLeft');
   await page.keyboard.press('ArrowDown');
   await page.keyboard.press('Home');
@@ -184,7 +191,7 @@ test('a click saves PATCH {rigor} with the toast; arrows preview and save after 
   assert.equal(saves.length, 1, 'nothing saved while the arrows move');
   await until(() => saves.length === 2, 'the save after the pause');
   assert.deepEqual(saves[1], { method: 'PATCH', body: { rigor: 3 } });
-  await until(async () => (await toasts(page)).includes('Rigor set to 3 · Balanced: applies to new planning and reflection'), 'the second toast');
+  await until(async () => (await toasts(page)).includes('Rigor set to 3 · Solid: applies to new planning and reflection'), 'the second toast');
   // Clicking the level it already has saves nothing.
   await page.click('#stRigor [data-level="3"]');
   await new Promise((r) => setTimeout(r, 300));
@@ -198,7 +205,7 @@ test('a server without the PATCH route gets the same body as a POST', { skip, ti
   await page.click('#stRigor [data-level="1"]');
   await until(async () => (await toasts(page)).length, 'the toast');
   assert.deepEqual(saves, [{ method: 'PATCH', body: { rigor: 1 } }, { method: 'POST', body: { rigor: 1 } }]);
-  assert.deepEqual(await toasts(page), ['Rigor set to 1 · Just make it work: applies to new planning and reflection']);
+  assert.deepEqual(await toasts(page), ['Rigor set to 1 · Sketch: applies to new planning and reflection']);
   assert.deepEqual(errors, []);
   await ctx.close();
 });

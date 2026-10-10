@@ -80,6 +80,10 @@ was retired when benchmark ranking was removed in #152/#153. Current work harden
 - Never commit anything under data/ (logins, password hash, chats, the orchestrator DB) or any secrets.
 - Keep dependencies minimal: plain Node ESM with no build step.
 
+13. Feature-first orchestrator (owner, 2026-10-10): the planner and reflection build new features efficiently and invent
+   ones that raise user satisfaction, drawing on popular similar projects on GitHub. Security and infrastructure loopholes
+   get attention only when the owner asks. Rigor 1-5 is an even ladder the owner can use at every step day to day.
+
 ## Definition of Done (this push)
 - A README.md exists and covers what the app is, setup (Caddy, ttyd, systemd/env vars) and security notes.
 - `npm test` runs a real smoke test suite that passes.

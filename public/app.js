@@ -7529,7 +7529,7 @@ $('stRapid').addEventListener('change', async (e) => { await saveParallel({ rapi
 $('stApplyUpdates').addEventListener('change', async (e) => { await saveParallel({ applyUpdates: e.target.value }); e.target.blur(); renderSettings(); });
 // Rigor (projects.rigor 1-5, #779): how much process the chat planner and reflection put into this project's tasks. Five
 // segments (a radiogroup: arrow keys, Home/End) name the levels (GET /api/orch/rigor-levels); the selected one shows its
-// name, summary and the example task that level writes. Moving previews; a click, a pointer release or a pause after the
+// name, summary, what it's best for, its dials and the example task that level writes. Moving previews; a click, a pointer release or a pause after the
 // arrows saves (PATCH the project {rigor}). Pushes don't move it while the owner is on it or a save is in flight.
 const RIGOR = { levels: null, loading: null, failed: false, preview: null, saving: 0, timer: null, drag: false, expanded: false };
 const RIGOR_DEFAULT = 3; // a project from before rigor existed (the migration sets those to 3)
@@ -7559,6 +7559,8 @@ function renderRigor() {
   }
   $('stRigorName').textContent = rigorLabel(n);
   $('stRigorSummary').textContent = l?.summary || (RIGOR.failed ? 'Couldn\'t load the level descriptions' : RIGOR.levels ? '' : 'Loading…');
+  $('stRigorUse').textContent = l?.use ? `Best for: ${l.use}` : '';
+  renderRigorDials(l?.dials);
   const ex = l?.example;
   $('stRigorExample').hidden = !ex;
   if (!ex) return;
@@ -7573,6 +7575,23 @@ function renderRigor() {
   more.hidden = !long;
   more.textContent = RIGOR.expanded ? 'Show less' : 'Show full prompt';
   more.setAttribute('aria-expanded', String(long && RIGOR.expanded));
+}
+// The level's dials (tests, errors, security, code care, reflection), each a 4-notch meter with its text, so moving
+// one step shows exactly what turns up.
+function renderRigorDials(dials) {
+  const ul = $('stRigorDials');
+  ul.hidden = !dials?.length;
+  if (!dials?.length) return;
+  ul.replaceChildren(...dials.map((d) => {
+    const li = document.createElement('li');
+    const k = document.createElement('span'); k.className = 'rg-dial-k'; k.textContent = d.label;
+    const m = document.createElement('span'); m.className = 'rg-meter'; m.setAttribute('aria-hidden', 'true');
+    for (let i = 1; i <= 4; i++) { const seg = document.createElement('i'); if (i <= d.value) seg.className = 'on'; m.append(seg); }
+    const v = document.createElement('span'); v.className = 'rg-dial-v'; v.textContent = d.text;
+    li.dataset.dial = d.key;
+    li.append(k, m, v);
+    return li;
+  }));
 }
 function rigorPreview(n) {
   if (n === (RIGOR.preview ?? rigorSaved())) return;

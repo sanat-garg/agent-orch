@@ -147,7 +147,7 @@ test('reflection direction: steers the reflect prompt when set; blank leaves it 
     assert.equal(r.freeDir, null, 'blank means no direction');
     assert.match(r.prompts.steered, /The owner's direction for this reflection:\n> Harden security: hash passwords and add a captcha to the login form\./);
     assert.match(r.prompts.steered, /most of the steps you queue should serve it/);
-    assert.match(r.prompts.steered, /unless the brief or the direction above asks for it/);
+    assert.match(r.prompts.steered, /Where the direction above asks for something else, it wins\./);
     assert.ok(r.prompts.steered.indexOf("owner's direction") < r.prompts.steered.indexOf('Ask yourself'), 'the direction comes first');
     assert.doesNotMatch(r.prompts.free, /owner's direction/);
     assert.match(r.prompts.free, /Ask yourself: what else should be done\?/);

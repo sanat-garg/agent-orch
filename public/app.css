@@ -1310,6 +1310,16 @@ label.st-row, label.st-text { cursor: pointer; }
 .rg-now strong { display: block; font-weight: 600; }
 .rg-now small { display: block; color: var(--muted); font-size: 12.5px; line-height: 1.35; }
 .rg-now small:empty { display: none; }
+.rg-now .rg-use { margin-top: 2px; color: var(--text); }
+.rg-dials { flex-basis: 100%; margin: 0; padding: 0; list-style: none; display: grid; gap: 5px; font-size: 12.5px; }
+.rg-dials[hidden] { display: none; }
+.rg-dials li { display: grid; grid-template-columns: 74px 54px 1fr; gap: 10px; align-items: center; }
+.rg-dial-k { color: var(--muted); white-space: nowrap; }
+.rg-meter { display: inline-flex; gap: 2px; }
+.rg-meter i { width: 12px; height: 6px; border-radius: 2px; background: var(--border); transition: background-color .15s; }
+.rg-meter i.on { background: var(--accent-strong); }
+.rg-dial-v { min-width: 0; overflow-wrap: anywhere; }
+@media (prefers-reduced-motion: reduce) { .rg-meter i { transition: none; } }
 .rg-ex { flex-basis: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); font-size: 13px; }
 .rg-ex[hidden] { display: none; }
 .rg-ex-head { font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }

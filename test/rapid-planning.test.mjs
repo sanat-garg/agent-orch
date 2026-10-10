@@ -24,8 +24,8 @@ test('14 slots, 3 running and 2 ready asks for 11 independent tasks, with recent
   for (const name of ['AUDIT.md', 'UI-REVIEW.md', 'ROADMAP.md', 'BRIEF.md', 'untested modules', 'file-disjoint', 'integrator', '`files`']) assert.ok(body.includes(name), name);
   assert.match(body, /One deliverable per task/);
   assert.match(body, /ONE check/);
-  assert.doesNotMatch(body, /next 1–5|up to 5 steps|machine runs one task/);
-  assert.match(prompt(null), /next 1–5/);
+  assert.doesNotMatch(body, /next 2–6|up to 6 steps|machine runs one task/);
+  assert.match(prompt(null), /next 2–6/);
 });
 
 test('planner defaults to parallel feature parts only in rapid mode with free slots', () => {

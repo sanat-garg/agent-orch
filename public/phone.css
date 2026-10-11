@@ -22,6 +22,18 @@
 .tk-body { padding: 8px 0 0 10px; margin-left: 4px; border-left: 2px solid var(--border); }
 .tk-body > .tool:last-child { margin-bottom: 0; }
 
+/* ---------- chat: Rewind is an iOS action sheet (app.js rewindMenu adds .sheet below 768px) ---------- */
+.rewind-scrim:has(+ .rewind-menu.sheet) { background: rgba(0,0,0,.32); }
+.rewind-menu.sheet {
+  left: 8px; right: 8px; bottom: calc(8px + env(safe-area-inset-bottom)); top: auto; max-width: none; min-width: 0;
+  padding: 0; border-radius: 14px; overflow: hidden; display: flex; flex-direction: column;
+}
+.rewind-menu.sheet .rw-title { padding: 14px 16px 10px; text-align: center; font-size: 13px; font-weight: 500; border-bottom: 1px solid var(--border); }
+.rewind-menu.sheet button { align-items: center; justify-content: center; min-height: 56px; padding: 8px 16px; border-radius: 0; border-bottom: 1px solid var(--border); text-align: center; }
+.rewind-menu.sheet .rw-l { font-size: 17px; font-weight: 500; color: var(--accent-ink); }
+.rewind-menu.sheet .rw-cancel { display: flex; border-bottom: 0; border-top: 6px solid var(--bg); }
+.rewind-menu.sheet .rw-cancel .rw-l { font-weight: 600; }
+
 /* ---------- sidebar (the drawer below 800px) ---------- */
 @media (max-width: 800px) {
   /* One scroller for the whole drawer, so the project list is never squeezed between the header and the cards. */

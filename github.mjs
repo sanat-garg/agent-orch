@@ -115,15 +115,43 @@ export function createGitHub({ env, log, alert = () => {}, now = Date.now }) {
     return { ok: false, ...r, warn: !!r.diverged || now() - failingSince.get(dir) > UNPUSHED_WARN_MS };
   }
 
-  // Commit whatever changed (if anything) and push.
+  // Commit whatever changed (if anything) and push. committed: the new commit's sha, or null when nothing changed.
   async function commitAndPush(dir, message) {
-    if (!fs.existsSync(dir)) return { ok: false, error: 'folder is gone' };
+    if (!fs.existsSync(dir)) return { ok: false, error: 'folder is gone', committed: null };
+    const committed = await commitAll(dir, message);
+    return { ...(await push(dir)), committed };
+  }
+  async function commitAll(dir, message) {
     await ensureLocalRepo(dir);
-    if ((await run('git', ['status', '--porcelain'], opts(dir))).out) {
-      await run('git', ['add', '-A'], opts(dir));
-      await run('git', [...GIT_ID, 'commit', '-q', '-m', message.slice(0, 200)], opts(dir));
+    if (!(await run('git', ['status', '--porcelain'], opts(dir))).out) return null;
+    await run('git', ['add', '-A'], opts(dir));
+    if (!(await run('git', [...GIT_ID, 'commit', '-q', '-m', message.slice(0, 200)], opts(dir))).ok) return null;
+    return (await run('git', ['rev-parse', 'HEAD'], opts(dir))).out || null;
+  }
+
+  // A chat rewind (server.mjs rewindChat): undoes `shas` (oldest first; those no longer in HEAD's history are skipped) as ONE
+  // new commit, newest first, so later work by others stays and nothing is forced. Uncommitted changes are committed first
+  // ('save'). A conflict (a later commit changed the same lines) undoes nothing. → { ok, sha?, reverted, error? }; not pushed.
+  async function revertCommits(dir, shas, message, save = 'Save before rewind') {
+    if (!fs.existsSync(dir)) return { ok: false, reverted: 0, error: 'The project folder is gone' };
+    await commitAll(dir, save);
+    const mine = [];
+    for (const sha of new Set(shas)) {
+      if (/^[0-9a-f]{7,64}$/i.test(sha) && (await run('git', ['merge-base', '--is-ancestor', sha, 'HEAD'], opts(dir))).ok) mine.push(sha);
     }
-    return push(dir);
+    if (!mine.length) return { ok: true, reverted: 0 };
+    const order = mine.reverse();
+    const r = await run('git', [...GIT_ID, 'revert', '--no-commit', '--no-edit', ...order], opts(dir));
+    if (!r.ok) {
+      const files = (await run('git', ['diff', '--name-only', '--diff-filter=U'], opts(dir))).out;
+      await run('git', ['revert', '--abort'], opts(dir));
+      return { ok: false, reverted: 0, error: /conflict/i.test(r.err + r.out) ? `Later changes touch the same lines${files ? ` in ${files.split('\n').slice(0, 3).join(', ')}` : ''}, so the code can't be rewound automatically. Nothing was changed; "Rewind chat only" still works` : lastLine(r.err) };
+    }
+    if (!(await run('git', ['diff', '--cached', '--quiet'], opts(dir))).ok) {
+      const c = await run('git', [...GIT_ID, 'commit', '-q', '-m', message.slice(0, 200)], opts(dir));
+      if (!c.ok) { await run('git', ['reset', '-q', '--merge'], opts(dir)); return { ok: false, reverted: 0, error: lastLine(c.err) }; }
+    }
+    return { ok: true, reverted: order.length, sha: (await run('git', ['rev-parse', 'HEAD'], opts(dir))).out };
   }
 
   // The signed-in account's repos (its own and its orgs'), newest push first, for New project → Import from GitHub.
@@ -156,7 +184,7 @@ export function createGitHub({ env, log, alert = () => {}, now = Date.now }) {
     return full.url ? repoOf(full.url) : { full: full.full, url: `https://github.com/${full.full}` };
   }
 
-  return { refresh, status: () => status, ensureRepo, push, commitAndPush, unpushed, remoteOf, listRepos, clone };
+  return { refresh, status: () => status, ensureRepo, push, commitAndPush, revertCommits, unpushed, remoteOf, listRepos, clone };
 }
 
 // What the owner typed to import: owner/name or a GitHub url → {full}; another https/ssh git url → {url, full: null}; else null.

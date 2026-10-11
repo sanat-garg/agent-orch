@@ -84,7 +84,7 @@ test('push() to an existing non-GitHub origin works without gh on PATH', async (
 test('commitAndPush() on a folder that no longer exists reports it', async () => {
   const { tmp, gh } = localRemote();
   try {
-    assert.deepEqual(await gh.commitAndPush(path.join(tmp, 'gone'), 'x'), { ok: false, error: 'folder is gone' });
+    assert.deepEqual(await gh.commitAndPush(path.join(tmp, 'gone'), 'x'), { ok: false, error: 'folder is gone', committed: null });
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

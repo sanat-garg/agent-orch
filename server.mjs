@@ -1075,9 +1075,17 @@ async function setupRepo(convo) {
   broadcastConvos();
   orch?.refreshProjects();
 }
-async function syncGit(dir, message) {
+// One sync per folder at a time (a rewind waits for the running one). Resolves the new commit's sha, or null.
+const gitSyncs = new Map(); // folder -> its latest syncGit promise
+function syncGit(dir, message) {
+  const p = (gitSyncs.get(dir) || Promise.resolve()).catch(() => {}).then(() => syncGitNow(dir, message));
+  gitSyncs.set(dir, p);
+  p.finally(() => gitSyncs.get(dir) === p && gitSyncs.delete(dir)).catch(() => {});
+  return p;
+}
+async function syncGitNow(dir, message) {
   const c = convos.find((x) => x.cwd === dir);
-  if (!c || !fs.existsSync(dir)) return;
+  if (!c || !fs.existsSync(dir)) return null;
   previews.redeploy(dir); // a no-op unless HEAD moved (or the folder changed what it serves)
   const r = message ? await gh.commitAndPush(dir, message) : await gh.push(dir);
   if (r.repo && r.repo.full !== c.repo?.full) { c.repo = r.repo; orch?.refreshProjects(); }
@@ -1086,7 +1094,12 @@ async function syncGit(dir, message) {
   shareRepoState(c);
   saveConvos();
   broadcastConvos();
+  return r.committed || null;
 }
+// A chat turn's commit goes into the chat's log as a 'commit' event (never shown): rewindChat undoes those after a prompt.
+const chatSync = (cid, dir, message) => syncGit(dir, message)
+  .then((sha) => { if (sha && findConvo(cid)) appendLog(cid, { t: 'commit', sha, ts: Date.now() }); })
+  .catch((e) => console.error('[github] sync failed', dir, e));
 // Repo and push state belong to the folder: copy them onto the folder's other chats.
 function shareRepoState(c) {
   for (const x of convos) {
@@ -1299,8 +1312,7 @@ function handleMessage(convo, rt, m) {
       broadcast(cid, { t: 'busy', busy: false });
       broadcastConvos();
       // GitHub protocol: whatever this reply changed is committed and pushed.
-      syncGit(convo.cwd, `Chat: ${String(rt.lastUserText || 'update').replace(/\s+/g, ' ').slice(0, 72)}`)
-        .catch((e) => console.error('[github] sync failed', convo.cwd, e));
+      chatSync(cid, convo.cwd, `Chat: ${String(rt.lastUserText || 'update').replace(/\s+/g, ' ').slice(0, 72)}`);
       break;
   }
 }
@@ -1391,7 +1403,7 @@ async function agentChatTurn(convo, text, files = []) {
     agentTurns.delete(cid);
     convo.updatedAt = Date.now();
     saveConvos();
-    syncGit(convo.cwd, `Chat: ${String(next).replace(/\s+/g, ' ').slice(0, 72)}`).catch((e) => console.error('[github] sync failed', convo.cwd, e));
+    chatSync(cid, convo.cwd, `Chat: ${String(next).replace(/\s+/g, ' ').slice(0, 72)}`);
     m = res.outcome === 'aborted' ? null : takeQueued(cid);
   }
   agentQueue.delete(cid);
@@ -1491,20 +1503,79 @@ function mergeChat(from, into) {
     const mine = readLog(into.id), start = theirs[0].ts ?? from.createdAt, at = mine.findIndex((e) => (e.ts ?? 0) > start);
     mine.splice(at < 0 ? mine.length : at, 0, { t: 'notice', text: `Merged in from the chat "${from.title}"`, ts: start },
       ...theirs, { t: 'notice', text: `End of "${from.title}"`, ts: theirs.at(-1).ts ?? start });
-    fs.writeFileSync(logPath(into.id) + '.tmp', mine.map((e) => JSON.stringify(e) + '\n').join(''));
-    fs.renameSync(logPath(into.id) + '.tmp', logPath(into.id));
+    writeLog(into.id, mine);
     (into.mergedRecaps ??= []).push({ title: from.title, recap: chatRecap(from.id) });
   }
   into.updatedAt = Math.max(into.updatedAt, from.updatedAt);
   removeConvo(from);
 }
-// What the agent is told, once, before the next message in a chat that others were merged into.
-function takeMergedRecap(convo) {
-  const list = convo.mergedRecaps;
-  if (!list?.length) return '';
-  delete convo.mergedRecaps;
+function writeLog(id, events) {
+  fs.writeFileSync(logPath(id) + '.tmp', events.map((e) => JSON.stringify(e) + '\n').join(''));
+  fs.renameSync(logPath(id) + '.tmp', logPath(id));
+}
+// Rewind and delete (owner, 2026-10-11), both only while the chat is idle; a prompt is its 'user' event's ts.
+// Rewind: that prompt and everything after it leave the log, and with `code` the commits its turns made (the 'commit'
+// events after it) are undone as one new commit (github.mjs revertCommits), which is pushed. The agent's session is
+// dropped: the next message starts a fresh one with a recap of what's left (rewindRecap). Without `code` the commit
+// events stay, so a later rewind to an earlier prompt still undoes them. → { text, attachments, reverted } | { status, error }
+async function rewindChat(c, ts, code) {
+  const log = readLog(c.id), at = log.findIndex((e) => e.t === 'user' && e.ts === ts);
+  if (at < 0) return { status: 404, error: 'That message is no longer in this chat' };
+  const prompt = log[at];
+  let reverted = 0;
+  if (code) {
+    const other = convos.find((x) => x.cwd === c.cwd && x !== c && chatBusy(x));
+    if (other) return { status: 409, error: `"${other.title}" is still working in this project: rewind the code when it has finished` };
+    await gitSyncs.get(c.cwd)?.catch(() => {}); // this chat's last commit is recorded before we look
+    const shas = readLog(c.id).slice(at).filter((e) => e.t === 'commit').map((e) => e.sha);
+    if (shas.length) {
+      const r = await gh.revertCommits(c.cwd, shas, `Rewind chat to before: ${String(prompt.text || 'a message').replace(/\s+/g, ' ').slice(0, 60)}`);
+      if (!r.ok) return { status: 409, error: r.error };
+      reverted = r.reverted;
+      if (r.sha) syncGit(c.cwd).catch((e) => console.error('[github] sync failed', c.cwd, e));
+    }
+  }
+  const now = readLog(c.id), cut = now.findIndex((e) => e.t === 'user' && e.ts === ts);
+  writeLog(c.id, [...now.slice(0, cut), ...(code ? [] : now.slice(cut).filter((e) => e.t === 'commit'))]);
+  forgetSession(c, reverted);
+  return { text: prompt.text || '', attachments: prompt.attachments || [], reverted };
+}
+// Delete: the prompt and its reply (up to the next prompt) leave the log; files are untouched. The session keeps its
+// context and is told to disregard it with the next message (or, after a rewind, the recap is simply rebuilt).
+function deletePrompt(c, ts) {
+  const log = readLog(c.id), at = log.findIndex((e) => e.t === 'user' && e.ts === ts);
+  if (at < 0) return { status: 404, error: 'That message is no longer in this chat' };
+  let end = log.findIndex((e, i) => i > at && e.t === 'user');
+  if (end < 0) end = log.length;
+  writeLog(c.id, [...log.slice(0, at), ...log.slice(at, end).filter((e) => e.t === 'commit'), ...log.slice(end)]);
+  if (c.rewindRecap) c.rewindRecap = { ...c.rewindRecap, recap: chatRecap(c.id) };
+  else (c.forgotten ??= []).push(String(log[at].text || '(attachments only)').replace(/\s+/g, ' ').slice(0, 300));
   saveConvos();
-  return list.map((m) => `[The owner merged another chat of this project, "${m.title}", into this one. Its conversation:]\n${m.recap}\n\n`).join('') + '[New message]\n';
+  return {};
+}
+// The chat's agent session (and an orchestrator chat's planner session) is dropped; its next message carries a recap.
+function forgetSession(c, reverted = 0) {
+  retireRuntime(runtimes, c.id);
+  c.sessionId = null;
+  c.ctxTokens = 0;
+  c.agentSession = null;
+  if (c.mode === 'orchestrator') orch.forgetPlanner(c.cwd);
+  c.rewindRecap = { recap: chatRecap(c.id), reverted: (c.rewindRecap?.reverted || 0) + reverted };
+  delete c.forgotten; // the fresh session never saw them
+  delete c.mergedRecaps; // the recap covers them
+  saveConvos();
+}
+// What the agent is told, once, before the next message after a merge, rewind or delete.
+function takeMergedRecap(convo) {
+  const list = convo.mergedRecaps || [], rw = convo.rewindRecap, gone = convo.forgotten || [];
+  if (!list.length && !rw && !gone.length) return '';
+  delete convo.mergedRecaps;
+  delete convo.rewindRecap;
+  delete convo.forgotten;
+  saveConvos();
+  return (rw ? `[The owner rewound this conversation to an earlier point${rw.reverted ? ' and undid the code changes made after it' : ''}, so it continues in a fresh session. The conversation so far:]\n${rw.recap}\n\n` : '')
+    + gone.map((t) => `[The owner deleted one of their earlier messages from this conversation: "${t}". Disregard it and your reply to it.]\n\n`).join('')
+    + list.map((m) => `[The owner merged another chat of this project, "${m.title}", into this one. Its conversation:]\n${m.recap}\n\n`).join('') + '[New message]\n';
 }
 // A resumed non-Claude session got its system text (and persona) only when it started: a persona picked since is
 // told to it with the next message.
@@ -1979,6 +2050,21 @@ async function handleRequest(req, res) {
     broadcastConvos();
     for (const ws of subscribers.get(into.id) || []) sendHistory(ws, into);
     return json(res, 200, { ok: true, into: into.id, merged: from.length });
+  }
+  // POST …/messages/:ts/rewind {code}: back to just before that prompt (rewindChat); DELETE …/messages/:ts drops it and its reply.
+  const pm = p.match(/^\/api\/convos\/([\w-]+)\/messages\/(\d{1,15})(\/rewind)?$/);
+  if (pm && (pm[3] ? req.method === 'POST' : req.method === 'DELETE')) {
+    const c = findConvo(pm[1]);
+    if (!c) return json(res, 404, { error: 'No such chat' });
+    if (chatBusy(c)) return json(res, 409, { error: 'This chat is still replying: stop it or wait until it has finished' });
+    const body = pm[3] ? await readBody(req) : {};
+    const r = pm[3] ? await rewindChat(c, Number(pm[2]), body.code !== false) : deletePrompt(c, Number(pm[2]));
+    if (r.error) return json(res, r.status, { error: r.error });
+    c.updatedAt = Date.now();
+    saveConvos();
+    broadcastConvos();
+    for (const ws of subscribers.get(c.id) || []) sendHistory(ws, c);
+    return json(res, 200, { ok: true, ...r });
   }
   const m = p.match(/^\/api\/convos\/([\w-]+)$/);
   if (m) {

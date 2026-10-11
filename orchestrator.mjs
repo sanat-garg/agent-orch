@@ -4982,6 +4982,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     // A sidebar chat's project rank ({id, position, priority}), or null when its folder has no orchestrator project.
     projectRank: (cwd) => q1('SELECT id, position, priority FROM projects WHERE path=:p', { p: cwd }) ?? null,
     projectChat: (cwd) => q1('SELECT convo_id FROM projects WHERE path=:p', { p: cwd })?.convo_id ?? null,
+    // A rewound chat (server.mjs forgetSession): the folder's planner sessions, on every agent, start fresh next time.
+    forgetPlanner: (cwd) => {
+      const pid = q1('SELECT id FROM projects WHERE path=:p', { p: cwd })?.id;
+      if (!pid) return;
+      updateProject(pid, { chat_session_id: null });
+      run("DELETE FROM kv WHERE key LIKE :k", { k: `planner_session:${pid}:%` });
+    },
     isRunning: (id) => running.has(Number(id)), logEvent, attachCluster, detectHardware,
     // The head's git endpoint (cluster-git.mjs): a project's checkout, and the tasks node nodeId may push to in it now.
     gitRepo: (pid) => getProject(Number(pid))?.path || null,

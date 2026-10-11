@@ -1371,6 +1371,7 @@ function renderEvent(ev, replay) {
       endLive();
       state.lastUser = add(el('div', 'msg user' + (ev.attachments?.length ? ` has-atts${ev.text ? '' : ' atts-only'}` : ''), ev.text));
       if (ev.attachments?.length) state.lastUser.append(attachmentList(ev.attachments));
+      if (ev.ts) add(promptMeta(ev));
       if (!replay) { stick = true; scrollDown(true); }
       break;
     }
@@ -1482,6 +1483,84 @@ function renderEvent(ev, replay) {
       break;
     }
   }
+}
+
+// ---------- a prompt's time and actions ----------
+// Under each prompt (owner, 2026-10-11): when it was sent, then Copy, Rewind and Delete. A mouse sees the actions on
+// hover; a touch screen always, at 44pt. Rewind (server.mjs rewindChat) takes the chat back to just before the prompt,
+// optionally undoing the code its turns changed, and puts the prompt back in the composer; Delete drops it and its reply.
+const MM_SVG = {
+  copy: '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M16 8V6.5A2.5 2.5 0 0 0 13.5 4h-7A2.5 2.5 0 0 0 4 6.5v7A2.5 2.5 0 0 0 6.5 16H8" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>',
+  rewind: '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.4-5.7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M4 4v5h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 8v4l3 2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  del: '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+};
+function promptMeta(ev) {
+  const row = el('div', 'msg-meta');
+  const when = new Date(ev.ts), t = el('time', 'mm-time', fmtWhen(ev.ts));
+  t.dateTime = when.toISOString();
+  t.title = `Sent ${when.toLocaleString()}`;
+  const act = (kind, label, fn) => {
+    const b = el('button', `mm-act mm-${kind}`);
+    b.type = 'button';
+    b.title = label;
+    b.setAttribute('aria-label', label);
+    b.innerHTML = MM_SVG[kind];
+    if (fn) b.onclick = fn;
+    return b;
+  };
+  const copy = ev.text ? act('copy', 'Copy message') : null;
+  if (copy) copy.dataset.copy = ev.text; // the document's [data-copy] handler copies it and shows 'Copied'
+  row.append(t, ...(copy ? [copy] : []), act('rewind', 'Rewind to before this message', (e) => rewindMenu(ev, e.currentTarget)), act('del', 'Delete message', () => deletePromptUI(ev)));
+  return row;
+}
+function closeRewindMenu() { document.querySelector('.rewind-menu')?.remove(); document.querySelector('.rewind-scrim')?.remove(); }
+function rewindMenu(ev, anchor) {
+  closeRewindMenu();
+  if (state.busy) return toast('Stop the reply first, or wait until it has finished', { kind: 'error' });
+  const m = el('div', 'menu rewind-menu');
+  m.setAttribute('role', 'menu');
+  const orchMode = $('mode').value === 'orchestrator';
+  const opt = (label, hint, fn, cls = '') => {
+    const b = el('button', cls);
+    b.type = 'button';
+    b.setAttribute('role', 'menuitem');
+    b.append(el('span', 'rw-l', label), ...(hint ? [el('span', 'rw-h', hint)] : []));
+    b.onclick = () => { closeRewindMenu(); fn(); };
+    return b;
+  };
+  m.append(el('div', 'rw-title', 'Rewind to before this message'),
+    ...(orchMode ? [] : [opt('Rewind code and chat', 'Undo the file changes made since, and remove the later messages', () => rewindTo(ev, true))]),
+    opt(orchMode ? 'Rewind chat' : 'Rewind chat only', orchMode ? 'Remove this message and everything after it' : 'Keep the files as they are', () => rewindTo(ev, false)),
+    opt('Cancel', '', () => {}, 'rw-cancel'));
+  const scrim = el('div', 'rewind-scrim');
+  scrim.onclick = closeRewindMenu;
+  document.body.append(scrim, m);
+  if (PHONE.matches) m.classList.add('sheet'); // a bottom action sheet on phones (phone.css)
+  else {
+    const r = anchor.getBoundingClientRect();
+    m.style.top = `${Math.max(8, Math.min(r.bottom + 6, innerHeight - m.offsetHeight - 8))}px`;
+    m.style.left = `${Math.max(8, Math.min(r.right - m.offsetWidth, innerWidth - m.offsetWidth - 8))}px`;
+  }
+  m.querySelector('button')?.focus({ preventScroll: true });
+  m.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); closeRewindMenu(); anchor.focus(); } });
+}
+async function rewindTo(ev, code) {
+  const cid = state.cid;
+  try {
+    const r = await api(`/api/convos/${cid}/messages/${ev.ts}/rewind`, 'POST', { code });
+    if (state.cid !== cid) return;
+    // The history frame redraws the chat; the prompt goes back into the composer, as in Claude Code.
+    if (r.text && !input.value.trim()) { input.value = r.text; store.set('cw.draft.' + cid, r.text); autosize(); updateSendButton(); }
+    toast(code ? (r.reverted ? `Rewound. The code changes from ${r.reverted === 1 ? '1 reply were' : `${r.reverted} replies were`} undone` : 'Rewound. No code had changed since that message')
+      : 'Rewound the chat. The files are unchanged', { kind: 'success' });
+  } catch (e) { toast(e.message, { kind: 'error' }); }
+}
+async function deletePromptUI(ev) {
+  closeRewindMenu();
+  if (state.busy) return toast('Stop the reply first, or wait until it has finished', { kind: 'error' });
+  if (!confirm('Delete this message and its reply from the chat? Files are not changed.')) return;
+  try { await api(`/api/convos/${state.cid}/messages/${ev.ts}`, 'DELETE'); toast('Message deleted', { kind: 'success' }); }
+  catch (e) { toast(e.message, { kind: 'error' }); }
 }
 
 // ---------- saved messages ----------

@@ -297,6 +297,24 @@ code, pre, kbd { font-family: var(--mono); }
 .msg-status .sep { padding: 0 1px; }
 .msg-status > span:first-child { margin-right: 4px; }
 .msg-status .err { color: var(--danger); }
+/* A prompt's time, then Copy · Rewind · Delete (app.js promptMeta): the actions show on hover or focus with a mouse,
+   always on touch (44px targets). */
+.msg-meta { display: flex; justify-content: flex-end; align-items: center; gap: 2px; margin: -14px 0 12px; min-height: 28px; font-size: 12px; color: var(--faint); }
+.msg-meta .mm-time { padding: 0 6px; font-variant-numeric: tabular-nums; }
+.mm-act { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: 0; border-radius: 7px; background: none; color: var(--muted); cursor: pointer; opacity: 0; transition: opacity .12s; }
+.mm-act:hover { background: var(--raised); color: var(--text); }
+.mm-act.mm-del:hover { color: var(--danger); }
+.mm-act.copied { color: var(--ok); }
+.msg.user:hover + .msg-meta .mm-act, .msg-meta:hover .mm-act, .msg-meta:focus-within .mm-act { opacity: 1; }
+@media (hover: none) { .mm-act { opacity: 1; width: 40px; height: 44px; margin: -8px 0; } .msg-meta { margin-top: -10px; } }
+.msg.user.saved + .msg-status + .msg-meta { display: none; } /* a saved planner message has its own Edit · Undo */
+.rewind-scrim { position: fixed; inset: 0; z-index: 49; }
+.rewind-menu { min-width: 260px; max-width: 320px; padding: 6px; }
+.rewind-menu .rw-title { padding: 6px 10px 4px; font-size: 12.5px; font-weight: 600; color: var(--muted); }
+.rewind-menu button { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; }
+.rewind-menu .rw-l { color: var(--text); font-weight: 550; }
+.rewind-menu .rw-h { color: var(--muted); font-size: 12.5px; }
+.rewind-menu .rw-cancel { display: none; }
 .msg-act { background: none; border: 0; color: var(--accent); font: inherit; font-weight: 550; cursor: pointer; min-height: 44px; margin: -13px 0; padding: 0 8px; }
 .msg-act:disabled { opacity: .5; cursor: default; }
 @media (pointer: coarse) { .msg-edit { font-size: 16px; } } /* iOS zooms into smaller inputs */

@@ -1,6 +1,6 @@
 // Phone composer (#451, HIG text fields and keyboards): boots server.mjs (CW_NO_ORCHESTRATOR=1, temp data dir) and opens a
-// chat at 390×844 with touch. The composer shows only the text field, the round send button inside its right edge, the
-// model pill and '+'; '+' opens a sheet with Photo, File and the hidden chips' options (mode, effort, persona), whose menus
+// chat at 390×844 with touch. The composer is one rounded field: the text on top, then '+', the model pill and the round
+// send in a row inside it (nothing else shows); '+' opens a sheet with Photo, File and the hidden chips' options (mode, effort, persona), whose menus
 // open above '+'; sending still works (the outgoing ws `send` is caught in the page, so no agent runs). At 1280px the
 // desktop chip row is unchanged. Skips when Chromium can't launch.
 import { test, before, after } from 'node:test';
@@ -93,9 +93,8 @@ const composer = (page) => page.evaluate(() => {
     .map((n) => n.textContent.trim());
   const b = {};
   for (const id of ['input', 'send', 'modelChip', 'plusBtn', 'composer']) b[id] = box(document.getElementById(id));
-  // The field's pill (.box::before) is the textarea's box plus its margins: the text sits inset inside it.
-  const ta = document.getElementById('input'), m = getComputedStyle(ta), px = (k) => parseFloat(m[k]) || 0;
-  b.field = { left: b.input.left - px('marginLeft'), right: b.input.right + px('marginRight'), top: b.input.top - px('marginTop'), bottom: b.input.bottom + px('marginBottom') };
+  // The field is .box itself (phone.css): the text on top, then '+', the model pill and send in a row inside it.
+  b.field = box(document.querySelector('#composer .box'));
   return { ids: controls.map((n) => n.id), text, b, font: getComputedStyle(document.getElementById('input')).fontSize, width: innerWidth,
     overflow: document.documentElement.scrollWidth - innerWidth, pill: document.getElementById('modelChip').scrollWidth <= document.getElementById('modelChip').clientWidth + 1 };
 });
@@ -112,11 +111,13 @@ test('390px: only the text field, send, the model pill and + are visible', { ski
   const { input, send, modelChip, plusBtn, field } = c.b;
   assert.ok(send.left >= field.left && send.right <= field.right + 0.5 && send.top >= field.top - 0.5 && send.bottom <= field.bottom + 0.5, `send sits inside the field: ${JSON.stringify({ send, field })}`);
   assert.ok(field.right - send.right <= 8, 'at its right edge');
-  assert.ok(input.right <= send.left + 0.5, `the text never runs under send: ${JSON.stringify({ input, send })}`);
+  assert.ok(input.bottom <= send.top + 0.5, `the text never runs under send: ${JSON.stringify({ input, send })}`);
   assert.equal(send.w, send.h, 'round');
   assert.ok(send.w >= 44 && plusBtn.w >= 44 && plusBtn.h >= 44 && modelChip.h >= 44, '44pt targets');
-  assert.equal(Math.round(plusBtn.top), Math.round(modelChip.top), '+ and the pill share one row');
-  assert.ok(plusBtn.left < modelChip.left && modelChip.bottom <= input.top, 'the row sits above the field, + first');
+  const mid = (r) => Math.round(r.top + r.h / 2);
+  assert.ok(Math.abs(mid(plusBtn) - mid(modelChip)) <= 1 && Math.abs(mid(plusBtn) - mid(send)) <= 1, '+, the pill and send share one row');
+  assert.ok(plusBtn.left < modelChip.left && modelChip.right <= send.left && plusBtn.top >= input.bottom - 0.5, 'the row sits under the text, + first');
+  assert.ok(plusBtn.left >= field.left && plusBtn.bottom <= field.bottom + 0.5, 'inside the field');
   assert.ok(modelChip.right <= c.width && c.overflow <= 0, `nothing overflows sideways: ${JSON.stringify(modelChip)} ${c.overflow}`);
   assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector('#modelChip .mc-prim')).textOverflow), 'ellipsis', 'the pill truncates');
 

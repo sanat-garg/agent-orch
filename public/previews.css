@@ -5,6 +5,7 @@
 }
 .side-link:hover { background: var(--raised); color: var(--text); }
 @media (pointer: coarse) { .side-link { min-height: 44px; } }
+.side-links { display: contents; } /* phones make it a row of tiles (phone.css) */
 
 .pv-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--faint); }
 .pv-dot.running { background: var(--ok); }

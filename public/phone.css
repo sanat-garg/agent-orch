@@ -1,0 +1,122 @@
+/* Phone layout (owner, 2026-10-11: "improve phone ui massively"). Loaded last, so these rules win over the base ones
+   with the same selectors. Apple HIG via the apple-design skill: list rows with a leading badge and a subtitle,
+   inset grouped settings, a single composer field, one line per run of tool calls. Desktop is untouched. */
+
+/* ---------- chat: back-to-back tool calls fold into one line (app.js addTool; phones only build them) ---------- */
+.tool-stack { margin: 0 0 10px; }
+.tool-stack > summary {
+  list-style: none; display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 12px;
+  border-radius: 12px; background: var(--raised); color: var(--muted); font-size: 15px; cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.tool-stack > summary::-webkit-details-marker { display: none; }
+.tool-stack > summary:active { background: var(--border); }
+.tool-stack .st { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--ok); }
+.tool-stack.running .st { background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+.tool-stack.err .st { background: var(--danger); }
+.tk-sum { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.tk-state { flex: 1 0 auto; white-space: nowrap; }
+.tool-stack.err .tk-state { color: var(--danger); }
+.tool-stack .chev { flex: none; color: var(--faint); transition: transform .15s; }
+.tool-stack[open] > summary .chev { transform: rotate(90deg); }
+.tk-body { padding: 8px 0 0 10px; margin-left: 4px; border-left: 2px solid var(--border); }
+.tk-body > .tool:last-child { margin-bottom: 0; }
+
+/* ---------- sidebar (the drawer below 800px) ---------- */
+@media (max-width: 800px) {
+  /* One scroller for the whole drawer, so the project list is never squeezed between the header and the cards. */
+  .sidebar { width: min(88vw, 340px); overflow-y: auto; overscroll-behavior: contain; padding: max(10px, env(safe-area-inset-top)) 12px 0; }
+  .sidebar > * { flex: none; }
+  .side-head { position: relative; min-height: 48px; padding: 2px 100px 8px 4px; }
+  .side-title { font-size: 20px; font-weight: 700; letter-spacing: -.01em; }
+  .side-head #closeSidebar { position: absolute; right: -4px; top: 0; width: 44px; height: 44px; }
+  /* New project: a round + beside the close button, like a navigation bar's add button. */
+  .new-chat { position: absolute; top: max(10px, env(safe-area-inset-top)); right: 58px; z-index: 1; width: 40px; height: 40px; margin-top: 2px; padding: 0;
+    justify-content: center; border: 0; border-radius: 50%; background: var(--accent-strong); color: #fff; font-size: 0; }
+  .new-chat svg { width: 20px; height: 20px; }
+  @media (pointer: coarse) { .new-chat::after { content: ''; position: absolute; inset: -2px; } } /* 44pt */
+  .new-chat:active { filter: brightness(.92); }
+  /* Live previews, Schedules, Credentials: three tiles. */
+  .side-links { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 2px 0 0; }
+  .side-link, .side-link + .side-link { flex-direction: column; justify-content: flex-start; gap: 6px; height: 78px; margin: 0; padding: 14px 4px 6px;
+    border: 1px solid var(--border); border-radius: 14px; background: var(--panel); color: var(--text); font-size: 13px; font-weight: 600;
+    text-align: center; line-height: 1.2; }
+  .side-link svg { flex: none; width: 22px; height: 22px; color: var(--accent-ink); }
+  .side-link:active { background: var(--raised); }
+  .side-search { margin-top: 12px; }
+  .side-search input { border-radius: 12px; background: var(--raised); border-color: transparent; }
+  .convo-list { flex: none; overflow: visible; margin: 6px -6px 8px; padding: 0; }
+  .group-label { padding: 14px 10px 6px; font-size: 13px; }
+  /* Project rows: a letter badge, the name and a status line ("2 tasks running", "3h ago"). */
+  .convo:not(.search-hit) { min-height: 62px; gap: 12px; padding: 8px 46px 8px 8px; border-radius: 14px; }
+  .convo.sub:not(.search-hit) { min-height: 44px; width: calc(100% - 58px); margin-left: 58px; padding: 6px 46px 6px 12px; border-radius: 0 12px 12px 0; }
+  .convo:active { background: var(--raised); }
+  .convo .cav { display: grid; place-items: center; flex: none; width: 40px; height: 40px; border-radius: 11px;
+    background: hsl(var(--h) 60% 91%); color: hsl(var(--h) 50% 30%); font-size: 18px; font-weight: 700; }
+  .convo .ct { font-size: 17px; font-weight: 500; line-height: 1.3; }
+  .convo.sub .ct { font-size: 15px; font-weight: 400; }
+  .convo .csub { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 14px; line-height: 1.3; }
+  .convo.sub .csub { display: none; }
+  .convo .csub.live { color: var(--run); font-weight: 550; }
+  /* The busy / running dot becomes a badge on the letter's corner. */
+  .convo:not(.sub) .busy-dot, .convo:not(.sub) .run-dot { position: absolute; left: 41px; top: 7px; z-index: 1; width: 11px; height: 11px;
+    box-shadow: 0 0 0 2px var(--side); }
+  .convo.active { background: var(--panel); box-shadow: 0 1px 3px rgba(0, 0, 0, .06), inset 0 0 0 1px var(--border); }
+  .convo .more { right: 10px; color: var(--faint); } /* its ::after ring (app.css) makes it 48pt */
+  /* Machines and limits follow the list; the footer stays pinned to the bottom edge. */
+  .mini-stats { margin-top: auto; border-radius: 14px; }
+  .side-foot-row { position: sticky; bottom: 0; z-index: 2; margin: 0 -12px; padding: 6px 12px max(8px, env(safe-area-inset-bottom));
+    background: var(--side); }
+}
+@media (max-width: 800px) and (prefers-color-scheme: dark) {
+  .convo .cav { background: hsl(var(--h) 28% 25%); color: hsl(var(--h) 65% 82%); }
+  .convo.active { box-shadow: inset 0 0 0 1px var(--border); }
+}
+
+/* ---------- composer: one rounded field holding the text, '+', the model and send (Messages / the Claude app) ---------- */
+@media (max-width: 767px) {
+  #composer .box {
+    grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "tray tray tray" "field field field" "plus model send";
+    row-gap: 0; column-gap: 0; padding: 2px 6px 6px;
+    border: 1px solid var(--border-strong); border-radius: 24px; background: var(--panel); box-shadow: 0 2px 12px rgba(0, 0, 0, .06);
+    transition: border-color .15s, box-shadow .15s;
+  }
+  #composer .box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus); }
+  #composer .box::before { content: none; }
+  #composer .att-tray { padding: 8px 6px 2px; }
+  #composer textarea { grid-area: field; margin: 10px 10px 2px 10px; }
+  #composer .send { grid-area: send; align-self: center; justify-self: end; margin: 0; }
+  #plusBtn { align-self: center; }
+  #modelChip { align-self: center; padding-left: 4px; }
+  .composer { padding-top: 4px; }
+}
+@media (max-width: 767px) and (pointer: coarse) {
+  #composer textarea { margin: 12px 12px 2px 12px; }
+}
+
+/* ---------- Settings: inset grouped lists (iOS Settings) ---------- */
+@media (max-width: 767px) {
+  .modal-panel.st .m-body { background: var(--side); padding-top: 4px; }
+  .modal-panel.st { background: var(--side); }
+  .st-group { display: block; margin: 8px 0 0; padding: 0 16px; border-radius: 14px; background: var(--panel); }
+  .st-group > .st-row + .st-row { border-top: 1px solid var(--border); }
+  .st-group > .st-row { padding: 10px 0; }
+  .st-sec { margin: 28px 0 0; padding: 0 16px; font-size: 13px; }
+  .st-hint { padding: 0 16px; font-size: 14px; }
+  .st-text strong { font-size: 16px; font-weight: 500; }
+  .st-text small { font-size: 13.5px; }
+  .st-row select { font-size: 16px; }
+}
+
+/* ---------- the orchestrator bar: a status line with two capsule buttons, not a second card over the composer ---------- */
+@media (max-width: 767px) {
+  .orch-bar { width: calc(100% - 20px); margin: 2px auto 0; padding: 0 0 0 8px; border: 0; background: none; font-size: 14px; }
+  .orch-bar .ob-btn { position: relative; height: 38px; min-height: 0; padding: 0 14px; border: 0; border-radius: 999px; background: var(--raised);
+    font-size: 14px; font-weight: 600; }
+  .orch-bar .ob-pause { min-width: 0; background: var(--accent-soft); color: var(--accent-ink); }
+  .orch-bar .ob-pause.primary { background: var(--accent-strong); color: var(--accent-text); }
+  .orch-bar .ob-btn::after { content: ''; position: absolute; inset: -3px 0; } /* 44pt tall */
+}
+@media (prefers-color-scheme: dark) and (max-width: 767px) {
+  .orch-bar .ob-btn { background: var(--panel); }
+}

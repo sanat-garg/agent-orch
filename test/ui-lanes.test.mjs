@@ -93,7 +93,8 @@ test('running projects get a sidebar dot; the Queue window shows no lanes', { sk
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   await page.evaluate(() => closeQueue());
   await page.waitForFunction((cid) => document.querySelector(`.convo[data-cid="${cid}"] .run-dot`), CID);
-  assert.equal(await page.evaluate((cid) => document.querySelector(`.convo[data-cid="${cid}"] .run-dot`).nextElementSibling.className, CID), 'ct', 'the dot leads the project name');
+  // (on phones it sits on the letter badge's corner, just before the name block)
+  assert.equal(await page.evaluate((cid) => document.querySelector(`.convo[data-cid="${cid}"] .run-dot`).nextElementSibling.firstElementChild.className, CID), 'ct', 'the dot leads the project name');
   await page.evaluate(() => { for (const t of O.tasks.values()) onOrch({ t: 'otask', task: { ...t, status: 'done', finished_at: Date.now()/1000 } }); });
   await page.waitForFunction((cid) => !document.querySelector(`.convo[data-cid="${cid}"] .run-dot`), CID);
   // Another project's running lane (from server state) marks it too.

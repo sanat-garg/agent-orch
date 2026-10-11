@@ -106,7 +106,7 @@ function setView(view) {
   else window.bxHide?.();
   if (view === 'term') openTerminals();
   else if (view === 'files') window.FilesView?.show(); // public/files.js
-  else if (view === 'chat') $('input').focus({ preventScroll: true });
+  else if (view === 'chat') focusComposer();
   store.set('cw.view', view);
 }
 document.querySelectorAll('.seg button').forEach((b) => b.addEventListener('click', () => setView(b.dataset.view)));
@@ -651,12 +651,23 @@ function convoItem(c, rankable, sub = false) {
   // One compact row: the busy / tasks-running dot, the title, then "not pushed" when a push failed. Mode and last
   // activity go in the tooltip.
   b.title = `${tilde(c.cwd)} · ${c.mode === 'orchestrator' ? 'Orchestrator' : 'Chat'} · ${relTime(c.updatedAt)}`;
+  const name = c.title || folderName(c.cwd);
+  // Phones (phone.css) show a two-line list row: a letter badge, the name, and a status line under it.
+  if (!sub) {
+    const av = el('span', 'cav', (name.match(/[a-z0-9]/i)?.[0] || '•').toUpperCase());
+    av.setAttribute('aria-hidden', 'true');
+    av.style.setProperty('--h', [...name].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) % 360, 7));
+    b.append(av);
+  }
   if (c.busy) b.append(el('span', 'busy-dot'));
   else if (c.project && runningProjectIds().has(c.project.id)) {
     const dot = el('span', 'run-dot'); dot.title = 'Tasks running'; dot.setAttribute('role', 'img'); dot.setAttribute('aria-label', 'Tasks running');
     b.append(dot);
   }
-  b.append(el('span', 'ct', c.title || folderName(c.cwd)));
+  const txt = el('span', 'ctx');
+  const [status, live] = convoStatus(c);
+  txt.append(el('span', 'ct', name), el('span', 'csub' + (live ? ' live' : ''), status));
+  b.append(txt);
   if (c.git?.error) b.append(el('span', 'cm', 'not pushed'));
   const more = el('button', 'more');
   more.setAttribute('aria-label', sub ? 'Chat options' : 'Project options');
@@ -681,6 +692,18 @@ function convoItem(c, rankable, sub = false) {
     b.addEventListener('contextmenu', (e) => { if (drag.pending || drag.active) e.preventDefault(); });
   }
   return b;
+}
+
+// The phone row's second line: what the project is doing now, else when it last changed.
+// [text, live]: live text is tinted.
+function convoStatus(c) {
+  if (c.busy) return ['Working…', true];
+  const n = c.project ? runningCount(c.project.id) : 0;
+  if (n) return [`${n} task${n === 1 ? '' : 's'} running`, true];
+  if (!c.updatedAt) return ['', false];
+  const when = Date.now() - c.updatedAt < 7 * 864e5 ? relTime(c.updatedAt)
+    : new Date(c.updatedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  return [c.archived ? `Archived · ${when}` : when[0].toUpperCase() + when.slice(1), false];
 }
 
 // ----- project order: pointer drag (long-press on touch) and Alt+↑/↓
@@ -964,8 +987,9 @@ function setModeUI(mode) {
   $('mode').value = mode;
   $('modeChip').dataset.mode = mode;
   $('modeLabel').textContent = $('mode').selectedOptions[0]?.textContent || mode;
+  // Phones get the short form, so the empty field stays one line.
   $('input').placeholder = mode === 'orchestrator'
-    ? 'Tell the orchestrator what to build or fix…'
+    ? (matchMedia('(max-width: 767px)').matches ? 'What should we build or fix?' : 'Tell the orchestrator what to build or fix…')
     : 'Ask Claude to build something…';
   if (typeof renderOrchBar === 'function') renderOrchBar();
 }
@@ -987,7 +1011,12 @@ function openConvo(cid) {
   window.Ext?.renderChip();
   send({ t: 'open', cid });
   if ($('app').dataset.view === 'files') window.FilesView?.show(); // Files follows the chat's project
-  else $('input').focus({ preventScroll: true });
+  else focusComposer();
+}
+// Phones don't focus the field on their own: a tap that opens a chat would bring up the keyboard over it (Messages
+// opens a thread the same way). Desktop types straight away.
+function focusComposer() {
+  if (!matchMedia('(pointer: coarse)').matches) $('input').focus({ preventScroll: true });
 }
 
 function resetMessages() {
@@ -1016,6 +1045,40 @@ function add(node) {
   $('messages').append(node);
   scrollDown();
   return node;
+}
+// Phones fold back-to-back tool calls into one line in Claude Code's words ("Ran 6 commands, read a file ›", the
+// drawer's toolGroupSummary); tap it for the usual cards. A lone call stays a card; the second one wraps both.
+const PHONE = matchMedia('(max-width: 767px)');
+function addTool(card) {
+  const last = $('messages').lastElementChild;
+  if (!PHONE.matches || card.classList.contains('sub')) return add(card);
+  if (last?.classList.contains('tool-stack')) {
+    last.querySelector('.tk-body').append(card);
+    refreshStack(last);
+    scrollDown();
+    return card;
+  }
+  if (!last?.matches('details.tool:not(.sub)')) return add(card);
+  const stack = el('details', 'tool-stack');
+  const sum = el('summary');
+  sum.append(el('span', 'st'), el('span', 'tk-sum'), el('span', 'tk-state'));
+  sum.insertAdjacentHTML('beforeend', '<svg class="chev" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>');
+  const body = el('div', 'tk-body');
+  stack.append(sum, body);
+  last.replaceWith(stack);
+  body.append(last, card);
+  refreshStack(stack);
+  scrollDown();
+  return card;
+}
+function refreshStack(stack) {
+  const cards = [...stack.querySelectorAll(':scope > .tk-body > .tool')];
+  const failed = cards.filter((c) => c.classList.contains('err')).length;
+  const running = cards.some((c) => c.classList.contains('running'));
+  stack.classList.toggle('running', running);
+  stack.classList.toggle('err', !!failed);
+  stack.querySelector('.tk-sum').textContent = toolGroupSummary(cards.map((c) => ({ e: { name: c.dataset.name, input: c._input || {}, id: c._id } })));
+  stack.querySelector('.tk-state').textContent = failed ? `· ${failed} failed` : running ? '· running' : '';
 }
 
 function shortPath(p) {
@@ -1106,6 +1169,8 @@ function toolCard(ev) {
   if (['Edit', 'MultiEdit', 'TodoWrite'].includes(ev.name)) card.open = true;
   if (ev.name === 'Write' && String(ev.input?.content || '').split('\n').length <= 30) card.open = true;
   card.dataset.name = ev.name;
+  card._input = ev.input;
+  card._id = ev.id;
   return card;
 }
 function finishTool(ev) {
@@ -1123,6 +1188,8 @@ function finishTool(ev) {
     body.append(el('pre', 'out' + (ev.isError ? ' err' : ''), text));
   }
   if (ev.isError) card.open = true;
+  const stack = card.closest('.tool-stack');
+  if (stack) refreshStack(stack);
 }
 
 // ----- screenshots: {id, name, w, h} images served from /api/media/:id
@@ -1323,7 +1390,7 @@ function renderEvent(ev, replay) {
       if (ev.name === 'AskUserQuestion' || ev.name === 'ExitPlanMode') break; // shown as prompts instead
       const card = toolCard(ev);
       state.tools.set(ev.id, card);
-      add(card);
+      addTool(card);
       break;
     }
     case 'tool_result':
@@ -1344,6 +1411,7 @@ function renderEvent(ev, replay) {
     case 'result': {
       endLive();
       state.tools.forEach((c) => c.classList.contains('running') && c.classList.replace('running', 'ok'));
+      $('messages').querySelectorAll('.tool-stack.running').forEach(refreshStack);
       const bits = [];
       if (ev.ms) bits.push(`${(ev.ms / 1000).toFixed(ev.ms < 10000 ? 1 : 0)}s`);
       if (ev.turns > 1) bits.push(`${ev.turns} steps`);
@@ -3062,7 +3130,7 @@ function hideSplash() {
   $('app').inert = false;
   s.classList.add('done');
   setTimeout(() => s.remove(), 400); // after the fade (instant when reduced motion turns transitions off)
-  $('input').focus({ preventScroll: true });
+  focusComposer();
 }
 $('splashSkip').addEventListener('click', hideSplash);
 splash.skipTimer = setTimeout(() => { if ($('splash')) $('splashSkip').hidden = false; }, 8000);
@@ -7335,6 +7403,16 @@ $('obPause').addEventListener('click', async () => {
   finally { obTogglePending = null; renderOrchBar(); }
 });
 // ----- Settings (sidebar gear): sound and parallel tasks for every project; the open project's reflection and options
+// Each run of back-to-back rows goes in one .st-group: an inset card on phones (phone.css, like iOS Settings),
+// display: contents elsewhere.
+for (const parent of new Set([...$('settingsModal').querySelectorAll('.st-row')].map((r) => r.parentElement))) {
+  let group = null;
+  for (const n of [...parent.children]) {
+    if (!n.classList.contains('st-row')) { group = null; continue; }
+    if (!group) { group = el('div', 'st-group'); n.before(group); }
+    group.append(n);
+  }
+}
 function openSettings() {
   if ($('settingsModal').hidden) ST.lastFocus = document.activeElement;
   $('settingsModal').hidden = false;
@@ -8462,9 +8540,16 @@ function runningProjectIds() {
   for (const t of O.tasks.values()) if (t.status === 'running') ids.add(t.project_id);
   return ids;
 }
+function runningCount(pid) {
+  let n = 0;
+  for (const t of O.tasks.values()) if (t.status === 'running' && t.project_id === pid) n++;
+  return n || (runningProjectIds().has(pid) ? 1 : 0);
+}
 let sidebarRunKey = '';
 function syncSidebarRunning() {
-  const key = [...runningProjectIds()].sort().join(',');
+  const counts = new Map();
+  for (const t of O.tasks.values()) if (t.status === 'running') counts.set(t.project_id, (counts.get(t.project_id) || 0) + 1);
+  const key = [...runningProjectIds()].sort().map((id) => `${id}:${counts.get(id) || 0}`).join(',');
   if (key !== sidebarRunKey) { sidebarRunKey = key; renderConvoList(); }
 }
 function parallelInfo(t) {

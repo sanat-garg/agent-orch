@@ -119,12 +119,12 @@ test('phone chat: back-to-back tool calls fold into one line, a lone call stays 
   await ctx.close();
 });
 
-test('phone drawer: project rows show a letter badge and a status line; Settings rows sit in inset groups', { skip, timeout: 60000 }, async () => {
+test('phone drawer: project rows show the name and a status line (no letter badge); Settings rows sit in inset groups', { skip, timeout: 60000 }, async () => {
   const { ctx, page, errors } = await open();
   await page.locator('#openSidebar').tap();
   const row = (cid) => page.locator(`#convoList .convo[data-cid="${cid}"]`);
   await row(OLD).waitFor();
-  assert.equal(await row(CID).locator('.cav').innerText(), 'W');
+  assert.equal(await row(CID).locator('.cav').count(), 0);
   assert.match(await row(CID).locator('.csub').innerText(), /^5m ago$/);
   const old = await row(OLD).locator('.csub').innerText();
   assert.ok(/Mar/.test(old) && !old.includes('/'), `an old project shows a short date (${old})`);
@@ -151,9 +151,8 @@ test('touch wording in the Queue hint; desktop keeps cards, flat settings and th
     stacks: document.querySelectorAll('.tool-stack').length,
     tools: document.querySelectorAll('#messages > details.tool').length,
     group: getComputedStyle(document.querySelector('#settingsModal .st-group')).display,
-    badge: getComputedStyle(document.querySelector('#convoList .convo .cav')).display,
   }));
-  assert.deepEqual(v, { stacks: 0, tools: 4, group: 'contents', badge: 'none' });
+  assert.deepEqual(v, { stacks: 0, tools: 4, group: 'contents' });
   await desk.page.waitForFunction(() => document.activeElement?.id === 'input');
   await desk.ctx.close();
 });

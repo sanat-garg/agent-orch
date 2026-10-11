@@ -1,18 +1,23 @@
-// Retention GC: run logs and media otherwise pile up forever. gcRetention({dataDir, runsDir?, db?, now?, runDays, mediaDays})
-// deletes <runsDir>/run-NNNNNN.jsonl once its task finished (done/failed/cancelled) more than runDays ago (the run's
-// finished_at when the task row is gone, the file mtime when the run row is gone too; a live task's log always stays),
-// then <DATA>/media/<sha256>.<ext> files older than mediaDays whose id appears nowhere it is still referenced: no chat log
-// (<DATA>/logs), surviving run log, approval audit log (<DATA>/audit/<task>.jsonl), approvals.screenshot or tasks.result
-// (review/checkpoint shots), then <DATA>/uploads/<id>/ dirs (uploads.mjs) whose meta.json `at` (else the dir mtime) is
-// older than mediaDays and whose 24-hex id appears in no chat log, then <browserDir>/<task id> screen-prompt workspaces
-// (browserDir defaults to <DATA>/orchestrator/browser-tasks; their .agent-orch/shots are duplicates of the media store)
-// whose task is done/failed/cancelled (any age) or has no row; any other status keeps it, and without a DB only those
-// whose mtime is older than runDays go. Non-integer names are left alone. Synchronous, never throws per file; returns
-// {runs, media, uploads, browserTasks, bytes}. Callers catch: see orchestrator.mjs retentionGc.
+// Retention GC: run logs, screenshots and uploads otherwise pile up forever. gcRetention({dataDir, runsDir?, db?, now?,
+// runDays, mediaDays, uploadDays, projectDirs, stars?}) deletes <runsDir>/run-NNNNNN.jsonl once its task finished
+// (done/failed/cancelled) more than runDays ago (the run's finished_at when the task row is gone, the file mtime when the
+// run row is gone too; a live task's log always stays), then <browserDir>/<task id> screen-prompt workspaces (browserDir
+// defaults to <DATA>/orchestrator/browser-tasks; their .agent-orch/shots are duplicates of the media store) whose task is
+// done/failed/cancelled (any age) or has no row (any other status keeps it; without a DB only those whose mtime is older
+// than runDays go), then <DATA>/uploads/<id>/ dirs (uploads.mjs) whose meta.json `at` (else the dir mtime) is older than
+// uploadDays and whose 24-hex id appears in no chat log. Then screenshots (owner, 2026-10-11): <DATA>/media/<sha256>.<ext>
+// files and every projectDirs' .agent-orch/shots/ images whose mtime is older than mediaDays (3) go even when a chat or
+// task shows them, except: starred ones (media.mjs readStars; a shot file by its content hash), ones used by a webpage
+// (a media id, or a shot file's name, appears in one of the project's web files: see webFiles), a surviving upload's
+// image (an attachment, not a screenshot) and a pending approval's screenshot. saveMedia touches a re-saved image, which
+// restarts its clock. Non-integer names are left alone. Synchronous, never throws per file; returns
+// {runs, media, shots, uploads, browserTasks, bytes}. Callers catch: see orchestrator.mjs retentionGc.
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { MEDIA_ID_RE } from './media.mjs';
+import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { MEDIA_ID_RE, SHOTS_DIR, readStars } from './media.mjs';
 import { UPLOAD_ID_RE } from './uploads.mjs';
 
 const DAY = 86400e3;
@@ -38,6 +43,40 @@ function scanDir(dir, ids, up, depth = 0) {
     else if (e.isFile()) scanFile(f, ids, up);
   }
 }
+// Image files under a project's .agent-orch/shots/ last written before `before` (ms), at most 3 levels deep.
+const SHOT_FILE = /\.(png|jpe?g|webp|gif)$/i;
+function oldShots(dir, before, depth = 0, out = []) {
+  for (const e of list(dir)) {
+    const f = path.join(dir, e.name);
+    if (e.isDirectory() && depth < 3) oldShots(f, before, depth + 1, out);
+    else if (e.isFile() && SHOT_FILE.test(e.name) && (stat(f)?.mtimeMs ?? Infinity) < before) out.push(f);
+  }
+  return out;
+}
+// A project's files a webpage could use a screenshot from (markup, styles, scripts, docs, data): git's tracked and
+// untracked-but-not-ignored files, else a walk that skips dot dirs and node_modules; never .agent-orch/, at most 5000.
+// Tests and scripts don't count: the script that takes a screenshot names it, but that isn't a page using it.
+const WEB_FILE = /\.(html?|css|scss|sass|less|[cm]?[jt]sx?|vue|svelte|astro|mdx?|json|php|erb|ejs|hbs|xml|svg)$/i;
+const NOT_PAGE = /(^|\/)(tests?|e2e|__tests__|specs?|scripts?|bin)\/|\.(test|spec)\.[^./]+$/i;
+const MAX_WEB_BYTES = 2 * 1024 * 1024;
+function webFiles(dir) {
+  let names;
+  try {
+    names = execFileSync('git', ['-C', dir, 'ls-files', '-z', '--cached', '--others', '--exclude-standard'],
+      { encoding: 'utf8', maxBuffer: 64 << 20, timeout: 30e3, stdio: ['ignore', 'pipe', 'ignore'] }).split('\0');
+  } catch {
+    names = [];
+    const walk = (rel, depth) => {
+      for (const e of list(path.join(dir, rel))) {
+        const r = rel ? `${rel}/${e.name}` : e.name;
+        if (e.isDirectory() && depth < 4 && !e.name.startsWith('.') && e.name !== 'node_modules') walk(r, depth + 1);
+        else if (e.isFile()) names.push(r);
+      }
+    };
+    walk('', 0);
+  }
+  return names.filter((n) => n && WEB_FILE.test(n) && !NOT_PAGE.test(n) && !n.startsWith('.agent-orch/')).slice(0, 5000).map((n) => path.join(dir, n));
+}
 // Rows of a query as strings; [] when the table or column is missing (an old DB) or there is no DB.
 function column(db, sql) {
   try { return db ? db.prepare(sql).all().map((r) => String(Object.values(r)[0] ?? '')) : []; } catch { return []; }
@@ -59,11 +98,12 @@ function treeBytes(f, depth = 0) {
 }
 
 export function gcRetention({ dataDir, runsDir = path.join(dataDir, 'orchestrator', 'runs'),
-  browserDir = path.join(dataDir, 'orchestrator', 'browser-tasks'), db = null, now = Date.now(), runDays = 30, mediaDays = 7 }) {
-  const out = { runs: 0, media: 0, uploads: 0, browserTasks: 0, bytes: 0 };
+  browserDir = path.join(dataDir, 'orchestrator', 'browser-tasks'), db = null, now = Date.now(), runDays = 30, mediaDays = 3, uploadDays = 7,
+  projectDirs = [], stars = readStars(dataDir) }) {
+  const out = { runs: 0, media: 0, shots: 0, uploads: 0, browserTasks: 0, bytes: 0 };
+  const mediaDir = path.join(dataDir, 'media'), uploadsDir = path.join(dataDir, 'uploads');
   const lookup = db?.prepare(`SELECT r.finished_at AS rf, t.id AS tid, t.status, t.finished_at AS tf
     FROM runs r LEFT JOIN tasks t ON t.id=r.task_id WHERE r.id=?`);
-  const surviving = [];
   for (const e of list(runsDir)) {
     const m = e.isFile() && RUN_RE.exec(e.name);
     if (!m) continue;
@@ -75,7 +115,6 @@ export function gcRetention({ dataDir, runsDir = path.join(dataDir, 'orchestrato
     if (finished != null && now - finished > runDays * DAY) {
       try { fs.rmSync(f); out.runs++; out.bytes += st.size; continue; } catch {}
     }
-    surviving.push(f);
   }
 
   let taskStatus = null;
@@ -96,37 +135,63 @@ export function gcRetention({ dataDir, runsDir = path.join(dataDir, 'orchestrato
     try { fs.rmSync(f, { recursive: true, force: true }); out.browserTasks++; out.bytes += size; } catch {}
   }
 
-  const maxAge = mediaDays * DAY;
-  const mediaDir = path.join(dataDir, 'media'), uploadsDir = path.join(dataDir, 'uploads');
-  const oldMedia = list(mediaDir).filter((e) => e.isFile() && MEDIA_ID_RE.test(e.name))
-    .map((e) => ({ name: e.name, st: stat(path.join(mediaDir, e.name)) }))
-    .filter((x) => x.st && now - x.st.mtimeMs > maxAge);
+  // Uploads first: the media copies of the ones that survive are attachments, not screenshots, and stay.
   const oldUploads = list(uploadsDir).filter((e) => e.isDirectory() && UPLOAD_ID_RE.test(e.name)).filter((e) => {
     const dir = path.join(uploadsDir, e.name);
     let at = null;
     try { at = Number(JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8')).at) || null; } catch {}
     at ??= stat(dir)?.mtimeMs;
-    return at != null && now - at > maxAge;
+    return at != null && now - at > uploadDays * DAY;
   }).map((e) => e.name);
-  if (!oldMedia.length && !oldUploads.length) return out;
+  if (oldUploads.length) {
+    const upIds = new Set();
+    scanDir(path.join(dataDir, 'logs'), new Set(), upIds);
+    for (const id of oldUploads) {
+      if (upIds.has(id)) continue;
+      const dir = path.join(uploadsDir, id), size = dirBytes(dir);
+      try { fs.rmSync(dir, { recursive: true }); out.uploads++; out.bytes += size; } catch {}
+    }
+  }
 
-  // Chat logs hold both kinds of id; the other sources only reference media.
-  const ids = new Set(), upIds = new Set();
-  scanDir(path.join(dataDir, 'logs'), ids, oldUploads.length ? upIds : null);
+  // Screenshots older than mediaDays go, chat or not, unless starred, used by a webpage or awaiting an approval.
+  const maxAge = mediaDays * DAY, starred = new Set([...stars].map((id) => id.slice(0, 64)));
+  const oldMedia = list(mediaDir).filter((e) => e.isFile() && MEDIA_ID_RE.test(e.name))
+    .map((e) => ({ name: e.name, st: stat(path.join(mediaDir, e.name)) }))
+    .filter((x) => x.st && now - x.st.mtimeMs > maxAge && !starred.has(x.name.slice(0, 64)));
+  const dirs = [...new Set(projectDirs.filter(Boolean))].map((dir) => ({ dir, shots: oldShots(path.join(dir, SHOTS_DIR), now - maxAge) }));
+  if (!oldMedia.length && !dirs.some((d) => d.shots.length)) return out;
+
+  const keep = new Set();
   if (oldMedia.length) {
-    for (const f of surviving) scanFile(f, ids);
-    scanDir(path.join(dataDir, 'audit'), ids);
-    for (const s of column(db, 'SELECT screenshot FROM approvals WHERE screenshot IS NOT NULL')) scanText(s, ids);
-    for (const s of column(db, 'SELECT result FROM tasks WHERE result IS NOT NULL')) scanText(s, ids);
+    for (const e of list(uploadsDir)) if (e.isDirectory()) scanFile(path.join(uploadsDir, e.name, 'meta.json'), keep);
+    for (const s of column(db, "SELECT screenshot FROM approvals WHERE screenshot IS NOT NULL AND status='pending'")) scanText(s, keep);
+  }
+  for (const { dir, shots } of dirs) {
+    if (!oldMedia.length && !shots.length) continue;
+    const names = new Set(shots.map((f) => path.basename(f))), used = new Set();
+    for (const f of webFiles(dir)) {
+      let text;
+      try { if ((stat(f)?.size ?? Infinity) > MAX_WEB_BYTES) continue; text = fs.readFileSync(f, 'latin1'); } catch { continue; }
+      if (oldMedia.length) scanText(text, keep);
+      for (const n of names) if (text.includes(n)) { used.add(n); names.delete(n); }
+    }
+    for (const f of shots) {
+      if (used.has(path.basename(f))) continue;
+      let size = 0;
+      try {
+        if (starred.size) {
+          const buf = fs.readFileSync(f);
+          if (starred.has(crypto.createHash('sha256').update(buf).digest('hex'))) continue;
+        }
+        size = stat(f)?.size || 0;
+        fs.rmSync(f);
+        out.shots++; out.bytes += size;
+      } catch {}
+    }
   }
   for (const { name, st } of oldMedia) {
-    if (ids.has(name.slice(0, 64))) continue;
+    if (keep.has(name.slice(0, 64))) continue;
     try { fs.rmSync(path.join(mediaDir, name)); out.media++; out.bytes += st.size; } catch {}
-  }
-  for (const id of oldUploads) {
-    if (upIds.has(id)) continue;
-    const dir = path.join(uploadsDir, id), size = dirBytes(dir);
-    try { fs.rmSync(dir, { recursive: true }); out.uploads++; out.bytes += size; } catch {}
   }
   return out;
 }

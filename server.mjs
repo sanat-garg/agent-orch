@@ -16,7 +16,7 @@ import { AGENTS, isAgent, agentEfforts, clampEffort, runAgentCli, clearLoginCach
 import { createModelStore } from './models.mjs';
 import { runHelper, claudeHelperSpawn } from './helpers.mjs';
 import { createConnections, SPECS, codexAccount, onPath, tmuxRunnerFor, loginSocketFor } from './connections.mjs';
-import { mediaCollector, MEDIA_ID_RE, MEDIA_TYPES, toolResultImages } from './media.mjs';
+import { mediaCollector, MEDIA_ID_RE, MEDIA_TYPES, toolResultImages, readStars, setStar } from './media.mjs';
 import { createUsageLog, createLimitStore, RANGES as USAGE_RANGES } from './usage.mjs';
 import { handleFiles } from './files.mjs';
 import { createStats } from './stats.mjs';
@@ -240,7 +240,7 @@ function userBlocked(req, url, u) {
 }
 // What a browser may receive: everything for an admin; for anyone else only their own chats, projects and tasks, and
 // nothing about machines, sign-ins, the account's plan usage or other users' work. null = don't send.
-const USER_MSGS = new Set(['status', 'previews', 'models', 'version', 'error', 'myusage']);
+const USER_MSGS = new Set(['media_stars', 'status', 'previews', 'models', 'version', 'error', 'myusage']);
 function forClient(ws, msg) {
   const u = ws.user;
   if (msg.t === 'convos' && u) return { ...msg, convos: msg.convos.filter((c) => chatOwner(c) === u.id) }; // everyone's sidebar: their own chats
@@ -925,6 +925,7 @@ const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
   onCommit: (dir) => syncGit(dir).catch((e) => console.error('[github] sync failed', dir, e)),
   projectReady: (dir) => gh.status().linked && !!convos.find((c) => c.cwd === dir)?.repo,
   projectArchived: (dir) => convos.some((c) => c.cwd === dir && c.archived), // no reflection: see PATCH /api/convos/:id
+  chatDirs: () => convos.map((c) => c.cwd), // retention.mjs sweeps old screenshots in each
   projectUser: (dir) => (dir ? pathOwner(dir) : null),
   userCap: (dir, agent, model) => users.capBlock(pathOwner(dir), agent, model),
   disabled: NO_ORCH,
@@ -2649,6 +2650,17 @@ async function handleRequest(req, res) {
       : action === 'cancel' ? await connections.cancel(id) : await connections.logout(id, await readBody(req));
     const { status, ...body } = r;
     return json(res, status, body);
+  }
+  // Starred screenshots are kept past the 3-day cleanup (retention.mjs): {ids}; POST {id, on} stars or unstars one.
+  if (p === '/api/media/stars') {
+    if (req.method === 'GET') return json(res, 200, { ids: [...readStars(DATA)] });
+    if (req.method !== 'POST') return json(res, 405, { error: 'Method not allowed' });
+    const { id, on } = await readBody(req);
+    if (!MEDIA_ID_RE.test(id || '')) return json(res, 400, { error: 'Bad media id' });
+    if (on && !fs.existsSync(path.join(DATA, 'media', id))) return json(res, 404, { error: 'That screenshot was already deleted' });
+    const ids = [...setStar(DATA, id, !!on)];
+    for (const ws of allClients) send(ws, { t: 'media_stars', ids });
+    return json(res, 200, { ids });
   }
   if (p.startsWith('/api/media/') && req.method === 'GET') {
     const id = p.slice('/api/media/'.length);

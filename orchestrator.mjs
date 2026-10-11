@@ -18,7 +18,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { AGENTS, isAgent, agentEfforts, agentStatus, clampEffort, codexExhausted, codexLatestSnapshot, isMissingSession, limitScope, limitScopes, modelCatalog, modelNames, runAgentCli, toolInputSummary, windowLabel } from './agents.mjs';
-import { SHOTS_DIR, mediaCollector } from './media.mjs';
+import { SHOTS_DIR, mediaCollector, MEDIA_ID_RE } from './media.mjs';
 import { BROWSER_SYSTEM, MCP_START_FAILED, needsBrowser, normIdentity, parseCapabilities, browserUnavailable, failedNodes, nextBrowserNode, chromeNode, findBrowser, FAILED_MS } from './browser.mjs';
 import { BROWSER_TASK_SYSTEM, browserTaskStatus, browserSteps, isBrowserTask } from './browser-task.mjs';
 import { CHROME_RUNNER_SLOTS, browserRoute, chromeCapable, chromePrompt, chromeSetup, runnerLabel } from './chrome.mjs';
@@ -1093,7 +1093,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   notify = () => {}, codexSnapshot = () => codexLatestSnapshot(), reap = null, config = {},
   // Users (users.mjs): projectUser(path) → the id of the user whose project it is (token records carry it); userCap(path,
   // agent, model) → {window, cap, mine, resetsAt} when that user reached their admin-set cap for agent/model, else null.
-  projectUser = () => null, userCap = () => null }) {
+  projectUser = () => null, userCap = () => null, chatDirs = () => [] }) {
   Object.assign(CFG, config); // tests tune slots (concurrency, parallelTasks, agentSlots, meminfo, hardware)
   let hw = readHardware(); // the controller's hardware as last detected (detectHardware)
   const dir = path.join(dataDir, 'orchestrator');
@@ -4863,7 +4863,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
         if (!lines[i].includes('"k":"image"')) continue;
         let e;
         try { e = JSON.parse(lines[i]); } catch { continue; }
-        if (e.k !== 'image' || !e.id || out.has(e.id)) continue;
+        if (e.k !== 'image' || !MEDIA_ID_RE.test(e.id || '') || out.has(e.id) || !fs.existsSync(path.join(dataDir, 'media', e.id))) continue; // deleted (retention.mjs)
         out.set(e.id, { id: e.id, name: e.name || null, w: e.w || null, h: e.h || null, at: e.at ?? r.finished_at ?? r.started_at,
           task: { id: r.task_id, title: r.title, status: r.status } });
       }
@@ -4906,11 +4906,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     runSubs.get(taskId).add(ws);
   }
 
-  // Old run logs and unreferenced media (retention.mjs); never throws into boot or the timer.
+  // Old run logs, screenshots (> 3 days, unless starred or used by a webpage) and uploads (retention.mjs); never throws
+  // into boot or the timer. Shots are swept in every project folder and every chat folder (chatDirs).
   function retentionGc() {
     try {
-      const r = gcRetention({ dataDir, runsDir, db });
-      if (r.runs || r.media) logEvent(`retention: removed ${r.runs} run logs and ${r.media} media files (${(r.bytes / 1048576).toFixed(1)} MB)`);
+      const projectDirs = [...qa('SELECT path FROM projects').map((p) => p.path), ...chatDirs()];
+      const r = gcRetention({ dataDir, runsDir, db, projectDirs });
+      if (r.runs || r.media || r.shots) logEvent(`retention: removed ${r.runs} run logs and ${r.media + r.shots} screenshots (${(r.bytes / 1048576).toFixed(1)} MB)`);
     } catch (e) { console.error('[orchestrator] retention gc failed', e); }
   }
 

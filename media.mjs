@@ -42,7 +42,9 @@ export function saveMedia(dataDir, buf, name = 'image') {
   if (!info) return null;
   const id = `${crypto.createHash('sha256').update(buf).digest('hex')}.${info.ext}`;
   const dir = path.join(dataDir, 'media'), file = path.join(dir, id);
-  if (!fs.existsSync(file)) {
+  if (fs.existsSync(file)) {
+    try { const t = new Date(); fs.utimesSync(file, t, t); } catch {} // seen again: its 3-day clock (retention.mjs) restarts
+  } else {
     fs.mkdirSync(dir, { recursive: true });
     const tmp = `${file}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, buf);
@@ -51,6 +53,20 @@ export function saveMedia(dataDir, buf, name = 'image') {
   const ev = { id, name: String(name).slice(0, 200) };
   if (info.w && info.h) Object.assign(ev, { w: info.w, h: info.h });
   return ev;
+}
+
+// Starred screenshots (<DATA>/media-stars.json, an array of media ids) are never auto-deleted (retention.mjs).
+const starsFile = (dataDir) => path.join(dataDir, 'media-stars.json');
+export function readStars(dataDir) {
+  try { return new Set(JSON.parse(fs.readFileSync(starsFile(dataDir), 'utf8')).filter((id) => MEDIA_ID_RE.test(id))); } catch { return new Set(); }
+}
+export function setStar(dataDir, id, on) {
+  const stars = readStars(dataDir);
+  if (on) stars.add(id); else stars.delete(id);
+  const f = starsFile(dataDir), tmp = `${f}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify([...stars]));
+  fs.renameSync(tmp, f);
+  return stars;
 }
 
 export function saveBase64(dataDir, data, name) {

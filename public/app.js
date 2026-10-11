@@ -652,13 +652,7 @@ function convoItem(c, rankable, sub = false) {
   // activity go in the tooltip.
   b.title = `${tilde(c.cwd)} · ${c.mode === 'orchestrator' ? 'Orchestrator' : 'Chat'} · ${relTime(c.updatedAt)}`;
   const name = c.title || folderName(c.cwd);
-  // Phones (phone.css) show a two-line list row: a letter badge, the name, and a status line under it.
-  if (!sub) {
-    const av = el('span', 'cav', (name.match(/[a-z0-9]/i)?.[0] || '•').toUpperCase());
-    av.setAttribute('aria-hidden', 'true');
-    av.style.setProperty('--h', [...name].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) % 360, 7));
-    b.append(av);
-  }
+  // Phones (phone.css) show a two-line list row: the name and a status line under it.
   if (c.busy) b.append(el('span', 'busy-dot'));
   else if (c.project && runningProjectIds().has(c.project.id)) {
     const dot = el('span', 'run-dot'); dot.title = 'Tasks running'; dot.setAttribute('role', 'img'); dot.setAttribute('aria-label', 'Tasks running');
@@ -1194,7 +1188,28 @@ function finishTool(ev) {
 
 // ----- screenshots: {id, name, w, h} images served from /api/media/:id
 const mediaUrl = (id) => `/api/media/${encodeURIComponent(id)}`;
-function shotMissing() { return el('div', 'shot-missing', 'Image unavailable'); }
+function shotMissing() { return el('div', 'shot-missing', 'No longer available'); }
+// Starred screenshots (GET/POST /api/media/stars, ws media_stars) survive the 3-day cleanup (retention.mjs). The
+// lightbox's star toggles the image it shows; starred thumbnails carry a badge (.shot.starred).
+const STARS = new Set();
+function applyStars(ids) {
+  STARS.clear();
+  for (const id of ids || []) STARS.add(id);
+  for (const f of document.querySelectorAll('.shot[data-id]')) f.classList.toggle('starred', STARS.has(f.dataset.id));
+  if (!$('lightbox').hidden) showStar();
+}
+function showStar() {
+  const id = LB.list[LB.i]?.id, on = STARS.has(id), b = $('lbStar');
+  b.setAttribute('aria-pressed', String(on));
+  b.title = on ? 'Starred: kept until you unstar it' : 'Star to keep it (unstarred screenshots are deleted after 3 days)';
+  b.setAttribute('aria-label', on ? 'Unstar screenshot' : 'Star screenshot (keep it)');
+}
+async function toggleStar() {
+  const id = LB.list[LB.i]?.id;
+  if (!id) return;
+  try { applyStars((await api('/api/media/stars', 'POST', { id, on: !STARS.has(id) })).ids); } catch (e) { toast(e.message); }
+}
+api('/api/media/stars').then((d) => applyStars(d.ids)).catch(() => {});
 function shotNode(img) {
   const fig = el('figure', 'shot');
   const b = el('button');
@@ -1210,6 +1225,7 @@ function shotNode(img) {
   b.append(im);
   b.onclick = () => openShot(fig);
   fig.dataset.id = img.id;
+  if (STARS.has(img.id)) fig.classList.add('starred');
   fig.dataset.name = img.name || '';
   if (img.w && img.h) { fig.dataset.w = img.w; fig.dataset.h = img.h; }
   fig.append(b, el('figcaption', '', img.name || 'image'));
@@ -1275,6 +1291,7 @@ function showShot(i) {
   $('lbImg').src = mediaUrl(img.id);
   $('lbView').scrollTo(0, 0);
   $('lbPrev').hidden = $('lbNext').hidden = n < 2;
+  showStar();
 }
 // Fit: the whole image in the view (object-fit: contain, never upscaled, no scrollbars). Actual size: natural pixels,
 // scrolling/panning (pinch-zoom on phones). At (x, y) (a double-click/tap), actual size keeps that image point under it.
@@ -1331,6 +1348,7 @@ $('lbView').addEventListener('pointerup', (e) => {
   LB.tapTimer = setTimeout(() => { LB.tap = null; }, 600); // swallows the synthetic dblclick a double-tap may also fire
 });
 $('lbZoom').addEventListener('click', () => toggleShotZoom());
+$('lbStar').addEventListener('click', toggleStar);
 $('lbPrev').addEventListener('click', () => showShot(LB.i - 1));
 $('lbNext').addEventListener('click', () => showShot(LB.i + 1));
 $('lightbox').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeShot(); });
@@ -3585,6 +3603,7 @@ function onServer(msg) {
     if (!$('connsModal').hidden) loadConnNodes();
     return checkPairing();
   }
+  if (msg.t === 'media_stars') return applyStars(msg.ids);
   if (msg.t === 'models') return api('/api/agents').then((d) => { AGENT_LIST = d.agents || []; renderAgentPicker(); }).catch(() => {});
   if (msg.t === 'status') {
     if (msg.alert) toast(msg.alert, { kind: 'error' });

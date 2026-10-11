@@ -181,6 +181,39 @@ test('phone: thumbnails are two per row filling the width at 16:10; the lightbox
   await ctx.close();
 });
 
+// Starring (the 3-day cleanup keeps starred screenshots, retention.mjs): the lightbox's star toggles the shown image,
+// its thumbnail gets a badge, and the choice is saved in <DATA>/media-stars.json.
+test('lightbox star: starring keeps a screenshot, badges its thumbnail and persists; unstarring undoes it', { skip, timeout: 60000 }, async () => {
+  const { ctx, page, errors } = await open({ width: 1280, height: 800 });
+  const stars = () => { try { return JSON.parse(fs.readFileSync(path.join(dataDir, 'media-stars.json'), 'utf8')); } catch { return []; } };
+  await page.locator('#messages .shot button').nth(2).click();
+  const star = page.locator('#lbStar');
+  await star.waitFor();
+  assert.equal(await star.getAttribute('aria-pressed'), 'false');
+  assert.match(await star.getAttribute('title'), /deleted after 3 days/);
+  await star.click();
+  await page.waitForFunction(() => document.querySelector('#lbStar').getAttribute('aria-pressed') === 'true');
+  assert.deepEqual(stars(), [imgs[2].id]);
+  assert.deepEqual(await page.locator('#messages .shot').evaluateAll((f) => f.map((x) => x.classList.contains('starred'))), [false, false, true, false, false]);
+  await page.keyboard.press('ArrowRight'); // another image shows its own state
+  assert.equal(await star.getAttribute('aria-pressed'), 'false');
+  await page.keyboard.press('ArrowLeft');
+  await page.keyboard.press('Escape');
+  await page.reload(); // stars load with the app
+  await page.locator('#messages .shot.starred').waitFor();
+  await page.locator('#messages .shot button').nth(2).click();
+  assert.equal(await star.getAttribute('aria-pressed'), 'true');
+  await star.click();
+  await page.waitForFunction(() => document.querySelector('#lbStar').getAttribute('aria-pressed') === 'false');
+  assert.deepEqual(stars(), []);
+  assert.equal(await page.locator('#messages .shot.starred').count(), 0);
+  // A deleted screenshot can't be starred.
+  const r = await page.evaluate(async () => (await fetch('/api/media/stars', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: `${'f'.repeat(64)}.png`, on: true }) })).status);
+  assert.equal(r, 404);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
 // The task drawer: every screenshot (not the last four plus "N more under Details") in a compact grid of equal small tiles.
 async function drawerGallery(viewport, mobile) {
   const { ctx, page, errors } = await open(viewport, mobile);

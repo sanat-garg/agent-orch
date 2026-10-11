@@ -2,7 +2,8 @@
 // DELETE /api/convos/:id/messages/:ts; public/app.js promptMeta). A chat turn's commit is a 'commit' event in its log;
 // rewinding with code undoes those after the prompt as one new commit, keeping commits the chat didn't make (a task's
 // merge), and cuts the log there. Chat-only keeps the commit events so a later rewind still undoes them. Delete drops a
-// prompt and its reply and tells the session to disregard it. Each prompt shows when it was sent.
+// prompt and its reply and tells the session to disregard it. Edit rewinds and resends the new text. Each prompt shows
+// when it was sent.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
@@ -144,4 +145,47 @@ test('rewinding with code undoes only the chat\'s commits after the prompt, as o
   assert.equal(c.rewindRecap.reverted, 2);
   for (let i = 0; i < 50 && execFileSync('git', ['rev-parse', 'main'], { cwd: origin, encoding: 'utf8' }).trim() !== git('rev-parse', 'HEAD'); i++) await new Promise((res) => setTimeout(res, 200));
   assert.equal(execFileSync('git', ['rev-parse', 'main'], { cwd: origin, encoding: 'utf8' }).trim(), git('rev-parse', 'HEAD'), 'the rewind is pushed');
+});
+
+test('editing a prompt rewinds to before it, code included, and sends the edited text with its attachments', { skip }, async () => {
+  const p3 = commit('d.txt', 'dee\n', 'Chat: add d');
+  const t = Date.now() - 600e3, att = { id: 'u'.repeat(32), name: 'spec.md', size: 3, type: 'text/markdown' };
+  fs.writeFileSync(path.join(dataDir, 'logs', 'c1.jsonl'), jsonl([
+    { t: 'user', text: 'add d', ts: t, attachments: [att] }, { t: 'text', text: 'Added d.', ts: t + 10 }, { t: 'commit', sha: p3, ts: t + 20 },
+  ]));
+  const [name, value] = cookie.split('=');
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  await ctx.addCookies([{ name, value, url: base }]);
+  const pg = await ctx.newPage();
+  const errors = [], sent = [];
+  pg.on('pageerror', (e) => errors.push(e.message));
+  // The resend is caught here so no real agent turn starts.
+  await pg.routeWebSocket(/\/ws$/, (ws) => {
+    const server = ws.connectToServer();
+    ws.onMessage((m) => { const msg = JSON.parse(m); if (msg.t === 'send') sent.push(msg); else server.send(m); });
+    server.onMessage((m) => ws.send(m));
+  });
+  await pg.goto(base + '/#c1');
+  await pg.locator('#app:not([inert])').waitFor();
+  await pg.locator('.msg.user').first().hover();
+  await pg.locator('.msg-meta .mm-edit').click();
+  const box = pg.locator('.msg.user.editing .msg-edit');
+  assert.equal(await box.inputValue(), 'add d');
+  assert.equal(await pg.locator('.msg.user.editing .msg-atts .att-file').count(), 1, 'its attachments stay shown');
+  // Esc puts the bubble back untouched.
+  await box.press('Escape');
+  assert.equal(await pg.locator('.msg.user.editing').count(), 0);
+  assert.equal(await pg.locator('.msg.user').first().evaluate((b) => b.firstChild.textContent), 'add d');
+  await pg.locator('.msg.user').first().hover();
+  await pg.locator('.msg-meta .mm-edit').click();
+  assert.equal(await pg.locator('.msg-edit-undo input').isChecked(), true, 'undoing the code is the default');
+  await box.fill('add e instead');
+  await box.press('Enter');
+  await pg.waitForFunction(() => document.querySelectorAll('.msg.user').length === 0);
+  for (let i = 0; i < 50 && !sent.length; i++) await new Promise((res) => setTimeout(res, 100));
+  assert.deepEqual(sent, [{ t: 'send', cid: 'c1', text: 'add e instead', attachments: [att.id] }]);
+  assert.equal(read('d.txt'), null, "the old prompt's code change is undone");
+  assert.deepEqual(readLog('c1'), []);
+  assert.deepEqual(errors, []);
+  await ctx.close();
 });

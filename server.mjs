@@ -1796,7 +1796,7 @@ async function handleRequest(req, res) {
 
   if (VENDOR[p]) return serveFile(res, path.join(ROOT, VENDOR[p]));
   if (p === '/' || p === '/index.html') return serveFile(res, path.join(PUBLIC, 'index.html'));
-  if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css' || p === '/browser.js' || p === '/browser.css' || p === '/previews.js' || p === '/previews.css' || p === '/schedules.js' || p === '/schedules.css' || p === '/users.js' || p === '/users.css' || p === '/credentials.js' || p === '/credentials.css') return serveFile(res, path.join(PUBLIC, p));
+  if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css' || p === '/browser.js' || p === '/browser.css' || p === '/previews.js' || p === '/previews.css' || p === '/schedules.js' || p === '/schedules.css' || p === '/users.js' || p === '/users.css' || p === '/credentials.js' || p === '/credentials.css' || p === '/shots.js' || p === '/shots.css') return serveFile(res, path.join(PUBLIC, p));
   // The Files view: listing, preview, download (a file, or a zip streamed on the fly), upload, and copy/move/zip/unzip over the whole disk, opening on the chat's project (files.mjs).
   // A user's requests stay inside their own projects: only their chats' roots, and no absolute paths (userBlocked checks the query).
   const filesBody = isAdmin(me) ? readBody : async (r) => {
@@ -2409,6 +2409,9 @@ async function handleRequest(req, res) {
     const d = orch.taskDetail(id);
     return d ? json(res, 200, d) : json(res, 404, { error: 'No such task' });
   }
+  // The project's latest screenshots from all its tasks (top bar → Screenshots), newest first.
+  const osh = p.match(/^\/api\/orch\/projects\/(\d+)\/shots$/);
+  if (osh && req.method === 'GET') return json(res, 200, { shots: orch.projectShots(Number(osh[1])) });
   // Manual delegation: GET lists the options (every connected model + usage status), POST {agent, model} reassigns a queued task.
   const od = p.match(/^\/api\/orch\/tasks\/(\d+)\/delegate$/);
   if (od) {

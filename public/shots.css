@@ -1,0 +1,28 @@
+/* Screenshots (shots.js): the top bar pill and its sheet, with the newest screenshot large, then the rest grouped by task. */
+.sh-link { gap: 6px; cursor: pointer; font: inherit; font-size: 12px; }
+.sh-link.has-new { color: var(--text); border-color: var(--accent); }
+.sh-new { padding: 0 6px; border-radius: 99px; background: var(--accent); color: var(--accent-text); font-size: 11px; font-weight: 650; line-height: 16px; }
+
+.modal-panel.shm { width: min(860px, 100%); }
+.sh-empty { margin: 6px 4px; font-size: 13px; color: var(--muted); line-height: 1.4; }
+.sh-label { margin: 0 0 6px; font-size: 12px; font-weight: 650; letter-spacing: .02em; text-transform: uppercase; color: var(--faint); }
+.sh-latest { margin-bottom: 20px; }
+.sh-latest .shot.shot-final { width: 100%; margin: 0; }
+.sh-latest .shot.shot-final figcaption { display: none; }
+.sh-group { margin-bottom: 14px; }
+.sh-group .shots { margin: 0; }
+
+/* A task heading: "#12 Title · done · 2h ago", a full-width row that opens the task (44pt on touch). */
+.sh-task {
+  display: flex; align-items: baseline; gap: 8px; width: 100%; min-height: 36px; margin: 0 0 6px; padding: 6px 8px;
+  border: 0; border-radius: 8px; background: none; color: var(--text); font: inherit; font-size: 13.5px; text-align: left; cursor: pointer;
+}
+.sh-task:hover { background: var(--raised); }
+.sh-tid { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+.sh-ttl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.sh-meta { flex: none; color: var(--faint); font-size: 12px; }
+@media (pointer: coarse) { .sh-task { min-height: 44px; align-items: center; } }
+@media (max-width: 767px) {
+  .sh-task { flex-wrap: wrap; row-gap: 0; }
+  .sh-meta { flex-basis: 100%; padding-left: 0; }
+}

@@ -4851,6 +4851,27 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return { project: projectView(p), tasks: qa('SELECT * FROM tasks WHERE project_id=:p ORDER BY id DESC LIMIT 400', { p: p.id }).map(taskView), state: stateView() };
   }
 
+  // The project's latest screenshots across its tasks, newest first (the top bar's Screenshots gallery): each media id
+  // once, at its latest sighting, with the task it came from. Reads at most `runs` recent run logs, image lines only.
+  function projectShots(projectId, { limit = 60, runs = 120 } = {}) {
+    const out = new Map();
+    for (const r of qa(`SELECT r.log_path, r.started_at, r.finished_at, t.id AS task_id, t.title, t.status FROM runs r
+      JOIN tasks t ON t.id=r.task_id WHERE t.project_id=:p AND r.log_path IS NOT NULL ORDER BY r.id DESC LIMIT :n`, { p: projectId, n: runs })) {
+      let lines;
+      try { lines = fs.readFileSync(r.log_path, 'utf8').split('\n'); } catch { continue; }
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (!lines[i].includes('"k":"image"')) continue;
+        let e;
+        try { e = JSON.parse(lines[i]); } catch { continue; }
+        if (e.k !== 'image' || !e.id || out.has(e.id)) continue;
+        out.set(e.id, { id: e.id, name: e.name || null, w: e.w || null, h: e.h || null, at: e.at ?? r.finished_at ?? r.started_at,
+          task: { id: r.task_id, title: r.title, status: r.status } });
+      }
+      if (out.size >= limit) break;
+    }
+    return [...out.values()].sort((a, b) => b.at - a.at).slice(0, limit);
+  }
+
   function taskDetail(id) {
     const t = getTask(id);
     if (!t) return null;
@@ -4955,7 +4976,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     createBrowserTask, listBrowserTasks, stopBrowserTask, attachBrowserViews, browserFailed, browserRunner,
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
     projectOrder: () => projectOrderView(), // [{id, path, position, priority}], highest priority first
-    planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, insertCheckpoint, approveCheckpoint, requestChanges, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setTaskRunOn, assignable, assignTask, setReflectFallbacks, setReflectSettings, syncConvoModel, pauseTask, resumeTask, handoffTask, setConvoMode, detachConvo, convoSnapshot, taskDetail, watchTask,
+    planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, insertCheckpoint, approveCheckpoint, requestChanges, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setTaskRunOn, assignable, assignTask, setReflectFallbacks, setReflectSettings, syncConvoModel, pauseTask, resumeTask, handoffTask, setConvoMode, detachConvo, convoSnapshot, taskDetail, projectShots, watchTask,
     drain, undrain, chatPlanning, applyUpdates: () => parallelSettings().applyUpdates,
     prepareRestart, resumeAfterRestart, restartBlocker, stateView, machines, browserTasks, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, reconcileClaudeLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     // A sidebar chat's project rank ({id, position, priority}), or null when its folder has no orchestrator project.

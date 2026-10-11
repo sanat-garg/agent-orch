@@ -122,7 +122,8 @@ phoneHeader.addEventListener('change', syncPhoneHeader);
 syncPhoneHeader();
 function openViewMenu() {
   const m = $('viewMenu'), repo = $('repoLink'), item = $('viewMenuRepo'), pv = $('previewLink'), pvItem = $('viewMenuPreview');
-  $('viewMenuMore').hidden = repo.hidden && pv.hidden;
+  const sh = $('shotsLink'), shItem = $('viewMenuShots');
+  $('viewMenuMore').hidden = repo.hidden && pv.hidden && sh.hidden;
   item.hidden = repo.hidden;
   if (!repo.hidden) {
     item.replaceChildren(repo.querySelector('svg').cloneNode(true), $('repoText').textContent);
@@ -130,6 +131,8 @@ function openViewMenu() {
   }
   pvItem.hidden = pv.hidden;
   if (!pv.hidden) pvItem.replaceChildren(...[...pv.childNodes].map((n) => n.cloneNode(true)));
+  shItem.hidden = sh.hidden;
+  if (!sh.hidden) shItem.replaceChildren(...[...sh.childNodes].map((n) => n.cloneNode(true)));
   m.hidden = false;
   $('viewBtn').setAttribute('aria-expanded', 'true');
   const r = $('viewBtn').getBoundingClientRect();
@@ -151,6 +154,7 @@ $('viewMenu').addEventListener('click', (e) => {
   if (b.dataset.view) setView(b.dataset.view);
   else if (b.id === 'viewMenuRepo') $('repoLink').click();
   else if (b.id === 'viewMenuPreview') $('previewLink').click();
+  else if (b.id === 'viewMenuShots') $('shotsLink').click();
 });
 $('viewMenu').addEventListener('keydown', (e) => {
   const items = [...$('viewMenu').querySelectorAll('button')].filter((b) => b.offsetParent);
@@ -905,12 +909,13 @@ function draftSlug() {
   return state.draft.type === 'new' ? slugify(state.draft.name) : '';
 }
 function updateHeader() {
-  if (['term', 'browser'].includes($('app').dataset.view)) { $('repoLink').hidden = true; $('previewLink').hidden = true; return; }
+  if (['term', 'browser'].includes($('app').dataset.view)) { $('repoLink').hidden = true; $('previewLink').hidden = true; $('shotsLink').hidden = true; return; }
   $('title').textContent = currentTitle();
   $('cwdLabel').textContent = currentCwdLabel();
   document.title = `${currentTitle()} · agent-orch`;
   renderRepoLink();
   window.Previews?.renderHeader();
+  window.Shots?.renderHeader();
 }
 function renderRepoLink() {
   const c = currentConvo(), a = $('repoLink');
@@ -1174,7 +1179,7 @@ const screenLabel = (status) => (['done', 'failed', 'cancelled'].includes(status
 // Prev/next goes through every image of the chat, or of the whole task in the drawer.
 function openShot(fig) {
   let list;
-  const panel = fig.closest('.rv-panel, .act-list, .bx-act');
+  const panel = fig.closest('.rv-panel, .act-list, .bx-act, .sh-panel');
   if (panel) list = [...panel.querySelectorAll('.shot')].map((f) => ({ id: f.dataset.id, name: f.dataset.name, w: +f.dataset.w || 0, h: +f.dataset.h || 0 }));
   else if (fig.closest('#drBody') && O.detail) list = shotsByTime(O.detail.runs.flatMap((r) => r.entries.filter((e) => e.k === 'image')));
   else list = [...$('messages').querySelectorAll('.shot')].map((f) => ({ id: f.dataset.id, name: f.dataset.name, w: +f.dataset.w || 0, h: +f.dataset.h || 0 }));
@@ -7207,6 +7212,7 @@ function applyOrchSnapshot(s) {
   O.project = s?.project || null;
   if (s?.state) O.state = s.state;
   for (const t of s?.tasks || []) O.tasks.set(t.id, t);
+  window.Shots?.sync(); // public/shots.js
   syncAppBadge();
   renderUsage();
   renderOrchBar();
@@ -7230,7 +7236,7 @@ function onOrch(msg) {
     refreshCards(msg.task.id);
     for (const other of O.tasks.values()) if (taskDeps(other).includes(msg.task.id)) refreshCards(other.id);
     if (O.drawer === msg.task.id) { renderDrawerHead(); scheduleDetail(); }
-    if (msg.task.project_id === O.project?.id) scheduleQueue();
+    if (msg.task.project_id === O.project?.id) { scheduleQueue(); window.Shots?.onTask(msg.task); }
   } else if (msg.t === 'oapproval') {
     // A held action: a sound (the task-sound switch) and a toast that opens the task, even while this tab has focus.
     const a = msg.approval, t = O.tasks.get(a.task);

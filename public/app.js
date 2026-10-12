@@ -1004,10 +1004,12 @@ function setModeUI(mode) {
 
 function openConvo(cid) {
   if (cid !== state.cid) { closeTask(); O.project = null; }
+  stashChat();
   state.cid = cid;
   history.replaceState(null, '', cid ? `#${cid}` : '#');
   resetMessages();
   setBusy(false);
+  const since = restoreChat(cid);
   if (!cid) {
     $('messages').append($('emptyTpl').content.cloneNode(true));
     setModeUI(state.draftMode);
@@ -1017,7 +1019,7 @@ function openConvo(cid) {
   updateHeader();
   renderConvoList();
   window.Ext?.renderChip();
-  send({ t: 'open', cid });
+  send({ t: 'open', cid, ...(since && { since }) });
   if ($('app').dataset.view === 'files') window.FilesView?.show(); // Files follows the chat's project
   else focusComposer();
 }
@@ -1027,6 +1029,37 @@ function focusComposer() {
   if (!matchMedia('(pointer: coarse)').matches) $('input').focus({ preventScroll: true });
 }
 
+// The last few chats opened stay drawn (owner, 2026-10-12: switching projects must feel instant): going back to one puts
+// its messages straight back, then the server sends only what its log gained since (server.mjs logMark, sendHistory).
+// Only a settled view is kept, exactly the log up to `state.mark`: no reply streaming, no tool running, nothing pending.
+const chatCache = new Map(), CHAT_CACHE_MAX = 6;
+const viewSettled = () => !!(state.cid && state.mark && !state.busy && !state.live && !state.perms.size && !pendingMsgs.size
+  && !$('messages').querySelector('.empty'));
+function stashChat() {
+  chatCache.delete(state.cid);
+  if (!viewSettled()) return;
+  const frag = document.createDocumentFragment();
+  frag.append(...$('messages').childNodes);
+  chatCache.set(state.cid, { frag, mark: state.mark, tools: [...state.tools], lastUser: state.lastUser,
+    backlog: { ...backlog, asked: false }, stick, top: scroller.scrollTop });
+  while (chatCache.size > CHAT_CACHE_MAX) chatCache.delete(chatCache.keys().next().value);
+}
+// → the restored view's mark, for {t:'open', since}; history then appends to it (or redraws when the log was rewritten).
+function restoreChat(cid) {
+  const c = cid && chatCache.get(cid);
+  if (!c) return null;
+  chatCache.delete(cid);
+  $('messages').append(c.frag);
+  for (const [id, card] of c.tools) state.tools.set(id, card);
+  state.lastUser = c.lastUser;
+  Object.assign(backlog, c.backlog);
+  olderButton();
+  stick = c.stick;
+  if (stick) scroller.scrollTop = scroller.scrollHeight;
+  else scroller.scrollTop = c.top;
+  state.mark = state.restored = c.mark;
+  return c.mark;
+}
 function resetMessages() {
   $('messages').textContent = '';
   state.tools.clear();
@@ -1035,6 +1068,8 @@ function resetMessages() {
   state.lastUser = null;
   state.live = null;
   state.liveText = '';
+  state.mark = state.restored = null;
+  Object.assign(backlog, { events: [], start: 0, asked: false });
 }
 
 // ---------- rendering ----------
@@ -1050,6 +1085,8 @@ function scrollDown(force) {
 }
 // Where rendered events go: #messages, or the detached box "Show earlier messages" fills before prepending it (renderOlder).
 let msgBox = null;
+// Events of the open chat's window not drawn yet, and where the server's older ones begin (drawEarlier).
+const backlog = { events: [], start: 0, asked: false };
 const msgs = () => msgBox || $('messages');
 function add(node) {
   msgs().querySelector('.empty')?.remove();
@@ -3603,7 +3640,9 @@ function connect() {
     retry = 0;
     splashStatus('Loading your chats…');
     renderConnFoot();
-    send({ t: 'open', cid: state.cid });
+    // A view still drawn from before the drop (an iPhone app back from the background) only needs what was added since.
+    if (viewSettled()) state.restored = state.mark;
+    send({ t: 'open', cid: state.cid, ...(state.restored && { since: state.restored }) });
     pollUpdates();
     refreshConnections();
     if (serverOpen()) send({ t: 'metrics_sub', on: true });
@@ -3679,13 +3718,28 @@ function onServer(msg) {
     return;
   }
   if (msg.cid && msg.cid !== state.cid) return;
+  // A logged chat event (server.mjs emit) moves the drawn view's mark; while a restored view waits for its history, that
+  // history brings the event, so it isn't drawn twice.
+  if (msg.mark && msg.t !== 'history') {
+    if (state.restored) return;
+    state.mark = msg.mark;
+  }
   switch (msg.t) {
     case 'history': {
       applyOrchSnapshot(msg.orch);
-      resetMessages();
-      if (!msg.events.length) { $('messages').append($('emptyTpl').content.cloneNode(true)); updateFolderChip(); }
-      for (const ev of msg.events) renderEvent(ev, true);
-      olderButton(msg.start);
+      // Only what the log gained since the view this chat was restored with (restoreChat); else a fresh window.
+      const append = !!msg.since && msg.since === state.restored;
+      if (append) for (const ev of msg.events) renderEvent(ev, true);
+      else {
+        resetMessages();
+        if (!msg.events.length) { $('messages').append($('emptyTpl').content.cloneNode(true)); updateFolderChip(); }
+        const cut = backlogCut(msg.events, renderBudget());
+        Object.assign(backlog, { events: msg.events.slice(0, cut), start: msg.start, asked: false });
+        for (const ev of msg.events.slice(cut)) renderEvent(ev, true);
+        olderButton();
+      }
+      state.restored = null;
+      state.mark = msg.mark;
       // Tool calls still running from before a reload.
       for (const req of msg.pending) showPerm(req);
       setBusy(msg.busy);
@@ -3695,8 +3749,8 @@ function onServer(msg) {
       input.value = store.get('cw.draft.' + state.cid) || '';
       autosize();
       updateSendButton();
-      stick = true;
-      scrollDown(true);
+      if (!append) stick = true;
+      scrollDown(!append);
       splashReady('history');
       break;
     }
@@ -3726,37 +3780,94 @@ function onServer(msg) {
   }
 }
 
-// A chat opens with only its recent part (server.mjs logWindow); "Show earlier messages" above it fetches the window
-// before its first log line (`start`), renders it apart and prepends it, keeping what's on screen where it was.
-function olderButton(start) {
+// A chat opens with only its recent part (server.mjs logWindow), and draws only the newest events of that, about two
+// screens (owner, 2026-10-12: opening a project still froze the phone for a second or more, mostly laying out hundreds of
+// task cards nobody had scrolled to). The rest waits in `backlog`; when the reader scrolls near the top, the next
+// screenful is drawn above, keeping what's on screen where it was, and once the backlog is empty the window before byte
+// `start` comes from the server ({t:'older'}) the same way. "Show earlier messages" marks the top and does it on a tap.
+// Rough screen rows an event takes: what makes the first draw about two screens.
+function evRows(ev) {
+  const len = (s) => (typeof s === 'string' ? s.length : 0);
+  switch (ev.t) {
+    case 'user': return 2 + len(ev.text) / 200;
+    case 'text': return 1 + len(ev.text) / 200;
+    case 'tool_use': return PHONE.matches && !ev.sub ? 0.25 : 1; // a phone folds a run of calls into one stack
+    case 'tasks': return 1 + 1.5 * (ev.ids?.length || 0);
+    case 'reflect': return 2.5;
+    case 'image': return 3;
+    case 'notice': case 'error': case 'moved': case 'approval': case 'result': return 1;
+    default: return 0;
+  }
+}
+const renderBudget = () => Math.max(20, ((scroller.clientHeight || innerHeight) / 40) * 2.5);
+// Where to split `events` so the part after it is about `rows` rows: only before a prompt, a reply or a notice, never
+// between a tool call and its result (or its turn's end) nor inside a run of calls or images. → the index (0 = all).
+const CUT_AT = new Set(['user', 'text', 'tasks', 'reflect', 'notice', 'error', 'moved', 'approval']);
+function backlogCut(events, rows) {
+  const n = events.length, ends = new Array(n).fill(-1), resultAt = new Map();
+  let nextResult = n;
+  for (let i = n - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (ev.t === 'result') nextResult = i;
+    else if (ev.t === 'tool_result') resultAt.set(ev.id, i);
+    else if (ev.t === 'tool_use') ends[i] = resultAt.get(ev.id) ?? nextResult;
+  }
+  const open = new Array(n + 1).fill(-1); // open[k]: the furthest a call before k reaches
+  for (let i = 0; i < n; i++) open[i + 1] = Math.max(open[i], ends[i]);
+  let sum = 0;
+  for (let k = n - 1; k > 0; k--) {
+    sum += evRows(events[k]);
+    if (sum >= rows && CUT_AT.has(events[k].t) && open[k] < k) return k;
+  }
+  return 0;
+}
+// The top marker; a fresh one is watched, so drawing a short batch with the view still near the top goes on to the next.
+const olderSeen = new IntersectionObserver((entries) => {
+  for (const e of entries) if (e.isIntersecting && e.target.isConnected) showEarlier();
+}, { root: scroller, rootMargin: '900px 0px 0px 0px' });
+function olderButton() {
   $('messages').querySelector(':scope > .history-more')?.remove();
-  if (!(start > 0)) return;
-  const b = el('button', 'history-more', 'Show earlier messages');
+  if (!backlog.events.length && !(backlog.start > 0)) return;
+  const b = el('button', 'history-more', backlog.asked ? 'Loading…' : 'Show earlier messages');
   b.type = 'button';
-  b.dataset.before = start;
-  b.onclick = () => {
-    if (!send({ t: 'older', cid: state.cid, before: start })) return toast("Can't reach the server", { kind: 'error' });
-    b.disabled = true;
-    b.textContent = 'Loading…';
-  };
+  b.disabled = backlog.asked;
+  b.onclick = showEarlier;
   $('messages').prepend(b);
+  requestAnimationFrame(() => { if (b.isConnected) olderSeen.observe(b); }); // after the open's scroll to the bottom
+}
+function showEarlier() {
+  if (backlog.events.length) return drawEarlier();
+  if (backlog.asked || !(backlog.start > 0)) return;
+  if (!send({ t: 'older', cid: state.cid, before: backlog.start })) return toast("Can't reach the server", { kind: 'error' });
+  backlog.asked = true;
+  const b = $('messages').querySelector(':scope > .history-more');
+  if (b) { b.disabled = true; b.textContent = 'Loading…'; }
 }
 function renderOlder(msg) {
-  const b = $('messages').querySelector(':scope > .history-more');
-  if (!b || Number(b.dataset.before) !== msg.before) return; // the chat was redrawn (rewind, merge) since it was asked for
+  if (!backlog.asked || msg.before !== backlog.start) return; // the chat was redrawn (rewind, merge) since it was asked for
+  Object.assign(backlog, { events: msg.events, start: msg.start, asked: false });
+  drawEarlier();
+}
+// Draws the newest screenful of the backlog apart and puts it above what's shown. Every call in it has finished: a cut
+// never leaves one open (backlogCut), and the server's windows end before a prompt.
+function drawEarlier() {
+  const cut = backlogCut(backlog.events, renderBudget()), events = backlog.events.slice(cut);
+  backlog.events = backlog.events.slice(0, cut);
   const box = el('div'), keep = { lastUser: state.lastUser, live: state.live, liveText: state.liveText }, wasStick = stick;
   state.live = null;
   stick = false;
   msgBox = box;
-  try { for (const ev of msg.events) renderEvent(ev, true); } finally {
+  try { for (const ev of events) renderEvent(ev, true); } finally {
     msgBox = null;
     Object.assign(state, keep);
     stick = wasStick;
   }
+  box.querySelectorAll('details.tool.running').forEach((c) => c.classList.replace('running', 'ok'));
+  box.querySelectorAll('.tool-stack.running').forEach(refreshStack);
   const fromBottom = scroller.scrollHeight - scroller.scrollTop;
-  b.remove();
+  $('messages').querySelector(':scope > .history-more')?.remove();
   $('messages').prepend(...box.childNodes);
-  olderButton(msg.start);
+  olderButton();
   scroller.scrollTop = scroller.scrollHeight - fromBottom;
 }
 

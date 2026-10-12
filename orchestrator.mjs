@@ -4875,9 +4875,11 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
   const pushState = () => broadcast({ t: 'ostate', state: stateView() });
 
-  function convoSnapshot(convo) {
+  // has(projectId) true: the browser already holds this project's tasks (live 'otask' frames keep them), so they're left out.
+  function convoSnapshot(convo, has = () => false) {
     const p = q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd });
     if (!p) return { project: null, tasks: [], state: stateView() };
+    if (has(p.id)) return { project: projectView(p), state: stateView() };
     return { project: projectView(p), tasks: withDeps(() => qa('SELECT * FROM tasks WHERE project_id=:p ORDER BY id DESC LIMIT 400', { p: p.id }).map(taskView)), state: stateView() };
   }
 

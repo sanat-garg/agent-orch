@@ -16,7 +16,7 @@ import { AGENTS, isAgent, agentEfforts, clampEffort, runAgentCli, clearLoginCach
 import { createModelStore } from './models.mjs';
 import { runHelper, claudeHelperSpawn } from './helpers.mjs';
 import { createConnections, SPECS, codexAccount, onPath, tmuxRunnerFor, loginSocketFor } from './connections.mjs';
-import { logWindow, toolEvents } from './chat-log.mjs';
+import { logWindow, logSince, toolEvents } from './chat-log.mjs';
 import { mediaCollector, MEDIA_ID_RE, MEDIA_TYPES, toolResultImages, readStars, setStar } from './media.mjs';
 import { createUsageLog, createLimitStore, RANGES as USAGE_RANGES } from './usage.mjs';
 import { handleFiles } from './files.mjs';
@@ -269,6 +269,13 @@ function capRefusal(c) {
 const stats = createStats({ dataDir: DATA, convos: () => convos, log: (m) => console.log(`[stats] ${m}`) });
 const logPath = (id) => path.join(LOGS, `${id}.jsonl`);
 function appendLog(id, ev) { fs.appendFileSync(logPath(id), JSON.stringify(ev) + '\n'); }
+// How much of a chat's log a browser has drawn: `<boot>.<generation>.<bytes>` (every emitted event and history frame
+// carries one). A browser reopening a chat it still has drawn sends it back, and gets only the events added since (sendHistory).
+// The generation goes up whenever the log is rewritten rather than appended to (writeLog, removeConvo), and a restart
+// changes the boot, so a stale mark always gets a fresh window.
+const LOG_BOOT = crypto.randomBytes(4).toString('hex'), logGen = new Map();
+const logMark = (id, bytes) => `${LOG_BOOT}.${logGen.get(id) || 0}.${bytes}`;
+const logRewritten = (id) => logGen.set(id, (logGen.get(id) || 0) + 1);
 function readLog(id) {
   try {
     return parseJsonl(fs.readFileSync(logPath(id), 'utf8'));
@@ -889,7 +896,9 @@ function emit(cid, ev) {
   if (!findConvo(cid)) return; // deleted while its session was winding down
   const stamped = { ...ev, ts: Date.now() };
   appendLog(cid, stamped);
-  broadcast(cid, stamped);
+  let bytes = null;
+  try { bytes = fs.statSync(logPath(cid)).size; } catch {}
+  broadcast(cid, bytes == null ? stamped : { ...stamped, mark: logMark(cid, bytes) });
 }
 
 // ---------- Orchestrator Mode (agent-orch) ----------
@@ -1472,13 +1481,17 @@ function chatRecap(cid, budget = 6000) {
   }
   return lines.join('\n') || '(no earlier messages)';
 }
-function sendHistory(ws, convo) {
-  const rt = runtimes.get(convo.id), { events, start } = logWindow(logPath(convo.id));
+// since: the mark of what this browser still has drawn (logMark); when only appends followed, just those are sent.
+// ws.orchSent: projects whose tasks this connection already got; every change since reached it as an 'otask' frame.
+function sendHistory(ws, convo, since) {
+  const rt = runtimes.get(convo.id), file = logPath(convo.id), [boot, gen, bytes] = String(since || '').split('.');
+  const tail = boot === LOG_BOOT && Number(gen) === (logGen.get(convo.id) || 0) && bytes ? logSince(file, Number(bytes)) : null;
+  const { events, start, end } = tail || logWindow(file);
   send(ws, {
-    t: 'history', cid: convo.id, events, start, busy: chatBusy(convo),
+    t: 'history', cid: convo.id, events, ...(tail ? { since } : { start }), mark: logMark(convo.id, end), busy: chatBusy(convo),
     pending: rt ? [...rt.pending.values()].map((x) => x.req) : [],
     mode: convo.mode, agent: chatAgent(convo), model: convo.model, cwd: convo.cwd,
-    orch: orch.convoSnapshot(convo),
+    orch: orch.convoSnapshot(convo, (pid) => { const had = ws.orchSent.has(pid); ws.orchSent.add(pid); return had; }),
   });
 }
 const chatBusy = (c) => !!runtimes.get(c.id)?.busy || planning.has(c.id) || agentTurns.has(c.id);
@@ -1495,6 +1508,7 @@ function removeConvo(c) {
   if (!heir) previews.remove(c.cwd).catch((e) => console.error('[previews] remove failed', c.cwd, e));
   convos = convos.filter((x) => x.id !== c.id);
   fs.rmSync(logPath(c.id), { force: true });
+  logRewritten(c.id);
 }
 // Merges chat `from` into `into` (its project's main chat; the caller saves and broadcasts). Its messages go into `into`'s
 // log as one block where they began, between two notices, so both conversations stay readable; `into`'s agent session
@@ -1514,6 +1528,7 @@ function mergeChat(from, into) {
 function writeLog(id, events) {
   fs.writeFileSync(logPath(id) + '.tmp', events.map((e) => JSON.stringify(e) + '\n').join(''));
   fs.renameSync(logPath(id) + '.tmp', logPath(id));
+  logRewritten(id);
 }
 // Rewind and delete (owner, 2026-10-11), both only while the chat is idle; a prompt is its 'user' event's ts.
 // Rewind: that prompt and everything after it leave the log, and with `code` the commits its turns made (the 'commit'
@@ -2716,7 +2731,9 @@ async function handleRequest(req, res) {
 server.requestTimeout = 0;
 
 // ---------- WebSocket ----------
-const wss = new WebSocketServer({ noServer: true });
+// Big frames go compressed (owner, 2026-10-12: switching projects on the phone was slow): a chat's history is 100–700 KB
+// of JSON, ~5× smaller deflated for ~5 ms of CPU. Ticks, deltas and other small frames skip it.
+const wss = new WebSocketServer({ noServer: true, perMessageDeflate: { threshold: 16 * 1024, zlibDeflateOptions: { level: 1 } } });
 server.on('upgrade', (req, socket, head) => {
   try { handleUpgrade(req, socket, head); } catch (e) {
     console.error('upgrade error', req.url, e);
@@ -2743,6 +2760,7 @@ function handleUpgrade(req, socket, head) {
 wss.on('connection', (ws, req) => {
   ws.user = sessionUser(req); // forClient filters every message by it
   allClients.add(ws);
+  ws.orchSent = new Set(); // sendHistory
   // Without a listener a bad frame crashes the server: Caddy 2.6 sends an unmasked close frame on every reload.
   ws.on('error', (e) => console.error('[ws] client socket error:', e.message));
   let current = null;
@@ -2791,7 +2809,7 @@ wss.on('connection', (ws, req) => {
       if (!convo) return;
       if (!subscribers.has(convo.id)) subscribers.set(convo.id, new Set());
       subscribers.get(convo.id).add(ws);
-      sendHistory(ws, convo);
+      sendHistory(ws, convo, typeof msg.since === 'string' ? msg.since : null);
       return;
     }
     if (msg.t === 'older') { // "Show earlier messages": the window ending at byte msg.before (chat-log.mjs logWindow)

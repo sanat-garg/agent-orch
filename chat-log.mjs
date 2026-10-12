@@ -7,16 +7,16 @@ import fs from 'node:fs';
 // HISTORY_WINDOW events back from byte `before` (default: the end), widened to begin at a prompt when one is within as
 // many again, with long tool input and output clipped (clipEvent). The log is read backwards in chunks, so a long chat
 // costs no more than a short one. → {events, start}: start = the first sent line's byte offset, the `before` of the next
-// older window ({t:'older'}); 0 = nothing older. GET …/tools/:id serves a clipped call whole.
+// older window ({t:'older'}); 0 = nothing older; end = where it stops. GET …/tools/:id serves a clipped call whole.
 export const HISTORY_WINDOW = 150, CLIP_CHARS = 4000, LOG_CHUNK = 256 * 1024;
 export function logWindow(file, before = Infinity) {
   let fd;
-  try { fd = fs.openSync(file, 'r'); } catch { return { events: [], start: 0 }; }
+  try { fd = fs.openSync(file, 'r'); } catch { return { events: [], start: 0, end: 0 }; }
   const events = [];
-  let start = 0;
+  let start = 0, end = 0;
   try {
     let pos = Math.min(Math.max(0, Math.floor(before) || 0), fs.fstatSync(fd).size), carry = Buffer.alloc(0);
-    start = pos;
+    start = end = pos;
     scan: while (pos > 0) {
       const n = Math.min(LOG_CHUNK, pos);
       pos -= n;
@@ -38,7 +38,25 @@ export function logWindow(file, before = Infinity) {
       }
     }
   } finally { fs.closeSync(fd); }
-  return { events: events.reverse(), start };
+  return { events: events.reverse(), start, end };
+}
+// The events appended after byte `from` (a chat the browser still has drawn up to there; server.mjs logMark), clipped like
+// a window. → {events, end}, or null when `from` is past the end or more than a window was added (send a fresh window).
+export function logSince(file, from) {
+  let fd;
+  try { fd = fs.openSync(file, 'r'); } catch { return null; }
+  try {
+    const size = fs.fstatSync(fd).size;
+    if (!(from >= 0 && from <= size) || size - from > 4 * LOG_CHUNK) return null;
+    const data = Buffer.alloc(size - from);
+    fs.readSync(fd, data, 0, data.length, from);
+    const events = [];
+    for (const line of data.toString('utf8').split('\n')) {
+      if (!line) continue;
+      try { events.push(clipEvent(JSON.parse(line))); } catch {}
+    }
+    return events.length > 2 * HISTORY_WINDOW ? null : { events, end: size };
+  } finally { fs.closeSync(fd); }
 }
 const clipText = (s) => (typeof s === 'string' && s.length > CLIP_CHARS ? `${s.slice(0, CLIP_CHARS)}\n… ${(s.length - CLIP_CHARS).toLocaleString('en-US')} more characters` : s);
 export function clipEvent(ev) {

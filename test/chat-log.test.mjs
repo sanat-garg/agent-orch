@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { logWindow, clipEvent, toolEvents, HISTORY_WINDOW, CLIP_CHARS, LOG_CHUNK } from '../chat-log.mjs';
+import { logWindow, logSince, clipEvent, toolEvents, HISTORY_WINDOW, CLIP_CHARS, LOG_CHUNK } from '../chat-log.mjs';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-chatlog-'));
 test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -30,8 +30,9 @@ function pageAll(f) {
 
 test('a short chat comes whole; a missing log is empty', () => {
   const evs = [{ t: 'user', text: 'hi', ts: 1 }, { t: 'text', text: 'hello ✓ ünïcode' }];
-  assert.deepEqual(logWindow(write('short.jsonl', evs)), { events: evs, start: 0 });
-  assert.deepEqual(logWindow(path.join(dir, 'nope.jsonl')), { events: [], start: 0 });
+  const f = write('short.jsonl', evs);
+  assert.deepEqual(logWindow(f), { events: evs, start: 0, end: fs.statSync(f).size });
+  assert.deepEqual(logWindow(path.join(dir, 'nope.jsonl')), { events: [], start: 0, end: 0 });
 });
 
 test('a long chat opens at a prompt with about HISTORY_WINDOW events, and paging back rebuilds it exactly', () => {
@@ -54,7 +55,7 @@ test('a long chat opens at a prompt with about HISTORY_WINDOW events, and paging
   const { all, starts } = pageAll(f);
   assert.deepEqual(all, evs.map(clipEvent));
   assert.ok(starts.length > 3);
-  assert.deepEqual(logWindow(f, 0), { events: [], start: 0 }, 'nothing before byte 0');
+  assert.deepEqual(logWindow(f, 0), { events: [], start: 0, end: 0 }, 'nothing before byte 0');
 });
 
 test('a turn longer than twice the window is cut there rather than sent whole', () => {
@@ -83,4 +84,23 @@ test('long tool output and input are clipped and marked; toolEvents has them who
   assert.deepEqual(toolEvents(f, 'toolu_big'), { use, result: res });
   assert.deepEqual(toolEvents(f, 'toolu_none'), { use: null, result: null });
   assert.deepEqual(toolEvents(path.join(dir, 'nope.jsonl'), 'toolu_big'), { use: null, result: null });
+});
+
+test('logSince: just the events appended after a byte, clipped; null when the mark is past the end or too much was added', () => {
+  const evs = Array.from({ length: 10 }, (_, i) => ({ t: 'text', text: `m${i}` }));
+  const f = write('since.jsonl', evs);
+  const mark = logWindow(f).end;
+  assert.equal(mark, fs.statSync(f).size);
+  assert.deepEqual(logSince(f, mark), { events: [], end: mark });
+  const big = 'x'.repeat(CLIP_CHARS + 50);
+  fs.appendFileSync(f, [{ t: 'user', text: 'new' }, { t: 'tool_result', id: 'a', text: big }].map((e) => JSON.stringify(e) + '\n').join(''));
+  const s = logSince(f, mark);
+  assert.equal(s.end, fs.statSync(f).size);
+  assert.deepEqual(s.events.map((e) => e.t), ['user', 'tool_result']);
+  assert.equal(s.events[1].cut, true);
+  assert.equal(logSince(f, s.end + 1), null, 'past the end: the log was rewritten shorter');
+  assert.equal(logSince(path.join(dir, 'missing.jsonl'), 0), null);
+  const many = write('since-many.jsonl', []);
+  fs.appendFileSync(many, Array.from({ length: 2 * HISTORY_WINDOW + 1 }, (_, i) => JSON.stringify({ t: 'text', text: `${i}` }) + '\n').join(''));
+  assert.equal(logSince(many, 0), null, 'more than a window was added');
 });

@@ -4,6 +4,7 @@
 //   - Caddy: agent-orch owns ONE file, /etc/caddy/agent-orch-previews.caddy, regenerated from previews.json, and adds
 //     `import <that file>` to the owner's Caddyfile once (backed up first). The owner's own site blocks are never edited.
 //     Every change is `caddy validate`d first; a failure restores the previous files and reports the error.
+//     A removed domain joins previews.json `oldDomains`: <slug>.<old> keeps a cert and 308s to the preview's current address.
 //   - Running (detectKind): package.json with a start script → `npm start` with PORT (built first if it has a build
 //     script); a build script only → static files from dist/, build/ or out/; index.html (or public/index.html) → static,
 //     served in-process; index.php → `php -S`. Ports come from PORTS and stay with the project. Processes are detached,
@@ -55,11 +56,20 @@ export function caddySubdomains(text, domain) {
   return out;
 }
 
-// The include file Caddy imports: one site block per preview ({slug, domain, port}).
-export function renderCaddy(entries) {
+// The include file Caddy imports: one site block per preview ({slug, domain, port}), plus a redirect from
+// <slug>.<old domain> to the preview's current address for every domain previews used to live on, so old links and
+// bookmarks get a real certificate instead of a TLS error. `taken(slug, old)` skips hosts the owner's Caddyfile serves.
+export function renderCaddy(entries, { oldDomains = [], taken = () => false } = {}) {
   const head = '# Managed by agent-orch (previews.mjs): live previews. Regenerated on every change; edits here are overwritten.\n';
-  return head + entries.map((e) => [hostName(e.slug, e.domain), e.port]).sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([host, port]) => `\n${host} {\n\tencode gzip\n\treverse_proxy 127.0.0.1:${port}\n}\n`).join('');
+  const live = new Set(entries.map((e) => hostName(e.slug, e.domain)));
+  const blocks = entries.map((e) => [hostName(e.slug, e.domain), `\tencode gzip\n\treverse_proxy 127.0.0.1:${e.port}`]);
+  for (const old of oldDomains) for (const e of entries) {
+    const host = hostName(e.slug, old);
+    if (e.slug === APEX || live.has(host) || taken(e.slug, old)) continue;
+    live.add(host);
+    blocks.push([host, `\tredir https://${hostName(e.slug, e.domain)}{uri} 308`]);
+  }
+  return head + blocks.sort((a, b) => a[0].localeCompare(b[0])).map(([host, body]) => `\n${host} {\n${body}\n}\n`).join('');
 }
 // A bare hostname such as example.com (lowercase, at least two labels).
 export function normalizeDomain(d) {
@@ -127,14 +137,15 @@ export function createPreviews({
   const file = path.join(dataDir, 'previews.json');
   const logDir = path.join(dataDir, 'previews');
   fs.mkdirSync(logDir, { recursive: true });
-  let store = {}, domainList = [domain];
+  let store = {}, domainList = [domain], oldDomains = []; // oldDomains: removed preview domains whose links still redirect
   try {
     const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
     store = saved.entries || {};
     if (saved.domains?.length) domainList = saved.domains;
+    oldDomains = saved.oldDomains || [];
   } catch {}
   for (const e of Object.values(store)) e.domain ||= domainList[0];
-  const save = () => { fs.writeFileSync(file + '.tmp', JSON.stringify({ domains: domainList, entries: store }, null, 2)); fs.renameSync(file + '.tmp', file); };
+  const save = () => { fs.writeFileSync(file + '.tmp', JSON.stringify({ domains: domainList, oldDomains, entries: store }, null, 2)); fs.renameSync(file + '.tmp', file); };
   const live = new Map(); // dir -> { status, kind, error, updatedAt, child, server, gen, timer, crashes, head, busy }
   const st = (dir) => { if (!live.has(dir)) live.set(dir, { status: 'stopped', gen: 0, crashes: 0 }); return live.get(dir); };
   const url = (slug, d) => `https://${hostName(slug, d)}`;
@@ -176,8 +187,8 @@ export function createPreviews({
   }
   function applyCaddy() {
     const next = caddyChain.then(async () => {
-      const content = renderCaddy(Object.values(store));
       const prevInclude = readOr(includeFile), prevMain = readOr(caddyfile, '');
+      const content = renderCaddy(Object.values(store), { oldDomains, taken: (slug, d) => caddySubdomains(prevMain, d).has(slug) });
       const importLine = `import ${includeFile}`;
       const needsImport = !prevMain.split('\n').some((l) => l.trim() === importLine);
       if (prevInclude === content && !needsImport) return { ok: true, changed: false };
@@ -349,7 +360,7 @@ export function createPreviews({
     async addDomain(raw) {
       const d = normalizeDomain(raw);
       if (!d) return { error: 'Enter a domain such as example.com.' };
-      if (!domainList.includes(d)) { domainList.push(d); save(); }
+      if (!domainList.includes(d)) { domainList.push(d); oldDomains = oldDomains.filter((x) => x !== d); save(); }
       let ips = [];
       try { ips = await dns.resolve4(`agent-orch-check.${d}`); } catch {}
       onChange(null);
@@ -362,7 +373,9 @@ export function createPreviews({
       if (n) return { error: `${n} preview${n > 1 ? 's use' : ' uses'} ${d}: move or remove ${n > 1 ? 'them' : 'it'} first.` };
       if (domainList.length === 1) return { error: 'Keep at least one domain.' };
       domainList = domainList.filter((x) => x !== d);
+      if (!oldDomains.includes(d)) oldDomains.push(d);
       save();
+      applyCaddy().catch((err) => log(err.message));
       onChange(null);
       return { ok: true };
     },

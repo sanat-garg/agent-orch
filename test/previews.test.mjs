@@ -122,7 +122,21 @@ test('caddy: include generated, import added once with a backup, validate failur
     assert.doesNotMatch(fs.readFileSync(includeFile, 'utf8'), /beta/);
     assert.equal(pv.removeDomain('example.dev').ok, true);
     assert.deepEqual(pv.domains().map((d) => d.domain), ['greygoose.baby']);
+    // Links on the removed domain now redirect to the preview's current address (a real cert, not a TLS error).
+    await pv.applyCaddy();
+    assert.match(fs.readFileSync(includeFile, 'utf8'), /\nalpha\.example\.dev \{\n\tredir https:\/\/alpha\.greygoose\.baby\{uri\} 308\n\}/);
+    assert.match(fs.readFileSync(path.join(tmp, 'data', 'previews.json'), 'utf8'), /"oldDomains": \[\s*"example\.dev"/);
   } finally { await cleanup(); }
+});
+
+test('renderCaddy redirects old-domain links, skipping apex, live hosts and the owner\'s sites', () => {
+  const out = renderCaddy([{ slug: 'shop', domain: 'new.dev', port: 1 }, { slug: 'blog', domain: 'new.dev', port: 2 },
+    { slug: '@', domain: 'new.dev', port: 3 }, { slug: 'live', domain: 'old.dev', port: 4 }],
+  { oldDomains: ['old.dev'], taken: (slug, d) => d === 'old.dev' && slug === 'blog' });
+  assert.match(out, /\nshop\.old\.dev \{\n\tredir https:\/\/shop\.new\.dev\{uri\} 308\n\}/);
+  assert.doesNotMatch(out, /blog\.old\.dev/);
+  assert.equal(out.split('\nold.dev {').length, 1);
+  assert.equal(out.split('\nlive.old.dev {').length, 2); // its own block, not a redirect too
 });
 
 test('renderCaddy sorts hosts and detectKind reads node/static/php/nothing', () => {

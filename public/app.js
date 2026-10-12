@@ -14,7 +14,21 @@ const store = {
 };
 
 marked.setOptions({ gfm: true, breaks: false });
-const md = (text) => DOMPurify.sanitize(marked.parse(text || ''), { ADD_ATTR: ['target'] });
+// Remembers recent results: parsing and sanitising was a third of the time to open a chat, and switching back re-renders it.
+// A reply still streaming passes cache=false: each of its partial texts is seen once.
+const MD_CACHE = new Map();
+const mdRaw = (text) => DOMPurify.sanitize(marked.parse(text), { ADD_ATTR: ['target'] });
+function md(text, cache = true) {
+  text = text || '';
+  if (!cache) return mdRaw(text);
+  let html = MD_CACHE.get(text);
+  if (html == null) {
+    html = mdRaw(text);
+    if (MD_CACHE.size >= 3000) MD_CACHE.delete(MD_CACHE.keys().next().value);
+  } else MD_CACHE.delete(text);
+  MD_CACHE.set(text, html); // most recent last, so the oldest go first
+  return html;
+}
 
 // ---------- click-to-copy for shell commands ----------
 // Markdown marks shell code blocks and command-like inline code with .copy-cmd; tool lines carry
@@ -1034,9 +1048,12 @@ $('jump').addEventListener('click', () => { stick = true; scrollDown(true); });
 function scrollDown(force) {
   if (stick || force) requestAnimationFrame(() => { scroller.scrollTop = scroller.scrollHeight; });
 }
+// Where rendered events go: #messages, or the detached box "Show earlier messages" fills before prepending it (renderOlder).
+let msgBox = null;
+const msgs = () => msgBox || $('messages');
 function add(node) {
-  $('messages').querySelector('.empty')?.remove();
-  $('messages').append(node);
+  msgs().querySelector('.empty')?.remove();
+  msgs().append(node);
   scrollDown();
   return node;
 }
@@ -1044,7 +1061,7 @@ function add(node) {
 // drawer's toolGroupSummary); tap it for the usual cards. A lone call stays a card; the second one wraps both.
 const PHONE = matchMedia('(max-width: 767px)');
 function addTool(card) {
-  const last = $('messages').lastElementChild;
+  const last = msgs().lastElementChild;
   if (!PHONE.matches || card.classList.contains('sub')) return add(card);
   if (last?.classList.contains('tool-stack')) {
     last.querySelector('.tk-body').append(card);
@@ -1156,31 +1173,55 @@ function toolCard(ev) {
   const chev = el('span', 'chev');
   chev.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
   sum.append(chev);
-  const body = el('div', 'body');
-  body.append(toolInputView(ev.name, ev.input));
-  card.append(sum, body);
-  // Diffs and task lists are what people want to see without clicking.
-  if (['Edit', 'MultiEdit', 'TodoWrite'].includes(ev.name)) card.open = true;
-  if (ev.name === 'Write' && String(ev.input?.content || '').split('\n').length <= 30) card.open = true;
+  card.append(sum, el('div', 'body'));
   card.dataset.name = ev.name;
   card._input = ev.input;
   card._id = ev.id;
+  card._cut = !!ev.cut; // the history clipped its input or output (server.mjs clipEvent): opening it fetches it whole
+  // Diffs and task lists are what people want to see without clicking. Other cards build their contents when first
+  // opened: a long chat holds thousands, and most are never opened.
+  if (!ev.cut && (['Edit', 'MultiEdit', 'TodoWrite'].includes(ev.name) || (ev.name === 'Write' && String(ev.input?.content || '').split('\n').length <= 30))) {
+    card.open = true;
+    fillTool(card);
+  }
+  card.addEventListener('toggle', () => { if (card.open) fillTool(card); });
   return card;
+}
+async function fillTool(card) {
+  if (card._filled) return;
+  card._filled = true;
+  const body = card.querySelector(':scope > .body');
+  if (card._cut && state.cid) {
+    card._cut = false;
+    body.append(el('div', 'label', 'Loading…'));
+    try {
+      const full = await api(`/api/convos/${state.cid}/tools/${encodeURIComponent(card._id)}`);
+      if (full.use?.input) card._input = full.use.input;
+      if (full.result && card._result) card._result = full.result;
+    } catch { /* the clipped copy is still worth showing */ }
+    body.textContent = '';
+  }
+  body.append(toolInputView(card.dataset.name, card._input));
+  if (card._result) toolResultView(card, card._result);
+}
+function toolResultView(card, ev) {
+  const name = card.dataset.name;
+  const text = (ev.text || '').trim();
+  // Edit/Write/Todo results are just confirmations; the input already shows the change.
+  const quiet = ['Edit', 'MultiEdit', 'Write', 'TodoWrite'].includes(name) && !ev.isError;
+  if (!text || quiet) return;
+  const body = card.querySelector(':scope > .body');
+  if (name !== 'Bash' && body.children.length) body.append(el('div', 'label', 'Result'));
+  body.append(el('pre', 'out' + (ev.isError ? ' err' : ''), text));
 }
 function finishTool(ev) {
   const card = state.tools.get(ev.id);
   if (!card) return;
   card.classList.remove('running');
   card.classList.add(ev.isError ? 'err' : 'ok');
-  const name = card.dataset.name;
-  const text = (ev.text || '').trim();
-  // Edit/Write/Todo results are just confirmations; the input already shows the change.
-  const quiet = ['Edit', 'MultiEdit', 'Write', 'TodoWrite'].includes(name) && !ev.isError;
-  if (text && !quiet) {
-    const body = card.querySelector('.body');
-    if (name !== 'Bash' && body.children.length) body.append(el('div', 'label', 'Result'));
-    body.append(el('pre', 'out' + (ev.isError ? ' err' : ''), text));
-  }
+  card._result = ev;
+  if (ev.cut && !card._filled) card._cut = true;
+  if (card._filled) toolResultView(card, ev);
   if (ev.isError) card.open = true;
   const stack = card.closest('.tool-stack');
   if (stack) refreshStack(stack);
@@ -1378,7 +1419,7 @@ function onDelta(text) {
   if (!liveRender) {
     liveRender = requestAnimationFrame(() => {
       liveRender = 0;
-      if (state.live) { state.live.innerHTML = md(state.liveText); scrollDown(); }
+      if (state.live) { state.live.innerHTML = md(state.liveText, false); scrollDown(); }
     });
   }
 }
@@ -1418,7 +1459,7 @@ function renderEvent(ev, replay) {
     case 'image': {
       // Consecutive screenshots share one grid.
       endLive();
-      const last = $('messages').lastElementChild;
+      const last = msgs().lastElementChild;
       const grid = last?.classList.contains('shots') ? last : add(shotGrid());
       grid.append(shotNode(ev));
       scrollDown();
@@ -1429,8 +1470,8 @@ function renderEvent(ev, replay) {
       break;
     case 'result': {
       endLive();
-      state.tools.forEach((c) => c.classList.contains('running') && c.classList.replace('running', 'ok'));
-      $('messages').querySelectorAll('.tool-stack.running').forEach(refreshStack);
+      msgs().querySelectorAll('details.tool.running').forEach((c) => c.classList.replace('running', 'ok'));
+      msgs().querySelectorAll('.tool-stack.running').forEach(refreshStack);
       const bits = [];
       if (ev.ms) bits.push(`${(ev.ms / 1000).toFixed(ev.ms < 10000 ? 1 : 0)}s`);
       if (ev.turns > 1) bits.push(`${ev.turns} steps`);
@@ -3644,6 +3685,7 @@ function onServer(msg) {
       resetMessages();
       if (!msg.events.length) { $('messages').append($('emptyTpl').content.cloneNode(true)); updateFolderChip(); }
       for (const ev of msg.events) renderEvent(ev, true);
+      olderButton(msg.start);
       // Tool calls still running from before a reload.
       for (const req of msg.pending) showPerm(req);
       setBusy(msg.busy);
@@ -3658,6 +3700,9 @@ function onServer(msg) {
       splashReady('history');
       break;
     }
+    case 'older':
+      renderOlder(msg);
+      break;
     case 'busy':
       setBusy(msg.busy);
       break;
@@ -3679,6 +3724,40 @@ function onServer(msg) {
     default:
       renderEvent(msg, false);
   }
+}
+
+// A chat opens with only its recent part (server.mjs logWindow); "Show earlier messages" above it fetches the window
+// before its first log line (`start`), renders it apart and prepends it, keeping what's on screen where it was.
+function olderButton(start) {
+  $('messages').querySelector(':scope > .history-more')?.remove();
+  if (!(start > 0)) return;
+  const b = el('button', 'history-more', 'Show earlier messages');
+  b.type = 'button';
+  b.dataset.before = start;
+  b.onclick = () => {
+    if (!send({ t: 'older', cid: state.cid, before: start })) return toast("Can't reach the server", { kind: 'error' });
+    b.disabled = true;
+    b.textContent = 'Loading…';
+  };
+  $('messages').prepend(b);
+}
+function renderOlder(msg) {
+  const b = $('messages').querySelector(':scope > .history-more');
+  if (!b || Number(b.dataset.before) !== msg.before) return; // the chat was redrawn (rewind, merge) since it was asked for
+  const box = el('div'), keep = { lastUser: state.lastUser, live: state.live, liveText: state.liveText }, wasStick = stick;
+  state.live = null;
+  stick = false;
+  msgBox = box;
+  try { for (const ev of msg.events) renderEvent(ev, true); } finally {
+    msgBox = null;
+    Object.assign(state, keep);
+    stick = wasStick;
+  }
+  const fromBottom = scroller.scrollHeight - scroller.scrollTop;
+  b.remove();
+  $('messages').prepend(...box.childNodes);
+  olderButton(msg.start);
+  scroller.scrollTop = scroller.scrollHeight - fromBottom;
 }
 
 // ---------- custom sounds (sounds.mjs): the add form under each machine's sound picker ----------

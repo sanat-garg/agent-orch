@@ -103,4 +103,25 @@ describe('queue reorder', { concurrency: true, timeout: 120000 }, () => {
     assert.deepEqual(r.statuses, ['done', 'done', 'done']);
     assert.deepEqual(r.order, ['bg', 'urgent', 'normal']);
   });
+
+  // convoSnapshot loads the dependency graph once (withDeps) instead of querying per task: same answers as one task alone.
+  test("a chat's snapshot gives each task the same deps, prereqs and dependents as its own view", async () => {
+    const r = await scenario(`
+      const p = project();
+      const a = task(p, 'a'), b = task(p, 'b', { dependsOn: a }), c = task(p, 'c'), d = task(p, 'd', { dependsOn: c }), e = task(p, 'e');
+      const f = task(p, 'f'), g = task(p, 'g', { dependsOn: f });
+      const link = (t, up) => db.prepare('INSERT INTO task_deps(task_id, depends_on) VALUES(?,?)').run(t, up);
+      link(d, a); link(d, b); link(e, d); link(e, a); link(f, g); // d and e have several; f ⇄ g is a cycle
+      db.prepare("UPDATE tasks SET status='done' WHERE id=?").run(a);
+      db.prepare('UPDATE tasks SET position=NULL WHERE id=?').run(e);
+      db.prepare('UPDATE tasks SET position=99 WHERE id=?').run(b); // queue order isn't id order
+      const pick = (t) => ({ id: t.id, deps: t.deps, prereqs: t.prereqs, dependents: t.dependents });
+      return { snap: o.convoSnapshot({ cwd: path.join(root, 'p1') }).tasks.map(pick).sort((x, y) => x.id - y.id),
+        one: [a, b, c, d, e, f, g].map((id) => pick(o.taskDetail(id).task)), a, b, c, d, e };`);
+    assert.deepEqual(r.snap, r.one);
+    const at = (id) => r.one.find((t) => t.id === id);
+    assert.deepEqual(at(r.d).deps, [r.c, r.a, r.b], 'the legacy depends_on first, then by id');
+    assert.deepEqual(at(r.e).prereqs, [r.d, r.c, r.b], 'unfinished only, up the graph');
+    assert.deepEqual(at(r.a).dependents, [r.d, r.b, r.e], 'queued ones in queue order, an unplaced one last');
+  });
 });

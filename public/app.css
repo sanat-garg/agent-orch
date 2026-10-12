@@ -406,6 +406,10 @@ code, pre, kbd { font-family: var(--mono); }
 .meta { font-size: 12.5px; color: var(--faint); margin: -6px 0 22px; }
 .notice { font-size: 13.5px; color: var(--muted); margin: 0 0 16px; }
 .notice.error { color: var(--danger); background: var(--danger-soft); padding: 8px 12px; border-radius: 10px; }
+/* Above a chat's first loaded message when older ones exist (app.js olderButton). 44px tall for touch. */
+.history-more { display: block; margin: 8px auto 18px; min-height: 44px; padding: 0 18px; border-radius: 22px; border: 1px solid var(--border); background: var(--panel); color: var(--muted); font: inherit; font-size: 14px; cursor: pointer; }
+.history-more:hover:not(:disabled) { color: var(--text); background: var(--raised); }
+.history-more:disabled { cursor: default; opacity: .7; }
 
 .working { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 14px; padding-bottom: 16px; }
 .working .esc-hint { font-size: 12px; color: var(--faint); margin-left: auto; }

@@ -16,6 +16,7 @@ import { AGENTS, isAgent, agentEfforts, clampEffort, runAgentCli, clearLoginCach
 import { createModelStore } from './models.mjs';
 import { runHelper, claudeHelperSpawn } from './helpers.mjs';
 import { createConnections, SPECS, codexAccount, onPath, tmuxRunnerFor, loginSocketFor } from './connections.mjs';
+import { logWindow, toolEvents } from './chat-log.mjs';
 import { mediaCollector, MEDIA_ID_RE, MEDIA_TYPES, toolResultImages, readStars, setStar } from './media.mjs';
 import { createUsageLog, createLimitStore, RANGES as USAGE_RANGES } from './usage.mjs';
 import { handleFiles } from './files.mjs';
@@ -1472,9 +1473,9 @@ function chatRecap(cid, budget = 6000) {
   return lines.join('\n') || '(no earlier messages)';
 }
 function sendHistory(ws, convo) {
-  const rt = runtimes.get(convo.id);
+  const rt = runtimes.get(convo.id), { events, start } = logWindow(logPath(convo.id));
   send(ws, {
-    t: 'history', cid: convo.id, events: readLog(convo.id), busy: chatBusy(convo),
+    t: 'history', cid: convo.id, events, start, busy: chatBusy(convo),
     pending: rt ? [...rt.pending.values()].map((x) => x.req) : [],
     mode: convo.mode, agent: chatAgent(convo), model: convo.model, cwd: convo.cwd,
     orch: orch.convoSnapshot(convo),
@@ -2051,6 +2052,12 @@ async function handleRequest(req, res) {
     broadcastConvos();
     for (const ws of subscribers.get(into.id) || []) sendHistory(ws, into);
     return json(res, 200, { ok: true, into: into.id, merged: from.length });
+  }
+  // GET …/tools/:toolId: one tool call whole ({use, result}), for a card whose input or output the history clipped.
+  const tc = p.match(/^\/api\/convos\/([\w-]+)\/tools\/([\w-]{1,200})$/);
+  if (tc && req.method === 'GET') {
+    if (!findConvo(tc[1])) return json(res, 404, { error: 'No such chat' });
+    return json(res, 200, toolEvents(logPath(tc[1]), tc[2]));
   }
   // POST …/messages/:ts/rewind {code}: back to just before that prompt (rewindChat); DELETE …/messages/:ts drops it and its reply.
   const pm = p.match(/^\/api\/convos\/([\w-]+)\/messages\/(\d{1,15})(\/rewind)?$/);
@@ -2785,6 +2792,11 @@ wss.on('connection', (ws, req) => {
       if (!subscribers.has(convo.id)) subscribers.set(convo.id, new Set());
       subscribers.get(convo.id).add(ws);
       sendHistory(ws, convo);
+      return;
+    }
+    if (msg.t === 'older') { // "Show earlier messages": the window ending at byte msg.before (chat-log.mjs logWindow)
+      if (!convo || !(msg.before > 0)) return;
+      send(ws, { t: 'older', cid: convo.id, before: msg.before, ...logWindow(logPath(convo.id), msg.before) });
       return;
     }
     if (msg.t === 'owatch') {

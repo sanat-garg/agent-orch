@@ -1445,8 +1445,26 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (rows[i].position - prev < 1e-6) { rows = renumber(rows); return i + 0.5; }
     return (prev + rows[i].position) / 2;
   }
+  // While a bulk view runs (withDeps), the whole dependency graph and every task's status are loaded once and the three
+  // helpers below answer from memory: per task, dependentIds' recursive query over the all_deps view took ~1.4 ms, so a
+  // chat's 400-task snapshot cost 700 ms of blocked server on every chat switch. {up, down: id → ids, task: id → row}.
+  let depGraph = null;
+  function withDeps(fn) {
+    if (depGraph) return fn();
+    const up = new Map(), down = new Map(), task = new Map();
+    for (const r of qa('SELECT id, status, position FROM tasks')) task.set(r.id, r);
+    for (const { t, d } of qa(`SELECT x.task_id AS t, x.depends_on AS d FROM all_deps x JOIN tasks t ON t.id=x.task_id
+      ORDER BY x.task_id, x.depends_on IS NOT t.depends_on, x.depends_on`)) {
+      if (!up.has(t)) up.set(t, []);
+      up.get(t).push(d);
+      if (!down.has(d)) down.set(d, []);
+      down.get(d).push(t);
+    }
+    depGraph = { up, down, task };
+    try { return fn(); } finally { depGraph = null; }
+  }
   // A task's direct prerequisites (all_deps: task_deps plus the legacy depends_on), first-declared first.
-  const depsOf = (id) => qa(`SELECT x.depends_on AS d FROM all_deps x JOIN tasks t ON t.id=x.task_id WHERE x.task_id=:id
+  const depsOf = (id) => depGraph ? [...(depGraph.up.get(id) || [])] : qa(`SELECT x.depends_on AS d FROM all_deps x JOIN tasks t ON t.id=x.task_id WHERE x.task_id=:id
     ORDER BY x.depends_on IS NOT t.depends_on, x.depends_on`, { id }).map((r) => r.d);
   // Declared files of a task row: null = everything. An integrator touches what the task it integrates declared.
   const filesOf = (t) => parseFiles(t.files) ?? (t.integrates ? parseFiles(getTask(t.integrates)?.files) : null);
@@ -1498,7 +1516,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   function prereqIds(ids) {
     const out = [], seen = new Set(), todo = (Array.isArray(ids) ? ids : [ids]).filter((i) => i != null);
     while (todo.length) {
-      const t = getTask(todo.shift());
+      const t = depGraph ? depGraph.task.get(todo.shift()) : getTask(todo.shift());
       if (!t || seen.has(t.id)) continue;
       seen.add(t.id);
       if (t.status !== 'done') out.push(t.id);
@@ -1507,7 +1525,19 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     return out;
   }
   // Every queued task whose prerequisites lead to `id`, in queue order: they move with it.
-  const dependentIds = (id) => qa(`WITH RECURSIVE d(id) AS (SELECT task_id FROM all_deps WHERE depends_on=:id UNION SELECT x.task_id FROM all_deps x JOIN d ON x.depends_on=d.id)
+  function dependentIds(id) {
+    if (!depGraph) return dependentRows(id);
+    const seen = new Set(), todo = [...(depGraph.down.get(id) || [])];
+    while (todo.length) {
+      const x = todo.pop();
+      if (seen.has(x)) continue;
+      seen.add(x);
+      todo.push(...(depGraph.down.get(x) || []));
+    }
+    return [...seen].map((x) => depGraph.task.get(x)).filter((t) => t?.status === 'queued')
+      .sort((a, b) => (a.position == null) - (b.position == null) || (a.position ?? 0) - (b.position ?? 0) || a.id - b.id).map((t) => t.id);
+  }
+  const dependentRows = (id) => qa(`WITH RECURSIVE d(id) AS (SELECT task_id FROM all_deps WHERE depends_on=:id UNION SELECT x.task_id FROM all_deps x JOIN d ON x.depends_on=d.id)
     SELECT t.id FROM tasks t JOIN d ON d.id=t.id WHERE t.status='queued' ORDER BY t.position IS NULL, t.position, t.id`, { id }).map((r) => r.id);
 
   // Owner reorder: move a queued task and its queued dependent subtree as one block (relative order kept) to just
@@ -4848,7 +4878,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   function convoSnapshot(convo) {
     const p = q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd });
     if (!p) return { project: null, tasks: [], state: stateView() };
-    return { project: projectView(p), tasks: qa('SELECT * FROM tasks WHERE project_id=:p ORDER BY id DESC LIMIT 400', { p: p.id }).map(taskView), state: stateView() };
+    return { project: projectView(p), tasks: withDeps(() => qa('SELECT * FROM tasks WHERE project_id=:p ORDER BY id DESC LIMIT 400', { p: p.id }).map(taskView)), state: stateView() };
   }
 
   // The project's latest screenshots across its tasks, newest first (the top bar's Screenshots gallery): each media id

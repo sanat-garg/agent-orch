@@ -2299,3 +2299,32 @@ button.dg-row:disabled { opacity: .6; cursor: progress; }
   .msg.text, .tcard, .tcard .tc-title, .convo .ct, .dr-summary { font-size: 16px; }
   .tc-tag, .ms-age, .ms-open, .ms-note, .ms-foot, .cn-step.muted, .att-size, .fb-pop .m-head h2 { font-size: 12px; }
 }
+
+/* sidebar ⋯ → Delete: what goes, then type the phrase (GitHub style) */
+.modal-panel.dlm { width: min(480px, 100%); max-height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 24px); }
+.dl-body { overflow-y: auto; overscroll-behavior: contain; padding: 0 20px max(20px, env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 12px; }
+.dl-scope { display: flex; gap: 6px; }
+.dl-scope:empty { display: none; }
+.dl-scope label { flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 40px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 10px; cursor: pointer; font-size: 13.5px; text-align: center; }
+.dl-scope label:has(input:checked) { border-color: var(--accent); background: var(--raised); font-weight: 600; }
+.dl-scope input { position: absolute; opacity: 0; pointer-events: none; }
+.dl-scope label:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
+.dl-opts { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.dl-opts:empty { display: none; }
+.dl-opt { display: flex; align-items: flex-start; gap: 10px; padding: 11px 12px; border-top: 1px solid var(--border); cursor: pointer; min-height: 44px; }
+.dl-opt:first-child { border-top: 0; }
+.dl-opt input { margin: 3px 0 0; width: 17px; height: 17px; accent-color: var(--danger); flex: none; }
+.dl-opt.locked { cursor: default; }
+.dl-opt.locked input { accent-color: var(--muted); }
+.dl-opt span { display: flex; flex-direction: column; gap: 2px; min-width: 0; font-size: 14px; }
+.dl-opt small { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+.dl-opt.warn small { color: var(--danger); }
+.dl-confirm { font-size: 13.5px; color: var(--muted); }
+.dl-confirm b { color: var(--text); font-family: var(--mono, ui-monospace, monospace); font-weight: 600; overflow-wrap: anywhere; }
+#delInput { height: 40px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--panel); color: var(--text); font: inherit; font-size: 16px; }
+#delInput:focus { outline: none; border-color: var(--danger); }
+.dl-err { margin: 0; color: var(--danger); font-size: 13px; overflow-wrap: anywhere; }
+.dl-go { height: 42px; border-color: var(--danger); }
+.dl-go:not(:disabled):hover { background: var(--danger); color: #fff; border-color: var(--danger); }
+.dl-go:disabled { opacity: .5; cursor: not-allowed; }
+@media (max-width: 800px) { .modal-panel.dlm { width: 100%; } } /* a bottom sheet (.modal.sheet) */

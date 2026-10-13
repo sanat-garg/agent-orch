@@ -4669,6 +4669,20 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     }
   }
 
+  // A project whose folder the owner deleted (server.mjs deleteProject): its open tasks are cancelled, its schedules
+  // turned off and it pauses, so nothing runs in a folder that is gone. The rows stay as history. → cancelled count.
+  function closeProject(dir) {
+    const p = q1('SELECT * FROM projects WHERE path=:p', { p: dir });
+    if (!p) return 0;
+    updateProject(p.id, { status: 'paused', convo_id: null });
+    run('UPDATE schedules SET enabled=0 WHERE project_id=:p', { p: p.id });
+    const open = qa("SELECT id FROM tasks WHERE project_id=:p AND status IN ('queued','running','paused','needs_integration','awaiting_review') ORDER BY id DESC", { p: p.id });
+    for (const t of open) if (['queued', 'running', 'paused', 'needs_integration', 'awaiting_review'].includes(getTask(t.id)?.status)) taskAction(t.id, 'cancel');
+    pauseProject(p.id);
+    logEvent(`■ project deleted by the owner${open.length ? `; ${open.length} open task${open.length > 1 ? 's' : ''} cancelled` : ''}`, { projectId: p.id });
+    return open.length;
+  }
+
   // ---- views for the UI
   function taskView(t) {
     if (!t) return null;
@@ -5010,7 +5024,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     createBrowserTask, listBrowserTasks, stopBrowserTask, attachBrowserViews, browserFailed, browserRunner,
     finishedSince, initMemory: initProject, readMemory, refreshProjects: () => { for (const p of qa('SELECT id FROM projects')) pushProject(p.id); },
     projectOrder: () => projectOrderView(), // [{id, path, position, priority}], highest priority first
-    planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, insertCheckpoint, approveCheckpoint, requestChanges, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setTaskRunOn, assignable, assignTask, setReflectFallbacks, setReflectSettings, syncConvoModel, pauseTask, resumeTask, handoffTask, setConvoMode, detachConvo, convoSnapshot, taskDetail, projectShots, watchTask,
+    planTurn, abortPlan, nextModel, delegateOptions, delegateTask, taskAction, moveTask, insertCheckpoint, approveCheckpoint, requestChanges, reorderProjects, changeMessage, projectAction, setTaskFallbacks, setTaskRunOn, assignable, assignTask, setReflectFallbacks, setReflectSettings, syncConvoModel, pauseTask, resumeTask, handoffTask, setConvoMode, detachConvo, closeProject, convoSnapshot, taskDetail, projectShots, watchTask,
     drain, undrain, chatPlanning, applyUpdates: () => parallelSettings().applyUpdates,
     prepareRestart, resumeAfterRestart, restartBlocker, stateView, machines, browserTasks, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, reconcileClaudeLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     // A sidebar chat's project rank ({id, position, priority}), or null when its folder has no orchestrator project.
@@ -5024,6 +5038,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       run("DELETE FROM kv WHERE key LIKE :k", { k: `planner_session:${pid}:%` });
     },
     isRunning: (id) => running.has(Number(id)), logEvent, attachCluster, detectHardware,
+    // Run fn under the project's git lock (serialGit: merges, worktrees), e.g. server.mjs freshen's pull of the main tree.
+    withRepo: (p, fn) => serialGit(p, fn),
     // The head's git endpoint (cluster-git.mjs): a project's checkout, and the tasks node nodeId may push to in it now.
     gitRepo: (pid) => getProject(Number(pid))?.path || null,
     // The project folder a task, project, schedule or planner message belongs to, or null (server.mjs: a user's own only).

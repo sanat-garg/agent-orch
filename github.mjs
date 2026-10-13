@@ -123,6 +123,9 @@ export function createGitHub({ env, log, alert = () => {}, now = Date.now }) {
   }
   async function commitAll(dir, message) {
     await ensureLocalRepo(dir);
+    return saveAll(dir, message);
+  }
+  async function saveAll(dir, message) { // commitAll in a folder already set up (no .gitignore edits)
     if (!(await run('git', ['status', '--porcelain'], opts(dir))).out) return null;
     await run('git', ['add', '-A'], opts(dir));
     if (!(await run('git', [...GIT_ID, 'commit', '-q', '-m', message.slice(0, 200)], opts(dir))).ok) return null;
@@ -152,6 +155,46 @@ export function createGitHub({ env, log, alert = () => {}, now = Date.now }) {
       if (!c.ok) { await run('git', ['reset', '-q', '--merge'], opts(dir)); return { ok: false, reverted: 0, error: lastLine(c.err) }; }
     }
     return { ok: true, reverted: order.length, sha: (await run('git', ['rev-parse', 'HEAD'], opts(dir))).out };
+  }
+
+  // Brings the folder's branch up to origin's (server.mjs freshen: a project opened after an hour). Fetches; when origin has
+  // commits HEAD lacks, uncommitted changes are committed first ('save'), then origin is merged in: a fast-forward when
+  // HEAD has nothing of its own, else a merge commit (never a rebase: chat logs hold commit shas, rewind needs them). A
+  // conflict aborts the merge and changes nothing. onBehind(n) is called once origin is known to be n commits ahead.
+  // → { ok, pulled (origin's new commits), sha?, merged?, conflict?, error? }; not pushed.
+  async function pull(dir, { save = 'Save before pulling from GitHub', onBehind = () => {} } = {}) {
+    if (!fs.existsSync(path.join(dir, '.git')) || !(await originUrl(dir))) return { ok: true, pulled: 0 };
+    const branch = (await run('git', ['symbolic-ref', '--short', '-q', 'HEAD'], opts(dir))).out;
+    if (!branch) return { ok: false, pulled: 0, error: 'HEAD is detached: no branch to pull' };
+    const tracking = `refs/remotes/origin/${branch}`;
+    const f = await run('git', ['fetch', '-q', 'origin', `+refs/heads/${branch}:${tracking}`], { ...opts(dir), timeout: 120000 });
+    if (!f.ok) return /couldn't find remote ref/i.test(f.err) ? { ok: true, pulled: 0 } : { ok: false, pulled: 0, error: lastLine(f.err) };
+    const pulled = parseInt((await run('git', ['rev-list', '--count', `HEAD..${tracking}`], opts(dir))).out, 10) || 0;
+    if (!pulled) return { ok: true, pulled: 0 };
+    onBehind(pulled);
+    await saveAll(dir, save);
+    const own = parseInt((await run('git', ['rev-list', '--count', `${tracking}..HEAD`], opts(dir))).out, 10) || 0;
+    const m = await run('git', [...GIT_ID, 'merge', '-q', '--no-edit', '-m', `Merge origin/${branch} (pulled from GitHub)`, tracking], opts(dir));
+    if (!m.ok) {
+      const files = (await run('git', ['diff', '--name-only', '--diff-filter=U'], opts(dir))).out;
+      await run('git', ['merge', '--abort'], opts(dir));
+      const conflict = /conflict/i.test(m.err + m.out);
+      return { ok: false, pulled, conflict, error: conflict
+        ? `GitHub and this server both changed the same lines${files ? ` in ${files.split('\n').slice(0, 3).join(', ')}` : ''}, so it couldn't be merged automatically. Nothing was changed`
+        : lastLine(m.err || m.out) };
+    }
+    return { ok: true, pulled, merged: own > 0, sha: (await run('git', ['rev-parse', 'HEAD'], opts(dir))).out };
+  }
+
+  // Deletes a GitHub repo (owner/name) for good: the sidebar's Delete → "Delete the GitHub repo". gh needs the delete_repo
+  // scope, which a normal `gh auth login` doesn't grant: the error then says how to add it. → { ok } | { ok: false, error }.
+  async function deleteRepo(full) {
+    if (!/^[\w.-]+\/[\w.-]+$/.test(full || '')) return { ok: false, error: 'Not a GitHub repo' };
+    const r = await run('gh', ['repo', 'delete', full, '--yes'], opts());
+    if (r.ok) { log(`deleted GitHub repo ${full}`); return { ok: true }; }
+    if (/delete_repo|403|admin rights/i.test(r.err)) return { ok: false, error: `GitHub refused: the gh sign-in lacks the delete_repo permission. Run \`gh auth refresh -h github.com -s delete_repo\` in the terminal once, then try again` };
+    if (/404|Could not resolve|not found/i.test(r.err)) return { ok: true, gone: true };
+    return { ok: false, error: lastLine(r.err) || 'could not delete the GitHub repo' };
   }
 
   // The signed-in account's repos (its own and its orgs'), newest push first, for New project → Import from GitHub.
@@ -184,7 +227,7 @@ export function createGitHub({ env, log, alert = () => {}, now = Date.now }) {
     return full.url ? repoOf(full.url) : { full: full.full, url: `https://github.com/${full.full}` };
   }
 
-  return { refresh, status: () => status, ensureRepo, push, commitAndPush, revertCommits, unpushed, remoteOf, listRepos, clone };
+  return { refresh, status: () => status, ensureRepo, push, commitAndPush, revertCommits, pull, deleteRepo, unpushed, remoteOf, listRepos, clone };
 }
 
 // What the owner typed to import: owner/name or a GitHub url → {full}; another https/ssh git url → {url, full: null}; else null.

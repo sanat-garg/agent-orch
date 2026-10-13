@@ -199,6 +199,7 @@
       <div class="drop-zone" id="dropZone" hidden aria-hidden="true"><div>Drop images or files to attach</div></div>
       <div class="scroller" id="scroller">
         <div class="messages" id="messages"></div>
+        <div class="working git-pull" id="gitPull" role="status" hidden><span class="spark"></span><span id="gitPullText"></span></div>
         <div class="working" id="working" hidden>
           <span class="spark"></span><span id="workingText">Working…</span>
           <span class="esc-hint">esc to interrupt</span>
@@ -405,6 +406,30 @@
       </div>
     </div>
   </div>
+</div>
+
+<div class="modal sheet" id="delModal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <form class="modal-panel dlm" role="dialog" aria-modal="true" aria-labelledby="delTitle" id="delForm">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <div class="m-head">
+      <div>
+        <h2 id="delTitle">Delete</h2>
+        <p class="m-sub" id="delSub"></p>
+      </div>
+      <button type="button" class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="dl-body">
+      <div class="dl-scope" id="delScope" role="radiogroup" aria-label="What to delete"></div>
+      <div class="dl-opts" id="delOpts"></div>
+      <label class="dl-confirm" for="delInput">To confirm, type <b id="delPhrase"></b> in the box below</label>
+      <input id="delInput" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="done">
+      <p class="dl-err" id="delErr" role="alert" hidden></p>
+      <button type="submit" class="btn danger dl-go" id="delGo" disabled>Delete</button>
+    </div>
+  </form>
 </div>
 
 <div class="modal sheet" id="awayModal" hidden>

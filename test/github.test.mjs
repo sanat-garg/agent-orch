@@ -106,3 +106,62 @@ test('a failed push returns git\'s last stderr line, not a stack', async () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('pull() fast-forwards to origin, merges when both sides moved, and changes nothing on a conflict', async () => {
+  const { tmp, dir, bare, git, gh } = localRemote();
+  const commit = (cwd, file, text) => { fs.writeFileSync(path.join(cwd, file), text); git(cwd, 'add', '-A'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', file); };
+  try {
+    assert.equal((await gh.push(dir)).ok, true); // its first commit (with the .gitignore it writes)
+    commit(dir, 'a.txt', 'one\n');
+    assert.equal((await gh.push(dir)).ok, true);
+    assert.deepEqual(await gh.pull(dir), { ok: true, pulled: 0 }); // up to date
+    // Another machine pushes two commits: a fast-forward, reported before it starts.
+    const other = path.join(tmp, 'other');
+    git(tmp, 'clone', '-q', '-b', 'main', bare, other);
+    commit(other, 'b.txt', 'b\n'); commit(other, 'c.txt', 'c\n');
+    git(other, 'push', '-q', 'origin', 'main');
+    const behind = [];
+    let r = await gh.pull(dir, { onBehind: (n) => behind.push(n) });
+    assert.equal(r.ok, true); assert.equal(r.pulled, 2); assert.equal(r.merged, false);
+    assert.deepEqual(behind, [2]);
+    assert.equal(fs.readFileSync(path.join(dir, 'c.txt'), 'utf8'), 'c\n');
+    // Both sides moved, different files: a merge commit (shas kept, never rebased).
+    assert.equal((await gh.push(dir)).ok, true);
+    git(other, 'pull', '-q', '--no-rebase', 'origin', 'main');
+    commit(other, 'd.txt', 'd\n'); git(other, 'push', '-q', 'origin', 'main');
+    commit(dir, 'e.txt', 'e\n');
+    fs.writeFileSync(path.join(dir, 'wip.txt'), 'unsaved\n'); // uncommitted work is saved first
+    const mine = git(dir, 'rev-parse', 'HEAD');
+    r = await gh.pull(dir);
+    assert.equal(r.ok, true); assert.equal(r.pulled, 1); assert.equal(r.merged, true);
+    assert.equal(fs.readFileSync(path.join(dir, 'wip.txt'), 'utf8'), 'unsaved\n');
+    assert.equal(git(dir, 'status', '--porcelain'), '');
+    assert.equal(git(dir, 'merge-base', '--is-ancestor', mine, 'HEAD'), '');
+    assert.ok(fs.existsSync(path.join(dir, 'd.txt')));
+    // Same lines on both sides: nothing changes and the conflict is named.
+    assert.equal((await gh.push(dir)).ok, true);
+    git(other, 'pull', '-q', '--no-rebase', 'origin', 'main');
+    commit(other, 'a.txt', 'theirs\n'); git(other, 'push', '-q', 'origin', 'main');
+    commit(dir, 'a.txt', 'ours\n');
+    const before = git(dir, 'rev-parse', 'HEAD');
+    r = await gh.pull(dir);
+    assert.equal(r.ok, false); assert.equal(r.conflict, true);
+    assert.match(r.error, /same lines in a\.txt/);
+    assert.equal(git(dir, 'rev-parse', 'HEAD'), before);
+    assert.equal(git(dir, 'status', '--porcelain'), '');
+    assert.equal(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8'), 'ours\n');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('pull() with no origin, or an origin without the branch yet, has nothing to pull', async () => {
+  const { tmp, dir, git, gh } = localRemote();
+  try {
+    assert.deepEqual(await gh.pull(dir), { ok: true, pulled: 0 }); // never pushed: origin has no main
+    git(dir, 'remote', 'remove', 'origin');
+    assert.deepEqual(await gh.pull(dir), { ok: true, pulled: 0 });
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});

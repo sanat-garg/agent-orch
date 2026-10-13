@@ -853,7 +853,18 @@ const ext = createExtensions({ dataDir: DATA });
 // ---------- Live previews (previews.mjs): https://<slug>.<domain> per project, served from its main tree via Caddy ----------
 // Status changes reach every client as the chats' `preview` field plus {t:'previews'} (the Live previews manager refetches).
 let previewPush = null;
-const previews = createPreviews({ dataDir: DATA, forbid: [ROOT], log: (m) => console.log(`[previews] ${m}`),
+// A test or preflight boot (CW_DATA_DIR elsewhere: rolling.mjs preflight, README's test servers) has its own empty previews
+// list: it must never rewrite the live /etc/caddy include (that dropped every live preview until the next real boot), so
+// its Caddy files live in its data dir and sudo/caddy/systemctl are skipped.
+const sandboxCaddy = DATA !== path.join(ROOT, 'data') && !process.env.CW_REAL_CADDY && {
+  caddyfile: path.join(DATA, 'Caddyfile'), includeFile: path.join(DATA, 'agent-orch-previews.caddy'),
+  exec: async (cmd, args) => {
+    if (cmd === 'sudo' && args[0] === 'install') fs.copyFileSync(args.at(-2), args.at(-1));
+    return { code: 0, stdout: '', stderr: '' };
+  },
+};
+if (sandboxCaddy && !fs.existsSync(sandboxCaddy.caddyfile)) { try { fs.copyFileSync('/etc/caddy/Caddyfile', sandboxCaddy.caddyfile); } catch {} } // the owner's sites stay taken
+const previews = createPreviews({ dataDir: DATA, forbid: [ROOT], ...sandboxCaddy, log: (m) => console.log(`[previews] ${m}`),
   onChange: () => {
     clearTimeout(previewPush);
     previewPush = setTimeout(() => { broadcastConvos(); for (const ws of allClients) send(ws, { t: 'previews' }); }, 150);
@@ -1088,8 +1099,9 @@ async function setupRepo(convo) {
 }
 // One sync per folder at a time (a rewind waits for the running one). Resolves the new commit's sha, or null.
 const gitSyncs = new Map(); // folder -> its latest syncGit promise
-function syncGit(dir, message) {
-  const p = (gitSyncs.get(dir) || Promise.resolve()).catch(() => {}).then(() => syncGitNow(dir, message));
+const syncGit = (dir, message) => queueGit(dir, () => syncGitNow(dir, message));
+function queueGit(dir, job) {
+  const p = (gitSyncs.get(dir) || Promise.resolve()).catch(() => {}).then(job);
   gitSyncs.set(dir, p);
   p.finally(() => gitSyncs.get(dir) === p && gitSyncs.delete(dir)).catch(() => {});
   return p;
@@ -1101,7 +1113,8 @@ async function syncGitNow(dir, message) {
   const r = message ? await gh.commitAndPush(dir, message) : await gh.push(dir);
   if (r.repo && r.repo.full !== c.repo?.full) { c.repo = r.repo; orch?.refreshProjects(); }
   // error (the chat's sticky 'not pushed') only once pushes have failed for 10 min or origin diverged; the queue retries a race.
-  c.git = { pushedAt: r.ok ? Date.now() : c.git?.pushedAt || null, error: r.warn ? r.error : null, unpushed: r.ok ? 0 : await gh.unpushed(dir) };
+  c.git = { pushedAt: r.ok ? Date.now() : c.git?.pushedAt || null, error: r.warn ? r.error : null, unpushed: r.ok ? 0 : await gh.unpushed(dir),
+    checkedAt: c.git?.checkedAt || 0 };
   shareRepoState(c);
   saveConvos();
   broadcastConvos();
@@ -1111,6 +1124,37 @@ async function syncGitNow(dir, message) {
 const chatSync = (cid, dir, message) => syncGit(dir, message)
   .then((sha) => { if (sha && findConvo(cid)) appendLog(cid, { t: 'commit', sha, ts: Date.now() }); })
   .catch((e) => console.error('[github] sync failed', dir, e));
+// Opening a project after an hour (owner, 2026-10-13): GitHub is checked first and, when it has commits this folder lacks,
+// they're pulled (github.mjs pull, under the orchestrator's git lock) before anything works there: a message sent meanwhile
+// waits for it, and the folder's open chats show each step ({t:'gitpull'} frames; a pull or a conflict is also logged as a
+// notice in the chat that asked). Skipped while a chat of the folder is mid-turn. c.git.checkedAt is the last good fetch.
+const FRESH_MS = 60 * 60e3, FRESH_RETRY_MS = 5 * 60e3;
+const freshening = new Map(); // folder -> { promise, state: 'checking'|'pulling', pulled }
+function freshen(c) {
+  const dir = c.cwd, cur = freshening.get(dir);
+  if (cur) return cur.promise;
+  if (!fs.existsSync(dir) || Date.now() - (c.git?.checkedAt || 0) < FRESH_MS) return Promise.resolve(); // no origin: pull says 0
+  if (convos.some((x) => x.cwd === dir && chatBusy(x))) return Promise.resolve();
+  const job = { state: 'checking', pulled: 0 };
+  const show = () => { for (const x of convos) if (x.cwd === dir) broadcast(x.id, { t: 'gitpull', state: job.state, pulled: job.pulled }); };
+  const pull = () => gh.pull(dir, { onBehind: (n) => { Object.assign(job, { state: 'pulling', pulled: n }); show(); } });
+  job.promise = queueGit(dir, () => (orch ? orch.withRepo(dir, pull) : pull())).catch((e) => ({ ok: false, pulled: 0, error: String(e?.message || e) }))
+    .then((r) => {
+      c.git = { ...(c.git || {}), checkedAt: r.ok ? Date.now() : Date.now() - FRESH_MS + FRESH_RETRY_MS };
+      shareRepoState(c);
+      saveConvos();
+      if (r.ok && r.pulled) {
+        emit(c.id, { t: 'notice', text: `Pulled ${r.pulled} new commit${r.pulled > 1 ? 's' : ''} from GitHub${r.merged ? ' and merged them with this server\'s own' : ''}: the project is on the latest version.` });
+        syncGit(dir).catch((e) => console.error('[github] sync failed', dir, e)); // pushes a merge commit; redeploys the preview
+      } else if (!r.ok && r.pulled) emit(c.id, { t: 'error', text: `Couldn't pull the latest version from GitHub: ${r.error}` });
+      else if (!r.ok) console.error('[github] pull failed', dir, r.error);
+      job.state = r.ok ? 'done' : 'failed';
+      show();
+    }).finally(() => freshening.delete(dir));
+  freshening.set(dir, job);
+  show();
+  return job.promise;
+}
 // Repo and push state belong to the folder: copy them onto the folder's other chats.
 function shareRepoState(c) {
   for (const x of convos) {
@@ -1497,7 +1541,7 @@ function sendHistory(ws, convo, since) {
 const chatBusy = (c) => !!runtimes.get(c.id)?.busy || planning.has(c.id) || agentTurns.has(c.id);
 // Drops a chat (the caller saves and broadcasts): its session, queues and log go; the project's next oldest chat becomes its
 // main chat; with none left, its background work pauses (the folder and tasks are kept) and its live preview address is freed.
-function removeConvo(c) {
+function removeConvo(c, { keepPreview = false } = {}) {
   retireRuntime(runtimes, c.id);
   agentQueue.delete(c.id);
   agentTurns.get(c.id)?.abort();
@@ -1505,10 +1549,45 @@ function removeConvo(c) {
   orch.abortPlan(c.id);
   const heir = convos.filter((x) => x.id !== c.id && x.cwd === c.cwd).sort((a, b) => a.createdAt - b.createdAt)[0];
   orch.detachConvo(c.id, heir?.id || null);
-  if (!heir) previews.remove(c.cwd).catch((e) => console.error('[previews] remove failed', c.cwd, e));
+  if (!heir && !keepPreview) previews.remove(c.cwd).catch((e) => console.error('[previews] remove failed', c.cwd, e));
   convos = convos.filter((x) => x.id !== c.id);
   fs.rmSync(logPath(c.id), { force: true });
   logRewritten(c.id);
+}
+// The sidebar's Delete → whole project (DELETE /api/convos/:id {project: true, …}): every chat of the folder goes, plus
+// what the owner ticked: `repo` deletes its GitHub repo (first, so a refusal changes nothing), `preview` frees its live
+// preview address (else it keeps serving), `files` cancels its open tasks and schedules (orch.closeProject) and deletes
+// the folder and its task worktrees. Never a folder outside home, home or ~/workspace itself, one holding agent-orch or
+// another project's folder. → {ok, done} | {error}.
+async function deleteProject(c, me, { files, repo, preview }) {
+  const dir = c.cwd, done = [], tilde = (d) => d.replace(HOME, '~');
+  if (files) {
+    const real = (() => { try { return fs.realpathSync(dir); } catch { return path.resolve(dir); } })();
+    const inside = (a, b) => a === b || a.startsWith(b + path.sep);
+    if (!inside(real, HOME) || real === HOME || inside(WORKSPACE, real) || inside(ROOT, real) || inside(DATA, real) || path.relative(HOME, real).startsWith('.'))
+      return { error: `${tilde(dir)} can't be deleted from here`, status: 400 };
+    const nested = convos.find((x) => x.cwd !== dir && inside(path.resolve(x.cwd), real));
+    if (nested) return { error: `${tilde(dir)} holds another project (${tilde(nested.cwd)}): delete that one first`, status: 409 };
+  }
+  if (repo && c.repo?.full) {
+    if (!isAdmin(me)) return { error: 'Only the admin can delete GitHub repos', status: 403 };
+    const r = await gh.deleteRepo(c.repo.full);
+    if (!r.ok) return { error: r.error, status: 502 };
+    done.push(`GitHub repo ${c.repo.full}`);
+  }
+  const chats = convos.filter((x) => x.cwd === dir);
+  for (const x of chats) removeConvo(x, { keepPreview: true });
+  done.push(chats.length === 1 ? 'its chat' : `${chats.length} chats`);
+  if (files) orch.closeProject(dir);
+  if (preview && previews.view(dir)) { await previews.remove(dir).catch((e) => console.error('[previews] remove failed', dir, e)); done.push('live preview'); }
+  if (files) {
+    const wt = path.join(path.dirname(dir), '.agent-orch-worktrees'), prefix = `${path.basename(dir)}-task-`;
+    try { for (const n of fs.readdirSync(wt)) if (n.startsWith(prefix)) fs.rmSync(path.join(wt, n), { recursive: true, force: true }); } catch {}
+    fs.rmSync(dir, { recursive: true, force: true });
+    done.push(`folder ${tilde(dir)}`);
+  }
+  console.log(`[delete] ${tilde(dir)}: ${done.join(', ')}`);
+  return { ok: true, done };
 }
 // Merges chat `from` into `into` (its project's main chat; the caller saves and broadcasts). Its messages go into `into`'s
 // log as one block where they began, between two notices, so both conversations stay readable; `into`'s agent session
@@ -2094,6 +2173,15 @@ async function handleRequest(req, res) {
     const c = findConvo(m[1]);
     if (!c) return json(res, 404, { error: 'No such chat' });
     if (req.method === 'DELETE') {
+      // No body (or project: false): just this chat. {project: true, files, repo, preview}: the whole project (deleteProject).
+      const body = await readBody(req).catch(() => ({}));
+      if (body?.project) {
+        const r = await deleteProject(c, me, { files: !!body.files, repo: !!body.repo, preview: !!body.preview });
+        if (r.error) return json(res, r.status, { error: r.error });
+        saveConvos();
+        broadcastConvos();
+        return json(res, 200, r);
+      }
       removeConvo(c);
       saveConvos();
       broadcastConvos();
@@ -2810,6 +2898,9 @@ wss.on('connection', (ws, req) => {
       if (!subscribers.has(convo.id)) subscribers.set(convo.id, new Set());
       subscribers.get(convo.id).add(ws);
       sendHistory(ws, convo, typeof msg.since === 'string' ? msg.since : null);
+      const pulling = freshening.get(convo.cwd);
+      if (pulling) send(ws, { t: 'gitpull', cid: convo.id, state: pulling.state, pulled: pulling.pulled });
+      else freshen(convo);
       return;
     }
     if (msg.t === 'older') { // "Show earlier messages": the window ending at byte msg.before (chat-log.mjs logWindow)
@@ -2836,7 +2927,8 @@ wss.on('connection', (ws, req) => {
         try { files = ids.length ? placeUploads(DATA, ids, convo.cwd) : []; }
         catch (e) { emit(convo.id, { t: 'error', text: `Couldn't attach the files: ${e?.message || e}` }); break; }
         if (!text.trim() && !files.length) break;
-        sendUserMessage(convo, text, files).catch((e) => emit(convo.id, { t: 'error', text: String(e?.message || e) }));
+        freshen(convo).then(() => sendUserMessage(convo, text, files)) // on the latest version only
+          .catch((e) => emit(convo.id, { t: 'error', text: String(e?.message || e) }));
         break;
       }
       case 'perm_reply':

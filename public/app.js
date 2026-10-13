@@ -870,21 +870,87 @@ function convoMenu(c, anchor) {
     const title = prompt(sub ? 'Rename chat' : 'Rename project (the folder keeps its name)', c.title);
     if (title && title.trim()) await api(`/api/convos/${c.id}`, 'PATCH', { title });
   };
-  del.onclick = async () => {
-    m.remove();
-    const what = sub ? `Delete the chat "${c.title}"? The project and its other chats are kept.`
-      : others ? `Delete "${c.title}"'s main chat? Its ${others === 1 ? 'other chat takes' : `oldest other chat takes`} over as the project's main chat; the folder and its GitHub repo are kept.`
-        : `Remove "${c.title}" and its chat from the sidebar? The folder and its GitHub repo are kept.`;
-    if (!confirm(what)) return;
-    await api(`/api/convos/${c.id}`, 'DELETE');
-    if (state.cid === c.id) openConvo(null);
-  };
+  del.onclick = () => { m.remove(); deleteModal(c); };
   m.append(fresh, rename, ...(others ? [merge] : []), archive, del);
   document.body.append(m);
   const r = anchor.getBoundingClientRect();
   m.style.top = `${Math.min(r.bottom + 4, innerHeight - 100)}px`;
   m.style.left = `${Math.min(r.left, innerWidth - 170)}px`;
   setTimeout(() => document.addEventListener('click', () => m.remove(), { once: true }));
+}
+
+// Sidebar ⋯ → Delete: a sheet saying what goes. A project's main chat (or a folder's only chat) can take the whole
+// project: every chat, plus the code folder, GitHub repo and live preview if ticked (DELETE {project: true, …}, server.mjs
+// deleteProject). A sub chat, or "Only this chat", is the old single-chat delete. Delete stays off until the phrase is typed.
+function deleteModal(c) {
+  const modal = $('delModal'), sub = isSubChat(c), chats = state.convos.filter((x) => x.cwd === c.cwd), name = folderName(c.cwd);
+  const admin = (document.documentElement.dataset.role || 'admin') === 'admin';
+  let whole = !sub && chats.length === 1;
+  const scope = $('delScope'), opts = $('delOpts'), input = $('delInput'), go = $('delGo'), err = $('delErr');
+  const phrase = () => (whole ? `delete ${name}` : 'delete this chat');
+  const opt = (key, label, note, { checked = false, locked = false, warn = false } = {}) => {
+    const row = el('label', `dl-opt${locked ? ' locked' : ''}${warn ? ' warn' : ''}`), box = el('input'), txt = el('span');
+    box.type = 'checkbox'; box.name = key; box.checked = checked; box.disabled = locked;
+    txt.append(el('b', '', label), el('small', '', note));
+    row.append(box, txt);
+    return row;
+  };
+  const draw = () => {
+    $('delTitle').textContent = whole ? `Delete ${name}` : `Delete "${c.title}"`;
+    $('delSub').textContent = whole ? 'Choose what goes with the project. This can\'t be undone.'
+      : sub ? 'Only this chat goes. The project and its other chats are kept.'
+        : `Only this chat goes. ${chats.length === 2 ? 'Its other chat takes' : 'Its oldest other chat takes'} over as the project's main chat; the folder and its GitHub repo are kept.`;
+    opts.replaceChildren(...(whole ? [
+      opt('chats', 'Remove from the sidebar', `${chats.length === 1 ? 'Its chat and history' : `All ${chats.length} chats and their history`}; background work stops`, { checked: true, locked: true }),
+      opt('files', 'Delete the code files', `${tilde(c.cwd)} and its task worktrees, with any open tasks and schedules`, { warn: true }),
+      ...(c.repo && admin ? [opt('repo', 'Delete the GitHub repo', `${c.repo.full}, for good`, { warn: true })] : []),
+      ...(c.preview ? [opt('preview', 'Remove the live preview', `${c.preview.url.replace(/^https?:\/\//, '')} stops serving and the address is freed`, { checked: true })] : []),
+    ] : []));
+    $('delPhrase').textContent = phrase();
+    check();
+  };
+  const check = () => {
+    go.disabled = input.value.trim().toLowerCase() !== phrase().toLowerCase();
+    const ticked = [...opts.querySelectorAll('input:checked:not(:disabled)')].map((b) => b.name);
+    go.textContent = !whole ? 'Delete this chat' : ticked.includes('files') || ticked.includes('repo') ? 'Delete the project and its code' : 'Delete the project';
+  };
+  scope.replaceChildren();
+  if (!sub && chats.length > 1) {
+    for (const [val, label] of [[false, 'Only this chat'], [true, `Whole project (${chats.length} chats)`]]) {
+      const l = el('label'), r = el('input');
+      r.type = 'radio'; r.name = 'delScope'; r.checked = whole === val;
+      r.onchange = () => { whole = val; input.value = ''; draw(); input.focus(); };
+      l.append(r, label);
+      scope.append(l);
+    }
+  }
+  input.value = '';
+  err.hidden = true;
+  input.oninput = check;
+  opts.onchange = check;
+  const close = () => { modal.hidden = true; removeEventListener('keydown', onKey, true); };
+  const onKey = (e) => { if (e.key === 'Escape') { e.stopImmediatePropagation(); close(); } };
+  addEventListener('keydown', onKey, true);
+  modal.onclick = (e) => { if (e.target.closest('[data-close]')) close(); };
+  $('delForm').onsubmit = async (e) => {
+    e.preventDefault();
+    if (go.disabled) return;
+    const ticked = Object.fromEntries([...opts.querySelectorAll('input:not(:disabled)')].map((b) => [b.name, b.checked]));
+    go.disabled = true; err.hidden = true;
+    go.textContent = 'Deleting…';
+    try {
+      const r = await api(`/api/convos/${c.id}`, 'DELETE', whole ? { project: true, ...ticked } : undefined);
+      close();
+      if (chats.some((x) => x.id === state.cid) && (whole || state.cid === c.id)) openConvo(null);
+      toast(whole ? `Deleted ${name}: ${r.done?.join(', ') || 'removed'}` : 'Chat deleted', { kind: 'success' });
+    } catch (ex) {
+      err.textContent = ex.message; err.hidden = false;
+      check();
+    }
+  };
+  draw();
+  modal.hidden = false;
+  setTimeout(() => input.focus(), 50);
 }
 
 async function api(url, method = 'GET', body, retry = true) {
@@ -1009,6 +1075,7 @@ function openConvo(cid) {
   history.replaceState(null, '', cid ? `#${cid}` : '#');
   resetMessages();
   setBusy(false);
+  $('gitPull').hidden = true; // the server re-sends it when this chat's folder is mid-check
   const since = restoreChat(cid);
   if (!cid) {
     $('messages').append($('emptyTpl').content.cloneNode(true));
@@ -1990,6 +2057,16 @@ document.addEventListener('keydown', (e) => {
 // ---------- busy indicator ----------
 const VERBS = ['Working', 'Thinking', 'Reading', 'Tinkering', 'Building', 'Pondering', 'Crafting'];
 let workTimer;
+// Opening a project after an hour (server.mjs freshen): GitHub is checked, and newer commits pulled, before it works there.
+function showGitPull(msg) {
+  const on = msg.state === 'checking' || msg.state === 'pulling', n = msg.pulled;
+  $('gitPull').hidden = !on;
+  if (!on) return;
+  $('gitPullText').textContent = msg.state === 'pulling'
+    ? `Pulling ${n} new commit${n > 1 ? 's' : ''} from GitHub. Messages wait until it's on the latest version…`
+    : 'Checking GitHub for a newer version…';
+  scrollDown();
+}
 function setBusy(b) {
   state.busy = b;
   renderUsage();
@@ -3759,6 +3836,9 @@ function onServer(msg) {
       break;
     case 'busy':
       setBusy(msg.busy);
+      break;
+    case 'gitpull':
+      showGitPull(msg);
       break;
     case 'perm':
       showPerm(msg);

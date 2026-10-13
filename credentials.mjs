@@ -118,6 +118,8 @@ export function createCredentials({ dataDir, now = Date.now }) {
     const d = crypto.createDecipheriv('aes-256-gcm', getKey(), Buffer.from(box.iv, 'base64'));
     d.setAuthTag(Buffer.from(box.tag, 'base64'));
     items = JSON.parse(Buffer.concat([d.update(Buffer.from(box.data, 'base64')), d.final()]).toString('utf8'));
+    // Imported cards once carried a "Saved automatically from…" note (owner, 2026-10-13: removed); clear it, once.
+    for (const s of items) if (s.auto && s.notes?.startsWith('Saved automatically from the ')) s.notes = '';
     return items;
   }
   function save() {
@@ -167,11 +169,10 @@ export function createCredentials({ dataDir, now = Date.now }) {
       if (!row) {
         if (live(owner).length >= LIMITS.services) return [];
         const name = path.basename(dir).slice(0, LIMITS.name);
-        row = { id: crypto.randomUUID(), owner, name, url: '', notes: `Saved automatically from the ${name} project's .env files. Edit or delete anything here: a key comes back only when its value in the project changes.`,
-          fields: [], auto: dir, seen: {}, createdAt: now() };
+        row = { id: crypto.randomUUID(), owner, name, url: '', notes: '', fields: [], auto: dir, seen: {}, createdAt: now() };
         items.push(row);
       }
-      if (row.deleted) Object.assign(row, { deleted: false, notes: `Saved automatically from the ${row.name} project's .env files.` });
+      if (row.deleted) row.deleted = false;
       const changed = [];
       for (const e of fresh) {
         row.seen[e.label] = digest(e.value);

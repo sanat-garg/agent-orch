@@ -2,7 +2,8 @@
 // ---------- Credentials (server: credentials.mjs, /api/credentials) ----------
 // The sidebar's "Credentials" sheet: one card per service (Stripe, Postgres, the domain registrar…) with its logins and
 // keys, so the owner reads them here instead of digging through .env files and docs. Secret values show as dots until
-// tapped (eye), every value copies with one tap, and "Copy .env" copies the whole service as KEY=value lines. The
+// tapped (eye), every value copies with one tap, and "Copy .env" copies the whole service as KEY=value lines. Projects
+// add a card of their own .env keys by themselves (s.auto = the project, labelled under the name). The
 // editor (in place of the list) takes fields one by one or pasted .env lines. Everything is dropped from the page when
 // the sheet closes. Loaded after app.js and uses its helpers ($, el, api, toast, coarse, closeSidebar, copyToClipboard).
 (() => {
@@ -102,6 +103,8 @@
       a.href = s.url; a.target = '_blank'; a.rel = 'noopener noreferrer';
       id.append(a);
     }
+    // Saved by the project itself from its .env files (credentials.mjs importProject).
+    if (s.auto) id.append(el('span', 'cr-auto', `From the ${s.auto} project's .env`));
     head.append(id);
     c.append(head);
     if (s.fields.length) {

@@ -4,7 +4,13 @@
 //   <DATA>/credentials.json: {v: 1, iv, tag, data} = AES-256-GCM of [{id, owner, name, url, notes, fields: [{label,
 //   value, secret}], createdAt, updatedAt}] under the key in <DATA>/credentials.key (both 0600; data/ is never committed).
 //   The encryption keeps values out of anything that copies the JSON alone (a log, a grep, a backup of one file).
-//   createCredentials({dataDir, now}) → { list(owner), add(owner, body), update(owner, id, body), remove(owner, id), reown(from, to) }
+//   createCredentials({dataDir, now}) → { list(owner), add(owner, body), update(owner, id, body), remove(owner, id), reown(from, to),
+//   importProject(owner, dir, entries) }
+// Projects add their keys themselves (owner, 2026-10-13): after every commit in a project folder (server.mjs syncGitNow)
+// the secrets in its .env files (projectSecrets) go into its owner's card for that project (row.auto = the folder;
+// row.seen = label → hash of the value last imported). A value is (re)written only when it differs from the last one
+// imported, so the owner's edits and deletions stick until the project's .env changes that key; deleting the card keeps a
+// hidden tombstone (row.deleted) for the same reason. Never in list() or the services limit.
 // Bodies are {name, url?, notes?, fields: [{label, value, secret?}]}; a bad one throws an Error with status 400, a
 // missing or someone else's id 404.
 import crypto from 'node:crypto';
@@ -12,6 +18,54 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export const LIMITS = { name: 80, url: 500, notes: 4000, label: 80, value: 8000, fields: 40, services: 500 };
+
+// .env files (root and one folder down) and the keys worth keeping: names that say key/token/secret/password…, or a
+// URL with a password in it (DATABASE_URL). Examples, templates and placeholder values are skipped.
+const ENV_FILE = /^\.env(\.[\w.-]+)?$/, ENV_SKIP = /\.(example|sample|template|dist|defaults?|schema)$/i;
+const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', 'coverage', 'vendor', 'venv', '__pycache__']);
+const SECRET_NAME = /(^|_)(API_?KEY|KEY|KEYS|TOKEN|SECRET|PASSWORD|PASSWD|PASS|PWD|PRIVATE|CREDENTIALS?|AUTH|DSN|WEBHOOK)(_|$)|(SECRET|TOKEN|APIKEY|PASSWORD)/i;
+const PLACEHOLDER = /^(x+|\*+|\.+|0+|changeme|change[-_]?me|replace[-_]?me|todo|tbd|placeholder|example|secret|password|test|dummy|null|none|undefined|true|false|(your|my|insert|put|add|enter)[-_ ].*|<.*>|\[.*\]|\{\{.*\}\}|\$\{.*\})$/i;
+export function parseEnvText(text) {
+  const out = [];
+  for (const line of String(text).split(/\r?\n/)) {
+    const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][\w.-]*)\s*=\s*(.*?)\s*$/);
+    if (!m) continue;
+    let v = m[2];
+    if (/^"(.*)"$/.test(v)) { try { v = JSON.parse(v); } catch { v = v.slice(1, -1); } } else if (/^'(.*)'$/.test(v)) v = v.slice(1, -1);
+    else v = v.replace(/\s+#.*$/, '');
+    out.push({ key: m[1], value: v });
+  }
+  return out;
+}
+const worthKeeping = ({ key, value }) => value.length >= 8 && value.length <= LIMITS.value && !PLACEHOLDER.test(value.trim())
+  && ((SECRET_NAME.test(key) && !/_(URL|URI|HOST|PORT|ENDPOINT|DOMAIN|REGION|EMAIL)$/i.test(key)) || /^[a-z][a-z0-9+.-]*:\/\/[^/\s:@]*:[^/\s@]+@/i.test(value));
+// [{label, value, file}] for one project folder: a key found in several files with different values is labelled with
+// the file (e.g. "STRIPE_KEY (web/.env.local)"); the same value twice is kept once.
+export function projectSecrets(dir) {
+  const files = [];
+  const scan = (sub) => {
+    let ents;
+    try { ents = fs.readdirSync(path.join(dir, sub), { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      if (e.isFile() && ENV_FILE.test(e.name) && !ENV_SKIP.test(e.name)) files.push(path.join(sub, e.name));
+      else if (!sub && e.isDirectory() && !e.name.startsWith('.') && !SKIP_DIRS.has(e.name)) scan(e.name);
+    }
+  };
+  scan('');
+  files.sort((a, b) => a.split(path.sep).length - b.split(path.sep).length || a.localeCompare(b));
+  const out = [];
+  for (const file of files) {
+    let text;
+    try { if (fs.statSync(path.join(dir, file)).size > 256e3) continue; text = fs.readFileSync(path.join(dir, file), 'utf8'); } catch { continue; }
+    for (const e of parseEnvText(text).filter(worthKeeping)) {
+      const same = out.filter((o) => o.key === e.key);
+      if (same.some((o) => o.value === e.value)) continue;
+      out.push({ key: e.key, value: e.value, file, label: same.length ? `${e.key} (${file})` : e.key });
+    }
+  }
+  return out.slice(0, LIMITS.fields).map(({ label, value, file }) => ({ label, value, file }));
+}
+const digest = (v) => crypto.createHash('sha256').update(v).digest('base64').slice(0, 22);
 
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const str = (v, max, what) => {
@@ -74,19 +128,20 @@ export function createCredentials({ dataDir, now = Date.now }) {
     fs.writeFileSync(file + '.tmp', JSON.stringify(box), { mode: 0o600 });
     fs.renameSync(file + '.tmp', file);
   }
-  const view = ({ owner, ...s }) => s;
+  const view = ({ owner, auto, seen, deleted, ...s }) => (auto ? { ...s, auto: path.basename(auto) } : s);
+  const live = (owner) => load().filter((s) => s.owner === owner && !s.deleted);
   const mine = (owner, id) => {
-    const s = load().find((x) => x.id === id && x.owner === owner);
+    const s = load().find((x) => x.id === id && x.owner === owner && !x.deleted);
     if (!s) throw fail(404, 'No such service');
     return s;
   };
 
   return {
     // Newest change first.
-    list: (owner) => load().filter((s) => s.owner === owner).sort((a, b) => b.updatedAt - a.updatedAt).map(view),
+    list: (owner) => live(owner).sort((a, b) => b.updatedAt - a.updatedAt).map(view),
     add(owner, body) {
       const s = cleanService(body);
-      if (load().filter((x) => x.owner === owner).length >= LIMITS.services) throw fail(400, `At most ${LIMITS.services} services`);
+      if (live(owner).length >= LIMITS.services) throw fail(400, `At most ${LIMITS.services} services`);
       const t = now(), row = { id: crypto.randomUUID(), owner, ...s, createdAt: t, updatedAt: t };
       items.push(row);
       save();
@@ -99,8 +154,36 @@ export function createCredentials({ dataDir, now = Date.now }) {
     },
     remove(owner, id) {
       const row = mine(owner, id);
-      items = items.filter((x) => x !== row);
+      if (row.auto) Object.assign(row, { deleted: true, fields: [], notes: '', updatedAt: now() });
+      else items = items.filter((x) => x !== row);
       save();
+    },
+    // A project's .env secrets ([{label, value, file}], projectSecrets) into `owner`'s card for the folder `dir`, created
+    // on the first one. Only values that changed since the last import are written. → the labels added or changed.
+    importProject(owner, dir, entries) {
+      let row = load().find((x) => x.owner === owner && x.auto === dir);
+      const fresh = entries.filter((e) => row?.seen?.[e.label] !== digest(e.value));
+      if (!fresh.length) return [];
+      if (!row) {
+        if (live(owner).length >= LIMITS.services) return [];
+        const name = path.basename(dir).slice(0, LIMITS.name);
+        row = { id: crypto.randomUUID(), owner, name, url: '', notes: `Saved automatically from the ${name} project's .env files. Edit or delete anything here: a key comes back only when its value in the project changes.`,
+          fields: [], auto: dir, seen: {}, createdAt: now() };
+        items.push(row);
+      }
+      if (row.deleted) Object.assign(row, { deleted: false, notes: `Saved automatically from the ${row.name} project's .env files.` });
+      const changed = [];
+      for (const e of fresh) {
+        row.seen[e.label] = digest(e.value);
+        const f = row.fields.find((x) => x.label === e.label);
+        if (f) { if (f.value === e.value) continue; f.value = e.value; }
+        else if (row.fields.length < LIMITS.fields) row.fields.push({ label: e.label, value: e.value, secret: true });
+        else continue;
+        changed.push(e.label);
+      }
+      if (changed.length) row.updatedAt = now();
+      save();
+      return changed;
     },
     // A deleted user's services go to whoever takes over their chats.
     reown(from, to) {

@@ -40,7 +40,7 @@ import { createSounds, MAX_SOUND_BYTES as MAX_CUSTOM_SOUND_BYTES } from './sound
 import { createVersion, formatVersion } from './version.mjs';
 import { createPreviews } from './previews.mjs';
 import { projectWord } from './project-name.mjs';
-import { createCredentials } from './credentials.mjs';
+import { createCredentials, projectSecrets } from './credentials.mjs';
 import { describeCron, nextRun, validTz } from './cron.mjs';
 import { createUsers, ADMIN_ID } from './users.mjs';
 
@@ -578,6 +578,15 @@ const RAW_FILE = path.join(METRICS_DIR, 'raw.jsonl');
 const usageLog = createUsageLog(DATA);
 const users = createUsers({ dataDir: DATA, usageLog, agents: () => Object.keys(AGENTS) });
 const credentials = createCredentials({ dataDir: DATA }); // each user's own service logins and keys (credentials.mjs)
+// A project's .env secrets go into its owner's Credentials by themselves (credentials.mjs importProject): after every
+// commit sync and once at boot. Anything new or changed is mentioned in the project's main chat.
+function saveProjectKeys(dir, { quiet = false } = {}) {
+  try {
+    const got = credentials.importProject(pathOwner(dir), dir, projectSecrets(dir));
+    const cid = got.length && !quiet && mainChatId(dir);
+    if (cid) emit(cid, { t: 'notice', text: `Saved ${got.length > 3 ? `${got.length} keys` : got.join(', ')} from the project's .env to Credentials.` });
+  } catch (e) { console.error('[credentials] project keys not saved', dir, e.message); }
+}
 try { usageLog.compact(); } catch (e) { console.error('[usage] compact failed', e); }
 // Every agent's latest plan-limit check (usage.mjs createLimitStore): only when the owner presses refresh on the usage
 // card, for that one agent (each check can start a CLI). Claude goes through refreshUsage (it also feeds the sidebar);
@@ -1110,6 +1119,7 @@ async function syncGitNow(dir, message) {
   const c = convos.find((x) => x.cwd === dir);
   if (!c || !fs.existsSync(dir)) return null;
   previews.redeploy(dir); // a no-op unless HEAD moved (or the folder changed what it serves)
+  saveProjectKeys(dir);
   const r = message ? await gh.commitAndPush(dir, message) : await gh.push(dir);
   if (r.repo && r.repo.full !== c.repo?.full) { c.repo = r.repo; orch?.refreshProjects(); }
   // error (the chat's sticky 'not pushed') only once pushes have failed for 10 min or origin diverged; the queue retries a race.
@@ -1690,6 +1700,7 @@ function chatSystemAppend(convo) {
 When you learn a durable fact a future session needs, update .agent-orch/CONTEXT.md in a line or two (edit existing lines; it is not a log).
 After each of your replies, changes are committed and pushed to the project's GitHub repo automatically, so don't run git commit or git push yourself.
 This is the owner's disposable server and you have full access: run any command without asking, and install whatever you need (passwordless sudo, e.g. \`sudo apt-get install -y …\`, plus npm and pip).
+Keep API keys, tokens and passwords in a .env file in this folder (or one folder down), never in committed files: after each reply, agent-orch saves them into the owner's Credentials sheet for this project automatically.
 ${SHOT_HINT}${live ? `\n${live}` : ''}
 
 Current .agent-orch/BRIEF.md:
@@ -3010,6 +3021,8 @@ if (process.argv[2] === 'set-password') {
     .finally(() => server.listen(PORT, '127.0.0.1', () => console.log(`agent-orch on 127.0.0.1:${PORT}`)));
   // Live previews: Caddy gets every saved one and each restarts (an earlier run's processes are stopped first).
   if (!NO_ORCH) previews.startAll().catch((e) => console.error('[previews] start failed', e));
+  // Keys already in projects' .env files show up in Credentials without waiting for each project's next commit.
+  setTimeout(() => { for (const dir of new Set(convos.map((c) => c.cwd))) if (dir && fs.existsSync(dir)) saveProjectKeys(dir, { quiet: true }); }, 5000).unref();
   // Browser runs start only the pinned local @playwright/mcp (never npx at run time): installed here when it's missing.
   ensurePlaywrightMcp().then((r) => (r.ok ? r.installed && console.log(`[browser] installed ${r.cli}`) : console.error(`[browser] ${r.error}`)), () => {});
 }

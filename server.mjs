@@ -55,7 +55,7 @@ const refusal = headRefusal({ dataDir: DATA });
 if (refusal) { console.error(refusal); process.exit(1); }
 const LOGS = path.join(DATA, 'logs');
 const PUBLIC = path.join(ROOT, 'public');
-const INSTALL_SCRIPTS = { '/install/worker-linux.sh': 'install-worker.sh', '/install/worker-macos.sh': 'install-worker-macos.sh' };
+const INSTALL_SCRIPTS = { '/install/worker-linux.sh': 'install-worker.sh', '/install/worker-macos.sh': 'install-worker-macos.sh', '/install/worker-windows.ps1': 'install-worker-windows.ps1' };
 const HOME = os.homedir();
 const WORKSPACE = path.join(HOME, 'workspace');
 const PORT = Number(process.env.PORT || 3000);
@@ -1860,7 +1860,7 @@ async function handleRequest(req, res) {
   // The worker install scripts, for the "Add machine" one-liners (`curl … | bash`). Not secret: the pairing code is.
   const inst = INSTALL_SCRIPTS[p];
   if (inst && req.method === 'GET') {
-    res.writeHead(200, { 'Content-Type': 'text/x-shellscript; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.writeHead(200, { 'Content-Type': inst.endsWith('.ps1') ? 'text/plain; charset=utf-8' : 'text/x-shellscript; charset=utf-8', 'Cache-Control': 'no-store' });
     return res.end(fs.readFileSync(path.join(ROOT, 'bin', inst)));
   }
   // Liveness, without a session: a worker's Ping and the owner's one-liner for a disconnected machine test the head with it.

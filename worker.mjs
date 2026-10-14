@@ -540,6 +540,7 @@ export function createWorker({ home = workerHome(), config = readConfig(home), l
       agents, limits: Object.fromEntries(ids.map((id) => [id, limits.get(id)]).filter(([, v]) => v)),
       versions: { agentOrch: VERSION, node: process.version, git: gitVersion, ...(srcSha ? { sha: srcSha, build: srcBuild } : {}) }, cap, ...(browser && { browser }),
       // Claude in Chrome (chrome.mjs): {capable, chrome, extension, nativeHost, gui, reason?} on a Mac.
+      ...(process.platform === 'linux' && /microsoft/i.test(os.release()) && { wsl: true }), // Windows (install-worker-windows.ps1)
       ...(process.platform === 'darwin' && { chrome: detectChrome() }), ...(CHROME_RUNNER && { chromeRunner: true }),
       ext: { hash: synced.hash, ...(extError ? { error: extError } : {}), ...(synced.kept.length ? { kept: synced.kept } : {}) },
     };

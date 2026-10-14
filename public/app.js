@@ -4461,8 +4461,8 @@ function miniPaint() {
     $('hostName').textContent = n.name || MINI.host;
     $('miniRole').hidden = !n.local;
     $('miniLive').hidden = !n.local; // the head's pulse is its live stream; a worker's numbers are its latest reading
-    $('miniOs').innerHTML = OS_ICON[n.os] || OS_ICON.linux;
-    $('miniOs').title = OS_NAME[n.os] || n.os || '';
+    $('miniOs').innerHTML = OS_ICON[osKind(n)] || OS_ICON.linux;
+    $('miniOs').title = OS_NAME[osKind(n)] || n.os || '';
   }
   const running = n.tasks?.length;
   $('miniTasks').textContent = running == null ? '' : running ? `${plural(running, 'task')} running` : 'Idle';
@@ -4759,8 +4759,11 @@ const MC = { nodes: [], at: 0, raf: 0, cards: new Map(), timer: null, loading: f
 const fmtGB = (b) => `${((b || 0) / 2 ** 30).toFixed(1)} GB`;
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const NODE_ST = { online: 'Online', draining: 'Draining', disabled: 'Disabled', updating: 'Updating', paused: 'Paused' };
-const OS_NAME = { darwin: 'macOS', linux: 'Linux' };
-const OS_ICON = { // SF Symbols style: laptopcomputer (macOS) and server.rack (Linux)
+// A worker in WSL (install-worker-windows.ps1) reports os linux and inventory.wsl: it shows as a Windows PC.
+const osKind = (n) => (n.inventory?.wsl ? 'windows' : n.os);
+const OS_NAME = { darwin: 'macOS', linux: 'Linux', windows: 'Windows (WSL)' };
+const OS_ICON = { // SF Symbols style: laptopcomputer (macOS), server.rack (Linux) and pc (Windows)
+  windows: '<svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M9 20h6M12 16v4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
   darwin: '<svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true"><rect x="5" y="5" width="14" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M2.5 18.5h19" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
   linux: '<svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="4" y="13" width="16" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 7.5h.01M8 16.5h.01" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>',
 };
@@ -4903,8 +4906,8 @@ function mcOpen(n, st) {
   const b = el('button', 'mc-open'), top = el('span', 'mo-top'), icon = el('span', 'mc-os'), id = el('span', 'mo-id'), pill = el('span', 'mc-st');
   b.type = 'button';
   b.dataset.act = 'open';
-  icon.innerHTML = OS_ICON[n.os] || OS_ICON.linux;
-  id.append(el('span', 'mo-name', n.name), el('span', 'mo-meta', [n.local ? 'This server' : OS_NAME[n.os] || n.os, n.build && fmtVersion(n.build)].filter(Boolean).join(' · ')));
+  icon.innerHTML = OS_ICON[osKind(n)] || OS_ICON.linux;
+  id.append(el('span', 'mo-name', n.name), el('span', 'mo-meta', [n.local ? 'This server' : OS_NAME[osKind(n)] || n.os, n.build && fmtVersion(n.build)].filter(Boolean).join(' · ')));
   pill.append(el('span', `dot ${st.dot}`), document.createTextNode(st.label));
   top.append(icon, id, pill, el('span', 'mo-chev'));
   const u = nodeUsage(n), cores = n.inventory?.cores, mem = n.inventory?.mem, gauges = el('span', 'mo-gauges');
@@ -4936,14 +4939,14 @@ function machineCard(n) {
   if (!n.connected || !n.enabled) li.classList.add('away');
   li.append(mcOpen(n, st));
   const top = el('div', 'mc-top'), icon = el('span', 'mc-os'), id = el('div', 'mc-id'), name = el('span', 'mc-name', n.name);
-  icon.innerHTML = OS_ICON[n.os] || OS_ICON.linux;
-  icon.title = OS_NAME[n.os] || n.os || '';
+  icon.innerHTML = OS_ICON[osKind(n)] || OS_ICON.linux;
+  icon.title = OS_NAME[osKind(n)] || n.os || '';
   if (n.local) name.append(el('small', '', '(this server)'));
   if (n.build) name.append(el('small', 'mc-build', fmtVersion(n.build)));
   // Behind the head's origin/main (or, while that count is unknown, an older build than the one running here).
   if (!n.local && (n.behind > 0 || (n.behind == null && n.build && VER.running?.build && n.build < VER.running.build))) name.append(el('span', 'tc-tag outdated', 'outdated'));
   const seen = n.local ? 'controller' : n.lastSeen ? `${n.connected ? 'seen' : 'last seen'} ${relTime(n.lastSeen)}` : 'never connected';
-  id.append(name, el('span', 'mc-meta', [OS_NAME[n.os] || n.os, n.arch, seen].filter(Boolean).join(' · ')));
+  id.append(name, el('span', 'mc-meta', [OS_NAME[osKind(n)] || n.os, n.arch, seen].filter(Boolean).join(' · ')));
   const pill = el('span', 'mc-st');
   pill.append(el('span', `dot ${st.dot}`), document.createTextNode(st.label));
   top.append(icon, id, pill);
@@ -5995,9 +5998,9 @@ function caPaint(v) {
   v.link?.setAttribute('class', off ? 'ca-link off' : 'ca-link');
   const cpu = caCpu(n), ram = caRam(n);
   if (v.rc) { caGauge(v.cpu, v.rc, cpu); caGauge(v.ram, v.rr, ram); }
-  const s = v.r <= 22 ? 14 : v.r <= 26 ? 18 : 24, k = `${n.os}|${s}`;
+  const s = v.r <= 22 ? 14 : v.r <= 26 ? 18 : 24, k = `${osKind(n)}|${s}`;
   if (v.icon.dataset.k !== k) {
-    v.icon.innerHTML = OS_ICON[n.os] || OS_ICON.linux;
+    v.icon.innerHTML = OS_ICON[osKind(n)] || OS_ICON.linux;
     const i = v.icon.firstElementChild;
     for (const [a, val] of [['width', s], ['height', s], ['x', -s / 2], ['y', -s / 2]]) i.setAttribute(a, val);
     v.icon.dataset.k = k;
@@ -6623,7 +6626,7 @@ function ndRender() {
   if (!n) return closeNode(true); // removed meanwhile
   const st = nodeState(n);
   $('ndTitle').textContent = n.name;
-  $('ndSub').textContent = [n.local ? 'This server · the head' : null, OS_NAME[n.os] || n.os, n.arch, st.label,
+  $('ndSub').textContent = [n.local ? 'This server · the head' : null, OS_NAME[osKind(n)] || n.os, n.arch, st.label,
     !n.local && (n.lastSeen ? `${n.connected ? 'seen' : 'last seen'} ${relTime(n.lastSeen)}` : 'never connected')].filter(Boolean).join(' · ');
   // What runs here: tap for the drawer; a remote run's phase timeline under it (re-read when its phase moves on).
   const tasks = n.tasks || [], key = tasks.map((t) => `${t.id}:${t.phase || ''}:${t.waiting_for || ''}`).join(',');
@@ -6785,7 +6788,8 @@ addEventListener('resize', () => { if (ND.id) ND.draws.forEach((d) => d()); });
 const installCmd = (os, code) => {
   const o = location.origin;
   return os === 'mac' ? `curl -fsSL ${o}/install/worker-macos.sh | sudo bash -s -- --controller ${o} --code ${code} --agents claude,codex`
-    : `curl -fsSL ${o}/install/worker-linux.sh | bash -s -- --controller ${o} --code ${code} --agents claude,codex`;
+    : os === 'windows' ? `& ([scriptblock]::Create((irm ${o}/install/worker-windows.ps1))) -Controller ${o} -Code ${code} -Agents 'claude,codex'`
+      : `curl -fsSL ${o}/install/worker-linux.sh | bash -s -- --controller ${o} --code ${code} --agents claude,codex`;
 };
 // How many machines the code pairs: one (a one-time code, valid 10 min) or several in one go (one code, valid 1 h).
 function amUsesPicker() {
@@ -6824,7 +6828,8 @@ function renderAddMachine() {
   if (open) {
     nodes.push(el('p', 'am-note', multi ? `Run the same line on each machine, up to ${AM.uses}. Each one pairs as a machine of its own and names itself after its model and host name, like “MacBook Pro (Sanat-MBP-2)”; rename any of them later.`
       : 'Run one line on the new machine. It installs Node 22 and the worker, signs in to GitHub if needed, pairs with this server and starts at boot.'));
-    for (const [os, label, note] of [['linux', 'Linux VPS (systemd)', ''], ['mac', 'macOS (launchd)', 'Runs as a separate standard user, agentorch, so agents can’t see your files. It starts at boot and keeps the Mac awake only while tasks run on power.']]) {
+    for (const [os, label, note] of [['linux', 'Linux VPS (systemd)', ''], ['mac', 'macOS (launchd)', 'Runs as a separate standard user, agentorch, so agents can’t see your files. It starts at boot and keeps the Mac awake only while tasks run on power.'],
+      ['windows', 'Windows 10/11 (PowerShell, WSL2)', 'Paste into PowerShell. The worker runs in a Linux of its own (WSL2), apart from your files, while you’re signed in to Windows. If WSL is new to the PC, Windows needs one restart: then run the line again.']]) {
       const cmd = installCmd(os, AM.code), pre = el('pre', 'am-cmd copy-cmd');
       pre.dataset.copy = cmd;
       pre.title = 'Click to copy';
@@ -9515,7 +9520,7 @@ function renderConnFoot() {
 function connNodeRow(n) {
   const main = el('div', 'cn-main'), info = el('div', 'cn-info'), st = el('span', 'cn-status');
   info.append(el('span', 'cn-label', n.name));
-  const os = n.os === 'darwin' ? 'macOS' : n.os === 'linux' ? 'Linux' : n.os || '';
+  const os = OS_NAME[osKind(n)] || n.os || '';
   st.append(el('span', `dot ${n.connected ? 'on' : 'off'}`), el('span', 'cn-st', [n.connected ? NODE_ST[n.status] || 'Online' : cap(n.awayLabel || 'offline'), os].filter(Boolean).join(' · ')));
   info.append(st);
   const icon = el('span');

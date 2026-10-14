@@ -178,3 +178,30 @@ test('bad arguments are refused', () => {
     assert.notEqual(dry(s, ['--bogus']).status, 0);
   }
 });
+
+// bin/install-worker-windows.ps1 (Windows, WSL2) under PowerShell 7 when it is installed here (/usr/local/bin/pwsh on
+// the VPS); skipped otherwise. A fake wsl.exe logs its calls, and -DryRun prints the rest.
+const WIN = path.join(BIN, 'install-worker-windows.ps1');
+const pwsh = spawnSync('pwsh', ['-v']).status === 0;
+test('windows: the PowerShell installer parses and its dry run sets up WSL, then runs the Linux installer', { skip: !pwsh && 'no pwsh here' }, () => {
+  const parse = spawnSync('pwsh', ['-NoProfile', '-Command', `$e=$null;$t=$null;[void][System.Management.Automation.Language.Parser]::ParseFile('${WIN}',[ref]$t,[ref]$e);$e.Count`], { encoding: 'utf8' });
+  assert.equal(parse.stdout.trim(), '0', parse.stderr);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-install-win-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'wsl.exe'), `#!/bin/sh\necho "$*" >> "${dir}/log"\n[ "$*" = "-l -q" ] && echo "\${FAKE_DISTROS:-Ubuntu}"\nexit 0\n`, { mode: 0o755 });
+    const run = (args, distros) => spawnSync('pwsh', ['-NoProfile', '-File', WIN, '-DryRun', ...args], { encoding: 'utf8',
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, LOCALAPPDATA: dir, TEMP: dir, COMPUTERNAME: "DESK'TOP-1", FAKE_DISTROS: distros } });
+    const r = run(['-Controller', 'https://head.example', '-Code', 'ABCD-2345', '-Agents', 'claude,codex'], 'Ubuntu');
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /ubuntu-noble-wsl-amd64-wsl\.rootfs\.tar\.gz and check its SHA256/);
+    assert.match(r.stdout, /wsl --import agent-orch \S+ \S+ --version 2/);
+    assert.match(r.stdout, /systemd=true[\s\S]*appendWindowsPath=false/);
+    assert.match(r.stdout, /Register-ScheduledTask 'agent-orch worker'/);
+    assert.ok(r.stdout.includes("curl -fsSL 'https://head.example/install/worker-linux.sh' | bash -s -- --name 'DESKTOP-1' --controller 'https://head.example' --code 'ABCD-2345' --agents 'claude,codex'"), r.stdout);
+    assert.doesNotMatch(run(['-Controller', 'https://head.example'], 'agent-orch').stdout, /Downloading Ubuntu/, 'an existing distro is reused');
+    const bad = run(['-Controller', 'https://head.example', '-Agents', 'claude codex'], 'Ubuntu');
+    assert.notEqual(bad.status, 0);
+    assert.match(bad.stdout, /-Agents takes a comma list/);
+    assert.notEqual(run(['-Code', 'ABCD-2345'], 'Ubuntu').status, 0, '-Controller is required');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

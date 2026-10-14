@@ -371,6 +371,11 @@ curl -fsSL https://<your-host>/install/worker-linux.sh | bash -s -- --controller
 curl -fsSL https://<your-host>/install/worker-macos.sh | sudo bash -s -- --controller https://<your-host> --code ABCD-1234 --agents claude,codex
 ```
 
+```powershell
+# Windows 10/11, in PowerShell (it asks for administrator rights)
+& ([scriptblock]::Create((irm https://<your-host>/install/worker-windows.ps1))) -Controller https://<your-host> -Code ABCD-1234 -Agents 'claude,codex'
+```
+
 The wizard shows "Waiting for the machine to connect…", then each machine's name once it claims the code, then
 "Connected" when its worker dials in. A multi-use code lists every machine that paired with it. **Revoke code** stops
 it early; the machines that already paired stay. Codes are stored as hashes, so a server restart doesn't void one.
@@ -397,6 +402,16 @@ you pass a new `--code`. Re-running with a code pairs the machine again as a new
 multi-use code; remove the old entry in Machines. `--dry-run` prints every step without changing anything.
 `--uninstall` removes the service and the checkout. Add `--purge` to delete `~/.agent-orch-worker` too. Then remove
 the machine in the UI.
+
+**Windows** (`bin/install-worker-windows.ps1`) runs the Linux worker in WSL2, in a distro of its own named
+`agent-orch`: Ubuntu 24.04's official WSL image (checksum-checked) with systemd on, a passwordless-sudo user
+`agentorch` and no Windows PATH, so the agents never see your Windows files or tools. It installs WSL first if needed
+(Windows then needs one restart: run the same line again), runs `install-worker.sh` inside the distro, and adds a
+scheduled task, "agent-orch worker", that keeps the distro running from Windows sign-in on (WSL stops an idle distro,
+services included). So the worker runs while you're signed in and the PC is awake. WSL gives Linux half the PC's
+memory unless `%USERPROFILE%\.wslconfig` says otherwise. The machine shows as "Windows (WSL)". Status:
+`wsl -d agent-orch -- node ~/agent-orch-worker/worker.mjs status`. `-DryRun` prints every step; `-Uninstall` removes
+the task and the whole distro, pairing included.
 
 ### macOS: a dedicated user, a LaunchDaemon, and a power policy
 

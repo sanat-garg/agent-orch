@@ -64,7 +64,7 @@ after(async () => {
 });
 
 test('install scripts are served without a session', async () => {
-  for (const [p, f] of [['/install/worker-linux.sh', 'install-worker.sh'], ['/install/worker-macos.sh', 'install-worker-macos.sh']]) {
+  for (const [p, f] of [['/install/worker-linux.sh', 'install-worker.sh'], ['/install/worker-macos.sh', 'install-worker-macos.sh'], ['/install/worker-windows.ps1', 'install-worker-windows.ps1']]) {
     const r = await fetch(base + p);
     assert.equal(r.status, 200);
     assert.equal(await r.text(), fs.readFileSync(path.join(ROOT, 'bin', f), 'utf8'));
@@ -103,11 +103,12 @@ test('UI: Add machine shows a command per OS with a fresh code, then the machine
   await page.locator('#caWrap .cc[data-node="controller"]').waitFor(); // the head's card beside it
   await page.locator('#addMachine').click();
   const cmds = page.locator('#amBody pre.am-cmd');
-  await cmds.nth(1).waitFor();
-  const [linux, mac] = await cmds.evaluateAll((els) => els.map((e) => e.dataset.copy));
+  await cmds.nth(2).waitFor();
+  const [linux, mac, windows] = await cmds.evaluateAll((els) => els.map((e) => e.dataset.copy));
   const code = linux.match(/--code (\S+)/)[1];
   assert.equal(linux, `curl -fsSL ${base}/install/worker-linux.sh | bash -s -- --controller ${base} --code ${code} --agents claude,codex`);
   assert.equal(mac, `curl -fsSL ${base}/install/worker-macos.sh | sudo bash -s -- --controller ${base} --code ${code} --agents claude,codex`);
+  assert.equal(windows, `& ([scriptblock]::Create((irm ${base}/install/worker-windows.ps1))) -Controller ${base} -Code ${code} -Agents 'claude,codex'`);
   assert.equal((await call(`/api/cluster/pair/${code}`)).body.state, 'waiting', 'the UI code is fresh and live');
   assert.match(await page.locator('.am-status').textContent(), /Waiting for the machine to connect/);
   // A worker claims it: the server's 'cluster' push makes the wizard re-check.

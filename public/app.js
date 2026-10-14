@@ -185,6 +185,12 @@ $('updateRestart').addEventListener('click', async () => {
   try { upd.update = (await api('/api/restart-now', 'POST')).update || upd.update; } catch (e) { $('updateRestart').disabled = false; toast(e.message, { kind: 'error' }); }
   renderUpdateBanner();
 });
+// "Restart when idle": stop claiming tasks and restart once running tasks and chat turns finish (Cancel calls it off).
+$('updateIdle').addEventListener('click', async () => {
+  $('updateIdle').disabled = true;
+  try { await api('/api/restart-when-idle', 'POST'); upd.pending = true; upd.deferred = null; } catch (e) { toast(e.message, { kind: 'error' }); }
+  renderUpdateBanner();
+});
 $('updateCancel').addEventListener('click', async () => {
   $('updateCancel').disabled = true;
   try { applyUpdateStatus(await api('/api/restart/cancel', 'POST')); } catch (e) { $('updateCancel').disabled = false; toast(e.message, { kind: 'error' }); }
@@ -4057,7 +4063,7 @@ function applyUpdateStatus(s) {
 async function pollUpdates() { try { applyUpdateStatus(await api('/api/status')); } catch {} }
 const UPDATE_PHASE = { preflight: 'Updating: checking that the new code starts…', merging: 'Updating: waiting for a merge to finish…', pausing: 'Updating: pausing this server\'s tasks…', exiting: 'Updating: restarting…' };
 // What the updates banner shows (pure, tested): a rolling restart's time or phase, an idle drain, an update the owner
-// deferred with Cancel ('Update ready: vX.YY' + Restart now), a reload notice, or the new-commit count.
+// deferred with Cancel ('Update ready: vX.YY' + Restart now / when idle), a reload notice, or the new-commit count.
 function updateBannerView(upd, draining, applyUpdates) {
   const u = upd.update, busy = draining || (u && u.phase !== 'scheduled');
   const deferred = !u && !draining && upd.deferred;
@@ -4071,6 +4077,7 @@ function updateBannerView(upd, draining, applyUpdates) {
       : reloadOnly ? 'The app was updated: reload to get the new version'
       : `${upd.commits} new commit${upd.commits === 1 ? '' : 's'} since the server started`,
     restart: !busy && !reloadOnly,
+    idle: !busy && !u && !reloadOnly,
     cancel: !!draining || !!(u && ['scheduled', 'merging', 'preflight'].includes(u.phase)),
     reload: reloadOnly,
     dismiss: !busy && !u,
@@ -4082,6 +4089,8 @@ function renderUpdateBanner() {
   $('updateText').textContent = v.text;
   $('updateRestart').hidden = !v.restart;
   $('updateRestart').disabled = false;
+  $('updateIdle').hidden = !v.idle;
+  $('updateIdle').disabled = false;
   $('updateCancel').hidden = !v.cancel;
   $('updateCancel').disabled = false;
   $('updateReload').hidden = !v.reload;

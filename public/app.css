@@ -265,7 +265,13 @@ code, pre, kbd { font-family: var(--mono); }
 .banner.update { background: var(--accent-soft); padding: 6px 6px 6px 14px; }
 .banner.update span { min-width: 0; }
 .banner.update .icon-btn { width: 32px; height: 32px; }
-@media (max-width: 800px) { .banner.update { margin: 8px 10px 0; gap: 8px; font-size: 13.5px; } }
+@media (max-width: 800px) {
+  .banner.update { margin: 8px 10px 0; gap: 8px; font-size: 13.5px; }
+  /* Text and ✕ on the first row, the restart buttons sharing the second. */
+  .banner.update span { flex: 1 1 calc(100% - 48px); }
+  .banner.update .icon-btn { order: 1; }
+  .banner.update .btn { order: 2; flex: 1; }
+}
 .btn { border: 1px solid var(--border-strong); background: var(--panel); border-radius: 9px; padding: 0 14px; height: 36px; cursor: pointer; font-weight: 550; }
 .btn:hover { border-color: var(--accent); }
 .btn.small { display: inline-flex; align-items: center; justify-content: center; height: 32px; font-size: 13.5px; }

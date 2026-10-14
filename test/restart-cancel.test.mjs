@@ -59,17 +59,18 @@ test('the banner shows Cancel while a restart is pending and "Update ready" once
 
   const idle = view({ ...base, pending: true }, true, 'idle');
   assert.equal(idle.text, 'Restarting once idle (automatic)…');
-  assert.deepEqual([idle.hidden, idle.cancel, idle.restart], [false, true, false]);
+  assert.deepEqual([idle.hidden, idle.cancel, idle.restart, idle.idle], [false, true, false, false]);
+  assert.deepEqual([view(base, false, 'manual').restart, view(base, false, 'manual').idle], [true, true], 'new commits offer both restarts');
   const rolling = view({ ...base, update: { at: 1, phase: 'scheduled' } }, false, 'auto');
   assert.equal(rolling.text, 'Updating the server at soon');
-  assert.deepEqual([rolling.cancel, rolling.restart], [true, true]);
+  assert.deepEqual([rolling.cancel, rolling.restart, rolling.idle], [true, true, false]);
   assert.equal(view({ ...base, update: { at: 1, phase: 'pausing' } }, false, 'auto').cancel, false, 'too late once pausing');
 
   const deferred = view({ ...base, deferred: { version: '3.61' } }, false, 'auto');
   assert.equal(deferred.text, 'Update ready: v3.61');
-  assert.deepEqual([deferred.hidden, deferred.restart, deferred.cancel], [false, true, false]);
+  assert.deepEqual([deferred.hidden, deferred.restart, deferred.idle, deferred.cancel], [false, true, true, false]);
   assert.equal(view({ ...base, commits: 0 }, false, 'auto').hidden, true);
-  assert.match(fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8'), /id="updateBanner"[\s\S]*id="updateCancel"[^>]*>Cancel</);
+  assert.match(fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8'), /id="updateBanner"[\s\S]*id="updateIdle"[^>]*>Restart when idle<[\s\S]*id="updateCancel"[^>]*>Cancel</);
 });
 
 // ---------- the server ----------

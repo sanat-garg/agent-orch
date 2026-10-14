@@ -118,6 +118,7 @@
     } else meta.append('Not run yet');
     if (s.skipped) meta.append(` · ${plural(s.skipped, 'run')} skipped while the previous one was still going`);
     if (s.created_by === 'planner') meta.append(' · made from chat');
+    else if (s.created_by === 'project') meta.append(' · logged by the project');
     const acts = el('div', 'sc-acts');
     const run = btn('btn small', 'Run now', async () => {
       run.disabled = true;

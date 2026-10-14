@@ -77,6 +77,39 @@ describe('schedules', { concurrency: true, timeout: 90000 }, () => {
     assert.deepEqual([r.del.ok, r.left, r.gone], [true, 0, 404]);
   });
 
+  test('a project logs its own schedules in .agent-orch/schedules.json', async () => {
+    const r = await scenario(`
+      const pid = project(), dir = db.prepare('SELECT path FROM projects WHERE id=?').get(pid).path;
+      const write = (v) => { fs.mkdirSync(path.join(dir, '.agent-orch'), { recursive: true }); fs.writeFileSync(path.join(dir, '.agent-orch', 'schedules.json'), typeof v === 'string' ? v : JSON.stringify(v)); };
+      const list = () => o.listSchedules(pid).map((s) => [s.title, s.cron, s.command, s.created_by]);
+      const none = o.syncScheduleFile(dir);
+      write([{ title: 'Scrape', cron: '0 9 * * *', command: 'node scrape.mjs' }, { title: 'Bad', cron: '61 * * * *', command: 'x' }]);
+      const first = o.syncScheduleFile(dir), afterFirst = list();
+      const again = o.syncScheduleFile(dir);
+      const id = o.listSchedules(pid).find((s) => s.title === 'Scrape').id;
+      o.editSchedule(id, { cron: '0 10 * * *' }); // the owner's edit stands while the file's entry is unchanged
+      const kept = (o.syncScheduleFile(dir), list());
+      write([{ title: 'Scrape', cron: '30 9 * * *', command: 'node scrape.mjs' }, { title: 'Report', cron: '0 18 * * 1-5', prompt: 'Write the report' }]);
+      const changed = o.syncScheduleFile(dir), afterChange = list();
+      write('{ not json');
+      const broken = o.syncScheduleFile(dir), brokenAgain = o.syncScheduleFile(dir), untouched = list().length;
+      write([]);
+      const removed = o.syncScheduleFile(dir);
+      return { none, first, afterFirst, again, kept, changed, afterChange, broken, brokenAgain, untouched, removed, end: list(), stranger: o.syncScheduleFile('/nowhere') };`);
+    assert.deepEqual(r.none, { added: [], updated: [], removed: [], errors: [] });
+    assert.deepEqual(r.first.added, ["'Scrape' (Every day at 09:00)"]);
+    assert.match(r.first.errors[0], /'Bad': .*minute: 61/);
+    assert.deepEqual(r.afterFirst, [['Scrape', '0 9 * * *', 'node scrape.mjs', 'project']]);
+    assert.deepEqual(r.again, { added: [], updated: [], removed: [], errors: [] }, 'an unchanged file changes nothing and repeats no error');
+    assert.equal(r.kept[0][1], '0 10 * * *');
+    assert.deepEqual([r.changed.updated, r.changed.added, r.changed.removed], [["'Scrape' (Every day at 09:30)"], ["'Report' (Weekdays at 18:00)"], []]);
+    assert.deepEqual(r.afterChange, [['Scrape', '30 9 * * *', 'node scrape.mjs', 'project'], ['Report', '0 18 * * 1-5', null, 'project']]);
+    assert.match(r.broken.errors[0], /schedules\.json: /);
+    assert.deepEqual([r.brokenAgain.errors, r.untouched], [[], 2], 'a broken file is reported once and removes nothing');
+    assert.deepEqual(r.removed.removed.sort(), ["'Report'", "'Scrape'"]);
+    assert.deepEqual([r.end, r.stranger], [[], null]);
+  });
+
   test('a due schedule queues a task; the next run is skipped while that task is unfinished', async () => {
     const r = await scenario(`
       const pid = project('paused'); // its tasks stay queued

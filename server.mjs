@@ -587,6 +587,19 @@ function saveProjectKeys(dir, { quiet = false } = {}) {
     if (cid) emit(cid, { t: 'notice', text: `Saved ${got.length > 3 ? `${got.length} keys` : got.join(', ')} from the project's .env to Credentials.` });
   } catch (e) { console.error('[credentials] project keys not saved', dir, e.message); }
 }
+// A project logs its own schedules in .agent-orch/schedules.json (orchestrator syncScheduleFile): synced like the keys
+// above, and what was added, changed, removed or refused is mentioned in the project's main chat.
+function saveProjectSchedules(dir, { quiet = false } = {}) {
+  try {
+    const r = orch?.syncScheduleFile(dir);
+    const cid = r && !quiet && mainChatId(dir);
+    if (!cid) return;
+    const lines = [['Scheduled', r.added], ['Updated the schedule', r.updated], ['Removed the schedule', r.removed]]
+      .filter(([, l]) => l.length).map(([w, l]) => `${w} ${l.join(', ')}.`);
+    if (lines.length) emit(cid, { t: 'notice', text: `${lines.join(' ')} See Schedules in the sidebar.` });
+    if (r.errors.length) emit(cid, { t: 'notice', text: `Not scheduled: ${r.errors.join('; ')}` });
+  } catch (e) { console.error('[schedules] project schedules not synced', dir, e.message); }
+}
 try { usageLog.compact(); } catch (e) { console.error('[usage] compact failed', e); }
 // Every agent's latest plan-limit check (usage.mjs createLimitStore): only when the owner presses refresh on the usage
 // card, for that one agent (each check can start a CLI). Claude goes through refreshUsage (it also feeds the sidebar);
@@ -1120,6 +1133,7 @@ async function syncGitNow(dir, message) {
   if (!c || !fs.existsSync(dir)) return null;
   previews.redeploy(dir); // a no-op unless HEAD moved (or the folder changed what it serves)
   saveProjectKeys(dir);
+  saveProjectSchedules(dir);
   const r = message ? await gh.commitAndPush(dir, message) : await gh.push(dir);
   if (r.repo && r.repo.full !== c.repo?.full) { c.repo = r.repo; orch?.refreshProjects(); }
   // error (the chat's sticky 'not pushed') only once pushes have failed for 10 min or origin diverged; the queue retries a race.
@@ -1701,6 +1715,7 @@ When you learn a durable fact a future session needs, update .agent-orch/CONTEXT
 After each of your replies, changes are committed and pushed to the project's GitHub repo automatically, so don't run git commit or git push yourself.
 This is the owner's disposable server and you have full access: run any command without asking, and install whatever you need (passwordless sudo, e.g. \`sudo apt-get install -y …\`, plus npm and pip).
 Keep API keys, tokens and passwords in a .env file in this folder (or one folder down), never in committed files: after each reply, agent-orch saves them into the owner's Credentials sheet for this project automatically.
+When the owner asks for something to run on a schedule (every day at 9, hourly, …), log it in .agent-orch/schedules.json and agent-orch's server runs it at those times, even when no chat is open (don't set up crontab, systemd timers or sleep loops yourself). The file is a JSON list of {"title", "cron" (5 fields: minute hour day month weekday), "command" (a bash command run in this folder with its .env loaded; no agent, no plan usage) or "prompt" (an agent task, only for work that needs judgement), "tz" (optional; default ${orch?.ownerTz?.() || 'UTC'}, the owner's), "enabled" (optional)}. After your reply it is applied by title: add, edit or remove an entry to change that schedule.
 ${SHOT_HINT}${live ? `\n${live}` : ''}
 
 Current .agent-orch/BRIEF.md:
@@ -3027,8 +3042,8 @@ if (process.argv[2] === 'set-password') {
     .finally(() => server.listen(PORT, '127.0.0.1', () => console.log(`agent-orch on 127.0.0.1:${PORT}`)));
   // Live previews: Caddy gets every saved one and each restarts (an earlier run's processes are stopped first).
   if (!NO_ORCH) previews.startAll().catch((e) => console.error('[previews] start failed', e));
-  // Keys already in projects' .env files show up in Credentials without waiting for each project's next commit.
-  setTimeout(() => { for (const dir of new Set(convos.map((c) => c.cwd))) if (dir && fs.existsSync(dir)) saveProjectKeys(dir, { quiet: true }); }, 5000).unref();
+  // Keys already in projects' .env files (and their schedules.json) show up without waiting for each project's next commit.
+  setTimeout(() => { for (const dir of new Set(convos.map((c) => c.cwd))) if (dir && fs.existsSync(dir)) { saveProjectKeys(dir, { quiet: true }); saveProjectSchedules(dir, { quiet: true }); } }, 5000).unref();
   // Browser runs start only the pinned local @playwright/mcp (never npx at run time): installed here when it's missing.
   ensurePlaywrightMcp().then((r) => (r.ok ? r.installed && console.log(`[browser] installed ${r.cli}`) : console.error(`[browser] ${r.error}`)), () => {});
 }

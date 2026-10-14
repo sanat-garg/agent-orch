@@ -2744,6 +2744,50 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (r.error) logEvent(`planner schedule '${s.title}' not saved: ${r.error}`, { level: 'warn', projectId: project.id });
     return r;
   }
+  // A project logs its own schedules (owner, 2026-10-14): the chat writes <project>/.agent-orch/schedules.json, a list of
+  // {title, cron, command | prompt, tz?, done_when?, enabled?, agent?, model?}, and server.mjs syncs it after each reply
+  // and at boot. kv schedule_file:<pid> keeps each title's entry as last synced, so only an entry that changed in the
+  // file is applied: the owner's later edits (or deletion) in the sheet stand until the project changes that entry.
+  // A title dropped from the file removes its schedule. → {added, updated, removed, errors} (titles), or null.
+  function syncScheduleFile(projectPath) {
+    const project = q1('SELECT * FROM projects WHERE path=:p', { p: projectPath });
+    if (!project) return null;
+    const file = path.join(projectPath, '.agent-orch', 'schedules.json'), key = `schedule_file:${project.id}`;
+    const prev = JSON.parse(kvGet(key) || '{}'), next = {}, out = { added: [], updated: [], removed: [], errors: [] };
+    let list = [];
+    if (fs.existsSync(file)) {
+      try {
+        const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+        list = Array.isArray(raw) ? raw : raw?.schedules;
+        if (!Array.isArray(list)) throw new Error('expected a list of schedules');
+      } catch (e) {
+        if (prev.error !== e.message) out.errors.push(`.agent-orch/schedules.json: ${e.message}`);
+        kvSet(key, JSON.stringify({ ...prev, error: e.message }));
+        return out;
+      }
+    }
+    delete prev.error;
+    for (const s of list) {
+      const title = String(s?.title || '').trim().slice(0, 200);
+      if (!title) { out.errors.push('a schedule without a title'); continue; }
+      const k = title.toLowerCase(), entry = JSON.stringify(s);
+      next[k] = entry;
+      if (prev[k] === entry) continue;
+      const same = q1('SELECT id FROM schedules WHERE project_id=:p AND lower(title)=lower(:t)', { p: project.id, t: title });
+      const fields = { title, cron: s.cron, command: s.command ?? null, prompt: s.command ? '' : s.prompt ?? '', done_when: s.done_when ?? null,
+        agent: s.agent ?? null, model: s.model ?? null, ...(s.tz ? { tz: s.tz } : {}), ...(s.enabled !== undefined ? { enabled: !!s.enabled } : {}) };
+      const r = saveSchedule(project.id, fields, same?.id ?? null, 'project');
+      if (r.error) out.errors.push(`'${title}': ${r.error}`);
+      else (same ? out.updated : out.added).push(`'${title}' (${r.schedule.when})`);
+    }
+    for (const k of Object.keys(prev)) {
+      if (k in next) continue;
+      const cur = q1("SELECT id, title FROM schedules WHERE project_id=:p AND lower(title)=:t AND created_by='project'", { p: project.id, t: k });
+      if (cur && deleteSchedule(cur.id).ok) out.removed.push(`'${cur.title}'`);
+    }
+    kvSet(key, JSON.stringify(next));
+    return out;
+  }
   function schedulesText(projectId) {
     const rows = listSchedules(projectId).map((s) => `  #${s.id} '${s.title}': ${describeCron(s.cron)} (${s.cron}, ${s.tz})${s.enabled ? '' : ' [off]'}`
       + (s.command ? `, runs \`${s.command.split('\n')[0].slice(0, 120)}\`` : ', agent task'));
@@ -5142,7 +5186,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     // Projects without a chat (old ones, the Browser tab's) only show while they have one.
     allSchedules: () => ({ projects: qa(`SELECT id, name, path, convo_id FROM projects p WHERE convo_id IS NOT NULL OR EXISTS(SELECT 1 FROM schedules s WHERE s.project_id=p.id)
       ORDER BY position IS NULL, position, priority DESC, id`),
-      schedules: qa('SELECT * FROM schedules ORDER BY project_id, id').map((s) => ({ ...scheduleView(s), project_id: s.project_id })), tz: ownerTz() }), saveSchedule, editSchedule, deleteSchedule, runScheduleNow, scheduleRuns, noteOwnerTz, ownerTz,
+      schedules: qa('SELECT * FROM schedules ORDER BY project_id, id').map((s) => ({ ...scheduleView(s), project_id: s.project_id })), tz: ownerTz() }), saveSchedule, editSchedule, deleteSchedule, syncScheduleFile, runScheduleNow, scheduleRuns, noteOwnerTz, ownerTz,
     fireSchedules, // tests: queue every due schedule now, as a tick would
     checkJobs, // tests: finish the schedule command runs that ended, as a tick would
     gateSettings, setGateSettings, decideApproval, taskActions, pendingApprovals: () => approvals.pending().map(({ args, ...a }) => a),

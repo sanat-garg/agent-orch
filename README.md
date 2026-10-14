@@ -569,6 +569,7 @@ All runtime state lives in `data/` (or `CW_DATA_DIR`). The JSON state files (`au
 | `metrics/` | `raw.jsonl` and `minutes.jsonl` server metrics |
 | `orchestrator/agent-orch.db` | the orchestrator SQLite database (migrated from `ao2.db` on start) (projects, tasks, runs, events, usage limits) |
 | `orchestrator/runs/` | per-run agent logs |
+| `orchestrator/schedule-runs/` | output and exit code of each schedule command still running (cron-run.mjs); a finished run moves into the database |
 | `orchestrator/lock` | PID of the process that runs the orchestrator; a second instance on the same dir won't schedule tasks |
 | `orchestrator/bin/` | `python`/`pip` shims |
 | `push-vapid.json` | the Web Push VAPID key pair (made on first start) |

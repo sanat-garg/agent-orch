@@ -235,7 +235,7 @@ function userBlocked(req, url, u) {
   }
   if ((m = p.match(/^\/api\/orch\/tasks?\/(\d+)(\/[\w-]+)?$/))) return ['/assign', '/run-on'].includes(m[2]) ? ADMIN_ONLY : ownsPath(u, orch.pathOf('task', m[1])) ? null : NOT_YOURS;
   if ((m = p.match(/^\/api\/orch\/projects?\/(\d+)(\/[\w-]+)?$/))) return ownsPath(u, orch.pathOf('project', m[1])) ? null : NOT_YOURS;
-  if ((m = p.match(/^\/api\/orch\/schedules\/(\d+)(\/run)?$/))) return ownsPath(u, orch.pathOf('schedule', m[1])) ? null : NOT_YOURS;
+  if ((m = p.match(/^\/api\/orch\/schedules\/(\d+)(\/runs?)?$/))) return ownsPath(u, orch.pathOf('schedule', m[1])) ? null : NOT_YOURS;
   if ((m = p.match(/^\/api\/orch\/messages\/(\d+)$/))) return ownsPath(u, orch.pathOf('message', m[1])) ? null : NOT_YOURS;
   return ADMIN_ONLY;
 }
@@ -2686,8 +2686,9 @@ async function handleRequest(req, res) {
   // task for the same sample request.
   if (p === '/api/orch/rigor-levels' && req.method === 'GET') return json(res, 200, rigorLevelsView());
   // Schedules (orchestrator saveSchedule, cron.mjs): GET lists a project's (?tz= records the owner's browser zone, used
-  // for schedules the planner makes), POST {title, prompt, cron, tz, done_when?, enabled?, agent?, model?} adds one,
-  // PATCH/DELETE /api/orch/schedules/:id edit or remove one, POST …/:id/run queues its task now (409 while the last runs).
+  // for schedules the planner makes), POST {title, command | prompt, cron, tz, done_when?, enabled?, agent?, model?} adds one,
+  // PATCH/DELETE /api/orch/schedules/:id edit or remove one, POST …/:id/run runs it now (409 while the last one runs),
+  // GET …/:id/runs lists a command schedule's latest runs with their output.
   if (p === '/api/orch/schedules' && req.method === 'GET') {
     if (isAdmin(me)) orch.noteOwnerTz(url.searchParams.get('tz'));
     const all = orch.allSchedules(), projects = all.projects.filter((x) => ownsPath(me, x.path)), ids = new Set(projects.map((x) => x.id));
@@ -2710,6 +2711,11 @@ async function handleRequest(req, res) {
     const body = await readBody(req);
     orch.noteOwnerTz(body.tz);
     const r = orch.saveSchedule(Number(osch[1]), body);
+    return json(res, r.error ? r.status : 200, r);
+  }
+  const oscr = p.match(/^\/api\/orch\/schedules\/(\d+)\/runs$/);
+  if (oscr && req.method === 'GET') {
+    const r = orch.scheduleRuns(Number(oscr[1]));
     return json(res, r.error ? r.status : 200, r);
   }
   const osc = p.match(/^\/api\/orch\/schedules\/(\d+)(\/run)?$/);

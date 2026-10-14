@@ -1,14 +1,18 @@
 'use strict';
 // ---------- Schedules (server: cron.mjs + orchestrator `schedules`) ----------
-// Recurring tasks: each schedule queues a task in its project whenever its cron time comes round (in the owner's time
-// zone, this browser's). The sidebar's "Schedules" sheet lists every project's, with on/off, Run now, Edit and Delete;
-// the editor builds the cron from simple choices (or takes one typed) and checks it live (GET /api/orch/cron-preview).
-// The chat planner makes them too ("every Monday at 8, check dependencies"). Loaded after app.js and uses its helpers
+// Cron jobs: whenever a schedule's time comes round (in the owner's time zone, this browser's) the server runs its
+// command in the project folder (cron-run.mjs; Output shows each run's exit code and output, GET …/runs), or, for an
+// "Ask an agent" schedule, queues a task. The sidebar's "Schedules" sheet lists every project's, with on/off, Run now,
+// Output, Edit and Delete; the editor builds the cron from simple choices (or takes one typed) and checks it live
+// (GET /api/orch/cron-preview). The chat planner makes them too ("every night at 2, run the scraper"). Loaded after app.js and uses its helpers
 // ($, el, api, toast, fmtWhen, closeSidebar, coarse, routeHash, O).
 (() => {
   const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-  const SC = { projects: [], list: [], loaded: false, edit: null, lastFocus: null, reload: 0 };
+  const SC = { projects: [], list: [], loaded: false, edit: null, lastFocus: null, reload: 0, open: new Set() };
   const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const JOB = { running: 'running…', ok: 'finished', failed: 'failed', timeout: 'stopped after 1 hour', interrupted: 'interrupted' };
+  const jobText = (j) => (j.status === 'failed' && j.exit_code != null ? `failed (exit ${j.exit_code})` : JOB[j.status] || j.status);
+  const took = (j) => { const s = Math.round((j.finished_at || Date.now() / 1000) - j.started_at); return s < 90 ? `${s} s` : `${Math.round(s / 60)} min`; };
   const STATUS = { queued: 'queued', running: 'running', done: 'done', failed: 'failed', cancelled: 'cancelled', paused: 'paused', needs_integration: 'merging' };
   const pad = (n) => String(n).padStart(2, '0');
   const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
@@ -73,7 +77,7 @@
     if ($('schedModal').hidden || SC.edit) return;
     const body = $('scBody');
     const top = el('div', 'sc-top');
-    top.append(el('p', 'sc-hint', `Each schedule queues a task in its project at the times you set, in your time zone (${TZ}). You can also ask in chat, e.g. "every weekday at 9, check the inbox".`),
+    top.append(el('p', 'sc-hint', `Like cron: at the times you set, in your time zone (${TZ}), the server runs a command in the project folder. You can also ask in chat, e.g. "every night at 2, run the scraper".`),
       btn('btn small primary', 'New schedule', () => startEdit(null)));
     const parts = [top];
     if (!SC.loaded) parts.push(el('p', 'sc-empty', SC.error || 'Loading…'));
@@ -97,12 +101,17 @@
     sw.setAttribute('aria-label', `${s.title}: ${s.enabled ? 'on' : 'off'}`);
     sw.onchange = () => save(s.id, { enabled: sw.checked, tz: s.tz }, sw.checked ? `${s.title} is on` : `${s.title} is off`);
     head.append(el('span', 'sc-title', s.title), sw);
+    const what = s.kind === 'command' ? el('code', 'sc-cmd', s.command.split('\n')[0]) : el('div', 'sc-agent', 'Agent task');
+    if (s.kind === 'command') what.title = s.command;
     const when = el('div', 'sc-when');
     when.append(el('span', 'sc-cron', s.when + (s.tz !== TZ ? ` (${s.tz})` : '')));
     if (s.enabled && s.next_run_at) when.append(el('span', '', ` · Next ${fmtWhen(s.next_run_at * 1000)}`));
     else if (!s.enabled) when.append(el('span', '', ' · Off'));
     const meta = el('div', 'sc-meta');
-    if (s.last_task) {
+    if (s.last_job) {
+      const j = s.last_job;
+      meta.append(el('span', `sc-job ${j.status}`, `Last run ${jobText(j)}`), `, ${fmtWhen(j.started_at * 1000)}${j.status === 'running' ? '' : ` in ${took(j)}`} · ${plural(s.runs, 'run')}`);
+    } else if (s.last_task) {
       const a = btn('sc-task', `#${s.last_task.id}`, () => { close(); routeHash(`task-${s.last_task.id}`); });
       a.title = 'Open the task from the last run';
       meta.append('Last run ', a, ` ${STATUS[s.last_task.status] || s.last_task.status}${s.last_run_at ? `, ${fmtWhen(s.last_run_at * 1000)}` : ''} · ${plural(s.runs, 'run')}`);
@@ -112,17 +121,47 @@
     const acts = el('div', 'sc-acts');
     const run = btn('btn small', 'Run now', async () => {
       run.disabled = true;
-      try { const x = await api(`/api/orch/schedules/${s.id}/run`, 'POST'); toast(`Queued #${x.task}: ${s.title}`, { kind: 'success' }); await load(); render(); }
+      try {
+        const x = await api(`/api/orch/schedules/${s.id}/run`, 'POST');
+        toast(x.task ? `Queued #${x.task}: ${s.title}` : `Started: ${s.title}`, { kind: 'success' });
+        await load(); render();
+      }
       catch (e) { toast(e.message, { kind: 'error' }); } finally { run.disabled = false; }
     });
     const edit = btn('btn small', 'Edit', () => startEdit(s));
+    const out = el('div', 'sc-out');
+    out.hidden = !SC.open.has(s.id);
+    const log = s.kind === 'command' && btn('btn small', 'Output', () => {
+      if (SC.open.has(s.id)) SC.open.delete(s.id); else SC.open.add(s.id);
+      out.hidden = !SC.open.has(s.id);
+      log.setAttribute('aria-expanded', String(!out.hidden));
+      if (!out.hidden) runs(s, out);
+    });
+    if (log) { log.setAttribute('aria-expanded', String(!out.hidden)); if (!out.hidden) runs(s, out); }
     const del = btn('btn small danger', 'Delete', async () => {
-      if (!confirm(`Delete the schedule "${s.title}"? Tasks it already queued stay.`)) return;
+      if (!confirm(s.kind === 'command' ? `Delete the schedule "${s.title}"?${s.last_job?.status === 'running' ? ' Its run in progress is stopped.' : ''}`
+        : `Delete the schedule "${s.title}"? Tasks it already queued stay.`)) return;
       try { await api(`/api/orch/schedules/${s.id}`, 'DELETE'); await load(); render(); } catch (e) { toast(e.message, { kind: 'error' }); }
     });
-    acts.append(run, edit, del);
-    r.append(head, when, meta, acts);
+    acts.append(...[run, log, edit, del].filter(Boolean));
+    r.append(head, what, when, meta, acts, out);
     return r;
+  }
+
+  // A command schedule's latest runs, newest first: the newest one's output shown, older ones folded.
+  async function runs(s, box) {
+    if (!box.childElementCount) box.append(el('p', 'sc-empty', 'Loading…'));
+    let list;
+    try { list = (await api(`/api/orch/schedules/${s.id}/runs`)).runs; } catch (e) { box.replaceChildren(el('p', 'sc-empty', e.message)); return; }
+    if (!list.length) { box.replaceChildren(el('p', 'sc-empty', 'Not run yet.')); return; }
+    box.replaceChildren(...list.map((j, i) => {
+      const d = document.createElement('details');
+      d.className = 'sc-run'; d.open = i === 0;
+      const sum = el('summary', '');
+      sum.append(el('span', `sc-job ${j.status}`, jobText(j)), ` · ${fmtWhen(j.started_at * 1000)}${j.status === 'running' ? '' : ` · ${took(j)}`}${j.manual ? ' · Run now' : ''}`);
+      d.append(sum, el('pre', 'sc-pre', j.output || '(no output)'));
+      return d;
+    }));
   }
 
   async function save(id, fields, ok) {
@@ -149,7 +188,11 @@
     proj.value = f.projectId ?? '';
     proj.disabled = !!s;
     const title = document.createElement('input');
-    title.maxLength = 200; title.value = s?.title || ''; title.placeholder = 'e.g. Morning inbox triage'; title.required = true;
+    title.maxLength = 200; title.value = s?.title || ''; title.placeholder = 'e.g. Nightly scrape'; title.required = true;
+    let kind = s?.kind || 'command';
+    const command = document.createElement('textarea');
+    command.rows = 3; command.value = s?.command || ''; command.className = 'sc-cmdin'; command.placeholder = 'e.g. npm run scrape';
+    command.spellcheck = false; command.autocapitalize = 'none'; command.setAttribute('autocorrect', 'off');
     const prompt = document.createElement('textarea');
     prompt.rows = 4; prompt.value = s?.prompt || ''; prompt.placeholder = 'What the task should do each time, e.g. "Read new email, file receipts in Drive and list what needs my reply."';
     const preset = document.createElement('select');
@@ -237,8 +280,10 @@
       e.preventDefault();
       err.textContent = '';
       if (!title.value.trim()) { err.textContent = 'Give it a title'; return title.focus(); }
-      if (!prompt.value.trim()) { err.textContent = 'Say what the task should do'; return prompt.focus(); }
-      const body = { title: title.value, prompt: prompt.value, cron: toCron(f), done_when: doneWhen.value, tz: s?.tz || TZ };
+      const box = kind === 'command' ? command : prompt;
+      if (!box.value.trim()) { err.textContent = kind === 'command' ? 'Say what command to run' : 'Say what the task should do'; return box.focus(); }
+      const body = { title: title.value, cron: toCron(f), tz: s?.tz || TZ,
+        ...(kind === 'command' ? { command: command.value, prompt: '', done_when: '' } : { command: '', prompt: prompt.value, done_when: doneWhen.value }) };
       submit.disabled = true;
       try {
         const r = s ? await api(`/api/orch/schedules/${s.id}`, 'PATCH', body) : await api(`/api/orch/projects/${proj.value}/schedules`, 'POST', body);
@@ -249,10 +294,25 @@
     };
     const rep = el('div', 'sc-repeat');
     rep.append(preset, params);
+    const kinds = el('div', 'sc-kind');
+    kinds.setAttribute('role', 'tablist'); kinds.setAttribute('aria-label', 'What runs');
+    const cmdField = field('Command', command, 'Runs with bash in the project folder, with its .env loaded, like a cron job. No agent and no plan usage. Stopped after 1 hour.');
+    const agentFields = [field('What to do', prompt, 'A fresh agent runs this each time, with no memory of earlier runs, so make it self-contained. Uses your plan.'),
+      field('Done when', doneWhen, 'A command that proves a run worked. Leave blank to skip the check.')];
+    const showKind = () => {
+      for (const b of kinds.children) b.setAttribute('aria-selected', String(b.dataset.kind === kind));
+      cmdField.hidden = kind !== 'command';
+      for (const x of agentFields) x.hidden = kind === 'command';
+    };
+    for (const [k, t] of [['command', 'Run a command'], ['agent', 'Ask an agent']]) {
+      const b = btn('', t, () => { kind = k; showKind(); });
+      b.dataset.kind = k; b.setAttribute('role', 'tab');
+      kinds.append(b);
+    }
+    showKind();
     form.append(el('h3', 'sc-etitle', s ? 'Edit schedule' : 'New schedule'),
-      field('Project', proj), field('Title', title), field('What to do', prompt, 'A fresh agent runs this each time, with no memory of earlier runs, so make it self-contained.'),
-      field('Repeat', rep), preview,
-      field('Done when', doneWhen, 'A command that proves a run worked. Leave blank to skip the check.'), err, foot);
+      field('Project', proj), field('Title', title), kinds, cmdField, agentFields[0],
+      field('Repeat', rep), preview, agentFields[1], err, foot);
     body.replaceChildren(form);
     if (!coarse) title.focus();
   }

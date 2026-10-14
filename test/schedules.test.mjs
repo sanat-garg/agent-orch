@@ -1,5 +1,6 @@
 // Schedules (orchestrator `schedules` + cron.mjs): a due schedule queues a task, a run whose last task hasn't finished
-// is skipped (never piled up), Run now, edits/validation, and the planner's `schedules` in its tasks block.
+// is skipped (never piled up), Run now, edits/validation, and the planner's `schedules` in its tasks block. Command
+// schedules (cron-run.mjs) run their shell command in the project folder and keep its exit code and output.
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -12,7 +13,7 @@ import { extractTasks } from '../orchestrator.mjs';
 const ORCH = JSON.stringify(new URL('../orchestrator.mjs', import.meta.url).href);
 
 // createOrchestrator starts timers, so the scenario runs in a child process with a fake SDK query(). Prints a JSON line.
-async function scenario(body) {
+async function scenario(body, config = {}) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-schedules-')), root = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-schedules-p-'));
   try {
     const script = `import { createOrchestrator } from ${ORCH};
@@ -27,7 +28,7 @@ async function scenario(body) {
         yield { type: 'result', subtype: 'success', result: 'AGENT-ORCH-STATUS: done — ok', session_id: 's', num_turns: 1 };
       })();
       const o = createOrchestrator({ config: { pollMs: 100, parallelTasks: 2, agentSlots: 2, worktrees: false, autoCommit: false,
-        meminfo: ${JSON.stringify(new URL('./fixtures/meminfo-ample', import.meta.url).pathname)} }, query, dataDir, claudeEnv: {}, getLimits: () => [],
+        meminfo: ${JSON.stringify(new URL('./fixtures/meminfo-ample', import.meta.url).pathname)}, scheduleScope: false, ...${JSON.stringify(config)} }, query, dataDir, claudeEnv: {}, getLimits: () => [],
         onSubscription: () => true, broadcast() {}, emitChat() {}, convoExists: () => false });
       const db = new DatabaseSync(path.join(dataDir, 'orchestrator', 'agent-orch.db'));
       let n = 0;
@@ -38,6 +39,7 @@ async function scenario(body) {
       const sched = (id) => db.prepare('SELECT * FROM schedules WHERE id=?').get(id);
       const due = (id) => db.prepare('UPDATE schedules SET next_run_at=? WHERE id=?').run(Date.now() / 1000 - 5, id);
       const tasks = (pid) => db.prepare("SELECT * FROM tasks WHERE project_id=? AND source='schedule' ORDER BY id").all(pid);
+      const jobs = (sid) => db.prepare('SELECT * FROM schedule_runs WHERE schedule_id=? ORDER BY id').all(sid);
       const out = await (async () => { ${body} })();
       console.log(JSON.stringify(out));
       process.exit(0);`;
@@ -119,13 +121,63 @@ describe('schedules', { concurrency: true, timeout: 90000 }, () => {
     assert.equal(r.runs, 2);
     assert.match(r.label, /The last run was task #\d+ \(done\)/);
   });
+
+  test('a command schedule runs its command in the project folder, like cron, and keeps the exit code and output', async () => {
+    const r = await scenario(`
+      const pid = project();
+      const dir = db.prepare('SELECT path FROM projects WHERE id=?').get(pid).path;
+      fs.writeFileSync(path.join(dir, '.env'), 'SCRAPE_TOKEN=abc123\\n');
+      const s = o.saveSchedule(pid, { title: 'Scrape', command: 'echo "in $(basename $PWD) tz=$TZ token=$SCRAPE_TOKEN port=\${PORT:-none}"; touch ran.txt',
+        cron: '0 2 * * *', tz: 'Asia/Kolkata' }).schedule;
+      due(s.id);
+      await until(() => jobs(s.id)[0]?.status === 'ok', 20000);
+      const bad = o.saveSchedule(pid, { title: 'Broken', command: 'echo half; echo oops >&2; exit 3', cron: '0 3 * * *' }).schedule;
+      const now = o.runScheduleNow(bad.id);
+      await until(() => jobs(bad.id)[0]?.status === 'failed', 20000);
+      return { s, ok: jobs(s.id), ran: fs.existsSync(path.join(dir, 'ran.txt')), now, failed: jobs(bad.id)[0], view: o.listSchedules(pid),
+        runs: o.scheduleRuns(bad.id), tasks: tasks(pid).length, files: fs.readdirSync(path.join(dataDir, 'orchestrator', 'schedule-runs')) };`);
+    assert.equal(r.s.kind, 'command');
+    assert.equal(r.ok.length, 1);
+    assert.equal(r.ok[0].exit_code, 0);
+    assert.equal(r.ok[0].output, 'in p1 tz=Asia/Kolkata token=abc123 port=none\n');
+    assert.ok(r.ran);
+    assert.equal(r.now.ok, true);
+    assert.equal(r.failed.exit_code, 3);
+    assert.match(r.failed.output, /half\noops/);
+    assert.equal(r.view[1].last_job.status, 'failed');
+    assert.equal(r.view[0].last_job.status, 'ok');
+    assert.equal(r.runs.runs[0].output, r.failed.output);
+    assert.equal(r.tasks, 0, 'no agent task');
+    assert.deepEqual(r.files, [], 'finished runs leave no files behind');
+  });
+
+  test('a command still running skips the next run; one over the time limit is stopped', async () => {
+    const r = await scenario(`
+      const pid = project();
+      const s = o.saveSchedule(pid, { title: 'Slow', command: 'echo start; sleep 30; echo never', cron: '0 2 * * *' }).schedule;
+      due(s.id);
+      await until(() => jobs(s.id)[0]?.pid, 10000);
+      due(s.id);
+      o.fireSchedules();
+      const runNow = o.runScheduleNow(s.id);
+      const pidOf = jobs(s.id)[0].pid;
+      await until(() => jobs(s.id)[0].status === 'timeout', 20000);
+      await until(() => { try { process.kill(pidOf, 0); return false; } catch { return true; } }, 10000);
+      return { runNow, skipped: sched(s.id).skipped, n: jobs(s.id).length, job: jobs(s.id)[0] };`, { scheduleTimeoutMs: 1500 });
+    assert.equal(r.runNow.status, 409);
+    assert.equal(r.skipped, 1);
+    assert.equal(r.n, 1, 'no pile-up');
+    assert.match(r.job.output, /^start\n[^]*ran longer than/);
+  });
 });
 
 test('extractTasks reads schedules from a planner block', () => {
   const [, p] = extractTasks('ok\n```agent-orch-tasks\n' + JSON.stringify({ tasks: [], schedules: [
     { title: 'Weekly deps', prompt: 'Check deps', cron: '0 8 * * 1', agent: 'openai', model: 'gpt-5' },
+    { title: 'Nightly scrape', command: 'npm run scrape', prompt: 'ignored', cron: '0 2 * * *' },
     { title: 'no cron', prompt: 'x' }, { remove: '#4' }, 'junk'] }) + '\n```');
   assert.deepEqual(p.schedules, [
     { title: 'Weekly deps', prompt: 'Check deps', cron: '0 8 * * 1', done_when: null, agent: 'codex', model: 'gpt-5' },
+    { title: 'Nightly scrape', command: 'npm run scrape', cron: '0 2 * * *', done_when: null, agent: null, model: null },
     { remove: 4 }]);
 });

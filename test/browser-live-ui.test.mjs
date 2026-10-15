@@ -86,10 +86,11 @@ const drawn = (p, pre = 'bx') => p.evaluate((pre) => {
 }, pre);
 const inControl = (p, pre = 'bx') => p.evaluate((pre) => document.getElementById(`${pre}Status`).textContent.includes('You are in control'), pre);
 
-test('desktop: the Browser tab shows the live page in place, and clicks and keys reach it', { skip, timeout: 180000 }, async () => {
+test('desktop: Settings → Open the browser shows the live page in place, and clicks and keys reach it', { skip, timeout: 180000 }, async () => {
   const { ctx, p, errors } = await app({ viewport: { width: 1280, height: 860 } });
   try {
-    await p.locator('.seg [data-view="browser"]').click();
+    await p.locator('#settingsBtn').click();
+    await p.locator('#stBrowserOpen').click(); // Settings → Open the browser (no header tab since 2026-10-15)
     await p.locator('#bxManage').click();
     await p.locator('#browserModal:not([hidden])').waitFor();
     const row = p.locator('#bwBody .bw-row', { hasText: 'default' });
@@ -130,8 +131,7 @@ test('desktop: the Browser tab shows the live page in place, and clicks and keys
 test('iPhone: a tap is a click and the keyboard field types into the page', { skip, timeout: 180000 }, async () => {
   const { ctx, p, errors } = await app({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
   try {
-    await p.locator('#viewBtn').tap(); // phones switch views from the title's menu (#450)
-    await p.locator('#viewMenu [data-view="browser"]').tap();
+    await p.evaluate(() => document.getElementById('stBrowserOpen').click()); // Settings → Open the browser (no tab since 2026-10-15)
     await waitFor(() => inControl(p), { timeout: 90000, message: 'in control' });
     await waitFor(() => p.evaluate((u) => document.getElementById('bxUrl').value === u, pageUrl), { timeout: 30000, message: 'the same page' });
     await waitFor(() => drawn(p), { timeout: 30000, message: 'a frame is drawn' });

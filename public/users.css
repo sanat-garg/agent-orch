@@ -3,7 +3,7 @@
 /* A non-admin (html[data-role=user]) gets their chats, projects, tasks and files; machines, sign-ins, previews, stats,
    the terminal, the Browser tab, updates and the plan's own usage card are the admin's. */
 html[data-role="user"] :is(.admin-only, #previewsBtn, #statsBtn, #connFoot, #miniMachine, #usageCard, #bannerTerm, #updateBanner, #repoLink, #viewMenuRepo, #previewLink, .preview-line,
-  .seg [data-view="term"], #browserTab, .gh-import, #pkGhBtn, #pkBrowseBtn) { display: none !important; }
+  .seg [data-view="term"], .gh-import, #pkGhBtn, #pkBrowseBtn) { display: none !important; }
 html[data-role="user"] .side-foot-row { justify-content: flex-end; }
 
 /* "Your usage" in the sidebar */
@@ -45,6 +45,12 @@ html[data-role="user"] .side-foot-row { justify-content: flex-end; }
 .um-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .um-err { margin: 6px 0 0; font-size: 13px; color: var(--danger); }
 .um-err:empty { display: none; }
+.um-access { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
+.um-atitle { margin: 0; font-size: 13px; font-weight: 650; }
+.um-projects { display: flex; flex-direction: column; gap: 2px; width: 100%; max-height: 220px; overflow-y: auto; }
+.um-check { display: flex; align-items: center; gap: 8px; min-height: 30px; font-size: 14px; cursor: pointer; }
+.um-check input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); flex: none; }
+.um-check .um-hint { margin-left: auto; padding-left: 8px; }
 .um-add { display: flex; flex-direction: column; gap: 12px; padding: 12px; margin-bottom: 14px; border: 1px solid var(--border-strong); border-radius: 12px; }
 .um-etitle { margin: 0; font-size: 15px; font-weight: 650; }
 .um-field { display: flex; flex-direction: column; gap: 5px; cursor: default; }
@@ -54,6 +60,7 @@ html[data-role="user"] .side-foot-row { justify-content: flex-end; }
 @media (max-width: 800px) { .modal-panel.um { width: 100%; } }
 @media (max-width: 600px) { .um-top { flex-direction: column; } }
 @media (pointer: coarse) {
-  .um-acts .btn.small, .um-top .btn.small, .um-foot .btn { min-height: 44px; }
+  .um-acts .btn.small, .um-top .btn.small, .um-foot .btn, .um-access .btn.small { min-height: 44px; }
+  .um-check { min-height: 44px; }
   .um-cap input, .um-add input, .um-add select { height: 44px; font-size: 16px; } /* iOS zooms into smaller inputs */
 }

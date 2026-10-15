@@ -158,10 +158,6 @@
           <svg viewBox="0 0 24 24" width="16" height="16"><path d="M5 7l5 5-5 5M12 17h7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span>Terminal</span>
         </button>
-        <button role="tab" data-view="browser" aria-selected="false" id="browserTab" title="Browser: watch and drive the live page, or tell an agent what to do on it">
-          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3.5 12h17M12 3.5c2.4 2.5 3.4 5.3 3.4 8.5s-1 6-3.4 8.5c-2.4-2.5-3.4-5.3-3.4-8.5s1-6 3.4-8.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
-          <span>Browser</span>
-        </button>
       </div>
       <!-- Phones: the one action for the current view (app.js renderTopAction), then the title's menu holds the rest. -->
       <button type="button" class="icon-btn only-phone" id="topAction" aria-label="New project" title="New project">
@@ -171,7 +167,6 @@
         <button type="button" role="menuitemradio" data-view="chat" aria-checked="true"><svg class="vm-check" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>Chat</button>
         <button type="button" role="menuitemradio" data-view="files" aria-checked="false"><svg class="vm-check" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>Files</button>
         <button type="button" role="menuitemradio" data-view="term" aria-checked="false"><svg class="vm-check" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>Terminal</button>
-        <button type="button" role="menuitemradio" data-view="browser" aria-checked="false"><svg class="vm-check" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>Browser</button>
         <div class="vm-more" id="viewMenuMore" role="group" aria-label="More">
           <button type="button" role="menuitem" id="viewMenuRepo"></button>
           <button type="button" role="menuitem" id="viewMenuPreview" hidden></button>
@@ -689,6 +684,7 @@
         <textarea id="stGatePatterns" rows="4" maxlength="4000" placeholder="payments and checkout&#10;send email&#10;delete&#10;bank.example.com&#10;post on social media" aria-describedby="stGateHint"></textarea>
         <div class="st-suggest" id="stGateSuggest" aria-label="Suggestions"></div>
       </div>
+      <button type="button" class="st-row st-link admin-only" id="stBrowserOpen"><span class="st-text"><strong>Open the browser</strong><small>Watch and drive the live page, or sign a profile in to a site once</small></span><svg class="st-chev" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>
       <h3 class="st-sec">Agents</h3>
       <p class="st-hint">What your agents know and can use</p>
       <button type="button" class="st-row st-link" data-ext-open="skills"><span class="st-text"><strong>Skills &amp; tools</strong><small id="stExtSummary">Skills, MCP servers, subagents and personas</small></span><svg class="st-chev" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>

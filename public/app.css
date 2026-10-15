@@ -309,7 +309,7 @@ code, pre, kbd { font-family: var(--mono); }
 /* A prompt's time, then Copy · Edit · Rewind · Delete (app.js promptMeta): the actions show on hover or focus with a mouse,
    always on touch (44px targets). */
 .msg-meta { display: flex; justify-content: flex-end; align-items: center; gap: 2px; margin: -14px 0 12px; min-height: 28px; font-size: 12px; color: var(--faint); }
-.msg-meta .mm-time { padding: 0 6px; font-variant-numeric: tabular-nums; }
+.msg-meta .mm-time { padding: 0 4px 0 6px; font-variant-numeric: tabular-nums; } /* last: the bubble's corner */
 .mm-act { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: 0; border-radius: 7px; background: none; color: var(--muted); cursor: pointer; opacity: 0; transition: opacity .12s; }
 .mm-act:hover { background: var(--raised); color: var(--text); }
 .mm-act.mm-del:hover { color: var(--danger); }

@@ -145,6 +145,36 @@ test('websocket: a user gets only their chats, and no turn past their cap', asyn
   a.ws.close();
 });
 
+test("the admin controls a user's access: shared projects and Orchestrator Mode", async () => {
+  const list = await call(admin, '/api/users');
+  assert.deepEqual(list.body.projects.map((x) => [x.path, x.owner]).sort(), [[mine, 'admin'], [theirs, 'sam1']].sort());
+  assert.deepEqual(list.body.users.find((u) => u.name === 'sam').projects, []);
+  assert.equal(list.body.users.find((u) => u.name === 'sam').orchestrator, true, 'allowed unless switched off');
+  assert.equal((await call(admin, '/api/users/sam1', 'PATCH', { projects: ['/not/a/project'] })).status, 400);
+  const s = socket(sam);
+  await s.opened;
+  await s.next((m) => m.t === 'convos');
+  // Share the admin's project and take Orchestrator Mode away: sam's open browser hears about both at once.
+  const r = await call(admin, '/api/users/sam1', 'PATCH', { projects: [mine], orchestrator: false });
+  assert.deepEqual([r.body.user.projects, r.body.user.orchestrator], [[mine], false]);
+  await s.next((m) => m.t === 'me');
+  await s.next((m) => m.t === 'convos' && m.convos.some((c) => c.id === 'a1'));
+  assert.deepEqual((await call(sam, '/api/convos')).body.map((c) => c.id).sort(), ['a1', 's1']);
+  assert.equal((await call(sam, '/api/files/list?cid=a1')).status, 200);
+  assert.equal((await call(sam, '/api/convos', 'POST', { folder: mine, mode: 'orchestrator' })).status, 403, 'no Orchestrator Mode');
+  s.ws.send(JSON.stringify({ t: 'open', cid: 'a1' }));
+  await s.next((m) => m.t === 'history' && m.cid === 'a1');
+  s.ws.send(JSON.stringify({ t: 'set_mode', cid: 'a1', mode: 'orchestrator' }));
+  assert.match((await s.next((m) => m.t === 'error' && /Orchestrator Mode/.test(m.text))).text, /hasn't given you/);
+  assert.equal((await call(admin, '/api/convos')).body.find((c) => c.id === 'a1').mode, 'bypassPermissions');
+  s.ws.close();
+  // Unshared again: the admin's project is out of reach.
+  await call(admin, '/api/users/sam1', 'PATCH', { projects: [], orchestrator: true });
+  assert.equal((await call(sam, '/api/files/list?cid=a1')).status, 403);
+  assert.deepEqual((await call(sam, '/api/convos')).body.map((c) => c.id), ['s1']);
+  assert.equal((await call(sam, '/api/me')).body.user.orchestrator, true);
+});
+
 test('the admin manages accounts: caps, role rules, delete hands the chats over and signs them out', async () => {
   const list = await call(admin, '/api/users');
   assert.deepEqual(list.body.users.map((u) => u.name), ['admin', 'sam']);
@@ -168,12 +198,13 @@ test('browser: a user sees "Your usage" and none of the admin\'s controls', { sk
   await page.context().addCookies([{ name: 'cw_session', value: kim.split('=')[1], url: base }]);
   await page.goto(base + '/');
   await page.waitForFunction(() => document.documentElement.dataset.role === 'user');
-  for (const id of ['#statsBtn', '#usageCard', '#miniMachine', '#previewsBtn', '#browserTab'])
+  for (const id of ['#statsBtn', '#usageCard', '#miniMachine', '#previewsBtn'])
     assert.equal(await page.isVisible(id), false, `${id} hidden`);
   assert.equal(await page.isVisible('#myUsage'), true);
   await page.click('#settingsBtn');
   assert.equal(await page.textContent('#stMeName'), 'Signed in as kim');
   assert.equal(await page.isVisible('#stUsersOpen'), false);
+  assert.equal(await page.isVisible('#stBrowserOpen'), false);
   assert.equal(await page.isVisible('#stParallel'), false);
   await page.close();
   // The admin's Settings has Users, and its sheet lists everyone with their caps.

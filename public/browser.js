@@ -1,6 +1,6 @@
 'use strict';
 // ---------- Browser: profiles per machine and the live view (server: browser-view.mjs, /api/browser*, bv_* on /ws) ----------
-// The header's Browser tab (#browserView, bx*) shows the live view in place: a profile picker, the URL bar, Back, Reload
+// The Browser view (#browserView, bx*; opened from Settings → Browser, or a profile's Open) shows the live view in place: a profile picker, the URL bar, Back, Reload
 // and Take over / Hand back, then the page on a canvas that fits the width (pinch, double-tap or ctrl+wheel zooms it), the owner's mouse, touch, keys and paste sent
 // back. The page is laid out for the canvas's area: its CSS size and devicePixelRatio go with bv_open and, debounced, as
 // bv_size after a resize or rotation, so on a phone it fills the tab with a phone layout. Below it a prompt box sends an
@@ -215,6 +215,8 @@ function bwPick(n, identity) {
   bxSelect(n.id, identity, n.name);
 }
 $('bxManage').addEventListener('click', bwOpen);
+// Settings → Browser → Open the browser: the view's only way in since the header lost its Browser tab (owner, 2026-10-15).
+$('stBrowserOpen').addEventListener('click', () => { $('settingsModal').hidden = true; setView('browser'); });
 $('browserModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) bwClose(); });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !$('browserModal').hidden && $('bvModal').hidden) { e.stopImmediatePropagation(); bwClose(); }
@@ -255,7 +257,7 @@ function bvClose({ keepFocus = false, next = false } = {}) {
   if (m === BVM.tab) { m.wait.hidden = false; m.wait.textContent = ''; m.status.textContent = ''; bxRenderBusy(); return; }
   m.root.hidden = true;
   if (!$('browserModal').hidden) bwLoad();
-  if (!keepFocus) (BV.lastViewFocus?.isConnected ? BV.lastViewFocus : $('browserTab')).focus?.();
+  if (!keepFocus) (BV.lastViewFocus?.isConnected ? BV.lastViewFocus : $('bxManage'))?.focus?.();
   if (!next && bvTabOn()) bxOpenSel(); // the tab's view was lent to the modal
 }
 const bvCanDrive = () => BV.st?.role === 'control' && !BV.st.closed;

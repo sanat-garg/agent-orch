@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createUsers, shareOf, windowCovers, windowName, ADMIN_ID } from '../users.mjs';
+import { createUsers, shareOf, windowCovers, windowName, sharedWith, canOrchestrate, ADMIN_ID } from '../users.mjs';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'cw-users-'));
 const legacyAuth = (dir, pw) => {
@@ -104,4 +104,21 @@ test('capBlock: a user over their cap for that model is blocked until the reset;
   assert.equal(users.capBlock(sam.id, 'claude', 'opus')?.window, 'seven_day', 'an all-models cap covers every model');
   assert.equal(users.capBlock(ADMIN_ID, 'claude', 'claude-fable-5-1'), null);
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a user's access: shared project folders and Orchestrator Mode; admins see everything", () => {
+  const dir = tmp();
+  legacyAuth(dir, 'old-password');
+  const users = createUsers({ dataDir: dir });
+  const sam = users.add({ name: 'sam', password: 'sam-password' });
+  assert.deepEqual([sam.projects, sam.orchestrator], [[], true]);
+  assert.throws(() => users.update(sam.id, { projects: ['relative/dir'] }), /project folder paths/);
+  const v = users.update(sam.id, { projects: ['/w/a', '/w/a/', '/w/b'], orchestrator: false });
+  assert.deepEqual([v.projects, v.orchestrator], [['/w/a', '/w/b'], false]);
+  const u = users.get(sam.id);
+  assert.ok(sharedWith(u, '/w/a') && !sharedWith(u, '/w/c'));
+  assert.equal(canOrchestrate(u), false);
+  assert.equal(canOrchestrate(users.get(ADMIN_ID)), true);
+  const promoted = users.update(sam.id, { role: 'admin' });
+  assert.deepEqual([promoted.projects, promoted.orchestrator], [[], true], 'an admin sees everything');
 });

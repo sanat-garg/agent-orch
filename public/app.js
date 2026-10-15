@@ -103,7 +103,7 @@ const state = {
 // Saved chat messages still editable/retractable (see markPending): msgId -> { bubble, status, notice, editing, state }.
 const pendingMsgs = new Map();
 
-// ---------- view toggle (Vibecode chat / Files / Terminal / Browser) ----------
+// ---------- view toggle (Vibecode chat / Files / Terminal; Browser opens from Settings → Browser, not a tab) ----------
 function setView(view) {
   if (!['term', 'files', 'browser'].includes(view)) view = 'chat';
   $('app').dataset.view = view;
@@ -121,7 +121,7 @@ function setView(view) {
   if (view === 'term') openTerminals();
   else if (view === 'files') window.FilesView?.show(); // public/files.js
   else if (view === 'chat') focusComposer();
-  store.set('cw.view', view);
+  store.set('cw.view', view === 'browser' ? 'chat' : view); // the Browser has no tab to come back to
 }
 document.querySelectorAll('.seg button').forEach((b) => b.addEventListener('click', () => setView(b.dataset.view)));
 
@@ -1655,7 +1655,7 @@ function renderEvent(ev, replay) {
 }
 
 // ---------- a prompt's time and actions ----------
-// Under each prompt (owner, 2026-10-11): when it was sent, then Copy, Edit, Rewind and Delete. A mouse sees the actions
+// Under each prompt (owner, 2026-10-11): Copy, Edit, Rewind and Delete, then when it was sent, in the bubble's corner (2026-10-15). A mouse sees the actions
 // on hover; a touch screen always, at 44pt. Rewind (server.mjs rewindChat) takes the chat back to just before the prompt,
 // optionally undoing the code its turns changed, and puts the prompt back in the composer; Edit is that rewind plus
 // sending the edited text (with the same attachments) at once; Delete drops it and its reply.
@@ -1681,7 +1681,7 @@ function promptMeta(ev, bubble) {
   };
   const copy = ev.text ? act('copy', 'Copy message') : null;
   if (copy) copy.dataset.copy = ev.text; // the document's [data-copy] handler copies it and shows 'Copied'
-  row.append(t, ...(copy ? [copy] : []), act('edit', 'Edit message', () => editPrompt(ev, bubble, row)), act('rewind', 'Rewind to before this message', (e) => rewindMenu(ev, e.currentTarget)), act('del', 'Delete message', () => deletePromptUI(ev)));
+  row.append(...(copy ? [copy] : []), act('edit', 'Edit message', () => editPrompt(ev, bubble, row)), act('rewind', 'Rewind to before this message', (e) => rewindMenu(ev, e.currentTarget)), act('del', 'Delete message', () => deletePromptUI(ev)), t);
   return row;
 }
 function closeRewindMenu() { document.querySelector('.rewind-menu')?.remove(); document.querySelector('.rewind-scrim')?.remove(); }
@@ -2264,7 +2264,8 @@ input.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Tab' && e.shiftKey) {
     e.preventDefault();
-    const next = MODES[(MODES.indexOf($('mode').value) + 1) % MODES.length];
+    const modes = MODES.filter((m) => m !== 'orchestrator' || meOrch());
+    const next = modes[(modes.indexOf($('mode').value) + 1) % modes.length];
     changeMode(next);
   }
 });
@@ -2452,6 +2453,7 @@ document.addEventListener('keydown', (e) => {
 // Mode: its four permission levels, then Orchestrator Mode.
 bindMenu($('modeChip'), $('modePop'), (menu) => {
   for (const o of $('mode').options) {
+    if (o.disabled) continue;
     if (o.value === 'orchestrator') menu.append(el('div', 'cm-sep'));
     menu.append(menuOpt(o.textContent, { value: o.value, selected: o.value === $('mode').value }));
   }
@@ -3767,6 +3769,7 @@ function onServer(msg) {
     return checkPairing();
   }
   if (msg.t === 'media_stars') return applyStars(msg.ids);
+  if (msg.t === 'me') return loadMe(); // the admin changed this account (shared projects, Orchestrator Mode)
   if (msg.t === 'models') return api('/api/agents').then((d) => { AGENT_LIST = d.agents || []; renderAgentPicker(); }).catch(() => {});
   if (msg.t === 'status') {
     if (msg.alert) toast(msg.alert, { kind: 'error' });
@@ -9843,9 +9846,14 @@ addEventListener('hashchange', () => routeHash(location.hash.slice(1)));
 // controls (users.css: html[data-role=user]) and skips their requests; users.js renders the rest.
 const me = { user: null, usage: [] };
 const meAdmin = () => me.user?.role !== 'user';
+// Whether this account may use Orchestrator Mode (the admin can switch it off per user, users.mjs).
+const meOrch = () => meAdmin() || me.user?.orchestrator !== false;
 async function loadMe() {
   try { Object.assign(me, await api('/api/me')); } catch {}
   document.documentElement.dataset.role = me.user?.role || 'admin';
+  const orchOpt = $('mode').querySelector('option[value="orchestrator"]');
+  orchOpt.disabled = orchOpt.hidden = !meOrch();
+  if (!meOrch() && state.draftMode === 'orchestrator') { state.draftMode = 'bypassPermissions'; if (!state.cid) setModeUI(state.draftMode); }
   window.Users?.changed();
 }
 

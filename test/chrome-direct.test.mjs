@@ -188,7 +188,8 @@ async function app(data) {
   await p.route('**/api/media/*', (r) => r.fulfill({ status: 200, contentType: 'image/png', body: PNG }));
   await p.goto(`${base}/`);
   await p.locator('#app:not([inert])').waitFor({ timeout: 20000 });
-  await p.locator('.seg [data-view="browser"]').click();
+  await p.locator('#settingsBtn').click();
+  await p.locator('#stBrowserOpen').click(); // Settings → Open the browser (no header tab since 2026-10-15)
   return { ctx, p, s };
 }
 const shot = async (p, name) => { if (SHOTS) { fs.mkdirSync(SHOTS, { recursive: true }); await p.screenshot({ path: path.join(SHOTS, `chrome-direct-${name}.png`) }); } };

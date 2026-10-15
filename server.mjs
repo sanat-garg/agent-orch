@@ -42,7 +42,7 @@ import { createPreviews } from './previews.mjs';
 import { projectWord } from './project-name.mjs';
 import { createCredentials, projectSecrets } from './credentials.mjs';
 import { describeCron, nextRun, validTz } from './cron.mjs';
-import { createUsers, ADMIN_ID } from './users.mjs';
+import { createUsers, ADMIN_ID, sharedWith, canOrchestrate } from './users.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -204,15 +204,16 @@ function mainChatId(cwd) {
 // ---------- users: who owns what ----------
 // A chat belongs to the user who made it (convos[].owner; none = the admin). A project folder belongs to its main
 // chat's owner (none = the admin), and so do its tasks, schedules and files. Admins may open anything; everyone's
-// sidebar lists only their own chats.
+// sidebar lists only their own chats, plus every chat in a project the admin shared with them (users.mjs projects).
 const chatOwner = (c) => c?.owner || ADMIN_ID;
-const ownsConvo = (u, c) => !!c && (isAdmin(u) || chatOwner(c) === u.id);
+const ownsConvo = (u, c) => !!c && (isAdmin(u) || chatOwner(c) === u.id || sharedWith(u, c.cwd));
 function pathOwner(cwd) {
   const id = cwd && mainChatId(cwd);
   return id ? chatOwner(findConvo(id)) : ADMIN_ID;
 }
-const ownsPath = (u, cwd) => !!cwd && (isAdmin(u) || pathOwner(cwd) === u.id);
+const ownsPath = (u, cwd) => !!cwd && (isAdmin(u) || pathOwner(cwd) === u.id || sharedWith(u, cwd));
 const NOT_YOURS = 'That belongs to another user', ADMIN_ONLY = 'Only an admin can do that';
+const NO_ORCH_MODE = "Your admin hasn't given you Orchestrator Mode";
 // What a non-admin may use: their own chats, projects, tasks, schedules and files (relative paths inside the project
 // only), the model lists, their own usage and sounds. Machines, sign-ins, settings, extensions, the terminal, stats,
 // GitHub, Browser, approvals and everyone else's work stay the admin's. → an error for a 403, or null.
@@ -241,10 +242,10 @@ function userBlocked(req, url, u) {
 }
 // What a browser may receive: everything for an admin; for anyone else only their own chats, projects and tasks, and
 // nothing about machines, sign-ins, the account's plan usage or other users' work. null = don't send.
-const USER_MSGS = new Set(['media_stars', 'status', 'previews', 'models', 'version', 'error', 'myusage']);
+const USER_MSGS = new Set(['media_stars', 'status', 'previews', 'models', 'version', 'error', 'myusage', 'me']);
 function forClient(ws, msg) {
   const u = ws.user;
-  if (msg.t === 'convos' && u) return { ...msg, convos: msg.convos.filter((c) => chatOwner(c) === u.id) }; // everyone's sidebar: their own chats
+  if (msg.t === 'convos' && u) return { ...msg, convos: msg.convos.filter((c) => chatOwner(c) === u.id || sharedWith(u, c.cwd)) }; // everyone's sidebar: their own (and shared) chats
   if (!u || isAdmin(u)) return msg;
   if (msg.cid) return ownsConvo(u, findConvo(msg.cid)) ? msg : null;
   const mine = (cwd) => ownsPath(u, cwd);
@@ -1943,7 +1944,8 @@ async function handleRequest(req, res) {
   // Who is signed in, and their estimated share of each weekly plan window against their caps (users.mjs).
   if (p === '/api/me' && req.method === 'GET') return json(res, 200, { user: users.view(me), usage: users.usage(me.id) });
   // Admin: the accounts. GET → {users: [{…, usage, chats}], me}; POST {name, password, role?, caps?} adds one;
-  // PATCH /api/users/:id {password?, role?, caps?: {'<agent>/<window>': pct | null}}; DELETE gives their chats to you.
+  // PATCH /api/users/:id {password?, role?, caps?: {'<agent>/<window>': pct | null}, projects?: [folder], orchestrator?: bool};
+  // DELETE gives their chats to you. GET also lists every project folder ({path, name, owner}) for sharing.
   // Credentials (credentials.mjs): the signed-in user's services and their logins/keys, for the sidebar's Credentials sheet.
   if (p === '/api/credentials' && req.method === 'GET') {
     try { return json(res, 200, { services: credentials.list(me.id) }); } catch (e) { return json(res, e.status || 500, { error: e.message }); }
@@ -1959,7 +1961,9 @@ async function handleRequest(req, res) {
     try { credentials.remove(me.id, crm[1]); return json(res, 200, { ok: true }); } catch (e) { return json(res, e.status || 400, { error: e.message }); }
   }
   if (p === '/api/users' && req.method === 'GET') {
-    return json(res, 200, { me: me.id, users: users.list().map((u) => ({ ...u, usage: users.usage(u.id), chats: convos.filter((c) => (c.owner || ADMIN_ID) === u.id).length })) });
+    const projects = [...new Set(convos.map((c) => c.cwd))].map((cwd) => ({ path: cwd, name: path.basename(cwd), owner: pathOwner(cwd) }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    return json(res, 200, { me: me.id, projects, users: users.list().map((u) => ({ ...u, usage: users.usage(u.id), chats: convos.filter((c) => (c.owner || ADMIN_ID) === u.id).length })) });
   }
   if (p === '/api/users' && req.method === 'POST') {
     try { return json(res, 200, { user: users.add(await readBody(req)) }); } catch (e) { return json(res, e.status || 400, { error: e.message }); }
@@ -1968,10 +1972,28 @@ async function handleRequest(req, res) {
   if (um && req.method === 'PATCH') {
     const body = await readBody(req);
     if (um[1] === me.id && body.role && body.role !== me.role) return json(res, 409, { error: "You can't change your own role" });
+    if (Array.isArray(body.projects) && body.projects.some((d) => !convos.some((c) => c.cwd === d))) return json(res, 400, { error: 'Not a project: pick from the project list' });
     try {
       const u = users.update(um[1], body);
       if (body.password != null) dropSessions(u.id, sessionToken(req)); // a reset password signs them out elsewhere
-      for (const ws of allClients) if (ws.user?.id === u.id) ws.user = users.get(u.id);
+      // Orchestrator Mode taken away: their own orchestrator chats go back to Full access (the orchestrator pauses there).
+      if (body.orchestrator === false && u.role !== 'admin') {
+        for (const c of convos) {
+          if (chatOwner(c) !== u.id || c.mode !== 'orchestrator') continue;
+          c.mode = 'bypassPermissions';
+          orch?.setConvoMode(c, c.mode);
+          broadcast(c.id, { t: 'mode', mode: c.mode });
+        }
+        saveConvos();
+      }
+      // Their open browsers pick up the change now: the sidebar (shared projects) and their account (Orchestrator Mode).
+      const list = convos.map(publicConvo);
+      for (const ws of allClients) {
+        if (ws.user?.id !== u.id) continue;
+        ws.user = users.get(u.id);
+        send(ws, { t: 'convos', convos: list });
+        send(ws, { t: 'me' });
+      }
       return json(res, 200, { user: u });
     } catch (e) { return json(res, e.status || 400, { error: e.message }); }
   }
@@ -2071,7 +2093,7 @@ async function handleRequest(req, res) {
   if (p === '/api/convos' && req.method === 'GET') {
     // ?q= searches titles and messages (search.mjs); without it, the plain list.
     const q = url.searchParams.get('q');
-    const own = convos.filter((c) => chatOwner(c) === me.id);
+    const own = convos.filter((c) => chatOwner(c) === me.id || sharedWith(me, c.cwd));
     if (q?.trim()) return json(res, 200, await searchConvos({ logsDir: LOGS, convos: own, q: q.slice(0, 200), limit: 20 }));
     return json(res, 200, own.map(publicConvo));
   }
@@ -2090,7 +2112,8 @@ async function handleRequest(req, res) {
       if (slug) { const ok = previews.check(slug, cwd, domain); if (!ok.ok) return json(res, 400, { error: `Live preview: ${ok.error}` }); }
       const existing = convos.find((c) => c.cwd === cwd);
       // A user opens only their own projects (a folder with no chat is the admin's); a new project is theirs.
-      if (!body.newProject && !isAdmin(me) && !(existing && pathOwner(cwd) === me.id)) return json(res, 403, { error: existing ? NOT_YOURS : 'Start a new project instead' });
+      if (!body.newProject && !isAdmin(me) && !(existing && ownsPath(me, cwd))) return json(res, 403, { error: existing ? NOT_YOURS : 'Start a new project instead' });
+      if (body.mode === 'orchestrator' && !canOrchestrate(me)) return json(res, 403, { error: NO_ORCH_MODE });
       if (existing) { // another chat in an existing project: same folder and repo, named from its first message
         if (await refreshRepo(existing)) shareRepoState(existing);
         for (const x of convos) if (x.cwd === cwd) delete x.archived; // starting one brings an archived project back
@@ -2822,7 +2845,7 @@ async function handleRequest(req, res) {
     }) });
   }
   if (p === '/api/projects') {
-    const list = listFolders(WORKSPACE).filter((f) => isAdmin(me) || pathOwner(f.path) === me.id).map((f) => {
+    const list = listFolders(WORKSPACE).filter((f) => ownsPath(me, f.path)).map((f) => {
       const chats = convos.filter((c) => c.cwd === f.path);
       return { ...f, chats: chats.length, lastUsed: Math.max(f.mtime, ...chats.map((c) => c.updatedAt)) };
     });
@@ -2833,7 +2856,7 @@ async function handleRequest(req, res) {
     try {
       const dir = safeCwd(url.searchParams.get('path') || WORKSPACE);
       // A user browses only the workspace's top level (their own projects) and inside those.
-      const top = isAdmin(me) ? null : convos.filter((c) => chatOwner(c) === me.id).map((c) => c.cwd);
+      const top = isAdmin(me) ? null : convos.filter((c) => ownsConvo(me, c)).map((c) => c.cwd);
       if (top && dir !== WORKSPACE && !top.some((d) => dir === d || dir.startsWith(d + path.sep))) return json(res, 403, { error: NOT_YOURS });
       const crumbs = [];
       for (let d = dir; ; d = path.dirname(d)) {
@@ -2955,6 +2978,7 @@ wss.on('connection', (ws, req) => {
         // A user at an admin-set cap for this chat's model gets no turn (users.mjs); the admin is never capped.
         const capped = capRefusal(convo);
         if (capped) { emit(convo.id, { t: 'error', text: capped }); break; }
+        if (convo.mode === 'orchestrator' && !canOrchestrate(ws.user)) { send(ws, { t: 'error', cid: convo.id, text: `${NO_ORCH_MODE}. Switch this chat to another mode to keep working.` }); break; }
         let files = [];
         try { files = ids.length ? placeUploads(DATA, ids, convo.cwd) : []; }
         catch (e) { emit(convo.id, { t: 'error', text: `Couldn't attach the files: ${e?.message || e}` }); break; }
@@ -2982,6 +3006,7 @@ wss.on('connection', (ws, req) => {
         break;
       }
       case 'set_mode':
+        if (msg.mode === 'orchestrator' && !canOrchestrate(ws.user)) { send(ws, { t: 'error', text: NO_ORCH_MODE }); send(ws, { t: 'mode', cid: convo.id, mode: convo.mode }); break; }
         if (MODES.includes(msg.mode)) {
           const was = convo.mode;
           convo.mode = msg.mode;

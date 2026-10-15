@@ -2,11 +2,12 @@
 // ---------- Users (server: users.mjs) ----------
 // Settings → Account: who is signed in, and Sign out. For the admin, Settings → "Users & usage caps" opens a sheet
 // listing every account with its estimated share of each weekly limit the agent CLIs report (Claude's all-models week
-// and per-model weeks such as Fable; codex's weekly) and the cap on it, plus add / reset password / role / delete.
+// and per-model weeks such as Fable; codex's weekly) and the cap on it, their access (which other projects they see,
+// and whether they may use Orchestrator Mode), plus add / reset password / role / delete.
 // A non-admin's sidebar shows "Your usage" instead of the machine and plan cards: their share of each weekly limit
 // against their caps. Loaded after app.js and uses its helpers ($, el, api, toast, coarse, me, loadMe, meAdmin).
 (() => {
-  const UM = { list: [], me: null, loaded: false, error: null, lastFocus: null, open: null, adding: false };
+  const UM = { list: [], projects: [], me: null, loaded: false, error: null, lastFocus: null, open: null, adding: false };
   const btn = (cls, text, onclick) => { const b = el('button', cls, text); b.type = 'button'; if (onclick) b.onclick = onclick; return b; };
   const pct = (n) => `${Number(n) < 10 && Number(n) % 1 ? Number(n).toFixed(1) : Math.round(Number(n))}%`;
   const resets = (s) => (s ? `resets ${new Date(s * 1000).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })}` : '');
@@ -44,7 +45,7 @@
 
   // ---- the admin's Users sheet
   async function load() {
-    try { const r = await api('/api/users'); UM.list = r.users; UM.me = r.me; UM.loaded = true; UM.error = null; }
+    try { const r = await api('/api/users'); UM.list = r.users; UM.projects = r.projects || []; UM.me = r.me; UM.loaded = true; UM.error = null; }
     catch (e) { UM.error = e.message; }
   }
   function open() {
@@ -137,6 +138,7 @@
       table.append(r);
     }
     card.append(table);
+    if (u.role !== 'admin') card.append(accessBox(u));
 
     const err = el('p', 'um-err');
     const acts = el('div', 'um-acts');
@@ -170,11 +172,43 @@
     return card;
   }
 
+  // A user's access: Orchestrator Mode on/off, and which other users' projects they see (their own always show).
+  function accessBox(u) {
+    const box = el('div', 'um-access');
+    const names = new Map(UM.list.map((x) => [x.id, x.name]));
+    const orch = input('checkbox', { checked: u.orchestrator !== false });
+    const orchRow = el('label', 'um-check');
+    orchRow.append(orch, el('span', '', 'Can use Orchestrator Mode'));
+    const others = UM.projects.filter((p) => p.owner !== u.id);
+    const picks = new Map();
+    const list = el('div', 'um-projects');
+    for (const p of others) {
+      const row = el('label', 'um-check');
+      const c = input('checkbox', { checked: (u.projects || []).includes(p.path) });
+      c.setAttribute('aria-label', `${u.name} sees ${p.name}`);
+      picks.set(p.path, c);
+      row.title = p.path;
+      row.append(c, el('span', '', p.name), el('span', 'um-hint', names.get(p.owner) || ''));
+      list.append(row);
+    }
+    const err = el('p', 'um-err');
+    const save = btn('btn small primary', 'Save access', async () => {
+      err.textContent = '';
+      const projects = [...picks].filter(([, c]) => c.checked).map(([p]) => p);
+      try { await api(`/api/users/${u.id}`, 'PATCH', { projects, orchestrator: orch.checked }); toast(`Saved ${u.name}'s access`, { kind: 'success' }); await load(); render(); }
+      catch (x) { err.textContent = x.message; }
+    });
+    box.append(el('h4', 'um-atitle', 'Access'), orchRow,
+      el('span', 'um-hint', others.length ? 'Other projects they can see and work in (their own projects always show):' : 'No other projects to share yet. Their own projects always show.'),
+      list, err, save);
+    return box;
+  }
+
   function render() {
     if ($('usersModal').hidden) return;
     const body = $('umBody');
     const top = el('div', 'um-top');
-    top.append(el('p', 'um-intro', "Each user has their own chats and projects. A cap is the most of a weekly limit they may use; past it their chats on that model stop, and their tasks move to a fallback or wait for the reset. Usage per user is estimated from their share of the tokens, since the plan only reports the account's total."));
+    top.append(el('p', 'um-intro', "Each user has their own chats and projects, plus any project you share with them under Access. A cap is the most of a weekly limit they may use; past it their chats on that model stop, and their tasks move to a fallback or wait for the reset. Usage per user is estimated from their share of the tokens, since the plan only reports the account's total."));
     if (!UM.adding) top.append(btn('btn small primary', 'Add user', () => { UM.adding = true; render(); }));
     const parts = [top];
     if (UM.adding) parts.push(addForm());

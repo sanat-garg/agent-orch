@@ -109,13 +109,15 @@ async function app(opts) {
 const serverSays = (p, msg) => p.evaluate((m) => window.bvOnServer(m), msg);
 const shot = async (p, name) => { if (SHOTS) { fs.mkdirSync(SHOTS, { recursive: true }); await p.screenshot({ path: path.join(SHOTS, `ui-browser-view-${name}.png`) }); } };
 
-test('desktop: the Browser tab shows the profile in place; the prompt posts to /api/browser/task and its steps render', { skip, timeout: 120000 }, async () => {
+test('desktop: Settings → Open the browser shows the profile in place; the prompt posts to /api/browser/task and its steps render', { skip, timeout: 120000 }, async () => {
   const { ctx, p, s } = await app({ viewport: { width: 1280, height: 860 } });
   try {
     assert.equal(await p.locator('#browserBtn').count(), 0, 'no sidebar Browser button');
-    await p.locator('.seg [data-view="browser"]').click();
+    await p.locator('#settingsBtn').click();
+    await p.locator('#stBrowserOpen').click(); // Settings → Open the browser (no header tab since 2026-10-15)
     assert.equal(await p.locator('#app').getAttribute('data-view'), 'browser');
-    assert.equal(await p.locator('.seg [data-view="browser"]').getAttribute('aria-selected'), 'true');
+    assert.equal(await p.locator('.seg [data-view="browser"]').count(), 0, 'no header tab');
+    assert.ok(await p.locator('#settingsModal').isHidden(), 'Settings closes');
     assert.ok(await p.locator('#browserView').isVisible() && await p.locator('#chatView').isHidden());
     await waitFor(() => s.bv.some((m) => m.t === 'bv_open' && m.node === 'mac' && m.identity === 'work' && m.thumb === false), { timeout: 10000, message: `opens the first profile: ${JSON.stringify(s.bv)}` });
     assert.equal(await p.locator('#bxProfile').inputValue(), 'mac/work');
@@ -181,8 +183,7 @@ test('desktop: the Browser tab shows the profile in place; the prompt posts to /
 test('iPhone (390px): the canvas fits the width and the prompt box stays on screen', { skip, timeout: 120000 }, async () => {
   const { ctx, p, s } = await app({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
   try {
-    await p.locator('#viewBtn').tap(); // phones switch views from the title's menu (#450)
-    await p.locator('#viewMenu [data-view="browser"]').tap();
+    await p.evaluate(() => document.getElementById('stBrowserOpen').click()); // Settings → Open the browser (no tab since 2026-10-15)
     await waitFor(() => s.bv.some((m) => m.t === 'bv_open' && m.identity === 'work'), { timeout: 10000, message: 'opens the profile' });
     await serverSays(p, { t: 'bv_state', node: 'mac', identity: 'work', url: 'https://mail.google.com/mail/u/0/', title: 'Inbox', active: true, takeover: false, role: 'watch', task: { id: 42, title: 'Archive' } });
     await serverSays(p, { t: 'bv_frame', node: 'mac', identity: 'work', n: 1, data: frame, w: 1280, h: 800 });
@@ -208,8 +209,7 @@ test('iPhone (390px): the canvas fits the width and the prompt box stays on scre
 test('iPhone (390px): two fingers pinch-zoom the canvas, a tap maps through the zoom, a double-tap goes back to fit', { skip, timeout: 120000 }, async () => {
   const { ctx, p, s } = await app({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
   try {
-    await p.locator('#viewBtn').tap(); // phones switch views from the title's menu (#450)
-    await p.locator('#viewMenu [data-view="browser"]').tap();
+    await p.evaluate(() => document.getElementById('stBrowserOpen').click()); // Settings → Open the browser (no tab since 2026-10-15)
     await waitFor(() => s.bv.some((m) => m.t === 'bv_open' && m.identity === 'work'), { timeout: 10000, message: 'opens the profile' });
     await serverSays(p, { t: 'bv_state', node: 'mac', identity: 'work', url: 'https://mail.google.com/mail/u/0/', title: 'Inbox', active: false, takeover: false, role: 'control', task: null });
     await serverSays(p, { t: 'bv_frame', node: 'mac', identity: 'work', n: 1, data: frame, w: 1280, h: 800 });

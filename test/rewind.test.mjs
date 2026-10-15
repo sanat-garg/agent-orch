@@ -99,6 +99,7 @@ test('each prompt shows when it was sent; rewinding chat-only from the page refi
   const time = pg.locator('.msg-meta .mm-time').first();
   assert.match(await time.textContent(), /\d:\d\d/);
   assert.equal(await time.getAttribute('datetime'), new Date(sha.ts[0]).toISOString());
+  assert.equal(await pg.locator('.msg-meta').first().evaluate((r) => r.lastElementChild.className), 'mm-time', 'the time is in the corner, the actions left of it');
   // Actions show on hover; Rewind opens a menu with both choices.
   await pg.locator('.msg.user').nth(2).hover();
   await pg.locator('.msg-meta').nth(2).locator('.mm-rewind').click();

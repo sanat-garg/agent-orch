@@ -293,7 +293,7 @@ screenshots saved as media. The task drawer's **Actions** section shows that log
 `GET`/`PUT /api/orch/gate` reads and sets `{rules, ttlHours}`, where `ttlHours` (up to 336) replaces the 24-hour
 expiry.
 
-**The Browser tab** (`browser-live.mjs`, `browser-view.mjs`, `public/browser.js`). The header's **Browser** tab shows
+**The Browser view** (`browser-live.mjs`, `browser-view.mjs`, `public/browser.js`). **Settings → Browser → Open the browser** shows
 a profile's Chromium live in place, with a profile picker, a URL bar, Back, Reload, Paste and Keyboard; your mouse,
 touch, keys and paste go back to it, and on a phone the page is laid out for the phone's screen. **Profiles** opens the
 Browser sheet: every machine that can run a browser, its profiles, the sites each is signed in to (cookie domains only)

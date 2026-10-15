@@ -220,7 +220,7 @@ test('top bar keeps its content row below the iPhone safe-area inset: 56px, 44px
   assert.match(appCss, /@media \(max-width: 767px\) \{\n  \.topbar \{/, 'the 44pt row is phones only');
   assert.match(appCss, /\.topbar \.seg, \.topbar \.cwd, \.topbar \.repo-link \{ display: none; \}/, 'the title menu replaces them on phones');
   assert.match(indexHtml, /id="viewBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="viewMenu"/);
-  for (const v of ['chat', 'files', 'term', 'browser']) assert.match(indexHtml, new RegExp(`role="menuitemradio" data-view="${v}"`));
+  for (const v of ['chat', 'files', 'term']) assert.match(indexHtml, new RegExp(`role="menuitemradio" data-view="${v}"`));
   assert.match(appJs, /\$\('viewBtn'\)\.disabled = !phoneHeader\.matches/, 'plain text on wider screens');
 });
 
@@ -336,10 +336,12 @@ test('touch screens get 16px fields and 44pt targets in Settings, Skills, Files,
   assert.ok(filesCss.indexOf('.fx-search input { flex: 1') < filesCss.indexOf('.fx-search input { font-size: 16px'));
 });
 
-test('the Browser is a header tab with the live view in place, a prompt box and an activity panel (not a sidebar button)', () => {
+test('the Browser view opens from Settings (no header tab), with the live view in place, a prompt box and an activity panel', () => {
   const browserJs = read('public/browser.js');
   assert.doesNotMatch(indexHtml, /id="browserBtn"/, 'the sidebar Browser button is gone');
-  assert.match(indexHtml, /<div class="seg" role="tablist"[^]*?<button role="tab" data-view="browser"[^>]*>\s*<svg[^]*?<span>Browser<\/span>[^]*?<\/div>/, 'a 4th header tab with an icon');
+  assert.doesNotMatch(indexHtml, /data-view="browser"|id="browserTab"/, 'no header tab or phone view-menu item (owner, 2026-10-15)');
+  assert.match(indexHtml, /class="st-row st-link admin-only" id="stBrowserOpen"/, 'Settings → Browser opens it');
+  assert.match(browserJs, /\$\('stBrowserOpen'\)\.addEventListener\('click', \(\) => \{ \$\('settingsModal'\)\.hidden = true; setView\('browser'\); \}\)/);
   const htmlIds = new Set([...indexHtml.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]));
   for (const id of ['browserView', 'bxBar', 'bxProfile', 'bxManage', 'bxBack', 'bxReload', 'bxUrl', 'bxTake', 'bxStatus', 'bxStage', 'bxCanvas', 'bxWait', 'bxBusy', 'bxKeys',
     'bxPrompt', 'bxInput', 'bxSend', 'bxActivity', 'bvModal', 'bvCanvas', 'browserModal']) assert.ok(htmlIds.has(id), `#${id} exists`);

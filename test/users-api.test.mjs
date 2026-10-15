@@ -4,7 +4,7 @@
 // controls for a user and shows "Your usage".
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
@@ -16,7 +16,7 @@ import { chromium } from 'playwright-core';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ADMIN_PW = 'admin-password-1', SAM_PW = 'sam-password-1', LEGACY = 'a'.repeat(64);
-let child, base, dataDir, mine, theirs, browser, skipUi = false;
+let child, base, dataDir, mine, theirs, ghBin, browser, skipUi = false;
 try { browser = await chromium.launch(); } catch (e) { skipUi = `cached Chromium unavailable: ${e.message.split('\n')[0]}`; }
 
 const freePort = () => new Promise((resolve, reject) => {
@@ -47,9 +47,12 @@ before(async () => {
     { t, agent: 'claude', kind: 'tokens', input: 0, cached: 0, output: 300, source: 'chat', ref: 's1', user: 'sam1', model: 'claude-fable-5-1' },
     { t, agent: 'claude', kind: 'tokens', input: 0, cached: 0, output: 900, source: 'chat', ref: 'a1', model: 'claude-fable-5-1' },
   ].map((r) => JSON.stringify(r) + '\n').join(''));
+  // test/fixtures/gh-stub.mjs is the server's `gh` (the admin is signed in as 'tester'; users sign in through it too).
+  ghBin = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-users-gh-'));
+  fs.symlinkSync(path.join(ROOT, 'test', 'fixtures', 'gh-stub.mjs'), path.join(ghBin, 'gh'));
   const port = await freePort();
   base = `http://127.0.0.1:${port}`;
-  child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: { ...process.env, PORT: String(port), CW_DATA_DIR: dataDir, CW_NO_ORCHESTRATOR: '1' },
+  child = spawn(process.execPath, ['server.mjs'], { cwd: ROOT, env: { ...process.env, PATH: `${ghBin}:${process.env.PATH}`, PORT: String(port), CW_DATA_DIR: dataDir, CW_NO_ORCHESTRATOR: '1' },
     stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   await new Promise((resolve, reject) => {
@@ -64,7 +67,7 @@ before(async () => {
 after(async () => {
   await browser?.close();
   child?.kill('SIGKILL');
-  for (const d of [dataDir, mine, theirs]) if (d) fs.rmSync(d, { recursive: true, force: true });
+  for (const d of [dataDir, mine, theirs, ghBin]) if (d) fs.rmSync(d, { recursive: true, force: true });
 });
 
 const login = async (username, password) => {
@@ -145,18 +148,16 @@ test('websocket: a user gets only their chats, and no turn past their cap', asyn
   a.ws.close();
 });
 
-test("the admin controls a user's access: shared projects and Orchestrator Mode", async () => {
+test("the admin controls a user's access: all projects or their own, and Orchestrator Mode", async () => {
   const list = await call(admin, '/api/users');
-  assert.deepEqual(list.body.projects.map((x) => [x.path, x.owner]).sort(), [[mine, 'admin'], [theirs, 'sam1']].sort());
-  assert.deepEqual(list.body.users.find((u) => u.name === 'sam').projects, []);
+  assert.equal(list.body.users.find((u) => u.name === 'sam').allProjects, false, 'their own projects unless given all');
   assert.equal(list.body.users.find((u) => u.name === 'sam').orchestrator, true, 'allowed unless switched off');
-  assert.equal((await call(admin, '/api/users/sam1', 'PATCH', { projects: ['/not/a/project'] })).status, 400);
   const s = socket(sam);
   await s.opened;
   await s.next((m) => m.t === 'convos');
-  // Share the admin's project and take Orchestrator Mode away: sam's open browser hears about both at once.
-  const r = await call(admin, '/api/users/sam1', 'PATCH', { projects: [mine], orchestrator: false });
-  assert.deepEqual([r.body.user.projects, r.body.user.orchestrator], [[mine], false]);
+  // All projects, and Orchestrator Mode taken away: sam's open browser hears about both at once.
+  const r = await call(admin, '/api/users/sam1', 'PATCH', { allProjects: true, orchestrator: false });
+  assert.deepEqual([r.body.user.allProjects, r.body.user.orchestrator], [true, false]);
   await s.next((m) => m.t === 'me');
   await s.next((m) => m.t === 'convos' && m.convos.some((c) => c.id === 'a1'));
   assert.deepEqual((await call(sam, '/api/convos')).body.map((c) => c.id).sort(), ['a1', 's1']);
@@ -168,11 +169,48 @@ test("the admin controls a user's access: shared projects and Orchestrator Mode"
   assert.match((await s.next((m) => m.t === 'error' && /Orchestrator Mode/.test(m.text))).text, /hasn't given you/);
   assert.equal((await call(admin, '/api/convos')).body.find((c) => c.id === 'a1').mode, 'bypassPermissions');
   s.ws.close();
-  // Unshared again: the admin's project is out of reach.
-  await call(admin, '/api/users/sam1', 'PATCH', { projects: [], orchestrator: true });
+  // Back to their own projects: the admin's is out of reach.
+  await call(admin, '/api/users/sam1', 'PATCH', { allProjects: false, orchestrator: true });
   assert.equal((await call(sam, '/api/files/list?cid=a1')).status, 403);
   assert.deepEqual((await call(sam, '/api/convos')).body.map((c) => c.id), ['s1']);
   assert.equal((await call(sam, '/api/me')).body.user.orchestrator, true);
+});
+
+test("a user connects their own GitHub: their status, import and a folder cloned with it; the admin's sign-in stays theirs", async () => {
+  assert.deepEqual((await call(sam, '/api/me')).body.github, { linked: false, login: null, linkedAt: null });
+  assert.equal((await call(admin, '/api/me')).body.github, undefined, "the admin's GitHub is the server's");
+  assert.deepEqual((await call(sam, '/api/github')).body, { linked: false, login: null, linkedAt: null, own: true });
+  assert.equal((await call(admin, '/api/github')).body.login, 'tester');
+  // Unconnected: no import (it would clone and push as the admin); the admin's own sign-in routes stay the admin's.
+  assert.match((await call(sam, '/api/github/repos')).body.error, /Connect your GitHub first/);
+  assert.equal((await call(sam, '/api/projects/import', 'POST', { repo: 'x/y' })).status, 409);
+  assert.equal((await call(sam, '/api/github/link', 'POST')).status, 403);
+  assert.equal((await call(admin, '/api/me/github/token', 'POST', { token: 'ghp_boss_0123456789abcdef' })).status, 400);
+
+  assert.match((await call(sam, '/api/me/github/token', 'POST', { token: 'bad_0123456789abcdefghij' })).body.error, /didn't accept that token/);
+  const s = socket(sam);
+  await s.opened;
+  const linked = await call(sam, '/api/me/github/token', 'POST', { token: 'ghp_samgh_0123456789abcdef' });
+  assert.deepEqual([linked.status, linked.body.linked, linked.body.login], [200, true, 'samgh']);
+  await s.next((m) => m.t === 'me'); // sam's open browsers reload their account
+  s.ws.close();
+  assert.equal((await call(sam, '/api/me')).body.github.login, 'samgh');
+
+  // A folder with no chat is the admin's, unless sam's own GitHub cloned it (its git config says so).
+  const git = (cwd, ...args) => execFileSync('git', args, { cwd, stdio: 'pipe' });
+  const clone = fs.mkdtempSync(path.join(os.homedir(), '.cw-users-clone-')), other = fs.mkdtempSync(path.join(os.homedir(), '.cw-users-other-'));
+  try {
+    git(clone, 'init', '-q'); git(clone, 'config', 'agent-orch.github-user', 'sam1');
+    git(other, 'init', '-q'); git(other, 'config', 'agent-orch.github-user', 'someone-else');
+    assert.equal((await call(sam, '/api/convos', 'POST', { folder: other })).status, 403);
+    const c = await call(sam, '/api/convos', 'POST', { folder: clone });
+    assert.equal(c.status, 200);
+    assert.ok((await call(sam, '/api/convos')).body.some((x) => x.id === c.body.id));
+    await call(sam, `/api/convos/${c.body.id}`, 'DELETE');
+  } finally { for (const d of [clone, other]) fs.rmSync(d, { recursive: true, force: true }); }
+
+  assert.equal((await call(sam, '/api/me/github', 'DELETE')).body.linked, false);
+  assert.equal((await call(sam, '/api/me')).body.github.linked, false);
 });
 
 test('the admin manages accounts: caps, role rules, delete hands the chats over and signs them out', async () => {

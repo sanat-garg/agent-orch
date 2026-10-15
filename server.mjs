@@ -11,6 +11,7 @@ import { WebSocketServer } from 'ws';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createOrchestrator, parseJsonl, SHOT_HINT, rigorLevelsView } from './orchestrator.mjs';
 import { createGitHub, parseRepoSpec } from './github.mjs';
+import { createGitHubUsers } from './github-users.mjs';
 import { retireRuntime, chatIdle, whenIdle } from './runtimes.mjs';
 import { AGENTS, isAgent, agentEfforts, clampEffort, runAgentCli, clearLoginCache, isMissingSession, modelCatalog, claudeWindows, fetchLimits, agentVersion, readVersion, windowLabel, setMcpSource } from './agents.mjs';
 import { createModelStore } from './models.mjs';
@@ -204,7 +205,7 @@ function mainChatId(cwd) {
 // ---------- users: who owns what ----------
 // A chat belongs to the user who made it (convos[].owner; none = the admin). A project folder belongs to its main
 // chat's owner (none = the admin), and so do its tasks, schedules and files. Admins may open anything; everyone's
-// sidebar lists only their own chats, plus every chat in a project the admin shared with them (users.mjs projects).
+// sidebar lists only their own chats, plus every other chat when the admin gave them all projects (users.mjs allProjects).
 const chatOwner = (c) => c?.owner || ADMIN_ID;
 const ownsConvo = (u, c) => !!c && (isAdmin(u) || chatOwner(c) === u.id || sharedWith(u, c.cwd));
 function pathOwner(cwd) {
@@ -215,9 +216,10 @@ const ownsPath = (u, cwd) => !!cwd && (isAdmin(u) || pathOwner(cwd) === u.id || 
 const NOT_YOURS = 'That belongs to another user', ADMIN_ONLY = 'Only an admin can do that';
 const NO_ORCH_MODE = "Your admin hasn't given you Orchestrator Mode";
 // What a non-admin may use: their own chats, projects, tasks, schedules and files (relative paths inside the project
-// only), the model lists, their own usage and sounds. Machines, sign-ins, settings, extensions, the terminal, stats,
-// GitHub, Browser, approvals and everyone else's work stay the admin's. → an error for a 403, or null.
-const USER_PATHS = new Set(['/api/status', '/api/version', '/api/me', '/api/agents', '/api/convos', '/api/projects', '/api/folders', '/api/uploads',
+// only), the model lists, their own usage and sounds, and their own GitHub (github-users.mjs). Machines, sign-ins,
+// settings, extensions, the terminal, stats, the server's GitHub sign-in, Browser, approvals and everyone else's work stay the admin's. → an error for a 403, or null.
+const USER_PATHS = new Set(['/api/status', '/api/version', '/api/me', '/api/me/github', '/api/me/github/device', '/api/me/github/token',
+  '/api/github', '/api/github/repos', '/api/projects/import', '/api/agents', '/api/convos', '/api/projects', '/api/folders', '/api/uploads',
   '/api/orch/rigor-levels', '/api/orch/cron-preview', '/api/orch/schedules', '/api/orch/projects/reorder', '/api/metrics', '/api/metrics/history', '/api/away']);
 const absolutePath = (v) => (Array.isArray(v) ? v.some(absolutePath) : typeof v === 'string' && (path.isAbsolute(v) || v.startsWith('~')));
 function userBlocked(req, url, u) {
@@ -982,6 +984,12 @@ if (orch && !NO_ORCH) setInterval(() => autoRestartCheck().catch((e) => console.
 // A push that origin's diverged main stopped (github.mjs never forces) needs the owner: it buzzes the phone.
 const gh = createGitHub({ env: CLAUDE_ENV, log: (m) => console.log(`[github] ${m}`),
   alert: (dir, error) => notify({ title: 'Push to GitHub stopped', body: `${path.basename(dir)}: ${error}`, tag: 'push-diverged', url: '/' }) });
+// Users' own GitHub accounts (github-users.mjs): a connected user's new projects get their repo there. A change reloads
+// that user's account in their open browsers ({t:'me'}: /api/me carries `github`).
+const ghUsers = createGitHubUsers({ dataDir: DATA, env: CLAUDE_ENV, log: (m) => console.log(`[github] ${m}`),
+  onChange: (uid) => { for (const ws of allClients) if (ws.user?.id === uid) send(ws, { t: 'me' }); } });
+// The GitHub a folder's new repo is made in: its owner's own when they connected one, else the admin's (the server's).
+const ghOf = (dir) => ghUsers.gh(pathOwner(dir)) || gh;
 // ---------- Sign-in connections (agent CLIs + GitHub), driven from the web UI ----------
 // Each agent's models, discovered from its CLI (models.mjs); clients refetch /api/agents on {t:'models'}.
 const modelStore = createModelStore({ file: path.join(DATA, 'models.json'), log: (m) => console.log(`[models] ${m}`),
@@ -1110,7 +1118,7 @@ async function refreshAllRepos() {
 async function setupRepo(convo) {
   try {
     await refreshRepo(convo);
-    convo.repo = await gh.ensureRepo(convo.cwd);
+    convo.repo = await ghOf(convo.cwd).ensureRepo(convo.cwd);
     convo.git = { ...(convo.git || {}), error: null };
   } catch (e) {
     convo.git = { ...(convo.git || {}), error: e.message };
@@ -1135,7 +1143,8 @@ async function syncGitNow(dir, message) {
   previews.redeploy(dir); // a no-op unless HEAD moved (or the folder changed what it serves)
   saveProjectKeys(dir);
   saveProjectSchedules(dir);
-  const r = message ? await gh.commitAndPush(dir, message) : await gh.push(dir);
+  const g = ghOf(dir);
+  const r = message ? await g.commitAndPush(dir, message) : await g.push(dir);
   if (r.repo && r.repo.full !== c.repo?.full) { c.repo = r.repo; orch?.refreshProjects(); }
   // error (the chat's sticky 'not pushed') only once pushes have failed for 10 min or origin diverged; the queue retries a race.
   c.git = { pushedAt: r.ok ? Date.now() : c.git?.pushedAt || null, error: r.warn ? r.error : null, unpushed: r.ok ? 0 : await gh.unpushed(dir),
@@ -1191,11 +1200,14 @@ function shareRepoState(c) {
 // Anything that couldn't be pushed (offline, GitHub down, not linked yet) is retried.
 if (!NO_ORCH) setInterval(async () => {
   try {
-    if (!gh.status().linked && !(await gh.refresh()).linked) return;
+    const linked = new Map(); // github.mjs instance -> signed in (checked once a round)
     const seen = new Set();
     for (const c of convos) {
       if (seen.has(c.cwd) || !fs.existsSync(c.cwd)) continue;
       seen.add(c.cwd); // once per folder, however many chats it has
+      const g = ghOf(c.cwd);
+      if (!linked.has(g)) linked.set(g, g.status().linked || (await g.refresh()).linked);
+      if (!linked.get(g)) continue;
       if (!c.repo) await setupRepo(c);
       else if (c.git?.error || (await gh.unpushed(c.cwd)) > 0) await syncGit(c.cwd);
     }
@@ -1595,8 +1607,9 @@ async function deleteProject(c, me, { files, repo, preview }) {
     if (nested) return { error: `${tilde(dir)} holds another project (${tilde(nested.cwd)}): delete that one first`, status: 409 };
   }
   if (repo && c.repo?.full) {
-    if (!isAdmin(me)) return { error: 'Only the admin can delete GitHub repos', status: 403 };
-    const r = await gh.deleteRepo(c.repo.full);
+    const bound = await ghUsers.boundUser(dir); // a repo in a user's own GitHub is deleted as them
+    if (!isAdmin(me) && bound !== me.id) return { error: 'Only the admin can delete GitHub repos', status: 403 };
+    const r = await ((bound && ghUsers.gh(bound)) || gh).deleteRepo(c.repo.full);
     if (!r.ok) return { error: r.error, status: 502 };
     done.push(`GitHub repo ${c.repo.full}`);
   }
@@ -1942,10 +1955,27 @@ async function handleRequest(req, res) {
   }
   if (!isAdmin(me)) { const why = userBlocked(req, url, me); if (why) return json(res, 403, { error: why }); }
   // Who is signed in, and their estimated share of each weekly plan window against their caps (users.mjs).
-  if (p === '/api/me' && req.method === 'GET') return json(res, 200, { user: users.view(me), usage: users.usage(me.id) });
+  if (p === '/api/me' && req.method === 'GET') return json(res, 200, { user: users.view(me), usage: users.usage(me.id), ...(!isAdmin(me) && { github: ghUsers.status(me.id) }) });
+  // A user's own GitHub (github-users.mjs; admins use the server's sign-in under Connections). GET → its status;
+  // POST …/device starts GitHub's device sign-in ({pending: {code, url}}; the browser re-reads GET until it's linked);
+  // POST …/token {token} links a personal access token; DELETE unlinks, and their folders stop pushing as them.
+  if (p.startsWith('/api/me/github')) {
+    if (isAdmin(me)) return json(res, 400, { error: "Admins use the server's GitHub sign-in (Settings → Connections)" });
+    try {
+      if (p === '/api/me/github' && req.method === 'GET') return json(res, 200, ghUsers.status(me.id));
+      if (p === '/api/me/github/device' && req.method === 'POST') return json(res, 200, await ghUsers.startDevice(me.id));
+      if (p === '/api/me/github/device' && req.method === 'DELETE') { ghUsers.cancelDevice(me.id); return json(res, 200, ghUsers.status(me.id)); }
+      if (p === '/api/me/github/token' && req.method === 'POST') return json(res, 200, await ghUsers.linkToken(me.id, (await readBody(req)).token));
+      if (p === '/api/me/github' && req.method === 'DELETE') {
+        for (const dir of new Set(convos.map((c) => c.cwd))) if (fs.existsSync(dir) && (await ghUsers.boundUser(dir)) === me.id) await ghUsers.unbind(dir);
+        ghUsers.unlink(me.id);
+        return json(res, 200, ghUsers.status(me.id));
+      }
+    } catch (e) { return json(res, e.status || 502, { error: e.message }); }
+  }
   // Admin: the accounts. GET → {users: [{…, usage, chats}], me}; POST {name, password, role?, caps?} adds one;
-  // PATCH /api/users/:id {password?, role?, caps?: {'<agent>/<window>': pct | null}, projects?: [folder], orchestrator?: bool};
-  // DELETE gives their chats to you. GET also lists every project folder ({path, name, owner}) for sharing.
+  // PATCH /api/users/:id {password?, role?, caps?: {'<agent>/<window>': pct | null}, allProjects?: bool, orchestrator?: bool};
+  // DELETE gives their chats to you.
   // Credentials (credentials.mjs): the signed-in user's services and their logins/keys, for the sidebar's Credentials sheet.
   if (p === '/api/credentials' && req.method === 'GET') {
     try { return json(res, 200, { services: credentials.list(me.id) }); } catch (e) { return json(res, e.status || 500, { error: e.message }); }
@@ -1961,9 +1991,7 @@ async function handleRequest(req, res) {
     try { credentials.remove(me.id, crm[1]); return json(res, 200, { ok: true }); } catch (e) { return json(res, e.status || 400, { error: e.message }); }
   }
   if (p === '/api/users' && req.method === 'GET') {
-    const projects = [...new Set(convos.map((c) => c.cwd))].map((cwd) => ({ path: cwd, name: path.basename(cwd), owner: pathOwner(cwd) }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-    return json(res, 200, { me: me.id, projects, users: users.list().map((u) => ({ ...u, usage: users.usage(u.id), chats: convos.filter((c) => (c.owner || ADMIN_ID) === u.id).length })) });
+    return json(res, 200, { me: me.id, users: users.list().map((u) => ({ ...u, usage: users.usage(u.id), chats: convos.filter((c) => (c.owner || ADMIN_ID) === u.id).length })) });
   }
   if (p === '/api/users' && req.method === 'POST') {
     try { return json(res, 200, { user: users.add(await readBody(req)) }); } catch (e) { return json(res, e.status || 400, { error: e.message }); }
@@ -1972,7 +2000,6 @@ async function handleRequest(req, res) {
   if (um && req.method === 'PATCH') {
     const body = await readBody(req);
     if (um[1] === me.id && body.role && body.role !== me.role) return json(res, 409, { error: "You can't change your own role" });
-    if (Array.isArray(body.projects) && body.projects.some((d) => !convos.some((c) => c.cwd === d))) return json(res, 400, { error: 'Not a project: pick from the project list' });
     try {
       const u = users.update(um[1], body);
       if (body.password != null) dropSessions(u.id, sessionToken(req)); // a reset password signs them out elsewhere
@@ -2111,8 +2138,10 @@ async function handleRequest(req, res) {
       if (slug && !isAdmin(me)) return json(res, 403, { error: 'Live previews: ' + ADMIN_ONLY.toLowerCase() });
       if (slug) { const ok = previews.check(slug, cwd, domain); if (!ok.ok) return json(res, 400, { error: `Live preview: ${ok.error}` }); }
       const existing = convos.find((c) => c.cwd === cwd);
-      // A user opens only their own projects (a folder with no chat is the admin's); a new project is theirs.
-      if (!body.newProject && !isAdmin(me) && !(existing && ownsPath(me, cwd))) return json(res, 403, { error: existing ? NOT_YOURS : 'Start a new project instead' });
+      // A user opens only their own projects (a folder with no chat is the admin's, unless they imported it with their own
+      // GitHub: github-users.mjs marks the clone); a new project is theirs.
+      if (!body.newProject && !isAdmin(me) && !(existing ? ownsPath(me, cwd) : (await ghUsers.boundUser(cwd).catch(() => null)) === me.id))
+        return json(res, 403, { error: existing ? NOT_YOURS : 'Start a new project instead' });
       if (body.mode === 'orchestrator' && !canOrchestrate(me)) return json(res, 403, { error: NO_ORCH_MODE });
       if (existing) { // another chat in an existing project: same folder and repo, named from its first message
         if (await refreshRepo(existing)) shareRepoState(existing);
@@ -2126,8 +2155,9 @@ async function handleRequest(req, res) {
         orch?.refreshProjects();
         return json(res, 200, publicConvo(c));
       }
-      // Mandatory protocol: every project lives in a GitHub repo, so GitHub must be linked first.
-      if (!gh.status().linked && !(await gh.refresh()).linked) {
+      // Mandatory protocol: every project lives in a GitHub repo, so GitHub must be linked first (the user's own, else the admin's).
+      const g = ghUsers.gh(me.id) || gh;
+      if (!g.status().linked && !(await g.refresh()).linked) {
         return json(res, 409, { error: 'Link GitHub first: every project gets its own GitHub repo.', github: false });
       }
       fs.mkdirSync(cwd, { recursive: true });
@@ -2592,13 +2622,20 @@ async function handleRequest(req, res) {
       return json(res, 400, { error: e.message, ...(e.exists && { exists: e.exists }) });
     }
   }
+  // A user gets their own GitHub's status ({own: true}; linked: false = their projects go to the admin's GitHub).
   if (p === '/api/github' && req.method === 'GET') {
+    if (!isAdmin(me)) return json(res, 200, { ...ghUsers.status(me.id), own: true });
     const s = Date.now() - gh.status().checkedAt > 15000 ? await gh.refresh() : gh.status();
     return json(res, 200, s);
   }
+  // Import needs the user's own GitHub: the admin's would clone (and push) with the admin's account.
+  const importGh = () => (isAdmin(me) ? gh : ghUsers.gh(me.id));
+  const NO_OWN_GH = 'Connect your GitHub first: Settings → Account → GitHub';
   // New project → Import from GitHub: the account's repos to pick from (the owner can also type any owner/name or URL).
   if (p === '/api/github/repos' && req.method === 'GET') {
-    try { return json(res, 200, { repos: await gh.listRepos() }); } catch (e) { return json(res, 400, { error: e.message, github: gh.status().linked }); }
+    const g = importGh();
+    if (!g) return json(res, 409, { error: NO_OWN_GH, github: false });
+    try { return json(res, 200, { repos: await g.listRepos() }); } catch (e) { return json(res, 400, { error: e.message, github: g.status().linked }); }
   }
   // {repo: owner/name | url} → cloned into a new ~/workspace folder, returned as {path, name, repo}; the UI then picks that
   // folder for the next chat. A repo a project already has returns that project ({existing: true}) instead of a second copy.
@@ -2606,16 +2643,19 @@ async function handleRequest(req, res) {
     const body = await readBody(req);
     const spec = parseRepoSpec(body.repo);
     if (!spec) return json(res, 400, { error: 'Give a GitHub repo as owner/name or its URL' });
-    if (!gh.status().linked && !(await gh.refresh()).linked) return json(res, 409, { error: 'Link GitHub first: every project gets its own GitHub repo.', github: false });
+    const g = importGh();
+    if (!g) return json(res, 409, { error: NO_OWN_GH, github: false });
+    if (!g.status().linked && !(await g.refresh()).linked) return json(res, 409, { error: 'Link GitHub first: every project gets its own GitHub repo.', github: false });
     const key = (spec.full || spec.url).toLowerCase();
-    const have = spec.full && convos.find((c) => c.repo?.full?.toLowerCase() === key && fs.existsSync(c.cwd));
+    const have = spec.full && convos.find((c) => c.repo?.full?.toLowerCase() === key && fs.existsSync(c.cwd) && ownsConvo(me, c));
     if (have) return json(res, 200, { path: have.cwd, name: path.basename(have.cwd), repo: have.repo, existing: true });
-    if (!importing.has(key)) {
+    const job = `${me.id}\0${key}`; // each user clones with their own GitHub
+    if (!importing.has(job)) {
       const name = (spec.full || spec.url).split(/[/:]/).pop().replace(/\.git$/, '');
       const dir = uniqueProjectDir(slugify(name) || 'project');
-      importing.set(key, gh.clone(spec.full || spec.url, dir).then((repo) => ({ path: dir, name: path.basename(dir), repo })).finally(() => importing.delete(key)));
+      importing.set(job, g.clone(spec.full || spec.url, dir).then((repo) => ({ path: dir, name: path.basename(dir), repo })).finally(() => importing.delete(job)));
     }
-    try { return json(res, 200, await importing.get(key)); } catch (e) { return json(res, 400, { error: e.message }); }
+    try { return json(res, 200, await importing.get(job)); } catch (e) { return json(res, 400, { error: e.message }); }
   }
   // Opens a terminal with GitHub's sign-in already started; the owner finishes it in their browser.
   if (p === '/api/github/link' && req.method === 'POST') {

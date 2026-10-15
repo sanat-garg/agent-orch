@@ -3,7 +3,9 @@
 /* A non-admin (html[data-role=user]) gets their chats, projects, tasks and files; machines, sign-ins, previews, stats,
    the terminal, the Browser tab, updates and the plan's own usage card are the admin's. */
 html[data-role="user"] :is(.admin-only, #previewsBtn, #statsBtn, #connFoot, #miniMachine, #usageCard, #bannerTerm, #updateBanner, #repoLink, #viewMenuRepo, #previewLink, .preview-line,
-  .seg [data-view="term"], .gh-import, #pkGhBtn, #pkBrowseBtn) { display: none !important; }
+  .seg [data-view="term"], #pkBrowseBtn) { display: none !important; }
+/* Import from GitHub needs the user's own GitHub (data-gh: app.js loadMe); .user-only rows are for non-admins. */
+html[data-role="user"]:not([data-gh="1"]) :is(.gh-import, #pkGhBtn), html:not([data-role="user"]) .user-only { display: none !important; }
 html[data-role="user"] .side-foot-row { justify-content: flex-end; }
 
 /* "Your usage" in the sidebar */
@@ -13,6 +15,22 @@ html[data-role="user"] .side-foot-row { justify-content: flex-end; }
 .my-usage .mu-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .my-usage .full .ms-bar i { background: var(--danger); }
 .my-usage .full .ms-val { color: var(--danger); }
+
+/* Settings → Account → GitHub (users.js renderGitHub) */
+.st-row.st-gh { display: block; min-height: 0; padding: 0; } /* an .st-row so phones group it into the Account card */
+.st-gh .st-row { padding-bottom: 2px; }
+.st-gh .st-hint { padding: 0; }
+.gh-device { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 12px; margin: 4px 0 8px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
+.gh-code { font: 650 24px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; user-select: all; }
+.gh-acts, .gh-token { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.gh-acts a.btn { display: inline-flex; align-items: center; text-decoration: none; }
+.gh-wait { font-size: 12.5px; color: var(--muted); }
+.gh-alt { margin: 0 0 8px; font-size: 13px; }
+.gh-token { margin: 2px 0 6px; width: 100%; }
+.gh-token input { flex: 1; min-width: 0; height: 36px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; font-size: 14px; }
+.gh-token input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus); }
+.st-gh .st-hint { display: block; margin-bottom: 8px; }
+.st-gh .um-err { margin: 0 0 8px; }
 
 /* The Users sheet */
 .modal-panel.um { width: min(640px, 100%); }
@@ -47,7 +65,7 @@ html[data-role="user"] .side-foot-row { justify-content: flex-end; }
 .um-err:empty { display: none; }
 .um-access { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
 .um-atitle { margin: 0; font-size: 13px; font-weight: 650; }
-.um-projects { display: flex; flex-direction: column; gap: 2px; width: 100%; max-height: 220px; overflow-y: auto; }
+.um-scope { display: flex; flex-direction: column; gap: 2px; }
 .um-check { display: flex; align-items: center; gap: 8px; min-height: 30px; font-size: 14px; cursor: pointer; }
 .um-check input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); flex: none; }
 .um-check .um-hint { margin-left: auto; padding-left: 8px; }
@@ -62,5 +80,7 @@ html[data-role="user"] .side-foot-row { justify-content: flex-end; }
 @media (pointer: coarse) {
   .um-acts .btn.small, .um-top .btn.small, .um-foot .btn, .um-access .btn.small { min-height: 44px; }
   .um-check { min-height: 44px; }
+  .st-gh .btn.small, .gh-alt { min-height: 44px; }
+  .gh-token input { height: 44px; font-size: 16px; }
   .um-cap input, .um-add input, .um-add select { height: 44px; font-size: 16px; } /* iOS zooms into smaller inputs */
 }

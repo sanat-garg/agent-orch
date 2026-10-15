@@ -106,19 +106,19 @@ test('capBlock: a user over their cap for that model is blocked until the reset;
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test("a user's access: shared project folders and Orchestrator Mode; admins see everything", () => {
+test("a user's access: their own projects or all of them, and Orchestrator Mode; admins see everything", () => {
   const dir = tmp();
   legacyAuth(dir, 'old-password');
   const users = createUsers({ dataDir: dir });
   const sam = users.add({ name: 'sam', password: 'sam-password' });
-  assert.deepEqual([sam.projects, sam.orchestrator], [[], true]);
-  assert.throws(() => users.update(sam.id, { projects: ['relative/dir'] }), /project folder paths/);
-  const v = users.update(sam.id, { projects: ['/w/a', '/w/a/', '/w/b'], orchestrator: false });
-  assert.deepEqual([v.projects, v.orchestrator], [['/w/a', '/w/b'], false]);
+  assert.deepEqual([sam.allProjects, sam.orchestrator], [false, true]);
+  assert.ok(!sharedWith(users.get(sam.id), '/w/a'), 'only their own projects by default');
+  const v = users.update(sam.id, { allProjects: true, orchestrator: false });
+  assert.deepEqual([v.allProjects, v.orchestrator], [true, false]);
   const u = users.get(sam.id);
-  assert.ok(sharedWith(u, '/w/a') && !sharedWith(u, '/w/c'));
+  assert.ok(sharedWith(u, '/w/a') && sharedWith(u, '/w/c') && !sharedWith(u, ''));
   assert.equal(canOrchestrate(u), false);
   assert.equal(canOrchestrate(users.get(ADMIN_ID)), true);
   const promoted = users.update(sam.id, { role: 'admin' });
-  assert.deepEqual([promoted.projects, promoted.orchestrator], [[], true], 'an admin sees everything');
+  assert.deepEqual([promoted.allProjects, promoted.orchestrator], [true, true], 'an admin sees everything');
 });

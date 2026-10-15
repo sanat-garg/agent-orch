@@ -9376,6 +9376,18 @@ function renderGhRow() {
   row.textContent = '';
   row.className = 'gh-row' + (GH.linked ? '' : ' need');
   row.insertAdjacentHTML('beforeend', $('repoLink').querySelector('svg').outerHTML);
+  if (!meAdmin()) { // a user: their own GitHub if they connected one (Settings → Account), else the admin's
+    row.classList.remove('need');
+    const g = me.github || {};
+    row.append(el('span', '', g.linked ? `Your GitHub: @${g.login}. Each new project gets a private repo in your account.`
+      : "Each new project gets a private repo in your admin's GitHub. Connect your own in Settings to keep yours in your account."));
+    if (!g.linked) {
+      const b = el('button', 'btn small', 'Connect GitHub');
+      b.onclick = () => { closePicker(); openSettings(); $('stGithub').scrollIntoView({ block: 'center' }); };
+      row.append(b);
+    }
+    return;
+  }
   if (GH.linked) {
     row.append(el('span', '', `GitHub linked as @${GH.login}. Each new project gets a private repo, and every finished task is pushed.`));
   } else {
@@ -9851,10 +9863,12 @@ const meOrch = () => meAdmin() || me.user?.orchestrator !== false;
 async function loadMe() {
   try { Object.assign(me, await api('/api/me')); } catch {}
   document.documentElement.dataset.role = me.user?.role || 'admin';
+  document.documentElement.dataset.gh = me.github?.linked ? '1' : ''; // a user's own GitHub (users.js): Import from GitHub shows
   const orchOpt = $('mode').querySelector('option[value="orchestrator"]');
   orchOpt.disabled = orchOpt.hidden = !meOrch();
   if (!meOrch() && state.draftMode === 'orchestrator') { state.draftMode = 'bypassPermissions'; if (!state.cid) setModeUI(state.draftMode); }
   window.Users?.changed();
+  if (!$('pickerModal').hidden) renderGhRow();
 }
 
 (async function boot() {

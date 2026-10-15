@@ -643,6 +643,8 @@
         <span class="st-text"><strong id="stMeName">Signed in</strong><small id="stMeHint"></small></span>
         <button type="button" class="btn small" id="stSignOut">Sign out</button>
       </div>
+      <!-- A user's own GitHub (users.js renderGitHub; server: github-users.mjs). Admins link the server's under Connections. -->
+      <div class="st-row st-gh user-only" id="stGithub"></div>
       <button type="button" class="st-row st-link admin-only" id="stUsersOpen" aria-haspopup="dialog"><span class="st-text"><strong>Users &amp; usage caps</strong><small id="stUsersHint">Who can sign in, and how much of each weekly limit they may use</small></span><svg class="st-chev" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>
       <h3 class="st-sec">Alerts</h3>
       <p class="st-hint">How agent-orch gets your attention</p>

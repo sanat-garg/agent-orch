@@ -2,12 +2,12 @@
 // ---------- Users (server: users.mjs) ----------
 // Settings → Account: who is signed in, and Sign out. For the admin, Settings → "Users & usage caps" opens a sheet
 // listing every account with its estimated share of each weekly limit the agent CLIs report (Claude's all-models week
-// and per-model weeks such as Fable; codex's weekly) and the cap on it, their access (which other projects they see,
+// and per-model weeks such as Fable; codex's weekly) and the cap on it, their access (only their own projects or all of them,
 // and whether they may use Orchestrator Mode), plus add / reset password / role / delete.
 // A non-admin's sidebar shows "Your usage" instead of the machine and plan cards: their share of each weekly limit
 // against their caps. Loaded after app.js and uses its helpers ($, el, api, toast, coarse, me, loadMe, meAdmin).
 (() => {
-  const UM = { list: [], projects: [], me: null, loaded: false, error: null, lastFocus: null, open: null, adding: false };
+  const UM = { list: [], me: null, loaded: false, error: null, lastFocus: null, open: null, adding: false };
   const btn = (cls, text, onclick) => { const b = el('button', cls, text); b.type = 'button'; if (onclick) b.onclick = onclick; return b; };
   const pct = (n) => `${Number(n) < 10 && Number(n) % 1 ? Number(n).toFixed(1) : Math.round(Number(n))}%`;
   const resets = (s) => (s ? `resets ${new Date(s * 1000).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })}` : '');
@@ -20,6 +20,71 @@
       : 'Your admin manages machines, sign-ins and your usage caps';
   }
   $('stSignOut').addEventListener('click', () => $('logout').click()); // the same confirm and sign-out as Connections
+
+  // ---- Settings → Account → GitHub (non-admins; server: github-users.mjs, /api/me/github). Connected, their new projects
+  // get a private repo in their own account and they can import their repos; otherwise new projects go to the admin's.
+  // Connect = GitHub's device sign-in: the code shows here, they approve it on github.com, and a {t:'me'} push (or the
+  // poll below) re-renders. "Use a token instead" takes a personal access token.
+  const UG = { token: false, busy: false, err: '', poll: null, tokenInput: null };
+  const ghLink = (href, text, cls) => Object.assign(el('a', cls, text), { href, target: '_blank', rel: 'noopener' });
+  async function ghCall(fn) {
+    UG.busy = true; UG.err = ''; renderGitHub();
+    try { me.github = await fn(); } catch (e) { UG.err = e.message; }
+    UG.busy = false;
+    if (me.github?.linked) { UG.token = false; if (UG.tokenInput) UG.tokenInput.value = ''; }
+    renderGitHub();
+  }
+  function renderGitHub() {
+    const box = $('stGithub'), g = me.github;
+    if (meAdmin() || !g) { box.replaceChildren(); return; }
+    const p = g.pending, waiting = p && !p.error && p.expiresAt > Date.now();
+    clearInterval(UG.poll);
+    UG.poll = waiting ? setInterval(() => { if (!document.hidden) loadMe(); }, 5000) : null;
+    const row = el('div', 'st-row'), text = el('span', 'st-text');
+    text.append(el('strong', '', g.linked ? `GitHub · @${g.login}` : 'GitHub'),
+      el('small', '', g.linked ? 'Your new projects get a private repo in your GitHub account, and you can import your own repos.'
+        : "Your new projects go to your admin's GitHub. Connect yours to keep them in your own account and import your repos."));
+    row.append(text);
+    if (g.linked) {
+      row.append(btn('btn small', 'Disconnect', () => {
+        if (!confirm(`Disconnect @${g.login}? Projects with a repo in your GitHub stop syncing with it until you connect again.`)) return;
+        ghCall(() => api('/api/me/github', 'DELETE'));
+      }));
+    } else if (!waiting && !UG.token) {
+      const b = btn('btn small primary', UG.busy && !UG.token ? 'Starting…' : 'Connect', () => ghCall(() => api('/api/me/github/device', 'POST')));
+      b.disabled = UG.busy;
+      row.append(b);
+    }
+    const parts = [row];
+    if (!g.linked && waiting) {
+      const card = el('div', 'gh-device');
+      const code = el('code', 'gh-code', p.code);
+      code.setAttribute('aria-label', `One-time code ${p.code.split('').join(' ')}`);
+      const acts = el('div', 'gh-acts');
+      acts.append(btn('btn small', 'Copy code', async () => toast(await copyToClipboard(p.code) ? 'Code copied' : `Copy failed: the code is ${p.code}`)),
+        ghLink(p.url, 'Open GitHub', 'btn small primary'), btn('btn small', 'Cancel', () => ghCall(() => api('/api/me/github/device', 'DELETE'))));
+      card.append(el('span', 'st-hint', 'Enter this code on GitHub, then approve agent-orch\'s access (it signs in as the GitHub CLI):'), code, acts,
+        el('span', 'gh-wait', 'Waiting for you to approve it on GitHub…'));
+      parts.push(card);
+    }
+    if (!g.linked && (p?.error || UG.err)) parts.push(el('p', 'um-err', UG.err || p.error));
+    if (!g.linked && !waiting) {
+      if (!UG.token) parts.push(btn('link-btn gh-alt', 'Use a personal access token instead', () => { UG.token = true; UG.err = ''; renderGitHub(); UG.tokenInput.focus(); }));
+      else {
+        UG.tokenInput ||= input('password', { autocomplete: 'off', spellcheck: false, autocapitalize: 'off', placeholder: 'ghp_… or github_pat_…' });
+        UG.tokenInput.setAttribute('aria-label', 'GitHub personal access token');
+        const form = el('form', 'gh-token');
+        const go = Object.assign(el('button', 'btn small primary', UG.busy ? 'Checking…' : 'Connect'), { type: 'submit', disabled: UG.busy });
+        form.onsubmit = (e) => { e.preventDefault(); const token = UG.tokenInput.value.trim(); if (token) ghCall(() => api('/api/me/github/token', 'POST', { token })); };
+        form.append(UG.tokenInput, go);
+        const hint = el('span', 'st-hint');
+        hint.append('A classic token with the repo, read:org, gist and workflow scopes. ',
+          Object.assign(el('a', '', 'Make one on GitHub'), { href: 'https://github.com/settings/tokens/new?scopes=repo,read:org,gist,workflow&description=agent-orch', target: '_blank', rel: 'noopener' }));
+        parts.push(form, hint, btn('link-btn gh-alt', 'Sign in with GitHub instead', () => { UG.token = false; UG.err = ''; renderGitHub(); }));
+      }
+    }
+    box.replaceChildren(...parts);
+  }
 
   // ---- "Your usage" (non-admins): their share of each weekly limit, against the cap
   function renderMine() {
@@ -45,7 +110,7 @@
 
   // ---- the admin's Users sheet
   async function load() {
-    try { const r = await api('/api/users'); UM.list = r.users; UM.projects = r.projects || []; UM.me = r.me; UM.loaded = true; UM.error = null; }
+    try { const r = await api('/api/users'); UM.list = r.users; UM.me = r.me; UM.loaded = true; UM.error = null; }
     catch (e) { UM.error = e.message; }
   }
   function open() {
@@ -172,35 +237,31 @@
     return card;
   }
 
-  // A user's access: Orchestrator Mode on/off, and which other users' projects they see (their own always show).
+  // A user's access: which projects they see (only their own, or everyone's) and Orchestrator Mode on/off.
   function accessBox(u) {
     const box = el('div', 'um-access');
-    const names = new Map(UM.list.map((x) => [x.id, x.name]));
+    const scope = el('div', 'um-scope');
+    scope.setAttribute('role', 'radiogroup');
+    scope.setAttribute('aria-label', `Projects ${u.name} sees`);
+    const choice = (all, text) => {
+      const row = el('label', 'um-check');
+      const r = input('radio', { name: `um-scope-${u.id}`, checked: !!u.allProjects === all });
+      row.append(r, el('span', '', text));
+      scope.append(row);
+      return r;
+    };
+    choice(false, 'Only their own projects');
+    const all = choice(true, 'All projects');
     const orch = input('checkbox', { checked: u.orchestrator !== false });
     const orchRow = el('label', 'um-check');
     orchRow.append(orch, el('span', '', 'Can use Orchestrator Mode'));
-    const others = UM.projects.filter((p) => p.owner !== u.id);
-    const picks = new Map();
-    const list = el('div', 'um-projects');
-    for (const p of others) {
-      const row = el('label', 'um-check');
-      const c = input('checkbox', { checked: (u.projects || []).includes(p.path) });
-      c.setAttribute('aria-label', `${u.name} sees ${p.name}`);
-      picks.set(p.path, c);
-      row.title = p.path;
-      row.append(c, el('span', '', p.name), el('span', 'um-hint', names.get(p.owner) || ''));
-      list.append(row);
-    }
     const err = el('p', 'um-err');
     const save = btn('btn small primary', 'Save access', async () => {
       err.textContent = '';
-      const projects = [...picks].filter(([, c]) => c.checked).map(([p]) => p);
-      try { await api(`/api/users/${u.id}`, 'PATCH', { projects, orchestrator: orch.checked }); toast(`Saved ${u.name}'s access`, { kind: 'success' }); await load(); render(); }
+      try { await api(`/api/users/${u.id}`, 'PATCH', { allProjects: all.checked, orchestrator: orch.checked }); toast(`Saved ${u.name}'s access`, { kind: 'success' }); await load(); render(); }
       catch (x) { err.textContent = x.message; }
     });
-    box.append(el('h4', 'um-atitle', 'Access'), orchRow,
-      el('span', 'um-hint', others.length ? 'Other projects they can see and work in (their own projects always show):' : 'No other projects to share yet. Their own projects always show.'),
-      list, err, save);
+    box.append(el('h4', 'um-atitle', 'Access'), scope, orchRow, err, save);
     return box;
   }
 
@@ -208,7 +269,7 @@
     if ($('usersModal').hidden) return;
     const body = $('umBody');
     const top = el('div', 'um-top');
-    top.append(el('p', 'um-intro', "Each user has their own chats and projects, plus any project you share with them under Access. A cap is the most of a weekly limit they may use; past it their chats on that model stop, and their tasks move to a fallback or wait for the reset. Usage per user is estimated from their share of the tokens, since the plan only reports the account's total."));
+    top.append(el('p', 'um-intro', "Each user has their own chats and projects; under Access you can let them see all projects. A cap is the most of a weekly limit they may use; past it their chats on that model stop, and their tasks move to a fallback or wait for the reset. Usage per user is estimated from their share of the tokens, since the plan only reports the account's total."));
     if (!UM.adding) top.append(btn('btn small primary', 'Add user', () => { UM.adding = true; render(); }));
     const parts = [top];
     if (UM.adding) parts.push(addForm());
@@ -229,7 +290,7 @@
 
   window.Users = {
     open,
-    changed() { renderAccount(); renderMine(); },
+    changed() { renderAccount(); renderMine(); renderGitHub(); },
   };
   window.Users.changed();
 })();

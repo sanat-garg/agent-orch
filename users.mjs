@@ -1,17 +1,17 @@
 // Users: several people sign in to one agent-orch. The admin (the original owner) manages the others and can cap each
 // one's share of every weekly plan window the agent CLIs report (Claude's all-models week and per-model weeks such as
 // Fable; codex's weekly), e.g. "Sam may use at most 10% of the Fable week".
-//   <DATA>/users.json: [{id, name, role: 'admin'|'user', salt, hash, caps: {'<agent>/<window>': pct}, projects?, orchestrator?,
+//   <DATA>/users.json: [{id, name, role: 'admin'|'user', salt, hash, caps: {'<agent>/<window>': pct}, allProjects?, orchestrator?,
 //   aliases?, createdAt}]
-// A user always sees their own projects; `projects` lists other project folders (absolute paths) the admin shared with
-// them, and `orchestrator: false` keeps them out of Orchestrator Mode (missing = allowed). Admins see everything.
+// A user sees their own projects, or every project when the admin sets `allProjects` (owner, 2026-10-15: one switch, never
+// a per-project pick), and `orchestrator: false` keeps them out of Orchestrator Mode (missing = allowed). Admins see everything.
 // The first run migrates the single-password login (auth.json) into the admin account (id 'admin', name 'admin', alias
 // 'claude': the old login page's hidden username, which saved passwords carry), so nobody is signed out.
 // A user's usage of a window is an estimate: the CLIs only report the whole account's pct, so it is split by each
 // user's share of the weighted tokens (input + cached/10 + 5 × output) recorded for that window's models since the
 // window began (usage.mjs tokens records carry user and model; older records count as the admin's).
 //   createUsers({dataDir, usageLog, now}) → { list, get, byName, check, add, update, remove, view, usage, capBlock }
-// sharedWith(u, cwd) / canOrchestrate(u): the project grants and the Orchestrator Mode switch, for the server's checks.
+// sharedWith(u, cwd) / canOrchestrate(u): the all-projects and Orchestrator Mode switches, for the server's checks.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -60,7 +60,7 @@ export function shareOf(records, { user, agent, window, pct, resetsAt }, at = Da
   return { pct, mine: all > 0 ? (Number(pct) || 0) * own / all : 0 };
 }
 
-export const sharedWith = (u, cwd) => !!cwd && u?.role !== 'admin' && (u?.projects || []).includes(cwd);
+export const sharedWith = (u, cwd) => !!cwd && u?.role !== 'admin' && u?.allProjects === true;
 export const canOrchestrate = (u) => !!u && (u.role === 'admin' || u.orchestrator !== false);
 
 export function createUsers({ dataDir, usageLog = null, now = Date.now, agents = () => ['claude', 'codex'] }) {
@@ -96,7 +96,7 @@ export function createUsers({ dataDir, usageLog = null, now = Date.now, agents =
   };
   // Sign-in: a blank name is the admin (the old password-only form still posts none).
   const check = (name, pw) => { const u = String(name || '').trim() ? byName(name) : get(ADMIN_ID); return u && passwordOk(u, pw) ? u : null; };
-  const view = (u) => u && { id: u.id, name: u.name, role: u.role, caps: u.caps || {}, projects: u.projects || [], orchestrator: u.orchestrator !== false, createdAt: u.createdAt || null };
+  const view = (u) => u && { id: u.id, name: u.name, role: u.role, caps: u.caps || {}, allProjects: u.role === 'admin' || u.allProjects === true, orchestrator: u.orchestrator !== false, createdAt: u.createdAt || null };
   const fail = (status, error) => Object.assign(new Error(error), { status });
   const admins = () => read().filter((u) => u.role === 'admin');
   function cleanCaps(caps) {
@@ -113,19 +113,14 @@ export function createUsers({ dataDir, usageLog = null, now = Date.now, agents =
     }
     return out;
   }
-  function cleanProjects(v) {
-    if (v == null) return [];
-    if (!Array.isArray(v) || v.some((x) => typeof x !== 'string' || !path.isAbsolute(x))) throw fail(400, 'projects must be a list of project folder paths');
-    return [...new Set(v.map((x) => path.resolve(x)))].slice(0, 1000);
-  }
-  function add({ name, password, role = 'user', caps, projects, orchestrator } = {}) {
+  function add({ name, password, role = 'user', caps, allProjects, orchestrator } = {}) {
     const n = String(name || '').trim().toLowerCase();
     if (!NAME_RE.test(n)) throw fail(400, 'Username: 1–32 lowercase letters, digits, . _ or -');
     if (byName(n)) throw fail(409, 'That username is taken');
     if (String(password || '').length < 8) throw fail(400, 'Password: at least 8 characters');
     if (!['admin', 'user'].includes(role)) throw fail(400, 'role must be admin or user');
     const u = { id: crypto.randomBytes(6).toString('hex'), name: n, role, ...hashPassword(password), caps: role === 'admin' ? {} : cleanCaps(caps),
-      ...(role !== 'admin' && { projects: cleanProjects(projects), orchestrator: orchestrator !== false }), createdAt: now() };
+      ...(role !== 'admin' && { allProjects: allProjects === true, orchestrator: orchestrator !== false }), createdAt: now() };
     read().push(u); save();
     return view(u);
   }
@@ -142,9 +137,10 @@ export function createUsers({ dataDir, usageLog = null, now = Date.now, agents =
       u.role = patch.role;
     }
     if (patch.caps !== undefined) u.caps = cleanCaps(patch.caps);
-    if (patch.projects !== undefined) u.projects = cleanProjects(patch.projects);
+    if (patch.allProjects !== undefined) u.allProjects = patch.allProjects === true;
     if (patch.orchestrator !== undefined) u.orchestrator = patch.orchestrator !== false;
-    if (u.role === 'admin') { u.caps = {}; delete u.projects; delete u.orchestrator; } // admins are never capped and see everything
+    delete u.projects; // the per-project picks before 2026-10-15
+    if (u.role === 'admin') { u.caps = {}; delete u.allProjects; delete u.orchestrator; } // admins are never capped and see everything
     save();
     return view(u);
   }

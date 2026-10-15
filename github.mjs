@@ -3,6 +3,9 @@
 // `gh` is only needed to create a repo: a folder that already has an `origin` pushes with plain git
 // (whatever credentials this machine has), so a gh/network hiccup or a missing gh never blocks it.
 // Every push of a branch (main, a task branch) goes through pushBranch: one per repo+branch at a time, retried, never forced.
+// A user's own GitHub (github-users.mjs) is another instance: env carries their GH_CONFIG_DIR, and `repoConfig` ([key,
+// value] pairs) goes into the .git/config of every repo it creates or clones (their git credential helper), so plain git
+// pushes there as that user. `setupGit: false` keeps such an instance from touching the global git config.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -28,14 +31,14 @@ const run = (cmd, args, opts = {}) => new Promise((resolve) => {
   });
 });
 
-export function createGitHub({ env, log, alert = () => {}, now = Date.now }) {
+export function createGitHub({ env, log, alert = () => {}, now = Date.now, repoConfig = [], setupGit = true }) {
   const opts = (cwd) => ({ cwd, env });
   let status = { linked: false, login: null, checkedAt: 0 };
 
   async function refresh() {
     const r = await run('gh', ['api', 'user', '--jq', '.login'], opts());
     const linked = r.ok && !!r.out;
-    if (linked && !status.linked) await run('gh', ['auth', 'setup-git'], opts()); // git push uses the gh sign-in
+    if (linked && !status.linked && setupGit) await run('gh', ['auth', 'setup-git'], opts()); // git push uses the gh sign-in
     status = { linked, login: linked ? r.out : null, checkedAt: Date.now() };
     return status;
   }
@@ -83,6 +86,7 @@ export function createGitHub({ env, log, alert = () => {}, now = Date.now }) {
     const base = path.basename(dir).replace(/[^A-Za-z0-9._-]/g, '-').replace(/^[.-]+/, '').slice(0, 90) || 'project';
     let name = base;
     for (let n = 2; (await run('gh', ['repo', 'view', `${status.login}/${name}`, '--json', 'name'], opts())).ok; n++) name = `${base}-${n}`;
+    await setRepoConfig(dir, repoConfig); // before the first push, which gh runs with plain git
     const r = await run('gh', ['repo', 'create', name, '--private', '--source', dir, '--remote', 'origin', '--push'], opts(dir));
     if (!r.ok) throw new Error(r.err.split('\n').pop() || 'could not create the GitHub repo');
     log(`created private GitHub repo ${status.login}/${name}`);
@@ -215,9 +219,10 @@ export function createGitHub({ env, log, alert = () => {}, now = Date.now }) {
   async function clone(spec, dir) {
     const full = parseRepoSpec(spec);
     if (!full) throw new Error('Give a GitHub repo as owner/name or its URL');
+    const cfg = repoConfig.flatMap(([k, v]) => ['-c', `${k}=${v}`]); // written into the clone's config, used by the clone itself
     const r = full.url
-      ? await run('git', ['clone', '-q', full.url, dir], { ...opts(), timeout: 900000 })
-      : await run('gh', ['repo', 'clone', full.full, dir, '--', '-q'], { ...opts(), timeout: 900000 });
+      ? await run('git', ['clone', '-q', ...cfg, full.url, dir], { ...opts(), timeout: 900000 })
+      : await run('gh', ['repo', 'clone', full.full, dir, '--', '-q', ...cfg], { ...opts(), timeout: 900000 });
     if (!r.ok) {
       fs.rmSync(dir, { recursive: true, force: true });
       const why = r.err.split('\n').filter(Boolean).pop() || 'clone failed';
@@ -255,6 +260,16 @@ export function repoOf(url) {
 // stops with { diverged: true } and nothing is forced. Anything else (auth, a missing remote) fails at once.
 // Resolves { ok, sha, error?, diverged? } and never rejects. retryGit (taskrun.mjs) doesn't fit: the delays are fixed
 // and every retry must re-check origin first.
+// Writes [key, value] pairs into a repo's own .git/config; each key's earlier values are replaced (a key given several
+// times keeps them all, in order). [[key, null]] removes the key.
+export async function setRepoConfig(dir, pairs, env = process.env) {
+  const keys = [...new Set(pairs.map(([k]) => k))];
+  for (const k of keys) {
+    await run('git', ['config', '--local', '--unset-all', k], { cwd: dir, env });
+    for (const [, v] of pairs.filter(([x]) => x === k)) if (v != null) await run('git', ['config', '--local', '--add', k, v], { cwd: dir, env });
+  }
+}
+
 export const pushOptions = { delays: [2000, 5000, 15000, 60000], sleep: (ms) => new Promise((r) => setTimeout(r, ms)) };
 const PUSH_RETRY = /\[rejected\][^\n]*\((?:non-fast-forward|fetch first)\)|returned error: 5\d\d\b/i;
 const pushRetryable = (t) => transientGit(t) || (PUSH_RETRY.test(t) && !/Authentication failed|Permission denied/i.test(t));

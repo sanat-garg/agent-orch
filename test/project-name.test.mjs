@@ -1,7 +1,7 @@
-// project-name.mjs: Haiku's one-word project name, its options, and the fallbacks (null) the server relies on.
+// project-name.mjs: Haiku's two-word project name, its options, and the fallbacks (null) the server relies on.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { projectWord, cleanWord, namePrompt, NAME_MODEL } from '../project-name.mjs';
+import { projectName, cleanName, namePrompt, NAME_MODEL } from '../project-name.mjs';
 
 const replying = (text, seen = {}) => (args) => {
   Object.assign(seen, args);
@@ -12,9 +12,9 @@ const replying = (text, seen = {}) => (args) => {
   })();
 };
 
-test('one word from Haiku: a tool-less, thinking-off single turn that lists the taken names', async () => {
+test('two hyphenated words from Haiku: a tool-less, thinking-off single turn that lists the taken names', async () => {
   const seen = {};
-  assert.equal(await projectWord('a website for my bakery', { taken: ['ledger'], query: replying('Knead\n', seen) }), 'knead');
+  assert.equal(await projectName('a website for my bakery', { taken: ['ledger'], query: replying('Dough-Riser\n', seen) }), 'dough-riser');
   assert.equal(seen.options.model, NAME_MODEL);
   assert.deepEqual(seen.options.tools, []);
   assert.deepEqual(seen.options.thinking, { type: 'disabled' });
@@ -23,14 +23,16 @@ test('one word from Haiku: a tool-less, thinking-off single turn that lists the 
   assert.match(seen.prompt, /ledger/);
 });
 
-test('anything but one fresh plain word is null, so the server falls back to the message', async () => {
-  assert.equal(await projectWord('a budget app', { taken: ['ledger'], query: replying('Ledger') }), null);
-  assert.equal(await projectWord('a budget app', { query: replying('Penny Wise') }), null);
-  assert.equal(await projectWord('a budget app', { query: replying('**Rise**\n\nThis name works well because…') }), null);
-  assert.equal(await projectWord('a budget app', { query: () => { throw new Error('signed out'); } }), null);
-  assert.equal(await projectWord('   ', { query: replying('never') }), null);
-  assert.equal(cleanWord('"Tempo."'), 'tempo');
-  assert.equal(cleanWord('ab'), null);
+test('anything but two fresh plain words is null, so the server falls back to the message', async () => {
+  assert.equal(await projectName('a budget app', { taken: ['penny-wise'], query: replying('penny-wise') }), null);
+  assert.equal(await projectName('a budget app', { query: replying('Ledger') }), null);
+  assert.equal(await projectName('a budget app', { query: replying('Penny Wise Pal') }), null);
+  assert.equal(await projectName('a budget app', { query: replying('**Rise**\n\nThis name works well because…') }), null);
+  assert.equal(await projectName('a budget app', { query: () => { throw new Error('signed out'); } }), null);
+  assert.equal(await projectName('   ', { query: replying('never') }), null);
+  assert.equal(cleanName('"Name Giver."'), 'name-giver');
+  assert.equal(cleanName('tempo_keeper'), 'tempo-keeper');
+  assert.equal(cleanName('a-b'), null);
 });
 
 test('a slow Haiku is given up on at the timeout', async () => {
@@ -39,7 +41,7 @@ test('a slow Haiku is given up on at the timeout', async () => {
     throw new Error('aborted');
   })();
   const t0 = Date.now();
-  assert.equal(await projectWord('a budget app', { query: hang, timeoutMs: 50 }), null);
+  assert.equal(await projectName('a budget app', { query: hang, timeoutMs: 50 }), null);
   assert.ok(Date.now() - t0 < 2000);
 });
 

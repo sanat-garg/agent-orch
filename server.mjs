@@ -40,7 +40,7 @@ import { createRollingRestart, preflight, readRestartState, serverFile } from '.
 import { createSounds, MAX_SOUND_BYTES as MAX_CUSTOM_SOUND_BYTES } from './sounds.mjs';
 import { createVersion, formatVersion } from './version.mjs';
 import { createPreviews } from './previews.mjs';
-import { projectWord } from './project-name.mjs';
+import { projectName } from './project-name.mjs';
 import { createCredentials, projectSecrets } from './credentials.mjs';
 import { describeCron, nextRun, validTz } from './cron.mjs';
 import { createUsers, ADMIN_ID, sharedWith, canOrchestrate } from './users.mjs';
@@ -2130,7 +2130,7 @@ async function handleRequest(req, res) {
       // A new project gets its own folder under ~/workspace (= its GitHub repo name): the user's name, else one word Haiku
       // picks from the first message (project-name.mjs), else the message's first words.
       const cwd = body.newProject
-        ? uniqueProjectDir(slugify(body.newProject.name) || await projectWord(body.newProject.fromText, { taken: takenNames(), bin: CLAUDE_BIN, env: CLAUDE_ENV, cwd: WORKSPACE })
+        ? uniqueProjectDir(slugify(body.newProject.name) || await projectName(body.newProject.fromText, { taken: takenNames(), bin: CLAUDE_BIN, env: CLAUDE_ENV, cwd: WORKSPACE })
           || slugify(body.newProject.fromText, true) || 'project')
         : safeCwd(body.folder);
       // newProject.slug (+ domain): its live preview address, checked before anything is created.

@@ -999,10 +999,10 @@ const tilde = (p) => (p || '').replace(/^\/home\/[^/]+/, '~');
 function currentCwdLabel() {
   const c = currentConvo();
   if (c) return tilde(c.cwd);
-  return state.draft.type === 'folder' ? tilde(state.draft.path) : `~/workspace/${draftSlug() || '(one-word name picked from your message)'}`;
+  return state.draft.type === 'folder' ? tilde(state.draft.path) : `~/workspace/${draftSlug() || '(two-word name picked from your message)'}`;
 }
 // Mirrors the server's slugify for a typed name, so the preview matches the folder that gets created. Without one the
-// server has Haiku pick a single word from the first message, so there is nothing to preview.
+// server has Haiku pick a two-word name from the first message, so there is nothing to preview.
 function slugify(text) {
   if (!text) return '';
   return String(text).toLowerCase().replace(/[^a-z0-9\s._-]/g, ' ').split(/[\s_]+/).filter(Boolean).slice(0, 8)
@@ -2284,7 +2284,7 @@ $('composer').addEventListener('submit', async (e) => {
     if (state.creating) return; // one tap, one project: the server may take a few seconds to name it
     state.creating = true;
     updateSendButton();
-    // An unnamed new project waits for Haiku to pick its one-word name (server project-name.mjs).
+    // An unnamed new project waits for Haiku to pick its two-word name (server project-name.mjs).
     const naming = {};
     if (state.draft.type === 'new' && !state.draft.name?.trim()) naming.timer = setTimeout(() => (naming.toast = toast('Naming your project…', { duration: 15000 })), 600);
     try {
@@ -3250,7 +3250,7 @@ function renderProjectList() {
       { name: raw ? `Create "${slug || raw}"` : 'New project' },
       {
         create: true,
-        meta: raw ? `~/workspace/${slug}` : 'Gets a one-word name picked from your message',
+        meta: raw ? `~/workspace/${slug}` : 'Gets a two-word name picked from your message',
         onUse: () => chooseNew(raw),
       },
     ));

@@ -96,9 +96,9 @@ test('the menu offers Rename, New file, New folder and Delete; rename in place, 
   assert.deepEqual(await names(page), ['docs', 'a.txt', 'b.txt', 'keep.txt']);
   await menu(page, rowSel('a.txt'));
   const acts = await page.$$eval('#fxMenu .cm-opt', (bs) => bs.map((b) => [b.dataset.act, b.disabled]));
-  assert.deepEqual(acts, [['open', false], ['copy', false], ['cut', false], ['paste', true], ['zip', false], ['rename', false], ['newfile', true],
-    ['newdir', true], ['delete', false], ['path', false], ['ask', false]], 'the four after Compress; New only on a folder or the background');
-  assert.deepEqual(await page.$$eval('#fxMenu .cm-opt .cm-l', (ls) => ls.map((l) => l.textContent)).then((ls) => ls.slice(5, 9)), ['Rename…', 'New file…', 'New folder…', 'Delete']);
+  assert.deepEqual(acts, [['open', false], ['edit', false], ['copy', false], ['cut', false], ['paste', true], ['zip', false], ['rename', false], ['newfile', true],
+    ['newdir', true], ['delete', false], ['download', false], ['path', false], ['ask', false]], 'the four after Compress; New only on a folder or the background');
+  assert.deepEqual(await page.$$eval('#fxMenu .cm-opt .cm-l', (ls) => ls.map((l) => l.textContent)).then((ls) => ls.slice(6, 10)), ['Rename…', 'New file…', 'New folder…', 'Delete']);
 
   // Rename…: the name becomes a field, its stem selected; Enter saves and the renamed file stays selected
   await page.click('#fxMenu [data-act="rename"]');

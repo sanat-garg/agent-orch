@@ -2037,6 +2037,16 @@ async function handleRequest(req, res) {
   }
 
   if (VENDOR[p]) return serveFile(res, path.join(ROOT, VENDOR[p]));
+  // The Files view's code editor (bin/editor/build.sh): hashed chunks never change; editor.js is revalidated by ETag.
+  if (/^\/vendor\/cm\/[\w-]+\.js$/.test(p)) {
+    const file = path.join(PUBLIC, p);
+    let st;
+    try { st = fs.statSync(file); } catch { res.writeHead(404); return res.end('Not found'); }
+    const etag = `"${st.size.toString(36)}-${Math.floor(st.mtimeMs).toString(36)}"`;
+    const cache = p === '/vendor/cm/editor.js' ? { 'Cache-Control': 'no-cache', ETag: etag } : { 'Cache-Control': 'public, max-age=31536000, immutable' };
+    if (req.headers['if-none-match'] === etag) { res.writeHead(304, cache); return res.end(); }
+    return serveFile(res, file, cache);
+  }
   if (p === '/' || p === '/index.html') return serveFile(res, path.join(PUBLIC, 'index.html'));
   if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css' || p === '/browser.js' || p === '/browser.css' || p === '/previews.js' || p === '/previews.css' || p === '/schedules.js' || p === '/schedules.css' || p === '/users.js' || p === '/users.css' || p === '/credentials.js' || p === '/credentials.css' || p === '/shots.js' || p === '/shots.css' || p === '/phone.css') return serveFile(res, path.join(PUBLIC, p));
   // The Files view: listing, preview, download (a file, or a zip streamed on the fly), upload, and copy/move/zip/unzip over the whole disk, opening on the chat's project (files.mjs).

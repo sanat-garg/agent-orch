@@ -10,7 +10,8 @@
 //       (`path=` works as well as `dir=`; dir/parent/entry paths are absolute real paths; the top-level `path` and crumbs
 //       are project-relative for a relative request, absolute otherwise; type is 'dir' or 'file', of what a link points to;
 //       at most LIST_MAX entries; an entry it can't stat is kept with readable: false)
-//   GET /api/files/raw?cid=<chat>&path=<abs|rel> → the file (images), or text/plain (first TEXT_MAX bytes; 415 for binary)
+//   GET /api/files/raw?cid=<chat>&path=<abs|rel>[&edit=1] → the file (images), or text/plain (first TEXT_MAX bytes, SAVE_MAX
+//       with edit=1, the editor's read; 415 for binary)
 //   GET /api/files/find?cid=<chat>&q=<text>[&dir=] → {q, entries: [{name, path, dir, size, mtime}], truncated} (q: 2+ chars)
 //   GET /api/files/grep?cid=<chat>&q=<text>[&dir=] → {q, hits: [{path, line, text}], files, truncated} (q: 2–200 chars; text files ≤ 1 MB)
 //       (find/grep search under dir, default the project; paths are absolute when dir is, else project-relative)
@@ -27,7 +28,8 @@
 //   GET /api/files/download?cid=<chat>&path=<p>[&path=<p2>…] → one file as an attachment, else a zip streamed on the fly (rules above sendDownload)
 //                                     …&check=1 → {ok, name, kind, size?} or the same error, nothing streamed (the client's preflight)
 //   POST /api/files/upload?cid=&dir=<abs|rel>&path=<rel in upload>&overwrite=0|1, raw body → {saved} (409 {error: 'exists', path}; rules above uploadFile)
-//   (the rules for these seven are above copyPaths; errors are {error} with 400/403/404/409/413)
+//   POST /api/files/save?cid=&path=<abs|rel>&mtime=<ms>, raw body → {saved, mtime, size} (409 {error: 'changed', mtime}; rules above saveFile)
+//   (raw's text answers carry X-Mtime, the version the editor saves against; the rules for these seven are above copyPaths; errors are {error} with 400/403/404/409/413)
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -240,7 +242,7 @@ function grepSnippet(line, at, len) {
 
 // Serves one file. Images (by extension) as their type; anything else as UTF-8 text, first TEXT_MAX bytes, or 415 when
 // the start of it looks binary (a NUL byte).
-export function sendFile(req, res, rootDir, rel) {
+export function sendFile(req, res, rootDir, rel, { max = TEXT_MAX } = {}) {
   const { real, at } = resolvePath(rootDir, rel);
   if (isSecret(at, real)) throw new FileError(403, 'This file is protected');
   const st = fs.statSync(real);
@@ -257,10 +259,10 @@ export function sendFile(req, res, rootDir, rel) {
   }
   const fd = fs.openSync(real, 'r');
   try {
-    const buf = Buffer.alloc(Math.min(st.size, TEXT_MAX));
+    const buf = Buffer.alloc(Math.min(st.size, max));
     const n = fs.readSync(fd, buf, 0, buf.length, 0);
     if (buf.subarray(0, Math.min(n, 8192)).includes(0)) throw new FileError(415, 'Binary file');
-    res.writeHead(200, { ...common, 'Content-Type': 'text/plain; charset=utf-8', 'X-File-Size': String(st.size), ...(st.size > n ? { 'X-Truncated': '1' } : {}) });
+    res.writeHead(200, { ...common, 'Content-Type': 'text/plain; charset=utf-8', 'X-File-Size': String(st.size), 'X-Mtime': String(st.mtimeMs), ...(st.size > n ? { 'X-Truncated': '1' } : {}) });
     return res.end(buf.subarray(0, n));
   } finally { fs.closeSync(fd); }
 }
@@ -893,6 +895,43 @@ export async function uploadFile(rootDir, dir, rel, body, { overwrite = false, s
   return { saved: show(at) };
 }
 
+// POST /api/files/save?cid=&path=<abs|rel>&mtime=<ms>, raw body → {saved, mtime, size}: the editor's Save. It replaces
+// an existing text file only (New file… makes one), under the same guards as an upload; `mtime` is the version the
+// editor opened (raw's X-Mtime), and a file changed since then is 409 {error: 'changed', mtime} unless it's left out
+// (the client's Overwrite). Written to a temp file in the same folder with the old mode, then renamed over it, so a
+// failed save never leaves half a file; a folder that refuses the temp file gets an in-place write instead.
+export const SAVE_MAX = 5 * 1024 * 1024;
+export async function saveFile(rootDir, p, body, { mtime, size } = {}) {
+  const { real, at, root } = resolvePath(rootDir, p), show = shower(root, [p ?? '']);
+  const rel = projRel(root, real);
+  if (isSecret(at, real)) throw new FileError(403, 'This file is protected');
+  if (isProtected(rel) || real.split(path.sep).includes('.git')) throw new FileError(403, `${show(real)} is read-only`);
+  assertWritable(root, real);
+  const st = fs.statSync(real);
+  if (!st.isFile()) throw new FileError(400, 'Not a file');
+  if (Number(size) > SAVE_MAX) throw new FileError(413, 'The file is too large to save from the editor (5 MB at most)');
+  const chunks = [];
+  let n = 0;
+  for await (const c of body) { n += c.length; if (n > SAVE_MAX) throw new FileError(413, 'The file is too large to save from the editor (5 MB at most)'); chunks.push(c); }
+  const now = fs.statSync(real);
+  if (mtime != null && mtime !== '' && now.mtimeMs !== Number(mtime)) {
+    throw Object.assign(new FileError(409, 'changed'), { body: { error: 'changed', mtime: now.mtimeMs } });
+  }
+  const data = Buffer.concat(chunks);
+  const tmp = path.join(path.dirname(real), `.${path.basename(real).slice(0, 200)}.save-${process.pid}-${Date.now().toString(36)}`);
+  try {
+    await fs.promises.writeFile(tmp, data, { flag: 'wx', mode: now.mode & 0o7777 });
+    await fs.promises.chmod(tmp, now.mode & 0o7777);
+    await fs.promises.rename(tmp, real);
+  } catch (e) {
+    await fs.promises.rm(tmp, { force: true });
+    if (e.code !== 'EACCES' && e.code !== 'EPERM') throw e;
+    await fs.promises.writeFile(real, data); // the folder is read-only to us but the file isn't
+  }
+  const after = fs.statSync(real);
+  return { saved: show(real), mtime: after.mtimeMs, size: after.size };
+}
+
 // The route handler: rootFor(cid) → the chat's project folder, or null; readBody(req) → the parsed JSON body (POSTs).
 // Returns true (synchronously) when it answers; grep, changed, diff and the POSTs answer later, from their own promises.
 const OPS = { copy: (root, b) => copyPaths(root, b.paths, b.dest), move: (root, b) => movePaths(root, b.paths, b.dest),
@@ -902,11 +941,11 @@ const OPS = { copy: (root, b) => copyPaths(root, b.paths, b.dest), move: (root, 
 const FS_ERRORS = { EACCES: [403, 'Permission denied'], EPERM: [403, 'Permission denied'], EROFS: [403, 'The disk is read-only'],
   EEXIST: [409, 'Something with that name is already there'], ENOSPC: [507, 'The disk is full'], ENOENT: [404, 'Not found'] };
 export function handleFiles(req, res, url, { rootFor, json, readBody }) {
-  const m = url.pathname.match(/^\/api\/files\/(list|raw|find|grep|changed|diff|download|copy|move|zip|unzip|rename|new|delete|upload)$/);
-  if (!m || req.method !== (OPS[m[1]] || m[1] === 'upload' ? 'POST' : 'GET')) return false;
+  const m = url.pathname.match(/^\/api\/files\/(list|raw|find|grep|changed|diff|download|copy|move|zip|unzip|rename|new|delete|upload|save)$/);
+  if (!m || req.method !== (OPS[m[1]] || m[1] === 'upload' || m[1] === 'save' ? 'POST' : 'GET')) return false;
   const fail = (e) => {
     if (res.headersSent) return res.destroy();
-    if (m[1] === 'upload' && !req.readableEnded) { res.setHeader('Connection', 'close'); req.resume(); }
+    if ((m[1] === 'upload' || m[1] === 'save') && !req.readableEnded) { res.setHeader('Connection', 'close'); req.resume(); }
     if (e.body) return json(res, e.status, e.body);
     const [status, error] = e.status ? [e.status, e.message] : FS_ERRORS[e.code] || [500, OPS[m[1]] ? `Could not ${m[1]} it` : 'Could not read it'];
     json(res, status, { error });
@@ -926,6 +965,10 @@ export function handleFiles(req, res, url, { rootFor, json, readBody }) {
       const q = url.searchParams;
       uploadFile(root, q.get('dir') ?? '', q.get('path'), req, { overwrite: q.get('overwrite') === '1', size: req.headers['content-length'] }).then((r) => json(res, 200, r), fail);
     }
+    else if (m[1] === 'save') {
+      const q = url.searchParams;
+      saveFile(root, q.get('path'), req, { mtime: q.get('mtime'), size: req.headers['content-length'] }).then((r) => json(res, 200, r), fail);
+    }
     else if (m[1] === 'list') json(res, 200, listDir(root, url.searchParams.get('path') ?? url.searchParams.get('dir')));
     else if (m[1] === 'find' || m[1] === 'grep') {
       const q = (url.searchParams.get('q') || '').trim();
@@ -940,7 +983,7 @@ export function handleFiles(req, res, url, { rootFor, json, readBody }) {
     }
     else if (m[1] === 'changed') changedFiles(root).then((r) => json(res, 200, r), fail);
     else if (m[1] === 'diff') sendDiff(req, res, root, url.searchParams.get('path')).catch(fail);
-    else sendFile(req, res, root, url.searchParams.get('path'));
+    else sendFile(req, res, root, url.searchParams.get('path'), { max: url.searchParams.get('edit') === '1' ? SAVE_MAX : TEXT_MAX });
   } catch (e) { fail(e); }
   return true;
 }

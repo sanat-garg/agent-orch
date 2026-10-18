@@ -9,6 +9,7 @@
 // The Changed view lists the files that differ from git HEAD with +/− counts; Quick Look shows their diff.
 // Ask in chat (Quick Look's header, a Contents hit's trailing button, Shift+Enter on a row) puts `path[:line]` into the composer. Loaded after
 // app.js and uses its helpers ($, el, api, store, md, currentConvo, toast, copyToClipboard).
+// Edit (E, the menu, Quick Look's Edit; a New file… opens in it) is a code editor with Save (⌘S): fxEdit, POST /api/files/save.
 // Selection: click, ⌘/Ctrl-click, Shift-click ranges, ⌘A, a marquee dragged from empty space (fxMarqueeDown). A context menu (right-click, long-press, a row's ⋯, Shift+F10) offers
 // Open, Copy/Cut/Paste (⌘C ⌘X ⌘V), Compress to ZIP, Extract here, Rename… (F2), New file…/New folder…, Delete (Delete or
 // Backspace, after an in-page confirm), Copy path and Ask in chat. The clipboard is app-internal
@@ -339,6 +340,7 @@ function fxReveal(r) {
   fxGo(fxParent(r.rel));
   FX.sel = r.rel;
 }
+const ICON_EDIT = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
 const ICON_ASK = '<svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
 // `rel[:line]` into the composer at the caret (spaced from its neighbours), then back to the chat with the caret after it.
 function fxAskAbout(rel, line) {
@@ -726,7 +728,7 @@ function fxSelect(rel, how = null) {
   if (!c) return;
   if (how !== 'all') c.querySelector(`#fx-o-${i}`)?.scrollIntoView({ block: 'nearest' });
   fxActive(c);
-  if (FX.ql && i >= 0 && !FX.rows[i].e.dir && FX.picked.has(rel)) fxPreview(FX.rows[i]); // Quick Look follows the selection
+  if (FX.ql && !FX.ql.ed && i >= 0 && !FX.rows[i].e.dir && FX.picked.has(rel)) fxPreview(FX.rows[i]); // Quick Look follows the selection (not an open editor)
 }
 const fxPickedRows = () => FX.rows.filter((r) => FX.picked.has(r.rel));
 function fxPaintPicked() {
@@ -881,6 +883,7 @@ function fxKey(e) {
   else if ((FX.find || changed) && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) e.preventDefault();
   else if (changed && (e.key === 'Backspace' || ((mod || e.altKey) && e.key === 'ArrowUp'))) e.preventDefault(); // no folder to go up from
   else if ((mod || e.altKey) && e.key === 'ArrowUp') { e.preventDefault(); fxUp(); }
+  else if (k === 'e' && !mod && !e.shiftKey && !e.altKey && cur && FX.picked.size === 1) { if (fxEditable(cur)) { e.preventDefault(); fxEdit(cur); } }
   else if (e.shiftKey && e.key === 'Enter') { if (cur) { e.preventDefault(); fxAskAbout(cur.file || cur.rel, cur.hit?.line); } }
   else if ((mod && e.key === 'ArrowDown') || e.key === 'Enter') { if (cur) { e.preventDefault(); fxOpen(cur); } }
   else if (e.key === ' ') { e.preventDefault(); if (FX.ql) fxClosePreview(); else if (cur && !cur.e.dir) fxPreview(cur); }
@@ -1018,6 +1021,10 @@ async function fxEditCommit() {
     for (const k of [...FX.expanded]) if (k === ed.rel || k.startsWith(ed.rel + '/')) { FX.expanded.delete(k); FX.expanded.add(rel + k.slice(ed.rel.length)); }
   } else {
     rel = typeof res.created === 'string' ? res.created : join(ed.dir, name);
+    if (ed.type === 'file') { // a new file opens in the editor, ready to type into
+      const at = rel;
+      setTimeout(() => fxEdit({ rel: at, e: { name: fxBase(at), dir: false, size: 0, mtime: Date.now(), writable: true } }), 0);
+    }
     if (ed.dir !== FX.path && FX.view === 'list') FX.expanded.add(ed.dir); // shown in place, under its folder
     else if (ed.dir !== FX.path) { toast(`Created “${name}” in “${fxFolderName(ed.dir)}”`, { kind: 'success' }); rel = ed.dir; }
   }
@@ -1113,6 +1120,7 @@ function fxMenuOpen(r, x, y) {
   const destRo = !fxWritableDir(dest);
   const items = [
     ['open', 'Open', '', !!r, () => fxOpen(r)],
+    ...(r && !r.e.dir && rows.length === 1 ? [['edit', 'Edit', 'E', fxEditable(r), () => fxEdit(r), fxEditable(r) ? '' : why(ro || prot) || "This file can't be edited here"]] : []),
     '-',
     ['copy', 'Copy', fxKeys('C'), !!rows.length && !prot, () => fxClipSet('copy'), prot ? FX_PROT : ''],
     ['cut', 'Cut', fxKeys('X'), !!rows.length && !ro && !prot, () => fxClipSet('cut'), why(ro || prot)],
@@ -1552,6 +1560,10 @@ function fxQuickLook() {
         <div class="seg-sm fx-md" id="fxQLMode" role="radiogroup" aria-label="Show" hidden>
           <button type="button" role="radio" data-mode="preview">Preview</button><button type="button" role="radio" data-mode="source">Source</button>
         </div>
+        <span class="fx-ed-state" id="fxEdState" role="status" aria-live="polite"></span>
+        <button type="button" class="btn small fx-ed-wrap" id="fxEdWrap" role="switch" aria-checked="false" title="Wrap long lines">Wrap</button>
+        <button type="button" class="btn small primary fx-ed-save" id="fxEdSave" title="Save (${fxKeys('S')})" disabled>Save</button>
+        <button type="button" class="btn small fx-ql-edit" id="fxQLEdit" title="Edit this file (E)" hidden>${ICON_EDIT}Edit</button>
         <button type="button" class="icon-btn" id="fxQLAsk" aria-label="Ask in chat" title="Ask in chat">${ICON_ASK}</button>
         <a class="btn small fx-ql-file" id="fxQLFile" target="_blank" rel="noopener" title="Open the file itself in a new tab" hidden>File</a>
         <a class="icon-btn" id="fxQLOpen" target="_blank" rel="noopener" aria-label="Open in a new tab" title="Open in a new tab"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
@@ -1561,10 +1573,25 @@ function fxQuickLook() {
     </div>`;
   document.body.append(m);
   m.addEventListener('click', (e) => { if (e.target.closest('[data-close]')) fxClosePreview(); });
-  $('fxQLAsk').onclick = () => { const r = FX.ql?.r; if (r) fxAskAbout(r.file || r.rel, r.hit?.line); };
+  $('fxQLAsk').onclick = () => { const r = FX.ql?.r; if (r) fxAskAbout(r.file || r.rel, FX.ql.ed?.cm ? FX.ql.ed.cm.view.state.doc.lineAt(FX.ql.ed.cm.view.state.selection.main.head).number : r.hit?.line); };
+  $('fxQLEdit').onclick = () => { if (FX.ql) fxEdit(FX.ql.r); };
+  $('fxEdSave').onclick = () => fxSave();
+  $('fxEdWrap').onclick = () => {
+    const on = $('fxEdWrap').getAttribute('aria-checked') !== 'true';
+    store.set('cw.files.wrap', on ? '1' : '0');
+    $('fxEdWrap').setAttribute('aria-checked', String(on));
+    FX.ql?.ed?.cm?.setWrap(on);
+  };
   m.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', () => { store.set(FX.ql?.r.ch ? 'cw.files.diff' : 'cw.files.md', b.dataset.mode); if (FX.ql) fxPreview(FX.ql.r); }));
   m.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' || (e.key === ' ' && !e.target.closest('button, a'))) { e.preventDefault(); e.stopPropagation(); fxClosePreview(); }
+    if (FX.ql?.ed) { // editing: the editor owns its keys (Escape closes its search panel); ⌘S saves from anywhere in the sheet
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 's') { e.preventDefault(); fxSave(); }
+      // composedPath, not target.closest: Escape in the search field removes it from the page before the event gets here
+      else if (e.key === 'Escape' && !e.defaultPrevented && !e.composedPath().some((n) => n.classList?.contains('cm-editor'))) { e.preventDefault(); e.stopPropagation(); fxClosePreview(); }
+      return;
+    }
+    if (e.key.toLowerCase() === 'e' && !e.metaKey && !e.ctrlKey && !e.altKey && !$('fxQLEdit').hidden && !e.target.closest('input, textarea')) { e.preventDefault(); fxEdit(FX.ql.r); }
+    else if (e.key === 'Escape' || (e.key === ' ' && !e.target.closest('button, a'))) { e.preventDefault(); e.stopPropagation(); fxClosePreview(); }
     else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
       const files = FX.rows.filter((r) => !r.e.dir), k = files.findIndex((r) => r.rel === FX.ql?.r.rel);
       const next = files[k + (e.key === 'ArrowRight' ? 1 : -1)];
@@ -1574,9 +1601,12 @@ function fxQuickLook() {
   return m;
 }
 async function fxPreview(r) {
+  if (FX.ql?.ed && !(await fxEditLeave())) return;
   const m = fxQuickLook(), seq = ++FX.qseq;
   const wasOpen = !m.hidden;
   FX.ql = { r, back: wasOpen ? FX.ql?.back : document.activeElement };
+  fxEditMode(false);
+  $('fxQLEdit').hidden = !fxEditable(r);
   m.hidden = false;
   const url = fxUrl('raw', r.file || r.rel), body = $('fxQLBody');
   $('fxQLTitle').textContent = r.e.name;
@@ -1610,12 +1640,13 @@ async function fxPreview(r) {
   } catch (e) {
     if (seq !== FX.qseq || FX.ql?.r !== r) return;
     body.textContent = '';
+    $('fxQLEdit').hidden = true;
     body.append(fxEmpty(e.status === 415 ? 'No preview for this file' : "Couldn't open it", e.status === 415 ? `${kindOf(r.e)} · ${fxSize(r.e.size)}. Only text and images open here.` : e.message));
     return;
   }
   if (seq !== FX.qseq || FX.ql?.r !== r) return;
   body.textContent = '';
-  if (truncated) body.append(el('div', 'fx-trunc', `Showing the first 1 MB of ${fxSize(r.e.size)}.`));
+  if (truncated) { body.append(el('div', 'fx-trunc', `Showing the first 1 MB of ${fxSize(r.e.size)}.`)); if (!(r.e.size <= FX_EDIT_MAX)) $('fxQLEdit').hidden = true; }
   const mdFile = /^(md|markdown|mdx)$/.test(extOf(r.e.name));
   const mode = store.get('cw.files.md') === 'source' ? 'source' : 'preview';
   if (mdFile) {
@@ -1680,9 +1711,154 @@ async function fxDiff(r, seq) {
   }
   body.append(code);
 }
-function fxClosePreview() {
+// ----- Edit: Quick Look's Edit (E), the menu's Edit and a new file open the file in a code editor (CodeMirror 6,
+// public/vendor/cm/editor.js from bin/editor/build.sh, loaded on first use): syntax colours, line numbers, search (⌘F),
+// go to line (⌘G), undo, Tab indents (Esc then Tab leaves). Save (⌘S) POSTs the text to /api/files/save with the
+// version it opened (X-Mtime); a file changed meanwhile (say, by an agent) asks before overwriting. Closing, stepping to
+// another file or leaving the page with unsaved changes asks first (Save / Don't Save / Cancel).
+const FX_EDIT_MAX = 5 * 1024 * 1024; // files.mjs SAVE_MAX
+let fxCmLoad = null;
+const fxEditable = (r) => !!r && !r.e.dir && !r.e.protected && r.e.writable !== false && (!isImage(r.e.name) || extOf(r.e.name) === 'svg')
+  && !(r.ch && r.ch.status === 'D') && !(r.e.size > FX_EDIT_MAX) && !(fxReadOnly() && !r.hit && !r.ch);
+function fxEditMode(on) {
+  const m = $('fxQL');
+  if (!m) return;
+  if (!on && FX.ql?.ed) { FX.ql.ed.cm?.destroy(); FX.ql.ed = null; }
+  m.classList.toggle('editing', on);
+  $('fxQLBody').classList.toggle('fx-ed-body', on);
+}
+function fxEditPaint() {
+  const ed = FX.ql?.ed;
+  if (!ed) return;
+  const dirty = !!ed.cm?.dirty();
+  $('fxEdSave').disabled = !ed.cm || ed.saving || !dirty;
+  $('fxEdSave').textContent = ed.saving ? 'Saving…' : 'Save';
+  $('fxEdState').textContent = !ed.cm ? '' : ed.saving ? '' : dirty ? 'Edited' : ed.savedAt ? 'Saved' : '';
+  $('fxEdState').classList.toggle('dirty', dirty);
+}
+async function fxEdit(r, line) {
+  if (!fxEditable(r)) return;
+  if (!FX.ql || FX.ql.r !== r || $('fxQL').hidden) await fxPreview(r);
+  if (FX.ql?.r !== r) return;
+  const seq = ++FX.qseq, body = $('fxQLBody'), path = r.file || r.rel;
+  FX.ql.ed = { path, mtime: null, cm: null, saving: false, savedAt: 0 };
+  fxEditMode(true);
+  $('fxEdWrap').setAttribute('aria-checked', String(store.get('cw.files.wrap') ? store.get('cw.files.wrap') === '1' : touch()));
+  $('fxQLSub').textContent = `Editing · ${kindOf(r.e)}`;
+  body.textContent = '';
+  body.append(el('div', 'fx-loading', 'Loading…'));
+  fxEditPaint();
+  let text, mtime;
+  try {
+    const [res] = await Promise.all([fetch(`${fxUrl('raw', path)}&edit=1`, { cache: 'no-store' }), (fxCmLoad ??= import('/vendor/cm/editor.js').catch((e) => { fxCmLoad = null; throw e; }))]);
+    if (res.status === 401) { location.href = '/login'; return; }
+    if (!res.ok) throw Object.assign(new Error((await res.json().catch(() => ({}))).error || `Request failed (${res.status})`), { status: res.status });
+    if (res.headers.get('X-Truncated') === '1') throw new Error('This file is too large to edit here');
+    text = await res.text();
+    mtime = res.headers.get('X-Mtime');
+  } catch (e) {
+    if (seq !== FX.qseq || FX.ql?.r !== r) return;
+    body.textContent = '';
+    body.append(fxEmpty("Can't edit this file", e.status === 415 ? 'It is a binary file; only text files open in the editor.' : e.message === 'Failed to fetch' || /module|import/i.test(e.message) ? "The editor couldn't load. Check your connection and try again." : e.message));
+    return;
+  }
+  if (seq !== FX.qseq || FX.ql?.r !== r || !FX.ql.ed) return;
+  const ed = FX.ql.ed;
+  ed.mtime = mtime;
+  body.textContent = '';
+  const { createEditor } = await fxCmLoad;
+  if (seq !== FX.qseq || FX.ql?.ed !== ed) return;
+  ed.cm = await createEditor({ parent: body, doc: text, name: r.e.name, wrap: $('fxEdWrap').getAttribute('aria-checked') === 'true', onChange: fxEditPaint, onSave: () => fxSave() });
+  if (FX.ql?.ed !== ed) return ed.cm.destroy();
+  fxEditPaint();
+  const at = line ?? r.hit?.line;
+  if (at) ed.cm.gotoLine(at);
+  if (!touch()) ed.cm.focus(); // on a phone the keyboard waits for a tap, so the file can be read first
+}
+async function fxSave(force = false) {
+  const ed = FX.ql?.ed, r = FX.ql?.r;
+  if (!ed?.cm || ed.saving) return;
+  if (!force && !ed.cm.dirty()) return;
+  ed.saving = true; fxEditPaint();
+  const text = ed.cm.text(), q = new URLSearchParams({ cid: FX.cid, path: ed.path, ...(force || ed.mtime == null ? {} : { mtime: ed.mtime }) });
+  let res, data = {};
+  try {
+    res = await fetch(`/api/files/save?${q}`, { method: 'POST', headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: text });
+    data = await res.json().catch(() => ({}));
+  } catch { res = null; }
+  ed.saving = false;
+  if (FX.ql?.ed !== ed) return;
+  if (res?.status === 401) { location.href = '/login'; return; }
+  if (res?.status === 409 && data.error === 'changed') {
+    fxEditPaint();
+    const pick = await fxAsk(`“${r.e.name}” changed on disk`, 'Someone (maybe an agent) changed it after you opened it. Overwrite it with your version, or cancel and keep editing.', [['cancel', 'Cancel'], ['go', 'Overwrite', 'fx-cf-del']]);
+    return pick === 'go' ? fxSave(true) : false;
+  }
+  if (!res?.ok) {
+    fxEditPaint();
+    toast(!res ? "Couldn't reach the server. Your changes are still here." : res.status === 404 && !data.error ? API_UPDATING : `Couldn't save: ${data.error || `request failed (${res.status})`}`, { kind: 'error' });
+    return false;
+  }
+  ed.mtime = String(data.mtime);
+  ed.savedAt = Date.now();
+  ed.cm.markSaved(text);
+  fxEditPaint();
+  if (!r.hit && !r.ch) fxLoad(); // the listing's size and date
+  else if (FX.view === 'changed') fxChanged();
+  return true;
+}
+// Unsaved changes before the editor goes away → true to go on (saved or discarded), false to stay.
+async function fxEditLeave() {
+  const ed = FX.ql?.ed;
+  if (!ed?.cm?.dirty()) return true;
+  const pick = await fxAsk(`Save changes to “${FX.ql.r.e.name}”?`, 'Your changes will be lost if you don’t save them.', [['discard', 'Don’t Save'], ['cancel', 'Cancel'], ['go', 'Save', 'primary']]);
+  if (pick === 'discard') { ed.cm.markSaved(); return true; }
+  if (pick === 'go') return (await fxSave()) === true;
+  ed.cm.focus();
+  return false;
+}
+// An in-page question (a sheet on phones) → the picked button's key, 'cancel' for Escape or the backdrop.
+function fxAsk(title, text, buttons) {
+  return new Promise((resolve) => {
+    $('fxConfirm')?.remove();
+    const m = el('div', 'modal sheet fx-confirm');
+    m.id = 'fxConfirm';
+    m.innerHTML = `
+      <div class="modal-backdrop" data-k="cancel"></div>
+      <div class="modal-panel fx-cf-panel" role="alertdialog" aria-modal="true" aria-labelledby="fxCfTitle" aria-describedby="fxCfText">
+        <span class="sheet-grip" aria-hidden="true"></span>
+        <h2 id="fxCfTitle"></h2>
+        <p class="m-sub" id="fxCfText"></p>
+        <div class="fx-cf-acts"></div>
+      </div>`;
+    m.querySelector('h2').textContent = title;
+    m.querySelector('p').textContent = text;
+    for (const [k, label, cls] of buttons) {
+      const b = el('button', `btn${cls ? ` ${cls}` : ''}`, label);
+      b.type = 'button'; b.dataset.k = k;
+      m.querySelector('.fx-cf-acts').append(b);
+    }
+    const done = (k) => { m.remove(); resolve(k); };
+    m.addEventListener('click', (e) => { const b = e.target.closest('[data-k]'); if (b) done(b.dataset.k); });
+    m.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Escape') { e.preventDefault(); done('cancel'); }
+      else if (e.key === 'Tab') {
+        e.preventDefault();
+        const bs = [...m.querySelectorAll('.fx-cf-acts .btn')];
+        bs[(bs.indexOf(document.activeElement) + (e.shiftKey ? bs.length - 1 : 1)) % bs.length].focus();
+      }
+    });
+    document.body.append(m);
+    m.querySelector('.fx-cf-acts .btn:last-child').focus();
+  });
+}
+window.addEventListener('beforeunload', (e) => { if (FX.ql?.ed?.cm?.dirty()) e.preventDefault(); });
+async function fxClosePreview() {
   const m = $('fxQL');
   if (!m || m.hidden) return;
+  if (FX.ql?.ed && !(await fxEditLeave())) return;
+  fxEditMode(false);
   m.hidden = true;
   const back = FX.ql?.back;
   FX.ql = null;

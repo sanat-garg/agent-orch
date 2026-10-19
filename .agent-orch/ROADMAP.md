@@ -3,66 +3,31 @@
 _Maintained by the orchestrator's reflection loop._
 
 ## Assessment
-_2026-10-19 (reflect #2241)._ The existing product already covers multi-project chats, autonomous tasks, file editing,
-schedules, credentials, screenshots and token usage. This reflection inspected the actual feature modules, their APIs and
-tests. The next useful step is making those capabilities easier to reuse and evaluate: saved prompts, visual comparison,
-responsive previews, portable run data, copied schedules, favourite folders and searchable skills.
 
-The previous reflection's work remains reserved: #2234–#2240 cover the task diff UI, activity digest, dictation, command
-palette, slash commands, retry notes and chat export. #2230/#2231 cover sidebar activity order and Zen mode. During this
-inspection, commits for #2232 (stale UI assertion) and #2233 (task changes API) landed. Do not queue these again. Finish the
-reserved diff viewer and digest through their existing tasks; the additions below need neither one.
+_2026-10-19 (reflect #2256)._ agent-orch already has multi-project chats, a task queue, Files, Stats, schedules, screenshots, token usage, and a Browser view with persistent profiles. The active queue covers the previous reflection's seven features (#2249–#2255) plus the task diff, digest, voice input, command palette, chat export, retry note, slash commands, sidebar order, and Zen mode. #2233's task-changes API is done; its UI is still running as #2234. Let those features finish rather than queueing duplicates.
 
-Checks: direct Node runs passed all 22 ui-static, 7 cron and 5 digest tests, plus 8 pure/empty-data Stats tests. This is a
-plain Node application with no build step. Integration checks could not be completed in this session: files-save could
-not bind localhost (EPERM), and changes/Stats could not spawn synchronous git (EPERM). The broken-repository changes
-fixture was also inconclusive under the temporary directory nested in this checkout. These are not confirmed product
-bugs. Logs: `.agent-orch/verify/reflect-2241*.log`. No full-suite or browser-pass claim is made.
+The built-in Browser has an address bar and profiles but no saved site shortcuts. That is a practical gap for repeated office work in signed-in web apps. A small, browser-only shortcuts feature is the next independent user-facing addition. It must not assign a public preview address or start a service.
 
-## Next (seven independent tasks proposed by #2241)
-1. **Saved project prompts:** a small library that saves the current draft and inserts a saved prompt at the cursor.
-   Browser-local, scoped by signed-in user and project, clearly labelled; never sends automatically. Implement in a new
-   prompts module; the only shared-file changes are script/style registration in index.html and the server allowlist.
-2. **Screenshot comparison:** choose two existing project screenshots and view them together, with task/time labels and
-   a phone-friendly layout. Reuse the existing gallery and media endpoint; no image processing or new backend.
-3. **Responsive preview inspector:** explicitly open an already-configured live preview in an embedded viewport with
-   phone/tablet/desktop widths. This checks layout, not full device emulation. Open-in-new-tab remains available if a site
-   refuses framing. Never assign an address, deploy, or change proxy configuration.
-4. **Export filtered agent runs as CSV:** use Stats' existing snapshot and range/project selection, with exact numeric
-   token values and clearly labelled run time. A client-side download; no extra polling or API calls.
-5. **Copy a schedule:** prefill a new schedule from an existing one, allow choosing its destination project, preserve its
-   timezone and command/prompt, and save the copy paused. Reuse the create API; never copy history or run it implicitly.
-6. **Favourite folders in Files:** save the current folder in Places and revisit/remove favourites; scope browser storage
-   to the signed-in user and project. Reuse normal navigation and errors for missing folders.
-7. **Search Skills & tools:** filter each existing tab's loaded entries by name/description, with source filtering for
-   local versus synced skills. Keep editing and read-only synced-skill behaviour intact.
+Check: `node --test test/ui-static.test.mjs` passed (1/1). `npm test -- test/ui-static.test.mjs` stopped before running tests because its temp-dir selector chose the read-only `/home/ubuntu/.cache`; this is a check-runner environment limitation, not a confirmed app failure. No full-suite or live-browser claim is made.
 
-All seven are background work with focused main-path and failure/empty-state tests. They use separate JS/CSS modules and
-unique test files, have no prerequisite chains, and avoid app.js, app.css, phone.css and orchestrator.mjs. Only task 1 needs
-small server/index registration edits. No integrator is required by design. No domains, services or live data were changed.
+## Next
+
+1. **Saved sites in the built-in Browser:** save the current HTTP(S) page to a named shortcut, revisit it through the existing navigation action, and remove it. Scope shortcuts to the signed-in user and machine/profile, clear them when that profile is cleared, and show an empty state. Keep Chrome direct mode's UI as it is. This is one independent task touching `public/browser.js`, `public/browser.css`, and a focused UI test.
+2. **Finish the active queue:** land #2234's Changes section on top of #2233's API, then the already queued digest, command palette, dictation, sidebar order, and reusable/export features. No duplicate tasks are needed.
 
 ## Later (feature ideas)
-- Inline comments on a task's diff that queue a follow-up task with the comment, once #2234 lands (vibe-kanban).
-- Per-turn "View changes" from hidden chat commit events, reusing the eventual task diff renderer.
-- Read-only project Git history with per-commit diffs (claudecodeui). Defer to avoid overlapping Files and server work;
-  branch switching/staging require a separate owner decision about interactions with autonomous task merges.
-- Saved prompt sync across devices after the browser-local library proves useful; optional variables later.
-- Compare alternative task implementations in parallel worktrees (crystal); screenshot comparison is a smaller first step,
-  not a claim to implement alternative-run orchestration.
-- Owner cancellation notes surfaced in the digest.
-- AGENTIC.md files-only office workspace when the owner asks for computer work again.
+
+- Inline feedback on a task diff that can become a follow-up instruction, after #2234 lands (vibe-kanban).
+- Read-only project Git history with commit titles and diffs. Stats already gathers commit counts and file names, but does not provide a navigable history; keep this separate from autonomous merge controls (claudecodeui).
+- Per-turn chat changes using the hidden commit events and the task diff renderer, once the latter is stable.
+- Sync saved prompts across devices after #2249's browser-local version proves useful; consider variables only if owners reuse them.
+- Compare alternative task approaches in parallel worktrees after screenshot comparison #2250 shows what comparison UX owners need (crystal).
 
 ## Inspiration
-Reused the prior reflection's research; it still contains unused ideas, so no new repository search was needed. These are
-design inspirations, not claims that the proposed adaptations already exist in those projects. Study patterns, not copied
-code; respect each repository's licence. Star counts were removed because they become stale.
 
-- [BloopAI/vibe-kanban](https://github.com/BloopAI/vibe-kanban) → task workspaces, inline diff feedback, embedded previews
-  and device-size inspection. Reserved: task diff UI. New: responsive preview inspector and visual comparison. Still open:
-  inline feedback and PR creation with descriptions.
-- [siteboon/claudecodeui](https://github.com/siteboon/claudecodeui) → mobile file navigation/editing, Git explorer and
-  discoverable tools. New adaptations: favourite folders and searchable Skills & tools. Still open: project Git history.
-- [winfunc/opcode](https://github.com/winfunc/opcode) → reusable agent instructions and usage reporting/export. New
-  adaptations: saved user prompts and filtered run CSV export; existing personas remain system instructions.
-- [stravu/crystal](https://github.com/stravu/crystal) → comparing approaches in parallel workspaces. New adaptation:
-  comparing existing screenshots. Full alternative-run comparison remains later work.
+The earlier reflection researched these open-source repos. Several useful ideas remain, so this reflection reuses that research instead of searching again. These are design patterns to study, not code to copy; respect each repository's licence.
+
+- [BloopAI/vibe-kanban](https://github.com/BloopAI/vibe-kanban) → task workspaces, inline diff feedback, embedded previews and device-size inspection. #2234, #2250 and #2251 cover the first visual steps; inline feedback remains open.
+- [siteboon/claudecodeui](https://github.com/siteboon/claudecodeui) → mobile navigation, file editing, Git explorer and discoverable tools. #2254 and #2255 cover Files and Skills navigation; read-only Git history remains open. Profile-specific Browser shortcuts are a small adaptation of making frequently used destinations easy to reach.
+- [winfunc/opcode](https://github.com/winfunc/opcode) → reusable agent instructions and usage reporting. #2249 and #2252 cover saved project prompts and CSV export.
+- [stravu/crystal](https://github.com/stravu/crystal) → comparing approaches in parallel workspaces. #2250 begins with comparison of existing screenshots; full alternative-run comparison remains open.

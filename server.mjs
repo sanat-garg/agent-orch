@@ -2071,7 +2071,7 @@ async function handleRequest(req, res) {
     return serveFile(res, file, cache);
   }
   if (p === '/' || p === '/index.html') return serveFile(res, path.join(PUBLIC, 'index.html'));
-  if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css' || p === '/browser.js' || p === '/browser.css' || p === '/previews.js' || p === '/previews.css' || p === '/schedules.js' || p === '/schedules.css' || p === '/users.js' || p === '/users.css' || p === '/credentials.js' || p === '/credentials.css' || p === '/shots.js' || p === '/shots.css' || p === '/tokens.js' || p === '/tokens.css' || p === '/phone.css') return serveFile(res, path.join(PUBLIC, p));
+  if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css' || p === '/browser.js' || p === '/browser.css' || p === '/previews.js' || p === '/previews.css' || p === '/schedules.js' || p === '/schedules.css' || p === '/users.js' || p === '/users.css' || p === '/credentials.js' || p === '/credentials.css' || p === '/shots.js' || p === '/shots.css' || p === '/commits.js' || p === '/commits.css' || p === '/tokens.js' || p === '/tokens.css' || p === '/phone.css') return serveFile(res, path.join(PUBLIC, p));
   // The Files view: listing, preview, download (a file, or a zip streamed on the fly), upload, and copy/move/zip/unzip over the whole disk, opening on the chat's project (files.mjs).
   // A user's requests stay inside their own projects: only their chats' roots, and no absolute paths (userBlocked checks the query).
   const filesBody = isAdmin(me) ? readBody : async (r) => {

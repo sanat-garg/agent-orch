@@ -33,3 +33,7 @@ Test `test/ui-commits.test.mjs`: copy the boot setup of a neighbouring UI test s
 ## Done when
 
 `npm test -- test/ui-commits.test.mjs test/ui-static.test.mjs` passes
+
+## Result — done (check passed) (2026-10-19 14:35)
+
+AGENT-ORCH-STATUS: done — History sheet lists commits and shows coloured diffs; tests pass

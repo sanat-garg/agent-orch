@@ -1717,3 +1717,7 @@ Owner can compare two gallery screenshots; four compare tests pass
 ## 2026-10-19 14:35 — #2264 Find recent messages in long chats with bounded search and tests [done (check passed)]
 
 Chat search now scans the newest maxBytes; search tests pass
+
+## 2026-10-19 14:35 — #2262 Project History sheet: commit list and coloured commit diff, with tests (ui) [done (check passed)]
+
+History sheet lists commits and shows coloured diffs; tests pass

@@ -1,0 +1,52 @@
+/* History (commits.js): the top bar pill and its sheet, the project's commits newest first, then one commit's coloured diff. */
+.cm-link { gap: 6px; cursor: pointer; font: inherit; font-size: 12px; }
+.app.zen #commitsLink { display: none !important; }
+
+.modal-panel.cmm { width: min(860px, 100%); }
+.cm-empty { margin: 6px 4px; font-size: 13px; color: var(--muted); line-height: 1.4; }
+.cm-error { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0; }
+.cm-error .cm-empty { flex: 1; min-width: 0; margin: 0 4px; color: var(--danger); overflow-wrap: anywhere; }
+.cm-label { margin: 14px 0 6px; font-size: 12px; font-weight: 650; letter-spacing: .02em; text-transform: uppercase; color: var(--faint); }
+
+.cm-list { list-style: none; margin: 0; padding: 0; }
+.cm-item { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); }
+.cm-item:last-child { border-bottom: 0; }
+.cm-open {
+  display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; min-height: 44px; padding: 7px 8px;
+  border: 0; border-radius: 8px; background: none; color: var(--text); font: inherit; text-align: left; cursor: pointer;
+}
+.cm-open:hover { background: var(--raised); }
+.cm-subj { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; font-weight: 600; }
+.cm-meta { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; margin: 0; color: var(--faint); font-size: 12px; }
+.cm-sha { font-family: var(--mono); color: var(--muted); }
+.cm-author { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cm-counts { display: inline-flex; gap: 6px; font-variant-numeric: tabular-nums; }
+.cm-add { color: var(--add-fg); }
+.cm-del { color: var(--del-fg); }
+.cm-task {
+  flex: none; height: 24px; padding: 0 9px; border: 1px solid var(--border); border-radius: 99px; background: var(--raised);
+  color: var(--muted); font: inherit; font-size: 12px; font-variant-numeric: tabular-nums; cursor: pointer; white-space: nowrap;
+}
+.cm-task:hover { color: var(--text); border-color: var(--accent); }
+.cm-more { display: flex; margin: 12px auto 4px; }
+
+/* One commit: Back, its message, the files and the patch. */
+.cm-dhead { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.cm-dsubj { margin: 0 0 4px; font-size: 15px; line-height: 1.35; overflow-wrap: anywhere; }
+.cm-body { margin: 10px 0 0; padding: 0; font-family: inherit; font-size: 13px; line-height: 1.45; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+.cm-files { list-style: none; margin: 0 0 12px; padding: 0; font-size: 12.5px; }
+.cm-file { display: flex; align-items: baseline; gap: 10px; padding: 3px 4px; }
+.cm-path { flex: 1; min-width: 0; font-family: var(--mono); overflow-wrap: anywhere; }
+.cm-bin { color: var(--faint); }
+.cm-patch { max-height: none; border-radius: 8px; padding: 6px 0; }
+.cm-trunc { margin: 8px 4px 0; font-size: 12.5px; color: var(--warn); }
+
+@media (pointer: coarse) {
+  .cm-task { height: 44px; padding: 0 12px; }
+  .cm-open { min-height: 56px; }
+}
+@media (max-width: 767px) {
+  .modal-panel.cmm { width: 100%; } /* a bottom sheet (.modal.sheet) */
+  #commitsModal { grid-template-columns: minmax(0, 100%); }
+  .cm-patch { font-size: 11.5px; }
+}

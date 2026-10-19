@@ -18,6 +18,7 @@
 <link rel="stylesheet" href="/schedules.css">
 <link rel="stylesheet" href="/credentials.css">
 <link rel="stylesheet" href="/shots.css">
+<link rel="stylesheet" href="/commits.css">
 <link rel="stylesheet" href="/tokens.css">
 <link rel="stylesheet" href="/users.css">
 <link rel="stylesheet" href="/browser.css">
@@ -143,6 +144,11 @@
         <button type="button" class="repo-link sh-link" id="shotsLink" aria-haspopup="dialog" aria-controls="shotsModal" hidden>
           <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="8.5" cy="10" r="1.6" fill="currentColor"/><path d="M4 17l5-4.5 3.5 3 3-2.5L20 17" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
           <span id="shotsText">Screenshots</span><span class="sh-new" id="shotsNew" hidden></span>
+        </button>
+        <!-- The project's commits (commits.js): chat auto-commits and task merges, each opening its coloured diff. -->
+        <button type="button" class="repo-link cm-link" id="commitsLink" aria-haspopup="dialog" aria-controls="commitsModal" hidden>
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><circle cx="12" cy="12" r="3.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 2v6.5M12 15.5V22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <span>History</span>
         </button>
         <!-- The open chat's token usage against the weekly plan limits (tokens.js): shown once it has used any. -->
         <button type="button" class="repo-link tk-link" id="tokLink" aria-haspopup="dialog" aria-controls="tokModal" hidden>
@@ -506,6 +512,24 @@
       </button>
     </div>
     <div class="m-body sh-panel" id="shBody"></div>
+  </div>
+</div>
+
+<!-- History (commits.js): the open project's commits newest first; a commit opens its files and coloured patch in place. -->
+<div class="modal sheet" id="commitsModal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-panel cmm" role="dialog" aria-modal="true" aria-labelledby="cmTitle">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <div class="m-head">
+      <div>
+        <h2 id="cmTitle">History</h2>
+        <p class="m-sub" id="cmSub"></p>
+      </div>
+      <button class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="m-body cm-panel" id="cmBody"></div>
   </div>
 </div>
 
@@ -1111,6 +1135,7 @@
 <script src="/schedules.js"></script>
 <script src="/credentials.js"></script>
 <script src="/shots.js"></script>
+<script src="/commits.js"></script>
 <script src="/tokens.js"></script>
 <script src="/users.js"></script>
 </body>

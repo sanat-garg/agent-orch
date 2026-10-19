@@ -916,6 +916,7 @@ function updateHeader() {
   renderRepoLink();
   window.Previews?.renderHeader();
   window.Shots?.renderHeader();
+  window.Commits?.sync();
   window.Tokens?.sync();
 }
 function renderRepoLink() {
@@ -7695,6 +7696,7 @@ function applyOrchSnapshot(s) {
   if (s?.state) O.state = s.state;
   for (const t of s?.tasks || []) O.tasks.set(t.id, t);
   window.Shots?.sync(); // public/shots.js
+  window.Commits?.sync(); // public/commits.js
   syncAppBadge();
   renderUsage();
   renderOrchBar();

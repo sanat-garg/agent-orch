@@ -146,7 +146,7 @@ test('the sidebar gear opens Settings: a sound switch, parallel tasks (what can 
   assert.match(sheet, /id="stParallel"[\s\S]*<select id="stApplyUpdates" name="applyUpdates"[\s\S]*<option value="auto">Automatically within 2 min<\/option>[\s\S]*<option value="idle">When idle<\/option>[\s\S]*<option value="manual">Manually<\/option>[\s\S]*id="stGatePatterns"/);
   assert.match(appJs, /saveParallel\(\{ applyUpdates: e\.target\.value \}\)/);
   assert.match(appJs, /if \(document\.activeElement !== \$\('stApplyUpdates'\)\) \$\('stApplyUpdates'\)\.value = s\.parallel\?\.applyUpdates \|\| 'auto'/);
-  assert.match(appJs, /O\.state\?\.parallel\?\.applyUpdates === 'idle' \? 'Restarting once idle \(automatic\)…'/);
+  assert.match(appJs, /function updateBannerView\(upd, draining, applyUpdates\) \{[\s\S]*?applyUpdates === 'idle' \? 'Restarting once idle \(automatic\)…' : 'Restarting after running tasks finish…'/);
   assert.match(appJs, /toast\(`Updated to v\$\{s\.updated\.version\}`/);
   assert.doesNotMatch(sheet, /stRank|stRoutes|Project priority|Routes/, 'no priority or routes rows in project settings');
   assert.match(appJs, /sound\?\.custom \? `\/api\/settings\/sound\?v=\$\{sound\.at\}` : DEFAULT_TASK_SOUND/);

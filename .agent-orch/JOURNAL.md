@@ -1650,3 +1650,7 @@ Rigor slider with example card saves per project
 ## 2026-09-28 23:24 — #778 Rigor levels 1-5 per project for planner and reflection prompts [done (check passed)]
 
 Per-project rigor 1-5 now shapes planner, reflection and top-up prompts
+
+## 2026-10-19 14:12 — #2232 Fix ui-static's stale restart-wording assertion [done (check passed)]
+
+ui-static assertion now matches updateBannerView restart wording

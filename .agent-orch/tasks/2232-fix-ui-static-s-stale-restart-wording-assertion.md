@@ -13,3 +13,7 @@ test/ui-static.test.mjs, test 'the sidebar gear opens Settings: …' (around lin
 ## Done when
 
 `npm test -- test/ui-static.test.mjs` passes.
+
+## Result — done (check passed) (2026-10-19 14:12)
+
+AGENT-ORCH-STATUS: done — ui-static assertion now matches updateBannerView restart wording

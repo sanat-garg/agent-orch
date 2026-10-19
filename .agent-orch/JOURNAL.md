@@ -1657,3 +1657,6 @@ ui-static assertion now matches updateBannerView restart wording
 ## 2026-10-19 14:14 — #2233 Task changes API: GET /api/orch/tasks/:id/changes with tests [done (check passed)]
 
 GET /api/orch/tasks/:id/changes serves taskChanges; tests pass
+## 2026-10-19 14:19 — #2235 'Since you were away' group at the top of the Queue, from digest.mjs, with tests (ui) [done (check passed)]
+
+Queue shows 'Since you were away' digest card; tests pass

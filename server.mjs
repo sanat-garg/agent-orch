@@ -47,6 +47,7 @@ import { taskChanges } from './changes.mjs';
 import { createCredentials, projectSecrets } from './credentials.mjs';
 import { describeCron, nextRun, validTz } from './cron.mjs';
 import { createUsers, ADMIN_ID, sharedWith, canOrchestrate } from './users.mjs';
+import { digest } from './digest.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -223,7 +224,7 @@ const NO_ORCH_MODE = "Your admin hasn't given you Orchestrator Mode";
 // settings, extensions, the terminal, stats, the server's GitHub sign-in, Browser, approvals and everyone else's work stay the admin's. → an error for a 403, or null.
 const USER_PATHS = new Set(['/api/status', '/api/version', '/api/me', '/api/me/github', '/api/me/github/device', '/api/me/github/token',
   '/api/github', '/api/github/repos', '/api/projects/import', '/api/agents', '/api/convos', '/api/projects', '/api/folders', '/api/uploads',
-  '/api/orch/rigor-levels', '/api/orch/cron-preview', '/api/orch/schedules', '/api/orch/projects/reorder', '/api/metrics', '/api/metrics/history', '/api/away']);
+  '/api/orch/rigor-levels', '/api/orch/cron-preview', '/api/orch/schedules', '/api/orch/projects/reorder', '/api/metrics', '/api/metrics/history', '/api/away', '/api/orch/digest']);
 const absolutePath = (v) => (Array.isArray(v) ? v.some(absolutePath) : typeof v === 'string' && (path.isAbsolute(v) || v.startsWith('~')));
 function userBlocked(req, url, u) {
   const p = url.pathname;
@@ -2524,6 +2525,18 @@ async function handleRequest(req, res) {
   // The approval gate (gate.mjs): held outbound calls, the owner's answer {decision: approve | always | deny, reason?},
   // a task's Actions timeline (its audit log + approvals), and the settings {rules (the owner's "Don't allow" lines), ttlHours}.
   if (p === '/api/orch/approvals' && req.method === 'GET') return json(res, 200, { approvals: orch.pendingApprovals() });
+  // 'Since you were away' (digest.mjs): ?since=<epoch ms> (missing or bad → the last 24 h). A user sees only their own
+  // projects and no approvals (those stay the admin's).
+  if (p === '/api/orch/digest' && req.method === 'GET') {
+    const now = Date.now(), q = Number(url.searchParams.get('since'));
+    const d = digest({ dbFile: path.join(DATA, 'orchestrator', 'agent-orch.db'), since: Number.isFinite(q) && q > 0 ? q : now - 24 * 3600e3, now });
+    if (isAdmin(me)) return json(res, 200, d);
+    const projects = d.projects.filter((x) => ownsPath(me, orch?.pathOf('project', x.id)))
+      .map((x) => ({ ...x, needsYou: x.needsYou.filter((n) => n.why !== 'approval') }));
+    const counts = { done: 0, failed: 0, needsYou: 0 };
+    for (const x of projects) for (const k of Object.keys(counts)) counts[k] += x[k].length;
+    return json(res, 200, { ...d, projects: projects.filter((x) => x.done.length || x.failed.length || x.needsYou.length), counts });
+  }
   const oap = p.match(/^\/api\/orch\/approvals\/([\w-]{6,64})$/);
   if (oap && req.method === 'POST') {
     const r = orch.decideApproval(oap[1], await readBody(req));

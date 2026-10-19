@@ -3,7 +3,7 @@
 // a missing DB or table gives an empty digest, never a throw. Every time is epoch ms and nothing is formatted (app.js does).
 //   digest({ dbFile, since, now, limit }) → { since, at, projects: [{ id, name, done, failed, needsYou }], counts: { done, failed, needsYou } }
 // done/failed: tasks finished after `since` (newest first); needsYou: awaiting review, paused or holding a pending
-// approval, whatever their age. The server route and the Queue group come later (not wired yet).
+// approval, whatever their age. Served by server.mjs GET /api/orch/digest; app.js digestCard shows it atop the Queue.
 import { DatabaseSync } from 'node:sqlite';
 
 const RESULT_MAX = 200;

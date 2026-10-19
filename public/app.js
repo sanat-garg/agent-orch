@@ -6307,6 +6307,7 @@ function openMachines(id) {
     mxTab('machines');
     loadMachines();
     renderQueue();
+    loadDigest();
     if (!id) $('mxModal').querySelector('.mx-head [data-close]').focus();
   }
   if (id) openNode(id);
@@ -6317,6 +6318,7 @@ function closeMachines() {
   ND.lastFocus = null;
   closeNode(true);
   $('mxModal').hidden = true;
+  digestSeen();
   $('queueModal').querySelector('.modal-panel').append($('qBody'));
   caFlush();
   MX.lastFocus?.focus?.({ preventScroll: true });
@@ -9007,17 +9009,81 @@ function parallelInfo(t) {
   const parent = [...O.tasks.values()].find(p => p.project_id === t.project_id && taskDeps(p).length > 1 && taskDeps(p).includes(t.id));
   return { group: t.parallel_group || (parent ? `#${parent.id}` : integrates.length > 1 ? `#${t.id}` : ''), integrates };
 }
+// ----- since you were away (GET /api/orch/digest, digest.mjs): a card at the top of #qBody (the Queue sheet, or the
+// Machines view's queue) when the owner was gone more than 30 minutes since they last dismissed it or closed the
+// Queue (cw.digestSeen): counts, then up to 5 rows per kind, each opening its task. Nothing when every count is 0.
+const DIGEST_AWAY_MS = 30 * 60e3, DIGEST_ROWS = 5;
+const SY = { data: null, loading: false };
+async function loadDigest() {
+  const seen = Number(store.get('cw.digestSeen')) || 0;
+  if (SY.data || SY.loading || (seen && Date.now() - seen < DIGEST_AWAY_MS)) return;
+  SY.loading = true;
+  try { SY.data = await api(`/api/orch/digest${seen ? `?since=${seen}` : ''}`); } catch {} finally { SY.loading = false; }
+  if (SY.data && qShown()) renderQueue();
+}
+function digestSeen() {
+  SY.data = null;
+  store.set('cw.digestSeen', String(Date.now()));
+}
+const DIGEST_KINDS = [['done', 'Done'], ['failed', 'Failed'], ['needsYou', 'Needs you']];
+function digestNote(kind, t) {
+  if (kind === 'needsYou') return t.why === 'approval' ? `Approve: ${t.action || 'an action'}` : t.why === 'paused' ? 'Paused' : 'Waiting for your review';
+  return t.result || (t.status === 'needs_integration' ? 'Needs integration' : '');
+}
+function digestCard() {
+  const d = SY.data, c = d?.counts;
+  if (!c || !(c.done + c.failed + c.needsYou)) return null;
+  const box = el('section', 'sy');
+  box.setAttribute('aria-label', 'Since you were away');
+  const head = el('div', 'sy-head');
+  const title = el('div', 'sy-title');
+  title.append(el('h3', 'sy-h', 'Since you were away'),
+    el('span', 'sy-since', `since ${new Date(d.since).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })}`));
+  const dismiss = el('button', 'btn sy-dismiss', 'Dismiss');
+  dismiss.type = 'button';
+  dismiss.addEventListener('click', (e) => { e.stopPropagation(); digestSeen(); box.remove(); });
+  head.append(title, dismiss);
+  const counts = el('p', 'sy-counts');
+  for (const [k, label] of [['done', 'done'], ['failed', 'failed'], ['needsYou', 'need you']]) {
+    const s = el('span', `sy-n sy-n-${k}`);
+    s.append(el('b', '', String(c[k])), ` ${label}`);
+    counts.append(s);
+  }
+  box.append(head, counts);
+  for (const [k, label] of DIGEST_KINDS) {
+    const rows = d.projects.flatMap((p) => p[k].map((t) => ({ ...t, project: p.name })));
+    if (k !== 'needsYou') rows.sort((a, b) => (b.finished_at || 0) - (a.finished_at || 0));
+    if (!rows.length) continue;
+    const list = el('div', `sy-list sy-${k}`);
+    list.append(el('h4', 'sy-kind', `${label} · ${c[k]}`));
+    for (const t of rows.slice(0, DIGEST_ROWS)) {
+      const b = el('button', 'sy-row');
+      b.type = 'button';
+      b.dataset.task = t.id;
+      const top = el('span', 'sy-top');
+      top.append(el('span', 'sy-proj', t.project), el('span', 'sy-task', t.title));
+      b.append(top);
+      const note = digestNote(k, t);
+      if (note) b.append(el('span', 'sy-note', note));
+      b.addEventListener('click', (e) => { e.stopPropagation(); openTask(t.id); });
+      list.append(b);
+    }
+    box.append(list);
+  }
+  return box;
+}
 function openQueue() {
   if ($('queueModal').hidden) Q.lastFocus = document.activeElement;
   $('queueModal').hidden = false;
   if (!MC.at) loadMachines().then(renderQueue); // which machines exist, for the running tasks' 'on <machine>'
   renderQueue();
+  loadDigest();
   $('queueModal').querySelector('.q-card, [data-close].icon-btn').focus();
 }
 function closeQueue(refocus = true) {
   if (Q.drag) endDrag(false);
   $('queueModal').hidden = true;
-  if (refocus) Q.lastFocus?.focus?.();
+  if (refocus) { digestSeen(); Q.lastFocus?.focus?.(); } // closeQueue(false) is the Machines view taking #qBody over
 }
 $('obQueue').addEventListener('click', openQueue);
 $('queueModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeQueue(); });
@@ -9091,6 +9157,8 @@ function renderQueue() {
   const body = $('qBody'), mx = mxOpen();
   const focused = document.activeElement?.closest?.('#qBody .tcard')?.dataset.task; // keeps keyboard focus across re-renders
   body.textContent = '';
+  const away = digestCard();
+  if (away) body.append(away);
   if (mx) { body.append(mxLanes()); mxCountsRender(); } // every machine's running tasks, in place of this project's
   const running = mx ? [] : [...O.tasks.values()].filter((t) => t.status === 'running' && t.project_id === O.project?.id);
   const queued = queuedTasks();

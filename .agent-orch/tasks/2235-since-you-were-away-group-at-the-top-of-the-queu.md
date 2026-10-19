@@ -13,3 +13,9 @@ digest.mjs (see its header and test/digest.test.mjs) returns what finished, fail
 ## Done when
 
 `npm test -- test/digest-api.test.mjs test/ui-digest.test.mjs test/digest.test.mjs` passes.
+
+## Result — done (check passed) (2026-10-19 14:19)
+
+The pre-existing `ui-static` failure is unrelated: it's on HEAD at app.js:4086, which this change doesn't touch. All three Done-when test files pass.
+
+AGENT-ORCH-STATUS: done — Queue shows 'Since you were away' digest card; tests pass

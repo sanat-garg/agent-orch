@@ -2174,6 +2174,31 @@ button.dg-row:disabled { opacity: .6; cursor: progress; }
 .q-hint { background: var(--danger); color: #fff; }
 .tc-after { color: var(--accent); }
 .tc-after [role="link"] { text-decoration: underline dotted; text-underline-offset: 2px; cursor: pointer; }
+/* 'Since you were away' (app.js digestCard): a compact card at the top of #qBody, counts in tabular figures, then up
+   to 5 rows per kind (project · task, the result line under it), each opening its task */
+.sy { margin: 14px 0 4px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--raised); min-width: 0; }
+.sy-head { display: flex; align-items: center; gap: 10px; }
+.sy-title { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
+.sy-h { margin: 0; font-size: 14px; font-weight: 600; }
+.sy-since { font-size: 12px; color: var(--muted); }
+.sy-dismiss { flex: none; }
+.sy-counts { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 6px 0 0; font-size: 13px; color: var(--muted); }
+.sy-counts b { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+.sy-n-failed b { color: var(--danger); }
+.sy-n-needsYou b { color: var(--warn); }
+.sy-kind { margin: 12px 0 4px; font-size: 11.5px; font-weight: 600; color: var(--faint); text-transform: uppercase; letter-spacing: .04em; }
+.sy-list { display: flex; flex-direction: column; gap: 2px; }
+.sy-row { display: flex; flex-direction: column; gap: 2px; width: 100%; min-width: 0; padding: 6px 8px; margin: 0 -8px; box-sizing: content-box;
+  border: 0; border-radius: 8px; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.sy-row:hover { background: var(--panel); }
+.sy-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sy-top { display: flex; gap: 8px; min-width: 0; font-size: 13.5px; }
+.sy-proj { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.sy-task { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sy-note { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); }
+.sy-failed .sy-note { color: var(--danger); }
+@media (pointer: coarse) { .sy-row { min-height: 44px; justify-content: center; } .sy-dismiss { min-height: 44px; } }
+@media (max-width: 480px) { .sy { padding: 10px 12px; } .sy-proj { max-width: 35%; } }
 /* refill line (app.js renderRefillStatus): counts semibold in tabular figures, a pulsing dot while planning more work,
    an ⓘ that opens a short explanation; one line, down to 390px (the short text) */
 .rf { position: relative; display: flex; align-items: center; gap: 6px; margin: 14px 0 0; font-size: 12.5px; color: var(--muted); white-space: nowrap; min-width: 0; }

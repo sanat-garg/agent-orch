@@ -1660,3 +1660,7 @@ GET /api/orch/tasks/:id/changes serves taskChanges; tests pass
 ## 2026-10-19 14:19 — #2235 'Since you were away' group at the top of the Queue, from digest.mjs, with tests (ui) [done (check passed)]
 
 Queue shows 'Since you were away' digest card; tests pass
+
+## 2026-10-19 14:22 — #2234 Task drawer: a Changes section with per-file counts and a coloured diff (ui) [done (check passed)]
+
+Task drawer shows a lazy-loaded, coloured Changes diff; tests pass

@@ -13,3 +13,7 @@ Show what a task changed inside its drawer in public/app.js (render code near `s
 ## Done when
 
 `npm test -- test/ui-task-changes.test.mjs test/ui-static.test.mjs` passes.
+
+## Result — done (check passed) (2026-10-19 14:22)
+
+AGENT-ORCH-STATUS: done — Task drawer shows a lazy-loaded, coloured Changes diff; tests pass

@@ -1516,6 +1516,32 @@ label.st-row, label.st-text { cursor: pointer; }
 .act-cls.outbound { color: var(--warn); }
 .act-meta { font-size: 12px; }
 .act .shots { max-width: 240px; }
+/* The drawer's Changes (changesSection): file rows with +/− counts; an open row's hunks scroll sideways, never wrap. */
+details.dr-changes { min-width: 0; margin-bottom: 14px; }
+.chg-total { font-size: 13px; color: var(--muted); }
+.chg-add { color: var(--add-fg); font-variant-numeric: tabular-nums; }
+.chg-del { color: var(--del-fg); font-variant-numeric: tabular-nums; }
+.chg-note { font-size: 12.5px; margin-top: 6px; }
+.chg-files { list-style: none; margin: 8px 0 0; padding: 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.chg-file + .chg-file { border-top: 1px solid var(--border); }
+.chg-file > .chg-note { margin: 0; padding: 8px 10px; }
+.chg-row { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 32px; padding: 4px 10px; border: 0; background: none;
+  color: var(--text); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.chg-row:hover { background: var(--raised); }
+.chg-row::before { content: "▸"; flex: none; color: var(--faint); font-size: 11px; }
+.chg-row[aria-expanded="true"]::before { content: "▾"; }
+.chg-path { flex: 1; min-width: 0; font-family: var(--mono); font-size: 12.5px; overflow-wrap: anywhere; }
+.chg-row .chg-add, .chg-row .chg-del, .chg-bin { flex: none; font-family: var(--mono); font-size: 12px; }
+.chg-bin { color: var(--faint); }
+.chg-diff { max-height: 480px; overflow: auto; overscroll-behavior: contain; background: var(--code-bg); border-top: 1px solid var(--border);
+  font-family: var(--mono); font-size: 12px; line-height: 1.5; }
+.chg-lines { display: inline-block; min-width: 100%; }
+.chg-l { white-space: pre; padding: 0 10px; }
+.chg-l.add { background: var(--add-bg); color: var(--add-fg); }
+.chg-l.del { background: var(--del-bg); color: var(--del-fg); }
+.chg-l.hunk { color: var(--muted); padding-top: 4px; }
+.chg-l.meta { color: var(--faint); }
+@media (pointer: coarse) { .chg-row { min-height: 44px; } }
 
 /* the task drawer (slides in from the right) */
 .drawer {

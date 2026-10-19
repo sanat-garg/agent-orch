@@ -8378,6 +8378,95 @@ function section(title) {
   return s;
 }
 
+// The drawer's Changes (after vibe-kanban's diff review): what a work task changed, from GET /api/orch/tasks/:id/changes
+// ({source, files: [{path, add, del, binary}], patch, truncated}), fetched only when the owner opens it (and again on
+// each re-open, so a running task's newer commits show). Each file row has its +/− counts under a total line; a row
+// opens that file's hunks from the patch, lines coloured by --add-*/--del-* and scrolling sideways, never wrapping.
+const CHG = { task: null, data: null, err: '', open: null, stale: false, loading: null, files: new Set() };
+async function loadChanges(id) {
+  if (CHG.loading === id) return; // a live re-render while the fetch is out
+  CHG.stale = false;
+  CHG.loading = id;
+  let data = null, err = '';
+  try { data = await api(`/api/orch/tasks/${id}/changes`); } catch (e) { err = e.message || 'Could not load the changes'; }
+  if (CHG.loading === id) CHG.loading = null;
+  if (O.drawer !== id) return;
+  if (CHG.task !== id) CHG.files.clear();
+  Object.assign(CHG, { task: id, data, err });
+  $('drBody').querySelector('.dr-changes')?.replaceWith(changesSection(id));
+}
+// One file's part of a unified patch: the chunks whose 'diff --git a/X b/Y' (or ---/+++) header names its path (a
+// merged task's commits can each touch it).
+function patchFor(patch, file) {
+  const unq = (s) => s.replace(/^"(.*)"$/, '$1').replace(/^[ab]\//, ''), found = [];
+  for (const chunk of String(patch || '').split(/^(?=diff --git )/m)) {
+    const head = chunk.slice(0, chunk.indexOf('\n@@') + 1 || chunk.length);
+    const names = [...head.matchAll(/^(?:diff --git ("?a\/.*?"?) ("?b\/.*?"?)|(?:---|\+\+\+) ("?[ab]\/.*?"?)|rename (?:from|to) (.*))$/gm)]
+      .flatMap((m) => m.slice(1).filter(Boolean).map(unq));
+    if (names.includes(file.path)) found.push(chunk.replace(/\n?$/, '\n'));
+  }
+  return found.length ? found.join('') : null;
+}
+function fileDiff(file, data) {
+  if (file.binary) return el('div', 'muted chg-note', 'Binary file');
+  const chunk = patchFor(data.patch, file);
+  if (chunk == null) return el('div', 'muted chg-note', data.truncated ? 'Past the 200 KB cut; open it in the Files tab' : 'No diff for this file');
+  const lines = chunk.replace(/\n$/, '').split('\n'), hunks = lines.some((l) => l.startsWith('@@'));
+  const box = el('div', 'chg-diff'), inner = el('div', 'chg-lines');
+  // Lines before each file's first @@ are git's headers (hidden); a file with no hunks (a mode change) shows them instead.
+  let head = true;
+  for (const line of lines) {
+    if (line.startsWith('diff --git ')) { head = true; continue; }
+    else if (line.startsWith('@@')) head = false;
+    if (head && hunks) continue;
+    const cls = line.startsWith('@@') ? 'hunk' : head || line[0] === '\\' ? 'meta' : line[0] === '+' ? 'add' : line[0] === '-' ? 'del' : 'ctx';
+    inner.append(el('div', `chg-l ${cls}`, line || ' '));
+  }
+  box.append(inner);
+  return box;
+}
+function changesSection(id) {
+  const d = el('details', 'dr-more dr-changes');
+  d.open = CHG.open === id;
+  const data = CHG.task === id && !CHG.err ? CHG.data : null, files = data?.source === 'none' ? [] : data?.files || [];
+  d.append(el('summary', '', `Changes${files.length ? ` · ${files.length}` : ''}`));
+  d.addEventListener('toggle', () => {
+    CHG.open = d.open ? id : CHG.open === id ? null : CHG.open;
+    if (!d.open) CHG.stale = true;
+    else if (CHG.task !== id || CHG.stale) loadChanges(id);
+  });
+  if (CHG.task !== id) { d.append(el('div', 'muted', 'Loading…')); return d; }
+  if (CHG.err) { d.append(el('div', 'dr-err', CHG.err)); return d; }
+  if (!files.length) { d.append(el('div', 'muted', 'No changes yet')); return d; }
+  const add = files.reduce((n, f) => n + (f.add || 0), 0), del = files.reduce((n, f) => n + (f.del || 0), 0);
+  const total = el('div', 'chg-total');
+  total.append(document.createTextNode(`${files.length} file${files.length === 1 ? '' : 's'}, `), el('span', 'chg-add', `+${add}`),
+    document.createTextNode(' '), el('span', 'chg-del', `−${del}`));
+  d.append(total);
+  if (data.truncated) d.append(el('div', 'muted chg-note', 'Diff cut at 200 KB; open the files in the Files tab for the rest'));
+  const ul = el('ul', 'chg-files');
+  for (const f of files) {
+    const li = el('li', 'chg-file'), open = CHG.files.has(f.path);
+    const btn = el('button', 'chg-row');
+    btn.type = 'button';
+    btn.setAttribute('aria-expanded', String(open));
+    btn.append(el('span', 'chg-path', f.path));
+    if (f.binary) btn.append(el('span', 'chg-bin', 'binary'));
+    else btn.append(el('span', 'chg-add', `+${f.add || 0}`), el('span', 'chg-del', `−${f.del || 0}`));
+    btn.onclick = () => {
+      const now = !CHG.files.has(f.path);
+      if (now) CHG.files.add(f.path); else CHG.files.delete(f.path);
+      btn.setAttribute('aria-expanded', String(now));
+      if (now) li.append(fileDiff(f, data)); else li.querySelector(':scope > :not(.chg-row)')?.remove();
+    };
+    li.append(btn);
+    if (open) li.append(fileDiff(f, data));
+    ul.append(li);
+  }
+  d.append(ul);
+  return d;
+}
+
 // A remote run's timeline (job.phase from its worker): one thin bar whose segments take each step's share of the time
 // (a 2px gap between them; the step in progress in the running blue, done ones neutral, the step it failed in red),
 // then the same steps as text, which carries every value (the bar's hover titles only repeat it; a step cut short when
@@ -8593,7 +8682,9 @@ function renderDrawer(fromLive = false) {
   }
   body.append(s3);
 
-  // Every browser/connector call it made (the approval gate's audit log), loaded when opened.
+  // What it changed in the code (changesSection) and every browser/connector call it made (the approval gate's audit
+  // log), each loaded when opened.
+  if (t.kind === 'work' && ['running', 'done', 'failed', 'needs_integration'].includes(t.status)) body.append(changesSection(t.id));
   if (t.kind === 'work') body.append(actionsSection(t.id));
 
   // 4. What "done" means for it.

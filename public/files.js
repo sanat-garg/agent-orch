@@ -1164,7 +1164,7 @@ function fxDlPaint() {
 // The preflight → null when the download can go ahead, else the message to show.
 async function fxDlCheck(url) {
   let r;
-  try { r = await fetch(`${url}&check=1`, { cache: 'no-store' }); } catch { return "Couldn't reach the server"; }
+  try { r = await fetch(`${url}${url.includes('?') ? '&' : '?'}check=1`, { cache: 'no-store' }); } catch { return "Couldn't reach the server"; }
   if (r.status === 401) { location.href = '/login'; return 'Signed out'; }
   if (!/json/.test(r.headers.get('content-type') || '')) { // an older server that ignores check=1 streams the file itself
     r.body?.cancel().catch(() => {});

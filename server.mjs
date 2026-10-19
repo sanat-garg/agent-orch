@@ -21,6 +21,7 @@ import { logWindow, logSince, toolEvents } from './chat-log.mjs';
 import { mediaCollector, MEDIA_ID_RE, MEDIA_TYPES, toolResultImages, readStars, setStar } from './media.mjs';
 import { createUsageLog, createLimitStore, RANGES as USAGE_RANGES } from './usage.mjs';
 import { chatUsage } from './chat-usage.mjs';
+import { chatMarkdown, exportFileName } from './chat-export.mjs';
 import { handleFiles } from './files.mjs';
 import { createStats } from './stats.mjs';
 import { healthRow } from './health.mjs';
@@ -235,6 +236,7 @@ function userBlocked(req, url, u) {
   if (/^\/api\/uploads\/[a-f0-9]{24}$/.test(p) || p.startsWith('/api/media/')) return null;
   if (/^\/api\/credentials(\/[\w-]{1,40})?$/.test(p)) return null; // everyone's own; the routes only touch me.id's
   let m;
+  if (/^\/api\/convos\/[\w-]+\/export\.md$/.test(p)) return null; // its route answers 404 for a chat that isn't theirs
   if ((m = p.match(/^\/api\/convos\/([\w-]+)(?:\/|$)/))) return ownsConvo(u, findConvo(m[1])) ? null : NOT_YOURS;
   if (p.startsWith('/api/files/')) {
     const q = url.searchParams;
@@ -2258,6 +2260,19 @@ async function handleRequest(req, res) {
     broadcastConvos();
     for (const ws of subscribers.get(into.id) || []) sendHistory(ws, into);
     return json(res, 200, { ok: true, into: into.id, merged: from.length });
+  }
+  // GET …/export.md: the whole chat as Markdown (chat-export.mjs), as a download named after the chat. ?check=1 (the
+  // client's preflight) answers {ok} instead, so an error toasts rather than being saved. A chat the user can't see is 404.
+  const ex = p.match(/^\/api\/convos\/([\w-]+)\/export\.md$/);
+  if (ex && req.method === 'GET') {
+    const c = findConvo(ex[1]);
+    if (!c || !ownsConvo(me, c)) return json(res, 404, { error: 'No such chat' });
+    if (url.searchParams.has('check')) return json(res, 200, { ok: true });
+    const a = chatAgent(c), name = exportFileName(c.title);
+    const text = chatMarkdown(readLog(c.id), { title: c.title, cwd: c.cwd, agent: a === 'claude' ? 'Claude' : AGENTS[a].label.replace(/ CLI$/, '') });
+    res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8', 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff',
+      'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(name).replace(/['()*]/g, (x) => `%${x.charCodeAt(0).toString(16).toUpperCase()}`)}` });
+    return res.end(text);
   }
   // GET …/usage: the chat's tokens (its turns and planner replies; a main chat also its project's tasks) against the
   // weekly plan windows (chat-usage.mjs).

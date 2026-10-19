@@ -13,3 +13,7 @@ Let the owner take a conversation out of agent-orch. New module chat-export.mjs 
 ## Done when
 
 `npm test -- test/chat-export.test.mjs` passes and `node --check server.mjs` succeeds.
+
+## Result — done (check passed) (2026-10-19 14:37)
+
+AGENT-ORCH-STATUS: done — Chats export as Markdown from the sidebar ⋯ menu; tests pass

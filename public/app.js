@@ -744,6 +744,7 @@ function convoMenu(c, anchor) {
   const fresh = el('button', '', 'New chat in this project');
   const rename = el('button', '', 'Rename');
   const usage = el('button', '', 'Token usage');
+  const exportMd = el('button', '', 'Export as Markdown');
   const merge = el('button', '', sub ? 'Merge into the main chat' : `Merge ${others === 1 ? 'its other chat' : `its ${others} other chats`} into this one`);
   const archive = el('button', '', c.archived ? 'Unarchive project' : 'Archive project');
   const del = el('button', 'danger', 'Delete');
@@ -773,8 +774,19 @@ function convoMenu(c, anchor) {
   };
   // Opens the chat too: the sheet (tokens.js) is always the open chat's.
   usage.onclick = () => { m.remove(); if (state.cid !== c.id) openConvo(c.id); closeSidebar(); setView('chat'); window.Tokens?.open(); };
+  // The whole chat as a .md file (server.mjs …/export.md): a preflight first (files.js fxDlCheck) so an error toasts instead of saving.
+  exportMd.onclick = async () => {
+    m.remove();
+    const url = `/api/convos/${c.id}/export.md`, err = await fxDlCheck(url);
+    if (err) return toast(err === API_UPDATING ? err : `Export failed: ${err}`, { kind: 'error' });
+    const a = document.createElement('a');
+    a.href = url; a.download = ''; a.hidden = true;
+    document.body.append(a);
+    a.click();
+    a.remove();
+  };
   del.onclick = () => { m.remove(); deleteModal(c); };
-  m.append(fresh, rename, usage, ...(others ? [merge] : []), archive, del);
+  m.append(fresh, rename, usage, exportMd, ...(others ? [merge] : []), archive, del);
   document.body.append(m);
   const r = anchor.getBoundingClientRect();
   m.style.top = `${Math.min(r.bottom + 4, innerHeight - 100)}px`;

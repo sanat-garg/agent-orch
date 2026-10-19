@@ -1729,3 +1729,6 @@ Changed files can now add follow-up notes to the project chat draft, with tests 
 ## 2026-10-19 14:36 — #2266 Show the last seven days of chat token usage, with tests (ui) [done (check passed)]
 
 Token usage sheet has an All time / Last 7 days switch; tests pass
+## 2026-10-19 14:37 — #2240 Export a chat as Markdown from the sidebar ⋯ menu, with tests [done (check passed)]
+
+Chats export as Markdown from the sidebar ⋯ menu; tests pass

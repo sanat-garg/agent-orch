@@ -1834,3 +1834,7 @@ composer @-mentions suggest project files, tests pass
 ## 2026-10-19 16:25 — #2284 Browser tab title shows how many actions wait for you, with tests (ui) [done (check passed)]
 
 tab title prefixes pending approval count; test passes
+
+## 2026-10-19 16:30 — #2285 Task drawer: Follow up on a finished task, with tests (ui) [done (check passed)]
+
+Done tasks get Follow up; note lands in chat draft

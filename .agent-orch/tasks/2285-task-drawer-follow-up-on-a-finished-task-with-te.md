@@ -17,3 +17,9 @@ Test: new test/ui-task-followup.test.mjs copying test/ui-diff-feedback.test.mjs'
 ## Done when
 
 `npm test -- test/ui-task-followup.test.mjs test/ui-diff-feedback.test.mjs` passes.
+
+## Result — done (check passed) (2026-10-19 16:30)
+
+Both screenshots look right: the form sits under the action row, and the note lands in the web chat's box after the earlier draft without being sent. The Done-when command, the static UI test and the per-file notes test all pass.
+
+AGENT-ORCH-STATUS: done — Done tasks get Follow up; note lands in chat draft

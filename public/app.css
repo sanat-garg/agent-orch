@@ -2491,3 +2491,5 @@ button.dg-row:disabled { opacity: .6; cursor: progress; }
 .chg-fb-msg { flex: 1; min-width: 0; color: var(--danger); font-size: 12.5px; }
 .chg-fb-add { flex: none; }
 @media (pointer: coarse) { .chg-fb-note { font-size: 16px; } .chg-fb-add { min-height: 44px; } }
+/* A done task's Follow up form under the drawer's action row (app.js followUpForm) shares the note's styles. */
+.dr-fu { margin-top: 10px; padding: 0; border-top: 0; }

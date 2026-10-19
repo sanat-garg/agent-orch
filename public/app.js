@@ -8559,11 +8559,36 @@ function fileDiff(file, data) {
   box.append(inner);
   return box;
 }
+// Follow-up notes land in the project chat's message box, never sent: the per-file notes under the Changes section
+// (fileFeedback) and a done task's Follow up (followUpForm) both go through addToProjectChat, which appends `text` to
+// the draft of the open task's project chat (O.detail.project.convo_id, after any text already there), then opens that
+// chat. It returns false, doing nothing, when that chat is gone, so the caller keeps the note and says why.
+function addToProjectChat(text) {
+  const cid = O.detail?.project?.convo_id;
+  if (!cid || !state.convos.some((c) => c.id === cid)) return false;
+  const cur = (state.cid === cid ? input.value : store.get('cw.draft.' + cid) || '').replace(/\s+$/, '');
+  const draft = cur ? `${cur}\n\n${text}` : text;
+  store.set('cw.draft.' + cid, draft); // the chat's history frame restores the box from it
+  closeTask();
+  if (state.cid !== cid) openConvo(cid);
+  closeSidebar();
+  setView('chat');
+  input.value = draft;
+  input.dispatchEvent(new Event('input')); // autosize, Send button, saved draft
+  input.setSelectionRange(draft.length, draft.length);
+  toast('Added to the chat\'s message box. Send it when ready', { kind: 'success' });
+  return true;
+}
+// 'task #12 (Build the app)' for a follow-up line; the title comes from the drawer's detail or the card.
+function taskRef(id) {
+  const t = O.detail?.task.id === id ? O.detail.task : O.tasks.get(id);
+  return `task #${id}${t?.title ? ` (${displayTitle(t)})` : ''}`;
+}
+const NO_CHAT = 'This task\'s project chat isn\'t available, so the note stays here';
 // A file's follow-up note (after vibe-kanban's diff feedback, at file level only): a short owner note under the open
-// file; Add to chat appends the task's number and title, the file's path and the note to the draft of the task's project
-// chat (O.detail.project.convo_id), then opens that chat without sending. Notes stay in localStorage per task and file
-// until added, so drawer re-renders and reloads keep them (a re-render also keeps the field focused); with no chat to
-// add to, the note stays and the form says why.
+// file; Add to chat appends the task's number and title, the file's path and the note to the project chat's draft
+// (addToProjectChat). Notes stay in localStorage per task and file until added, so drawer re-renders and reloads keep
+// them (a re-render also keeps the field focused); with no chat to add to, the note stays and the form says why.
 const chgNoteKey = (id, path) => `cw.chgNote.${id}.${path}`;
 function fileFeedback(id, file) {
   const key = chgNoteKey(id, file.path), box = el('div', 'chg-fb');
@@ -8586,22 +8611,46 @@ function fileFeedback(id, file) {
   add.onclick = () => {
     const note = ta.value.trim();
     if (!note) { say('Write a note first'); return ta.focus(); }
-    const cid = O.detail?.project?.convo_id, t = O.detail?.task.id === id ? O.detail.task : O.tasks.get(id);
-    if (!cid || !state.convos.some((c) => c.id === cid)) return say('This task\'s project chat isn\'t available, so the note stays here');
-    const text = `Follow-up on task #${id}${t?.title ? ` (${displayTitle(t)})` : ''}, file \`${file.path}\`:\n${note}`;
-    const cur = (state.cid === cid ? input.value : store.get('cw.draft.' + cid) || '').replace(/\s+$/, '');
-    const draft = cur ? `${cur}\n\n${text}` : text;
-    store.set('cw.draft.' + cid, draft); // the chat's history frame restores the box from it
+    if (!addToProjectChat(`Follow-up on ${taskRef(id)}, file \`${file.path}\`:\n${note}`)) return say(NO_CHAT);
     store.del(key);
     if (CHG.noteFocus === key) CHG.noteFocus = null;
-    closeTask();
-    if (state.cid !== cid) openConvo(cid);
-    closeSidebar();
-    setView('chat');
-    input.value = draft;
-    input.dispatchEvent(new Event('input')); // autosize, Send button, saved draft
-    input.setSelectionRange(draft.length, draft.length);
-    toast('Added to the chat\'s message box. Send it when ready', { kind: 'success' });
+  };
+  const bar = el('div', 'chg-fb-bar');
+  bar.append(msg, add);
+  box.append(ta, bar);
+  return box;
+}
+// A done task's Follow up (the task-level sibling of fileFeedback, under the drawer's action row): 'What should change?'
+// and Add to chat, which puts 'Follow-up on task #N (title):' and the note in the project chat's box (addToProjectChat).
+// FU.open is the task whose form is showing; the note stays in localStorage per task until added, so re-renders (which
+// also keep the field focused) and reloads keep it; with no chat to add to it stays and the form says why.
+const FU = { open: null, focus: false };
+const taskNoteKey = (id) => `cw.taskNote.${id}`;
+function followUpForm(t) {
+  const key = taskNoteKey(t.id), box = el('div', 'chg-fb dr-fu');
+  const ta = el('textarea', 'chg-fb-note dr-fu-note');
+  ta.rows = 2;
+  ta.placeholder = 'What should change?';
+  ta.setAttribute('aria-label', `Follow-up note on task #${t.id}`);
+  ta.value = store.get(key) || '';
+  const add = el('button', 'btn small chg-fb-add dr-fu-add', 'Add to chat');
+  add.type = 'button';
+  add.title = 'Add this note to the project chat\'s message box (Ctrl+Enter); it is not sent';
+  const msg = el('div', 'chg-fb-msg dr-fu-msg');
+  msg.setAttribute('role', 'status');
+  const say = (text) => { msg.textContent = text; };
+  ta.oninput = () => { if (ta.value.trim()) store.set(key, ta.value); else store.del(key); say(''); };
+  ta.onkeydown = (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); add.click(); } };
+  ta.onfocus = () => (FU.focus = true);
+  ta.onblur = () => setTimeout(() => { if (ta.isConnected && document.activeElement !== ta) FU.focus = false; });
+  if (FU.focus) queueMicrotask(() => ta.isConnected && ta.focus({ preventScroll: true }));
+  add.onclick = () => {
+    const note = ta.value.trim();
+    if (!note) { say('Write a note first'); return ta.focus(); }
+    if (!addToProjectChat(`Follow-up on ${taskRef(t.id)}:\n${note}`)) return say(NO_CHAT);
+    store.del(key);
+    FU.open = null;
+    FU.focus = false;
   };
   const bar = el('div', 'chg-fb-bar');
   bar.append(msg, add);
@@ -8802,10 +8851,17 @@ function renderDrawer(fromLive = false) {
     const retry = el('button', 'btn small primary', 'Retry');
     retry.onclick = () => openRetry(t);
     row.append(retry);
+  } else if (t.status === 'done' && t.kind !== 'review') {
+    const fu = el('button', 'btn small dr-fu-open', 'Follow up…');
+    fu.title = 'Note what should change and add it to the project chat';
+    fu.setAttribute('aria-expanded', String(FU.open === t.id));
+    fu.onclick = () => { FU.open = FU.open === t.id ? null : t.id; FU.focus = FU.open != null; renderDrawer(true); };
+    row.append(fu);
   }
   if (t.status === 'awaiting_review') top.append(reviewPanel(t));
   for (const a of t.approvals || []) top.append(approvalPanel(a));
   if (row.children.length) top.append(row);
+  if (FU.open === t.id && t.status === 'done' && t.kind !== 'review') top.append(followUpForm(t));
   if (O.err) top.append(el('div', 'dr-err', O.err));
   body.append(top);
   if (t.kind === 'review') { // a checkpoint has no model, instructions or output of its own

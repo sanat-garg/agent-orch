@@ -1654,3 +1654,6 @@ Per-project rigor 1-5 now shapes planner, reflection and top-up prompts
 ## 2026-10-19 14:12 — #2232 Fix ui-static's stale restart-wording assertion [done (check passed)]
 
 ui-static assertion now matches updateBannerView restart wording
+## 2026-10-19 14:14 — #2233 Task changes API: GET /api/orch/tasks/:id/changes with tests [done (check passed)]
+
+GET /api/orch/tasks/:id/changes serves taskChanges; tests pass

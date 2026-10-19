@@ -42,6 +42,8 @@ import { createSounds, MAX_SOUND_BYTES as MAX_CUSTOM_SOUND_BYTES } from './sound
 import { createVersion, formatVersion } from './version.mjs';
 import { createPreviews } from './previews.mjs';
 import { projectName } from './project-name.mjs';
+import { repoInfo } from './worktrees.mjs';
+import { taskChanges } from './changes.mjs';
 import { createCredentials, projectSecrets } from './credentials.mjs';
 import { describeCron, nextRun, validTz } from './cron.mjs';
 import { createUsers, ADMIN_ID, sharedWith, canOrchestrate } from './users.mjs';
@@ -2531,6 +2533,18 @@ async function handleRequest(req, res) {
   if (oac && req.method === 'GET') {
     const r = orch.taskActions(Number(oac[1]));
     return r ? json(res, 200, r) : json(res, 404, { error: 'No such task' });
+  }
+  // What a task changed (changes.mjs): its live branch, or once merged its 'agent-orch #<id>:' commits. ?max= caps the patch.
+  const och = p.match(/^\/api\/orch\/tasks\/(\d+)\/changes$/);
+  if (och && req.method === 'GET') {
+    const dir = orch.pathOf('task', och[1]);
+    if (!dir) return json(res, 404, { error: 'No such task' });
+    const max = Number(url.searchParams.get('max')) || 200_000;
+    try {
+      const info = await repoInfo(dir);
+      if (!info) return json(res, 500, { error: "The project's folder is not a git repository on a branch" });
+      return json(res, 200, await taskChanges(info, Number(och[1]), { maxBytes: Math.min(Math.max(max, 20_000), 1_000_000) }));
+    } catch (e) { return json(res, 500, { error: `Couldn't read the task's changes: ${e.message}` }); }
   }
   if (p === '/api/orch/gate' && req.method === 'GET') return json(res, 200, orch.gateSettings());
   if (p === '/api/orch/gate' && req.method === 'PUT') {

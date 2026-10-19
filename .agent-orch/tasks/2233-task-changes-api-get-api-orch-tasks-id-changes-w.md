@@ -13,3 +13,7 @@ changes.mjs already computes what a task changed (`taskChanges(info, id, {maxByt
 ## Done when
 
 `npm test -- test/task-changes-api.test.mjs test/changes.test.mjs` passes.
+
+## Result — done (check passed) (2026-10-19 14:14)
+
+AGENT-ORCH-STATUS: done — GET /api/orch/tasks/:id/changes serves taskChanges; tests pass

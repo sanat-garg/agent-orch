@@ -7,6 +7,9 @@
 //     ran it, users.mjs; model: the model id it ran on; both missing on older records)
 //   {t, agent, kind:'limit', status:'hit'|'cleared', resetsAt, window?}
 // `input` is uncached input (Claude: input + cache writes; codex reports input including the cached part).
+// Lifetime totals per chat and task (the jsonl keeps 30 days) live in <DATA>/metrics/token-totals.json:
+//   {refs: {'chat:<convo id>' | 'task:<task id>': {first, last, turns, models: {'<agent>/<model>': {input, output, cached, turns}}}}}
+// built once from the jsonl when missing, then updated by every tokens record that carries a ref.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -49,8 +52,8 @@ export function readRecords(file, since = 0) {
 }
 
 export function createUsageLog(dataDir, { now = Date.now } = {}) {
-  const file = path.join(dataDir, 'metrics', 'usage.jsonl');
-  let state = null; // agent/window -> last window record; agent -> last limit record; the last TOKENS_MS of tokens records
+  const file = path.join(dataDir, 'metrics', 'usage.jsonl'), totalsFile = path.join(dataDir, 'metrics', 'token-totals.json');
+  let state = null, totals = null; // agent/window -> last window record; agent -> last limit record; the last TOKENS_MS of tokens records
   const load = () => {
     if (state) return state;
     state = { windows: new Map(), limits: new Map(), tokens: [] };
@@ -64,6 +67,29 @@ export function createUsageLog(dataDir, { now = Date.now } = {}) {
       state.tokens.push(r);
       if (state.tokens[0].t < now() - TOKENS_MS) state.tokens = state.tokens.filter((x) => x.t >= now() - TOKENS_MS);
     }
+  };
+  const addTotal = (refs, r) => {
+    if (r.ref == null || !r.source) return;
+    const e = (refs[`${r.source}:${r.ref}`] ??= { first: r.t, last: r.t, turns: 0, models: {} });
+    const m = (e.models[`${r.agent}/${r.model || ''}`] ??= { input: 0, output: 0, cached: 0, turns: 0 });
+    for (const k of ['input', 'output', 'cached']) m[k] += num(r[k]);
+    m.turns++; e.turns++;
+    e.first = Math.min(e.first, r.t); e.last = Math.max(e.last, r.t);
+  };
+  const loadTotals = () => {
+    if (totals) return totals;
+    try { totals = JSON.parse(fs.readFileSync(totalsFile, 'utf8')).refs || {}; return totals; } catch (e) { if (e.code !== 'ENOENT') console.error('[usage] totals unreadable', e.message); }
+    totals = {};
+    for (const r of readRecords(file)) if (r.kind === 'tokens') addTotal(totals, r);
+    saveTotals();
+    return totals;
+  };
+  const saveTotals = () => {
+    try {
+      fs.mkdirSync(path.dirname(totalsFile), { recursive: true });
+      fs.writeFileSync(totalsFile + '.tmp', JSON.stringify({ refs: totals }));
+      fs.renameSync(totalsFile + '.tmp', totalsFile);
+    } catch (e) { console.error('[usage] totals save failed', e); }
   };
   const append = (r) => {
     load();
@@ -85,10 +111,11 @@ export function createUsageLog(dataDir, { now = Date.now } = {}) {
       if (last && last.pct === r.pct && last.resetsAt === r.resetsAt && now() - last.t < DEDUPE_MS) return null;
       return append(r);
     },
-    // The latest reading of each of an agent's plan windows whose reset (if known) is still ahead: [{window, pct, resetsAt}].
+    // The latest reading of each of an agent's plan windows whose reset (if known) is still ahead:
+    // [{window, pct, resetsAt, readAt (epoch ms)}].
     current(agent) {
       const out = [];
-      for (const r of load().windows.values()) if (r.agent === agent && (r.resetsAt == null || r.resetsAt * 1000 > now())) out.push({ window: r.window, pct: r.pct, resetsAt: r.resetsAt });
+      for (const r of load().windows.values()) if (r.agent === agent && (r.resetsAt == null || r.resetsAt * 1000 > now())) out.push({ window: r.window, pct: r.pct, resetsAt: r.resetsAt, readAt: r.at ?? r.t });
       return out;
     },
     // An adapter's res.windows ([{window, pct, resetsAt}], e.g. codex '5h'/'weekly').
@@ -96,7 +123,25 @@ export function createUsageLog(dataDir, { now = Date.now } = {}) {
     tokens(agent, usage, source, ref, { user = null, model = null } = {}) {
       const u = normUsage(agent, usage);
       if (!u.input && !u.output && !u.cached) return null;
-      return append({ agent, kind: 'tokens', ...u, source, ref: ref ?? null, ...(user && { user }), ...(model && { model }) });
+      loadTotals();
+      const rec = append({ agent, kind: 'tokens', ...u, source, ref: ref ?? null, ...(user && { user }), ...(model && { model }) });
+      if (rec?.ref != null) { addTotal(totals, rec); saveTotals(); }
+      return rec;
+    },
+    // A chat's or task's lifetime totals (see the header), or null.
+    totalsOf(source, ref) { return loadTotals()[`${source}:${ref}`] || null; },
+    // A merged chat's totals move into the chat it merged into.
+    mergeTotals(source, from, into) {
+      const t = loadTotals(), a = t[`${source}:${from}`];
+      if (!a) return;
+      const b = (t[`${source}:${into}`] ??= { first: a.first, last: a.last, turns: 0, models: {} });
+      for (const [k, m] of Object.entries(a.models)) {
+        const n = (b.models[k] ??= { input: 0, output: 0, cached: 0, turns: 0 });
+        for (const f of ['input', 'output', 'cached', 'turns']) n[f] += m[f];
+      }
+      b.turns += a.turns; b.first = Math.min(b.first, a.first); b.last = Math.max(b.last, a.last);
+      delete t[`${source}:${from}`];
+      saveTotals();
     },
     // Tokens records since `t` (epoch ms, at most TOKENS_MS back), oldest first: users.mjs splits plan windows by them.
     tokensSince(t) { return load().tokens.filter((r) => r.t >= t); },

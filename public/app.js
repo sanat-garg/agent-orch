@@ -136,8 +136,8 @@ phoneHeader.addEventListener('change', syncPhoneHeader);
 syncPhoneHeader();
 function openViewMenu() {
   const m = $('viewMenu'), repo = $('repoLink'), item = $('viewMenuRepo'), pv = $('previewLink'), pvItem = $('viewMenuPreview');
-  const sh = $('shotsLink'), shItem = $('viewMenuShots');
-  $('viewMenuMore').hidden = repo.hidden && pv.hidden && sh.hidden;
+  const sh = $('shotsLink'), shItem = $('viewMenuShots'), tk = $('tokLink'), tkItem = $('viewMenuTok');
+  $('viewMenuMore').hidden = repo.hidden && pv.hidden && sh.hidden && tk.hidden;
   item.hidden = repo.hidden;
   if (!repo.hidden) {
     item.replaceChildren(repo.querySelector('svg').cloneNode(true), $('repoText').textContent);
@@ -147,6 +147,8 @@ function openViewMenu() {
   if (!pv.hidden) pvItem.replaceChildren(...[...pv.childNodes].map((n) => n.cloneNode(true)));
   shItem.hidden = sh.hidden;
   if (!sh.hidden) shItem.replaceChildren(...[...sh.childNodes].map((n) => n.cloneNode(true)));
+  tkItem.hidden = tk.hidden;
+  if (!tk.hidden) tkItem.replaceChildren(...[...tk.childNodes].map((n) => n.cloneNode(true)));
   m.hidden = false;
   $('viewBtn').setAttribute('aria-expanded', 'true');
   const r = $('viewBtn').getBoundingClientRect();
@@ -169,6 +171,7 @@ $('viewMenu').addEventListener('click', (e) => {
   else if (b.id === 'viewMenuRepo') $('repoLink').click();
   else if (b.id === 'viewMenuPreview') $('previewLink').click();
   else if (b.id === 'viewMenuShots') $('shotsLink').click();
+  else if (b.id === 'viewMenuTok') $('tokLink').click();
 });
 $('viewMenu').addEventListener('keydown', (e) => {
   const items = [...$('viewMenu').querySelectorAll('button')].filter((b) => b.offsetParent);
@@ -1012,13 +1015,14 @@ function draftSlug() {
   return state.draft.type === 'new' ? slugify(state.draft.name) : '';
 }
 function updateHeader() {
-  if (['term', 'browser'].includes($('app').dataset.view)) { $('repoLink').hidden = true; $('previewLink').hidden = true; $('shotsLink').hidden = true; return; }
+  if (['term', 'browser'].includes($('app').dataset.view)) { $('repoLink').hidden = true; $('previewLink').hidden = true; $('shotsLink').hidden = true; $('tokLink').hidden = true; return; }
   $('title').textContent = currentTitle();
   $('cwdLabel').textContent = currentCwdLabel();
   document.title = `${currentTitle()} · agent-orch`;
   renderRepoLink();
   window.Previews?.renderHeader();
   window.Shots?.renderHeader();
+  window.Tokens?.sync();
 }
 function renderRepoLink() {
   const c = currentConvo(), a = $('repoLink');
@@ -2074,6 +2078,7 @@ function showGitPull(msg) {
   scrollDown();
 }
 function setBusy(b) {
+  if (state.busy && !b) window.Tokens?.onResult(); // a reply finished: its tokens are recorded
   state.busy = b;
   renderUsage();
   $('working').hidden = !b;
@@ -7745,7 +7750,7 @@ function onOrch(msg) {
     refreshCards(msg.task.id);
     for (const other of O.tasks.values()) if (taskDeps(other).includes(msg.task.id)) refreshCards(other.id);
     if (O.drawer === msg.task.id) { renderDrawerHead(); scheduleDetail(); }
-    if (msg.task.project_id === O.project?.id) { scheduleQueue(); window.Shots?.onTask(msg.task); }
+    if (msg.task.project_id === O.project?.id) { scheduleQueue(); window.Shots?.onTask(msg.task); window.Tokens?.onTask(msg.task); }
   } else if (msg.t === 'oapproval') {
     // A held action: a sound (the task-sound switch) and a toast that opens the task, even while this tab has focus.
     const a = msg.approval, t = O.tasks.get(a.task);

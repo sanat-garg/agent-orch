@@ -2329,7 +2329,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   // gated: a task run whose browser and connector calls go through the approval gate (gate.mjs): its gate dir is hosted
   // here, and the time it spends held on the owner doesn't count against its timeout.
-  async function runAgent({ agent = 'claude', prompt, cwd, resume, model, append, tools, autonomous, signal, timeoutSec, taskId, runId, logPath, onMessage, onEvent, partial, effort, browser, gated }) {
+  async function runAgent({ agent = 'claude', prompt, cwd, resume, model, append, tools, autonomous, signal, timeoutSec, taskId, runId, logPath, onMessage, onEvent, partial, effort, browser, gated, chatRef }) {
     const ac = new AbortController();
     let stopped = null;
     const onAbort = () => { stopped = stopped || 'aborted'; ac.abort(); };
@@ -2380,7 +2380,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     }
     if (stopped) res.outcome = stopped;
     const owner = projectUser(taskId ? getProject(getTask(taskId)?.project_id)?.path : cwd);
-    usageLog.tokens(agent, res.usage, taskId ? 'task' : 'chat', taskId ?? null, { user: owner, model: model || delegator.defaultModel(agent) });
+    usageLog.tokens(agent, res.usage, taskId ? 'task' : 'chat', taskId ?? chatRef ?? null, { user: owner, model: model || delegator.defaultModel(agent) });
     usageLog.windows(agent, res.windows);
     if (taskId) writeShots();
     if (taskId) writeEntry({ k: 'end', at: now(), outcome: res.outcome, turns: res.numTurns });
@@ -3265,6 +3265,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       agent, prompt, cwd: project.path, resume, append: resume ? null : withPersona(PLANNER_SYSTEM, project, convoId), autonomous: false, signal, timeoutSec: 30 * 60,
       model: plannerModel, effort,
       tools: PLANNER_TOOLS, partial: claude && !!convoId, onMessage: claude && convoId ? chatStreamer(convoId) : null, onEvent: toChat,
+      chatRef: convoId || null, // its tokens count toward the chat (chat-usage.mjs)
     });
     const session = plannerSession(project, agent);
     let res = await attempt(session);
@@ -5161,6 +5162,8 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     // A sidebar chat's project rank ({id, position, priority}), or null when its folder has no orchestrator project.
     projectRank: (cwd) => q1('SELECT id, position, priority FROM projects WHERE path=:p', { p: cwd }) ?? null,
     projectChat: (cwd) => q1('SELECT convo_id FROM projects WHERE path=:p', { p: cwd })?.convo_id ?? null,
+    // Every task id of a folder's project, for its main chat's token usage (chat-usage.mjs).
+    taskIdsFor: (cwd) => qa('SELECT t.id FROM tasks t JOIN projects p ON p.id=t.project_id WHERE p.path=:p', { p: cwd }).map((r) => r.id),
     // A rewound chat (server.mjs forgetSession): the folder's planner sessions, on every agent, start fresh next time.
     forgetPlanner: (cwd) => {
       const pid = q1('SELECT id FROM projects WHERE path=:p', { p: cwd })?.id;

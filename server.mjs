@@ -20,6 +20,7 @@ import { createConnections, SPECS, codexAccount, onPath, tmuxRunnerFor, loginSoc
 import { logWindow, logSince, toolEvents } from './chat-log.mjs';
 import { mediaCollector, MEDIA_ID_RE, MEDIA_TYPES, toolResultImages, readStars, setStar } from './media.mjs';
 import { createUsageLog, createLimitStore, RANGES as USAGE_RANGES } from './usage.mjs';
+import { chatUsage } from './chat-usage.mjs';
 import { handleFiles } from './files.mjs';
 import { createStats } from './stats.mjs';
 import { healthRow } from './health.mjs';
@@ -1640,6 +1641,7 @@ function mergeChat(from, into) {
     (into.mergedRecaps ??= []).push({ title: from.title, recap: chatRecap(from.id) });
   }
   into.updatedAt = Math.max(into.updatedAt, from.updatedAt);
+  usageLog.mergeTotals('chat', from.id, into.id);
   removeConvo(from);
 }
 function writeLog(id, events) {
@@ -2048,7 +2050,7 @@ async function handleRequest(req, res) {
     return serveFile(res, file, cache);
   }
   if (p === '/' || p === '/index.html') return serveFile(res, path.join(PUBLIC, 'index.html'));
-  if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css' || p === '/browser.js' || p === '/browser.css' || p === '/previews.js' || p === '/previews.css' || p === '/schedules.js' || p === '/schedules.css' || p === '/users.js' || p === '/users.css' || p === '/credentials.js' || p === '/credentials.css' || p === '/shots.js' || p === '/shots.css' || p === '/phone.css') return serveFile(res, path.join(PUBLIC, p));
+  if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css' || p === '/browser.js' || p === '/browser.css' || p === '/previews.js' || p === '/previews.css' || p === '/schedules.js' || p === '/schedules.css' || p === '/users.js' || p === '/users.css' || p === '/credentials.js' || p === '/credentials.css' || p === '/shots.js' || p === '/shots.css' || p === '/tokens.js' || p === '/tokens.css' || p === '/phone.css') return serveFile(res, path.join(PUBLIC, p));
   // The Files view: listing, preview, download (a file, or a zip streamed on the fly), upload, and copy/move/zip/unzip over the whole disk, opening on the chat's project (files.mjs).
   // A user's requests stay inside their own projects: only their chats' roots, and no absolute paths (userBlocked checks the query).
   const filesBody = isAdmin(me) ? readBody : async (r) => {
@@ -2235,6 +2237,16 @@ async function handleRequest(req, res) {
     broadcastConvos();
     for (const ws of subscribers.get(into.id) || []) sendHistory(ws, into);
     return json(res, 200, { ok: true, into: into.id, merged: from.length });
+  }
+  // GET …/usage: the chat's tokens (its turns and planner replies; a main chat also its project's tasks) against the
+  // weekly plan windows (chat-usage.mjs).
+  const cu = p.match(/^\/api\/convos\/([\w-]+)\/usage$/);
+  if (cu && req.method === 'GET') {
+    const c = findConvo(cu[1]);
+    if (!c) return json(res, 404, { error: 'No such chat' });
+    const main = mainChatId(c.cwd) === c.id;
+    const tasks = main ? (orch.taskIdsFor?.(c.cwd) || []).map((id) => ({ source: 'task', ref: id })) : null;
+    return json(res, 200, { main, ...chatUsage({ usageLog, refs: [{ source: 'chat', ref: c.id }], tasks, agents: Object.keys(AGENTS) }) });
   }
   // GET …/tools/:toolId: one tool call whole ({use, result}), for a card whose input or output the history clipped.
   const tc = p.match(/^\/api\/convos\/([\w-]+)\/tools\/([\w-]{1,200})$/);

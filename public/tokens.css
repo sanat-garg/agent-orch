@@ -1,0 +1,40 @@
+/* Token usage (tokens.js): the top bar pill and its sheet (tiles, a bar per weekly window, the by-model table). */
+.tk-link { gap: 6px; cursor: pointer; font: inherit; font-size: 12px; }
+.tk-pct { color: var(--text); font-weight: 600; }
+.tk-pct::before { content: '·'; margin-right: 6px; color: var(--faint); font-weight: 400; }
+
+.modal-panel.tkm { width: min(620px, 100%); }
+.tk-label { margin: 18px 0 8px; font-size: 12px; font-weight: 650; letter-spacing: .02em; text-transform: uppercase; color: var(--faint); }
+.tk-note { margin: 4px 0 0; font-size: 13px; color: var(--muted); line-height: 1.4; }
+.tk-foot { margin: 20px 0 4px; font-size: 12px; color: var(--faint); line-height: 1.45; }
+
+.tk-tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.tk-tile { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: 10px; background: var(--raised); }
+.tk-n { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; color: var(--text); }
+.tk-l { font-size: 12px; color: var(--muted); }
+
+.tk-week { padding: 12px 0; border-top: 1px solid var(--border); }
+.tk-week:first-of-type { border-top: 0; padding-top: 0; }
+.tk-wh { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 14px; }
+.tk-reset { color: var(--faint); font-size: 12px; white-space: nowrap; }
+/* The account's reading (muted), with this chat's part of it this week drawn from the left in the accent. */
+.tk-bar { position: relative; height: 8px; margin: 8px 0 10px; border-radius: 99px; background: var(--raised); overflow: hidden; }
+.tk-bar span { position: absolute; inset: 0 auto 0 0; border-radius: 99px; }
+.tk-acct { background: var(--border-strong); }
+.tk-mine { background: var(--accent); min-width: 0; }
+.tk-facts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.tk-fact { display: flex; flex-direction: column; gap: 1px; }
+.tk-fact b { font-size: 17px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.tk-fact span { font-size: 12px; color: var(--muted); line-height: 1.3; }
+.tk-fact:first-child b { color: var(--accent); }
+
+.tk-models { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+.tk-models th { text-align: right; font-weight: 600; font-size: 12px; color: var(--muted); padding: 4px 6px; border-bottom: 1px solid var(--border); }
+.tk-models td { text-align: right; padding: 6px; border-bottom: 1px solid var(--border); }
+.tk-models th:first-child, .tk-models td:first-child { text-align: left; padding-left: 0; }
+.tk-models tr:last-child td { border-bottom: 0; }
+
+@media (max-width: 767px) {
+  .tk-tiles { grid-template-columns: repeat(2, 1fr); }
+  .tk-models th:nth-child(4), .tk-models td:nth-child(4) { display: none; }
+}

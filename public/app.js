@@ -559,24 +559,33 @@ function shortAgo(ts, now = Date.now()) {
 }
 setInterval(() => { for (const a of document.querySelectorAll('#convoList .ago[data-at]')) a.textContent = shortAgo(Number(a.dataset.at)); }, 60000);
 
-// Chat search: typing (debounced) asks GET /api/convos?q= (search.mjs) and #convoList shows the matches in place of
-// the list until the field is cleared or Escape. `seq` drops answers to queries the owner has already typed past.
+// Chat search (owner, 2026-10-19: finding a project took too long): typing filters #convoList by name at once (title,
+// folder, live preview address; archived projects too), and from 2 characters also asks GET /api/convos?q= (search.mjs,
+// debounced) for chats whose messages match, listed under "In messages" below the name hits, until the field is cleared
+// or Escape. `seq` drops answers to queries the owner has already typed past. Enter opens the first row, ↓ moves into
+// the list, ⌘K / Ctrl+K focuses the field.
 const chatSearch = { q: '', results: null, timer: 0, seq: 0 };
 $('chatSearch').addEventListener('input', () => {
   clearTimeout(chatSearch.timer);
+  chatSearch.seq++;
   const q = $('chatSearch').value.trim();
-  if (q.length < 2) { // search.mjs needs 2 characters; until then the normal list
-    chatSearch.seq++;
-    if (chatSearch.results) { Object.assign(chatSearch, { q: '', results: null }); renderConvoList(); }
-    return;
-  }
-  chatSearch.timer = setTimeout(() => runChatSearch(q), 250);
+  Object.assign(chatSearch, { q, results: null });
+  renderConvoList();
+  if (q.length >= 2) chatSearch.timer = setTimeout(() => runChatSearch(q), 250); // search.mjs needs 2 characters
 });
 $('chatSearch').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); $('convoList').querySelector('.convo')?.click(); return; }
+  if (e.key === 'ArrowDown') { const first = $('convoList').querySelector('.convo'); if (first) { e.preventDefault(); first.focus(); } return; }
   if (e.key !== 'Escape' || !$('chatSearch').value) return;
   e.preventDefault(); e.stopPropagation();
   $('chatSearch').value = '';
   $('chatSearch').dispatchEvent(new Event('input'));
+});
+document.addEventListener('keydown', (e) => {
+  if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'k' || e.target.closest?.('.cm-editor')) return;
+  if (innerWidth <= 800) return; // the sidebar is a drawer there; its field is a tap away
+  e.preventDefault();
+  $('chatSearch').focus(); $('chatSearch').select();
 });
 async function runChatSearch(q) {
   const seq = ++chatSearch.seq;
@@ -586,8 +595,23 @@ async function runChatSearch(q) {
     return;
   }
   if (seq !== chatSearch.seq) return;
-  Object.assign(chatSearch, { q, results });
+  chatSearch.results = results;
   renderConvoList();
+}
+// Name hits: every word of the query in the title, folder name or preview address. Ranked: the name starts with the
+// query, a word of it does, it's anywhere in the name, only the address matched; then by activity, archived last.
+// A main chat lists the sub chats that match too (all of them when it matched itself).
+function nameMatches(q) {
+  const low = q.toLowerCase(), terms = low.split(/\s+/).filter(Boolean);
+  const nameOf = (c) => `${(c.title || '').toLowerCase()} ${folderName(c.cwd).toLowerCase()}`.trim();
+  const hit = (c) => { const t = `${nameOf(c)} ${(c.preview?.url || '').replace(/^https?:\/\//, '').toLowerCase()}`; return terms.every((x) => t.includes(x)); };
+  const rank = (c) => { const n = nameOf(c); return n.startsWith(low) ? 0 : n.split(/[\s_./-]+/).some((w) => w.startsWith(low)) ? 1 : n.includes(low) ? 2 : 3; };
+  const out = [];
+  for (const c of state.convos.filter((c) => !isSubChat(c))) {
+    const own = hit(c), subs = subChats(c).filter((s) => own || hit(s));
+    if (own || subs.length) out.push({ c, subs, rank: own ? rank(c) : Math.min(...subs.map(rank)) });
+  }
+  return out.sort((a, b) => a.rank - b.rank || (a.c.archived ? 1 : 0) - (b.c.archived ? 1 : 0) || byActivity(a.c, b.c));
 }
 // `text` into `node` with every query term wrapped in <mark> (text nodes only, so nothing is parsed as HTML).
 function markTerms(node, text, q) {
@@ -608,14 +632,23 @@ function markTerms(node, text, q) {
   return node;
 }
 function renderChatSearch(nav) {
+  const focused = document.activeElement?.closest?.('#convoList .convo')?.dataset.cid;
   nav.textContent = '';
-  if (!chatSearch.results.length) {
-    const p = el('p', 'group-label', 'No chats match');
+  const named = new Set(), rows = nameMatches(chatSearch.q);
+  for (const { c, subs } of rows) {
+    const row = convoItem(c);
+    if (c.archived) (row.querySelector('.ago') || row.querySelector('.more')).before(el('span', 'cm arch', 'archived')); // phones say it in the status line
+    nav.append(row); named.add(c.id);
+    for (const s of subs) { nav.append(convoItem(s, true)); named.add(s.id); }
+  }
+  const hits = (chatSearch.results || []).filter((r) => !named.has(r.id));
+  if (hits.length) nav.append(el('p', 'group-label', 'In messages'));
+  else if (!rows.length) {
+    const p = el('p', 'group-label', chatSearch.results || chatSearch.q.length < 2 ? 'No chats match' : 'Searching messages…');
     p.style.textTransform = 'none';
     nav.append(p);
-    return;
   }
-  for (const r of chatSearch.results) {
+  for (const r of hits) {
     const c = state.convos.find((x) => x.id === r.id);
     const b = el('div', 'convo search-hit' + (r.id === state.cid ? ' active' : ''));
     b.tabIndex = 0;
@@ -629,12 +662,13 @@ function renderChatSearch(nav) {
     b.addEventListener('keydown', (e) => { if (e.target === b && e.key === 'Enter') open(); });
     nav.append(b);
   }
+  if (focused) nav.querySelector(`.convo[data-cid="${CSS.escape(focused)}"]`)?.focus();
 }
 
 let archFoldedFor = null; // the archived chat that was open when the owner folded Archived
 function renderConvoList() {
   const nav = $('convoList');
-  if (chatSearch.results) return renderChatSearch(nav);
+  if (chatSearch.q) return renderChatSearch(nav);
   const focused = document.activeElement?.closest?.('#convoList .convo')?.dataset.cid;
   nav.textContent = '';
   if (!state.convos.length) {

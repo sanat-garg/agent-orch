@@ -99,6 +99,7 @@ test('Inspect: loads only on click, keeps each CSS width while scaled to fit, un
     try {
       hits.length = 0;
       const demo = page.locator('.pv-row[data-cid="c0"]');
+      await demo.locator('.pv-chev').click(); // rows start folded
       assert.deepEqual(await demo.locator('.pv-act').allTextContents(), ['Open', 'Inspect', 'Restart', 'Logs', 'Edit']);
       assert.equal(await page.locator('#pvInspect').count(), 0);
       assert.equal(await page.locator('iframe').count(), 0, 'no iframe before Inspect');
@@ -160,6 +161,7 @@ test('a project without an address gets no Inspect action', { skip }, async () =
   try {
     const notes = page.locator('.pv-item[data-cid="c1"]');
     await notes.waitFor();
+    await page.locator('.pv-row[data-cid="c0"] .pv-chev').click(); // rows start folded
     assert.equal(await notes.locator('.pv-act').count(), 0);
     assert.equal(await page.locator('#pvBody button', { hasText: 'Inspect' }).count(), 1, 'only the project with an address');
     assert.equal(await page.locator('iframe').count(), 0);

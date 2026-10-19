@@ -136,9 +136,13 @@ test('sidebar manager: live cards, Add address, Edit, domains, and slug changes 
       await page.locator('#previewsBtn').click();
       await page.locator('#pvBody .pv-row[data-cid="c0"]').waitFor();
       const demo = page.locator('.pv-row[data-cid="c0"]'), notes = page.locator('.pv-item[data-cid="c1"]');
-      // A live card: its address as a link, the status pill and the actions; no field until Edit.
+      // A live row: its address as a link and the status pill; folded until its chevron (or head) is tapped, then the
+      // actions; no field until Edit.
       assert.equal(await demo.locator('a.pv-url').textContent(), 'demo-site.greygoose.baby');
       assert.match(await demo.locator('.pv-pill').textContent(), /Stopped/);
+      assert.equal(await demo.locator('.pv-act').count(), 0);
+      await demo.locator('.pv-chev').click();
+      assert.equal(await demo.locator('.pv-chev').getAttribute('aria-expanded'), 'true');
       assert.equal(await demo.locator('a.pv-act').getAttribute('href'), 'https://demo-site.greygoose.baby');
       assert.deepEqual(await demo.locator('.pv-act').allTextContents(), ['Open', 'Inspect', 'Restart', 'Logs', 'Edit']);
       assert.equal(await demo.locator('input.pv-slug').count(), 0);
@@ -200,10 +204,62 @@ test('sidebar manager: live cards, Add address, Edit, domains, and slug changes 
       const overflow = await page.evaluate(() => [...document.querySelectorAll('#pvBody *')].filter((n) => n.getBoundingClientRect().right > innerWidth + 1).map((n) => n.className));
       assert.deepEqual(overflow, [], `overflowing: ${overflow}`);
       if (mobile) {
-        const small = await page.evaluate(() => [...document.querySelectorAll('#pvBody .pv-act, #pvBody .pv-addbtn')].filter((n) => n.getBoundingClientRect().height < 44).map((n) => n.textContent));
+        const small = await page.evaluate(() => [...document.querySelectorAll('#pvBody .pv-act, #pvBody .pv-addbtn, #pvBody .pv-chev')].filter((n) => n.getBoundingClientRect().height < 44).map((n) => n.textContent));
         assert.deepEqual(small, [], `44pt targets: ${small}`);
       }
       assert.deepEqual(errors, []);
     } finally { await ctx.close(); }
   }
+});
+
+test('the open project leads, unfolded; the find field keeps matching names and addresses; Escape clears, then closes', { skip }, async () => {
+  const { ctx, page, errors } = await open('#c1');
+  try {
+    await page.locator('#previewsBtn').click();
+    await page.locator('#pvBody .pv-row[data-cid="c0"]').waitFor();
+    // Opened from Notes (no address): its Add address row leads under "This project"; Demo follows under Live, folded.
+    assert.deepEqual(await page.locator('#pvBody .pv-sec h3').allTextContents(), ['This project', 'Live', 'Domains']);
+    assert.equal(await page.locator('#pvBody .pv-sec').first().locator('.pv-item[data-cid="c1"] .pv-addbtn').count(), 1);
+    assert.equal(await page.locator('.pv-row[data-cid="c0"] .pv-act').count(), 0);
+    // The find field (focused on desktop) matches names and addresses; "This project" and the domains step aside meanwhile.
+    assert.equal(await page.locator('#pvSearch').evaluate((n) => n === document.activeElement), true);
+    await page.locator('#pvSearch').fill('greygoose');
+    assert.deepEqual(await page.locator('#pvBody [data-cid]').evaluateAll((ns) => ns.map((n) => n.dataset.cid)), ['c0']);
+    assert.deepEqual(await page.locator('#pvBody .pv-sec:not([hidden]) h3').allTextContents(), ['Live']);
+    await page.locator('#pvSearch').fill('not');
+    assert.deepEqual(await page.locator('#pvBody [data-cid]').evaluateAll((ns) => ns.map((n) => n.dataset.cid)), ['c1']);
+    assert.deepEqual(await page.locator('#pvBody .pv-sec:not([hidden]) h3').allTextContents(), ['No address']);
+    await page.locator('#pvSearch').fill('zzz');
+    assert.match(await page.locator('#pvBody .pv-empty').textContent(), /No project or address matches/);
+    await page.locator('#pvSearch').press('Escape');
+    assert.equal(await page.locator('#pvSearch').inputValue(), '');
+    assert.equal(await page.locator('#previewsModal').isVisible(), true);
+    assert.deepEqual(await page.locator('#pvBody .pv-sec h3').allTextContents(), ['This project', 'Live', 'Domains']);
+    // A tap on a row's head unfolds it; a second folds it again.
+    await page.locator('.pv-row[data-cid="c0"] .pv-name').click();
+    assert.equal(await page.locator('.pv-row[data-cid="c0"] .pv-act').count(), 5);
+    await page.locator('.pv-row[data-cid="c0"] .pv-name').click();
+    assert.equal(await page.locator('.pv-row[data-cid="c0"] .pv-act').count(), 0);
+    await page.locator('#pvSearch').press('Escape');
+    assert.equal(await page.locator('#previewsModal').isHidden(), true);
+    assert.deepEqual(errors, []);
+  } finally { await ctx.close(); }
+});
+
+test('Search chats filters the sidebar by name and address at once; Enter opens the first hit; Ctrl+K focuses it', { skip }, async () => {
+  const { ctx, page, errors } = await open('');
+  try {
+    await page.locator('#chatSearch').fill('demo-site');
+    assert.deepEqual(await page.locator('#convoList .convo').evaluateAll((ns) => ns.map((n) => n.dataset.cid)), ['c0'], 'found by its address');
+    await page.locator('#chatSearch').fill('no');
+    assert.deepEqual(await page.locator('#convoList .convo').evaluateAll((ns) => ns.map((n) => n.dataset.cid)), ['c1']);
+    await page.locator('#chatSearch').press('Enter');
+    await page.waitForFunction(() => state.cid === 'c1');
+    await page.locator('#chatSearch').press('Escape');
+    assert.equal(await page.locator('#convoList .convo').count(), 2);
+    await page.locator('#input').focus();
+    await page.keyboard.press('Control+k');
+    assert.equal(await page.locator('#chatSearch').evaluate((n) => n === document.activeElement), true);
+    assert.deepEqual(errors, []);
+  } finally { await ctx.close(); }
 });

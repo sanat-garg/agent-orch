@@ -129,3 +129,5 @@
 @media (prefers-color-scheme: dark) and (max-width: 767px) {
   .orch-bar .ob-btn { background: var(--panel); }
 }
+/* A search's archived name hit: the status line under the name already says Archived. */
+@media (max-width: 767px) { .convo .cm.arch { display: none; } }

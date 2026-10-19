@@ -10,7 +10,7 @@
 (() => {
   const APEX = '@';
   const PV = { domains: [], list: [], loaded: false, draft: { slug: '', skip: true, domain: null, apex: false, check: null }, timer: 0, seq: 0,
-    lastFocus: null, logsOpen: new Set(), editing: new Set() };
+    lastFocus: null, logsOpen: new Set(), editing: new Set(), q: '', current: null, expanded: new Set() };
   const STATUS = { running: 'Live', building: 'Deploying…', waiting: 'Waiting for code', error: 'Error', stopped: 'Stopped' };
   const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '');
   const host = (v) => (v.slug === APEX ? v.domain : `${v.slug}.${v.domain}`);
@@ -165,11 +165,18 @@
   // ---- The manager sheet.
   function open() {
     closeSidebar();
-    if ($('previewsModal').hidden) PV.lastFocus = document.activeElement;
+    if ($('previewsModal').hidden) {
+      PV.lastFocus = document.activeElement;
+      // The open chat's project comes first, unfolded; the rest fold to one row each until tapped. The find field starts empty.
+      const c = currentConvo();
+      PV.current = c ? c.mainId || c.id : null;
+      PV.expanded = new Set(PV.current ? [PV.current] : []);
+      PV.q = ''; $('pvSearch').value = '';
+    }
     $('previewsModal').hidden = false;
     render();
     load().then(render);
-    if (!coarse) $('previewsModal').querySelector('[data-close].icon-btn').focus();
+    if (!coarse) $('pvSearch').focus();
   }
   function close() {
     closeInspector();
@@ -178,6 +185,13 @@
     PV.editing.clear();
     PV.lastFocus?.focus?.();
   }
+  const isOpen = (cid) => PV.expanded.has(cid) || PV.editing.has(cid) || PV.logsOpen.has(cid);
+  // A tap on a row's head (or its chevron) unfolds its actions; folding also drops its logs and editor.
+  function toggle(cid) {
+    if (isOpen(cid)) { PV.expanded.delete(cid); PV.editing.delete(cid); PV.logsOpen.delete(cid); } else PV.expanded.add(cid);
+    render();
+    $('pvBody').querySelector(`[data-cid="${CSS.escape(cid)}"] .pv-chev`)?.focus({ preventScroll: true });
+  }
 
   function render() {
     if ($('previewsModal').hidden) return;
@@ -185,7 +199,7 @@
     // Never rebuild under the owner's fingers (a status push mid-typing).
     if (body.contains(document.activeElement) && document.activeElement.matches('input, select')) return refreshStatuses();
     const scroll = body.scrollTop;
-    body.replaceChildren(...projectsSection(), domainsSection());
+    body.replaceChildren(...projectsSection(), ...(PV.q ? [] : [domainsSection()])); // finding is about projects
     for (const i of body.querySelectorAll('.pv-slug')) fit(i);
     body.scrollTop = scroll;
   }
@@ -221,15 +235,40 @@
     if (det) { det.textContent = detailOf(v); det.hidden = !det.textContent; det.classList.toggle('bad', v.status === 'error'); }
   }
 
-  // Projects with an address first (cards), then the rest (a list with "Add address"). Main chats only.
+  // "This project" (the open chat's, unless the owner is typing in the find field), then projects with an address (one
+  // row each, A–Z), then the rest (a list with "Add address"). Main chats only. The find field keeps only names and
+  // addresses holding every word typed (owner, 2026-10-19: 22 cards took too long to scan).
   function projectsSection() {
     const byCid = new Map(PV.list.filter((v) => v.cid).map((v) => [v.cid, v]));
-    const convos = state.convos.filter((c) => !c.mainId || c.mainId === c.id).sort((a, b) => b.updatedAt - a.updatedAt);
-    const live = convos.filter((c) => byCid.has(c.id)), rest = convos.filter((c) => !byCid.has(c.id));
-    const orphans = PV.list.filter((x) => !x.cid); // previews whose chat is gone (kept until removed)
+    const nameOf = (c) => c.title || folderName(c.cwd);
+    const terms = PV.q.toLowerCase().split(/\s+/).filter(Boolean);
+    const keep = (text) => terms.every((t) => text.toLowerCase().includes(t));
+    const convos = state.convos.filter((c) => !c.mainId || c.mainId === c.id)
+      .filter((c) => keep(`${nameOf(c)} ${folderName(c.cwd)} ${byCid.has(c.id) ? host(byCid.get(c.id)) : ''}`))
+      .sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
+    const cur = terms.length ? null : convos.find((c) => c.id === PV.current) || null;
+    const live = convos.filter((c) => c !== cur && byCid.has(c.id)), rest = convos.filter((c) => c !== cur && !byCid.has(c.id));
+    const orphans = PV.list.filter((x) => !x.cid && keep(`${x.title || ''} ${host(x)}`)); // previews whose chat is gone (kept until removed)
+    const out = [];
+    if (cur) {
+      const mine = el('section', 'pv-sec');
+      mine.append(el('h3', '', 'This project'));
+      if (byCid.has(cur.id)) mine.append(liveRow(cur, byCid.get(cur.id)));
+      else { const list = el('div', 'pv-list'); list.append(addRow(cur)); mine.append(list); }
+      out.push(mine);
+    }
+    if (terms.length && !live.length && !orphans.length && !rest.length) {
+      const none = el('section', 'pv-sec');
+      none.append(el('p', 'pv-empty', `No project or address matches "${PV.q}".`));
+      return [none];
+    }
     const sec = el('section', 'pv-sec');
     sec.append(el('h3', '', 'Live'));
-    if (!live.length && !orphans.length) sec.append(el('p', 'pv-empty', convos.length ? 'No project has an address yet. Add one below.' : 'No projects yet. Start one with New project.'));
+    if (!live.length && !orphans.length) {
+      if (terms.length) sec.hidden = true;
+      else sec.append(el('p', 'pv-empty', !convos.length ? 'No projects yet. Start one with New project.' : cur && byCid.has(cur.id) ? 'No other project has an address.' : 'No project has an address yet. Add one below.'));
+    }
+    out.push(sec);
     for (const c of live) sec.append(liveRow(c, byCid.get(c.id)));
     for (const v of orphans) {
       const row = el('div', 'pv-row');
@@ -242,28 +281,40 @@
       row.append(head);
       sec.append(row);
     }
-    if (!rest.length) return [sec];
+    if (!rest.length) return out;
     const sec2 = el('section', 'pv-sec');
     sec2.append(el('h3', '', 'No address'));
     const list = el('div', 'pv-list');
     for (const c of rest) list.append(addRow(c));
     sec2.append(list);
-    return [sec, sec2];
+    out.push(sec2);
+    return out;
   }
 
+  // One row: name, address link, status pill, chevron. Unfolded (isOpen): the detail line, logs and the actions, or
+  // the editor under Edit. The address link opens the site; the rest of the head toggles the row.
   function liveRow(c, v) {
     const row = el('div', 'pv-row');
     row.dataset.cid = c.id;
+    const name = c.title || folderName(c.cwd), open = isOpen(c.id);
+    row.classList.toggle('open', open);
     const head = el('div', 'pv-head');
     const id = el('div', 'pv-id');
     const url = el('a', 'pv-url', host(v));
     url.href = v.url; url.target = '_blank'; url.rel = 'noopener';
     url.title = `Open ${v.url}`;
-    id.append(el('span', 'pv-name', c.title || folderName(c.cwd)), url);
-    head.append(id, el('span', 'pv-pill'));
+    id.append(el('span', 'pv-name', name), url);
+    const chev = el('button', 'pv-chev');
+    chev.type = 'button';
+    chev.setAttribute('aria-expanded', String(open));
+    chev.setAttribute('aria-label', `${open ? 'Hide' : 'Show'} actions for ${name}`);
+    chev.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    head.append(id, el('span', 'pv-pill'), chev);
+    head.addEventListener('click', (e) => { if (!e.target.closest('a')) toggle(c.id); });
     const det = el('p', 'pv-detail');
     row.append(head, det);
     setStatus(row, v);
+    if (!open) return row;
     if (PV.editing.has(c.id)) { row.append(editor(c, v)); return row; }
     const acts = el('div', 'pv-acts');
     const openA = act('a', 'open', 'Open');
@@ -317,6 +368,7 @@
   }
   function startEdit(cid) {
     PV.editing.add(cid);
+    PV.expanded.add(cid); // the row stays unfolded after Save or Cancel
     render();
     const at = $('pvBody').querySelector(`[data-cid="${CSS.escape(cid)}"]`);
     const f = at?.querySelector('.pv-slug:not([hidden])') || at?.querySelector('.pv-domain');
@@ -543,13 +595,16 @@
   }
 
   $('previewsBtn').addEventListener('click', open);
+  $('pvSearch').addEventListener('input', () => { PV.q = $('pvSearch').value.trim(); render(); });
   $('previewsModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) close(); });
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (PI.node) { e.stopImmediatePropagation(); return closeInspector(); }
     if ($('previewsModal').hidden) return;
     e.stopImmediatePropagation();
-    // Inside an open address editor, Escape cancels the edit; otherwise it closes the sheet.
+    // In the find field with text, Escape clears it; inside an open address editor it cancels the edit; otherwise it
+    // closes the sheet.
+    if (document.activeElement === $('pvSearch') && $('pvSearch').value) { $('pvSearch').value = ''; PV.q = ''; return render(); }
     const at = document.activeElement?.closest?.('#pvBody [data-cid]');
     if (at && PV.editing.has(at.dataset.cid)) stopEdit(at.dataset.cid);
     else close();

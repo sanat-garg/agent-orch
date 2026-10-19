@@ -1794,3 +1794,11 @@ tests fail after convo_id fixture change; tool access blocked
 ## 2026-10-19 16:17 — #2278 History: ask an agent to undo a commit, with tests (ui) [done (check passed)]
 
 History detail drafts git revert request into chat; tests pass
+
+## 2026-10-19 16:08 — #2271 Save reusable Browser task instructions per profile, with tests (ui) [verify failed (1)]
+
+Command: npm test -- test/ui-browser-recipes.test.mjs
+
+## 2026-10-19 16:17 — #2271 Save reusable Browser task instructions per profile, with tests (ui) [done (check passed)]
+
+recipes test passes again after allowing for a slow, busy VM

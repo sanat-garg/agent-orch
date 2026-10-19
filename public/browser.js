@@ -550,8 +550,9 @@ function bxSelect(node, identity, name, picked = true) {
   const same = BX.sel && bvKey(BX.sel.node, BX.sel.identity) === bvKey(node, identity);
   BX.sel = { node, identity, name: name || node };
   if (picked) store.set('cw.bxPick', bvKey(node, identity));
-  if (!same) { BX.tasks = []; bxDrop(); BX.err = ''; bxsSay(''); }
+  if (!same) { BX.tasks = []; bxDrop(); BX.err = ''; bxsSay(''); bxrSay(''); }
   bxsRender();
+  bxrRender();
   bxRenderActivity(); // first, so the view opens with the stage's final size
   bxRenderPicker();
   bxOpenSel();
@@ -861,6 +862,111 @@ BXS.form.addEventListener('submit', (e) => {
   bxsRender();
 });
 
+// ----- saved instructions (bxr*): named, reusable prompts per signed-in user, machine and profile, kept in this browser's
+// localStorage only (key cw.bxRecipes:<user>:<node>/<identity>, at most BXR_MAX). The prompt box's Saved chip opens the panel
+// just above it: save the draft under a name (the same name replaces it), insert one into the draft (appended after a blank
+// line when the box has text; never sent by itself), remove one. Hidden with the prompt box (the Chrome setup card).
+const BXR_MAX = 30, BXR_TEXT = 4000;
+const bxrKey = (node, identity) => `cw.bxRecipes:${me.user?.id || 'admin'}:${bvKey(node, identity)}`;
+function bxrList(node, identity) {
+  let v;
+  try { v = JSON.parse(store.get(bxrKey(node, identity)) || '[]'); } catch { v = []; }
+  return Array.isArray(v) ? v.filter((r) => r && typeof r.name === 'string' && r.name && typeof r.text === 'string' && r.text.trim()) : [];
+}
+const bxrWrite = (node, identity, list) => (list.length ? store.set(bxrKey(node, identity), JSON.stringify(list)) : store.del(bxrKey(node, identity)));
+// Saves `text` as `name` (replacing one of the same name); returns what is wrong, or ''.
+function bxrSave(node, identity, name, text) {
+  name = String(name || '').trim().slice(0, 60);
+  text = String(text || '').trim().slice(0, BXR_TEXT);
+  if (!text) return 'Type an instruction in the box first.';
+  if (!name) return 'Name the instruction first.';
+  const list = bxrList(node, identity).filter((r) => r.name.toLowerCase() !== name.toLowerCase());
+  list.push({ name, text });
+  bxrWrite(node, identity, list.slice(-BXR_MAX));
+  return '';
+}
+const bxrRemove = (node, identity, name) => bxrWrite(node, identity, bxrList(node, identity).filter((r) => r.name !== name));
+const BXR = (() => {
+  const btn = el('button', 'chip bx-recipes-btn');
+  Object.assign(btn, { type: 'button', id: 'bxRecipesBtn', title: 'Saved instructions', disabled: true });
+  btn.setAttribute('aria-label', 'Saved instructions');
+  btn.setAttribute('aria-expanded', 'false');
+  btn.setAttribute('aria-controls', 'bxRecipes');
+  btn.innerHTML = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M6.5 3.5h11v17l-5.5-4-5.5 4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg><span>Saved</span>';
+  const panel = el('div', 'bx-recipes');
+  Object.assign(panel, { id: 'bxRecipes', hidden: true });
+  panel.setAttribute('aria-label', 'Saved instructions');
+  const note = el('div', 'bx-recipes-note muted');
+  const list = el('ul', 'bx-recipes-list');
+  const form = el('form', 'bx-recipes-form');
+  form.autocomplete = 'off';
+  const name = el('input');
+  Object.assign(name, { id: 'bxRecipesName', placeholder: 'Name the instruction above, e.g. Daily invoices', maxLength: 60, spellcheck: false, enterKeyHint: 'done' });
+  name.setAttribute('aria-label', 'Instruction name');
+  const save = el('button', 'btn small primary', 'Save instruction');
+  save.type = 'submit';
+  form.append(name, save);
+  const msg = el('div', 'bx-recipes-msg');
+  msg.setAttribute('role', 'status');
+  panel.append(note, list, form, msg);
+  $('bxHint').before(btn);
+  $('bxPrompt').before(panel);
+  return { btn, panel, note, list, form, name, save, msg, open: false };
+})();
+const bxrSay = (text, err = false) => { BXR.msg.textContent = text; BXR.msg.classList.toggle('err', err); };
+function bxrShow(open) {
+  BXR.open = open;
+  BXR.btn.setAttribute('aria-expanded', String(open));
+  BXR.btn.classList.toggle('on', open);
+  BXR.panel.hidden = !open || bxMode() === 'setup';
+  bxrSay('');
+  bxrRender();
+}
+function bxrRender() {
+  const sel = BX.sel;
+  BXR.btn.disabled = !sel;
+  if (BXR.panel.hidden) return;
+  if (!sel) { BXR.panel.hidden = true; return; }
+  const shown = bxrList(sel.node, sel.identity);
+  BXR.note.textContent = `Saved on this device only, for ${sel.identity}. Insert one to edit it before you send.`;
+  BXR.list.textContent = '';
+  if (!shown.length) BXR.list.append(el('li', 'bx-recipes-empty muted', 'None yet. Type an instruction in the box below, name it here and save it.'));
+  for (const r of shown) {
+    const li = el('li', 'bx-recipe'), go = el('button', 'bx-recipe-ins', r.name), rm = el('button', 'icon-btn bx-recipe-rm', '×');
+    Object.assign(go, { type: 'button', title: r.text.slice(0, 300) });
+    go.setAttribute('aria-label', `Insert ${r.name}`);
+    go.onclick = () => bxrInsert(r);
+    rm.type = 'button';
+    rm.title = 'Remove';
+    rm.setAttribute('aria-label', `Remove ${r.name}`);
+    rm.onclick = () => { bxrRemove(sel.node, sel.identity, r.name); bxrSay(`Removed ${r.name}`); bxrRender(); };
+    li.append(go, rm);
+    BXR.list.append(li);
+  }
+}
+// Into the draft: the whole box if it is blank, else after what is there (a blank line between). It is only edited, not sent.
+function bxrInsert(r) {
+  const cur = bxIn.value;
+  bxIn.value = cur.trim() ? `${cur.replace(/\s+$/, '')}\n\n${r.text}` : r.text;
+  bxIn.dispatchEvent(new Event('input')); // resize, Send's state, clears a finished result
+  bxrShow(false);
+  bxIn.focus({ preventScroll: true });
+  bxIn.setSelectionRange(bxIn.value.length, bxIn.value.length);
+}
+BXR.btn.addEventListener('click', () => bxrShow(!BXR.open));
+// Like Send: pressing the chip or an entry keeps the prompt box focused, so a phone's keyboard (and the layout) stays put under the tap.
+for (const n of [BXR.btn, BXR.list]) n.addEventListener('mousedown', (e) => { if (e.target.closest('button')) e.preventDefault(); });
+BXR.form.addEventListener('submit', (e) => {
+  e.preventDefault();
+  const sel = BX.sel;
+  if (!sel) return;
+  const err = bxrSave(sel.node, sel.identity, BXR.name.value, bxIn.value);
+  if (err) { bxrSay(err, true); (bxIn.value.trim() ? BXR.name : bxIn).focus(); return; }
+  bxrSay(`Saved ${BXR.name.value.trim().slice(0, 60)}`);
+  BXR.name.value = '';
+  bxrRender();
+});
+
 // ----- Claude in Chrome (chrome.mjs, .agent-orch/CHROME.md). With a Chrome runner online the prompt goes straight to it
 // (direct mode): no live canvas or URL bar, the owner sees the real window on the Mac, and here the steps, the latest
 // screenshot and the answer. With none online the tab shows the setup card; the built-in browser stays behind a link.
@@ -873,6 +979,7 @@ function bxApplyMode() {
   $('bxDirect').hidden = mode !== 'chrome';
   $('bxSetup').hidden = mode !== 'setup';
   BXS.panel.hidden = mode !== 'builtin' || !BXS.open;
+  BXR.panel.hidden = mode === 'setup' || !BXR.open;
   $('bxPrompt').hidden = $('bxActivity').hidden = mode === 'setup';
   const alt = $('bxAlt');
   alt.hidden = mode === 'chrome' || !BV.data?.runner;
@@ -890,6 +997,7 @@ function bxDirectSel(mode) {
     BX.tasks = []; bxDrop(); BX.err = '';
     bxLoadTasks();
   } else if (mode !== 'chrome') BX.sel = null;
+  bxrRender();
   bxRenderActivity();
   bxSyncSend();
 }

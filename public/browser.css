@@ -131,6 +131,29 @@
 .bx-sites-msg { font-size: 12.5px; color: var(--text); }
 .bx-sites-msg:empty { display: none; }
 .bx-sites-msg.err { color: var(--danger); font-weight: 550; }
+/* Saved instructions (browser.js bxr*): the prompt box's Saved chip and its panel just above the box: chips that insert an
+   instruction into the draft, a name + Save row and a note that they stay on this device. */
+.bx-recipes-btn { flex: none; font: inherit; font-size: 13px; gap: 5px; }
+.bx-recipes-btn.on { color: var(--accent); border-color: var(--border-strong); background: var(--panel); }
+.bx-recipes-btn:disabled { opacity: .55; cursor: default; }
+.bx-recipes-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.bx-recipes { flex: none; box-sizing: border-box; width: calc(100% - 32px); max-width: 900px; max-height: 36%; overflow-y: auto; overscroll-behavior: contain; margin: 0 auto 2px;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); display: flex; flex-direction: column; gap: 8px; font-size: 13.5px; }
+.bx-recipes-note { font-size: 12px; }
+.bx-recipes-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.bx-recipes-empty { font-size: 13px; }
+.bx-recipe { display: inline-flex; align-items: center; min-width: 0; max-width: 100%; border: 1px solid var(--border-strong); border-radius: 99px; background: var(--raised); }
+.bx-recipe-ins { min-width: 0; max-width: 260px; height: 32px; padding: 0 2px 0 12px; border: 0; background: none; color: var(--text); font: inherit; font-weight: 550;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.bx-recipe-ins:focus-visible, .bx-recipe-rm:focus-visible { outline: 2px solid var(--focus); border-radius: 99px; }
+.bx-recipe-rm.icon-btn { width: 32px; height: 32px; border-radius: 50%; font-size: 17px; line-height: 1; }
+.bx-recipes-form { display: flex; gap: 8px; }
+.bx-recipes-form input { flex: 1; min-width: 0; height: 36px; padding: 0 10px; border-radius: 9px; border: 1px solid var(--border-strong); background: var(--bg); color: var(--text); font: inherit; font-size: 15px; }
+.bx-recipes-form input:focus { outline: 2px solid var(--focus); border-color: var(--accent); }
+.bx-recipes-form .btn.small { flex: none; height: 36px; }
+.bx-recipes-msg { font-size: 12.5px; color: var(--text); }
+.bx-recipes-msg:empty { display: none; }
+.bx-recipes-msg.err { color: var(--danger); font-weight: 550; }
 .bx > [hidden] { display: none !important; }
 /* Claude in Chrome direct mode: the header and the latest screenshot instead of the live canvas. */
 .bx-direct { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; gap: 6px; padding: 10px 16px 8px; }
@@ -157,6 +180,9 @@
   .bx-site-open, .bx-sites-form input, .bx-sites-form .btn.small { height: 44px; }
   .bx-site-rm.icon-btn { width: 44px; height: 44px; }
   .bx-sites-form input { font-size: 16px; } /* iOS doesn't zoom in */
+  .bx-recipe-ins, .bx-recipes-form input, .bx-recipes-form .btn.small, .bx-recipes-btn { height: 44px; }
+  .bx-recipe-rm.icon-btn { width: 44px; height: 44px; }
+  .bx-recipes-form input { font-size: 16px; }
 }
 @media (max-width: 800px) {
   .bx-bar { padding: 8px 8px 4px; }
@@ -170,6 +196,9 @@
   .bx-status { padding: 0 10px 4px; }
   .bx-sites { margin: 0 8px 6px; padding: 8px 10px; }
   .bx-site-open { max-width: 200px; }
+  .bx-recipes { width: calc(100% - 20px); }
+  .bx-recipe-ins { max-width: 200px; }
+  html.kb-open .bx-recipes { max-height: 30vh; }
   .bx-stage { padding: 0 6px 6px; }
   .bx-stage .bv-wait { inset: 0 6px 6px; }
   .bx-prompt { padding: 6px 10px 8px; }

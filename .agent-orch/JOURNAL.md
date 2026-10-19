@@ -1686,3 +1686,6 @@ CONTEXT.md conflict resolved; all Zen tests pass
 ## 2026-10-19 14:25 — #2260 Integrate #2247: Leaving Orchestrator Mode stops new tasks only; the queue keeps running [done (check passed)]
 
 conflict resolved; intake tests pass on merged main
+## 2026-10-19 14:25 — #2258 Save site shortcuts per built-in Browser profile, with tests (ui) [done (check passed)]
+
+Browser profiles have saved site shortcuts; four new tests pass

@@ -204,6 +204,8 @@ async function bwClear(n, identity) {
   try {
     await api('/api/browser/clear', 'POST', { node: n.id, identity });
     BV.sites.delete(bvKey(n.id, identity));
+    bxsWrite(n.id, identity, []); // its saved sites go with it
+    bxsRender();
     toast(`Cleared the ${identity} profile`);
   } catch (e) { toast(e.message, { kind: 'warn' }); }
   bwLoad();
@@ -292,7 +294,7 @@ function bvRenderState() {
   else if (s?.reconnecting) { m.wait.hidden = false; m.wait.textContent = 'Reconnecting…'; BV.reconnecting = true; }
   else if (BV.reconnecting) { BV.reconnecting = false; m.wait.textContent = 'Reconnected: waiting for the page…'; }
   if (s && BV.take && s.active && !s.takeover && !s.closed) { BV.take = false; bvSay({ t: 'bv_take' }); }
-  if (m === BVM.tab) bxRenderBusy();
+  if (m === BVM.tab) { bxRenderBusy(); bxsRender(); }
 }
 const bvSay = (m) => BV.view && send({ node: BV.view.node, identity: BV.view.identity, ...m });
 
@@ -548,7 +550,8 @@ function bxSelect(node, identity, name, picked = true) {
   const same = BX.sel && bvKey(BX.sel.node, BX.sel.identity) === bvKey(node, identity);
   BX.sel = { node, identity, name: name || node };
   if (picked) store.set('cw.bxPick', bvKey(node, identity));
-  if (!same) { BX.tasks = []; bxDrop(); BX.err = ''; }
+  if (!same) { BX.tasks = []; bxDrop(); BX.err = ''; bxsSay(''); }
+  bxsRender();
   bxRenderActivity(); // first, so the view opens with the stage's final size
   bxRenderPicker();
   bxOpenSel();
@@ -759,6 +762,105 @@ $('bxPrompt').addEventListener('submit', async (e) => {
   finally { BX.sending = false; bxSyncSend(); }
 });
 
+// ----- saved sites (bxs*): named shortcuts to http(s) pages per signed-in user, machine and profile, kept in this browser's
+// localStorage only (key cw.bxSites:<user>:<node>/<identity>). The toolbar's star opens the panel between the status line and
+// the page: open a shortcut (bv_nav go, like the URL bar), save the current page under a name, remove one. Built-in mode only
+// (the toolbar is hidden otherwise); a profile's Clear removes its shortcuts. Its elements are made here and held in BXS (not looked up by id).
+const BXS_MAX = 50;
+const bxsKey = (node, identity) => `cw.bxSites:${me.user?.id || 'admin'}:${bvKey(node, identity)}`;
+// The URL normalised if it is http(s), else '' (about:blank, chrome://, data:, not a URL).
+function bxsUrl(u) { try { const x = new URL(String(u || '')); return /^https?:$/.test(x.protocol) ? x.href : ''; } catch { return ''; } }
+function bxsList(node, identity) {
+  let v;
+  try { v = JSON.parse(store.get(bxsKey(node, identity)) || '[]'); } catch { v = []; }
+  return Array.isArray(v) ? v.filter((s) => s && typeof s.name === 'string' && s.name && bxsUrl(s.url)) : [];
+}
+const bxsWrite = (node, identity, list) => (list.length ? store.set(bxsKey(node, identity), JSON.stringify(list)) : store.del(bxsKey(node, identity)));
+// Saves the page as `name` (replacing a shortcut of the same name); returns what is wrong, or ''.
+function bxsSave(node, identity, name, url) {
+  name = String(name || '').trim().slice(0, 60);
+  if (!name) return 'Name the shortcut first.';
+  const href = bxsUrl(url);
+  if (!href) return 'Only an http or https page can be saved: open a site first.';
+  const list = bxsList(node, identity).filter((s) => s.name.toLowerCase() !== name.toLowerCase());
+  list.push({ name, url: href });
+  bxsWrite(node, identity, list.slice(-BXS_MAX));
+  return '';
+}
+const bxsRemove = (node, identity, name) => bxsWrite(node, identity, bxsList(node, identity).filter((s) => s.name !== name));
+const BXS = (() => {
+  const btn = el('button', 'icon-btn');
+  Object.assign(btn, { type: 'button', id: 'bxSitesBtn', title: 'Saved sites' });
+  btn.setAttribute('aria-label', 'Saved sites');
+  btn.setAttribute('aria-expanded', 'false');
+  btn.setAttribute('aria-controls', 'bxSites');
+  btn.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
+  const panel = el('div', 'bx-sites');
+  Object.assign(panel, { id: 'bxSites', hidden: true });
+  panel.setAttribute('aria-label', 'Saved sites');
+  const list = el('ul', 'bx-sites-list');
+  const form = el('form', 'bx-sites-form');
+  form.autocomplete = 'off';
+  const name = el('input');
+  Object.assign(name, { id: 'bxSitesName', placeholder: 'Name this page, e.g. Inbox', maxLength: 60, spellcheck: false, enterKeyHint: 'done' });
+  name.setAttribute('aria-label', 'Shortcut name');
+  const save = el('button', 'btn small primary', 'Save page');
+  save.type = 'submit';
+  form.append(name, save);
+  const cur = el('div', 'bx-sites-cur muted'), msg = el('div', 'bx-sites-msg');
+  msg.setAttribute('role', 'status');
+  panel.append(list, form, cur, msg);
+  $('bxReload').after(btn);
+  $('bxStatus').after(panel);
+  return { btn, panel, list, form, name, save, cur, msg, open: false };
+})();
+const bxsSay = (text, err = false) => { BXS.msg.textContent = text; BXS.msg.classList.toggle('err', err); };
+function bxsShow(open) {
+  BXS.open = open;
+  BXS.btn.setAttribute('aria-expanded', String(open));
+  BXS.btn.classList.toggle('on', open);
+  BXS.panel.hidden = !open || bxMode() !== 'builtin';
+  bxsSay('');
+  bxsRender();
+}
+function bxsRender() {
+  const sel = BX.sel;
+  if (BXS.panel.hidden || !sel) return;
+  const drive = BV.view?.m === BVM.tab && bvCanDrive(), shown = bxsList(sel.node, sel.identity);
+  BXS.list.textContent = '';
+  if (!shown.length) BXS.list.append(el('li', 'bx-sites-empty muted', `No saved sites for ${sel.identity} yet. Open a page, name it below and save it.`));
+  for (const s of shown) {
+    const li = el('li', 'bx-site'), go = el('button', 'bx-site-open', s.name), rm = el('button', 'icon-btn bx-site-rm', '×');
+    Object.assign(go, { type: 'button', disabled: !drive, title: drive ? s.url : 'Take control to open a saved site' });
+    go.onclick = () => bxsOpen(s);
+    rm.type = 'button';
+    rm.title = 'Remove';
+    rm.setAttribute('aria-label', `Remove ${s.name}`);
+    rm.onclick = () => { bxsRemove(sel.node, sel.identity, s.name); bxsSay(`Removed ${s.name}`); bxsRender(); };
+    li.append(go, rm);
+    BXS.list.append(li);
+  }
+  const url = bxsUrl(BV.st?.url);
+  BXS.cur.textContent = url ? `This page: ${url}` : 'Open an http or https page to save it here.';
+}
+function bxsOpen(s) {
+  if (!(BV.view?.m === BVM.tab && bvCanDrive())) return bxsSay('Take control to open a saved site.', true);
+  bvSay({ t: 'bv_nav', action: 'go', url: s.url });
+  bxsShow(false);
+  BVM.tab.canvas.focus({ preventScroll: true });
+}
+BXS.btn.addEventListener('click', () => bxsShow(!BXS.open));
+BXS.form.addEventListener('submit', (e) => {
+  e.preventDefault();
+  const sel = BX.sel;
+  if (!sel) return;
+  const err = bxsSave(sel.node, sel.identity, BXS.name.value, BV.st?.url);
+  if (err) { bxsSay(err, true); if (!BXS.name.value.trim()) BXS.name.focus(); return; }
+  bxsSay(`Saved ${BXS.name.value.trim().slice(0, 60)}`);
+  BXS.name.value = '';
+  bxsRender();
+});
+
 // ----- Claude in Chrome (chrome.mjs, .agent-orch/CHROME.md). With a Chrome runner online the prompt goes straight to it
 // (direct mode): no live canvas or URL bar, the owner sees the real window on the Mac, and here the steps, the latest
 // screenshot and the answer. With none online the tab shows the setup card; the built-in browser stays behind a link.
@@ -770,6 +872,7 @@ function bxApplyMode() {
   for (const id of ['bxBar', 'bxStatus', 'bxStage']) $(id).hidden = mode !== 'builtin';
   $('bxDirect').hidden = mode !== 'chrome';
   $('bxSetup').hidden = mode !== 'setup';
+  BXS.panel.hidden = mode !== 'builtin' || !BXS.open;
   $('bxPrompt').hidden = $('bxActivity').hidden = mode === 'setup';
   const alt = $('bxAlt');
   alt.hidden = mode === 'chrome' || !BV.data?.runner;

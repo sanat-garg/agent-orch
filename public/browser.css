@@ -111,6 +111,26 @@
 .bx-result > :first-child { margin-top: 0; }
 .bx-result > :last-child { margin-bottom: 0; }
 .bx-empty { font-size: 13px; }
+/* Saved sites (browser.js bxs*): the star's panel between the status line and the page, chips that open a site and a name + Save row. */
+#bxSitesBtn.on { background: var(--raised); color: var(--accent); }
+.bx-sites { flex: none; max-height: 40%; overflow-y: auto; overscroll-behavior: contain; margin: 0 16px 8px; padding: 10px 12px; border: 1px solid var(--border);
+  border-radius: 12px; background: var(--panel); display: flex; flex-direction: column; gap: 8px; font-size: 13.5px; }
+.bx-sites-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.bx-sites-empty { font-size: 13px; }
+.bx-site { display: inline-flex; align-items: center; min-width: 0; max-width: 100%; border: 1px solid var(--border-strong); border-radius: 99px; background: var(--raised); }
+.bx-site-open { min-width: 0; max-width: 260px; height: 32px; padding: 0 2px 0 12px; border: 0; background: none; color: var(--text); font: inherit; font-weight: 550;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.bx-site-open:disabled { opacity: .55; cursor: default; }
+.bx-site-open:focus-visible, .bx-site-rm:focus-visible { outline: 2px solid var(--focus); border-radius: 99px; }
+.bx-site-rm.icon-btn { width: 32px; height: 32px; border-radius: 50%; font-size: 17px; line-height: 1; }
+.bx-sites-form { display: flex; gap: 8px; }
+.bx-sites-form input { flex: 1; min-width: 0; height: 36px; padding: 0 10px; border-radius: 9px; border: 1px solid var(--border-strong); background: var(--bg); color: var(--text); font: inherit; font-size: 15px; }
+.bx-sites-form input:focus { outline: 2px solid var(--focus); border-color: var(--accent); }
+.bx-sites-form .btn.small { flex: none; height: 36px; }
+.bx-sites-cur { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bx-sites-msg { font-size: 12.5px; color: var(--text); }
+.bx-sites-msg:empty { display: none; }
+.bx-sites-msg.err { color: var(--danger); font-weight: 550; }
 .bx > [hidden] { display: none !important; }
 /* Claude in Chrome direct mode: the header and the latest screenshot instead of the live canvas. */
 .bx-direct { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; gap: 6px; padding: 10px 16px 8px; }
@@ -134,6 +154,9 @@
 .bx-alt { flex: none; align-self: center; margin: 0 0 max(8px, env(safe-area-inset-bottom)); font-size: 12.5px; color: var(--muted); }
 @media (pointer: coarse) {
   .bx-bar select { height: 44px; font-size: 16px; }
+  .bx-site-open, .bx-sites-form input, .bx-sites-form .btn.small { height: 44px; }
+  .bx-site-rm.icon-btn { width: 44px; height: 44px; }
+  .bx-sites-form input { font-size: 16px; } /* iOS doesn't zoom in */
 }
 @media (max-width: 800px) {
   .bx-bar { padding: 8px 8px 4px; }
@@ -145,6 +168,8 @@
   .bx-bar input { order: 10; flex: 1 1 0; }
   #bxKbd, #bxPaste, #bxTake { order: 11; }
   .bx-status { padding: 0 10px 4px; }
+  .bx-sites { margin: 0 8px 6px; padding: 8px 10px; }
+  .bx-site-open { max-width: 200px; }
   .bx-stage { padding: 0 6px 6px; }
   .bx-stage .bv-wait { inset: 0 6px 6px; }
   .bx-prompt { padding: 6px 10px 8px; }

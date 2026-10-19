@@ -13,3 +13,7 @@ Add saved site shortcuts to the built-in Browser view using public/browser.js an
 ## Done when
 
 `node --test test/ui-browser-shortcuts.test.mjs` passes
+
+## Result — done (check passed) (2026-10-19 14:25)
+
+AGENT-ORCH-STATUS: done — Browser profiles have saved site shortcuts; four new tests pass

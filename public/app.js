@@ -9342,7 +9342,7 @@ function openQueue() {
 function closeQueue(refocus = true) {
   if (Q.drag) endDrag(false);
   $('queueModal').hidden = true;
-  if (refocus) { digestSeen(); Q.lastFocus?.focus?.(); } // closeQueue(false) is the Machines view taking #qBody over
+  if (refocus) { digestSeen(); QS.q = ''; if (QS.input) QS.input.value = ''; Q.lastFocus?.focus?.(); } // closeQueue(false) is the Machines view taking #qBody over
 }
 $('obQueue').addEventListener('click', openQueue);
 $('queueModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeQueue(); });
@@ -9351,6 +9351,7 @@ document.addEventListener('keydown', (e) => {
   e.stopImmediatePropagation();
   if (RF.open) closeRefillPop();
   else if (Q.drag) endDrag(false);
+  else if (e.target === QS.input && QS.input.value) queueSearchClear(); // Escape empties the search before closing
   else closeQueue();
 }, true);
 function scheduleQueue() { clearTimeout(Q.timer); Q.timer = setTimeout(renderQueue, 120); }
@@ -9411,11 +9412,59 @@ function closeRefillPop() {
 }
 // ----- end refill status
 document.addEventListener('click', (e) => { if (RF.open && !e.target.closest?.('.rf')) closeRefillPop(); });
+// ----- queue search (#2269): filters Up next by title, task number (#12 or 12, as a prefix) and declared file path,
+// case-insensitively; every space-separated term must match one of them. A matching dependent keeps its queued
+// ancestors as dimmed context rows. Reordering is off while filtered. The search row is one element that renderQueue
+// never detaches from #qBody, so the value, focus and caret survive task updates. Closing the Queue clears it.
+const QS = { q: '', bar: null, input: null, count: null };
+function queueMatch(t, terms) {
+  const title = `${t.title || ''}\n${displayTitle(t)}`.toLowerCase(), files = (t.files || []).map((f) => String(f).toLowerCase());
+  return terms.every((w) => {
+    const n = /^#?(\d+)$/.exec(w);
+    return (n && String(t.id).startsWith(n[1])) || title.includes(w) || files.some((f) => f.includes(w));
+  });
+}
+// queueTree's rows narrowed to the matches plus their ancestors ({...row, context: true} when only shown for a match below).
+function queueFilter(rows, q) {
+  const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return { rows, hits: rows.length };
+  const by = new Map(rows.map((r) => [r.t.id, r])), keep = new Map();
+  for (const r of rows) { // tree order: a parent is settled before its dependents
+    if (!queueMatch(r.t, terms)) continue;
+    keep.set(r.t.id, false);
+    for (let p = r.parent; p != null && !keep.has(p); p = by.get(p)?.parent) keep.set(p, true);
+  }
+  return { rows: rows.filter((r) => keep.has(r.t.id)).map((r) => ({ ...r, context: keep.get(r.t.id) })),
+    hits: [...keep.values()].filter((c) => !c).length };
+}
+function queueSearchBar() {
+  if (QS.bar) return QS.bar;
+  const bar = QS.bar = el('div', 'q-search');
+  bar.setAttribute('role', 'search');
+  const input = QS.input = el('input', 'q-search-input');
+  Object.assign(input, { type: 'search', placeholder: 'Search by title, #number or file', autocomplete: 'off', spellcheck: false });
+  input.setAttribute('aria-label', 'Search queued tasks');
+  input.setAttribute('autocapitalize', 'off');
+  input.setAttribute('enterkeyhint', 'search');
+  input.addEventListener('input', () => { QS.q = input.value; renderQueue(); });
+  QS.count = el('span', 'q-search-count');
+  QS.count.setAttribute('aria-live', 'polite');
+  const clear = el('button', 'btn q-search-clear', 'Clear');
+  clear.type = 'button';
+  clear.addEventListener('click', () => { queueSearchClear(); input.focus(); });
+  bar.append(input, QS.count, clear);
+  return bar;
+}
+function queueSearchClear() {
+  QS.q = '';
+  if (QS.input) QS.input.value = '';
+  renderQueue();
+}
 function renderQueue() {
   if (!qShown() || Q.drag || Q.busy) return;
   const body = $('qBody'), mx = mxOpen();
   const focused = document.activeElement?.closest?.('#qBody .tcard')?.dataset.task; // keeps keyboard focus across re-renders
-  body.textContent = '';
+  for (const n of [...body.childNodes]) if (n !== QS.bar) n.remove(); // the search row stays put (focus, caret)
   const away = digestCard();
   if (away) body.append(away);
   if (mx) { body.append(mxLanes()); mxCountsRender(); } // every machine's running tasks, in place of this project's
@@ -9450,15 +9499,37 @@ function renderQueue() {
   body.append(el('h3', 'dg-group', `Up next · ${queued.length}${mx && O.project ? ` · ${O.project.name}` : ''}`));
   const stall = queueStallText(O.state?.stall, queued.length);
   if (stall) body.append(el('p', 'muted q-stall', stall));
-  if (!queued.length) body.append(el('p', 'muted', mx && !O.project ? 'Open a project to see its queue.' : 'Nothing queued.'));
+  const q = QS.q.trim(), found = queueFilter(queueTree(queued), q);
+  if (queued.length || q) {
+    const bar = queueSearchBar();
+    if (bar.parentNode === body) bar.before(...[...body.childNodes].filter((n) => n !== bar)); // new nodes landed after it
+    else body.append(bar);
+    bar.classList.toggle('on', !!q);
+    QS.count.textContent = q ? `${found.hits} of ${queued.length}` : '';
+  } else QS.bar?.remove();
+  if (!queued.length && !q) body.append(el('p', 'muted', mx && !O.project ? 'Open a project to see its queue.' : 'Nothing queued.'));
+  if (q && !found.hits) {
+    const none = el('div', 'q-none');
+    none.setAttribute('role', 'status');
+    const again = el('button', 'btn q-none-clear', 'Clear search');
+    again.type = 'button';
+    again.addEventListener('click', () => { queueSearchClear(); QS.input?.focus(); });
+    none.append(el('p', 'q-none-h', queued.length ? `No queued task matches “${q}”` : 'Nothing queued to search'),
+      el('p', 'muted q-none-tip', 'Search matches titles, task numbers like #42 and declared files like public/app.js.'), again);
+    body.append(none);
+  } else if (q && queued.length > 1) body.append(el('p', 'muted q-search-note', 'Reordering is off while searching. Clear to drag tasks again.'));
   const list = el('div', 'q-list');
   list.id = 'qList';
-  for (const { t, depth, parent } of queueTree(queued)) {
-    const b = queueCard(t.id, queued.length > 1);
+  for (const { t, depth, parent, context } of found.rows) {
+    const b = queueCard(t.id, !q && queued.length > 1);
     if (parent != null) {
       b.classList.add('q-child');
       b.dataset.parent = parent;
       b.style.marginLeft = `${Math.min(depth, 3) * 16}px`;
+    }
+    if (context) {
+      b.classList.add('q-context');
+      b.querySelector('.tc-main').prepend(el('span', 'q-ctx', 'Context · a dependent matches'));
     }
     list.append(b);
   }

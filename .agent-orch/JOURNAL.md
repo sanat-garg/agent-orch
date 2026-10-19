@@ -1775,3 +1775,7 @@ Command: npm test -- test/ui-credentials-generate.test.mjs
 ## 2026-10-19 16:13 — #2283 Credentials: generate a strong secret in the editor, with tests (ui) [done (check passed)]
 
 Generate menu fills credentials with crypto-random secrets; tests pass
+
+## 2026-10-19 16:15 — #2269 Search queued work by title, task number and file, with tests (ui) [done (check passed)]
+
+Up next queue search works; focused test passes 3/3

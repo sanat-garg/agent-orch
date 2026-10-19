@@ -53,4 +53,15 @@
 .shot.shc-shot .shot-missing { height: auto; min-height: 160px; place-items: center; }
 .shot.shc-shot figcaption { display: none; }
 @media (pointer: coarse) { .sh-pick { width: 44px; height: 44px; top: 2px; left: 2px; border-radius: 10px; } .sh-pick input { width: 22px; height: 22px; } }
+
+/* Attach to chat (shots.js withAttach): the caption row under each tile holds the name and the attach button (an icon on
+   grid tiles, a labelled button under the large newest one); .sh-note explains a project without a chat. */
+.sh-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 2px; }
+.sh-row figcaption { flex: 1; min-width: 0; margin-top: 0; }
+.sh-latest .shot.shot-final .sh-row { margin-top: 8px; }
+.icon-btn.sh-attach { width: 28px; height: 28px; margin-left: auto; border-radius: 7px; }
+.btn.small.sh-attach { gap: 6px; margin-left: auto; }
+.sh-attach:disabled { opacity: .5; cursor: progress; }
+.sh-note { flex-basis: 100%; font-size: 12px; color: var(--muted); }
+@media (pointer: coarse) { .icon-btn.sh-attach { width: 44px; height: 44px; } .btn.small.sh-attach { height: 44px; min-width: 44px; } }
 @media (max-width: 767px) { .shc { grid-template-columns: minmax(0, 1fr); } }

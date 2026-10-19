@@ -6,8 +6,10 @@
 // gallery was last opened (per project, this browser). Refetched when the project changes and when one of its tasks
 // changes status (a finished task has its final screens). Compare: tick exactly two screenshots, then Compare shows them
 // side by side (stacked on phones) at their own aspect ratios, each labelled with its task, name and time; Back returns to
-// the gallery, Clear drops the picks. Picks reset when the project changes. Loaded after app.js and uses its helpers ($, el, api, store,
-// O, relTime, shotNode, shotGrid, shotsByTime, showTask, closeSidebar, coarse).
+// the gallery, Clear drops the picks. Picks reset when the project changes. Attach to chat (every tile, not while comparing):
+// the screenshot goes into the project chat's composer as a file (app.js addAttachments), named task-<id>-<name>, so the
+// owner can send it with a note; nothing is sent. Loaded after app.js and uses its helpers ($, el, api, store, O, state,
+// relTime, shotNode, shotGrid, shotsByTime, showTask, openConvo, setView, closeSidebar, addAttachments, mediaUrl, toast, coarse).
 (() => {
   const SH = { pid: null, list: [], loaded: false, error: '', seq: 0, timer: null, status: new Map(), lastFocus: null, picks: [], comparing: false };
   const seenKey = (pid) => `cw.shots.seen.${pid}`;
@@ -122,6 +124,50 @@
     fig.append(lab);
     return fig;
   }
+  // Attach to chat: fetch the image, wrap it in a File (its real type and extension), close the sheet, open the project's
+  // main chat (O.project.convo_id) and add it to the composer's tray. A fetch that fails keeps the sheet open and toasts;
+  // a project without a chat gets a note under the button.
+  const chatId = () => { const cid = O.project?.convo_id; return cid && state.convos.some((c) => c.id === cid) ? cid : null; };
+  async function attach(s, btn) {
+    const cid = chatId();
+    if (!cid) {
+      if (!btn.nextElementSibling?.classList.contains('sh-note')) btn.after(el('span', 'sh-note', "This project has no chat yet, so there's nowhere to attach it."));
+      return;
+    }
+    btn.disabled = true;
+    try {
+      const r = await fetch(mediaUrl(s.id));
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const blob = await r.blob(), ext = s.id.split('.').pop();
+      let name = `task-${s.task.id}-${s.name || 'screenshot'}`;
+      if (!name.toLowerCase().endsWith(`.${ext}`)) name += `.${ext}`;
+      const file = new File([blob], name, { type: blob.type || `image/${ext === 'jpg' ? 'jpeg' : ext}` });
+      close();
+      if (state.cid !== cid) openConvo(cid);
+      setView('chat');
+      closeSidebar();
+      addAttachments([file]);
+      toast(`${name} is in the message: add a note and send`, { kind: 'success' });
+    } catch {
+      btn.disabled = false;
+      toast("Couldn't attach that screenshot", { kind: 'error' });
+    }
+  }
+  const CLIP = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M21 11.5l-8.5 8.5a5.5 5.5 0 0 1-7.8-7.8l9-9a3.5 3.5 0 0 1 5 5l-9 9a1.5 1.5 0 0 1-2.1-2.1l8.3-8.3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  // The tile's caption row: its name, then Attach (a labelled button under the large newest one, an icon on grid tiles).
+  function withAttach(s, fig, text) {
+    const b = el('button', text ? 'btn small sh-attach' : 'icon-btn sh-attach');
+    b.type = 'button';
+    b.innerHTML = CLIP;
+    if (text) b.append(' Attach to chat');
+    b.title = 'Attach to chat';
+    b.setAttribute('aria-label', `Attach ${s.name || 'screenshot'} to chat`);
+    b.onclick = () => attach(s, b);
+    const row = el('div', 'sh-row');
+    row.append(fig.querySelector('figcaption'), b);
+    fig.append(row);
+    return fig;
+  }
   function cmpBar() {
     const n = SH.picks.length, bar = el('div', 'sh-cmp-bar');
     bar.append(el('span', 'sh-cmp-msg', n === 2 ? '2 selected' : n ? '1 selected · pick one more to compare' : 'Tick two screenshots to compare them'));
@@ -176,7 +222,7 @@
     }
     const [latest, ...rest] = list;
     const top = el('section', 'sh-latest');
-    const fig = pickable(latest, shotNode(latest));
+    const fig = withAttach(latest, pickable(latest, shotNode(latest)), true);
     fig.classList.add('shot-final');
     top.append(el('h3', 'sh-label', 'Latest'), taskHead(latest.task, latest.at), fig);
     const out = list.length > 1 ? [cmpBar(), top] : [top];
@@ -190,7 +236,7 @@
     for (const g of groups.values()) {
       const sec = el('section', 'sh-group');
       const grid = el('div', 'shots');
-      for (const s of shotsByTime(g.shots)) grid.append(pickable(s, shotNode(s)));
+      for (const s of shotsByTime(g.shots)) grid.append(withAttach(s, pickable(s, shotNode(s))));
       sec.append(taskHead(g.task, g.at), grid);
       out.push(sec);
     }

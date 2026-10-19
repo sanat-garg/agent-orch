@@ -1820,3 +1820,10 @@ Command: npm test -- test/chat-usage.test.mjs test/ui-tokens-daily.test.mjs
 ## 2026-10-19 16:19 — #2281 Token usage: daily bars for the last seven days, with tests (ui) [done (check passed)]
 
 Daily token bars shipped; fixture boot waits survive load
+## 2026-10-19 16:18 — #2280 Screenshots: attach a screenshot to the project chat, with tests (ui) [verify failed (1)]
+
+Command: npm test -- test/ui-shots-attach.test.mjs
+
+## 2026-10-19 16:21 — #2280 Screenshots: attach a screenshot to the project chat, with tests (ui) [done (check passed)]
+
+Attach to chat on screenshots; all 3 tests pass

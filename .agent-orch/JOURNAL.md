@@ -1779,3 +1779,11 @@ Generate menu fills credentials with crypto-random secrets; tests pass
 ## 2026-10-19 16:15 — #2269 Search queued work by title, task number and file, with tests (ui) [done (check passed)]
 
 Up next queue search works; focused test passes 3/3
+
+## 2026-10-19 15:42 — #2274 Download a schedule run's retained output, with tests (ui) [verify failed (1)]
+
+Command: npm test -- test/ui-schedule-output-download.test.mjs
+
+## 2026-10-19 16:16 — #2274 Download a schedule run's retained output, with tests (ui) [done (check passed)]
+
+run output downloads verified; test now tolerates slow server boot

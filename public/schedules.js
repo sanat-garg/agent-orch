@@ -2,7 +2,7 @@
 // ---------- Schedules (server: cron.mjs + orchestrator `schedules`) ----------
 // Cron jobs: whenever a schedule's time comes round (in the owner's time zone, this browser's) the server runs its
 // command in the project folder (cron-run.mjs; Output shows each run's exit code and output, GET …/runs), or, for an
-// "Ask an agent" schedule, queues a task. The sidebar's "Schedules" sheet lists every project's, with on/off, Run now,
+// "Ask an agent" schedule, queues a task. Each run in Output can be saved as a text report (Download output; a running one as a snapshot). The sidebar's "Schedules" sheet lists every project's, with on/off, Run now,
 // Output, Edit and Delete; the editor builds the cron from simple choices (or takes one typed) and checks it live
 // (GET /api/orch/cron-preview). Copy opens the editor as a draft of a new schedule prefilled from one (any project,
 // its zone, agent and model kept; never its runs) that saves switched off. The chat planner makes them too ("every night at 2, run the scraper"). Loaded after app.js and uses its helpers
@@ -162,9 +162,38 @@
       d.className = 'sc-run'; d.open = i === 0;
       const sum = el('summary', '');
       sum.append(el('span', `sc-job ${j.status}`, jobText(j)), ` · ${fmtWhen(j.started_at * 1000)}${j.status === 'running' ? '' : ` · ${took(j)}`}${j.manual ? ' · Run now' : ''}`);
-      d.append(sum, el('pre', 'sc-pre', j.output || '(no output)'));
+      d.append(sum, el('pre', 'sc-pre', j.output || '(no output)'), downloadRow(s, j));
       return d;
     }));
+  }
+  // Download output: the run as it was loaded (no new request), a header then its exact retained output, as UTF-8 text.
+  const slug = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+  const iso = (t) => new Date(t * 1000).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
+  function runReport(s, j) {
+    const live = j.status === 'running', out = j.output || '';
+    const lines = [`agent-orch schedule output${live ? ' (snapshot)' : ''}`, `Schedule: ${s.title} (#${s.id})`, `Run: #${j.id}${j.manual ? ' (Run now)' : ''}`,
+      `Started: ${iso(j.started_at)}`];
+    if (j.finished_at && !live) lines.push(`Finished: ${iso(j.finished_at)}`);
+    lines.push(`Status: ${live ? 'running, still going when this snapshot was taken; output after that is not included' : JOB[j.status] || j.status}`);
+    if (j.exit_code != null) lines.push(`Exit code: ${j.exit_code}`);
+    lines.push(`Output: ${out ? 'the retained output follows, exactly as kept on the server' : 'none retained'}`);
+    return `${lines.join('\n')}\n\n${out ? '----- output -----\n' + out : ''}`;
+  }
+  const runFile = (s, j) => `schedule-${Number(s.id)}${slug(s.title) ? `-${slug(s.title)}` : ''}-run-${Number(j.id)}${j.status === 'running' ? '-snapshot' : ''}.txt`;
+  function downloadRow(s, j) {
+    const live = j.status === 'running', wrap = el('div', 'sc-dl');
+    const b = btn('btn small', live ? 'Download snapshot' : 'Download output', () => {
+      const url = URL.createObjectURL(new Blob([runReport(s, j)], { type: 'text/plain;charset=utf-8' }));
+      const a = document.createElement('a');
+      a.href = url; a.download = runFile(s, j); a.hidden = true;
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
+    b.setAttribute('aria-label', `${live ? 'Download a snapshot of' : 'Download'} the retained output of run #${j.id} as a text file`);
+    wrap.append(b, el('span', 'sc-dlnote', live ? 'Still running: saves the output so far as a snapshot.' : 'Saves the retained output as a text file.'));
+    return wrap;
   }
 
   async function save(id, fields, ok) {

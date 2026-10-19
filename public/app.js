@@ -536,16 +536,25 @@ function folderName(cwd) {
   return cwd.startsWith(state.workspace + '/') ? cwd.slice(state.workspace.length + 1) : tilde(cwd);
 }
 
-// Chats whose folder has an orchestrator project sit on top in the owner's drag order: the top project is the highest
-// priority and the scheduler follows the list (POST /api/orch/projects/reorder). Plain chats follow, newest first.
-const rankedConvos = () => state.convos.filter((c) => c.project && !c.archived)
-  .sort((a, b) => (a.project.position ?? Infinity) - (b.project.position ?? Infinity) || a.project.id - b.project.id || b.updatedAt - a.updatedAt);
-const rankedProjectIds = (convos = rankedConvos()) => [...new Set(convos.map((c) => c.project.id))];
 // A project folder can have several chats: its main chat (mainId === id) holds the project's place in the list and
 // the folder's other chats sit indented under it, newest first.
 const isSubChat = (c) => !!c.mainId && c.mainId !== c.id && state.convos.some((x) => x.id === c.mainId);
 const subChats = (c) => state.convos.filter((x) => x.mainId === c.id && x.id !== c.id).sort((a, b) => b.updatedAt - a.updatedAt);
 const familyUpdated = (c) => Math.max(c.updatedAt, ...subChats(c).map((x) => x.updatedAt));
+// The sidebar's order (#2230): latest activity first, ties by name. A project's lastActivityAt (server.mjs publicConvo,
+// kept live by 'oactivity') covers its tasks, merges, planner and reflection runs and chat messages.
+const activityOf = (c) => Math.max(c.project?.lastActivityAt || 0, familyUpdated(c) || 0);
+const byActivity = (a, b) => activityOf(b) - activityOf(a) || (a.title || folderName(a.cwd)).localeCompare(b.title || folderName(b.cwd));
+// The row's quiet time on the right: '2m', '3h', 'Mon', then 'Oct 3' (the minute timer keeps it current).
+function shortAgo(ts, now = Date.now()) {
+  const s = (now - ts) / 1000;
+  if (s < 60) return 'now';
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h`;
+  if (s < 7 * 86400) return new Date(ts).toLocaleDateString(undefined, { weekday: 'short' });
+  return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+setInterval(() => { for (const a of document.querySelectorAll('#convoList .ago[data-at]')) a.textContent = shortAgo(Number(a.dataset.at)); }, 60000);
 
 // Chat search: typing (debounced) asks GET /api/convos?q= (search.mjs) and #convoList shows the matches in place of
 // the list until the field is cleared or Escape. `seq` drops answers to queries the owner has already typed past.
@@ -621,7 +630,6 @@ function renderChatSearch(nav) {
 
 let archFoldedFor = null; // the archived chat that was open when the owner folded Archived
 function renderConvoList() {
-  if (drag.active) { drag.stale = true; return; } // re-rendering would pull the lifted card out from under the pointer
   const nav = $('convoList');
   if (chatSearch.results) return renderChatSearch(nav);
   const focused = document.activeElement?.closest?.('#convoList .convo')?.dataset.cid;
@@ -632,20 +640,12 @@ function renderConvoList() {
     nav.append(p);
     return;
   }
-  const ranked = rankedConvos();
-  if (ranked.length) {
-    const label = el('div', 'group-label rank-label', 'Priority order');
-    label.append(el('span', 'rank-hint', 'Drag to set priority'));
-    label.title = 'Drag projects to set priority (Alt+↑/↓ with the keyboard): the top one runs first';
-    nav.append(label);
-    for (const c of ranked) { nav.append(convoItem(c, true)); for (const s of subChats(c)) nav.append(convoItem(s, false, true)); }
-  }
-  // The rest, newest activity first, with no label (no date groups either: owner, 2026-10-04) and no gap (owner, 2026-10-06).
-  const sorted = state.convos.filter((c) => !c.project && !c.archived && !isSubChat(c)).sort((a, b) => familyUpdated(b) - familyUpdated(a));
-  for (const c of sorted) { nav.append(convoItem(c, false)); for (const s of subChats(c)) nav.append(convoItem(s, false, true)); }
+  // Projects and plain chats together, latest activity first, with no label (no date groups either: owner, 2026-10-04).
+  const sorted = state.convos.filter((c) => !c.archived && !isSubChat(c)).sort(byActivity);
+  for (const c of sorted) { nav.append(convoItem(c)); for (const s of subChats(c)) nav.append(convoItem(s, true)); }
   // Archived projects (finished ones; the whole folder, all its chats): folded into one row at the bottom, opened while
   // the open chat is one of them, unless the owner folded it again with that chat open (`archFoldedFor`).
-  const archived = state.convos.filter((c) => c.archived && !isSubChat(c)).sort((a, b) => familyUpdated(b) - familyUpdated(a));
+  const archived = state.convos.filter((c) => c.archived && !isSubChat(c)).sort(byActivity);
   if (archived.length) {
     const open = store.get('cw.archivedOpen') === '1' || (!!currentConvo()?.archived && archFoldedFor !== state.cid);
     const t = el('button', 'group-label arch-toggle');
@@ -661,12 +661,12 @@ function renderConvoList() {
       if (!open) nt?.scrollIntoView({ block: 'start', behavior: 'smooth' }); // opened: bring its projects into view
     };
     nav.append(t);
-    if (open) for (const c of archived) { nav.append(convoItem(c, false)); for (const s of subChats(c)) nav.append(convoItem(s, false, true)); }
+    if (open) for (const c of archived) { nav.append(convoItem(c)); for (const s of subChats(c)) nav.append(convoItem(s, true)); }
   }
   if (focused) nav.querySelector(`.convo[data-cid="${CSS.escape(focused)}"]`)?.focus();
 }
 
-function convoItem(c, rankable, sub = false) {
+function convoItem(c, sub = false) {
   const b = el('div', 'convo' + (sub ? ' sub' : '') + (c.id === state.cid ? ' active' : ''));
   b.tabIndex = 0;
   b.setAttribute('role', 'button');
@@ -686,28 +686,22 @@ function convoItem(c, rankable, sub = false) {
   txt.append(el('span', 'ct', name), el('span', 'csub' + (live ? ' live' : ''), status));
   b.append(txt);
   if (c.git?.error) b.append(el('span', 'cm', 'not pushed'));
+  const at = sub ? c.updatedAt : activityOf(c);
+  if (at) {
+    const ago = el('span', 'ago', shortAgo(at));
+    ago.dataset.at = at;
+    ago.title = new Date(at).toLocaleString();
+    b.append(ago);
+  }
   const more = el('button', 'more');
   more.setAttribute('aria-label', sub ? 'Chat options' : 'Project options');
   more.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16"><circle cx="5" cy="12" r="1.8" fill="currentColor"/><circle cx="12" cy="12" r="1.8" fill="currentColor"/><circle cx="19" cy="12" r="1.8" fill="currentColor"/></svg>';
   more.addEventListener('click', (e) => { e.stopPropagation(); convoMenu(c, more); });
   b.append(more);
   const open = () => { openConvo(c.id); closeSidebar(); setView('chat'); };
-  b.addEventListener('click', () => { if (performance.now() - drag.droppedAt > 350) open(); });
-  b.addEventListener('keydown', (e) => {
-    if (e.target !== b) return;
-    if (e.key === 'Enter') open();
-    else if (rankable && e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) { e.preventDefault(); nudgeProject(c, e.key === 'ArrowUp' ? -1 : 1); }
-  });
-  if (rankable) {
-    b.classList.add('rankable');
-    b.dataset.pid = c.project.id;
-    b.title += ` · priority ${c.project.priority} · drag or Alt+↑/↓ to reorder`;
-    b.setAttribute('aria-keyshortcuts', 'Alt+ArrowUp Alt+ArrowDown');
-    b.addEventListener('pointerdown', (e) => dragPointerDown(e, b));
-    // Once lifted, a touch drag must not scroll the list (and so cancel the pointer); a long press must not open a menu.
-    b.addEventListener('touchmove', (e) => { if (drag.active) e.preventDefault(); }, { passive: false });
-    b.addEventListener('contextmenu', (e) => { if (drag.pending || drag.active) e.preventDefault(); });
-  }
+  b.addEventListener('click', open);
+  b.addEventListener('keydown', (e) => { if (e.target === b && e.key === 'Enter') open(); });
+  if (c.project) b.dataset.pid = c.project.id;
   return b;
 }
 
@@ -723,127 +717,21 @@ function convoStatus(c) {
   return [c.archived ? `Archived · ${when}` : when[0].toUpperCase() + when.slice(1), false];
 }
 
-// ----- project order: pointer drag (long-press on touch) and Alt+↑/↓
-let drag = { active: false, pending: false, stale: false, droppedAt: -Infinity };
-function nudgeProject(c, dir) {
-  const ids = rankedProjectIds(), i = ids.indexOf(c.project.id), j = i + dir;
-  if (i < 0 || j < 0 || j >= ids.length) return;
-  [ids[i], ids[j]] = [ids[j], ids[i]];
-  saveProjectOrder(ids, c);
-}
-// Positions (and priorities, when the server sent them) onto the chats; `path` also links a chat whose project is new.
+// Links (and re-ranks) a chat's project from 'oprojects'; `path` also links a chat whose project is new.
 function applyProjectOrder(order) {
   const byId = new Map(order.map((r) => [r.id, r])), byPath = new Map(order.filter((r) => r.path).map((r) => [r.path, r]));
   for (const c of state.convos) {
     const r = (c.project && byId.get(c.project.id)) || (!isSubChat(c) && byPath.get(c.cwd));
     if (!r) continue;
-    c.project = { id: r.id, position: r.position, priority: r.priority ?? c.project?.priority ?? null };
+    c.project = { id: r.id, position: r.position, priority: r.priority ?? c.project?.priority ?? null,
+      lastActivityAt: Math.max(r.lastActivityAt || 0, c.project?.lastActivityAt || 0) || null };
   }
   if (O.project) { const r = byId.get(O.project.id); if (r?.priority != null) O.project = { ...O.project, position: r.position, priority: r.priority }; }
 }
-async function saveProjectOrder(ids, c) {
-  const before = state.convos.map((x) => [x, x.project]);
-  applyProjectOrder(ids.map((id, i) => ({ id, position: i + 1 }))); // optimistic; the server answers with priorities
-  renderConvoList();
-  $('convoList').querySelector(`.convo[data-cid="${CSS.escape(c.id)}"]`)?.focus();
-  const at = ids.indexOf(c.project.id) + 1;
-  $('rankLive').textContent = `${c.title || folderName(c.cwd)}: priority ${at} of ${ids.length}`;
-  try {
-    applyProjectOrder((await api('/api/orch/projects/reorder', 'POST', { ids })).order);
-  } catch (e) {
-    for (const [x, p] of before) x.project = p;
-    toast(`Couldn't reorder projects: ${e.message}`, { kind: 'error' });
-  }
-  renderConvoList();
-  renderOrchBar();
-}
-function dragPointerDown(e, card) {
-  if (e.button !== 0 || drag.active || drag.pending || e.target.closest('.more')) return;
-  const touch = e.pointerType === 'touch', id = e.pointerId, x0 = e.clientX, y0 = e.clientY;
-  let timer = null;
-  drag.pending = true;
-  const done = () => {
-    clearTimeout(timer);
-    drag.pending = false;
-    removeEventListener('pointermove', move);
-    removeEventListener('pointerup', up);
-    removeEventListener('pointercancel', up);
-  };
-  function move(ev) {
-    if (ev.pointerId !== id) return;
-    if (drag.active) return dragMove(ev.clientY);
-    const d = Math.hypot(ev.clientX - x0, ev.clientY - y0);
-    if (touch) { if (d > 8) done(); return; } // the finger moved before the long press: it's a scroll
-    if (d > 5) { liftCard(card, y0); dragMove(ev.clientY); }
-  }
-  function up(ev) {
-    if (ev.pointerId !== id) return;
-    done();
-    if (drag.active) dropCard(ev.type === 'pointerup');
-  }
-  addEventListener('pointermove', move);
-  addEventListener('pointerup', up);
-  addEventListener('pointercancel', up);
-  if (touch) timer = setTimeout(() => { liftCard(card, y0); navigator.vibrate?.(10); }, 400);
-}
-function liftCard(card, y) {
-  const nav = $('convoList');
-  const cards = [...nav.querySelectorAll('.convo.rankable')];
-  drag = { ...drag, active: true, pending: false, stale: false, card, cards, y0: y, y, scroll0: nav.scrollTop, to: cards.indexOf(card), edge: 0, raf: 0 };
-  const line = el('div', 'drop-indicator');
-  line.setAttribute('aria-hidden', 'true');
-  nav.append(line);
-  drag.line = line;
-  nav.classList.add('sorting');
-  card.classList.add('lifted');
-  drag.onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); dropCard(false); } };
-  addEventListener('keydown', drag.onKey, true);
-  dragMove(y);
-}
-function dragMove(y) {
-  const nav = $('convoList'), { card, cards } = drag;
-  drag.y = y;
-  card.style.transform = `translateY(${y - drag.y0 + nav.scrollTop - drag.scroll0}px)`;
-  const others = cards.filter((c) => c !== card);
-  let to = others.findIndex((c) => { const r = c.getBoundingClientRect(); return y < r.top + r.height / 2; });
-  if (to < 0) to = others.length;
-  drag.to = to;
-  const ref = others[to] ?? others[others.length - 1];
-  drag.line.hidden = !ref;
-  if (ref) drag.line.style.top = `${(others[to] ? ref.offsetTop : ref.offsetTop + ref.offsetHeight) - 1}px`;
-  // Near the list's top or bottom edge, scroll it (and keep following the pointer while it rests there).
-  const box = nav.getBoundingClientRect();
-  drag.edge = y < box.top + 36 ? -1 : y > box.bottom - 36 ? 1 : 0;
-  if (drag.edge && !drag.raf) {
-    const step = () => {
-      drag.raf = 0;
-      if (!drag.active || !drag.edge) return;
-      nav.scrollTop += drag.edge * 8;
-      dragMove(drag.y);
-      drag.raf = requestAnimationFrame(step);
-    };
-    drag.raf = requestAnimationFrame(step);
-  }
-}
-function dropCard(commit) {
-  const { card, cards, to, line, raf, onKey, stale } = drag;
-  cancelAnimationFrame(raf);
-  removeEventListener('keydown', onKey, true);
-  line.remove();
-  card.classList.remove('lifted');
-  card.style.transform = '';
-  $('convoList').classList.remove('sorting');
-  drag = { active: false, pending: false, stale: false, droppedAt: performance.now() };
-  const from = cards.indexOf(card);
-  if (commit && to !== from) {
-    const order = cards.filter((c) => c !== card);
-    order.splice(to, 0, card);
-    const byCid = new Map(state.convos.map((c) => [c.id, c]));
-    const ids = rankedProjectIds(order.map((x) => byCid.get(x.dataset.cid)).filter((c) => c?.project));
-    const c = byCid.get(card.dataset.cid);
-    if (c && ids.join() !== rankedProjectIds().join()) return saveProjectOrder(ids, c);
-  }
-  if (stale) renderConvoList();
+// 'oactivity': something happened in these projects, so they move up the list.
+function applyActivity(projects) {
+  const at = new Map(projects.map((p) => [p.id, p.at]));
+  for (const c of state.convos) if (c.project && at.get(c.project.id) > (c.project.lastActivityAt || 0)) c.project = { ...c.project, lastActivityAt: at.get(c.project.id) };
 }
 
 function convoMenu(c, anchor) {
@@ -3765,6 +3653,7 @@ function onServer(msg) {
   if (msg.t === 'mtick' || msg.t === 'mhist' || msg.t === 'mdetail' || msg.t === 'usage') return onMetrics(msg);
   if (msg.t?.startsWith('bv_')) return window.bvOnServer?.(msg); // the live browser view (browser.js)
   if (msg.t === 'oprojects') { applyProjectOrder(msg.order || []); renderConvoList(); return renderOrchBar(); }
+  if (msg.t === 'oactivity') { applyActivity(msg.projects || []); return renderConvoList(); }
   if (['otask', 'oproject', 'ostate', 'orun', 'oorder', 'olane'].includes(msg.t)) return onOrch(msg);
   if (msg.t === 'connections') return msg.node ? applyRemote(msg.node, msg.connections) : applyConnections(msg.connections);
   if (msg.t === 'cluster') {

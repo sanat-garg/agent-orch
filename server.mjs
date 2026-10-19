@@ -224,7 +224,7 @@ const NO_ORCH_MODE = "Your admin hasn't given you Orchestrator Mode";
 // settings, extensions, the terminal, stats, the server's GitHub sign-in, Browser, approvals and everyone else's work stay the admin's. → an error for a 403, or null.
 const USER_PATHS = new Set(['/api/status', '/api/version', '/api/me', '/api/me/github', '/api/me/github/device', '/api/me/github/token',
   '/api/github', '/api/github/repos', '/api/projects/import', '/api/agents', '/api/convos', '/api/projects', '/api/folders', '/api/uploads',
-  '/api/orch/rigor-levels', '/api/orch/cron-preview', '/api/orch/schedules', '/api/orch/projects/reorder', '/api/metrics', '/api/metrics/history', '/api/away', '/api/orch/digest']);
+  '/api/orch/rigor-levels', '/api/orch/cron-preview', '/api/orch/schedules', '/api/metrics', '/api/metrics/history', '/api/away', '/api/orch/digest']);
 const absolutePath = (v) => (Array.isArray(v) ? v.some(absolutePath) : typeof v === 'string' && (path.isAbsolute(v) || v.startsWith('~')));
 function userBlocked(req, url, u) {
   const p = url.pathname;
@@ -261,6 +261,7 @@ function forClient(ws, msg) {
     case 'oorder': return mine(orch?.pathOf('project', msg.project_id)) ? msg : null;
     case 'olane': return mine(orch?.pathOf('task', msg.taskId)) ? msg : null;
     case 'oprojects': return { ...msg, order: (msg.order || []).filter((p) => mine(p.path)) };
+    case 'oactivity': return { ...msg, projects: (msg.projects || []).filter((p) => mine(p.path)) };
     default: return USER_MSGS.has(msg.t) ? msg : null;
   }
 }
@@ -305,11 +306,14 @@ function checkFallbacks(v) {
 }
 function publicConvo(c) {
   const rt = runtimes.get(c.id);
-  // project: its orchestrator project's {id, position, priority} (the sidebar's drag order) on the folder's main chat
-  // (mainId: that chat's id), null for a plain chat and for a project's other chats.
+  // project: its orchestrator project's {id, position, priority, lastActivityAt} on the folder's main chat (mainId: that
+  // chat's id), null for a plain chat and for a project's other chats. lastActivityAt (epoch ms, the sidebar's order):
+  // the orchestrator's (tasks, events, messages) or the folder's latest chat message, whichever is later.
   const mainId = mainChatId(c.cwd);
+  let project = mainId === c.id ? orch?.projectRank(c.cwd) ?? null : null;
+  if (project) project = { ...project, lastActivityAt: Math.max(project.lastActivityAt ?? 0, ...convos.filter((x) => x.cwd === c.cwd).map((x) => x.updatedAt || 0)) || null };
   return { ...c, fallbacks: c.fallbacks ?? null, effort: c.effort ?? null, persona: c.persona ?? null, busy: !!rt?.busy || planning.has(c.id) || agentTurns.has(c.id),
-    mainId, project: mainId === c.id ? orch?.projectRank(c.cwd) ?? null : null, preview: previews.view(c.cwd) };
+    mainId, project, preview: previews.view(c.cwd) };
 }
 const planning = new Set(); // convo ids with an orchestrator planner turn in progress
 const agentTurns = new Map(); // convo id -> AbortController of a running non-Claude chat turn
@@ -2797,20 +2801,6 @@ async function handleRequest(req, res) {
     const body = req.method === 'PATCH' ? await readBody(req) : null;
     if (body && typeof body.text !== 'string') return json(res, 400, { error: 'text is required' });
     const r = orch.changeMessage(Number(om[1]), body ? body.text : null);
-    return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r);
-  }
-  // Sidebar drag order: POST {ids: [project id, …]}, top (highest priority) first. Sets positions and derives each
-  // project's priority from its place (90 → 10); every client gets the new order ('oprojects').
-  if (p === '/api/orch/projects/reorder' && req.method === 'POST') {
-    let ids = (await readBody(req)).ids;
-    // A user orders only their own projects, within the places they already hold: everyone else's keep theirs.
-    if (!isAdmin(me)) {
-      if (!Array.isArray(ids) || ids.some((id) => !ownsPath(me, orch.pathOf('project', id)))) return json(res, 403, { error: NOT_YOURS });
-      const all = orch.projectOrder().map((x) => x.id), theirs = all.filter((id) => ownsPath(me, orch.pathOf('project', id)));
-      const next = [...ids, ...theirs.filter((id) => !ids.includes(id))];
-      ids = all.map((id) => (theirs.includes(id) ? next.shift() : id));
-    }
-    const r = orch.reorderProjects(ids);
     return json(res, r.error ? r.status : 200, r.error ? { error: r.error } : r);
   }
   // Rigor levels 1-5 (#778) the owner picks per project ({rigor} in the project fields below), each with an example

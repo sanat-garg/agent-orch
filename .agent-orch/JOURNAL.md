@@ -1651,6 +1651,9 @@ Rigor slider with example card saves per project
 
 Per-project rigor 1-5 now shapes planner, reflection and top-up prompts
 
+## 2026-10-19 14:15 — #2230 Sidebar projects sorted by latest activity; remove priority drag order [done (check passed)]
+
+sidebar sorts by live activity with relative times, drag removed
 ## 2026-10-19 14:12 — #2232 Fix ui-static's stale restart-wording assertion [done (check passed)]
 
 ui-static assertion now matches updateBannerView restart wording
@@ -1664,3 +1667,7 @@ Queue shows 'Since you were away' digest card; tests pass
 ## 2026-10-19 14:22 — #2234 Task drawer: a Changes section with per-file counts and a coloured diff (ui) [done (check passed)]
 
 Task drawer shows a lazy-loaded, coloured Changes diff; tests pass
+
+## 2026-10-19 14:24 — #2248 Integrate #2230: Sidebar projects sorted by latest activity; remove priority drag order [done (check passed)]
+
+merge conflicts resolved; sidebar-activity, ui-static and digest tests pass

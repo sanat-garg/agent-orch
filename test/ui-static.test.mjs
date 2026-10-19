@@ -282,9 +282,7 @@ test('top-level function names are unique across the classic public/*.js scripts
     }
   }
   assert.deepEqual(dups, [], `duplicate top-level functions: ${dups.join('; ')}`);
-  // the sidebar project drag and the Queue sheet card drag each call their own mover
-  assert.match(appJs, /^function dragMove\(y\)/m);
-  assert.match(appJs, /liftCard\(card, y0\); dragMove\(ev\.clientY\)/);
+  // the Queue sheet card drag calls its own mover (the sidebar's project drag went in #2230)
   assert.match(appJs, /^function qDragMove\(\)/m);
   assert.match(appJs, /return qDragMove\(\);/);
 });

@@ -1307,9 +1307,35 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
   const taskUrl = (id) => `/#task-${id}`;
 
+  // ---- project activity (#2230; the sidebar sorts by it): epoch ms of a project's latest task created/started/finished,
+  // event (merges, planner and reflection runs log one) and owner message. One query loads every project's; from then
+  // logEvent, pushTask and deferMessage bump it in place, and each rise reaches clients (batched) as 'oactivity'
+  // {projects: [{id, path, at}]}.
+  const ACTIVITY_SQL = `SELECT a.project_id AS id, MAX(a.at) AS at FROM (
+      SELECT project_id, MAX(created_at, COALESCE(started_at, 0), COALESCE(finished_at, 0)) AS at FROM tasks
+      UNION ALL SELECT project_id, ts FROM events WHERE project_id IS NOT NULL
+      UNION ALL SELECT project_id, created_at FROM messages) a GROUP BY a.project_id`;
+  let activity = null, activityPush = new Set(), activityTimer = null;
+  const activityMap = () => (activity ??= new Map(qa(ACTIVITY_SQL).map((r) => [r.id, Math.round(r.at * 1000)])));
+  const lastActivity = (id) => activityMap().get(id) ?? null;
+  function touchActivity(projectId, ts = now()) {
+    const ms = Math.round(ts * 1000), m = activityMap();
+    if (projectId == null || (m.get(projectId) ?? 0) >= ms) return;
+    m.set(projectId, ms);
+    activityPush.add(projectId);
+    activityTimer ??= setTimeout(() => {
+      activityTimer = null;
+      const projects = [...activityPush].map((id) => ({ id, path: getProject(id)?.path, at: m.get(id) })).filter((p) => p.path);
+      activityPush = new Set();
+      if (projects.length) broadcast({ t: 'oactivity', projects });
+    }, 250);
+  }
+
   function logEvent(message, { level = 'info', projectId = null, taskId = null } = {}) {
+    const ts = now();
     run('INSERT INTO events(ts,level,project_id,task_id,message) VALUES(:ts,:l,:p,:t,:m)',
-      { ts: now(), l: level, p: projectId, t: taskId, m: message });
+      { ts, l: level, p: projectId, t: taskId, m: message });
+    touchActivity(projectId, ts);
     console.log(`[orchestrator] ${message}`);
     if (level === 'warn' && message.startsWith('waiting:')) notifyOwner({ title: 'agent-orch is waiting', body: message.slice(8).trim(), tag: 'waiting', url: '/' });
   }
@@ -1597,13 +1623,13 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       throw e;
     }
   }
-  // ---- project order. The owner drags projects in the sidebar; the top one matters most. Positions become 1..n and
+  // ---- project order (the sidebar sorts by activity since #2230 and no longer sets it). The top one matters most. Positions become 1..n and
   // priority is spread evenly from 90 (top) to 10 (bottom), so the scheduler's cross-project ranking (effective
   // priority, then position) follows the list. kv projects_ordered = '1' once the owner has set an order: from then on
   // new projects join at the bottom and the planner no longer changes project priority.
   const projectsInOrder = () => qa('SELECT * FROM projects ORDER BY position IS NULL, position, priority DESC, created_at, id');
   const rankPriority = (i, n) => (n > 1 ? Math.round(90 - (80 * i) / (n - 1)) : 90);
-  const projectOrderView = (rows = projectsInOrder()) => rows.map((p) => ({ id: p.id, path: p.path, position: p.position, priority: p.priority }));
+  const projectOrderView = (rows = projectsInOrder()) => rows.map((p) => ({ id: p.id, path: p.path, position: p.position, priority: p.priority, lastActivityAt: lastActivity(p.id) }));
   const projectsOrdered = () => kvGet('projects_ordered') === '1';
   function applyProjectOrder(order) {
     db.exec('BEGIN IMMEDIATE');
@@ -3160,6 +3186,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   // which the 'Saved…' notice carries (`msgId`) so the owner can edit or retract it while it is still pending.
   function deferMessage(projectId, text, selfId = 0, agent = null, model = null) {
     const msgId = text != null ? Number(run("INSERT INTO messages(project_id,content,created_at) VALUES(:p,:c,:t)", { p: projectId, c: text, t: now() }).lastInsertRowid) : null;
+    if (msgId != null) touchActivity(projectId);
     if (!q1("SELECT 1 AS x FROM tasks WHERE project_id=:p AND kind='plan' AND status IN ('queued','running') AND id!=:s", { p: projectId, s: selfId })) {
       addTask(projectId, { title: "Answer owner's message", prompt: '(pending chat messages)', kind: 'plan', source: 'user',
         agent: agent && agent !== 'claude' ? agent : null, model: agent && agent !== 'claude' ? model : null });
@@ -5004,8 +5031,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     if (r.phaseLog.length > 40) r.phaseLog.splice(1, r.phaseLog.length - 40);
   }
   function pushTask(id) {
-    const t = taskView(getTask(id));
+    const row = getTask(id), t = taskView(row);
     if (!t) return;
+    touchActivity(row.project_id, Math.max(row.created_at, row.started_at || 0, row.finished_at || 0));
     broadcast({ t: 'otask', task: t });
     pushProject(t.project_id);
   }
@@ -5160,7 +5188,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     drain, undrain, chatPlanning, applyUpdates: () => parallelSettings().applyUpdates,
     prepareRestart, resumeAfterRestart, restartBlocker, stateView, machines, browserTasks, setParallelSettings, limitResetFor, recordLimit: recordGovernor, reconcileCodexLimit, reconcileClaudeLimit, projectFor: (convo) => projectView(q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd })),
     // A sidebar chat's project rank ({id, position, priority}), or null when its folder has no orchestrator project.
-    projectRank: (cwd) => q1('SELECT id, position, priority FROM projects WHERE path=:p', { p: cwd }) ?? null,
+    projectRank: (cwd) => { const r = q1('SELECT id, position, priority FROM projects WHERE path=:p', { p: cwd }); return r ? { ...r, lastActivityAt: lastActivity(r.id) } : null; },
     projectChat: (cwd) => q1('SELECT convo_id FROM projects WHERE path=:p', { p: cwd })?.convo_id ?? null,
     // Every task id of a folder's project, for its main chat's token usage (chat-usage.mjs).
     taskIdsFor: (cwd) => qa('SELECT t.id FROM tasks t JOIN projects p ON p.id=t.project_id WHERE p.path=:p', { p: cwd }).map((r) => r.id),

@@ -13,3 +13,7 @@ Change the sidebar project list (public/app.js, app.css; plus the project list A
 ## Done when
 
 `node --test test/ui-sidebar-activity*.test.mjs` passes (newest-first order, live re-sort on activity, relative time shown, no drag handlers), and `! grep -n 'Drag to set priority' public/app.js`
+
+## Result — done (check passed) (2026-10-19 14:15)
+
+AGENT-ORCH-STATUS: done — sidebar sorts by live activity with relative times, drag removed

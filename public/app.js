@@ -852,6 +852,7 @@ function convoMenu(c, anchor) {
   const sub = isSubChat(c), others = state.convos.filter((x) => x.cwd === c.cwd && x.id !== c.id).length;
   const fresh = el('button', '', 'New chat in this project');
   const rename = el('button', '', 'Rename');
+  const usage = el('button', '', 'Token usage');
   const merge = el('button', '', sub ? 'Merge into the main chat' : `Merge ${others === 1 ? 'its other chat' : `its ${others} other chats`} into this one`);
   const archive = el('button', '', c.archived ? 'Unarchive project' : 'Archive project');
   const del = el('button', 'danger', 'Delete');
@@ -879,8 +880,10 @@ function convoMenu(c, anchor) {
     const title = prompt(sub ? 'Rename chat' : 'Rename project (the folder keeps its name)', c.title);
     if (title && title.trim()) await api(`/api/convos/${c.id}`, 'PATCH', { title });
   };
+  // Opens the chat too: the sheet (tokens.js) is always the open chat's.
+  usage.onclick = () => { m.remove(); if (state.cid !== c.id) openConvo(c.id); closeSidebar(); setView('chat'); window.Tokens?.open(); };
   del.onclick = () => { m.remove(); deleteModal(c); };
-  m.append(fresh, rename, ...(others ? [merge] : []), archive, del);
+  m.append(fresh, rename, usage, ...(others ? [merge] : []), archive, del);
   document.body.append(m);
   const r = anchor.getBoundingClientRect();
   m.style.top = `${Math.min(r.bottom + 4, innerHeight - 100)}px`;

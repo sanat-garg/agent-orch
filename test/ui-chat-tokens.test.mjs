@@ -1,7 +1,7 @@
 // The top bar's token pill and sheet (tokens.js, GET /api/convos/:id/usage) in a real browser: boots server.mjs
 // (CW_NO_ORCHESTRATOR=1, temp data dir) on a spare port with a usage log holding this chat's turns, its project's task
 // runs and a weekly reading. The pill shows the chat's tokens and its share of a full week; the sheet shows tiles, each
-// weekly window, the models and the project's tasks; a chat with no tokens shows no pill; on a phone the pill lives in
+// weekly window, the models and the project's tasks; a chat with no tokens shows no pill; the sidebar ⋯ opens a chat\'s sheet; on a phone the pill lives in
 // the title menu. TK_SHOTS=<dir> saves screenshots there. Skips when Playwright's Chromium can't launch.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -150,10 +150,17 @@ test('the pill shows the chat\'s tokens and share of a week; the sheet breaks it
   }
 });
 
-test('a chat with no tokens shows no pill; on a phone the pill lives in the title menu', { skip, timeout: 60000 }, async () => {
+test('a chat with no tokens shows no pill; the sidebar ⋯ opens a chat\'s sheet; on a phone the pill lives in the title menu', { skip, timeout: 60000 }, async () => {
   let { ctx, page, errors } = await open(CID2);
   await page.waitForTimeout(800);
   assert.equal(await page.locator('#tokLink').isHidden(), true);
+  // The sidebar ⋯ of another chat opens that chat and its sheet.
+  const row = page.locator('.convo', { hasText: 'Web' });
+  await row.hover();
+  await row.locator('button.more').click();
+  await page.locator('.convo-menu button', { hasText: 'Token usage' }).click();
+  await page.locator('#tokModal .tk-week').first().waitFor();
+  assert.equal(await page.evaluate(() => state.cid), CID);
   assert.deepEqual(errors, []);
   await ctx.close();
   ({ ctx, page, errors } = await open(CID, { viewport: { width: 390, height: 844 } }));

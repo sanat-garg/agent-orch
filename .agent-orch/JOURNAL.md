@@ -1768,3 +1768,10 @@ Command: npm test -- test/ui-persona-copy.test.mjs
 ## 2026-10-19 16:12 — #2273 Copy a persona into an editable new draft, with tests (ui) [done (check passed)]
 
 Persona copy test passes in 11s; earlier timeout was lock queueing
+## 2026-10-19 16:00 — #2283 Credentials: generate a strong secret in the editor, with tests (ui) [verify failed (1)]
+
+Command: npm test -- test/ui-credentials-generate.test.mjs
+
+## 2026-10-19 16:13 — #2283 Credentials: generate a strong secret in the editor, with tests (ui) [done (check passed)]
+
+Generate menu fills credentials with crypto-random secrets; tests pass

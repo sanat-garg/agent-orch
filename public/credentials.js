@@ -5,7 +5,9 @@
 // tapped (eye), every value copies with one tap, and "Copy .env" copies the whole service as KEY=value lines. Projects
 // add a card of their own .env keys by themselves (s.auto = the project, labelled under the name). The
 // editor (in place of the list) takes fields one by one or pasted .env lines. Everything is dropped from the page when
-// the sheet closes. Loaded after app.js and uses its helpers ($, el, api, toast, coarse, closeSidebar, copyToClipboard).
+// the sheet closes. Each value in the editor has a Generate menu (crypto.getRandomValues) for new secrets such as
+// SESSION_SECRET. Loaded after app.js and uses its helpers ($, el, api, toast, coarse, closeSidebar, copyToClipboard,
+// bindMenu, menuOpt).
 (() => {
   const CR = { list: [], loaded: false, error: '', edit: null, shown: new Set(), q: '', lastFocus: null };
   const ICON = {
@@ -15,6 +17,7 @@
     edit: '<path d="M4.5 19.5l1-4L15.8 5.2a2 2 0 0 1 2.8 0l.2.2a2 2 0 0 1 0 2.8L8.5 18.5z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/>',
     env: '<path d="M7 8l-4 4 4 4M17 8l4 4-4 4M13.5 5.5l-3 13" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>',
     x: '<path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+    dice: '<rect x="3.5" y="3.5" width="17" height="17" rx="4" fill="none" stroke="currentColor" stroke-width="1.9"/><circle cx="8.5" cy="8.5" r="1.4" fill="currentColor"/><circle cx="15.5" cy="8.5" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="8.5" cy="15.5" r="1.4" fill="currentColor"/><circle cx="15.5" cy="15.5" r="1.4" fill="currentColor"/>',
   };
   const svg = (name, size = 18) => `<svg viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true">${ICON[name]}</svg>`;
   const btn = (cls, text, onclick) => { const b = el('button', cls, text); b.type = 'button'; if (onclick) b.onclick = onclick; return b; };
@@ -38,6 +41,22 @@
     }
     return out;
   }
+  // Strong secrets for a new key: alphanumeric (default), hex or a password with symbols. Each character is drawn
+  // with rejection sampling from crypto.getRandomValues, so every character is equally likely (never Math.random).
+  const GEN = {
+    alnum: { label: '32 letters and digits', hint: 'A–Z a–z 0–9', len: 32, chars: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789' },
+    hex: { label: '64 hex digits', hint: '0–9 a–f', len: 64, chars: '0123456789abcdef' },
+    password: { label: '24-character password', hint: 'with symbols', len: 24, chars: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()-_=+[]{}<>?' },
+  };
+  function generateSecret(kind = 'alnum') {
+    const { len, chars } = GEN[kind] || GEN.alnum, limit = 256 - (256 % chars.length);
+    let out = '';
+    while (out.length < len) {
+      const bytes = crypto.getRandomValues(new Uint8Array(len * 2));
+      for (const b of bytes) { if (b < limit && out.length < len) out += chars[b % chars.length]; }
+    }
+    return out;
+  }
 
   async function load() {
     try { CR.list = (await api('/api/credentials')).services; CR.loaded = true; CR.error = ''; } catch (e) { CR.error = e.message; }
@@ -58,6 +77,7 @@
     Object.assign(CR, { list: [], loaded: false, edit: null, q: '' });
     CR.shown.clear();
     $('crBody').replaceChildren();
+    for (const m of $('credModal').querySelectorAll('.cr-genmenu')) m.remove();
     CR.lastFocus?.focus?.();
   }
 
@@ -69,6 +89,7 @@
   function render() {
     if ($('credModal').hidden || CR.edit) return;
     const body = $('crBody');
+    for (const m of $('credModal').querySelectorAll('.cr-genmenu')) m.remove();
     const top = el('div', 'cr-top');
     const add = btn('btn small primary', 'Add service', () => startEdit(null));
     if (CR.list.length > 3) {
@@ -189,7 +210,22 @@
       hideBox.append(cb, document.createTextNode('Secret'));
       hideBox.title = 'Show as dots until tapped';
       const eye = iconBtn('cr-icon', 'eye', 'Show the value', () => { peek = !peek; sync(); });
-      const del = iconBtn('cr-icon cr-del', 'x', 'Remove this field', () => { r.remove(); if (!rows.children.length) addRow(); });
+      // Generate: a menu of secret shapes; the new value shows in clear until saved (nothing is sent before Save).
+      const gen = btn('cr-gen', null, null);
+      gen.innerHTML = `${svg('dice', 16)}<span>Generate</span>`;
+      gen.title = 'Fill with a strong random secret'; gen.setAttribute('aria-haspopup', 'listbox'); gen.setAttribute('aria-expanded', 'false');
+      const genMenu = el('div', 'cmenu cr-genmenu');
+      genMenu.hidden = true; genMenu.setAttribute('role', 'listbox'); genMenu.setAttribute('aria-label', 'Generate a secret');
+      $('credModal').append(genMenu);
+      bindMenu(gen, genMenu, (menu) => {
+        for (const [k, g] of Object.entries(GEN)) menu.append(menuOpt(g.label, { value: k, hint: g.hint, selected: k === 'alnum' }));
+      }, (kind) => {
+        if (val.value && !confirm('Replace the current value?')) return;
+        val.value = generateSecret(kind);
+        peek = true; r.dataset.touched = '1'; sync();
+        val.focus();
+      });
+      const del = iconBtn('cr-icon cr-del', 'x', 'Remove this field', () => { r.remove(); genMenu.remove(); if (!rows.children.length) addRow(); });
       const sync = () => {
         val.type = secret && !peek ? 'password' : 'text';
         eye.hidden = !secret;
@@ -202,7 +238,7 @@
       r.read = () => ({ label: lab.value, value: val.value, secret });
       const v = el('div', 'cr-vwrap');
       v.append(val, eye);
-      r.append(lab, v, hideBox, del);
+      r.append(lab, v, gen, hideBox, del);
       rows.append(r);
       return lab;
     };
@@ -261,10 +297,10 @@
   $('credBtn').addEventListener('click', open);
   $('credModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) close(); });
   document.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape' || $('credModal').hidden) return;
+    if (e.key !== 'Escape' || $('credModal').hidden || CM.open) return; // an open Generate menu takes Escape itself
     e.stopImmediatePropagation();
     if (CR.edit) { document.activeElement?.blur?.(); CR.edit = null; render(); } else close();
   }, true);
 
-  window.Credentials = { open, parseEnv, envLine };
+  window.Credentials = { open, parseEnv, envLine, generateSecret };
 })();

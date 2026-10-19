@@ -4,10 +4,12 @@
 // divided by the reading's percent. The chat's tokens over that size say how much of a week it used: this week (its
 // turns since the window began) and over its whole life (usage.mjs lifetime totals).
 //   chatUsage({usageLog, refs: [{source, ref}], tasks: [{source, ref}], agents, now})
-//     → {chat: Sum, tasks: Sum|null, weeks: [{agent, window, label, pct, resetsAt, readAt, size, week, life, tasksWeek, tasksLife}]}
+//     → {chat: Sum, tasks: Sum|null, weeks: [{agent, window, label, pct, resetsAt, readAt, size, week, life, tasksWeek, tasksLife}],
+//        recent: {since, until, chat: Sum, tasks: Sum|null}}
 //   Sum: {input, output, cached, turns, first, last, models: [{agent, model, input, output, cached, turns}]}
 //   size: estimated weighted tokens of the whole window, or null while the reading is too small to scale up (< MIN_PCT);
 //   week/life (and the tasks' pair): the chat's percent of one full window.
+//   recent: the same sums over only the turns recorded in the rolling seven days since..until (now - WEEK_MS .. now).
 import { tokenWeight, windowCovers, windowName, isWeekly, WEEK_MS } from './users.mjs';
 
 export const MIN_PCT = 2; // below this a reading's rounding swamps the estimate
@@ -26,6 +28,19 @@ export function sumTotals(entries) {
   }
   out.models = [...by.values()].sort((a, b) => tokenWeight(b) - tokenWeight(a));
   return out;
+}
+
+// Tokens records (usage.mjs) summed into one Sum, as if they were one ref's lifetime totals.
+export function sumRecords(records) {
+  const e = { first: null, last: null, models: {} };
+  for (const r of records) {
+    e.first = e.first == null ? r.t : Math.min(e.first, r.t);
+    e.last = e.last == null ? r.t : Math.max(e.last, r.t);
+    const m = (e.models[`${r.agent}/${r.model || ''}`] ??= { input: 0, output: 0, cached: 0, turns: 0 });
+    for (const f of ['input', 'output', 'cached']) m[f] += Number(r[f]) || 0;
+    m.turns++;
+  }
+  return sumTotals(records.length ? [e] : []);
 }
 
 export function chatUsage({ usageLog, refs, tasks = null, agents = ['claude', 'codex'], now = Date.now() }) {
@@ -62,5 +77,7 @@ export function chatUsage({ usageLog, refs, tasks = null, agents = ['claude', 'c
       });
     }
   }
-  return { chat, tasks: taskSum, weeks };
+  const since = now - WEEK_MS, inRange = records.filter((r) => r.t <= now), of = (set) => inRange.filter((r) => set.has(`${r.source}:${r.ref}`));
+  const recent = { since, until: now, chat: sumRecords(of(mine)), tasks: tasks ? sumRecords(of(theirs)) : null };
+  return { chat, tasks: taskSum, weeks, recent };
 }

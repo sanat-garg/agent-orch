@@ -13,3 +13,7 @@ Add an All time / Last 7 days selector inside the existing Token usage sheet. In
 ## Done when
 
 `npm test -- test/chat-usage.test.mjs test/ui-token-range.test.mjs test/ui-chat-tokens.test.mjs` passes.
+
+## Result — done (check passed) (2026-10-19 14:36)
+
+AGENT-ORCH-STATUS: done — Token usage sheet has an All time / Last 7 days switch; tests pass

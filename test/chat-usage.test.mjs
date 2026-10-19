@@ -71,3 +71,43 @@ test('a chat is compared with each weekly window, sized from the reading', () =>
   assert.equal(sub.tasks, null);
   assert.deepEqual(sub.weeks.map((w) => w.window), ['seven_day']);
 });
+
+test('recent totals cover only the supplied refs\' turns from now minus seven days through now', () => {
+  const dir = tmp();
+  const now = Date.UTC(2026, 9, 19, 12);
+  let t = now - 7 * D - 1; // just outside the interval: lifetime only
+  const log = createUsageLog(dir, { now: () => t });
+  log.tokens('claude', claude(1, 1), 'chat', 'c1', { model: 'opus' });
+  t = now - 7 * D; // the interval's first millisecond
+  log.tokens('claude', claude(100, 10, 1000), 'chat', 'c1', { model: 'opus' });
+  t = now - D;
+  log.tokens('codex', { input_tokens: 40, output_tokens: 4 }, 'chat', 'c1', { model: 'gpt-5' });
+  log.tokens('claude', claude(9000, 900), 'chat', 'other', { model: 'opus' }); // unrelated chat
+  log.tokens('claude', claude(8000, 800), 'task', 99, { model: 'opus' }); // unrelated task
+  log.tokens('claude', claude(20, 2), 'task', 5, { model: 'fable' });
+  t = now; // the interval's last millisecond
+  log.tokens('claude', claude(3, 0), 'chat', 'c1', { model: 'opus' });
+  t = now + 1; // after `now`: outside
+  log.tokens('claude', claude(5000, 0), 'chat', 'c1', { model: 'opus' });
+  log.tokens('claude', claude(5000, 0), 'task', 5, { model: 'fable' });
+
+  const r = chatUsage({ usageLog: log, refs: [{ source: 'chat', ref: 'c1' }], tasks: [{ source: 'task', ref: 5 }], now });
+  assert.equal(r.recent.since, now - 7 * D);
+  assert.equal(r.recent.until, now);
+  assert.deepEqual([r.recent.chat.input, r.recent.chat.output, r.recent.chat.cached, r.recent.chat.turns], [143, 14, 1000, 3]);
+  assert.equal(r.recent.chat.first, now - 7 * D);
+  assert.equal(r.recent.chat.last, now);
+  assert.deepEqual(r.recent.chat.models.map((m) => [m.agent, m.model, m.input, m.turns]), [['claude', 'opus', 103, 2], ['codex', 'gpt-5', 40, 1]]);
+  assert.deepEqual([r.recent.tasks.input, r.recent.tasks.output, r.recent.tasks.turns], [20, 2, 1]);
+  assert.deepEqual(r.recent.tasks.models.map((m) => m.model), ['fable']);
+  // The lifetime fields are unchanged: every turn, inside the interval or not.
+  assert.equal(r.chat.turns, 5);
+  assert.equal(r.chat.input, 5144);
+  assert.equal(r.tasks.turns, 2);
+
+  // No tasks supplied: no recent task totals. A chat with nothing recent has an empty recent Sum.
+  assert.equal(chatUsage({ usageLog: log, refs: [{ source: 'chat', ref: 'c1' }], now }).recent.tasks, null);
+  const quiet = chatUsage({ usageLog: log, refs: [{ source: 'chat', ref: 'c1' }], tasks: [], now: now + 30 * D });
+  assert.deepEqual(quiet.recent.chat, { input: 0, output: 0, cached: 0, turns: 0, first: null, last: null, models: [] });
+  assert.equal(quiet.recent.tasks.turns, 0);
+});

@@ -3,10 +3,12 @@
 // The top bar's token pill: how many tokens the open chat has used, and how much of a weekly plan limit that is.
 // Its sheet breaks it down: this week and all time against each weekly window the account reports (Claude's
 // all-models week, per-model weeks such as Fable, codex's week), tokens by model and, on a project's main chat, its
-// tasks. Refetched when the chat changes, after each reply (debounced) and when one of the project's tasks finishes.
+// tasks. All time / Last 7 days switches the totals, model tables and task totals between lifetime sums and the rolling
+// seven days (the server's `recent`); the pill and the weekly-limit estimates always stay as they are. Refetched when the chat changes, after each reply (debounced) and when one of the project's tasks finishes.
 // Loaded after app.js and uses its helpers ($, el, api, state, O, fmtTok, fmtResetAt, modelName, relTime, coarse).
 (() => {
-  const TK = { cid: null, data: null, error: '', seq: 0, timer: null, lastFocus: null };
+  const TK = { cid: null, data: null, error: '', seq: 0, timer: null, lastFocus: null, range: 'all' };
+  const RANGES = [['all', 'All time'], ['week', 'Last 7 days']];
   const total = (s) => (s ? s.input + s.output + s.cached : 0);
   const pctText = (n) => (n == null ? '?' : n < 0.1 && n > 0 ? '<0.1%' : `${n >= 10 ? Math.round(n) : n.toFixed(1)}%`);
   // The pill's comparison: the account-wide week of the agent this chat used most.
@@ -33,7 +35,7 @@
   function sync() {
     const cid = state.cid || null;
     if (cid !== TK.cid) {
-      Object.assign(TK, { cid, data: null, error: '' });
+      Object.assign(TK, { cid, data: null, error: '', range: 'all' });
       clearTimeout(TK.timer);
       if (cid) load();
       else close();
@@ -119,28 +121,51 @@
     return t;
   }
   const label = (text) => el('h3', 'tk-label', text);
+  const day = (t) => new Date(t).toLocaleDateString([], { day: 'numeric', month: 'short' });
+  const when = (t) => new Date(t).toLocaleString([], { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+  function rangePicker() {
+    const seg = el('span', 'seg-sm tk-range');
+    seg.setAttribute('role', 'group');
+    seg.setAttribute('aria-label', 'Token usage period');
+    for (const [v, text] of RANGES) {
+      const b = el('button', '', text);
+      b.type = 'button';
+      b.dataset.range = v;
+      b.setAttribute('aria-pressed', String(v === TK.range));
+      b.addEventListener('click', () => { if (v !== TK.range) { TK.range = v; render(); } });
+      seg.append(b);
+    }
+    return seg;
+  }
 
   function render() {
     if ($('tokModal').hidden) return;
     const body = $('tkBody'), d = TK.data;
     if (!d) {
       $('tkSub').textContent = '';
-      body.replaceChildren(el('p', 'tk-note', TK.error ? `Couldn't load token usage: ${TK.error}` : 'Loading…'));
+      body.replaceChildren(el('p', TK.error ? 'tk-note tk-err' : 'tk-note', TK.error ? `Couldn't load token usage: ${TK.error}` : 'Loading…'));
       return;
     }
-    const s = d.chat;
-    $('tkSub').textContent = s.turns ? `This chat · ${s.turns} ${s.turns === 1 ? 'reply' : 'replies'} since ${new Date(s.first).toLocaleDateString([], { day: 'numeric', month: 'short' })}` : 'This chat';
+    const week = TK.range === 'week' && !!d.recent, s = week ? d.recent.chat : d.chat, tasks = week ? d.recent.tasks : d.tasks;
+    const replies = (n) => `${n} ${n === 1 ? 'reply' : 'replies'}`;
+    $('tkSub').textContent = week ? `This chat · ${s.turns ? `${replies(s.turns)} in the last 7 days` : 'last 7 days'}`
+      : s.turns ? `This chat · ${replies(s.turns)} since ${day(s.first)}` : 'This chat';
     const out = [];
-    if (!s.turns) out.push(el('p', 'tk-note', 'No tokens recorded for this chat yet.'));
+    const bar = el('div', 'tk-rangebar');
+    bar.append(rangePicker());
+    if (week) bar.append(el('span', 'tk-span', `Rolling 7 days: ${when(d.recent.since)} – now`));
+    out.push(bar);
+    if (TK.error) out.push(el('p', 'tk-note tk-err', `Couldn't refresh token usage: ${TK.error}`));
+    if (!s.turns) out.push(el('p', 'tk-note tk-empty', week ? 'No tokens recorded for this chat in the last 7 days.' : 'No tokens recorded for this chat yet.'));
     else out.push(tiles(s));
+    if (s.models.length > 1) out.push(label(week ? 'By model · last 7 days' : 'By model'), modelTable(s));
+    if (tasks && tasks.turns) {
+      out.push(label(`This project's tasks · ${tasks.turns} ${tasks.turns === 1 ? 'run' : 'runs'}${week ? ' in the last 7 days' : ''}`), tiles(tasks));
+      if (tasks.models.length > 1) out.push(modelTable(tasks));
+    } else if (week && d.tasks?.turns) out.push(label("This project's tasks"), el('p', 'tk-note tk-empty', 'No task runs recorded in the last 7 days.'));
     out.push(label('Against your weekly limits'));
     if (d.weeks.length) out.push(...d.weeks.map(weekRow));
     else out.push(el('p', 'tk-note', 'No weekly reading yet. Refresh the plan limits on the usage card, then reopen this.'));
-    if (s.models.length > 1) out.push(label('By model'), modelTable(s));
-    if (d.tasks && d.tasks.turns) {
-      out.push(label(`This project's tasks · ${d.tasks.turns} ${d.tasks.turns === 1 ? 'run' : 'runs'}`), tiles(d.tasks));
-      if (d.tasks.models.length > 1) out.push(modelTable(d.tasks));
-    }
     const sized = d.weeks.find((w) => w.size);
     out.push(el('p', 'tk-foot', 'Estimated. The CLIs report weekly limits only as a percent, so agent-orch sizes a full week from the tokens it '
       + 'recorded this week up to that reading (cache reads count a tenth, output five times)'

@@ -1,4 +1,4 @@
-/* Token usage (tokens.js): the top bar pill and its sheet (tiles, a bar per weekly window, the by-model table). */
+/* Token usage (tokens.js): the top bar pill and its sheet (the period picker, tiles, the by-model table, a bar per weekly window). */
 .tk-link { gap: 6px; cursor: pointer; font: inherit; font-size: 12px; }
 .tk-pct { color: var(--text); font-weight: 600; }
 .tk-pct::before { content: '·'; margin-right: 6px; color: var(--faint); font-weight: 400; }
@@ -6,6 +6,9 @@
 .modal-panel.tkm { width: min(620px, 100%); }
 .tk-label { margin: 18px 0 8px; font-size: 12px; font-weight: 650; letter-spacing: .02em; text-transform: uppercase; color: var(--faint); }
 .tk-note { margin: 4px 0 0; font-size: 13px; color: var(--muted); line-height: 1.4; }
+.tk-err { color: var(--danger); }
+.tk-rangebar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin-bottom: 12px; }
+.tk-span { font-size: 12px; color: var(--muted); }
 .tk-foot { margin: 20px 0 4px; font-size: 12px; color: var(--faint); line-height: 1.45; }
 
 .tk-tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
@@ -34,6 +37,7 @@
 .tk-models th:first-child, .tk-models td:first-child { text-align: left; padding-left: 0; }
 .tk-models tr:last-child td { border-bottom: 0; }
 
+@media (pointer: coarse) { .tk-range button { height: 44px; padding: 0 14px; } }
 @media (max-width: 767px) {
   .tk-tiles { grid-template-columns: repeat(2, 1fr); }
   .tk-models th:nth-child(4), .tk-models td:nth-child(4) { display: none; }

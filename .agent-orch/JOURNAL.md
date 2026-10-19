@@ -1725,3 +1725,7 @@ History sheet lists commits and shows coloured diffs; tests pass
 ## 2026-10-19 14:36 — #2265 Draft follow-up requests from changed files in the task drawer, with tests (ui) [done (check passed)]
 
 Changed files can now add follow-up notes to the project chat draft, with tests passing
+
+## 2026-10-19 14:36 — #2266 Show the last seven days of chat token usage, with tests (ui) [done (check passed)]
+
+Token usage sheet has an All time / Last 7 days switch; tests pass

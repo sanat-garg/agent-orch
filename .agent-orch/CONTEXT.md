@@ -17,6 +17,7 @@ _What the code doesn't say. Per-area rules (chats, users, files, previews, sched
 - Times: events carry `until` (epoch s) and the browser formats them (`withUntil`); the server never formats times except in logs.
 - Mobile follows Apple's HIG (apple-design skill): 44px targets and 16px fields in `@media (pointer: coarse)`, phone layout in `public/phone.css` (loaded last), modals need `grid-template-columns: minmax(0, 100%)`, filled buttons use `--accent-strong` (contrast test ≥ 4.5:1). Phones never auto-focus #input.
 - AUDIT.md items get `**Fixed**` + a one-line note; UI-REVIEW.md rows are marked fixed in place.
+- Zen mode (app.js setZen, `.zen` on #app, localStorage `cw.zen` = start ms): `toast()` returns a detached no-op while in Zen and finish/approval sounds are skipped, so new notices need no Zen check of their own; owner-needed items surface only via `renderZenQuiet` (#zenQuiet). Zen CSS must not add a `.topbar {` rule (ui-static counts them): target `.app.zen .main > header`.
 - macOS shell scripts must parse under bash 3.2 (test/install-macos-bash32.test.mjs).
 
 ## Decisions

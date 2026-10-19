@@ -1651,6 +1651,9 @@ Rigor slider with example card saves per project
 
 Per-project rigor 1-5 now shapes planner, reflection and top-up prompts
 
+## 2026-10-19 14:19 — #2231 Zen mode: a distraction-free coding view [done (check passed)]
+
+Zen mode added; ui-zen tests pass; three older UI test failures unchanged
 ## 2026-10-19 14:15 — #2230 Sidebar projects sorted by latest activity; remove priority drag order [done (check passed)]
 
 sidebar sorts by live activity with relative times, drag removed
@@ -1671,3 +1674,7 @@ Task drawer shows a lazy-loaded, coloured Changes diff; tests pass
 ## 2026-10-19 14:24 — #2248 Integrate #2230: Sidebar projects sorted by latest activity; remove priority drag order [done (check passed)]
 
 merge conflicts resolved; sidebar-activity, ui-static and digest tests pass
+
+## 2026-10-19 14:25 — #2257 Integrate #2231: Zen mode: a distraction-free coding view [done (check passed)]
+
+CONTEXT.md conflict resolved; all Zen tests pass

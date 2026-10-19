@@ -2374,3 +2374,45 @@ button.dg-row:disabled { opacity: .6; cursor: progress; }
 .dl-go:not(:disabled):hover { background: var(--danger); color: #fff; border-color: var(--danger); }
 .dl-go:disabled { opacity: .5; cursor: not-allowed; }
 @media (max-width: 800px) { .modal-panel.dlm { width: 100%; } } /* a bottom sheet (.modal.sheet) */
+
+/* ---------- Zen mode (app.js setZen): only the current view, calmer chrome, nothing that pings ---------- */
+.zen-btn { flex: none; height: 30px; padding: 0 12px; border: 1px solid var(--border); border-radius: 999px; background: transparent;
+  color: var(--muted); font: inherit; font-size: 13px; font-weight: 550; cursor: pointer; }
+.zen-btn:hover { color: var(--text); border-color: var(--border-strong); }
+.zen-hint, .zen-quiet, .zen-hint .zh-tap { display: none; }
+.app.zen .zen-hint { display: inline-flex; align-items: center; flex: none; padding: 4px 8px; border: 0; border-radius: 6px; background: none;
+  color: var(--faint); font: inherit; font-size: 12px; letter-spacing: .02em; white-space: nowrap; opacity: .75; cursor: pointer; }
+.app.zen .zen-hint:hover { opacity: 1; background: var(--raised); }
+.app.zen .zen-quiet:not([hidden]) { display: block; flex: none; align-self: center; max-width: calc(100% - 32px); margin: 4px auto 0; padding: 4px 12px;
+  border: 0; border-radius: 999px; background: transparent; color: var(--warn); font: inherit; font-size: 12.5px; cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.app.zen .zen-quiet:hover { background: var(--raised); }
+.app.zen #orchBar, .app.zen #updateBanner, .app.zen #cwdLabel, .app.zen #repoLink, .app.zen #previewLink, .app.zen #shotsLink,
+.app.zen #tokLink, .app.zen #zenBtn, .app.zen #openSidebar, .app.zen #topAction, .app.zen .scrim, .app.zen #viewMenuMore { display: none !important; }
+.app.zen ~ .toasts { display: none; }
+/* The sidebar (server, usage and machines cards, the version label) slides away; phones already keep it off-canvas. */
+.sidebar { transition: transform .2s ease, margin-left .2s ease, opacity .2s ease, visibility .2s; }
+.app.zen .sidebar { margin-left: -272px; opacity: 0; visibility: hidden; pointer-events: none; }
+.topbar, .topbar .seg, .top-title #title, .messages, .working, .composer .box { transition: height .2s ease, opacity .2s ease, color .2s ease,
+  background-color .2s ease, border-color .2s ease, box-shadow .2s ease, max-width .2s ease, padding .2s ease; }
+.app.zen .main > header { border-bottom-color: transparent; }
+.app.zen .top-title #title { color: var(--muted); font-weight: 550; }
+.app.zen .topbar .seg { background: transparent; border-color: transparent; opacity: .7; }
+.app.zen .topbar .seg:hover, .app.zen .topbar .seg:focus-within { opacity: 1; }
+.app.zen .topbar .seg button[aria-selected="true"] { box-shadow: none; background: var(--raised); }
+/* Chat reads at ~760px with more air; Files and Terminal keep the full width. */
+.app.zen .messages, .app.zen .working, .app.zen .composer .box { max-width: 760px; }
+.app.zen .messages { padding-top: 40px; }
+.app.zen .composer .box:not(:focus-within) { box-shadow: none; border-color: var(--border); }
+@media (max-width: 767px) {
+  .zen-btn { display: none; }
+  .app.zen .zen-hint .zh-key { display: none; }
+  .app.zen .zen-hint .zh-tap { display: inline; }
+  /* The title stays centred: equal side columns, the way out in the right one. */
+  .app.zen .main > header { grid-template-columns: 76px minmax(0, 1fr) 76px; }
+  .app.zen .zen-hint { grid-column: 3; justify-content: center; }
+}
+@media (pointer: coarse) { .app.zen .zen-hint { min-height: 44px; } }
+@media (prefers-reduced-motion: reduce) {
+  .sidebar, .topbar, .topbar .seg, .top-title #title, .messages, .working, .composer .box { transition: none; }
+}

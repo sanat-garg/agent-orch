@@ -104,6 +104,8 @@ const state = {
 const pendingMsgs = new Map();
 
 // ---------- view toggle (Vibecode chat / Files / Terminal; Browser opens from Settings → Browser, not a tab) ----------
+// Zen's top line names the project whatever the view.
+const viewTitle = (view) => (view === 'term' && !zenOn() ? 'Terminal' : view === 'browser' && !zenOn() ? 'Browser' : currentTitle());
 function setView(view) {
   if (!['term', 'files', 'browser'].includes(view)) view = 'chat';
   $('app').dataset.view = view;
@@ -114,7 +116,7 @@ function setView(view) {
   $('filesView').hidden = view !== 'files';
   $('termView').hidden = view !== 'term';
   $('browserView').hidden = view !== 'browser';
-  $('title').textContent = view === 'term' ? 'Terminal' : view === 'browser' ? 'Browser' : currentTitle();
+  $('title').textContent = viewTitle(view);
   $('cwdLabel').textContent = view === 'term' ? '~/workspace · bash' : view === 'browser' ? '' : currentCwdLabel();
   if (view === 'browser') window.bxShow?.(); // public/browser.js
   else window.bxHide?.();
@@ -172,6 +174,7 @@ $('viewMenu').addEventListener('click', (e) => {
   else if (b.id === 'viewMenuPreview') $('previewLink').click();
   else if (b.id === 'viewMenuShots') $('shotsLink').click();
   else if (b.id === 'viewMenuTok') $('tokLink').click();
+  else if (b.id === 'viewMenuZen') setZen(!zenOn());
 });
 $('viewMenu').addEventListener('keydown', (e) => {
   const items = [...$('viewMenu').querySelectorAll('button')].filter((b) => b.offsetParent);
@@ -3599,7 +3602,7 @@ function observeTaskCompletion(t) {
     completionSound.done.add(t.id);
     if (!completionSound.synced || !previous || previous === 'done' || !['work', 'reflect'].includes(t.kind)) return;
   }
-  if (!$('stSound').checked) return; // plays whether this tab is focused or in the background
+  if (!$('stSound').checked || $('app')?.classList.contains('zen')) return; // plays whether this tab is focused or in the background; Zen mutes it
   // Several finishing within 3 s: each machine's sound once, in turn.
   const now = performance.now(), node = taskSoundNode(t);
   if (now - completionSound.window >= 3000) { completionSound.window = now; completionSound.heard.clear(); }
@@ -7634,10 +7637,12 @@ function onOrch(msg) {
   if (msg.t === 'olane') return caEvent(msg.taskId); // live lane activity: particles on the cluster diagram (no lanes in the Queue)
   if (msg.t === 'otask' || msg.t === 'ostate') scheduleMachines(); // running tasks per machine
   if (msg.t === 'otask') {
+    const prev = O.tasks.get(msg.task.id);
     caTask(msg.task);
     observeTaskCompletion(msg.task);
     if (FB.local?.url === `/api/orch/tasks/${msg.task.id}/fallbacks`) msg.task.fallbacks = FB.local.list; // a save still in flight
     O.tasks.set(msg.task.id, msg.task);
+    zenTask(prev, msg.task);
     syncAppBadge();
     syncSidebarRunning();
     renderUsage();
@@ -7655,7 +7660,9 @@ function onOrch(msg) {
       if (O.drawer === t.id) { renderDrawerHead(); scheduleDetail(); }
     }
     if (O.drawer === a.task && ACT.open) loadActions(a.task);
-    if (msg.kind === 'new') {
+    if (!t) msg.kind === 'new' ? ZEN.loose.set(a.id, a) : ZEN.loose.delete(a.id); // a task this page hasn't loaded
+    if (zenOn()) zenTask(null, t || { id: a.task, approvals: [a] });
+    else if (msg.kind === 'new') {
       toast(`#${a.task} needs your approval: ${a.action}`, { kind: 'warn', duration: 15000, action: 'Review', run: () => showTask(a.task) });
       if ($('stSound').checked) void playTaskSound();
     }
@@ -8884,6 +8891,7 @@ function queueTree(queued) {
 // swipe dismisses, and only the newest TOAST_MAX stay up.
 const TOAST_MAX = 3;
 function toast(msg, { kind = 'info', action, run, duration } = {}) {
+  if (zenOn()) return Object.assign(el('div'), { close() {} }); // Zen holds every toast (never shown, callers may still close it)
   const box = $('toasts');
   const t = el('div', `toast toast-${kind}`);
   t.setAttribute('role', kind === 'error' ? 'alert' : 'status');
@@ -9895,6 +9903,120 @@ document.addEventListener('visibilitychange', () => {
 });
 addEventListener('pagehide', markSeen);
 setInterval(() => { if (!document.hidden) markSeen(); }, 60e3);
+
+// ---------- Zen mode ----------
+// Ctrl/Cmd+. (or #zenBtn; phones: the title menu's #viewMenuZen) shows only the current view; the shortcut, Esc (when
+// nothing else claims it) or #zenHint leaves. Per device: localStorage cw.zen = when it began, so a reload stays in Zen.
+// While in Zen every toast and finish sound is held; what needs the owner (held approvals, tasks that failed since,
+// review checkpoints) is one quiet line (#zenQuiet) that opens the first. Server pushes already only carry those.
+// Leaving lists the work tasks that finished, failed or wait for the owner since it began (#zenModal); /api/away adds
+// finishes this page didn't see (a reload in between).
+const ZEN = { since: 0, done: new Map(), failed: new Map(), waiting: new Set(), loose: new Map() };
+function zenOn() { return $('app').classList.contains('zen'); }
+const zenNeedsYou = (t) => !!t && (t.status === 'awaiting_review' || !!t.approvals?.length);
+function setZen(on) {
+  if (on === zenOn()) return;
+  $('app').classList.toggle('zen', on);
+  $('zenBtn').setAttribute('aria-pressed', String(on));
+  $('viewMenuZen').textContent = on ? 'Exit Zen' : 'Zen mode';
+  $('title').textContent = viewTitle($('app').dataset.view);
+  if (on) {
+    ZEN.since = Number(store.get('cw.zen')) || Date.now();
+    store.set('cw.zen', String(ZEN.since));
+    ZEN.done.clear();
+    ZEN.failed.clear();
+    ZEN.waiting.clear();
+    closeSidebar();
+    for (const t of $('toasts').children) t.close?.();
+  } else {
+    store.del('cw.zen');
+    void showZenSummary(ZEN.since, new Map(ZEN.done), new Map(ZEN.failed), [...ZEN.waiting]);
+  }
+  renderZenQuiet();
+}
+// A task change seen while in Zen: a work task that finished or failed, or anything that now waits for the owner.
+function zenTask(prev, t) {
+  if (!zenOn()) return;
+  if (prev && prev.status !== t.status && t.kind === 'work') {
+    if (t.status === 'done') ZEN.done.set(t.id, t);
+    else if (t.status === 'failed') ZEN.failed.set(t.id, t);
+  }
+  if (zenNeedsYou(t)) ZEN.waiting.add(t.id);
+  renderZenQuiet();
+}
+function zenNeeds() {
+  const out = [];
+  for (const t of O.tasks.values()) {
+    if (t.approvals?.length) out.push({ id: t.id, k: 'approval', n: t.approvals.length });
+    else if (t.status === 'awaiting_review') out.push({ id: t.id, k: 'review', n: 1 });
+  }
+  for (const a of ZEN.loose.values()) if (!O.tasks.has(a.task)) out.push({ id: a.task, k: 'approval', n: 1 });
+  for (const t of ZEN.failed.values()) if ((O.tasks.get(t.id) || t).status === 'failed') out.push({ id: t.id, k: 'failed', n: 1 });
+  return out;
+}
+const zenCount = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+function renderZenQuiet() {
+  const b = $('zenQuiet'), items = zenOn() ? zenNeeds() : [];
+  b.hidden = !items.length;
+  if (!items.length) return;
+  const sum = (k) => items.filter((i) => i.k === k).reduce((a, i) => a + i.n, 0);
+  b.textContent = `${[[sum('approval'), 'approval'], [sum('failed'), 'failed task'], [sum('review'), 'review']]
+    .filter(([n]) => n).map(([n, w]) => zenCount(n, w)).join(' · ')} waiting`;
+  b.dataset.task = items[0].id;
+}
+$('zenQuiet').addEventListener('click', () => showTask(Number($('zenQuiet').dataset.task)));
+async function showZenSummary(since, done, failed, waitingIds) {
+  try {
+    for (const t of (await api(`/api/away?since=${since}`)).tasks || []) (t.status === 'done' ? done : failed).set(t.id, t);
+  } catch {} // offline: what this page saw is still the summary
+  const loose = [...ZEN.loose.values()].filter((a) => !O.tasks.has(a.task) && waitingIds.includes(a.task));
+  const waiting = [...waitingIds.map((id) => O.tasks.get(id)).filter(zenNeedsYou),
+    ...new Map(loose.map((a) => [a.task, { id: a.task, title: `#${a.task}: ${a.action}` }])).values()];
+  if (!done.size && !failed.size && !waiting.length) return;
+  const mins = Math.max(1, Math.round((Date.now() - since) / 60e3));
+  $('zenSub').textContent = `${mins < 60 ? `${mins} min` : `${Math.floor(mins / 60)} h ${mins % 60} min`} in Zen · ` +
+    `${done.size} done, ${failed.size} failed, ${waiting.length} waiting for you`;
+  const body = $('zenBody');
+  body.textContent = '';
+  const group = (k, label, tasks, mark) => {
+    if (!tasks.length) return;
+    const sec = el('div', 'aw-proj zs-group');
+    sec.dataset.k = k;
+    const h = el('h3', '', label);
+    h.append(el('small', 'zs-n', String(tasks.length)));
+    const ul = el('ul', 'aw-list');
+    for (const t of tasks) {
+      const li = el('li', k === 'done' ? 'done' : 'failed');
+      const tx = el('div', 'tx');
+      const tt = el('a', 'tt', t.title || `#${t.id}`);
+      tt.href = `#task-${t.id}`;
+      tt.onclick = (e) => { e.preventDefault(); $('zenModal').hidden = true; showTask(t.id); };
+      tx.append(tt);
+      if (t.project) tx.append(el('small', '', t.project));
+      li.append(el('span', 'mk', mark), tx);
+      ul.append(li);
+    }
+    sec.append(h, ul);
+    body.append(sec);
+  };
+  group('waiting', 'Waiting for you', waiting, '!');
+  group('failed', 'Failed', [...failed.values()], '✗');
+  group('done', 'Finished', [...done.values()], '✓');
+  $('zenModal').hidden = false;
+}
+$('zenModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) $('zenModal').hidden = true; });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('zenModal').hidden) { e.stopImmediatePropagation(); $('zenModal').hidden = true; } }, true);
+$('zenBtn').addEventListener('click', () => setZen(true));
+$('zenHint').addEventListener('click', () => setZen(false));
+// Bubbling and registered late: Escape only leaves Zen when no dialog, menu, drawer, field or chat (deny, interrupt) took it.
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key === '.') { e.preventDefault(); setZen(!zenOn()); return; }
+  if (e.key !== 'Escape' || e.defaultPrevented || !zenOn() || O.drawer) return;
+  if (document.querySelector('.modal:not([hidden]), .menu:not([hidden]), .cmenu:not([hidden])')) return;
+  if (e.target !== $('input') && e.target.closest?.('input, textarea, select, [contenteditable="true"], .cm-editor')) return;
+  setZen(false);
+});
+if (store.get('cw.zen')) setZen(true);
 
 // '#task-<id>' (a notification's link) opens that task's drawer once the first state has arrived; '#<cid>' opens a chat.
 const hashRoute = { ready: false, task: null };

@@ -224,7 +224,11 @@ function exResults(top, res) {
       frag.append(ul);
     }
   }
+  // A reload (the server's change notice after a save) rebuilds the rows: keep focus on the same row's button.
+  const had = res.contains(document.activeElement) ? document.activeElement : null, key = had?.closest('.ext-item')?.querySelector('.ext-open')?.dataset.key;
   res.replaceChildren(frag);
+  const row = key != null && res.querySelector(`.ext-open[data-key="${CSS.escape(key)}"]`)?.parentElement;
+  if (row) ([...row.children].find((c) => c.className === had.className) || row.firstChild).focus();
 }
 // Clear: the open tab's words and the skills source, then back to the search field.
 function exClearSearch() {
@@ -276,6 +280,11 @@ function exRow(it) {
       $('extBody').querySelector(`.ext-open[data-key="${CSS.escape(it.name)}"]`)?.parentElement.querySelector('.st-switch')?.focus();
     };
     li.append(sw);
+  } else if (EX.tab === 'personas') {
+    const copy = exBtn('Copy', 'btn small ext-copy', () => exEdit(it, 'copy'));
+    copy.setAttribute('aria-label', `Copy ${it.name}`);
+    copy.title = 'Start a new persona from this one';
+    li.append(copy);
   } else li.classList.add('no-switch');
   return li;
 }
@@ -340,6 +349,7 @@ function exChips(label, items, onpick) {
 }
 // One entry's editor (item null = new), in place of the list. Skills also have modes: 'add' (GitHub link, upload or
 // from scratch), 'import' (the GitHub link), 'preview' (item = a staged skill to install); a synced skill is read-only.
+// A persona's 'copy' (item = the original) is a new persona's editor prefilled from it: saving adds one, never edits item.
 function exEdit(item, mode = null) {
   EX.edit = { item, mode, tab: EX.tab };
   EX.dirty = false;
@@ -351,7 +361,7 @@ function exEdit(item, mode = null) {
   back.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
   back.append(el('span', null, k.label));
   back.setAttribute('aria-label', `Back to ${k.label}`);
-  const title = { add: 'Add a skill', import: 'Add a skill from GitHub', preview: `Install ${item?.name}` }[mode] || (item ? item.name : `New ${k.one}`);
+  const title = { add: 'Add a skill', import: 'Add a skill from GitHub', preview: `Install ${item?.name}`, copy: `Copy of ${item?.name}` }[mode] || (item ? item.name : `New ${k.one}`);
   const readOnly = !!item?.readOnly || mode === 'add';
   head.append(back, el('h3', null, title));
   form.append(head);
@@ -365,7 +375,7 @@ function exEdit(item, mode = null) {
   if (item && !mode && !readOnly) acts.append(exBtn('Delete', 'btn small danger', () => exDelete(item)));
   acts.append(el('span', 'ext-gap'));
   acts.append(exBtn(readOnly && mode !== 'add' ? 'Done' : 'Cancel', 'btn small', () => exBack()));
-  const save = el('button', 'btn small primary', { import: 'Preview', preview: 'Install' }[mode] || (item ? 'Save' : 'Add'));
+  const save = el('button', 'btn small primary', { import: 'Preview', preview: 'Install', copy: 'Add' }[mode] || (item ? 'Save' : 'Add'));
   save.type = 'submit';
   if (!readOnly && !(mode === 'preview' && item.exists === 'synced')) acts.append(save);
   form.append(err, acts);
@@ -497,19 +507,30 @@ function exAgentFields(f, a) {
   for (const [v, label] of opts) sel.append(new Option(label, v, false, (a?.model || '') === v));
   f.append(exField('Model', sel, 'Default: the subagent model Claude Code is set to use, else the chat’s.'));
 }
-function exPersonaFields(f, p, _mode, form) {
+function exPersonaFields(f, p, mode, form) {
+  const copy = mode === 'copy';
   if (!p) f.append(exChips('Start from', EX_PERSONA_STARTERS, (x) => {
     form.elements.name.value = x.name;
     form.elements.description.value = x.description;
     form.elements.prompt.value = x.prompt;
     EX.dirty = true;
   }));
-  f.append(exField('Name', exInput('name', p?.name, { placeholder: 'e.g. Staff engineer', maxLength: 60 })));
+  if (copy) f.append(el('p', 'ext-note', `A new persona, prefilled from ${p.name}. ${p.name} and the chats using it stay as they are.`));
+  f.append(exField('Name', exInput('name', copy ? exCopyName(p.name) : p?.name, { placeholder: 'e.g. Staff engineer', maxLength: 60 })));
   f.append(exField('Summary', exInput('description', p?.description, { placeholder: 'Optional. Shown in the persona menu', maxLength: 200 })));
   f.append(exField('Instructions', exArea('prompt', p?.prompt, { rows: 9, maxLength: 20000, placeholder: 'You are… Focus on… When you reply…' }),
     "Added to the system prompt of every chat that uses it and of that chat's planner and tasks."));
-  const n = p ? state.convos.filter((c) => c.persona === p.id).length : 0;
+  const n = p && !copy ? state.convos.filter((c) => c.persona === p.id).length : 0;
   if (n) f.append(el('p', 'ext-note', `Used by ${n} chat${n > 1 ? 's' : ''}. Changes apply from their next message.`));
+}
+// "Teacher (copy)", then "Teacher (copy 2)"…: a name no persona has yet (the server rejects duplicates), within 60 chars.
+function exCopyName(name) {
+  const taken = new Set((EX.personas || []).map((p) => p.name.toLowerCase()));
+  const base = name.replace(/ \(copy(?: \d+)?\)$/, '');
+  for (let i = 1; ; i++) {
+    const tag = i === 1 ? ' (copy)' : ` (copy ${i})`, n = `${base.slice(0, 60 - tag.length).trimEnd()}${tag}`;
+    if (!taken.has(n.toLowerCase())) return n;
+  }
 }
 async function exSubmit(form, item, mode, save, err) {
   if (EX.saving) return;
@@ -519,7 +540,7 @@ async function exSubmit(form, item, mode, save, err) {
   if (EX.tab === 'mcp') body.enabled = !!form.elements.enabled?.checked;
   if (mode === 'import') body.preview = true;
   else if (mode === 'preview') { body.id = item.id; if (item.exists === 'local') body.replace = true; }
-  else if (item) { if (EX.tab === 'personas') body.id = item.id; else body.prev = EX_KINDS[EX.tab].key(item); }
+  else if (item && mode !== 'copy') { if (EX.tab === 'personas') body.id = item.id; else body.prev = EX_KINDS[EX.tab].key(item); }
   const tab = EX.tab, url = mode === 'import' || mode === 'preview' ? '/api/ext/import' : `/api/ext/${tab}`, label = save.textContent;
   EX.saving = true;
   save.disabled = true;
@@ -544,7 +565,7 @@ async function exSubmit(form, item, mode, save, err) {
     EX.dirty = false;
     exRender();
     const name = r.item?.name || body.name || '';
-    toast(mode === 'preview' ? `Installed ${name}` : item ? `Saved ${name}` : `Added ${name}`, { kind: 'success' });
+    toast(mode === 'preview' ? `Installed ${name}` : item && mode !== 'copy' ? `Saved ${name}` : `Added ${name}`, { kind: 'success' });
     const key = r.item && EX_KINDS[tab].key(r.item);
     (key != null && $('extBody').querySelector(`.ext-open[data-key="${CSS.escape(key)}"]`))?.focus();
   } catch (e) {

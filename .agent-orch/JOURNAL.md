@@ -1756,3 +1756,15 @@ app.css conflict fixed; final test result still unchecked
 ## 2026-10-19 16:10 — #2276 Integrate #2237: ⌘K command palette: jump to any chat or project and open any view, with tests (ui) [done (check passed)]
 
 app.css conflict resolved; palette and static tests pass (25/25)
+
+## 2026-10-19 15:40 — #2273 Copy a persona into an editable new draft, with tests (ui) [in progress (1)]
+
+persona Copy built; focused test not yet re-verified
+
+## 2026-10-19 15:57 — #2273 Copy a persona into an editable new draft, with tests (ui) [verify failed (2)]
+
+Command: npm test -- test/ui-persona-copy.test.mjs
+
+## 2026-10-19 16:12 — #2273 Copy a persona into an editable new draft, with tests (ui) [done (check passed)]
+
+Persona copy test passes in 11s; earlier timeout was lock queueing

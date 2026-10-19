@@ -1663,6 +1663,10 @@ ui-static assertion now matches updateBannerView restart wording
 ## 2026-10-19 14:14 — #2233 Task changes API: GET /api/orch/tasks/:id/changes with tests [done (check passed)]
 
 GET /api/orch/tasks/:id/changes serves taskChanges; tests pass
+
+## 2026-10-19 14:21 — #2247 Leaving Orchestrator Mode stops new tasks only; the queue keeps running [done (check passed)]
+
+leaving Orchestrator Mode now stops new tasks; queued and running work continues
 ## 2026-10-19 14:19 — #2235 'Since you were away' group at the top of the Queue, from digest.mjs, with tests (ui) [done (check passed)]
 
 Queue shows 'Since you were away' digest card; tests pass
@@ -1678,3 +1682,7 @@ merge conflicts resolved; sidebar-activity, ui-static and digest tests pass
 ## 2026-10-19 14:25 — #2257 Integrate #2231: Zen mode: a distraction-free coding view [done (check passed)]
 
 CONTEXT.md conflict resolved; all Zen tests pass
+
+## 2026-10-19 14:25 — #2260 Integrate #2247: Leaving Orchestrator Mode stops new tasks only; the queue keeps running [done (check passed)]
+
+conflict resolved; intake tests pass on merged main

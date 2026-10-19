@@ -13,3 +13,7 @@ Today, switching a chat out of Orchestrator Mode pauses the whole project: orche
 ## Done when
 
 `node --test test/orch-mode-intake*.test.mjs` passes (running/queued continue after leaving the mode, no reflection while intake=0, re-entering re-enables, Pause still pauses)
+
+## Result — done (check passed) (2026-10-19 14:21)
+
+AGENT-ORCH-STATUS: done — leaving Orchestrator Mode now stops new tasks; queued and running work continues

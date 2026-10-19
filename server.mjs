@@ -974,6 +974,7 @@ const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
   emitChat: (cid, ev, { persist = true } = {}) => (persist ? emit(cid, ev) : broadcast(cid, ev)),
   broadcast: (msg) => { for (const ws of allClients) send(ws, msg); },
   convoExists: (cid) => !!findConvo(cid),
+  convoMode: (cid) => { const c = findConvo(cid); return c ? c.mode || 'default' : null; },
   convoFallbacks: (cid) => findConvo(cid)?.fallbacks ?? null,
   // Read at every task session boundary: tasks follow the chat's live effort, never a snapshot.
   convoEffort: (cid) => findConvo(cid)?.effort ?? null,
@@ -2016,7 +2017,7 @@ async function handleRequest(req, res) {
     try {
       const u = users.update(um[1], body);
       if (body.password != null) dropSessions(u.id, sessionToken(req)); // a reset password signs them out elsewhere
-      // Orchestrator Mode taken away: their own orchestrator chats go back to Full access (the orchestrator pauses there).
+      // Orchestrator Mode taken away: their own orchestrator chats go back to Full access (their queues finish; no new tasks are added).
       if (body.orchestrator === false && u.role !== 'admin') {
         for (const c of convos) {
           if (chatOwner(c) !== u.id || c.mode !== 'orchestrator') continue;
@@ -3101,7 +3102,7 @@ wss.on('connection', (ws, req) => {
             broadcast(convo.id, { t: 'osnapshot', orch: orch.convoSnapshot(convo) });
           } else if (was === 'orchestrator' && msg.mode !== 'orchestrator') {
             orch.setConvoMode(convo, msg.mode);
-            emit(convo.id, { t: 'notice', text: 'Orchestrator paused. Switch back to Orchestrator Mode to resume its work.' });
+            emit(convo.id, { t: 'notice', text: 'Orchestrator Mode off: queued tasks keep running; no new tasks will be added. Switch back to plan new work.' });
           }
         }
         break;

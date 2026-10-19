@@ -23,6 +23,7 @@ _What the code doesn't say. Per-area rules (chats, users, files, previews, sched
 ## Decisions
 - Subscriptions only: API_ENV stripping in server.mjs enforces it. Never weaken that.
 - Feature-first (owner, 2026-10-10): planner and reflection lead with user-facing features, borrowing ideas from popular similar repos (ROADMAP.md "Inspiration"). Security/infrastructure work only when the owner asks or rigor ≥ 4. Rigor 1-5 per project (`projects.rigor`, orchestrator `RIGOR_LEVELS`) shapes planner/reflection prompts and the Rapid top-up cap.
+- Leaving Orchestrator Mode only closes `projects.intake` (0: no reflection, Rapid top-up or plan-task claims; queued/running work finishes). Only Pause (`projects.status='paused'`) stops work.
 - `after` only for true prerequisites (cancelling cascades); `files` keeps parallel work apart. In Rapid mode overlap never blocks a free slot; a merge conflict retries once, then gets an integrator.
 - Placement uses every online machine; only sustained CPU saturation gates a node. RAM is only an emergency pause, never a placement gate (BRIEF goal 9).
 - No benchmark ranking of models, ever. No Antigravity/OpenCode/Kiro/Copilot.

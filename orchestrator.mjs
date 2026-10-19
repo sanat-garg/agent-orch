@@ -1107,7 +1107,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   notify = () => {}, codexSnapshot = () => codexLatestSnapshot(), reap = null, config = {},
   // Users (users.mjs): projectUser(path) → the id of the user whose project it is (token records carry it); userCap(path,
   // agent, model) → {window, cap, mine, resetsAt} when that user reached their admin-set cap for agent/model, else null.
-  projectUser = () => null, userCap = () => null, chatDirs = () => [] }) {
+  projectUser = () => null, userCap = () => null, chatDirs = () => [],
+  // convoMode(cid) → the chat's mode ('orchestrator', 'default', …) or null when there is no such chat (intake migration).
+  convoMode = () => null }) {
   Object.assign(CFG, config); // tests tune slots (concurrency, parallelTasks, agentSlots, meminfo, hardware)
   let hw = readHardware(); // the controller's hardware as last detected (detectHardware)
   const dir = path.join(dataDir, 'orchestrator');
@@ -1282,6 +1284,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     db.exec(`UPDATE projects SET position=(SELECT rn FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY priority DESC, created_at, id) AS rn
       FROM projects) o WHERE o.id=projects.id)`);
   }
+  // projects.intake (#2247): 1 = new tasks may be added (reflection, Rapid top-up, planner turns); 0 = closed because its
+  // chat left Orchestrator Mode. Queued and running tasks still run either way; only Pause (status) stops them.
+  const addIntake = !db.prepare('PRAGMA table_info(projects)').all().some((c) => c.name === 'intake');
+  if (addIntake) db.exec('ALTER TABLE projects ADD COLUMN intake INTEGER NOT NULL DEFAULT 1');
 
   const q1 = (sql, p = {}) => db.prepare(sql).get(p);
   const qa = (sql, p = {}) => db.prepare(sql).all(p);
@@ -1338,6 +1344,16 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     touchActivity(projectId, ts);
     console.log(`[orchestrator] ${message}`);
     if (level === 'warn' && message.startsWith('waiting:')) notifyOwner({ title: 'agent-orch is waiting', body: message.slice(8).trim(), tag: 'waiting', url: '/' });
+  }
+  // Once, with the intake column: leaving Orchestrator Mode used to pause the whole project. Those projects (paused, their
+  // chat in another mode) go back to active with intake closed, so their queues resume without new work being added.
+  if (addIntake) {
+    for (const p of qa("SELECT id, name, convo_id FROM projects WHERE status='paused' AND convo_id IS NOT NULL")) {
+      const mode = convoMode(p.convo_id);
+      if (mode == null || mode === 'orchestrator') continue;
+      run("UPDATE projects SET status='active', intake=0 WHERE id=:id", { id: p.id });
+      logEvent(`${p.name}: resumed (it was paused only by leaving Orchestrator Mode); no new tasks until the chat returns to it`, { projectId: p.id });
+    }
   }
 
   function updateProject(id, fields) {
@@ -1402,6 +1418,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
 
   const RUNNABLE = `SELECT t.*, ${EFFECTIVE_SQL} AS eff, p.position AS project_position FROM tasks t JOIN projects p ON p.id=t.project_id
     WHERE t.status='queued' AND t.kind!='review' AND p.status='active' AND t.not_before<=:now AND (t.kind!='reflect' OR p.perpetual=1)
+      AND (t.kind NOT IN ('reflect','plan') OR p.intake=1)
       AND NOT EXISTS(SELECT 1 FROM all_deps x LEFT JOIN tasks d ON d.id=x.depends_on WHERE x.task_id=t.id AND d.status IS NOT 'done')`;
   function runnable(allowed, exclusive, limit) {
     let sql = RUNNABLE;
@@ -3532,9 +3549,9 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   }
   function rapidStatus() {
     if (!parallelSettings().rapidDevelopment) return null;
-    const blockedProjects = qa("SELECT * FROM projects WHERE status='active' AND perpetual=1")
+    const blockedProjects = qa("SELECT * FROM projects WHERE status='active' AND perpetual=1 AND intake=1")
       .map((p) => ({ id: p.id, reason: rapidLimitReason(p) })).filter((p) => p.reason);
-    const q = rapidQueue(), open = qa("SELECT id FROM projects WHERE status='active' AND perpetual=1").length > blockedProjects.length;
+    const q = rapidQueue(), open = qa("SELECT id FROM projects WHERE status='active' AND perpetual=1 AND intake=1").length > blockedProjects.length;
     return { ...q, toppingUp: q.requested > 0 && open, blockedProjects, reason: blockedProjects.length ? blockedProjects[0].reason : null };
   }
   // Keep improving off (projects.perpetual=0) means no reflection at all: scheduleReflections is the only path that
@@ -3552,7 +3569,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
   function scheduleReflections() {
     let added = false;
     const t = now(), rapid = parallelSettings().rapidDevelopment ? rapidQueue() : null;
-    for (const p of qa("SELECT * FROM projects WHERE status='active' AND perpetual=1")) {
+    for (const p of qa("SELECT * FROM projects WHERE status='active' AND perpetual=1 AND intake=1")) {
       if (planningProjects.has(p.id)) continue; // the owner is mid-conversation with the planner
       if (!projectReady(p.path) || projectArchived(p.path)) continue; // an archived project is finished: no reflection
       if (rapid) {
@@ -4416,9 +4433,10 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     const [clean, payload] = extractTasks(res.text);
     // Its work routes like the chat's: it snapshots the chat's fallbacks, so a later edit doesn't change what's queued.
     const fresh = getProject(project.id);
-    if (!fresh.perpetual) { // switched off while it ran: nothing it proposes is queued
+    if (!fresh.perpetual || !fresh.intake) { // switched off (or the chat left Orchestrator Mode) while it ran: nothing it proposes is queued
       const n = payload?.tasks?.length || 0;
-      const note = `Keep improving was switched off while this reflection ran${n ? `: its ${n} proposed task(s) were discarded, not queued` : ''}.`;
+      const why = fresh.perpetual ? 'The chat left Orchestrator Mode' : 'Keep improving was switched off';
+      const note = `${why} while this reflection ran${n ? `: its ${n} proposed task(s) were discarded, not queued` : ''}.`;
       updateTask(task.id, { status: 'done', finished_at: now(), result: `${(clean || '').trim()}\n\n${note}`.trim().slice(-4000) }, true);
       await gitCommit(project.path, `agent-orch: roadmap update (reflection #${task.id})`);
       if (project.convo_id && convoExists(project.convo_id)) emitChat(project.convo_id, { t: 'notice', text: note });
@@ -4804,18 +4822,26 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
     for (const [tid, r] of running) if (r.projectId === id) r.abort.abort(); // sessions are kept and resumed
   }
 
-  // Leaving Orchestrator Mode pauses the project's background work; returning resumes it.
+  // Leaving Orchestrator Mode closes the project's intake (no reflection, top-up or planner turns) but its queued and
+  // running tasks carry on; returning reopens it. Pause (projects.status) is the only way to stop work.
   function setConvoMode(convo, mode) {
     const p = q1('SELECT * FROM projects WHERE path=:p', { p: convo.cwd });
     if (mode === 'orchestrator') {
       const project = ensureProject(convo);
       ensureGit(project.path); // never rejects; planTurn awaits it before any task can commit
-      if (project.status !== 'active') updateProject(project.id, { status: 'active' });
+      if (project.status !== 'active' || !project.intake) {
+        updateProject(project.id, { status: 'active', intake: 1, ...(!project.intake && { next_reflect_at: 0 }) });
+        setTimeout(tick, 100);
+      }
       return getProject(project.id);
     }
-    if (p && p.convo_id === convo.id && p.status === 'active') {
-      updateProject(p.id, { status: 'paused' });
-      pauseProject(p.id);
+    if (p && p.convo_id === convo.id && p.intake) {
+      updateProject(p.id, { intake: 0 });
+      // A reflection still waiting would only add tasks: it goes (returning to the mode schedules a fresh one).
+      for (const r of qa("SELECT id FROM tasks WHERE project_id=:p AND kind='reflect' AND status IN ('queued','paused')", { p: p.id })) {
+        updateTask(r.id, { status: 'cancelled', finished_at: now(), result: 'The chat left Orchestrator Mode: no new tasks are added.' });
+      }
+      logEvent('Orchestrator Mode off: queued tasks keep running; no new tasks will be added', { projectId: p.id });
     }
     return null;
   }
@@ -4891,7 +4917,7 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       SUM(status='failed') AS failed FROM tasks WHERE project_id=:p AND kind!='plan'`, { p: p.id }) || {};
     return {
       id: p.id, name: p.name, path: p.path, convo_id: p.convo_id, status: p.status, priority: p.priority, position: p.position ?? null, mode: p.mode,
-      perpetual: !!p.perpetual, autonomous: !!p.autonomous, rigor: rigorOf(p), next_reflect_at: p.next_reflect_at, ready: !!projectReady(p.path),
+      perpetual: !!p.perpetual, intake: !!p.intake, autonomous: !!p.autonomous, rigor: rigorOf(p), next_reflect_at: p.next_reflect_at, ready: !!projectReady(p.path),
       counts: { queued: c.queued || 0, running: c.running || 0, done: c.done || 0, failed: c.failed || 0 },
       reflect_fallbacks: parseFallbacks(p.reflect_fallbacks), reflect_direction: p.reflect_direction || null, reflect: reflectFor(p),
       // What a reflect task starts on when Settings names no reflection model (a 'reflect' route, else the chat's model).

@@ -19,7 +19,7 @@ const ok = (cwd, args) => git(cwd, args).then(() => true, () => false);
 
 // Up to `max` bytes of a git command's stdout; the process is killed once it has written more.
 // Resolves { buf, over } (over: it had more to say); rejects when git fails on its own.
-function gitCapped(cwd, args, max, env) {
+export function gitCapped(cwd, args, max, env) {
   return new Promise((resolve, reject) => {
     const child = spawn('git', args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
     const chunks = [];
@@ -41,7 +41,7 @@ function gitCapped(cwd, args, max, env) {
 }
 
 // `git diff --numstat -z` output → [{ path, add, del, binary }] (binary files report '-' counts).
-function parseNumstat(out) {
+export function parseNumstat(out) {
   return out.split('\0').filter(Boolean).map((entry) => {
     const [add, del, ...rest] = entry.split('\t');
     const binary = add === '-';
@@ -61,7 +61,7 @@ function mergeStats(lists) {
 }
 
 // Collect patch pieces up to maxBytes; a cut lands on a line boundary.
-function patchBuilder(maxBytes) {
+export function patchBuilder(maxBytes) {
   const parts = [];
   let used = 0, truncated = false;
   return {

@@ -44,6 +44,7 @@ import { createPreviews } from './previews.mjs';
 import { projectName } from './project-name.mjs';
 import { repoInfo } from './worktrees.mjs';
 import { taskChanges } from './changes.mjs';
+import { projectCommits, commitDetail } from './commits.mjs';
 import { createCredentials, projectSecrets } from './credentials.mjs';
 import { describeCron, nextRun, validTz } from './cron.mjs';
 import { createUsers, ADMIN_ID, sharedWith, canOrchestrate } from './users.mjs';
@@ -2563,6 +2564,23 @@ async function handleRequest(req, res) {
       if (!info) return json(res, 500, { error: "The project's folder is not a git repository on a branch" });
       return json(res, 200, await taskChanges(info, Number(och[1]), { maxBytes: Math.min(Math.max(max, 20_000), 1_000_000) }));
     } catch (e) { return json(res, 500, { error: `Couldn't read the task's changes: ${e.message}` }); }
+  }
+  // A project's history (commits.mjs): /commits?before=&limit= pages its branch's log, /commit?sha=&max= is one commit's diff.
+  const ocm = p.match(/^\/api\/orch\/projects\/(\d+)\/(commits|commit)$/);
+  if (ocm && req.method === 'GET') {
+    const dir = orch.pathOf('project', ocm[1]);
+    if (!dir) return json(res, 404, { error: 'No such project' });
+    const q = (k) => url.searchParams.get(k) || undefined, max = Number(q('max')) || 200_000;
+    try {
+      const info = await repoInfo(dir);
+      if (!info) return json(res, 500, { error: "The project's folder is not a git repository on a branch" });
+      return json(res, 200, ocm[2] === 'commits'
+        ? await projectCommits(info.top, { branch: info.branch, before: q('before'), limit: q('limit') })
+        : await commitDetail(info.top, q('sha'), { maxBytes: Math.min(Math.max(max, 20_000), 1_000_000) }));
+    } catch (e) {
+      if (e.code === 400 || e.code === 404) return json(res, e.code, { error: e.message });
+      return json(res, 500, { error: `Couldn't read the project's history: ${e.message}` });
+    }
   }
   if (p === '/api/orch/gate' && req.method === 'GET') return json(res, 200, orch.gateSettings());
   if (p === '/api/orch/gate' && req.method === 'PUT') {

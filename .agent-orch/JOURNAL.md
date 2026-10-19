@@ -1695,3 +1695,6 @@ Schedules can be copied into paused drafts; copy tests pass
 ## 2026-10-19 14:27 — #2239 Retry a failed task with an optional note from the owner, with tests [done (check passed)]
 
 Retry sheet sends optional note, appended to prompt; tests pass
+## 2026-10-19 14:28 — #2261 Project history backend: commit log and per-commit diff API, with tests [done (check passed)]
+
+commits.mjs history API, two server routes, tests passing

@@ -24,3 +24,7 @@ API contract shared with a parallel UI task (public/commits.js). Don't change th
 ## Done when
 
 `npm test -- test/commits.test.mjs` passes and `node --check server.mjs` succeeds
+
+## Result — done (check passed) (2026-10-19 14:28)
+
+AGENT-ORCH-STATUS: done — commits.mjs history API, two server routes, tests passing

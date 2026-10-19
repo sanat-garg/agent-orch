@@ -13,3 +13,7 @@ Fix search.mjs so its bounded log scan searches the newest complete JSONL record
 ## Done when
 
 `npm test -- test/search.test.mjs` passes, including the recent-message regression and bounded-read checks.
+
+## Result — done (check passed) (2026-10-19 14:35)
+
+AGENT-ORCH-STATUS: done — Chat search now scans the newest maxBytes; search tests pass

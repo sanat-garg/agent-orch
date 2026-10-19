@@ -1,6 +1,9 @@
 // Chat search: find conversations whose title or messages contain every whitespace-separated term of a query
-// (case-insensitive). Read-only over <DATA>/logs/<id>.jsonl, one line at a time, at most maxBytes per log, so a huge
-// log is never loaded whole; a missing log, a corrupt line or a line cut by the byte cap is skipped, never thrown.
+// (case-insensitive). Read-only over <DATA>/logs/<id>.jsonl, one line at a time, only the last maxBytes of each log, so a
+// huge log is never loaded whole and its newest messages stay findable. When the window doesn't start at the top of
+// the file, its first byte is the one before the window's first line and that line is dropped unless the byte is a
+// newline, so a record cut by the window is never parsed; a final record without a trailing newline still counts.
+// A missing log or a corrupt line is skipped, never thrown.
 //   searchConvos({ logsDir, convos, q, limit = 20, perConvo = 3, maxBytes = 4 MB })
 //     → [{ id, title, at, hits: [{ role, at, snippet }] }], newest hit first, at most `limit` conversations.
 // Only message text is searched: log lines {t:'user'|'text', text, ts} (the chat's own events) and SDK-shaped
@@ -53,7 +56,12 @@ async function scanLog(file, need, terms, perConvo, maxBytes) {
   const hits = [];
   let stream;
   try {
-    stream = fs.createReadStream(file, { encoding: 'utf8', start: 0, end: Math.max(0, maxBytes - 1) });
+    // Pinned to the size at stat time, so a record appended mid-scan is never half-read.
+    const { size } = await fs.promises.stat(file);
+    if (!size) return [];
+    const start = Math.max(0, size - Math.max(1, maxBytes));
+    let partial = start > 0;
+    stream = fs.createReadStream(file, { encoding: 'utf8', start, end: size - 1 });
     const failed = new Promise((_, reject) => stream.once('error', reject));
     failed.catch(() => {});
     const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
@@ -61,6 +69,7 @@ async function scanLog(file, need, terms, perConvo, maxBytes) {
     for (;;) {
       const { value: line, done } = await Promise.race([lines.next(), failed]);
       if (done) break;
+      if (partial) { partial = false; continue; }
       if (!line) continue;
       let ev;
       try { ev = JSON.parse(line); } catch { continue; }

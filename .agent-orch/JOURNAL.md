@@ -1713,3 +1713,7 @@ Places menu saves, opens and removes per-project favourites; tests pass
 ## 2026-10-19 14:34 — #2250 Compare two project screenshots side by side, with tests (ui) [done (check passed)]
 
 Owner can compare two gallery screenshots; four compare tests pass
+
+## 2026-10-19 14:35 — #2264 Find recent messages in long chats with bounded search and tests [done (check passed)]
+
+Chat search now scans the newest maxBytes; search tests pass

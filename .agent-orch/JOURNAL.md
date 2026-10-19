@@ -1698,3 +1698,6 @@ Retry sheet sends optional note, appended to prompt; tests pass
 ## 2026-10-19 14:28 — #2261 Project history backend: commit log and per-commit diff API, with tests [done (check passed)]
 
 commits.mjs history API, two server routes, tests passing
+## 2026-10-19 14:29 — #2238 Slash-command autocomplete in the composer from the SDK's slash_commands, with tests [done (check passed)]
+
+composer suggests SDK-reported slash commands; tests and checks pass

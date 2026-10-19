@@ -878,6 +878,10 @@ async function metrics(since) {
 
 // ---------- live Claude runtimes ----------
 const runtimes = new Map(); // convo id -> { q, push, busy, pending: Map }
+// Slash commands (names, no '/') the Claude SDK's init reported: per chat, and per folder for a chat there that hasn't run
+// yet. Only what the SDK said, in memory (the next init refreshes it); codex chats get none.
+const slashCmds = { chat: new Map(), folder: new Map() };
+const chatCommands = (c) => (chatAgent(c) === 'claude' ? slashCmds.chat.get(c.id) || slashCmds.folder.get(c.cwd) || [] : []);
 const subscribers = new Map(); // convo id -> Set<ws>
 const allClients = new Set();
 
@@ -1362,7 +1366,10 @@ function handleMessage(convo, rt, m) {
           rt.q.close();
           break;
         }
-        broadcast(cid, { t: 'init', model: m.model, cwd: m.cwd, mode: m.permissionMode });
+        const commands = Array.isArray(m.slash_commands) ? [...new Set(m.slash_commands.map((x) => String(x).replace(/^\//, '')).filter(Boolean))] : [];
+        slashCmds.chat.set(cid, commands);
+        slashCmds.folder.set(convo.cwd, commands);
+        broadcast(cid, { t: 'init', model: m.model, cwd: m.cwd, mode: m.permissionMode, commands });
       }
       break;
     case 'stream_event': {
@@ -1585,7 +1592,7 @@ function sendHistory(ws, convo, since) {
   send(ws, {
     t: 'history', cid: convo.id, events, ...(tail ? { since } : { start }), mark: logMark(convo.id, end), busy: chatBusy(convo),
     pending: rt ? [...rt.pending.values()].map((x) => x.req) : [],
-    mode: convo.mode, agent: chatAgent(convo), model: convo.model, cwd: convo.cwd,
+    mode: convo.mode, agent: chatAgent(convo), model: convo.model, cwd: convo.cwd, commands: chatCommands(convo),
     orch: orch.convoSnapshot(convo, (pid) => { const had = ws.orchSent.has(pid); ws.orchSent.add(pid); return had; }),
   });
 }
@@ -1602,6 +1609,7 @@ function removeConvo(c, { keepPreview = false } = {}) {
   orch.detachConvo(c.id, heir?.id || null);
   if (!heir && !keepPreview) previews.remove(c.cwd).catch((e) => console.error('[previews] remove failed', c.cwd, e));
   convos = convos.filter((x) => x.id !== c.id);
+  slashCmds.chat.delete(c.id);
   fs.rmSync(logPath(c.id), { force: true });
   logRewritten(c.id);
 }

@@ -2095,6 +2095,11 @@ pre.copy-cmd:hover::after { opacity: .7; }
 .eff-note { margin: 0 0 4px; font-size: 12px; color: var(--warn); }
 @keyframes cm-in { from { opacity: 0; transform: translateY(3px); } }
 @media (prefers-reduced-motion: reduce) { .cmenu { animation: none; } }
+/* Slash-command autocomplete (#slashPop): the composer menu's look; the highlighted row is the one Tab/Enter inserts. */
+.slash-menu .cm-opt::after { content: none; }
+.slash-menu .cm-opt[aria-selected="true"] { background: var(--raised); font-weight: inherit; }
+.slash-menu .cm-l { font-family: var(--mono); font-size: 12.5px; }
+@media (pointer: coarse) { .slash-menu .cm-opt { min-height: 44px; } }
 .fb-chip:not(.none) { color: var(--text); }
 .fb-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .fb-pop .modal-backdrop { background: transparent; animation: none; }

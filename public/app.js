@@ -973,7 +973,7 @@ function setModeUI(mode) {
 }
 
 function openConvo(cid) {
-  if (cid !== state.cid) { closeTask(); O.project = null; }
+  if (cid !== state.cid) { closeTask(); O.project = null; state.commands = []; } // the history frame brings the chat's slash commands
   stashChat();
   state.cid = cid;
   history.replaceState(null, '', cid ? `#${cid}` : '#');
@@ -2154,9 +2154,12 @@ input.addEventListener('input', () => {
   store.set('cw.draft.' + (state.cid || 'new'), input.value);
   // An unnamed new project previews the folder name it will get from this message.
   if (!state.cid && state.draft.type === 'new' && !state.draft.name) { updateFolderChip(); updateHeader(); }
+  SL.i = 0;
+  renderSlash();
 });
 const coarse = matchMedia('(pointer: coarse)').matches;
 input.addEventListener('keydown', (e) => {
+  if (slashKey(e)) return;
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !coarse) {
     e.preventDefault();
     $('composer').requestSubmit();
@@ -2168,8 +2171,73 @@ input.addEventListener('keydown', (e) => {
     changeMode(next);
   }
 });
+// Slash-command autocomplete: while #input is '/' plus a word (no space yet), #slashPop (a .cmenu listbox above the
+// composer) lists the commands Claude's SDK reported for this chat (server.mjs slashCmds, sent in the history and init
+// frames; codex chats get none): prefix matches first, then names containing the text, at most 8. Focus stays in the
+// textarea; ↑/↓ move, Tab or Enter (which then doesn't send) inserts '/name ', Esc closes until the text changes.
+const SL = { list: [], i: 0, dismissed: null };
+function slashMatches(commands, text, max = 8) {
+  if (!/^\/\S*$/.test(text)) return [];
+  const q = text.slice(1).toLowerCase(), pre = [], mid = [];
+  for (const c of [...new Set(commands)].sort()) {
+    const at = c.toLowerCase().indexOf(q);
+    if (at === 0) pre.push(c);
+    else if (at > 0) mid.push(c);
+  }
+  return [...pre, ...mid].slice(0, max);
+}
+function hideSlash() {
+  SL.list = [];
+  $('slashPop').hidden = true;
+  input.setAttribute('aria-expanded', 'false');
+  input.removeAttribute('aria-activedescendant');
+}
+function renderSlash() {
+  const cmds = parsePick($('model').value).agent === 'claude' ? state.commands || [] : [];
+  const list = document.activeElement === input && input.value !== SL.dismissed ? slashMatches(cmds, input.value) : [];
+  if (!list.length) return hideSlash();
+  const menu = $('slashPop');
+  SL.list = list;
+  SL.i = Math.max(0, Math.min(SL.i, list.length - 1));
+  menu.replaceChildren(...list.map((c, j) => {
+    const b = menuOpt('/' + c, { value: c, selected: j === SL.i });
+    b.id = 'slashOpt' + j;
+    b.tabIndex = -1;
+    return b;
+  }));
+  menu.hidden = false;
+  input.setAttribute('aria-expanded', 'true');
+  input.setAttribute('aria-activedescendant', 'slashOpt' + SL.i);
+  placeMenu(menu, input.closest('.box'));
+  menu.children[SL.i].scrollIntoView({ block: 'nearest' });
+}
+function pickSlash(name) {
+  hideSlash();
+  input.value = `/${name} `;
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+  input.dispatchEvent(new Event('input')); // autosize, Send button, saved draft
+}
+function slashKey(e) {
+  if ($('slashPop').hidden || e.isComposing) return false;
+  const n = SL.list.length;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { SL.i = (SL.i + (e.key === 'ArrowDown' ? 1 : -1) + n) % n; renderSlash(); }
+  else if ((e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey) pickSlash(SL.list[SL.i]);
+  else if (e.key === 'Escape') { SL.dismissed = input.value; hideSlash(); }
+  else return false;
+  e.preventDefault();
+  e.stopPropagation();
+  return true;
+}
+input.setAttribute('aria-autocomplete', 'list');
+input.setAttribute('aria-controls', 'slashPop');
+input.addEventListener('blur', hideSlash);
+$('slashPop').addEventListener('pointerdown', (e) => e.preventDefault()); // a tap keeps the keyboard and the textarea's focus
+$('slashPop').addEventListener('click', (e) => { const b = e.target.closest('.cm-opt'); if (b) pickSlash(b.dataset.value); });
+addEventListener('resize', () => { if (!$('slashPop').hidden) placeMenu($('slashPop'), input.closest('.box')); });
 $('composer').addEventListener('submit', async (e) => {
   e.preventDefault();
+  hideSlash();
   const text = input.value.trim();
   if (!text && !ATT.list.length) {
     if (state.busy) send({ t: 'interrupt', cid: state.cid });
@@ -3713,6 +3781,8 @@ function onServer(msg) {
   switch (msg.t) {
     case 'history': {
       applyOrchSnapshot(msg.orch);
+      state.commands = msg.commands || [];
+      hideSlash();
       // Only what the log gained since the view this chat was restored with (restoreChat); else a fresh window.
       const append = !!msg.since && msg.since === state.restored;
       if (append) for (const ev of msg.events) renderEvent(ev, true);
@@ -3763,6 +3833,7 @@ function onServer(msg) {
       renderConnFoot();
       break;
     case 'init':
+      if (Array.isArray(msg.commands)) state.commands = msg.commands;
       break;
     default:
       renderEvent(msg, false);

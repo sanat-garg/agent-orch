@@ -13,3 +13,7 @@ Claude Code's custom commands (.claude/commands/*.md, ~/.claude/commands) and bu
 ## Done when
 
 `npm test -- test/slash-commands.test.mjs test/ui-static.test.mjs` passes and `node --check server.mjs` succeeds.
+
+## Result — done (check passed) (2026-10-19 14:29)
+
+AGENT-ORCH-STATUS: done — composer suggests SDK-reported slash commands; tests and checks pass

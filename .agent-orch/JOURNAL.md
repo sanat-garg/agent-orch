@@ -1671,6 +1671,9 @@ leaving Orchestrator Mode now stops new tasks; queued and running work continues
 
 Queue shows 'Since you were away' digest card; tests pass
 
+## 2026-10-19 14:36 — #2237 ⌘K command palette: jump to any chat or project and open any view, with tests (ui) [done (check passed)]
+
+⌘K palette jumps to chats and actions; both test files pass
 ## 2026-10-19 14:22 — #2234 Task drawer: a Changes section with per-file counts and a coloured diff (ui) [done (check passed)]
 
 Task drawer shows a lazy-loaded, coloured Changes diff; tests pass
@@ -1741,3 +1744,15 @@ app.js conflict resolved; submit stops dictation and hides slash menu
 ## 2026-10-19 14:43 — #2252 Export filtered agent runs from Stats as CSV, with tests (ui) [done (check passed)]
 
 Stats exports filtered runs as CSV; export tests pass
+
+## 2026-10-19 15:40 — #2276 Integrate #2237: ⌘K command palette: jump to any chat or project and open any view, with tests (ui) [in progress (1)]
+
+app.css conflict fixed; palette and static tests still unverified
+
+## 2026-10-19 16:03 — #2276 Integrate #2237: ⌘K command palette: jump to any chat or project and open any view, with tests (ui) [in progress (2)]
+
+app.css conflict fixed; final test result still unchecked
+
+## 2026-10-19 16:10 — #2276 Integrate #2237: ⌘K command palette: jump to any chat or project and open any view, with tests (ui) [done (check passed)]
+
+app.css conflict resolved; palette and static tests pass (25/25)

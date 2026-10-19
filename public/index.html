@@ -426,6 +426,19 @@
   </div>
 </div>
 
+<!-- Command palette (app.js openPalette, ⌘K / Ctrl+K on desktop): jump to a chat or project, or run an action. -->
+<div class="modal pal" id="paletteModal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-panel pal-panel" role="dialog" aria-modal="true" aria-label="Go to a chat, project or view">
+    <div class="pal-search">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      <input id="palInput" placeholder="Go to a chat, project or view…" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="true" aria-controls="palList" aria-autocomplete="list">
+      <kbd class="pal-esc">esc</kbd>
+    </div>
+    <div class="pal-list" id="palList" role="listbox" aria-label="Results"></div>
+  </div>
+</div>
+
 <div class="modal sheet" id="delModal" hidden>
   <div class="modal-backdrop" data-close></div>
   <form class="modal-panel dlm" role="dialog" aria-modal="true" aria-labelledby="delTitle" id="delForm">

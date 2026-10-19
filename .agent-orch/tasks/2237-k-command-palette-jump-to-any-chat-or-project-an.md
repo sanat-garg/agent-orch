@@ -13,3 +13,7 @@ Add a desktop command palette, like opcode's smart search and VS Code's ⌘K/⌘
 ## Done when
 
 `npm test -- test/ui-palette.test.mjs test/ui-static.test.mjs` passes.
+
+## Result — done (check passed) (2026-10-19 14:36)
+
+AGENT-ORCH-STATUS: done — ⌘K palette jumps to chats and actions; both test files pass

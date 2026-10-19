@@ -505,6 +505,7 @@ $('termLayout').addEventListener('click', (e) => {
 $('termReload').addEventListener('click', () => { const f = T.cells.get(T.active)?.querySelector('iframe'); if (f) f.src = termSrc(T.active); });
 document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === '`') { e.preventDefault(); setView($('app').dataset.view === 'chat' ? 'term' : 'chat'); }
+  else if (isPaletteKey(e) && !phoneHeader.matches) { e.preventDefault(); if ($('paletteModal').hidden) openPalette(); else closePalette(); }
 });
 
 // ---------- sidebar ----------
@@ -10318,6 +10319,142 @@ async function loadMe() {
   window.Users?.changed();
   if (!$('pickerModal').hidden) renderGhRow();
 }
+
+// ---------- command palette (⌘K / Ctrl+K on desktop, #paletteModal) ----------
+// One field over the chats and projects (newest first, sub-chats under their project) and then the actions, each running
+// what its own button runs. Typing ranks matches prefix > word start > scattered letters and bolds the matched letters.
+const PAL_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+const isPaletteKey = (e) => !e.shiftKey && !e.altKey && e.key?.toLowerCase() === 'k' && (PAL_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey);
+const PAL = { items: [], sel: 0, lastFocus: null };
+// Only what this account can see: a role-hidden button (users.css) hides its action too.
+const palShown = (sel) => !!document.querySelector(sel)?.getClientRects().length;
+const PAL_ACTIONS = [
+  ['New chat', () => $('newChat').click(), '#newChat'],
+  ['Files', () => setView('files'), '.seg [data-view="files"]'],
+  ['Terminal', () => setView('term'), '.seg [data-view="term"]'],
+  ['Queue', () => openQueue(), () => meOrch()],
+  ['Machines', () => openMachines(), '#miniMachine'],
+  ['Schedules', () => $('schedBtn').click(), '#schedBtn'],
+  ['Credentials', () => $('credBtn').click(), '#credBtn'],
+  ['Live previews', () => $('previewsBtn').click(), '#previewsBtn'],
+  ['Settings', () => openSettings(), '#settingsBtn'],
+  ['Usage', () => openUsage(), '#usageCard'],
+];
+// Case-insensitive subsequence match of q (lower case) in s: tier 3 prefix, 2 word start, 1 scattered letters; `at` holds
+// the matched indexes and `score` orders matches within a tier (higher first). null when q's letters aren't all in s.
+function palMatch(q, s) {
+  const t = s.toLowerCase();
+  if (t.length !== s.length) return null; // a case fold that changes length would misplace the bold
+  const run = (i) => Array.from(q, (_, k) => i + k);
+  if (t.startsWith(q)) return { tier: 3, score: -t.length, at: run(0) };
+  for (let i = t.indexOf(q, 1); i > 0; i = t.indexOf(q, i + 1)) {
+    if (!/[\p{L}\p{N}]/u.test(t[i - 1]) || (/[a-z]/.test(s[i - 1]) && /[A-Z]/.test(s[i]))) return { tier: 2, score: -i, at: run(i) };
+  }
+  const at = [];
+  for (let i = 0; i < t.length && at.length < q.length; i++) if (t[i] === q[at.length]) at.push(i);
+  if (at.length < q.length) return null;
+  return { tier: 1, score: -(at[at.length - 1] - at[0]) - at[0] / 100, at };
+}
+// The text with the letters at `at` in <b>.
+function palMark(text, at = []) {
+  const f = document.createDocumentFragment(), on = new Set(at);
+  for (let i = 0; i < text.length;) {
+    let j = i;
+    while (j < text.length && on.has(j) === on.has(i)) j++;
+    f.append(on.has(i) ? el('b', '', text.slice(i, j)) : text.slice(i, j));
+    i = j;
+  }
+  return f;
+}
+function palEntries() {
+  const live = state.convos.filter((c) => !c.archived);
+  const mains = live.filter((c) => !isSubChat(c)).sort((a, b) => familyUpdated(b) - familyUpdated(a));
+  const chats = mains.flatMap((c) => [c, ...subChats(c).filter((x) => !x.archived)]).map((c) => {
+    const sub = isSubChat(c), parent = sub && state.convos.find((x) => x.id === c.mainId);
+    return { name: c.title || folderName(c.cwd), detail: sub ? `in ${parent.title || folderName(parent.cwd)}` : folderName(c.cwd),
+      kind: !sub && c.project ? 'Project' : 'Chat', sub, cid: c.id, run: () => { openConvo(c.id); closeSidebar(); setView('chat'); } };
+  });
+  const actions = PAL_ACTIONS.filter(([, , when]) => typeof when === 'function' ? when() : palShown(when))
+    .map(([name, run]) => ({ name, detail: '', kind: 'Action', run }));
+  return [...chats, ...actions];
+}
+function renderPalette() {
+  const q = $('palInput').value.trim().toLowerCase();
+  let items = palEntries().map((it, i) => ({ ...it, i, group: it.kind === 'Action' ? 1 : 0 }));
+  if (q) {
+    items = items.map((it) => {
+      const m = palMatch(q, it.name);
+      if (m) return { ...it, m };
+      // The folder or project name, below any name match; scattered letters in a long path would match nearly anything.
+      const d = it.detail && palMatch(q, it.detail);
+      return d?.tier >= 2 && { ...it, m: { ...d, tier: d.tier - 0.5 }, inDetail: true };
+    }).filter(Boolean).sort((a, b) => b.m.tier - a.m.tier || a.group - b.group || b.m.score - a.m.score || a.i - b.i);
+  }
+  PAL.items = items.slice(0, 60);
+  const list = $('palList');
+  list.replaceChildren();
+  PAL.items.forEach((it, i) => {
+    const b = el('button', 'pal-item' + (it.sub && !q ? ' sub' : ''));
+    b.type = 'button';
+    b.id = `pal-${i}`;
+    b.tabIndex = -1;
+    b.setAttribute('role', 'option');
+    const main = el('span', 'pal-main');
+    const name = el('span', 'pal-name'), detail = el('span', 'pal-detail');
+    name.append(palMark(it.name, it.inDetail ? [] : it.m?.at));
+    detail.append(palMark(it.detail, it.inDetail ? it.m.at : []));
+    main.append(name);
+    if (it.detail) main.append(detail);
+    b.append(main, el('span', 'pal-kind', it.kind));
+    b.addEventListener('mousedown', (e) => e.preventDefault()); // the field keeps the focus
+    b.addEventListener('mousemove', () => { if (PAL.sel !== i) palSelect(i); });
+    b.addEventListener('click', () => palRun(i));
+    list.append(b);
+  });
+  if (!PAL.items.length) list.append(el('div', 'pal-empty', 'No matches'));
+  palSelect(0);
+}
+function palSelect(i) {
+  PAL.sel = i;
+  const rows = $('palList').querySelectorAll('.pal-item');
+  rows.forEach((r, k) => r.setAttribute('aria-selected', String(k === i)));
+  if (rows[i]) { $('palInput').setAttribute('aria-activedescendant', rows[i].id); rows[i].scrollIntoView({ block: 'nearest' }); }
+  else $('palInput').removeAttribute('aria-activedescendant');
+}
+function openPalette() {
+  PAL.lastFocus = document.activeElement;
+  $('paletteModal').hidden = false;
+  $('palInput').value = '';
+  renderPalette();
+  $('palInput').focus();
+}
+function closePalette(restoreFocus = true) {
+  if ($('paletteModal').hidden) return;
+  $('paletteModal').hidden = true;
+  if (restoreFocus) PAL.lastFocus?.focus?.();
+}
+function palRun(i) {
+  const it = PAL.items[i];
+  if (!it) return;
+  closePalette(); // focus goes back first, so whatever the action opens returns it there when it closes
+  it.run();
+}
+$('palInput').addEventListener('input', renderPalette);
+$('paletteModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closePalette(); });
+// Window capture runs before the other modals' document handlers, so Escape closes only the palette.
+window.addEventListener('keydown', (e) => {
+  if ($('paletteModal').hidden || e.isComposing) return;
+  const n = PAL.items.length;
+  if (e.key === 'Escape') closePalette();
+  else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { if (n) palSelect((PAL.sel + (e.key === 'ArrowDown' ? 1 : -1) + n) % n); }
+  else if (e.key === 'Enter') palRun(PAL.sel);
+  else if (e.key === 'Tab') $('palInput').focus(); // the field is the only stop
+  else return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+}, true);
+document.addEventListener('focusin', (e) => { if (!$('paletteModal').hidden && !$('paletteModal').contains(e.target)) $('palInput').focus(); });
+phoneHeader.addEventListener('change', () => { if (phoneHeader.matches) closePalette(false); });
 
 (async function boot() {
   await loadMe();

@@ -13,7 +13,7 @@ _What the code doesn't say. Per-area rules (chats, users, files, previews, sched
 
 ## Conventions
 - ESM `.mjs`, no build step, no framework, minimal deps, system font stack. Match the terse style and comment density.
-- Tests: `npm test` runs only test files the diff from main reaches; `npm test -- test/x.test.mjs` runs named files; `npm run test:full` is for reflection only. Copy a neighbouring test's setup: server tests spawn server.mjs on a free port with a temp `CW_DATA_DIR`; scheduler tests use `createOrchestrator` with a fake `query`; UI tests use playwright-core against a static/test server. A bare test origin's HEAD is `master`: clone it with `-b main`.
+- Tests: `npm test` runs only test files the diff from main reaches; `npm test -- test/x.test.mjs` runs named files; `npm run test:full` is for reflection only. Copy a neighbouring test's setup: server tests spawn server.mjs on a free port with a temp `CW_DATA_DIR`; scheduler tests use `createOrchestrator` with a fake `query`; UI tests use playwright-core against a static/test server; wait for `!$("app").inert` (the splash lifts, then focuses #input) before driving focus or keys. A bare test origin's HEAD is `master`: clone it with `-b main`.
 - Times: events carry `until` (epoch s) and the browser formats them (`withUntil`); the server never formats times except in logs.
 - Mobile follows Apple's HIG (apple-design skill): 44px targets and 16px fields in `@media (pointer: coarse)`, phone layout in `public/phone.css` (loaded last), modals need `grid-template-columns: minmax(0, 100%)`, filled buttons use `--accent-strong` (contrast test ≥ 4.5:1). Phones never auto-focus #input.
 - AUDIT.md items get `**Fixed**` + a one-line note; UI-REVIEW.md rows are marked fixed in place.

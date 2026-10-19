@@ -7,10 +7,12 @@
 // except in the term/browser views; nothing is fetched until the sheet opens. A commit's 'Ask to undo…' (after opcode's
 // checkpoints: undo is one tap but always a NEW commit) drafts a `git revert` request into the project's main chat
 // (O.project.convo_id) without sending it, like app.js fileFeedback: appended after the chat's saved draft, then the chat
-// opens; with no chat an inline status says why. Loaded after app.js and uses its helpers ($, el, api, O, relTime,
+// opens; with no chat an inline status says why. The search field above the list (#cmSearch, debounced) reloads page one
+// with &q= (the server's case-insensitive, literal --grep); 'Load older' keeps it, clearing it restores the full list, and
+// a reply for an older query is dropped (CM.seq). Loaded after app.js and uses its helpers ($, el, api, O, relTime,
 // showTask, coarse, state, store, input, openConvo, closeSidebar, setView, toast).
 (() => {
-  const CM = { pid: null, branch: '', list: [], more: false, loaded: false, loading: false, error: '', seq: 0, detail: null, lastFocus: null };
+  const CM = { pid: null, branch: '', list: [], more: false, loaded: false, loading: false, error: '', seq: 0, detail: null, lastFocus: null, q: '' };
   const shown = () => !$('commitsModal').hidden;
 
   // A page of commits: from the top (older = false) or the page after the last one shown.
@@ -21,7 +23,7 @@
     Object.assign(CM, { loading: true, error: '' });
     render();
     try {
-      const r = await api(`/api/orch/projects/${pid}/commits?limit=50${before ? `&before=${encodeURIComponent(before)}` : ''}`);
+      const r = await api(`/api/orch/projects/${pid}/commits?limit=50${before ? `&before=${encodeURIComponent(before)}` : ''}${CM.q ? `&q=${encodeURIComponent(CM.q)}` : ''}`);
       if (seq !== CM.seq || pid !== CM.pid) return;
       Object.assign(CM, { branch: r.branch || '', list: older ? CM.list.concat(r.commits || []) : r.commits || [], more: !!r.more, loaded: true });
     } catch (e) {
@@ -48,7 +50,8 @@
     const pid = O.project?.id || null;
     if (pid !== CM.pid) {
       CM.seq++;
-      Object.assign(CM, { pid, branch: '', list: [], more: false, loaded: false, loading: false, error: '', detail: null });
+      Object.assign(CM, { pid, branch: '', list: [], more: false, loaded: false, loading: false, error: '', detail: null, q: '' });
+      $('cmSearch').value = '';
       if (!pid) close();
       else if (shown()) load();
     }
@@ -116,7 +119,7 @@
     $('cmSub').textContent = CM.list.length ? `${CM.branch ? `${CM.branch} · ` : ''}${CM.list.length}${CM.more ? '+' : ''} commit${CM.list.length === 1 ? '' : 's'}, newest first` : '';
     if (!CM.list.length) {
       if (CM.error) return body.replaceChildren(failed(`Couldn't load the history: ${CM.error}`, () => load()));
-      return body.replaceChildren(el('p', 'cm-empty', CM.loaded ? 'No commits yet' : 'Loading…'));
+      return body.replaceChildren(el('p', 'cm-empty', !CM.loaded ? 'Loading…' : CM.q ? `No commits match "${CM.q}"` : 'No commits yet'));
     }
     const ul = el('ul', 'cm-list');
     ul.append(...CM.list.map(row));
@@ -208,15 +211,27 @@
   function render() {
     if (!shown()) return;
     const body = $('cmBody');
+    $('cmFind').hidden = !!CM.detail;
     if (CM.detail) renderDetail(body);
     else renderList(body);
   }
+
+  // Typing reloads page one for the new query ~250ms after the last keystroke; Escape in a filled field clears it first.
+  let searchTimer = 0;
+  function search() {
+    const q = $('cmSearch').value.trim().slice(0, 200);
+    clearTimeout(searchTimer);
+    if (q === CM.q) return;
+    searchTimer = setTimeout(() => { if (q === $('cmSearch').value.trim().slice(0, 200)) { CM.q = q; load(); } }, 250);
+  }
+  $('cmSearch').addEventListener('input', search);
 
   $('commitsLink').addEventListener('click', open);
   $('commitsModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) close(); });
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape' || !shown()) return;
     e.stopImmediatePropagation();
+    if (document.activeElement === $('cmSearch') && $('cmSearch').value) { $('cmSearch').value = ''; return search(); }
     close();
   }, true);
   // The term/browser views hide the pill; updateHeader returns before syncing there, so watch the view itself.

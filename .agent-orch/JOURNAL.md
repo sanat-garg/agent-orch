@@ -1860,3 +1860,7 @@ merge conflict fixed; prompt-library test race fixed; check passes
 ## 2026-10-19 16:46 — #2294 Integrate #2272: Download Markdown code blocks as files, with tests (ui) [done (check passed)]
 
 server.mjs merge resolved; prompts and code-download assets both served
+
+## 2026-10-19 16:49 — #2279 History: search commit messages, with tests [done (check passed)]
+
+History sheet searches commit messages; literal, paged, tested

@@ -1,7 +1,8 @@
 // A project's commit history: its branch's first-parent log, newest first and paged by `before`, with per-commit
 // add/del/file totals, and one commit's message, per-file stat and unified diff capped at maxBytes (on a line boundary,
 // like changes.mjs). Read-only: nothing here writes to the repo's index, refs or working tree.
-//   projectCommits(top, { branch, before, limit }) → { branch, commits: [{ sha, subject, author, at, task, add, del, files }], more }
+//   projectCommits(top, { branch, before, limit, q }) → { branch, commits: [{ sha, subject, author, at, task, add, del, files }], more }
+// `q` (trimmed, ≤ 200 chars) keeps only commits whose message contains it, case-insensitively and literally (--fixed-strings).
 //   commitDetail(top, sha, { maxBytes }) → { sha, subject, body, author, at, task, files: [{ path, add, del, binary }], patch, truncated }
 // `at` is epoch ms; `task` is N for an 'agent-orch #N:' subject, else null. A bad sha throws with code 400, an unknown
 // one with code 404. Served by server.mjs GET /api/orch/projects/:id/commits and /commit; public/commits.js shows it.
@@ -28,8 +29,9 @@ async function resolveSha(top, sha) {
   return full;
 }
 
-export async function projectCommits(top, { branch, before, limit = 50 } = {}) {
+export async function projectCommits(top, { branch, before, limit = 50, q } = {}) {
   limit = Math.min(200, Math.max(1, Math.floor(Number(limit)) || 50));
+  q = typeof q === 'string' ? q.trim().slice(0, 200) : '';
   if (!branch) branch = (await git(top, ['symbolic-ref', '--short', '-q', 'HEAD']).catch(() => '')).trim();
   const empty = { branch, commits: [], more: false };
   let start;
@@ -40,7 +42,7 @@ export async function projectCommits(top, { branch, before, limit = 50 } = {}) {
     start = (await git(top, ['rev-parse', '--verify', '-q', `refs/heads/${branch}^{commit}`]).catch(() => '')).trim();
   }
   if (!start) return empty; // no commits yet, or paged past the first one
-  const out = await git(top, ['log', '--first-parent', ...DIFF, '--numstat', `-n${limit + 1}`,
+  const out = await git(top, ['log', '--first-parent', ...DIFF, '--numstat', `-n${limit + 1}`, ...(q ? [`--grep=${q}`, '-i', '--fixed-strings'] : []),
     '--format=%x1e%H%x1f%an%x1f%at%x1f%s', start, '--']);
   const commits = out.split('\x1e').filter(Boolean).map((chunk) => {
     const [head, ...lines] = chunk.split('\n');

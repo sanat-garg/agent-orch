@@ -19,3 +19,7 @@ Tests: new test/commits-search.test.mjs copying test/commits.test.mjs's temp-rep
 ## Done when
 
 `npm test -- test/commits-search.test.mjs` passes and `node --check server.mjs` succeeds.
+
+## Result — done (check passed) (2026-10-19 16:49)
+
+AGENT-ORCH-STATUS: done — History sheet searches commit messages; literal, paged, tested

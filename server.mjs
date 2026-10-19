@@ -2598,7 +2598,7 @@ async function handleRequest(req, res) {
       const info = await repoInfo(dir);
       if (!info) return json(res, 500, { error: "The project's folder is not a git repository on a branch" });
       return json(res, 200, ocm[2] === 'commits'
-        ? await projectCommits(info.top, { branch: info.branch, before: q('before'), limit: q('limit') })
+        ? await projectCommits(info.top, { branch: info.branch, before: q('before'), limit: q('limit'), q: q('q') })
         : await commitDetail(info.top, q('sha'), { maxBytes: Math.min(Math.max(max, 20_000), 1_000_000) }));
     } catch (e) {
       if (e.code === 400 || e.code === 404) return json(res, e.code, { error: e.message });

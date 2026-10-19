@@ -3,6 +3,7 @@
 .app.zen #commitsLink { display: none !important; }
 
 .modal-panel.cmm { width: min(860px, 100%); }
+.cm-find { flex: none; margin: -4px 20px 12px; } /* the search field between the head and the list (app.css .side-search) */
 .cm-empty { margin: 6px 4px; font-size: 13px; color: var(--muted); line-height: 1.4; }
 .cm-error { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0; }
 .cm-error .cm-empty { flex: 1; min-width: 0; margin: 0 4px; color: var(--danger); overflow-wrap: anywhere; }
@@ -45,6 +46,7 @@
 .cm-trunc { margin: 8px 4px 0; font-size: 12.5px; color: var(--warn); }
 
 @media (pointer: coarse) {
+  .cm-find input { height: 44px; font-size: 16px; } /* iOS zooms into smaller fields */
   .cm-task { height: 44px; padding: 0 12px; }
   .cm-undo { height: 44px; padding: 0 14px; }
   .cm-open { min-height: 56px; }

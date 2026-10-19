@@ -1830,3 +1830,7 @@ Attach to chat on screenshots; all 3 tests pass
 ## 2026-10-19 16:22 — #2277 @-mention project files in the composer, with tests (ui) [done (check passed)]
 
 composer @-mentions suggest project files, tests pass
+
+## 2026-10-19 16:25 — #2284 Browser tab title shows how many actions wait for you, with tests (ui) [done (check passed)]
+
+tab title prefixes pending approval count; test passes

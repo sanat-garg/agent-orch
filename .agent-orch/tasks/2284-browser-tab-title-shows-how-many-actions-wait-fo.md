@@ -17,3 +17,7 @@ Test: new test/ui-title-badge.test.mjs using playwright-core with a neighbouring
 ## Done when
 
 `npm test -- test/ui-title-badge.test.mjs` passes.
+
+## Result — done (check passed) (2026-10-19 16:25)
+
+AGENT-ORCH-STATUS: done — tab title prefixes pending approval count; test passes

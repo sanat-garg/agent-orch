@@ -959,7 +959,7 @@ function updateHeader() {
   if (['term', 'browser'].includes($('app').dataset.view)) { $('repoLink').hidden = true; $('previewLink').hidden = true; $('shotsLink').hidden = true; $('tokLink').hidden = true; return; }
   $('title').textContent = currentTitle();
   $('cwdLabel').textContent = currentCwdLabel();
-  document.title = `${currentTitle()} · agent-orch`;
+  syncDocTitle();
   renderRepoLink();
   window.Previews?.renderHeader();
   window.Shots?.renderHeader();
@@ -3615,11 +3615,21 @@ $('stPush').addEventListener('change', async (e) => {
   }
   sw.disabled = false;
 });
-// The Home Screen icon's badge: held actions waiting for the owner, across every task this page knows.
-function syncAppBadge() {
-  if (!('setAppBadge' in navigator)) return;
+// Held actions waiting for the owner, across every task this page knows: the Home Screen icon's badge and, so another tab
+// shows it too, a '(n) ' prefix on the browser tab title. Zen keeps the plain title (notices are held there).
+function waitingApprovals() {
   let n = 0;
   for (const t of O.tasks.values()) n += t.approvals?.length || 0;
+  return n;
+}
+function syncDocTitle() {
+  const n = zenOn() ? 0 : waitingApprovals();
+  document.title = `${n ? `(${n}) ` : ''}${currentTitle()} · agent-orch`;
+}
+function syncAppBadge() {
+  syncDocTitle();
+  if (!('setAppBadge' in navigator)) return;
+  const n = waitingApprovals();
   (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {});
 }
 
@@ -10320,6 +10330,7 @@ function setZen(on) {
     void showZenSummary(ZEN.since, new Map(ZEN.done), new Map(ZEN.failed), [...ZEN.waiting]);
   }
   renderZenQuiet();
+  syncDocTitle();
 }
 // A task change seen while in Zen: a work task that finished or failed, or anything that now waits for the owner.
 function zenTask(prev, t) {

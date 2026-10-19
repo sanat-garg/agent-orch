@@ -895,10 +895,14 @@ const previews = createPreviews({ dataDir: DATA, forbid: [ROOT], ...sandboxCaddy
     clearTimeout(previewPush);
     previewPush = setTimeout(() => { broadcastConvos(); for (const ws of allClients) send(ws, { t: 'previews' }); }, 150);
   } });
-// The line every agent working on the project gets (chat, planner and task runs).
+// The line every agent working on the project gets (chat, planner and task runs). The owner picks a project's public
+// address on the new-project screen (or later in Live previews); agents never publish one themselves (owner, 2026-10-19:
+// they had been adding their own Caddy site blocks, e.g. agla-station/pakdo.greygoose.baby).
+const PUBLISH_RULE = 'Never give this project a public address yourself: don\'t add or change domains, subdomains or Caddy site blocks (/etc/caddy), and don\'t start services or tunnels to serve it publicly.';
 const previewNote = (dir) => {
   const v = previews.view(dir);
-  return v ? `Live preview: ${v.url} (served from this project's main branch, redeployed after each commit/merge; web apps must listen on process.env.PORT, static sites need an index.html or a build script that outputs dist/).` : '';
+  return v ? `Live preview: ${v.url} (served from this project's main branch, redeployed after each commit/merge; web apps must listen on process.env.PORT, static sites need an index.html or a build script that outputs dist/). It is the project's only public address. ${PUBLISH_RULE}`
+    : `Live preview: none. The owner sets a project's address on agent-orch's new-project screen (or later under Live previews in the sidebar). ${PUBLISH_RULE} If the owner wants it online, ask them to add a live preview address; to check it works, run it on localhost.`;
 };
 setMcpSource((agent, run) => ext.mcpRun(agent, run)); // every runAgentCli run (tasks, planner, non-Claude chats) reads the list as it starts
 ext.onChange((kind) => { for (const ws of allClients) send(ws, { t: 'ext', kind }); });

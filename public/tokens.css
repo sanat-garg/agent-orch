@@ -1,4 +1,4 @@
-/* Token usage (tokens.js): the top bar pill and its sheet (the period picker, tiles, the by-model table, a bar per weekly window). */
+/* Token usage (tokens.js): the top bar pill and its sheet (the period picker, the last seven days' bars, tiles, the by-model table, a bar per weekly window). */
 .tk-link { gap: 6px; cursor: pointer; font: inherit; font-size: 12px; }
 .tk-pct { color: var(--text); font-weight: 600; }
 .tk-pct::before { content: '·'; margin-right: 6px; color: var(--faint); font-weight: 400; }
@@ -15,6 +15,19 @@
 .tk-tile { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: 10px; background: var(--raised); }
 .tk-n { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; color: var(--text); }
 .tk-l { font-size: 12px; color: var(--muted); }
+
+/* Last 7 days: one column per local day, the bar's height relative to the busiest day, the chat's tokens with its tasks' stacked on top. */
+.tk-days { margin-bottom: 12px; }
+.tk-chart { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; height: 96px; padding: 8px 8px 0; border-radius: 10px; background: var(--raised); }
+.tk-day { display: flex; flex-direction: column; min-width: 0; height: 100%; }
+.tk-dslot { flex: 1 1 auto; display: flex; align-items: flex-end; justify-content: center; min-height: 0; }
+.tk-dbar { display: flex; flex-direction: column; width: min(100%, 28px); border-radius: 4px 4px 0 0; overflow: hidden; }
+.tk-dchat { background: var(--accent); }
+.tk-dtasks { background: var(--border-strong); }
+.tk-dl { flex: none; padding: 4px 0 6px; font-size: 11px; line-height: 1; text-align: center; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tk-legend { display: flex; gap: 14px; margin-top: 6px; font-size: 12px; color: var(--muted); }
+.tk-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.tk-legend i { width: 10px; height: 10px; border-radius: 3px; }
 
 .tk-week { padding: 12px 0; border-top: 1px solid var(--border); }
 .tk-week:first-of-type { border-top: 0; padding-top: 0; }
@@ -40,5 +53,6 @@
 @media (pointer: coarse) { .tk-range button { height: 44px; padding: 0 14px; } }
 @media (max-width: 767px) {
   .tk-tiles { grid-template-columns: repeat(2, 1fr); }
+  .tk-chart { gap: 4px; height: 84px; padding: 6px 4px 0; }
   .tk-models th:nth-child(4), .tk-models td:nth-child(4) { display: none; }
 }

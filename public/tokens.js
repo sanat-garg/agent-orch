@@ -4,7 +4,8 @@
 // Its sheet breaks it down: this week and all time against each weekly window the account reports (Claude's
 // all-models week, per-model weeks such as Fable, codex's week), tokens by model and, on a project's main chat, its
 // tasks. All time / Last 7 days switches the totals, model tables and task totals between lifetime sums and the rolling
-// seven days (the server's `recent`); the pill and the weekly-limit estimates always stay as they are. Refetched when the chat changes, after each reply (debounced) and when one of the project's tasks finishes.
+// seven days (the server's `recent`), which also draws a bar per local day from `recent.hours`; the pill and the weekly-limit
+// estimates always stay as they are. Refetched when the chat changes, after each reply (debounced) and when one of the project's tasks finishes.
 // Loaded after app.js and uses its helpers ($, el, api, state, O, fmtTok, fmtResetAt, modelName, relTime, coarse).
 (() => {
   const TK = { cid: null, data: null, error: '', seq: 0, timer: null, lastFocus: null, range: 'all' };
@@ -121,6 +122,57 @@
     return t;
   }
   const label = (text) => el('h3', 'tk-label', text);
+  // Last 7 days: a bar per local day, today last, from the server's per-UTC-hour totals (`recent.hours`, grouped here into
+  // the owner's days), the chat's tokens with its tasks' stacked on top; heights relative to the busiest day. Hours that
+  // fall before the first of the seven local days (the window starts at now minus 7×24h) are left out.
+  function dailyBars(recent) {
+    const until = new Date(recent.until), days = [], byKey = new Map();
+    const key = (d) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(until.getFullYear(), until.getMonth(), until.getDate() - i);
+      const day = { label: d.toLocaleDateString([], { weekday: 'short' }), chat: 0, tasks: 0 };
+      days.push(day);
+      byKey.set(key(d), day);
+    }
+    for (const h of recent.hours || []) {
+      const day = byKey.get(key(new Date(h.t)));
+      if (day) { day.chat += h.chat || 0; day.tasks += h.tasks || 0; }
+    }
+    const max = Math.max(...days.map((d) => d.chat + d.tasks)), hasTasks = days.some((d) => d.tasks);
+    const wrap = el('div', 'tk-days');
+    if (!max) {
+      wrap.append(el('p', 'tk-note tk-empty tk-days-empty', 'No tokens in the last seven days.'));
+      return wrap;
+    }
+    const chart = el('div', 'tk-chart');
+    chart.setAttribute('role', 'group');
+    chart.setAttribute('aria-label', 'Tokens per day, last 7 days');
+    for (const d of days) {
+      const col = el('div', 'tk-day'), slot = el('div', 'tk-dslot'), bar = el('div', 'tk-dbar');
+      col.setAttribute('role', 'img');
+      const sum = d.chat + d.tasks;
+      col.setAttribute('aria-label', `${d.label}: ${fmtTok(sum)} tokens${hasTasks && sum ? ` (chat ${fmtTok(d.chat)}, tasks ${fmtTok(d.tasks)})` : ''}`);
+      col.title = `${d.label}: ${sum.toLocaleString()} tokens${hasTasks ? ` (chat ${d.chat.toLocaleString()}, tasks ${d.tasks.toLocaleString()})` : ''}`;
+      bar.style.height = `${Math.max(sum ? 2 : 0, Math.round(sum / max * 100))}%`;
+      const chat = el('span', 'tk-dchat'), tasks = el('span', 'tk-dtasks');
+      chat.style.flex = `${d.chat} 0 0`;
+      tasks.style.flex = `${d.tasks} 0 0`;
+      bar.append(tasks, chat);
+      slot.append(bar);
+      const cap = el('span', 'tk-dl', d.label);
+      cap.setAttribute('aria-hidden', 'true');
+      col.append(slot, cap);
+      chart.append(col);
+    }
+    wrap.append(chart);
+    if (hasTasks) {
+      const legend = el('div', 'tk-legend');
+      legend.setAttribute('aria-hidden', 'true');
+      for (const [cls, text] of [['tk-dchat', 'This chat'], ['tk-dtasks', 'Its tasks']]) { const i = el('span', ''); i.append(el('i', cls), text); legend.append(i); }
+      wrap.append(legend);
+    }
+    return wrap;
+  }
   const day = (t) => new Date(t).toLocaleDateString([], { day: 'numeric', month: 'short' });
   const when = (t) => new Date(t).toLocaleString([], { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
   function rangePicker() {
@@ -156,7 +208,8 @@
     if (week) bar.append(el('span', 'tk-span', `Rolling 7 days: ${when(d.recent.since)} – now`));
     out.push(bar);
     if (TK.error) out.push(el('p', 'tk-note tk-err', `Couldn't refresh token usage: ${TK.error}`));
-    if (!s.turns) out.push(el('p', 'tk-note tk-empty', week ? 'No tokens recorded for this chat in the last 7 days.' : 'No tokens recorded for this chat yet.'));
+    if (week) out.push(dailyBars(d.recent));
+    if (!s.turns) { if (!week) out.push(el('p', 'tk-note tk-empty', 'No tokens recorded for this chat yet.')); }
     else out.push(tiles(s));
     if (s.models.length > 1) out.push(label(week ? 'By model · last 7 days' : 'By model'), modelTable(s));
     if (tasks && tasks.turns) {

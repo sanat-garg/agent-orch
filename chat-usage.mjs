@@ -5,14 +5,17 @@
 // turns since the window began) and over its whole life (usage.mjs lifetime totals).
 //   chatUsage({usageLog, refs: [{source, ref}], tasks: [{source, ref}], agents, now})
 //     → {chat: Sum, tasks: Sum|null, weeks: [{agent, window, label, pct, resetsAt, readAt, size, week, life, tasksWeek, tasksLife}],
-//        recent: {since, until, chat: Sum, tasks: Sum|null}}
+//        recent: {since, until, chat: Sum, tasks: Sum|null, hours: [{t, chat, tasks}]}}
 //   Sum: {input, output, cached, turns, first, last, models: [{agent, model, input, output, cached, turns}]}
 //   size: estimated weighted tokens of the whole window, or null while the reading is too small to scale up (< MIN_PCT);
 //   week/life (and the tasks' pair): the chat's percent of one full window.
-//   recent: the same sums over only the turns recorded in the rolling seven days since..until (now - WEEK_MS .. now).
+//   recent: the same sums over only the turns recorded in the rolling seven days since..until (now - WEEK_MS .. now);
+//   hours: those turns' plain tokens (input + output + cached) per UTC hour, t the hour's start (epoch ms), only
+//   non-empty hours in time order, tasks 0 without task refs. The browser groups them into the owner's local days.
 import { tokenWeight, windowCovers, windowName, isWeekly, WEEK_MS } from './users.mjs';
 
 export const MIN_PCT = 2; // below this a reading's rounding swamps the estimate
+const HOUR_MS = 3600e3;
 
 export function sumTotals(entries) {
   const out = { input: 0, output: 0, cached: 0, turns: 0, first: null, last: null, models: [] }, by = new Map();
@@ -78,6 +81,15 @@ export function chatUsage({ usageLog, refs, tasks = null, agents = ['claude', 'c
     }
   }
   const since = now - WEEK_MS, inRange = records.filter((r) => r.t <= now), of = (set) => inRange.filter((r) => set.has(`${r.source}:${r.ref}`));
-  const recent = { since, until: now, chat: sumRecords(of(mine)), tasks: tasks ? sumRecords(of(theirs)) : null };
+  const hours = new Map();
+  for (const r of inRange) {
+    const k = `${r.source}:${r.ref}`, side = mine.has(k) ? 'chat' : theirs.has(k) ? 'tasks' : null;
+    if (!side) continue;
+    const t = Math.floor(r.t / HOUR_MS) * HOUR_MS;
+    const h = hours.get(t) || hours.set(t, { t, chat: 0, tasks: 0 }).get(t);
+    h[side] += (Number(r.input) || 0) + (Number(r.output) || 0) + (Number(r.cached) || 0);
+  }
+  const recent = { since, until: now, chat: sumRecords(of(mine)), tasks: tasks ? sumRecords(of(theirs)) : null,
+    hours: [...hours.values()].sort((a, b) => a.t - b.t) };
   return { chat, tasks: taskSum, weeks, recent };
 }

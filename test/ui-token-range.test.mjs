@@ -158,7 +158,7 @@ test('a chat with no recent turns shows an empty state for the last 7 days', { s
   await page.locator('.tk-range button', { hasText: 'Last 7 days' }).click();
   const week = await sheet(page);
   assert.deepEqual(week.tiles, []);
-  assert.deepEqual(week.empty, ['No tokens recorded for this chat in the last 7 days.']);
+  assert.deepEqual(week.empty, ['No tokens in the last seven days.']); // the daily bars' empty state stands in for the tiles
   assert.equal(await page.locator('#tkSub').innerText(), 'This chat · last 7 days');
   if (SHOTS) await page.screenshot({ path: path.join(SHOTS, 'tokens-range-empty.png') });
   assert.deepEqual(errors, []);

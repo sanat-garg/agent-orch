@@ -32,7 +32,7 @@ _What the code doesn't say. Per-area rules (chats, users, files, previews, sched
 - Machines UI: every machine card and detail panel keeps the 'Assign task' button (`renderAssignButton`); the window opens only via `openMachines()`.
 
 ## Gotchas
-- This checkout IS the live app (agent-orch.service on :3000). Never restart/kill it or call its restart endpoints, and never import server.mjs in a test or script (it boots the app; use `node --check`). Test servers use another port and `CW_DATA_DIR=$(mktemp -d)`. Never create a test chat on ~/workspace or a real folder: it gets a real private GitHub repo.
+- This checkout IS the live app (agent-orch.service on :3000). Never restart/kill it or call its restart endpoints, and never import server.mjs in a test or script (it boots the app; use `node --check`). Test servers use another port and `CW_DATA_DIR=$(mktemp -d)`. A test's cold server boot takes ~8s at this box's usual load average (>10 with other sessions' suites) and has exceeded 20s: give boot waits ≥90s. Never create a test chat on ~/workspace or a real folder: it gets a real private GitHub repo.
 - The Done-when verifier runs every command-like backtick snippet joined with ` && `; it refuses `>` (except `2>&1`, `2>/dev/null`), `curl` and more than three `&&`. Absence checks use `! grep …`.
 - /tmp is a small tmpfs: run heavy tests with `TMPDIR=` on the home disk. test/helper-kill.test.mjs can leave `test/fixtures/helper-parent.mjs` holding the test lock: kill that pid.
 - On the owner's MacBook Playwright browsers die at launch (SIGILL) unless launched with test/helpers/mac-chromium.mjs's env; some suites (compute-only's /proc check, cluster slot sizing) fail on macOS regardless of the change.

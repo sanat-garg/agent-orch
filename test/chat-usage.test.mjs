@@ -111,3 +111,33 @@ test('recent totals cover only the supplied refs\' turns from now minus seven da
   assert.deepEqual(quiet.recent.chat, { input: 0, output: 0, cached: 0, turns: 0, first: null, last: null, models: [] });
   assert.equal(quiet.recent.tasks.turns, 0);
 });
+
+test('recent hours hold each UTC hour\'s plain tokens for the chat and its tasks, only inside the seven days', () => {
+  const dir = tmp();
+  const now = Date.UTC(2026, 9, 19, 12, 30);
+  let t = now - 8 * D; // older than seven days: left out
+  const log = createUsageLog(dir, { now: () => t });
+  log.tokens('claude', claude(7000, 700, 70000), 'chat', 'c1', { model: 'opus' });
+  t = now - 2 * D + 5 * 60e3; // two turns in one hour, plus a task run
+  log.tokens('claude', claude(100, 10, 1000), 'chat', 'c1', { model: 'opus' });
+  log.tokens('claude', claude(200, 20, 2000), 'chat', 'c1', { model: 'fable' });
+  log.tokens('claude', claude(50, 5, 500), 'task', 5, { model: 'opus' });
+  log.tokens('claude', claude(9000, 900, 0), 'chat', 'other', { model: 'opus' }); // another chat: not counted
+  t = now - 2 * D + 20 * 60e3; // the same hour, a later minute
+  log.tokens('claude', claude(1, 1, 1), 'chat', 'c1', { model: 'opus' });
+  t = now - 3 * H; // a different hour: only the task
+  log.tokens('codex', { input_tokens: 30, output_tokens: 3 }, 'task', 5, { model: 'gpt-5' });
+  t = now + 1; // after now: left out
+  log.tokens('claude', claude(5000, 0), 'chat', 'c1', { model: 'opus' });
+
+  const r = chatUsage({ usageLog: log, refs: [{ source: 'chat', ref: 'c1' }], tasks: [{ source: 'task', ref: 5 }], now });
+  const hour = (x) => Math.floor(x / H) * H;
+  assert.deepEqual(r.recent.hours, [
+    { t: hour(now - 2 * D), chat: 3333, tasks: 555 },
+    { t: hour(now - 3 * H), chat: 0, tasks: 33 },
+  ]);
+  assert.equal(r.recent.hours[0].t % H, 0);
+  // Without task refs every hour's tasks is 0, and task-only hours are not listed.
+  assert.deepEqual(chatUsage({ usageLog: log, refs: [{ source: 'chat', ref: 'c1' }], now }).recent.hours, [{ t: hour(now - 2 * D), chat: 3333, tasks: 0 }]);
+  assert.deepEqual(chatUsage({ usageLog: log, refs: [{ source: 'chat', ref: 'c1' }], now: now + 30 * D }).recent.hours, []);
+});

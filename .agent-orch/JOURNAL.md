@@ -1744,6 +1744,14 @@ Chats export as Markdown from the sidebar ⋯ menu; tests pass
 ## 2026-10-19 14:37 — #2268 Integrate #2236: Voice dictation in the composer (Web Speech API), with tests (ui) [done (check passed)]
 
 app.js conflict resolved; submit stops dictation and hides slash menu
+
+## 2026-10-19 16:37 — #2272 Download Markdown code blocks as files, with tests (ui) [in progress (1)]
+
+code-download files and test written; test run not yet verified
+
+## 2026-10-19 16:45 — #2272 Download Markdown code blocks as files, with tests (ui) [done (check passed)]
+
+code blocks in chat and task output now have a Download button; 4 tests pass
 ## 2026-10-19 14:43 — #2252 Export filtered agent runs from Stats as CSV, with tests (ui) [done (check passed)]
 
 Stats exports filtered runs as CSV; export tests pass
@@ -1848,3 +1856,7 @@ Command: npm test -- test/ui-prompt-library.test.mjs test/ui-static.test.mjs
 ## 2026-10-19 16:37 — #2293 Integrate #2249: Save and reuse project prompts from the composer, with tests (ui) [done (check passed)]
 
 merge conflict fixed; prompt-library test race fixed; check passes
+
+## 2026-10-19 16:46 — #2294 Integrate #2272: Download Markdown code blocks as files, with tests (ui) [done (check passed)]
+
+server.mjs merge resolved; prompts and code-download assets both served

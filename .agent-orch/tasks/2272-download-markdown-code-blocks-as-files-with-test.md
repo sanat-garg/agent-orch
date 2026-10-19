@@ -13,3 +13,11 @@ Create public/code-download.js and public/code-download.css to add a Download ac
 ## Done when
 
 `npm test -- test/ui-code-download.test.mjs` passes.
+
+## Result — in progress (1) (2026-10-19 16:37)
+
+AGENT-ORCH-STATUS: continue — code-download files and test written; test run not yet verified
+
+## Result — done (check passed) (2026-10-19 16:45)
+
+AGENT-ORCH-STATUS: done — code blocks in chat and task output now have a Download button; 4 tests pass

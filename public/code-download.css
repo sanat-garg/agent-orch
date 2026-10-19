@@ -1,0 +1,15 @@
+/* Download bar above Markdown code blocks (code-download.js): outside the pre, so shell click-to-copy and selecting the
+   code are untouched; the bar itself can't be selected into a copy. */
+.cd-bar { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin: 10px 0 4px; min-width: 0;
+  font-size: 12px; color: var(--muted); user-select: none; -webkit-user-select: none; }
+.cd-bar + pre { margin-top: 0; }
+.cd-lang { margin-right: auto; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cd-btn { display: inline-flex; align-items: center; min-height: 26px; padding: 0 10px; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; cursor: pointer; flex: none; }
+.cd-btn:hover:not(:disabled) { border-color: var(--border-strong); background: var(--raised); }
+.cd-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.cd-btn:disabled { color: var(--faint); cursor: default; opacity: .6; }
+@media (pointer: coarse) {
+  .cd-bar { font-size: 14px; }
+  .cd-btn { min-height: 44px; min-width: 44px; padding: 0 14px; border-radius: 10px; }
+}

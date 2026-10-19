@@ -4,30 +4,31 @@ _Maintained by the orchestrator's reflection loop._
 
 ## Assessment
 
-_2026-10-19 (reflect #2256)._ agent-orch already has multi-project chats, a task queue, Files, Stats, schedules, screenshots, token usage, and a Browser view with persistent profiles. The active queue covers the previous reflection's seven features (#2249–#2255) plus the task diff, digest, voice input, command palette, chat export, retry note, slash commands, sidebar order, and Zen mode. #2233's task-changes API is done; its UI is still running as #2234. Let those features finish rather than queueing duplicates.
+_2026-10-19 (reflect #2259)._ The queue is full of the last three reflections' features (#2234–#2258): task diff UI, digest, command palette, dictation, slash commands, retry note, chat export, saved prompts, screenshot compare, preview inspector, Stats CSV, schedule copy, Files favourites, Skills search and Browser shortcuts. Nothing visibly broken surfaced: the last reflection's ui-static fix (#2232) landed and the three recent reflection tasks all passed. Let those finish; don't duplicate them.
 
-The built-in Browser has an address bar and profiles but no saved site shortcuts. That is a practical gap for repeated office work in signed-in web apps. A small, browser-only shortcuts feature is the next independent user-facing addition. It must not assign a public preview address or start a service.
+The biggest remaining gap against similar tools is **seeing what changed in a project over time**. The owner can see one task's diff (#2233/#2234) and commit counts in Stats, but not a browsable history of commits: chat auto-commits, `agent-orch #N:` task merges and their diffs. That is the next feature, split into a read-only backend and a UI built against the same fixed API contract so both run in parallel.
 
-Check: `node --test test/ui-static.test.mjs` passed (1/1). `npm test -- test/ui-static.test.mjs` stopped before running tests because its temp-dir selector chose the read-only `/home/ubuntu/.cache`; this is a check-runner environment limitation, not a confirmed app failure. No full-suite or live-browser claim is made.
+API contract (both halves use it): `GET /api/orch/projects/:id/commits?before=<sha>&limit=<n>` → `{ branch, commits: [{ sha, subject, author, at, task, add, del, files }], more }` (newest first, first-parent, `at` epoch ms, `task` = N from an `agent-orch #N:` subject or null). `GET /api/orch/projects/:id/commit?sha=<sha>&max=<bytes>` → `{ sha, subject, body, author, at, task, files: [{ path, add, del, binary }], patch, truncated }`; a malformed sha is 400 and an unknown one 404. Query params keep both routes inside server.mjs's `/api/orch/projects/:id/<word>` ownership check.
 
 ## Next
 
-1. **Saved sites in the built-in Browser:** save the current HTTP(S) page to a named shortcut, revisit it through the existing navigation action, and remove it. Scope shortcuts to the signed-in user and machine/profile, clear them when that profile is cleared, and show an empty state. Keep Chrome direct mode's UI as it is. This is one independent task touching `public/browser.js`, `public/browser.css`, and a focused UI test.
-2. **Finish the active queue:** land #2234's Changes section on top of #2233's API, then the already queued digest, command palette, dictation, sidebar order, and reusable/export features. No duplicate tasks are needed.
+1. **Project history backend** (`commits.mjs` + two routes): read-only log and per-commit diff, reusing changes.mjs's numstat/patch-cap approach.
+2. **Project history UI** (`public/commits.js`/`.css`): a "History" pill beside Screenshots opening a sheet: commit list with +/- counts, task links, Load older, and a commit view with per-file counts and a coloured diff. Its test stubs the API, so it doesn't wait for (1).
+3. **Finish the active queue** (#2234–#2258). No duplicates.
 
 ## Later (feature ideas)
 
-- Inline feedback on a task diff that can become a follow-up instruction, after #2234 lands (vibe-kanban).
-- Read-only project Git history with commit titles and diffs. Stats already gathers commit counts and file names, but does not provide a navigable history; keep this separate from autonomous merge controls (claudecodeui).
-- Per-turn chat changes using the hidden commit events and the task diff renderer, once the latter is stable.
-- Sync saved prompts across devices after #2249's browser-local version proves useful; consider variables only if owners reuse them.
-- Compare alternative task approaches in parallel worktrees after screenshot comparison #2250 shows what comparison UX owners need (crystal).
+- Once both history halves land: "Revert this commit" as a queued agent task (never a direct reset; main is never rewritten), and search commits by text.
+- Inline feedback on a task diff that becomes a follow-up instruction, after #2234 lands (vibe-kanban).
+- Per-turn chat changes using the hidden commit events and the diff renderer, once the history and task diff views are stable; unify the two diff renderers then.
+- Sync saved prompts across devices after #2249's browser-local version proves useful.
+- Compare alternative task approaches in parallel worktrees after #2250 shows what comparison UX owners need (crystal).
 
 ## Inspiration
 
 The earlier reflection researched these open-source repos. Several useful ideas remain, so this reflection reuses that research instead of searching again. These are design patterns to study, not code to copy; respect each repository's licence.
 
 - [BloopAI/vibe-kanban](https://github.com/BloopAI/vibe-kanban) → task workspaces, inline diff feedback, embedded previews and device-size inspection. #2234, #2250 and #2251 cover the first visual steps; inline feedback remains open.
-- [siteboon/claudecodeui](https://github.com/siteboon/claudecodeui) → mobile navigation, file editing, Git explorer and discoverable tools. #2254 and #2255 cover Files and Skills navigation; read-only Git history remains open. Profile-specific Browser shortcuts are a small adaptation of making frequently used destinations easy to reach.
+- [siteboon/claudecodeui](https://github.com/siteboon/claudecodeui) → mobile navigation, file editing, Git explorer and discoverable tools. #2254 and #2255 cover Files and Skills navigation; the read-only Git history is queued by reflection #2259 (its commit list + diff view is the model). Profile-specific Browser shortcuts are a small adaptation of making frequently used destinations easy to reach.
 - [winfunc/opcode](https://github.com/winfunc/opcode) → reusable agent instructions and usage reporting. #2249 and #2252 cover saved project prompts and CSV export.
 - [stravu/crystal](https://github.com/stravu/crystal) → comparing approaches in parallel workspaces. #2250 begins with comparison of existing screenshots; full alternative-run comparison remains open.

@@ -1689,3 +1689,6 @@ conflict resolved; intake tests pass on merged main
 ## 2026-10-19 14:25 — #2258 Save site shortcuts per built-in Browser profile, with tests (ui) [done (check passed)]
 
 Browser profiles have saved site shortcuts; four new tests pass
+## 2026-10-19 14:27 — #2253 Copy a schedule into an editable paused draft, with tests (ui) [done (check passed)]
+
+Schedules can be copied into paused drafts; copy tests pass

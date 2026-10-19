@@ -4,7 +4,8 @@
 // command in the project folder (cron-run.mjs; Output shows each run's exit code and output, GET …/runs), or, for an
 // "Ask an agent" schedule, queues a task. The sidebar's "Schedules" sheet lists every project's, with on/off, Run now,
 // Output, Edit and Delete; the editor builds the cron from simple choices (or takes one typed) and checks it live
-// (GET /api/orch/cron-preview). The chat planner makes them too ("every night at 2, run the scraper"). Loaded after app.js and uses its helpers
+// (GET /api/orch/cron-preview). Copy opens the editor as a draft of a new schedule prefilled from one (any project,
+// its zone, agent and model kept; never its runs) that saves switched off. The chat planner makes them too ("every night at 2, run the scraper"). Loaded after app.js and uses its helpers
 // ($, el, api, toast, fmtWhen, closeSidebar, coarse, routeHash, O).
 (() => {
   const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
@@ -130,6 +131,7 @@
       catch (e) { toast(e.message, { kind: 'error' }); } finally { run.disabled = false; }
     });
     const edit = btn('btn small', 'Edit', () => startEdit(s));
+    const copy = btn('btn small', 'Copy', () => startEdit(null, null, s));
     const out = el('div', 'sc-out');
     out.hidden = !SC.open.has(s.id);
     const log = s.kind === 'command' && btn('btn small', 'Output', () => {
@@ -144,7 +146,7 @@
         : `Delete the schedule "${s.title}"? Tasks it already queued stay.`)) return;
       try { await api(`/api/orch/schedules/${s.id}`, 'DELETE'); await load(); render(); } catch (e) { toast(e.message, { kind: 'error' }); }
     });
-    acts.append(...[run, log, edit, del].filter(Boolean));
+    acts.append(...[run, log, edit, copy, del].filter(Boolean));
     r.append(head, what, when, meta, acts, out);
     return r;
   }
@@ -178,9 +180,11 @@
     if (hint) w.append(el('small', 'sc-fhint', hint));
     return w;
   }
-  function startEdit(s, projectId) {
+  // s: the schedule being edited (null for a new one); src: the one a copy is drafted from (saved as a new, paused schedule).
+  function startEdit(s, projectId, src = null) {
     const curProject = SC.projects.find((p) => p.path === O.project?.path)?.id;
-    SC.edit = { id: s?.id ?? null, projectId: s?.project_id ?? projectId ?? curProject ?? SC.projects[0]?.id, ...fromCron(s?.cron || '0 9 * * *') };
+    const from = s || src, tz = from?.tz || TZ;
+    SC.edit = { id: s?.id ?? null, projectId: from?.project_id ?? projectId ?? curProject ?? SC.projects[0]?.id, ...fromCron(from?.cron || '0 9 * * *') };
     const f = SC.edit, body = $('scBody');
     const form = el('form', 'sc-form');
     form.noValidate = true;
@@ -189,13 +193,13 @@
     proj.value = f.projectId ?? '';
     proj.disabled = !!s;
     const title = document.createElement('input');
-    title.maxLength = 200; title.value = s?.title || ''; title.placeholder = 'e.g. Nightly scrape'; title.required = true;
-    let kind = s?.kind || 'command';
+    title.maxLength = 200; title.value = s?.title || (src ? `${src.title} (copy)`.slice(0, 200) : ''); title.placeholder = 'e.g. Nightly scrape'; title.required = true;
+    let kind = from?.kind || 'command';
     const command = document.createElement('textarea');
-    command.rows = 3; command.value = s?.command || ''; command.className = 'sc-cmdin'; command.placeholder = 'e.g. npm run scrape';
+    command.rows = 3; command.value = from?.command || ''; command.className = 'sc-cmdin'; command.placeholder = 'e.g. npm run scrape';
     command.spellcheck = false; command.autocapitalize = 'none'; command.setAttribute('autocorrect', 'off');
     const prompt = document.createElement('textarea');
-    prompt.rows = 4; prompt.value = s?.prompt || ''; prompt.placeholder = 'What the task should do each time, e.g. "Read new email, file receipts in Drive and list what needs my reply."';
+    prompt.rows = 4; prompt.value = from?.prompt || ''; prompt.placeholder = 'What the task should do each time, e.g. "Read new email, file receipts in Drive and list what needs my reply."';
     const preset = document.createElement('select');
     for (const [v, t] of PRESETS) { const o = el('option', '', t); o.value = v; preset.append(o); }
     preset.value = f.preset;
@@ -203,11 +207,11 @@
     const preview = el('div', 'sc-preview');
     preview.setAttribute('aria-live', 'polite');
     const doneWhen = document.createElement('input');
-    doneWhen.value = s?.done_when || ''; doneWhen.placeholder = 'Optional, e.g. npm test';
+    doneWhen.value = from?.done_when || ''; doneWhen.placeholder = 'Optional, e.g. npm test';
     const err = el('div', 'sc-err');
     err.setAttribute('role', 'alert');
     const cancel = btn('btn', 'Cancel', () => { SC.edit = null; render(); });
-    const submit = el('button', 'btn primary', s ? 'Save' : 'Add schedule');
+    const submit = el('button', 'btn primary', s ? 'Save' : src ? 'Save paused copy' : 'Add schedule');
     submit.type = 'submit';
     const foot = el('div', 'sc-foot');
     foot.append(cancel, submit);
@@ -219,10 +223,10 @@
       if (!cron) { preview.textContent = ''; return; }
       timer = setTimeout(async () => {
         try {
-          const r = await api(`/api/orch/cron-preview?cron=${encodeURIComponent(cron)}&tz=${encodeURIComponent(s?.tz || TZ)}`);
+          const r = await api(`/api/orch/cron-preview?cron=${encodeURIComponent(cron)}&tz=${encodeURIComponent(tz)}`);
           if (n !== seq) return;
           preview.className = `sc-preview${r.error ? ' bad' : ''}`;
-          preview.textContent = r.error || `${r.when}. Next: ${r.next.map((t) => fmtWhen(t * 1000)).join(', ')}`;
+          preview.textContent = r.error || `${r.when}${tz !== TZ ? ` (${tz})` : ''}. Next: ${r.next.map((t) => fmtWhen(t * 1000)).join(', ')}`;
         } catch (e) { if (n === seq) { preview.className = 'sc-preview bad'; preview.textContent = e.message; } }
       }, 250);
     };
@@ -283,12 +287,13 @@
       if (!title.value.trim()) { err.textContent = 'Give it a title'; return title.focus(); }
       const box = kind === 'command' ? command : prompt;
       if (!box.value.trim()) { err.textContent = kind === 'command' ? 'Say what command to run' : 'Say what the task should do'; return box.focus(); }
-      const body = { title: title.value, cron: toCron(f), tz: s?.tz || TZ,
-        ...(kind === 'command' ? { command: command.value, prompt: '', done_when: '' } : { command: '', prompt: prompt.value, done_when: doneWhen.value }) };
+      const body = { title: title.value, cron: toCron(f), tz,
+        ...(kind === 'command' ? { command: command.value, prompt: '', done_when: '' } : { command: '', prompt: prompt.value, done_when: doneWhen.value }),
+        ...(src ? { enabled: false, ...(kind === 'agent' ? { agent: src.agent ?? null, model: src.model ?? null } : {}) } : {}) };
       submit.disabled = true;
       try {
         const r = s ? await api(`/api/orch/schedules/${s.id}`, 'PATCH', body) : await api(`/api/orch/projects/${proj.value}/schedules`, 'POST', body);
-        toast(`${s ? 'Saved' : 'Scheduled'}: ${r.schedule.title} · ${r.schedule.when}`, { kind: 'success' });
+        toast(src ? `Copied, paused: ${r.schedule.title}. Switch it on to run it.` : `${s ? 'Saved' : 'Scheduled'}: ${r.schedule.title} · ${r.schedule.when}`, { kind: 'success' });
         SC.edit = null;
         await load(); render();
       } catch (x) { err.textContent = x.message; } finally { submit.disabled = false; }
@@ -310,10 +315,16 @@
       b.dataset.kind = k; b.setAttribute('role', 'tab');
       kinds.append(b);
     }
+    // A copy keeps its source's agent and model (no picker here: the server drops a model the agent doesn't have).
+    if (src && (src.agent || src.model)) {
+      const runsOn = el('p', 'sc-fhint sc-runson', `Runs on ${[src.agent, src.model].filter(Boolean).join(' · ')}, as "${src.title}" does.`);
+      agentFields.splice(1, 0, runsOn);
+    }
     showKind();
-    form.append(el('h3', 'sc-etitle', s ? 'Edit schedule' : 'New schedule'),
-      field('Project', proj), field('Title', title), kinds, cmdField, agentFields[0],
-      field('Repeat', rep), preview, agentFields[1], err, foot);
+    const note = src && el('p', 'sc-copynote', `Saving creates a new paused schedule: it won't run until you switch it on. "${src.title}" stays as it is, and its runs aren't copied.`);
+    form.append(el('h3', 'sc-etitle', s ? 'Edit schedule' : src ? 'Copy schedule' : 'New schedule'), ...(note ? [note] : []),
+      field(src ? 'Copy to project' : 'Project', proj), field('Title', title), kinds, cmdField, ...agentFields.slice(0, -1),
+      field('Repeat', rep), preview, agentFields.at(-1), err, foot);
     body.replaceChildren(form);
     if (!coarse) title.focus();
   }

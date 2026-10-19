@@ -13,3 +13,7 @@ Extend public/schedules.js with Copy on each schedule. Reuse the existing editor
 ## Done when
 
 `npm test -- test/ui-schedule-copy.test.mjs` passes.
+
+## Result — done (check passed) (2026-10-19 14:27)
+
+AGENT-ORCH-STATUS: done — Schedules can be copied into paused drafts; copy tests pass

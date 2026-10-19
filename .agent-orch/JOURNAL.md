@@ -1802,3 +1802,14 @@ Command: npm test -- test/ui-browser-recipes.test.mjs
 ## 2026-10-19 16:17 — #2271 Save reusable Browser task instructions per profile, with tests (ui) [done (check passed)]
 
 recipes test passes again after allowing for a slow, busy VM
+## 2026-10-19 15:49 — #2282 Live previews: Copy link and Share on each live card, with tests (ui) [in progress (1)]
+
+tool calls now denied; share test failed, needs debugging
+
+## 2026-10-19 16:05 — #2282 Live previews: Copy link and Share on each live card, with tests (ui) [done (check passed)]
+
+Copy link and Share on live cards, tests pass
+
+## 2026-10-19 16:18 — #2290 Integrate #2282: Live previews: Copy link and Share on each live card, with tests (ui) [done (check passed)]
+
+merge resolved; share icons sit in folded rows; tests pass

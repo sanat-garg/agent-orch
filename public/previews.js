@@ -5,8 +5,9 @@
 //   - the chat header links to the open project's preview with a status dot,
 //   - the sidebar's "Live previews" manager lists every project's address and status (set, move, restart, logs, remove)
 //     and the owner's domains (add, remove, make default),
-//   - a card's Inspect opens the inspector: that address in an iframe at a 390, 768 or 1280px CSS viewport width.
-// Loaded after app.js and uses its helpers ($, el, api, toast, state, currentConvo, closeSidebar, coarse).
+//   - a card's Inspect opens the inspector: that address in an iframe at a 390, 768 or 1280px CSS viewport width,
+//   - a card (and the inspector bar) has Copy link, and Share where navigator.share exists (phones), to send a preview on.
+// Loaded after app.js and uses its helpers ($, el, api, toast, state, currentConvo, closeSidebar, coarse, copyToClipboard).
 (() => {
   const APEX = '@';
   const PV = { domains: [], list: [], loaded: false, draft: { slug: '', skip: true, domain: null, apex: false, check: null }, timer: 0, seq: 0,
@@ -218,6 +219,8 @@
     logs: '<path d="M5 6h14M5 12h14M5 18h9"/>',
     edit: '<path d="M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4"/>',
     inspect: '<rect x="3" y="4" width="13" height="16" rx="2"/><rect x="15" y="9" width="6" height="11" rx="1.5"/>',
+    copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/>',
+    share: '<path d="M12 3v12M7 8l5-5 5 5M5 13v6a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-6"/>',
   };
   function act(tag, kind, label) {
     const b = el(tag, 'pv-act');
@@ -225,6 +228,35 @@
     b.insertAdjacentHTML('afterbegin', `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[kind]}</svg>`);
     b.append(el('span', '', label));
     return b;
+  }
+  // Copy link / Share: compact icon buttons (label in aria-label and title) so the owner can send a preview to a client or
+  // open it on another device. Share only where the browser has navigator.share (phones); a cancelled share is silent.
+  function iconBtn(kind, label) {
+    const b = el('button', `pv-ico ${kind}`);
+    b.type = 'button'; b.title = label; b.setAttribute('aria-label', label);
+    b.insertAdjacentHTML('afterbegin', `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[kind]}</svg>`);
+    return b;
+  }
+  async function copyLink(url) {
+    let ok = false;
+    try { ok = typeof copyToClipboard === 'function' ? await copyToClipboard(url) : (await navigator.clipboard.writeText(url), true); } catch { ok = false; }
+    toast(ok ? 'Link copied' : "Couldn't copy the link", { kind: ok ? 'success' : 'error' });
+  }
+  async function shareLink(name, url) {
+    try { await navigator.share({ title: name, url }); }
+    catch (e) { if (e?.name !== 'AbortError') toast(e?.message || "Couldn't share the link", { kind: 'error' }); }
+  }
+  function shareButtons(name, url) {
+    const box = el('span', 'pv-share');
+    const copy = iconBtn('copy', 'Copy link');
+    copy.onclick = () => copyLink(url);
+    box.append(copy);
+    if (typeof navigator.share === 'function') {
+      const sh = iconBtn('share', 'Share');
+      sh.onclick = () => shareLink(name, url);
+      box.append(sh);
+    }
+    return box;
   }
   // The status pill's word, and the line under the card that explains an error or what it waits for.
   const detailOf = (v) => (v.status === 'error' ? v.error || '' : v.status === 'waiting' ? v.error || '' : '');
@@ -291,8 +323,9 @@
     return out;
   }
 
-  // One row: name, address link, status pill, chevron. Unfolded (isOpen): the detail line, logs and the actions, or
-  // the editor under Edit. The address link opens the site; the rest of the head toggles the row.
+  // One row: name, address link, Copy link/Share icons, status pill, chevron. Unfolded (isOpen): the detail line, logs and
+  // the actions, or the editor under Edit. The address link opens the site, the icons copy or share it; the rest of the
+  // head toggles the row.
   function liveRow(c, v) {
     const row = el('div', 'pv-row');
     row.dataset.cid = c.id;
@@ -309,8 +342,8 @@
     chev.setAttribute('aria-expanded', String(open));
     chev.setAttribute('aria-label', `${open ? 'Hide' : 'Show'} actions for ${name}`);
     chev.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-    head.append(id, el('span', 'pv-pill'), chev);
-    head.addEventListener('click', (e) => { if (!e.target.closest('a')) toggle(c.id); });
+    head.append(id, shareButtons(name, v.url), el('span', 'pv-pill'), chev);
+    head.addEventListener('click', (e) => { if (!e.target.closest('a, .pv-share')) toggle(c.id); });
     const det = el('p', 'pv-detail');
     row.append(head, det);
     setStatus(row, v);
@@ -540,9 +573,12 @@
     }
     const tab = el('a', 'btn small pvi-tab', 'Open in new tab');
     tab.href = v.url; tab.target = '_blank'; tab.rel = 'noopener';
+    const copy = el('button', 'btn small pvi-copy', 'Copy link');
+    copy.type = 'button'; copy.title = `Copy ${v.url}`;
+    copy.onclick = () => copyLink(v.url);
     const size = el('span', 'pvi-size');
     size.setAttribute('aria-live', 'polite');
-    bar.append(seg, size, el('span', 'pv-grow'), tab);
+    bar.append(seg, size, el('span', 'pv-grow'), copy, tab);
     const note = el('p', 'pvi-note', `Blank or an error below? Some sites refuse to be shown inside another page. Use Open in new tab to see ${host(v)}.`);
     const stage = el('div', 'pvi-stage');
     const box = el('div', 'pvi-box');

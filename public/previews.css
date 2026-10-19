@@ -41,9 +41,9 @@
 .pv-link span:last-child { overflow: hidden; text-overflow: ellipsis; }
 #viewMenuPreview { display: flex; align-items: center; gap: 8px; }
 
-/* The manager sheet: a find field, then one row per project (name, address link, status pill, chevron), A–Z with the
-   open project first. A tap unfolds the row's actions (Open/Inspect/Restart/Logs/Edit; the address editor only under
-   Edit). "No address" and "Domains" are grouped lists. */
+/* The manager sheet: a find field, then one row per project (name, address link, Copy link/Share icons, status pill,
+   chevron), A–Z with the open project first. A tap unfolds the row's actions (Open/Inspect/Restart/Logs/Edit; the address
+   editor only under Edit). "No address" and "Domains" are grouped lists. */
 .modal-panel.pvm { width: min(560px, 100%); }
 .pv-find { flex: none; margin: -4px 20px 12px; }
 .pvm .m-head { align-items: flex-start; }
@@ -72,6 +72,11 @@
 .pv-pill.running { background: color-mix(in srgb, var(--ok) 13%, transparent); color: var(--ok); }
 .pv-pill.building { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
 .pv-pill.error { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
+/* Copy link / Share: icon buttons between the address and the pill (their clicks don't fold or unfold the row). */
+.pv-share { display: flex; flex: none; gap: 2px; }
+.pv-ico { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 8px; background: none; color: var(--muted); cursor: pointer; }
+.pv-ico:hover, .pv-ico:active { background: var(--raised); color: var(--text); }
+.pv-ico:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .pv-detail { margin: 0 14px 10px; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
 .pv-detail.bad { color: var(--danger); }
 .pv-detail[hidden] { display: none; }
@@ -126,6 +131,8 @@
   .pv-act { flex-direction: column; gap: 2px; height: 50px; font-size: 12px; }
   .pv-chev { width: 44px; height: 44px; }
   .pv-act svg { width: 18px; height: 18px; }
+  .pv-ico { width: 44px; height: 44px; }
+  .pv-ico svg { width: 20px; height: 20px; }
   .pv-ed-acts .btn.small, .pv-add .btn.small, .pv-remove, .pv-addbtn { min-height: 44px; }
   .pv-ed-acts .btn.small { padding: 0 16px; }
   .pv-editor .pv-addr, .pv-add input { height: 44px; }
@@ -151,4 +158,4 @@
   .pvi-note { margin: 0 12px 8px; }
   .pvi-stage { margin: 0 0 0; border-radius: 0; }
 }
-@media (pointer: coarse) { .pvi-widths button, .pvi-tab { min-height: 44px; } .pvi-close { width: 44px; height: 44px; } }
+@media (pointer: coarse) { .pvi-widths button, .pvi-tab, .pvi-copy { min-height: 44px; } .pvi-close { width: 44px; height: 44px; } }

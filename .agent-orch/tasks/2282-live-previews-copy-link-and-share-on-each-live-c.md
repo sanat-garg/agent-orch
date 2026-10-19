@@ -17,3 +17,13 @@ Test: new test/ui-preview-share.test.mjs copying test/ui-previews.test.mjs's set
 ## Done when
 
 `npm test -- test/ui-preview-share.test.mjs` passes.
+
+## Result — in progress (1) (2026-10-19 15:49)
+
+AGENT-ORCH-STATUS: continue — tool calls now denied; share test failed, needs debugging
+
+## Result — done (check passed) (2026-10-19 16:05)
+
+Both views look right: the copy icon sits compact between the address and the pill, with a 44pt target on the phone, and Share is correctly absent in a browser without `navigator.share`. Tests, static checks and the inspector suite all pass.
+
+AGENT-ORCH-STATUS: done — Copy link and Share on live cards, tests pass

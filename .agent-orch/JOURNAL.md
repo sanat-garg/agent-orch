@@ -1721,3 +1721,7 @@ Chat search now scans the newest maxBytes; search tests pass
 ## 2026-10-19 14:35 — #2262 Project History sheet: commit list and coloured commit diff, with tests (ui) [done (check passed)]
 
 History sheet lists commits and shows coloured diffs; tests pass
+
+## 2026-10-19 14:36 — #2265 Draft follow-up requests from changed files in the task drawer, with tests (ui) [done (check passed)]
+
+Changed files can now add follow-up notes to the project chat draft, with tests passing

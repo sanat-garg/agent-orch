@@ -13,3 +13,7 @@ Build on the completed Changes section (#2234). Add a file-level feedback action
 ## Done when
 
 `npm test -- test/ui-diff-feedback.test.mjs test/ui-task-changes.test.mjs test/ui-static.test.mjs` passes.
+
+## Result — done (check passed) (2026-10-19 14:36)
+
+AGENT-ORCH-STATUS: done — Changed files can now add follow-up notes to the project chat draft, with tests passing

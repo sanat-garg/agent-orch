@@ -8355,7 +8355,7 @@ function section(title) {
 // ({source, files: [{path, add, del, binary}], patch, truncated}), fetched only when the owner opens it (and again on
 // each re-open, so a running task's newer commits show). Each file row has its +/− counts under a total line; a row
 // opens that file's hunks from the patch, lines coloured by --add-*/--del-* and scrolling sideways, never wrapping.
-const CHG = { task: null, data: null, err: '', open: null, stale: false, loading: null, files: new Set() };
+const CHG = { task: null, data: null, err: '', open: null, stale: false, loading: null, files: new Set(), noteFocus: null };
 async function loadChanges(id) {
   if (CHG.loading === id) return; // a live re-render while the fetch is out
   CHG.stale = false;
@@ -8398,6 +8398,55 @@ function fileDiff(file, data) {
   box.append(inner);
   return box;
 }
+// A file's follow-up note (after vibe-kanban's diff feedback, at file level only): a short owner note under the open
+// file; Add to chat appends the task's number and title, the file's path and the note to the draft of the task's project
+// chat (O.detail.project.convo_id), then opens that chat without sending. Notes stay in localStorage per task and file
+// until added, so drawer re-renders and reloads keep them (a re-render also keeps the field focused); with no chat to
+// add to, the note stays and the form says why.
+const chgNoteKey = (id, path) => `cw.chgNote.${id}.${path}`;
+function fileFeedback(id, file) {
+  const key = chgNoteKey(id, file.path), box = el('div', 'chg-fb');
+  const ta = el('textarea', 'chg-fb-note');
+  ta.rows = 2;
+  ta.placeholder = 'Note for a follow-up on this file';
+  ta.setAttribute('aria-label', `Follow-up note on ${file.path}`);
+  ta.value = store.get(key) || '';
+  const add = el('button', 'btn small chg-fb-add', 'Add to chat');
+  add.type = 'button';
+  add.title = 'Add this note to the project chat\'s message box (Ctrl+Enter); it is not sent';
+  const msg = el('div', 'chg-fb-msg');
+  msg.setAttribute('role', 'status');
+  const say = (text) => { msg.textContent = text; };
+  ta.oninput = () => { if (ta.value.trim()) store.set(key, ta.value); else store.del(key); say(''); };
+  ta.onkeydown = (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); add.click(); } };
+  ta.onfocus = () => (CHG.noteFocus = key);
+  ta.onblur = () => setTimeout(() => { if (ta.isConnected && document.activeElement !== ta && CHG.noteFocus === key) CHG.noteFocus = null; });
+  if (CHG.noteFocus === key) queueMicrotask(() => ta.isConnected && ta.focus({ preventScroll: true }));
+  add.onclick = () => {
+    const note = ta.value.trim();
+    if (!note) { say('Write a note first'); return ta.focus(); }
+    const cid = O.detail?.project?.convo_id, t = O.detail?.task.id === id ? O.detail.task : O.tasks.get(id);
+    if (!cid || !state.convos.some((c) => c.id === cid)) return say('This task\'s project chat isn\'t available, so the note stays here');
+    const text = `Follow-up on task #${id}${t?.title ? ` (${displayTitle(t)})` : ''}, file \`${file.path}\`:\n${note}`;
+    const cur = (state.cid === cid ? input.value : store.get('cw.draft.' + cid) || '').replace(/\s+$/, '');
+    const draft = cur ? `${cur}\n\n${text}` : text;
+    store.set('cw.draft.' + cid, draft); // the chat's history frame restores the box from it
+    store.del(key);
+    if (CHG.noteFocus === key) CHG.noteFocus = null;
+    closeTask();
+    if (state.cid !== cid) openConvo(cid);
+    closeSidebar();
+    setView('chat');
+    input.value = draft;
+    input.dispatchEvent(new Event('input')); // autosize, Send button, saved draft
+    input.setSelectionRange(draft.length, draft.length);
+    toast('Added to the chat\'s message box. Send it when ready', { kind: 'success' });
+  };
+  const bar = el('div', 'chg-fb-bar');
+  bar.append(msg, add);
+  box.append(ta, bar);
+  return box;
+}
 function changesSection(id) {
   const d = el('details', 'dr-more dr-changes');
   d.open = CHG.open === id;
@@ -8430,10 +8479,10 @@ function changesSection(id) {
       const now = !CHG.files.has(f.path);
       if (now) CHG.files.add(f.path); else CHG.files.delete(f.path);
       btn.setAttribute('aria-expanded', String(now));
-      if (now) li.append(fileDiff(f, data)); else li.querySelector(':scope > :not(.chg-row)')?.remove();
+      if (now) li.append(fileDiff(f, data), fileFeedback(id, f)); else li.querySelectorAll(':scope > :not(.chg-row)').forEach((n) => n.remove());
     };
     li.append(btn);
-    if (open) li.append(fileDiff(f, data));
+    if (open) li.append(fileDiff(f, data), fileFeedback(id, f));
     ul.append(li);
   }
   d.append(ul);

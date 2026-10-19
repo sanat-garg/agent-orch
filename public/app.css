@@ -2433,3 +2433,13 @@ button.dg-row:disabled { opacity: .6; cursor: progress; }
 @media (prefers-reduced-motion: reduce) {
   .sidebar, .topbar, .topbar .seg, .top-title #title, .messages, .working, .composer .box { transition: none; }
 }
+
+/* The Changes section's per-file follow-up note (app.js fileFeedback). */
+.chg-fb { padding: 8px 10px; border-top: 1px solid var(--border); }
+.chg-fb-note { display: block; width: 100%; box-sizing: border-box; min-height: 52px; max-height: 160px; resize: vertical; padding: 6px 9px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; font-size: 13px; line-height: 1.4; }
+.chg-fb-note:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.chg-fb-bar { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.chg-fb-msg { flex: 1; min-width: 0; color: var(--danger); font-size: 12.5px; }
+.chg-fb-add { flex: none; }
+@media (pointer: coarse) { .chg-fb-note { font-size: 16px; } .chg-fb-add { min-height: 44px; } }

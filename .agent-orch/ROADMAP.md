@@ -4,52 +4,46 @@ _Maintained by the orchestrator's reflection loop._
 
 ## Assessment
 
-_2026-10-19 (reflect #2267)._ Recent work delivered task diffs, the away digest, Zen mode, activity sorting, retry notes, slash commands, schedule copying, Browser site shortcuts and Skills search. The history backend is present; its UI already has a worker. Next, help owners find queued work, inspect office-work outputs and reuse successful instructions.
+_2026-10-19 (reflect #2275)._ Since #2267 landed: History sheet (#2262), chat export (#2240), dictation (#2236/#2268), seven-day token switch (#2266), file follow-up notes (#2265), bounded chat search (#2264). test/ui-static.test.mjs passes 22/22 (log: reflection-2275-static.log). Nothing visibly broken was found; no full suite or browser run this turn.
 
-Do not repeat active work: #2262 History UI, #2254 Files favourites, #2252 Stats CSV, #2251 preview inspector, #2250 screenshot comparison, #2249 saved project prompts, #2240 chat export, #2237 command palette, #2236 dictation, #2264 recent-message search, #2265 file feedback drafts and #2266 seven-day token usage.
+Still active, do not repeat: #2269 Queue search, #2270 CSV Quick Look, #2271 Browser recipes, #2272 code-block download, #2273 persona copy, #2274 schedule-output download, #2252 Stats CSV, #2249 project prompts, #2237 command palette.
 
-Concrete gaps verified in code:
-- Queue's Up next tree has no search; the Machines assignment picker has a separate ready-task search.
-- Files Quick Look renders CSV as raw lines; Markdown already has Preview/Source.
-- Browser has saved site URLs but no reusable task instructions.
-- Markdown supports shell-command click-to-copy but no code-block file download.
-- Personas can be created and edited, but variations require manual copying.
-- Schedule Output exposes retained run text but has no download action.
+Free areas this round: commits.js, shots.js, tokens.js + chat-usage.mjs, previews.js, credentials.js, and small localised app.js hunks (composer, title, task drawer). New public files are avoided: every one edits the same server.mjs allowlist line as #2272/#2249.
 
-Checks: direct runs of test/ui-static.test.mjs (22 tests) and test/cron.test.mjs (7 tests) passed without skips. Logs: reflection-2267-static.log and reflection-2267-cron.log. test/commits.test.mjs failed during fixture setup at spawnSync git EPERM in this sandbox; neither test reached a product assertion. Details: reflection-2267-commits.log; initial combined run: reflection-2267-checks.log. This does not establish a history defect. No full-suite or browser validation was performed. There is no build step.
+## Next: nine independent tasks (queued by #2275)
 
-## Next: six independent tasks
+1. **@-mention project files in the composer.** Typing @ suggests files from the existing GET /api/files/find?cid=&q=, beside the slash-command menu (claudecodeui-style).
+2. **History: Ask to undo a commit.** Commit detail drafts a `git revert` request into the project chat (never sent, never resets main).
+3. **History: search commit messages.** commits.mjs `q` (git log --grep, case-insensitive, fixed-string) + one-line route pass-through + a search field in the History sheet.
+4. **Screenshots: attach one to the project chat** through the existing attachment tray (addAttachments).
+5. **Token usage: daily bars for the last seven days** (hourly buckets from chat-usage.mjs, grouped into local days in the browser).
+6. **Live previews: Copy link and Share** on each live card (navigator.share where available).
+7. **Credentials: generate a strong secret** in the field editor.
+8. **Browser tab title shows how many actions wait for the owner** (same count as the Home Screen badge).
+9. **Task drawer: Follow up on a finished task** drafts a note into the project chat (task-level sibling of #2265's per-file notes).
 
-1. **Search Up next by title, task number or declared file.** Confine search to the existing queue section, preserving the digest and machine lanes. Retain necessary ancestor context in filtered results and disable reordering until cleared. Preserve focus through task pushes; show match counts and a clear empty state. Files: public/app.js (Queue helpers/renderQueue only), public/app.css (scoped rules), test/ui-queue-search.test.mjs.
-2. **Preview CSV files as tables in Quick Look.** Reuse the bounded raw response and Preview/Source control. Handle quoted commas, escaped quotes and multiline fields, preserve text, cap rendered rows/columns and label partial previews. Malformed CSV offers an understandable Source fallback. Files: public/files.js (Quick Look only), public/files.css (scoped CSV rules), test/ui-files-csv.test.mjs.
-3. **Save reusable Browser task instructions per profile.** A browser-local library beside the Browser prompt saves named instructions and inserts editable drafts. Scope by signed-in user, node and identity. The owner still presses Send; preserve the live-only activity panel and approval behavior. This is separate from #2249's project-chat prompt library and depends on none of its code. Files: public/browser.js, public/browser.css, test/ui-browser-recipes.test.mjs.
-4. **Download a Markdown code block as a file.** A standalone script adds Download outside each code element in chat and task output. Use exact code text, a conservative language-extension map and .txt fallback. Preserve shell click-to-copy. Files: public/code-download.js, public/code-download.css, public/index.html (asset tags only), server.mjs (static allowlist only), test/ui-code-download.test.mjs.
-5. **Copy a persona into an editable new draft.** Copy name, summary and instructions without its id; create only on explicit save. Existing chats keep their current persona. Files: public/ext.js, public/ext.css, test/ui-persona-copy.test.mjs.
-6. **Download a schedule run's retained output.** Add Download output using the already-loaded /runs response, with schedule/run identity, time, status and exact retained output. Label running output as a snapshot; do not imply it is the complete lifetime log. Files: public/schedules.js, public/schedules.css, test/ui-schedule-output-download.test.mjs.
+## Already shipped: project history contract
 
-All six are background urgency, independently runnable, with no after prerequisites and mutually disjoint file sets. Existing hot-file exceptions stay localized: Queue instead of composer/drawer; Quick Look instead of Files Places; asset tags and static allowlist instead of routes. No integrator is needed in advance. Each task gets a focused interaction test and one obvious empty/error case, including phone sizing. No source code was changed in this reflection.
-
-## Already queued: project history contract
-
-Preserve #2261/#2262's interface:
 - GET /api/orch/projects/:id/commits?before=<sha>&limit=<n> returns { branch, commits: [{ sha, subject, author, at, task, add, del, files }], more }; newest first, first-parent, at in epoch ms, task parsed from agent-orch #N: or null.
-- GET /api/orch/projects/:id/commit?sha=<sha>&max=<bytes> returns { sha, subject, body, author, at, task, files: [{ path, add, del, binary }], patch, truncated }; malformed sha 400, unknown sha 404. Both retain the project ownership gate.
+- GET /api/orch/projects/:id/commit?sha=<sha>&max=<bytes> returns { sha, subject, body, author, at, task, files: [{ path, add, del, binary }], patch, truncated }; malformed sha 400, unknown sha 404.
 
 ## Later: feature ideas
 
-- After History lands: owner-submitted revert requests producing new commits, plus history text search. Never reset or rewrite main.
-- After file feedback lands: select a hunk or line range for precise follow-up context.
-- Per-turn chat changes from hidden commit events once History and task diffs are stable.
-- Sync saved project prompts across devices after #2249; Browser recipes can follow later.
-- Compare alternative approaches in parallel worktrees after screenshot comparison lands.
-- Explicitly paginated deeper-history search with clear coverage if bounded recent search proves insufficient.
-- Cross-project schedule agenda using server-supplied next_run_at, without a second cron implementation.
+- Kanban board view of a project's tasks (vibe-kanban) as a new public file, once the allowlist line is quiet.
+- @-mention follow-ups: folders, and chips for mentioned files after #1 lands.
+- Select a hunk or line range in task/commit diffs for precise follow-up context.
+- Per-turn chat changes from commit events; "Run again" for done tasks via a copy-task endpoint.
+- Sync saved project prompts and Browser recipes across devices after #2249/#2271.
+- Compare alternative approaches in parallel worktrees (crystal).
+- Cross-project schedule agenda using server-supplied next_run_at; human-readable cron preview in the schedule editor.
+- Preview inspector: reload and landscape rotation; QR code to open a preview on the phone.
+- Usage by project across all chats (opcode usage dashboard).
 
 ## Inspiration
 
 Reuse these existing sources; the pattern inventory is not exhausted. Their README pages were re-opened on 2026-10-19 to verify descriptions. Borrow interaction ideas, not code; respect licences.
 
 - [BloopAI/vibe-kanban](https://github.com/BloopAI/vibe-kanban) → task planning, branch workspaces, inline diff feedback and device previews. Adapt task-management emphasis into queue search; #2265 covers feedback and #2251 inspection. Its current README announces sunsetting, so treat it as interaction research rather than a new dependency.
-- [siteboon/claudecodeui](https://github.com/siteboon/claudecodeui) → responsive chat, file exploration/editing and Git exploration; its README lists a task-queue plugin with filtering. Adapt these patterns into searchable queued work and practical file/output handling. CSV previews and code downloads are our extensions, not claims about its implementation.
-- [winfunc/opcode](https://github.com/winfunc/opcode) → purpose-built agent libraries with custom instructions, execution logs and usage reporting. Adapt instruction reuse into persona copies and profile-scoped Browser recipes, and log access into schedule-output downloads. #2249/#2252/#2266 cover project prompts and usage/export work.
+- [siteboon/claudecodeui](https://github.com/siteboon/claudecodeui) → responsive chat, @-file mentions in the composer, file exploration/editing and Git exploration (commit search, revert); its README lists a task-queue plugin with filtering. Adapt these patterns into searchable queued work and practical file/output handling. CSV previews and code downloads are our extensions, not claims about its implementation.
+- [winfunc/opcode](https://github.com/winfunc/opcode) → purpose-built agent libraries, checkpoints you can roll back to (→ History undo), execution logs and a usage dashboard with per-day charts (→ daily token bars). Adapt instruction reuse into persona copies and profile-scoped Browser recipes, and log access into schedule-output downloads. #2249/#2252/#2266 cover project prompts and usage/export work.
 - [stravu/crystal](https://github.com/stravu/crystal) → previously recorded inspiration for comparing approaches in parallel workspaces; retained for later, not re-researched this turn.

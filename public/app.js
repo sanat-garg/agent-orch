@@ -2203,6 +2203,7 @@ input.addEventListener('input', () => {
   // An unnamed new project previews the folder name it will get from this message.
   if (!state.cid && state.draft.type === 'new' && !state.draft.name) { updateFolderChip(); updateHeader(); }
   SL.i = 0;
+  mentionInput();
   renderSlash();
 });
 const coarse = matchMedia('(pointer: coarse)').matches;
@@ -2223,7 +2224,7 @@ input.addEventListener('keydown', (e) => {
 // composer) lists the commands Claude's SDK reported for this chat (server.mjs slashCmds, sent in the history and init
 // frames; codex chats get none): prefix matches first, then names containing the text, at most 8. Focus stays in the
 // textarea; ↑/↓ move, Tab or Enter (which then doesn't send) inserts '/name ', Esc closes until the text changes.
-const SL = { list: [], i: 0, dismissed: null };
+const SL = { list: [], i: 0, dismissed: null, kind: 'slash' }; // kind: 'slash' | 'file' (what SL.list holds)
 function slashMatches(commands, text, max = 8) {
   if (!/^\/\S*$/.test(text)) return [];
   const q = text.slice(1).toLowerCase(), pre = [], mid = [];
@@ -2242,17 +2243,19 @@ function hideSlash() {
 }
 function renderSlash() {
   const cmds = parsePick($('model').value).agent === 'claude' ? state.commands || [] : [];
-  const list = document.activeElement === input && input.value !== SL.dismissed ? slashMatches(cmds, input.value) : [];
-  if (!list.length) return hideSlash();
+  const live = document.activeElement === input && input.value !== SL.dismissed;
+  let list = live ? slashMatches(cmds, input.value) : [], kind = 'slash';
+  if (!list.length && live && FM.list && FM.cid === state.cid && mentionAt(input.value, input.selectionStart)) { list = FM.list; kind = 'file'; }
+  if (!list.length && kind === 'slash') return hideSlash();
   const menu = $('slashPop');
   SL.list = list;
+  SL.kind = kind;
   SL.i = Math.max(0, Math.min(SL.i, list.length - 1));
-  menu.replaceChildren(...list.map((c, j) => {
-    const b = menuOpt('/' + c, { value: c, selected: j === SL.i });
-    b.id = 'slashOpt' + j;
-    b.tabIndex = -1;
-    return b;
-  }));
+  menu.classList.toggle('files', kind === 'file');
+  const row = (b, j) => { b.id = 'slashOpt' + j; b.tabIndex = -1; return b; };
+  menu.replaceChildren(...(kind === 'slash' ? list.map((c, j) => row(menuOpt('/' + c, { value: c, selected: j === SL.i }), j))
+    : list.length ? list.map((f, j) => row(menuOpt(f.name + (f.dir ? '/' : ''), { value: String(j), selected: j === SL.i, hint: f.path.includes('/') ? f.path.slice(0, f.path.lastIndexOf('/')) : '' }), j))
+    : [row(menuOpt('No matching files', { disabled: true }), 0)]));
   menu.hidden = false;
   input.setAttribute('aria-expanded', 'true');
   input.setAttribute('aria-activedescendant', 'slashOpt' + SL.i);
@@ -2269,8 +2272,13 @@ function pickSlash(name) {
 function slashKey(e) {
   if ($('slashPop').hidden || e.isComposing) return false;
   const n = SL.list.length;
+  if (!n) { // the 'No matching files' row: Esc closes it until the text changes; Enter and Tab close it and go on to send / move focus
+    if (e.key === 'Escape') { SL.dismissed = input.value; hideSlash(); e.preventDefault(); return true; }
+    if (e.key === 'Enter' || e.key === 'Tab') hideSlash();
+    return false;
+  }
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { SL.i = (SL.i + (e.key === 'ArrowDown' ? 1 : -1) + n) % n; renderSlash(); }
-  else if ((e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey) pickSlash(SL.list[SL.i]);
+  else if ((e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey) { if (SL.kind === 'file') pickFile(SL.list[SL.i]); else pickSlash(SL.list[SL.i]); }
   else if (e.key === 'Escape') { SL.dismissed = input.value; hideSlash(); }
   else return false;
   e.preventDefault();
@@ -2281,7 +2289,44 @@ input.setAttribute('aria-autocomplete', 'list');
 input.setAttribute('aria-controls', 'slashPop');
 input.addEventListener('blur', hideSlash);
 $('slashPop').addEventListener('pointerdown', (e) => e.preventDefault()); // a tap keeps the keyboard and the textarea's focus
-$('slashPop').addEventListener('click', (e) => { const b = e.target.closest('.cm-opt'); if (b) pickSlash(b.dataset.value); });
+$('slashPop').addEventListener('click', (e) => {
+  const b = e.target.closest('.cm-opt:not(:disabled)');
+  if (b) { if (SL.kind === 'file') pickFile(SL.list[Number(b.dataset.value)]); else pickSlash(b.dataset.value); }
+});
+// @-mentions (ui-file-mention.test): '@' that starts a word, plus 2+ characters up to the caret, looks the text up in the
+// open chat's project (GET /api/files/find, like the Files pane) and lists at most 8 hits in #slashPop with the slash menu's
+// keys; a pick replaces '@query' with '@<path relative to the project> ' so the agent sees the file. Debounced 150 ms,
+// answers out of order are dropped (seq), a failed fetch just hides the menu, no hit shows one muted 'No matching files'
+// row. Not in emails (a@b.com), and no menu without a chat (a new-project draft). The last list stays while a new one loads.
+const FM = { seq: 0, timer: 0, q: null, cid: null, list: null }; // list: /api/files/find entries for q (null: none yet)
+function mentionAt(text, caret) {
+  const m = /(^|\s)@(\S*)$/.exec(text.slice(0, caret));
+  return m && m[2].length >= 2 ? { start: caret - m[2].length - 1, q: m[2] } : null;
+}
+function mentionInput() {
+  clearTimeout(FM.timer);
+  const m = state.cid && mentionAt(input.value, input.selectionStart);
+  if (!m) { FM.q = null; FM.list = null; return; }
+  if (m.q === FM.q && FM.cid === state.cid) return;
+  if (FM.list && !FM.list.length) FM.list = null; // never show a stale 'No matching files' for the new text
+  FM.q = m.q; FM.cid = state.cid;
+  const seq = ++FM.seq, cid = state.cid;
+  FM.timer = setTimeout(async () => {
+    let d;
+    try { d = await api(`/api/files/find?cid=${encodeURIComponent(cid)}&q=${encodeURIComponent(m.q)}`); } catch { if (seq === FM.seq) { FM.list = null; if (SL.kind === 'file') hideSlash(); } return; }
+    if (seq !== FM.seq || cid !== state.cid) return;
+    FM.list = (d.entries || []).slice(0, 8);
+    renderSlash();
+  }, 150);
+}
+function pickFile(f) {
+  hideSlash();
+  const caret = input.selectionStart, m = mentionAt(input.value, caret);
+  input.setRangeText(`@${f.path}${f.dir ? '/' : ''} `, m ? m.start : caret, caret, 'end');
+  input.focus();
+  FM.q = null; FM.list = null;
+  input.dispatchEvent(new Event('input')); // autosize, Send button, saved draft
+}
 addEventListener('resize', () => { if (!$('slashPop').hidden) placeMenu($('slashPop'), input.closest('.box')); });
 $('composer').addEventListener('submit', async (e) => {
   e.preventDefault();

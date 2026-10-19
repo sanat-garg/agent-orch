@@ -2108,6 +2108,11 @@ pre.copy-cmd:hover::after { opacity: .7; }
 .slash-menu .cm-opt[aria-selected="true"] { background: var(--raised); font-weight: inherit; }
 .slash-menu .cm-l { font-family: var(--mono); font-size: 12.5px; }
 @media (pointer: coarse) { .slash-menu .cm-opt { min-height: 44px; } }
+/* @-mention file rows (#slashPop.files): the file name, then its folder muted; long paths get an ellipsis; one disabled row says 'No matching files'. */
+.slash-menu.files { max-width: min(460px, calc(100vw - 16px)); }
+.slash-menu.files .cm-l { flex: none; max-width: 100%; }
+.slash-menu.files .cm-h { flex: 1; min-width: 0; font-family: var(--mono); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.slash-menu .cm-opt:disabled .cm-l { color: var(--faint); font-family: inherit; }
 .fb-chip:not(.none) { color: var(--text); }
 .fb-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .fb-pop .modal-backdrop { background: transparent; animation: none; }

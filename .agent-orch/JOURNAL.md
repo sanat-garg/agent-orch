@@ -1827,3 +1827,6 @@ Command: npm test -- test/ui-shots-attach.test.mjs
 ## 2026-10-19 16:21 — #2280 Screenshots: attach a screenshot to the project chat, with tests (ui) [done (check passed)]
 
 Attach to chat on screenshots; all 3 tests pass
+## 2026-10-19 16:22 — #2277 @-mention project files in the composer, with tests (ui) [done (check passed)]
+
+composer @-mentions suggest project files, tests pass

@@ -19,3 +19,7 @@ Test: new test/ui-file-mention.test.mjs using playwright-core like test/ui-slash
 ## Done when
 
 `npm test -- test/ui-file-mention.test.mjs` passes (typing @app suggests the stubbed file and Enter inserts its path; no matches shows 'No matching files').
+
+## Result — done (check passed) (2026-10-19 16:22)
+
+AGENT-ORCH-STATUS: done — composer @-mentions suggest project files, tests pass

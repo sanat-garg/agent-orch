@@ -13,6 +13,26 @@
 .ext-body { --px: 20px; --pb: 20px; padding: 2px var(--px) var(--pb); }
 .ext-sub { margin: 0 0 12px; color: var(--muted); font-size: 13px; line-height: 1.45; }
 .ext-acts { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+/* Search: stays at the top of the sheet while the list scrolls under it */
+.ext-search { position: sticky; top: -2px; z-index: 1; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin: 0 0 10px; padding: 2px 0 8px; background: var(--bg); }
+.ext-search[hidden] { display: none; }
+.ext-search-field { position: relative; flex: 1 1 220px; min-width: 0; }
+.ext-search-ico { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--faint); pointer-events: none; }
+.ext-q { width: 100%; height: 36px; padding: 0 34px 0 32px; border: 1px solid var(--border); border-radius: 9px; background: var(--panel); color: var(--text); font: inherit; font-size: 14px; }
+.ext-q::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; }
+.ext-q:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-color: transparent; }
+.ext-q-clear { position: absolute; right: 3px; top: 50%; transform: translateY(-50%); display: grid; place-items: center; width: 30px; height: 30px; border: 0; border-radius: 7px; background: none; color: var(--muted); cursor: pointer; }
+.ext-q-clear:hover { color: var(--text); background: var(--raised); }
+.ext-q-clear[hidden] { display: none; }
+.ext-q-clear:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ext-src { display: flex; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: 9px; background: var(--raised); flex: none; }
+.ext-src button { border: 0; background: transparent; color: var(--muted); height: 30px; padding: 0 10px; border-radius: 7px; cursor: pointer; font: inherit; font-size: 12.5px; font-weight: 550; }
+.ext-src button:hover { color: var(--text); }
+.ext-src button[aria-pressed="true"] { background: var(--seg-on); color: var(--text); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+.ext-src button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ext-count { flex-basis: 100%; margin: 0; color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.ext-count:empty { display: none; }
+.ext-nomatch .link-btn { color: var(--accent-ink); font-size: inherit; font-weight: 550; }
 .ext-empty { margin: 18px 0; padding: 18px; border: 1px dashed var(--border-strong); border-radius: 12px; color: var(--muted); font-size: 13.5px; text-align: center; line-height: 1.45; }
 
 .ext-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); overflow: hidden; }
@@ -110,6 +130,8 @@
   .ext-seg span { height: 44px; }
   .ext-acts .btn.small, .ext-form-acts .btn.small, .ext-starters .chip { min-height: 44px; }
   .ext-back { min-height: 44px; }
+  .ext-q, .ext-src button { height: 44px; }
+  .ext-q-clear { width: 40px; height: 40px; }
 }
 /* Skills: the Add skill choices, a staged skill's preview, and the list as a drop target for .zip/.skill files */
 .ext-choices .ext-open { min-height: 60px; }

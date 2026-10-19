@@ -4,22 +4,23 @@
 // place (Back, Cancel or Esc returns, asking first when something was typed). The composer's persona chip (#personaChip)
 // picks the open chat's persona, or the next new chat's. Loaded after app.js and uses its helpers ($, el, api, toast,
 // store, state, currentConvo, menuOpt, bindMenu, openSettings, closeSettings, CM).
-const EX = { data: null, err: '', tab: 'skills', edit: null, dirty: false, saving: false, lastFocus: null, fromSettings: false, seq: 0, personas: null, draft: store.get('cw.persona') || null };
+const EX = { data: null, err: '', tab: 'skills', edit: null, dirty: false, saving: false, lastFocus: null, fromSettings: false, seq: 0, personas: null, draft: store.get('cw.persona') || null, q: {}, src: 'all' };
 const EX_KINDS = {
-  skills: { label: 'Skills', one: 'skill', key: (s) => s.folder,
+  skills: { label: 'Skills', one: 'skill', many: 'skills', key: (s) => s.folder,
     sub: 'Instructions, and any files they need, that an agent loads when a task calls for them. Saved in ~/.claude/skills and ~/.codex/skills, so chats, tasks and the Terminal all use them. Skills synced from your Claude account show here too.',
     empty: 'No skills yet. Add one from GitHub or a .zip file (drop it here), or write your own.' },
-  mcp: { label: 'MCP servers', one: 'server', key: (s) => s.name,
+  mcp: { label: 'MCP servers', one: 'server', many: 'servers', key: (s) => s.name,
     sub: 'Servers that give agents extra tools: a browser, a database, docs, other apps. agent-orch starts the ones that are on for its chat turns and task runs on this server (not for the Terminal), so each uses some memory while they run.',
     empty: 'No MCP servers yet.' },
-  agents: { label: 'Subagents', one: 'subagent', key: (a) => a.file,
+  agents: { label: 'Subagents', one: 'subagent', many: 'subagents', key: (a) => a.file,
     sub: 'Specialists Claude Code can hand part of a task to, each with its own instructions, tools and model. Saved in ~/.claude/agents. Claude Code only: Codex has no subagents.',
     empty: 'No subagents yet.' },
-  personas: { label: 'Personas', one: 'persona', key: (p) => p.id,
+  personas: { label: 'Personas', one: 'persona', many: 'personas', key: (p) => p.id,
     sub: "How a chat's agents work and talk. Pick one per chat with the persona button next to the model; the chat's planner and tasks follow it too.",
     empty: 'No personas yet. Start from a suggestion or write your own.' },
 };
 const EX_AGENT_NAMES = { claude: 'Claude', codex: 'Codex' };
+const EX_SOURCES = [['all', 'All'], ['local', 'Local'], ['synced', 'Synced']]; // the skills search's source filter
 const EX_MCP_TYPES = [['stdio', 'Command'], ['http', 'HTTP'], ['sse', 'SSE']];
 const EX_MODELS = [['', 'Default'], ['inherit', 'Same as the chat'], ['fable', 'Fable'], ['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku']];
 const EX_MCP_EXAMPLES = [
@@ -66,7 +67,7 @@ function exCounts() {
 // fromSettings: opened from a Settings row, so closing returns to Settings and the header shows "‹ Settings".
 function exOpen(tab = EX.tab, { fromSettings = false } = {}) {
   const m = $('extModal');
-  if (m.hidden) { EX.lastFocus = document.activeElement; EX.fromSettings = fromSettings; }
+  if (m.hidden) { EX.lastFocus = document.activeElement; EX.fromSettings = fromSettings; EX.q = {}; EX.src = 'all'; $('extBody').replaceChildren(); }
   $('extBackSettings').hidden = !EX.fromSettings;
   EX.tab = EX_KINDS[tab] ? tab : 'skills';
   EX.edit = null;
@@ -127,33 +128,112 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || $('extModal').hidden || CM.open) return;
   e.preventDefault();
   e.stopImmediatePropagation();
-  if (EX.edit) exBack(); else exClose();
+  if (EX.edit) exBack();
+  else if (e.target.closest?.('.ext-q') && e.target.value) exClearSearch(); // Esc in a search clears it first
+  else exClose();
 }, true);
 // Settings → Skills & tools rows (their counts load with the sheet).
 for (const b of document.querySelectorAll('[data-ext-open]')) b.addEventListener('click', () => { closeSettings(); exOpen(b.dataset.extOpen, { fromSettings: true }); });
 $('settingsBtn').addEventListener('click', () => exLoad());
 
 // ----- list
+// The list view is a stable top (blurb, actions, search) over a results area. Typing, a reload or an MCP toggle only
+// rebuilds the results, so the search field and its focus survive; the top is rebuilt on a tab change or after an editor.
+// The search (per tab, plus All/Local/Synced for skills) only hides rows: EX.data stays whole and nothing is fetched.
 function exRender() {
   if ($('extModal').hidden || EX.edit) return; // an open editor is never rebuilt under the owner's typing
-  const k = EX_KINDS[EX.tab], body = $('extBody');
-  const frag = document.createDocumentFragment();
-  frag.append(el('p', 'ext-sub', k.sub));
+  const body = $('extBody');
+  let top = body.querySelector(':scope > .ext-top'), res = body.querySelector(':scope > .ext-results');
+  if (!top || !res || top.dataset.tab !== EX.tab) {
+    top = exTop();
+    res = el('div', 'ext-results');
+    body.replaceChildren(top, res);
+    body.scrollTop = 0;
+  }
+  exResults(top, res);
+}
+function exTop() {
+  const k = EX_KINDS[EX.tab], top = el('div', 'ext-top');
+  top.dataset.tab = EX.tab;
+  top.append(el('p', 'ext-sub', k.sub));
   const acts = el('div', 'ext-acts');
   acts.append(EX.tab === 'skills' ? exBtn('Add skill', 'btn small primary', () => exEdit(null, 'add')) : exBtn(`New ${k.one}`, 'btn small primary', () => exEdit(null)));
-  frag.append(acts);
-  const items = EX.data?.[EX.tab];
-  if (!items) frag.append(el('p', 'ext-empty', EX.err ? `Couldn't load: ${EX.err}` : 'Loading…'));
-  else if (!items.length) frag.append(el('p', 'ext-empty', k.empty));
-  else {
-    const ul = el('ul', 'ext-list');
-    ul.setAttribute('aria-label', k.label);
-    for (const it of items) ul.append(exRow(it));
-    frag.append(ul);
+  top.append(acts);
+  const bar = el('div', 'ext-search');
+  bar.setAttribute('role', 'search');
+  const field = el('div', 'ext-search-field');
+  field.insertAdjacentHTML('beforeend', '<svg class="ext-search-ico" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>');
+  const q = exInput('q', EX.q[EX.tab] || '', { placeholder: `Search ${k.label.toLowerCase().replace('mcp', 'MCP')}`, type: 'search' });
+  q.className = 'ext-q';
+  q.setAttribute('aria-label', `Search ${k.label}`);
+  q.setAttribute('enterkeyhint', 'search');
+  q.addEventListener('input', () => { EX.q[EX.tab] = q.value; exRender(); });
+  const clear = exBtn('', 'ext-q-clear', () => exClearSearch());
+  clear.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
+  clear.setAttribute('aria-label', 'Clear search');
+  field.append(q, clear);
+  bar.append(field);
+  if (EX.tab === 'skills') {
+    const src = el('div', 'ext-src');
+    src.setAttribute('role', 'group');
+    src.setAttribute('aria-label', 'Source');
+    for (const [v, label] of EX_SOURCES) {
+      const b = exBtn(label, null, () => { EX.src = v; exRender(); });
+      b.dataset.src = v;
+      src.append(b);
+    }
+    bar.append(src);
   }
-  const top = body.scrollTop;
-  body.replaceChildren(frag);
-  body.scrollTop = top;
+  const count = el('p', 'ext-count');
+  count.setAttribute('aria-live', 'polite');
+  bar.append(count);
+  top.append(bar);
+  return top;
+}
+// The line under a row's name, which the search also matches.
+const exSummary = (it) => (EX.tab === 'mcp' ? it.commandLine || it.url : EX.tab === 'personas' ? it.description || it.prompt : it.description) || '';
+// Rows of the open tab that match its search (every word, in the name or the summary) and, for skills, the source.
+function exMatches(items) {
+  const words = (EX.q[EX.tab] || '').toLowerCase().split(/\s+/).filter(Boolean), src = EX.tab === 'skills' ? EX.src : 'all';
+  return items.filter((it) => (src === 'all' || (it.source || 'local') === src)
+    && words.every((w) => `${it.name}\n${exSummary(it)}`.toLowerCase().includes(w)));
+}
+function exResults(top, res) {
+  const k = EX_KINDS[EX.tab], items = EX.data?.[EX.tab];
+  const query = (EX.q[EX.tab] || '').trim(), src = EX.tab === 'skills' ? EX.src : 'all', filtering = !!query || src !== 'all';
+  const bar = top.querySelector('.ext-search');
+  bar.hidden = !items?.length && !filtering; // nothing to search yet; kept while a search is on so focus never drops
+  bar.querySelector('.ext-q-clear').hidden = !query;
+  for (const b of bar.querySelectorAll('.ext-src button')) b.setAttribute('aria-pressed', String(b.dataset.src === src));
+  const count = bar.querySelector('.ext-count'), frag = document.createDocumentFragment();
+  const noun = (n) => (n === 1 ? k.one : k.many);
+  if (!items) { count.textContent = ''; frag.append(el('p', 'ext-empty', EX.err ? `Couldn't load: ${EX.err}` : 'Loading…')); }
+  else if (!items.length) { count.textContent = ''; frag.append(el('p', 'ext-empty', k.empty)); }
+  else {
+    const shown = exMatches(items);
+    count.textContent = filtering ? `${shown.length} of ${items.length} ${noun(items.length)}` : `${items.length} ${noun(items.length)}`;
+    if (!shown.length) {
+      const where = src === 'all' ? '' : ` ${EX_SOURCES.find(([v]) => v === src)[1].toLowerCase()}`;
+      const p = el('p', 'ext-empty ext-nomatch', query ? `No${where} ${k.many} match “${query}”.` : `No${where} ${k.many}.`);
+      p.append(' ', exBtn('Clear search', 'link-btn', () => exClearSearch()));
+      frag.append(p);
+    } else {
+      const ul = el('ul', 'ext-list');
+      ul.setAttribute('aria-label', k.label);
+      for (const it of shown) ul.append(exRow(it));
+      frag.append(ul);
+    }
+  }
+  res.replaceChildren(frag);
+}
+// Clear: the open tab's words and the skills source, then back to the search field.
+function exClearSearch() {
+  EX.q[EX.tab] = '';
+  if (EX.tab === 'skills') EX.src = 'all';
+  const q = $('extBody').querySelector('.ext-q');
+  if (q) q.value = '';
+  exRender();
+  q?.focus();
 }
 function exBtn(label, cls, onclick) {
   const b = el('button', cls, label);
@@ -167,7 +247,7 @@ function exRow(it) {
   open.dataset.key = EX_KINDS[EX.tab].key(it);
   const main = el('span', 'ext-main');
   main.append(el('strong', null, it.name));
-  const sum = EX.tab === 'mcp' ? it.commandLine || it.url : EX.tab === 'personas' ? it.description || it.prompt : it.description;
+  const sum = exSummary(it);
   if (sum) main.append(el('small', EX.tab === 'mcp' ? 'mono' : null, sum));
   const tags = el('span', 'ext-tags');
   for (const t of exTags(it)) tags.append(el('span', 'ext-tag', t));

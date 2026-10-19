@@ -13,3 +13,7 @@ Add search to the existing Skills & tools sheet in public/ext.js and ext.css. Ad
 ## Done when
 
 `npm test -- test/ui-ext-search.test.mjs` passes.
+
+## Result — done (check passed) (2026-10-19 14:29)
+
+AGENT-ORCH-STATUS: done — Skills & tools sheet searchable with source filters; tests pass

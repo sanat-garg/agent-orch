@@ -13,3 +13,7 @@ The task drawer's Retry button (public/app.js ~line 8528, `orchAction('retry')` 
 ## Done when
 
 `npm test -- test/retry-note.test.mjs` passes.
+
+## Result — done (check passed) (2026-10-19 14:27)
+
+AGENT-ORCH-STATUS: done — Retry sheet sends optional note, appended to prompt; tests pass

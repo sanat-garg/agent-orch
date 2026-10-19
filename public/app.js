@@ -8517,7 +8517,7 @@ function renderDrawer(fromLive = false) {
     row.append(cancel);
   } else if (t.status === 'failed' || t.status === 'cancelled') {
     const retry = el('button', 'btn small primary', 'Retry');
-    retry.onclick = () => orchAction('retry');
+    retry.onclick = () => openRetry(t);
     row.append(retry);
   }
   if (t.status === 'awaiting_review') top.append(reviewPanel(t));
@@ -8861,6 +8861,45 @@ async function pickDelegate(r) {
     renderDelegate();
   }
 }
+
+// ----- the Retry sheet: requeue a failed/cancelled task, optionally with a note the server appends to its prompt
+const RT = { id: null, busy: false, lastFocus: null };
+function openRetry(t) {
+  RT.lastFocus = document.activeElement;
+  Object.assign(RT, { id: t.id, busy: false });
+  $('rtTitle').textContent = `Retry #${t.id}`;
+  $('rtSub').textContent = displayTitle(t);
+  $('rtNote').value = '';
+  $('rtErr').hidden = true;
+  $('rtGo').disabled = false;
+  $('retryModal').hidden = false;
+  if (!matchMedia('(pointer: coarse)').matches) $('rtNote').focus();
+}
+function closeRetry() {
+  $('retryModal').hidden = true;
+  RT.id = null;
+  RT.lastFocus?.focus?.();
+}
+async function submitRetry() {
+  if (RT.busy || !RT.id) return;
+  RT.busy = true;
+  $('rtGo').disabled = true;
+  try {
+    await api(`/api/orch/task/${RT.id}/action`, 'POST', { action: 'retry', value: $('rtNote').value.trim() });
+    O.err = '';
+    closeRetry();
+    loadDetail();
+  } catch (e) {
+    $('rtErr').textContent = e.message;
+    $('rtErr').hidden = false;
+  }
+  RT.busy = false;
+  $('rtGo').disabled = false;
+}
+$('retryModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeRetry(); });
+$('rtForm').addEventListener('submit', (e) => { e.preventDefault(); submitRetry(); });
+$('rtNote').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submitRetry(); } });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('retryModal').hidden) { e.stopImmediatePropagation(); closeRetry(); } }, true);
 
 // ----- the queue sheet: the project's running and queued tasks, queued ones in manual order. A queued card drags
 // with Pointer Events (mouse: after a 5 px move; touch: a ~350 ms long-press, so a swipe still scrolls) or moves with

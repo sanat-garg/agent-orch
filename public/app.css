@@ -2156,6 +2156,17 @@ button.dg-row:disabled { opacity: .6; cursor: progress; }
   }
 @keyframes sheet-up { from { transform: translateY(100%); } }
 
+/* retry sheet: an optional note for the next run (app.js RT) */
+.modal-panel.rt { width: min(520px, 100%); }
+.rt-form { display: grid; gap: 8px; }
+.rt-form label { font-weight: 550; }
+.rt-form textarea { width: 100%; box-sizing: border-box; min-height: 96px; max-height: 40dvh; resize: vertical; font: inherit; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); color: var(--text); }
+.rt-form textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.rt-hint { margin: 0; font-size: 12.5px; }
+.rt-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; padding-bottom: env(safe-area-inset-bottom); }
+@media (pointer: coarse) { .rt-form textarea { font-size: 16px; } .rt-actions .btn { height: 44px; flex: 1; } }
+@media (max-width: 800px) { .modal-panel.rt { width: 100%; } }
+
 /* queue sheet: drag to reorder (app.js Q) */
 .modal-panel.qs { width: min(760px, 92vw); }
 @media (max-width: 800px) { .modal-panel.qs { width: 100%; } }

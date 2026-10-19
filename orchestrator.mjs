@@ -4645,11 +4645,15 @@ export function createOrchestrator({ query, claudeBin, claudeEnv, dataDir, getLi
       }
       case 'retry': {
         if (task.kind === 'reflect' && !getProject(task.project_id)?.perpetual) return { error: 'Keep improving is off for this project; turn it on to reflect again' };
-        const res = run("UPDATE tasks SET status='queued', attempts=0, continuations=0, not_before=0, result=NULL, finished_at=NULL WHERE id=:id AND status IN ('failed','cancelled')", { id });
+        // An optional owner note rides along in the prompt so the next run knows what to do differently.
+        const note = typeof value === 'string' ? value.trim() : '';
+        if (note.length > 2000) return { error: 'Keep the note under 2000 characters' };
+        const res = run(`UPDATE tasks SET status='queued', attempts=0, continuations=0, not_before=0, result=NULL, finished_at=NULL${note ? ', prompt=prompt || :note' : ''} WHERE id=:id AND status IN ('failed','cancelled')`,
+          note ? { id, note: `\n\nOwner's note for this retry: ${note}` } : { id });
         if (!res.changes) return { error: 'Only failed or cancelled tasks can be retried' };
         pushTask(id);
         reviveBlocked(id);
-        logEvent(`#${id} retried`, { projectId: task.project_id, taskId: id });
+        logEvent(note ? `#${id} retried with a note: ${note}` : `#${id} retried`, { projectId: task.project_id, taskId: id });
         setTimeout(tick, 100);
         return { ok: true };
       }

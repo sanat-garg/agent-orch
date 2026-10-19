@@ -1710,3 +1710,6 @@ Inspect opens previews at 390/768/1280px; tests pass
 ## 2026-10-19 14:31 — #2254 Save favourite folders in the Files Places menu, with tests (ui) [done (check passed)]
 
 Places menu saves, opens and removes per-project favourites; tests pass
+## 2026-10-19 14:34 — #2250 Compare two project screenshots side by side, with tests (ui) [done (check passed)]
+
+Owner can compare two gallery screenshots; four compare tests pass

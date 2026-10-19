@@ -4,10 +4,12 @@
 // agents built without opening tasks one by one. The newest is shown large, then the rest grouped by task (each group's
 // heading opens its task). The pill shows only once the project has screenshots; "N new" counts ones taken since the
 // gallery was last opened (per project, this browser). Refetched when the project changes and when one of its tasks
-// changes status (a finished task has its final screens). Loaded after app.js and uses its helpers ($, el, api, store,
+// changes status (a finished task has its final screens). Compare: tick exactly two screenshots, then Compare shows them
+// side by side (stacked on phones) at their own aspect ratios, each labelled with its task, name and time; Back returns to
+// the gallery, Clear drops the picks. Picks reset when the project changes. Loaded after app.js and uses its helpers ($, el, api, store,
 // O, relTime, shotNode, shotGrid, shotsByTime, showTask, closeSidebar, coarse).
 (() => {
-  const SH = { pid: null, list: [], loaded: false, error: '', seq: 0, timer: null, status: new Map(), lastFocus: null };
+  const SH = { pid: null, list: [], loaded: false, error: '', seq: 0, timer: null, status: new Map(), lastFocus: null, picks: [], comparing: false };
   const seenKey = (pid) => `cw.shots.seen.${pid}`;
   const newest = () => SH.list[0]?.at || 0;
   const unseen = () => { const seen = Number(store.get(seenKey(SH.pid))) || 0; return SH.list.filter((s) => s.at > seen).length; };
@@ -31,7 +33,7 @@
   function sync() {
     const pid = O.project?.id || null;
     if (pid === SH.pid) return;
-    Object.assign(SH, { pid, list: [], loaded: false, error: '' });
+    Object.assign(SH, { pid, list: [], loaded: false, error: '', picks: [], comparing: false });
     SH.status.clear();
     for (const t of O.tasks.values()) if (t.project_id === pid) SH.status.set(t.id, t.status);
     clearTimeout(SH.timer);
@@ -74,6 +76,7 @@
   function close() {
     if ($('shotsModal').hidden) return;
     $('shotsModal').hidden = true;
+    SH.comparing = false;
     $('shBody').replaceChildren();
     SH.lastFocus?.focus?.();
   }
@@ -89,8 +92,80 @@
     return b;
   }
 
+  // Compare picks: media ids are unique in SH.list, so two picks are always two distinct images. A pick keeps its shot
+  // even if a refetch drops it (the comparison then shows "No longer available" when the image is gone).
+  const picked = (s) => SH.picks.some((p) => p.id === s.id);
+  function togglePick(s, on) {
+    if (on && !picked(s) && SH.picks.length < 2) SH.picks.push(s);
+    else if (!on) SH.picks = SH.picks.filter((p) => p.id !== s.id);
+    render();
+    [...$('shBody').querySelectorAll('.shot')].find((f) => f.dataset.id === s.id)?.querySelector('.sh-pick input')?.focus();
+  }
+  function clearPicks() { Object.assign(SH, { picks: [], comparing: false }); render(); }
+  function setComparing(on) {
+    SH.comparing = on && SH.picks.length === 2 && SH.picks[0].id !== SH.picks[1].id;
+    render();
+    const focus = $('shBody').querySelector(SH.comparing ? '.shc-back' : '.sh-cmp-go');
+    if (!coarse) (focus || $('shotsModal').querySelector('[data-close].icon-btn')).focus();
+  }
+  // The gallery's tile with a "select for comparison" tick (top left; the star badge sits top right).
+  function pickable(s, fig) {
+    const lab = el('label', 'sh-pick'), box = el('input');
+    box.type = 'checkbox';
+    box.checked = picked(s);
+    box.disabled = !box.checked && SH.picks.length >= 2;
+    box.setAttribute('aria-label', `Select ${s.name || 'screenshot'} from task #${s.task.id} to compare`);
+    box.onchange = () => togglePick(s, box.checked);
+    lab.title = box.disabled ? 'Two selected: clear one to pick another' : 'Select to compare';
+    lab.append(box);
+    fig.classList.toggle('picked', box.checked);
+    fig.append(lab);
+    return fig;
+  }
+  function cmpBar() {
+    const n = SH.picks.length, bar = el('div', 'sh-cmp-bar');
+    bar.append(el('span', 'sh-cmp-msg', n === 2 ? '2 selected' : n ? '1 selected · pick one more to compare' : 'Tick two screenshots to compare them'));
+    if (n) {
+      const clear = el('button', 'btn sh-cmp-clear', 'Clear');
+      clear.type = 'button';
+      clear.onclick = clearPicks;
+      bar.append(clear);
+    }
+    if (n === 2) {
+      const go = el('button', 'btn primary sh-cmp-go', 'Compare');
+      go.type = 'button';
+      go.onclick = () => setComparing(true);
+      bar.append(go);
+    }
+    return bar;
+  }
+  function comparePanel(s) {
+    const sec = el('section', 'shc-panel'), fig = shotNode(s), when = el('time', 'shc-time', s.at ? relTime(s.at * 1000) : '');
+    if (s.at) { when.dateTime = new Date(s.at * 1000).toISOString(); when.title = new Date(s.at * 1000).toLocaleString(); }
+    fig.classList.add('shc-shot');
+    const label = el('div', 'shc-label');
+    label.append(taskHead(s.task, null, 'shc-task'), el('div', 'shc-file'));
+    label.lastChild.append(el('span', 'shc-name', s.name || 'image'), when);
+    sec.append(label, fig);
+    return sec;
+  }
+  function renderCompare() {
+    const [a, b] = SH.picks;
+    $('shSub').textContent = 'Comparing two screenshots. Tap one to enlarge.';
+    const bar = el('div', 'sh-cmp-bar shc-bar'), back = el('button', 'btn shc-back', 'Back'), clear = el('button', 'btn sh-cmp-clear', 'Clear');
+    back.type = clear.type = 'button';
+    back.onclick = () => setComparing(false);
+    clear.onclick = () => { SH.picks = []; setComparing(false); };
+    bar.append(back, el('span', 'sh-cmp-msg', `#${a.task.id} vs #${b.task.id}`), clear);
+    const grid = el('div', 'shc');
+    grid.append(comparePanel(a), comparePanel(b));
+    $('shBody').replaceChildren(bar, grid);
+  }
+
   function render() {
     if ($('shotsModal').hidden) return;
+    $('shotsModal').querySelector('.shm').classList.toggle('comparing', SH.comparing);
+    if (SH.comparing) return renderCompare();
     const body = $('shBody'), list = SH.list;
     const tasks = new Set(list.map((s) => s.task.id)).size;
     $('shSub').textContent = list.length ? `${list.length} from ${tasks} task${tasks === 1 ? '' : 's'}, newest first. Tap one to enlarge.` : '';
@@ -101,10 +176,10 @@
     }
     const [latest, ...rest] = list;
     const top = el('section', 'sh-latest');
-    const fig = shotNode(latest);
+    const fig = pickable(latest, shotNode(latest));
     fig.classList.add('shot-final');
     top.append(el('h3', 'sh-label', 'Latest'), taskHead(latest.task, latest.at), fig);
-    const out = [top];
+    const out = list.length > 1 ? [cmpBar(), top] : [top];
     // The rest by task, the task with the newest shot first; each task's own shots in the order they were taken.
     const groups = new Map();
     for (const s of rest) {
@@ -114,7 +189,9 @@
     if (groups.size) out.push(el('h3', 'sh-label', 'Earlier'));
     for (const g of groups.values()) {
       const sec = el('section', 'sh-group');
-      sec.append(taskHead(g.task, g.at), shotGrid(shotsByTime(g.shots)));
+      const grid = el('div', 'shots');
+      for (const s of shotsByTime(g.shots)) grid.append(pickable(s, shotNode(s)));
+      sec.append(taskHead(g.task, g.at), grid);
       out.push(sec);
     }
     body.replaceChildren(...out);
@@ -125,7 +202,8 @@
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape' || $('shotsModal').hidden || !$('lightbox').hidden) return;
     e.stopImmediatePropagation();
-    close();
+    if (SH.comparing) setComparing(false); // Escape steps back out of a comparison first
+    else close();
   }, true);
 
   window.Shots = { sync, onTask, renderHeader, open };

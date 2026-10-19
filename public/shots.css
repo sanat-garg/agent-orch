@@ -26,3 +26,31 @@
   .sh-task { flex-wrap: wrap; row-gap: 0; }
   .sh-meta { flex-basis: 100%; padding-left: 0; }
 }
+
+/* Compare (shots.js): a tick on each gallery tile, a bar with Clear/Compare, then the two picks side by side (stacked on
+   phones), each at its own aspect ratio under a task / name / time label. */
+.sh-panel .shot { position: relative; }
+.sh-pick { position: absolute; top: 4px; left: 4px; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px;
+  background: color-mix(in srgb, var(--panel) 85%, transparent); box-shadow: 0 0 0 1px var(--border); cursor: pointer; }
+.sh-pick input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent-strong); cursor: inherit; }
+.sh-pick:has(input:disabled) { opacity: .45; cursor: not-allowed; }
+.shot.picked button { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+.sh-cmp-bar { position: sticky; top: -1px; z-index: 2; display: flex; align-items: center; gap: 8px; margin: 0 0 12px; padding: 8px 0; background: var(--bg); }
+.sh-cmp-msg { flex: 1; min-width: 0; font-size: 13px; color: var(--muted); }
+.shc-bar .sh-cmp-msg { text-align: center; font-variant-numeric: tabular-nums; }
+
+.modal-panel.shm.comparing { width: min(1280px, 100%); }
+.shc { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+.shc-panel { min-width: 0; }
+.shc-label { margin-bottom: 6px; }
+.shc-label .sh-task { margin-bottom: 0; }
+.shc-file { display: flex; gap: 8px; padding: 0 8px; font-size: 12px; color: var(--faint); }
+.shc-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.shc-time { flex: none; }
+.shot.shc-shot { width: 100%; margin: 0; }
+.shot.shc-shot button { height: auto; aspect-ratio: auto; }
+.shot.shc-shot img { width: auto; max-width: 100%; height: auto; max-height: 75vh; margin: 0 auto; } /* its own aspect ratio, never stretched */
+.shot.shc-shot .shot-missing { height: auto; min-height: 160px; place-items: center; }
+.shot.shc-shot figcaption { display: none; }
+@media (pointer: coarse) { .sh-pick { width: 44px; height: 44px; top: 2px; left: 2px; border-radius: 10px; } .sh-pick input { width: 22px; height: 22px; } }
+@media (max-width: 767px) { .shc { grid-template-columns: minmax(0, 1fr); } }

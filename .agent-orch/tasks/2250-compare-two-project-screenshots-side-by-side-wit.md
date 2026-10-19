@@ -13,3 +13,7 @@ Extend public/shots.js and shots.css so the owner can select exactly two existin
 ## Done when
 
 `npm test -- test/ui-shot-compare.test.mjs` passes.
+
+## Result — done (check passed) (2026-10-19 14:34)
+
+AGENT-ORCH-STATUS: done — Owner can compare two gallery screenshots; four compare tests pass

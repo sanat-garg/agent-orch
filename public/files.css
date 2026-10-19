@@ -185,6 +185,16 @@ a.fx-ql-file { color: var(--text); text-decoration: none; }
 .fx-menu-note { max-width: 240px; padding: 6px 10px 4px; border-top: 1px solid var(--border); margin-top: 4px; font-size: 11.5px; color: var(--muted); }
 .fx-menu .cm-opt[aria-current] .cm-l { font-weight: 600; }
 .fx-menu .cm-opt.fx-danger:not(:disabled) .cm-l { color: var(--danger); }
+/* Places' favourite folders: the folder, then its own × to remove it; a missing one is dimmed and says so. */
+.fx-fav { display: flex; align-items: stretch; gap: 2px; }
+.fx-fav > .cm-opt:first-child { flex: 1; min-width: 0; }
+.fx-fav .cm-h { flex: 0 1 auto; min-width: 0; max-width: 55%; margin-left: 12px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.fx-menu .cm-opt.fx-fav-x { flex: none; width: 30px; padding: 0; justify-content: center; color: var(--muted); font-size: 16px; }
+.fx-menu .cm-opt.fx-fav-x:hover { color: var(--danger); }
+.fx-fav-gone .cm-l { color: var(--muted); text-decoration: line-through; }
+.fx-fav-gone .cm-h { color: var(--danger); }
+.fx-fav-missing .btn { margin-top: 8px; }
+@media (pointer: coarse) { .fx-menu .cm-opt.fx-fav-x { width: 44px; min-height: 44px; } }
 /* a name typed in place (Rename, New file/folder) */
 .fx-edit { min-width: 0; height: 22px; padding: 0 5px; border: 1px solid var(--accent); border-radius: 5px; outline: 0; background: var(--panel);
   color: var(--text); font: inherit; font-size: 13px; box-shadow: 0 0 0 3px var(--focus); user-select: text; -webkit-user-select: text; }

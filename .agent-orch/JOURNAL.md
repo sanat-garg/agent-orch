@@ -1707,3 +1707,6 @@ Skills & tools sheet searchable with source filters; tests pass
 ## 2026-10-19 14:31 — #2251 Inspect existing live previews at phone and desktop widths, with tests (ui) [done (check passed)]
 
 Inspect opens previews at 390/768/1280px; tests pass
+## 2026-10-19 14:31 — #2254 Save favourite folders in the Files Places menu, with tests (ui) [done (check passed)]
+
+Places menu saves, opens and removes per-project favourites; tests pass

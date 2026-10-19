@@ -162,7 +162,7 @@ test('Places and a typed path (⌘L, with completion) navigate; a missing or for
   await at(page, '/', 'home', 'u', 'proj');
   await page.click('#fxPlaces');
   await page.locator('#fxMenu').waitFor();
-  assert.deepEqual(await page.$$eval('#fxMenu .cm-opt .cm-l', (ls) => ls.map((l) => l.textContent)), ['Project', 'Home', '/', '/tmp', 'Go to folder…']);
+  assert.deepEqual(await page.$$eval('#fxMenu .cm-opt .cm-l', (ls) => ls.map((l) => l.textContent)), ['Project', 'Home', '/', '/tmp', 'Add “proj” to Favourites', 'Go to folder…']);
   await page.locator('#fxMenu [data-act="place"]').filter({ has: page.locator('.cm-l', { hasText: /^\/tmp$/ }) }).click();
   await at(page, '/', 'tmp');
   await place(page, 'Home');

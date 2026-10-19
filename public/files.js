@@ -1,7 +1,8 @@
 'use strict';
 // ---------- Files: a Finder-style browser of the whole disk, opening on the open chat's project (server: files.mjs) ----------
 // Opens at the project's root (or the last folder, remembered per project for this page load only). Paths are absolute: the
-// path bar runs from '/', ‹ Parent (⌥↑, Backspace) climbs to '/', Places jumps to Project, Home, / and /tmp, and Go to folder
+// path bar runs from '/', ‹ Parent (⌥↑, Backspace) climbs to '/', Places jumps to Project, Home, / and /tmp, and favourite folders
+// (saved per signed-in user and project in this browser's localStorage: fxFavs), and Go to folder
 // (⌘L) takes a typed absolute, ~ or relative path with completion from the listings. Protected entries (secrets) show a lock
 // and never open; a read-only location shows a tag and disables the menu's write actions. Icon and list views (list folders
 // open in place with disclosure triangles), back/forward (⌥← ⌥→, ⌘[ ⌘]; no buttons), a name filter,
@@ -29,6 +30,7 @@ const FX = {
   picked: new Set(), anchor: null, // the selection (FX.sel is its lead row) and the Shift-click anchor
   root: null, clip: null, menu: null, press: 0, // root: the project key; clip: {mode: 'copy'|'cut', paths, root}
   proj: null, places: null, last: new Map(), restored: false, // proj: the project's real path; last: root → folder (this page load)
+  favGone: new Set(), favXY: null, // favourites found missing this page load; where Places last opened
   goto: { cache: new Map(), opts: [], i: -1, seq: 0 }, // Go to folder's suggestions
   climbed: false, // the selection is only the folder ‹ Parent came out of: Backspace climbs on instead of deleting it
   upl: null, uplFrame: 0, conflict: null, // the running upload batch (fxUpload) and its Replace / Keep both / Skip question
@@ -250,6 +252,7 @@ async function fxLoad(focus = false) {
     if (d.places?.length) FX.places = d.places;
     FX.proj = d.places?.find((p) => p.label === 'Project')?.path || FX.proj || (path ? null : d.dir) || null;
     if (FX.root) FX.last.set(FX.root, FX.path);
+    FX.favGone.delete(FX.path);
     // Refresh any folders opened in place in the list view.
     for (const rel of [...FX.expanded]) {
       try { FX.kids.set(rel, (await api(fxListUrl(rel))).entries); } catch { FX.expanded.delete(rel); FX.kids.delete(rel); }
@@ -260,6 +263,7 @@ async function fxLoad(focus = false) {
     FX.data = null; FX.err = e.message;
     // The remembered folder is gone: back to the project. A folder asked for by hand shows why it didn't open.
     if (FX.restored && /Not found|Not a folder|Outside/.test(e.message)) { FX.path = ''; FX.restored = false; FX.last.delete(FX.root); return fxLoad(focus); }
+    if (/Not found|Not a folder/.test(e.message) && fxFavs().list.includes(FX.path)) FX.favGone.add(FX.path);
   } finally { if (seq === FX.seq) $('filesView').classList.remove('loading'); }
   fxRender();
   if (focus) fxFocus();
@@ -388,6 +392,7 @@ function fxRender() {
   if (!d) {
     FX.rows = [];
     if (!FX.err) main.append(el('div', 'fx-loading', 'Loading…'));
+    else if (FX.favGone.has(FX.path)) main.append(fxFavMissing());
     else if (/Permission denied/i.test(FX.err)) main.append(fxEmpty('Permission denied', "agent-orch's user isn't allowed to open this folder. ‹ Parent or Places take you elsewhere.", 'fx-denied'));
     else main.append(fxEmpty("Couldn't open this folder", FX.err));
     if (FX.path.startsWith('/')) fxPathBar(); else $('fxPath').textContent = ''; // the path bar still climbs out
@@ -1201,7 +1206,7 @@ function fxMenuShow(items, label, x, y, note = '') {
     b.append(el('span', 'cm-l', text));
     if (keys) b.append(el('span', 'cm-h', keys));
     if (act === 'delete') b.classList.add('fx-danger');
-    b.onclick = () => { fxMenuClose(!['open', 'ask', 'place', 'goto', 'rename', 'newfile', 'newdir', 'delete'].includes(act)); run(); };
+    b.onclick = () => { fxMenuClose(!['open', 'ask', 'place', 'fav', 'goto', 'rename', 'newfile', 'newdir', 'delete'].includes(act)); run(); };
     m.append(b);
   }
   if (note) m.append(el('div', 'fx-menu-note', note));
@@ -1224,17 +1229,72 @@ function fxMenuShow(items, label, x, y, note = '') {
   m.querySelector('.cm-opt:not(:disabled)')?.focus({ preventScroll: true });
   return m;
 }
-// Places: the project, home, / and /tmp (as the server names them), then Go to folder.
+// Places: the project, home, / and /tmp (as the server names them), the project's favourites, then Go to folder.
 function fxPlacesOpen(x, y) {
   if (FX.menu?.el.dataset.places) return fxMenuClose(true);
   const places = FX.places || [{ label: 'Project', path: FX.proj || '' }, { label: '/', path: '/' }, { label: '/tmp', path: '/tmp' }];
+  const { ok, list: favs } = FX.cid ? fxFavs() : { ok: true, list: [] }, here = fxFavHere(), saved = !!here && favs.includes(here);
   const m = fxMenuShow([
     ...places.map((p) => ['place', p.label, p.label === p.path ? '' : fxTilde(p.path), !!FX.cid, () => fxNav(p.path), p.path]),
     '-',
+    ...favs.map((p) => ['fav', fxBase(p), FX.favGone.has(p) ? 'Missing' : fxTilde(fxParent(p)), true, () => fxNav(p), FX.favGone.has(p) ? `${p} (missing)` : p]),
+    saved ? ['favdel', `Remove “${fxBase(here)}” from Favourites`, '', ok, () => fxFavRemove(here)]
+      : ['favadd', here ? `Add “${fxBase(here)}” to Favourites` : 'Add this folder to Favourites', '', ok && !!here, () => fxFavAdd(here)],
+    '-',
     ['goto', 'Go to folder…', fxKeys('L'), !!FX.cid, () => fxGotoOpen()],
-  ], 'Places', x, y);
+  ], 'Places', x, y, ok || !FX.cid ? '' : "Favourites are unavailable: this browser won't let agent-orch store them.");
   m.dataset.places = '1';
+  FX.favXY = [x, y];
   m.querySelectorAll('[data-act="place"]').forEach((b, i) => { if (places[i].path === FX.path) b.setAttribute('aria-current', 'location'); });
+  m.querySelectorAll('[data-act="fav"]').forEach((b, i) => { // each favourite gets its own Remove button beside it
+    const p = favs[i], row = el('div', 'fx-fav'), rm = el('button', 'cm-opt fx-fav-x', '×');
+    if (p === FX.path) b.setAttribute('aria-current', 'location');
+    if (FX.favGone.has(p)) b.classList.add('fx-fav-gone');
+    rm.type = 'button'; rm.tabIndex = -1; rm.dataset.act = 'favx'; rm.setAttribute('role', 'menuitem');
+    rm.title = `Remove “${fxBase(p)}” from Favourites`; rm.setAttribute('aria-label', rm.title);
+    rm.onclick = () => fxFavRemove(p, true);
+    b.replaceWith(row); row.append(b, rm);
+  });
+}
+// ----- favourite folders: canonical listing paths (the server's `dir`), kept in localStorage under the signed-in user and
+// the project (the chat's folder), so every chat of the project shares them. Saving never navigates or touches files;
+// opening one is ordinary navigation (fxNav), so the server's permission checks apply and a vanished folder says so.
+const fxFavKey = () => `cw.files.favs:${me.user?.id || me.user?.name || 'owner'}:${String(FX.root || '').replace(/(.)\/+$/, '$1')}`;
+function fxFavs() {
+  try {
+    const raw = localStorage.getItem(fxFavKey()), list = JSON.parse(raw || '[]');
+    return { ok: true, list: Array.isArray(list) ? [...new Set(list.filter((p) => typeof p === 'string' && p.startsWith('/')))] : [] };
+  } catch { return { ok: false, list: [] }; }
+}
+function fxFavWrite(list) {
+  try { localStorage.setItem(fxFavKey(), JSON.stringify(list)); return true; } catch { return false; }
+}
+// The folder on show as a favourite: its canonical path, only for a real listing (not search results or Changed).
+const fxFavHere = () => (FX.cid && FX.view !== 'changed' && !FX.find && FX.data && FX.path.startsWith('/') ? (FX.data.dir ?? FX.path).replace(/(.)\/+$/, '$1') : '');
+function fxFavAdd(p) {
+  if (!p) return;
+  const { ok, list } = fxFavs();
+  if (!ok || !fxFavWrite([...list.filter((x) => x !== p), p])) return toast("Couldn't save the favourite: this browser's storage is unavailable.", { kind: 'error' });
+  toast(`Added “${fxBase(p)}” to Favourites`, { duration: 2500 });
+}
+function fxFavRemove(p, reopen = false) {
+  const { ok, list } = fxFavs();
+  if (!ok || !fxFavWrite(list.filter((x) => x !== p))) return toast("Couldn't remove the favourite: this browser's storage is unavailable.", { kind: 'error' });
+  FX.favGone.delete(p);
+  toast(`Removed “${fxBase(p)}” from Favourites`, { duration: 2500 });
+  if (reopen && FX.favXY) { fxMenuClose(); fxPlacesOpen(...FX.favXY); }
+  if (FX.err && FX.path === p) fxRender();
+}
+// A favourite whose folder is gone: says so and offers to remove it.
+function fxFavMissing() {
+  const box = fxEmpty('This favourite folder is missing', `“${fxTilde(FX.path)}” was moved or deleted. Remove it from Favourites, or use ‹ Parent or Places to go elsewhere.`, 'fx-fav-missing');
+  if (fxFavs().list.includes(FX.path)) {
+    const b = el('button', 'btn small', 'Remove from Favourites');
+    b.type = 'button'; b.id = 'fxFavMissingRemove';
+    b.onclick = () => fxFavRemove(FX.path);
+    box.append(b);
+  }
+  return box;
 }
 
 // ----- upload: the toolbar's Upload menu (Files… / Folder…) or files and folders dropped from the desktop onto the list (a

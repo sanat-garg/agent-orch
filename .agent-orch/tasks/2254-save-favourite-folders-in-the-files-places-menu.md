@@ -13,3 +13,7 @@ Extend public/files.js and files.css with favourite folders inside the existing 
 ## Done when
 
 `npm test -- test/ui-files-favourites.test.mjs` passes.
+
+## Result — done (check passed) (2026-10-19 14:31)
+
+AGENT-ORCH-STATUS: done — Places menu saves, opens and removes per-project favourites; tests pass

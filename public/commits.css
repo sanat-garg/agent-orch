@@ -32,6 +32,9 @@
 
 /* One commit: Back, its message, the files and the patch. */
 .cm-dhead { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.cm-dacts { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.cm-undo-msg { margin: -4px 0 10px; font-size: 12.5px; color: var(--muted); line-height: 1.4; }
+.cm-undo-msg:empty { display: none; }
 .cm-dsubj { margin: 0 0 4px; font-size: 15px; line-height: 1.35; overflow-wrap: anywhere; }
 .cm-body { margin: 10px 0 0; padding: 0; font-family: inherit; font-size: 13px; line-height: 1.45; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
 .cm-files { list-style: none; margin: 0 0 12px; padding: 0; font-size: 12.5px; }
@@ -43,6 +46,7 @@
 
 @media (pointer: coarse) {
   .cm-task { height: 44px; padding: 0 12px; }
+  .cm-undo { height: 44px; padding: 0 14px; }
   .cm-open { min-height: 56px; }
 }
 @media (max-width: 767px) {

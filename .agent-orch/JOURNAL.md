@@ -1787,3 +1787,10 @@ Command: npm test -- test/ui-schedule-output-download.test.mjs
 ## 2026-10-19 16:16 — #2274 Download a schedule run's retained output, with tests (ui) [done (check passed)]
 
 run output downloads verified; test now tolerates slow server boot
+## 2026-10-19 15:58 — #2278 History: ask an agent to undo a commit, with tests (ui) [in progress (1)]
+
+tests fail after convo_id fixture change; tool access blocked
+
+## 2026-10-19 16:17 — #2278 History: ask an agent to undo a commit, with tests (ui) [done (check passed)]
+
+History detail drafts git revert request into chat; tests pass

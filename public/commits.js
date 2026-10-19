@@ -4,8 +4,11 @@
 // sheet, newest first, 50 at a time ('Load older' passes before = the last sha). A row shows the subject, when, who and
 // +add −del, plus a 'Task #N' chip that opens the task. Tapping a row swaps the sheet to that commit: its message, the
 // files with their counts and the coloured patch (app.css .diff lines). The pill shows whenever a project is open,
-// except in the term/browser views; nothing is fetched until the sheet opens. Loaded after app.js and uses its helpers
-// ($, el, api, O, relTime, showTask, coarse).
+// except in the term/browser views; nothing is fetched until the sheet opens. A commit's 'Ask to undo…' (after opcode's
+// checkpoints: undo is one tap but always a NEW commit) drafts a `git revert` request into the project's main chat
+// (O.project.convo_id) without sending it, like app.js fileFeedback: appended after the chat's saved draft, then the chat
+// opens; with no chat an inline status says why. Loaded after app.js and uses its helpers ($, el, api, O, relTime,
+// showTask, coarse, state, store, input, openConvo, closeSidebar, setView, toast).
 (() => {
   const CM = { pid: null, branch: '', list: [], more: false, loaded: false, loading: false, error: '', seq: 0, detail: null, lastFocus: null };
   const shown = () => !$('commitsModal').hidden;
@@ -140,6 +143,26 @@
     return box;
   }
 
+  // The undo request, appended to the project chat's draft (not sent): the chat's box when it is open, else its saved
+  // draft (store 'cw.draft.<cid>', restored by the chat's history frame). The sheet closes and the chat opens.
+  function askUndo(c, status) {
+    const cid = O.project?.convo_id;
+    if (!cid || !state.convos.some((x) => x.id === cid)) { status.textContent = 'This project has no chat to ask, so nothing was drafted'; return; }
+    const text = `Undo commit ${c.sha.slice(0, 7)} ("${c.subject || '(no message)'}")${c.task ? `, from task #${c.task},` : ''} with \`git revert ${c.sha}\` as a new commit. `
+      + 'Keep everything after it; never reset or rewrite main. Check the app still works afterwards.';
+    const cur = (state.cid === cid ? input.value : store.get('cw.draft.' + cid) || '').replace(/\s+$/, '');
+    const draft = cur ? `${cur}\n\n${text}` : text;
+    store.set('cw.draft.' + cid, draft);
+    close();
+    if (state.cid !== cid) openConvo(cid);
+    closeSidebar();
+    setView('chat');
+    input.value = draft;
+    input.dispatchEvent(new Event('input')); // autosize, Send button, saved draft
+    input.setSelectionRange(draft.length, draft.length);
+    toast('Added to the chat\'s message box. Send it when ready', { kind: 'success' });
+  }
+
   function renderDetail(body) {
     const d = CM.detail, c = d.data || CM.list.find((x) => x.sha === d.sha) || { sha: d.sha };
     const back = el('button', 'btn small cm-back', '‹ Back');
@@ -149,10 +172,17 @@
       render();
       if (!coarse) $('cmBody').querySelector(`.cm-item[data-sha="${d.sha}"] .cm-open`)?.focus();
     };
-    const head = el('div', 'cm-dhead');
-    head.append(back);
-    if (c.task) head.append(taskChip(c.task));
-    const out = [head, el('h3', 'cm-dsubj', c.subject || '(no message)')];
+    const head = el('div', 'cm-dhead'), acts = el('span', 'cm-dacts');
+    if (c.task) acts.append(taskChip(c.task));
+    const undo = el('button', 'btn small cm-undo', 'Ask to undo…');
+    undo.type = 'button';
+    undo.title = 'Draft a request to revert this commit into the project chat; it is not sent';
+    const status = el('p', 'cm-undo-msg');
+    status.setAttribute('role', 'status');
+    undo.onclick = () => askUndo(c, status);
+    acts.append(undo);
+    head.append(back, acts);
+    const out = [head, status, el('h3', 'cm-dsubj', c.subject || '(no message)')];
     const meta = el('p', 'cm-meta');
     meta.append(el('span', 'cm-sha', c.sha.slice(0, 7)), el('span', '', c.at ? relTime(c.at) : ''), el('span', 'cm-author', c.author || ''));
     out.push(meta);

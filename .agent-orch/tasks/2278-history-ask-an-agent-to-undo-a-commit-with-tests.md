@@ -19,3 +19,15 @@ Test: new test/ui-history-undo.test.mjs copying test/ui-commits.test.mjs's setup
 ## Done when
 
 `npm test -- test/ui-history-undo.test.mjs` passes (the undo request is drafted into the chat box, not sent; with no chat it shows why).
+
+## Result — in progress (1) (2026-10-19 15:58)
+
+All tool calls are now being denied, including a plain `git status`, so I can't read the failing test output or re-run the test. The feature code is in place in public/commits.js and public/commits.css, and the test file test/ui-history-undo.test.mjs exists, but the last run reported all three tests failing (likely the fixture's `before` hook after the convo_id change) and I could not verify or fix it.
+
+AGENT-ORCH-STATUS: continue — tests fail after convo_id fixture change; tool access blocked
+
+## Result — done (check passed) (2026-10-19 16:17)
+
+Screenshots confirm the button in the detail head on desktop and phone, and the drafted request landing in the chat box with the toast. The Done-when test passed (3/3), as did ui-static and ui-commits.
+
+AGENT-ORCH-STATUS: done — History detail drafts git revert request into chat; tests pass

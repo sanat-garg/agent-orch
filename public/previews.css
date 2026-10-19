@@ -41,7 +41,7 @@
 .pv-link span:last-child { overflow: hidden; text-overflow: ellipsis; }
 #viewMenuPreview { display: flex; align-items: center; gap: 8px; }
 
-/* The manager sheet: "Live" cards (name, address link, status pill, Open/Restart/Logs/Edit; the address editor only
+/* The manager sheet: "Live" cards (name, address link, status pill, Open/Inspect/Restart/Logs/Edit; the address editor only
    under Edit), then "No address" and "Domains" as grouped lists. */
 .modal-panel.pvm { width: min(560px, 100%); }
 .pvm .m-head { align-items: flex-start; }
@@ -67,7 +67,7 @@
 .pv-detail.bad { color: var(--danger); }
 .pv-detail[hidden] { display: none; }
 /* A toolbar along the card's bottom edge, under a hairline. */
-.pv-acts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2px; margin: 12px -12px -12px -14px; padding: 3px; border-top: 1px solid var(--border); }
+.pv-acts { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 2px; margin: 12px -12px -12px -14px; padding: 3px; border-top: 1px solid var(--border); }
 .pv-act {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 0; height: 34px; padding: 0 6px;
   border: 0; border-radius: 10px; background: none; color: var(--accent-ink);
@@ -121,3 +121,23 @@
   .pv-slug, .pv-domain, .pv-add input { font-size: 16px; }
   .pv-item { min-height: 52px; }
 }
+
+/* The inspector (a card's Inspect): the address in an iframe at a chosen CSS width, scaled down to fit the stage. */
+.modal.pvi { z-index: 61; }
+.modal-panel.pvi-panel { width: min(1400px, 100%); height: calc(100dvh - 48px); }
+.pvi-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 0 20px 8px; }
+.pvi-size { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.pvi-tab { color: var(--text); text-decoration: none; }
+.pvi-note { margin: 0 20px 10px; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.pvi-stage { flex: 1; min-height: 0; display: flex; justify-content: center; align-items: flex-start; overflow: hidden;
+  margin: 0 20px 20px; border-radius: 12px; background: var(--raised); }
+.pvi-box { position: relative; flex: none; overflow: hidden; background: #fff; box-shadow: 0 0 0 1px var(--border); }
+.pvi-frame { position: absolute; top: 0; left: 0; border: 0; transform-origin: 0 0; background: #fff; }
+@media (max-width: 800px) {
+  .modal.pvi { padding: 0; }
+  .modal-panel.pvi-panel { height: 100dvh; max-height: none; border: 0; border-radius: 0; padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  .pvi-bar { padding: 0 12px 8px; }
+  .pvi-note { margin: 0 12px 8px; }
+  .pvi-stage { margin: 0 0 0; border-radius: 0; }
+}
+@media (pointer: coarse) { .pvi-widths button, .pvi-tab { min-height: 44px; } .pvi-close { width: 44px; height: 44px; } }

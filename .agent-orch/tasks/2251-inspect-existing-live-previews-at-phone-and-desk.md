@@ -13,3 +13,7 @@ Add an Inspect action to configured preview cards in public/previews.js, inspire
 ## Done when
 
 `npm test -- test/ui-preview-inspector.test.mjs` passes.
+
+## Result — done (check passed) (2026-10-19 14:31)
+
+AGENT-ORCH-STATUS: done — Inspect opens previews at 390/768/1280px; tests pass

@@ -4,7 +4,8 @@
 //   - the new-project screen offers an address (none unless the owner adds one; typed, checked live),
 //   - the chat header links to the open project's preview with a status dot,
 //   - the sidebar's "Live previews" manager lists every project's address and status (set, move, restart, logs, remove)
-//     and the owner's domains (add, remove, make default).
+//     and the owner's domains (add, remove, make default),
+//   - a card's Inspect opens the inspector: that address in an iframe at a 390, 768 or 1280px CSS viewport width.
 // Loaded after app.js and uses its helpers ($, el, api, toast, state, currentConvo, closeSidebar, coarse).
 (() => {
   const APEX = '@';
@@ -171,6 +172,7 @@
     if (!coarse) $('previewsModal').querySelector('[data-close].icon-btn').focus();
   }
   function close() {
+    closeInspector();
     if ($('previewsModal').hidden) return;
     $('previewsModal').hidden = true;
     PV.editing.clear();
@@ -201,6 +203,7 @@
     restart: '<path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5"/>',
     logs: '<path d="M5 6h14M5 12h14M5 18h9"/>',
     edit: '<path d="M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4"/>',
+    inspect: '<rect x="3" y="4" width="13" height="16" rx="2"/><rect x="15" y="9" width="6" height="11" rx="1.5"/>',
   };
   function act(tag, kind, label) {
     const b = el(tag, 'pv-act');
@@ -289,10 +292,14 @@
       logsBtn.setAttribute('aria-expanded', String(on));
       if (on) loadLogs();
     };
+    const inspect = act('button', 'inspect', 'Inspect');
+    inspect.title = 'See it at phone, tablet and desktop widths';
+    inspect.classList.add('inspect');
+    inspect.onclick = () => { PI.cid = c.id; openInspector(c.title || folderName(c.cwd), v, inspect); };
     const edit = act('button', 'edit', 'Edit');
     edit.title = 'Change or remove the address';
     edit.onclick = () => startEdit(c.id);
-    acts.append(openA, restart, logsBtn, edit);
+    acts.append(openA, inspect, restart, logsBtn, edit);
     row.append(pre, acts);
     return row;
   }
@@ -445,10 +452,102 @@
     try { await api(url, method, body); await load(); render(); } catch (e) { toast(e.message, { kind: 'error' }); }
   }
 
+  // ---- The inspector: built on Inspect, removed on close (so the iframe unloads). It loads only the owner's own address,
+  // and only after that click. It shows the page at a chosen CSS viewport width, scaled down to fit (layout inspection,
+  // not device emulation: no touch, user agent or pixel ratio changes). A site that refuses framing (X-Frame-Options,
+  // CSP frame-ancestors) shows the browser's own error; a cross-origin load event fires either way, so it proves nothing
+  // and the fallback note stays visible.
+  const WIDTHS = [{ w: 390, label: 'Phone' }, { w: 768, label: 'Tablet' }, { w: 1280, label: 'Desktop' }];
+  const PI = { node: null, width: 390, ro: null, back: null, cid: null };
+  function openInspector(name, v, from) {
+    if (PI.node) { PI.ro?.disconnect(); PI.node.remove(); PI.node = null; }
+    PI.back = from;
+    const m = el('div', 'modal pvi');
+    m.id = 'pvInspect';
+    const panel = el('div', 'modal-panel pvi-panel');
+    panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-modal', 'true'); panel.setAttribute('aria-labelledby', 'pviTitle');
+    const head = el('div', 'm-head');
+    const titles = el('div');
+    const h = el('h2', '', `Inspect ${name}`);
+    h.id = 'pviTitle';
+    titles.append(h, el('p', 'm-sub', 'Layout inspection at a CSS viewport width, scaled to fit. Not full device emulation.'));
+    const closeBtn = el('button', 'icon-btn pvi-close');
+    closeBtn.type = 'button';
+    closeBtn.setAttribute('aria-label', 'Close');
+    closeBtn.insertAdjacentHTML('afterbegin', '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>');
+    closeBtn.onclick = closeInspector;
+    head.append(titles, closeBtn);
+    const bar = el('div', 'pvi-bar');
+    const seg = el('div', 'seg-sm pvi-widths');
+    seg.setAttribute('role', 'group'); seg.setAttribute('aria-label', 'Viewport width');
+    for (const { w, label } of WIDTHS) {
+      const b = el('button', '', `${label} ${w}`);
+      b.type = 'button'; b.dataset.w = w;
+      b.onclick = () => setWidth(w);
+      seg.append(b);
+    }
+    const tab = el('a', 'btn small pvi-tab', 'Open in new tab');
+    tab.href = v.url; tab.target = '_blank'; tab.rel = 'noopener';
+    const size = el('span', 'pvi-size');
+    size.setAttribute('aria-live', 'polite');
+    bar.append(seg, size, el('span', 'pv-grow'), tab);
+    const note = el('p', 'pvi-note', `Blank or an error below? Some sites refuse to be shown inside another page. Use Open in new tab to see ${host(v)}.`);
+    const stage = el('div', 'pvi-stage');
+    const box = el('div', 'pvi-box');
+    const frame = document.createElement('iframe');
+    frame.className = 'pvi-frame';
+    frame.title = `${host(v)} at the chosen width`;
+    frame.referrerPolicy = 'no-referrer';
+    frame.src = v.url;
+    box.append(frame);
+    stage.append(box);
+    panel.append(head, bar, note, stage);
+    m.append(el('div', 'modal-backdrop'), panel);
+    m.firstChild.onclick = closeInspector;
+    document.body.append(m);
+    PI.node = m;
+    PI.ro = new ResizeObserver(layout);
+    PI.ro.observe(stage);
+    setWidth(PI.width);
+    if (!coarse) closeBtn.focus();
+  }
+  // The frame keeps the chosen CSS width and is scaled (never stretched) to fit; its height fills the stage.
+  function layout() {
+    const m = PI.node;
+    if (!m) return;
+    const stage = m.querySelector('.pvi-stage'), box = m.querySelector('.pvi-box'), frame = m.querySelector('.pvi-frame');
+    const w = PI.width, sw = stage.clientWidth, sh = stage.clientHeight;
+    const scale = sw > 0 ? Math.min(1, sw / w) : 1;
+    const ch = Math.max(1, Math.floor(sh / scale));
+    frame.style.width = `${w}px`; frame.style.height = `${ch}px`;
+    frame.style.transform = scale < 1 ? `scale(${scale})` : '';
+    box.style.width = `${Math.round(w * scale)}px`; box.style.height = `${Math.round(ch * scale)}px`;
+    m.querySelector('.pvi-size').textContent = `${w} × ${ch} CSS px${scale < 1 ? ` · ${Math.round(scale * 100)}%` : ''}`;
+  }
+  function setWidth(w) {
+    PI.width = w;
+    for (const b of PI.node.querySelectorAll('.pvi-widths button')) b.setAttribute('aria-pressed', String(Number(b.dataset.w) === w));
+    layout();
+  }
+  function closeInspector() {
+    const m = PI.node;
+    if (!m) return;
+    PI.ro?.disconnect();
+    m.querySelector('.pvi-frame')?.setAttribute('src', 'about:blank');
+    m.remove();
+    PI.node = null; PI.ro = null;
+    // The card's Inspect button, or the one that replaced it if the sheet re-rendered meanwhile.
+    const back = PI.back?.isConnected ? PI.back : PI.cid && $('pvBody').querySelector(`[data-cid="${CSS.escape(PI.cid)}"] .pv-act.inspect`);
+    back?.focus?.({ preventScroll: true });
+    PI.back = PI.cid = null;
+  }
+
   $('previewsBtn').addEventListener('click', open);
   $('previewsModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) close(); });
   document.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape' || $('previewsModal').hidden) return;
+    if (e.key !== 'Escape') return;
+    if (PI.node) { e.stopImmediatePropagation(); return closeInspector(); }
+    if ($('previewsModal').hidden) return;
     e.stopImmediatePropagation();
     // Inside an open address editor, Escape cancels the edit; otherwise it closes the sheet.
     const at = document.activeElement?.closest?.('#pvBody [data-cid]');

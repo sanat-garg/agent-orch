@@ -1704,3 +1704,6 @@ composer suggests SDK-reported slash commands; tests and checks pass
 ## 2026-10-19 14:29 — #2255 Search installed Skills and tools without scrolling the whole library, with tests (ui) [done (check passed)]
 
 Skills & tools sheet searchable with source filters; tests pass
+## 2026-10-19 14:31 — #2251 Inspect existing live previews at phone and desktop widths, with tests (ui) [done (check passed)]
+
+Inspect opens previews at 390/768/1280px; tests pass

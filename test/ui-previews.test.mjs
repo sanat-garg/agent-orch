@@ -140,7 +140,7 @@ test('sidebar manager: live cards, Add address, Edit, domains, and slug changes 
       assert.equal(await demo.locator('a.pv-url').textContent(), 'demo-site.greygoose.baby');
       assert.match(await demo.locator('.pv-pill').textContent(), /Stopped/);
       assert.equal(await demo.locator('a.pv-act').getAttribute('href'), 'https://demo-site.greygoose.baby');
-      assert.deepEqual(await demo.locator('.pv-act').allTextContents(), ['Open', 'Restart', 'Logs', 'Edit']);
+      assert.deepEqual(await demo.locator('.pv-act').allTextContents(), ['Open', 'Inspect', 'Restart', 'Logs', 'Edit']);
       assert.equal(await demo.locator('input.pv-slug').count(), 0);
       // A project without one sits in the "No address" list; Add address opens an empty field and Add waits for a slug.
       assert.equal(await notes.locator('input.pv-slug').count(), 0);
@@ -183,7 +183,7 @@ test('sidebar manager: live cards, Add address, Edit, domains, and slug changes 
       await demo.locator('input.pv-slug').press('Escape');
       assert.equal(await demo.locator('input.pv-slug').count(), 0);
       assert.equal(await page.locator('#previewsModal').isVisible(), true);
-      assert.equal(await demo.locator('.pv-act').count(), 4);
+      assert.equal(await demo.locator('.pv-act').count(), 5);
       // A rename: the live check, then Save PUTs the slug and domain.
       let put = null;
       await page.route('**/api/convos/c0/preview', (route) => {

@@ -13,3 +13,7 @@ Let the owner dictate prompts, especially on the iPhone PWA. Add a mic button to
 ## Done when
 
 `npm test -- test/ui-dictation.test.mjs test/ui-static.test.mjs` passes.
+
+## Result — done (check passed) (2026-10-19 14:30)
+
+AGENT-ORCH-STATUS: done — Composer dictation works on desktop and phones; its tests pass

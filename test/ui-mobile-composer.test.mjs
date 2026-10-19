@@ -138,7 +138,7 @@ test('390px: + opens a sheet with attach and the moved composer options', { skip
   await page.locator('#plusBtn').tap();
   await sheet.waitFor();
   assert.equal(await page.locator('#plusBtn').getAttribute('aria-expanded'), 'true');
-  assert.deepEqual(await rows(), ['Photo', 'File', 'Permission mode', 'Effort'], 'no persona row without personas');
+  assert.deepEqual(await rows(), ['Photo', 'File', 'Dictate', 'Permission mode', 'Effort'], 'no persona row without personas');
   assert.equal(await page.locator('#psMode').textContent(), await page.locator('#modeLabel').textContent());
   assert.equal(await page.locator('#psEff').textContent(), await page.locator('#effVal').textContent());
   await page.waitForFunction(() => !document.querySelector('#plusSheet .modal-panel').getAnimations().length); // sheet-up
@@ -171,7 +171,7 @@ test('390px: + opens a sheet with attach and the moved composer options', { skip
   // Persona: a row once a persona exists, opening its menu.
   await page.evaluate(() => { EX.personas = [{ id: 'p1', name: 'Reviewer', description: '', prompt: 'Review.' }]; exRenderChip(); });
   await page.locator('#plusBtn').tap();
-  assert.deepEqual(await rows(), ['Photo', 'File', 'Permission mode', 'Effort', 'Persona']);
+  assert.deepEqual(await rows(), ['Photo', 'File', 'Dictate', 'Permission mode', 'Effort', 'Persona']);
   assert.equal(await page.locator('#psPersona').textContent(), 'Persona');
   await sheet.locator('[data-plus="personaChip"]').tap();
   await page.locator('#personaPop .cm-opt >> text=Reviewer').waitFor();
@@ -232,7 +232,7 @@ test('390px: sending still works, with the attachments picked through +', { skip
 test('1280px: the desktop composer keeps its chip row and no +', { skip, timeout: 60000 }, async () => {
   const { ctx, page, errors } = await open({ width: 1280, height: 800 }, false);
   const c = await composer(page);
-  assert.deepEqual(c.ids, ['input', 'attBtn', 'modeChip', 'modelChip', 'effChip', 'send']);
+  assert.deepEqual(c.ids, ['input', 'attBtn', 'modeChip', 'modelChip', 'effChip', 'micBtn', 'send']);
   assert.ok(c.b.send.top >= c.b.input.bottom, 'send sits in the chip row under the field');
   assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector('#composer .box')).display), 'block');
   await ctx.close();

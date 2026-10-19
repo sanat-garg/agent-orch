@@ -490,6 +490,13 @@ code, pre, kbd { font-family: var(--mono); }
 .send.stop { background: var(--text); color: var(--bg); }
 .send.stop .i-send { display: none; }
 .send.stop .i-stop { display: block; }
+/* Dictation (app.js DICT): a quiet mic beside send; red and pulsing while it listens. */
+.mic-btn { width: 36px; height: 36px; flex: none; border: 0; border-radius: 10px; background: none; color: var(--muted);
+  display: grid; place-items: center; cursor: pointer; }
+@media (hover: hover) { .mic-btn:hover { background: var(--raised); color: var(--text); } }
+.mic-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mic-btn[aria-pressed="true"] { background: #d70015; color: #fff; animation: mic-pulse 1.4s ease-out infinite; }
+@keyframes mic-pulse { 0% { box-shadow: 0 0 0 0 rgba(215, 0, 21, .5); } 100% { box-shadow: 0 0 0 10px rgba(215, 0, 21, 0); } }
 .pop-wrap { position: relative; }
 .popover {
   position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 30; width: 280px;
@@ -2350,7 +2357,7 @@ button.dg-row:disabled { opacity: .6; cursor: progress; }
    buttons keep their look and get an invisible 44pt hit area (.convo .more is already absolutely positioned). */
 @media (pointer: coarse) {
   .chip, .orch-bar .chip, .btn.small, .cn-btn.btn.small { min-height: 44px; }
-  .icon-btn, .send { width: 44px; height: 44px; }
+  .icon-btn, .send, .mic-btn { width: 44px; height: 44px; }
   details.dr-prompt summary { min-height: 44px; line-height: 44px; }
   #usRefresh, #msFold { position: relative; }
   #usRefresh::after, #msFold::after, .convo .more::after { content: ''; position: absolute; inset: -10px; }

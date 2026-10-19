@@ -82,7 +82,7 @@
 /* ---------- composer: one rounded field holding the text, '+', the model and send (Messages / the Claude app) ---------- */
 @media (max-width: 767px) {
   #composer .box {
-    grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "tray tray tray" "field field field" "plus model send";
+    grid-template-columns: auto minmax(0, 1fr) auto auto; grid-template-areas: "tray tray tray tray" "field field field field" "plus model mic send";
     row-gap: 0; column-gap: 0; padding: 2px 6px 6px;
     border: 1px solid var(--border-strong); border-radius: 24px; background: var(--panel); box-shadow: 0 2px 12px rgba(0, 0, 0, .06);
     transition: border-color .15s, box-shadow .15s;
@@ -92,6 +92,9 @@
   #composer .att-tray { padding: 8px 6px 2px; }
   #composer textarea { grid-area: field; margin: 10px 10px 2px 10px; }
   #composer .send { grid-area: send; align-self: center; justify-self: end; margin: 0; }
+  /* Dictation starts from the '+' sheet; the mic shows only while listening, round, so a tap stops it. */
+  #micBtn { grid-area: mic; align-self: center; margin: 0 6px 0 0; border-radius: 50%; }
+  #micBtn:not([aria-pressed="true"]) { display: none; }
   #plusBtn { align-self: center; }
   #modelChip { align-self: center; padding-left: 4px; }
   .composer { padding-top: 4px; }

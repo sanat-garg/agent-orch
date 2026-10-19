@@ -2250,6 +2250,7 @@ $('slashPop').addEventListener('click', (e) => { const b = e.target.closest('.cm
 addEventListener('resize', () => { if (!$('slashPop').hidden) placeMenu($('slashPop'), input.closest('.box')); });
 $('composer').addEventListener('submit', async (e) => {
   e.preventDefault();
+  stopDictation(true);
   hideSlash();
   const text = input.value.trim();
   if (!text && !ATT.list.length) {
@@ -2425,11 +2426,69 @@ $('plusSheet').addEventListener('click', (e) => {
   closePlusSheet(false);
   if (what === 'photo') $('attImgInput').click();
   else if (what === 'file') $('attInput').click();
+  else if (what === 'dictate') toggleDictation();
   else openMenuFrom($(what), $('plusBtn'));
 });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !$('plusSheet').hidden) { e.stopImmediatePropagation(); closePlusSheet(); }
 }, true);
+// Dictation (Web Speech API): #micBtn beside send, or the '+' sheet's Dictate row on phones (where #micBtn shows only while
+// listening, so it can be tapped to stop). Speech lands in #input after what was already typed: interim words live, final
+// ones kept. Tapping again, sending or 30 s without a result stops it. No API (Firefox): the button and row are hidden.
+const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+const DICT = { rec: null, closing: null, timer: 0, silence: 30000 }; // rec: listening; closing: stopped, final words still due
+if (!SpeechRec) $('micBtn').hidden = $('psDictate').hidden = true;
+function dictUi(on) {
+  $('micBtn').setAttribute('aria-pressed', String(on));
+  $('micBtn').setAttribute('aria-label', on ? 'Stop dictation' : 'Dictate');
+  $('micBtn').title = on ? 'Stop dictation' : 'Dictate';
+  $('psDictateL').textContent = on ? 'Stop dictation' : 'Dictate';
+}
+function toggleDictation() {
+  if (DICT.rec) return stopDictation();
+  stopDictation(true);
+  const rec = new SpeechRec();
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.lang = navigator.language;
+  const base = input.value && !/\s$/.test(input.value) ? input.value + ' ' : input.value;
+  const idle = () => { clearTimeout(DICT.timer); DICT.timer = setTimeout(() => DICT.rec === rec && stopDictation(), DICT.silence); };
+  rec.onresult = (e) => {
+    if (rec !== DICT.rec && rec !== DICT.closing) return;
+    let text = '';
+    for (const r of e.results) text += r[0].transcript;
+    input.value = base + text.replace(/^\s+/, '');
+    input.dispatchEvent(new Event('input')); // grows the field, enables send and keeps the draft, as typing does
+    input.scrollTop = input.scrollHeight;
+    if (rec === DICT.rec) idle();
+  };
+  rec.onerror = (e) => {
+    if (rec !== DICT.rec || e.error === 'aborted') return;
+    stopDictation(true);
+    toast(/^(not-allowed|service-not-allowed)$/.test(e.error) ? 'Microphone access is off for this site' : `Dictation stopped: ${e.error}`, { kind: 'error' });
+  };
+  rec.onend = () => {
+    if (rec === DICT.rec) stopDictation(true);
+    if (rec === DICT.closing) DICT.closing = null;
+  };
+  try { rec.start(); } catch (err) { toast(`Dictation didn't start: ${err.message}`, { kind: 'error' }); return; }
+  DICT.rec = rec;
+  dictUi(true);
+  idle();
+  focusComposer();
+}
+// A plain stop (tap, silence) lets the words still being recognised arrive; abort (sending, errors) drops them.
+function stopDictation(abort = false) {
+  if (abort && DICT.closing) { DICT.closing.abort(); DICT.closing = null; }
+  const rec = DICT.rec;
+  if (!rec) return;
+  DICT.rec = null;
+  clearTimeout(DICT.timer);
+  dictUi(false);
+  if (abort) rec.abort();
+  else { DICT.closing = rec; rec.stop(); }
+}
+$('micBtn').addEventListener('click', toggleDictation);
 // Mode: its four permission levels, then Orchestrator Mode.
 bindMenu($('modeChip'), $('modePop'), (menu) => {
   for (const o of $('mode').options) {

@@ -1675,6 +1675,9 @@ Queue shows 'Since you were away' digest card; tests pass
 
 Task drawer shows a lazy-loaded, coloured Changes diff; tests pass
 
+## 2026-10-19 14:30 — #2236 Voice dictation in the composer (Web Speech API), with tests (ui) [done (check passed)]
+
+Composer dictation works on desktop and phones; its tests pass
 ## 2026-10-19 14:24 — #2248 Integrate #2230: Sidebar projects sorted by latest activity; remove priority drag order [done (check passed)]
 
 merge conflicts resolved; sidebar-activity, ui-static and digest tests pass
@@ -1732,3 +1735,6 @@ Token usage sheet has an All time / Last 7 days switch; tests pass
 ## 2026-10-19 14:37 — #2240 Export a chat as Markdown from the sidebar ⋯ menu, with tests [done (check passed)]
 
 Chats export as Markdown from the sidebar ⋯ menu; tests pass
+## 2026-10-19 14:37 — #2268 Integrate #2236: Voice dictation in the composer (Web Speech API), with tests (ui) [done (check passed)]
+
+app.js conflict resolved; submit stops dictation and hides slash menu

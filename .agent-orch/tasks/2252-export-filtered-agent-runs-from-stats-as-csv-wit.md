@@ -13,3 +13,7 @@ Add an Export runs CSV action to the existing Stats controls in public/stats.js,
 ## Done when
 
 `npm test -- test/ui-stats-export.test.mjs` passes.
+
+## Result — done (check passed) (2026-10-19 14:43)
+
+AGENT-ORCH-STATUS: done — Stats exports filtered runs as CSV; export tests pass

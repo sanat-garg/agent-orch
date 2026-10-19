@@ -2,6 +2,7 @@
 // ---------- Stats: you and the orchestrator (server: stats.mjs, GET /api/stats) ----------
 // The server sends raw records; everything here is sliced by the chosen range and project, bucketed in the browser's
 // timezone and turned into tiles, charts and plain-language insights. Tabs: Overview · You · Agents · Projects · Machines.
+// "Export runs CSV" downloads the current slice's runs client-side from the loaded snapshot (no extra API call).
 // Loaded after app.js and uses its helpers ($, el, api, store, fmtTok, fmtDur, closeSidebar, modelName, agentLabel).
 (() => {
   const MIN = 60e3, H = 3600e3, DAY = 864e5;
@@ -91,6 +92,46 @@
       const e = Math.min(r.end ?? SX.data.at, to);
       while (t < e) { const n = Math.min(nextHour(t), e); cb(t, n - t, r); t = n; }
     }
+  }
+
+  // ---------- runs CSV (Export runs CSV) ----------
+  // One row per run in the current project + range slice (cut()'s overlap rule), seconds in range by runMs. Token
+  // counts are the run's whole total, not prorated to the range; unknown values (no model recorded, still running) stay
+  // empty rather than guessed. Timestamps are ISO 8601 UTC.
+  const CSV_HEAD = ['Project', 'Task ID', 'Agent', 'Model', 'Started (UTC)', 'Ended (UTC)', 'Outcome', 'Seconds in range',
+    'Input tokens (whole run)', 'Output tokens (whole run)', 'Cache tokens (whole run)'];
+  const csvCell = (v) => { const s = v == null ? '' : String(v); return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const isoAt = (ms) => (Number.isFinite(ms) ? new Date(ms).toISOString() : '');
+  function sxRunsCsv(c) {
+    const names = new Map(SX.data.projects.map((p) => [p.id, p.name]));
+    const rows = [...c.runs].sort((a, b) => a.start - b.start || a.id - b.id).map((r) => [names.get(r.p), r.task, r.agent, r.model,
+      isoAt(r.start), isoAt(r.end), r.outcome, Math.round(runMs(r, c.from, c.to) / 1000), r.in, r.out, r.cached]);
+    return [CSV_HEAD, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
+  }
+  function sxExportRuns() {
+    if (SX.loading || !SX.data) return;
+    const { cur } = slices();
+    if (!cur.runs.length) return;
+    const proj = SX.project === 'all' ? 'all-projects' : SX.data.projects.find((p) => String(p.id) === SX.project)?.name || SX.project;
+    const slug = String(proj).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'project';
+    const day = new Date(SX.data.at), ymd = [day.getFullYear(), day.getMonth() + 1, day.getDate()].map((x) => String(x).padStart(2, '0')).join('-');
+    const url = URL.createObjectURL(new Blob([sxRunsCsv(cur)], { type: 'text/csv;charset=utf-8' }));
+    const a = el('a');
+    a.href = url; a.download = `agent-orch-runs-${slug}-${SX.range}-${ymd}.csv`; a.hidden = true;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000); // after the download has read the blob
+  }
+  // Disabled while loading, and with a visible reason when no runs match the filters.
+  function sxSyncExport(cur) {
+    const b = $('sxExport'), note = $('sxExportNote');
+    const n = cur && !SX.loading ? cur.runs.length : 0;
+    const why = SX.loading || !SX.data ? (SX.err && !SX.data ? "Stats didn't load" : 'Loading stats…') : n ? '' : 'No agent runs match this project and range';
+    b.disabled = !n;
+    b.title = why || `Download ${plural(n, 'run')} as CSV`;
+    note.textContent = SX.data && !SX.loading ? why : '';
+    note.hidden = !note.textContent;
   }
 
   function metrics(c) {
@@ -1036,7 +1077,7 @@
     placeSub();
     const d = SX.data, body = $('sxBody');
     $('sxSub').textContent = SX.err ? `Couldn't load stats: ${SX.err}` : !d ? 'Loading…' : `You and the orchestrator · updated ${fmtWhen(d.at)}`;
-    if (!d) { body.classList.toggle('busy', !SX.err); return; }
+    if (!d) { body.classList.toggle('busy', !SX.err); sxSyncExport(); return; }
     body.classList.remove('busy');
     const sel = $('sxProject');
     const opts = [['all', 'All projects'], ...d.projects.map((p) => [String(p.id), p.name])];
@@ -1048,6 +1089,7 @@
     SX.observers = [];
     hideTip();
     const { cur, prev } = slices();
+    sxSyncExport(cur);
     const m = metrics(cur), pm = prev && metrics(prev);
     const content = SX.tab === 'you' ? youTab(cur, m, pm) : SX.tab === 'agents' ? agentsTab(cur, m) : SX.tab === 'projects' ? projectsTab(cur, m) : SX.tab === 'machines' ? sxMachinesTab(cur, m) : overview(cur, m, pm);
     const grid = el('div', 'sx-grid');
@@ -1058,8 +1100,10 @@
   }
   async function load(fresh = false) {
     if (SX.loading) return SX.loading;
-    return (SX.loading = api(`/api/stats${fresh ? '?fresh=1' : ''}`).then((d) => { SX.data = d; SX.err = ''; })
-      .catch((e) => { SX.err = e.message; }).finally(() => { SX.loading = null; render(); }));
+    SX.loading = api(`/api/stats${fresh ? '?fresh=1' : ''}`).then((d) => { SX.data = d; SX.err = ''; })
+      .catch((e) => { SX.err = e.message; }).finally(() => { SX.loading = null; render(); });
+    sxSyncExport();
+    return SX.loading;
   }
   function open() {
     closeSidebar();
@@ -1089,7 +1133,7 @@
   const pop = el('div', 'sx-range-pop');
   pop.id = 'sxRangePop';
   $('sxRange').before(chip);
-  pop.append($('sxProject'), $('sxRange'));
+  pop.append($('sxProject'), $('sxRange'), $('sxExport'), $('sxExportNote'));
   chip.after(pop);
   function rangeMenu(on) {
     chip.parentNode.classList.toggle('open', on);
@@ -1151,5 +1195,9 @@
   });
   $('sxProject').addEventListener('change', (e) => { SX.project = e.target.value; render(); });
   $('sxRefresh').addEventListener('click', () => load(true));
+  $('sxExport').addEventListener('click', () => {
+    if (chip.getAttribute('aria-expanded') === 'true') { rangeMenu(false); chip.focus(); }
+    sxExportRuns();
+  });
   wireTips($('statsModal'));
 })();

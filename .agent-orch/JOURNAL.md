@@ -1738,3 +1738,6 @@ Chats export as Markdown from the sidebar ⋯ menu; tests pass
 ## 2026-10-19 14:37 — #2268 Integrate #2236: Voice dictation in the composer (Web Speech API), with tests (ui) [done (check passed)]
 
 app.js conflict resolved; submit stops dictation and hides slash menu
+## 2026-10-19 14:43 — #2252 Export filtered agent runs from Stats as CSV, with tests (ui) [done (check passed)]
+
+Stats exports filtered runs as CSV; export tests pass

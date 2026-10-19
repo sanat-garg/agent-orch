@@ -1,0 +1,36 @@
+/* Saved prompts (prompts.js): the composer's Prompts chip (desktop; phones reach it from the '+' sheet) and its sheet
+   with the browser-local list and the name + prompt editor. */
+.pl-chip { gap: 6px; }
+.pl-chip svg { flex: none; }
+@media (max-width: 767px) { #promptsChip { display: none; } }
+
+.modal-panel.plm { width: min(580px, 100%); }
+.pl-top { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.pl-top .btn { flex: none; }
+.pl-hint, .pl-empty { margin: 0; font-size: 13px; color: var(--muted); line-height: 1.4; }
+.pl-hint { flex: 1; min-width: 0; }
+.pl-empty { margin: 6px 4px; }
+.pl-err { margin: 0 0 12px; padding: 8px 12px; border-radius: 10px; background: var(--raised); color: var(--danger); font-size: 13px; line-height: 1.4; }
+
+.pl-card { margin-bottom: 10px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); }
+.pl-name-t { margin: 0; font-size: 15px; font-weight: 650; overflow-wrap: anywhere; }
+.pl-text { margin: 4px 0 10px; font-size: 13.5px; color: var(--muted); line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.pl-tools { display: flex; gap: 8px; }
+.pl-tools .pl-del { margin-left: auto; }
+
+.pl-form { display: flex; flex-direction: column; gap: 12px; }
+.pl-form-t { margin: 0; font-size: 15px; font-weight: 650; }
+.pl-field { display: flex; flex-direction: column; gap: 4px; }
+.pl-label { font-size: 12px; font-weight: 600; color: var(--muted); }
+.pl-name, .pl-ta { width: 100%; padding: 8px 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--panel);
+  color: var(--text); font: inherit; font-size: 14px; }
+.pl-ta { min-height: 140px; resize: vertical; line-height: 1.45; }
+.pl-name:focus, .pl-ta:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus); }
+.pl-form .pl-err { margin: 0; }
+.pl-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+@media (pointer: coarse) {
+  .pl-name, .pl-ta { font-size: 16px; }
+  .pl-tools .btn, .pl-actions .btn, .pl-top .btn { height: 44px; }
+}

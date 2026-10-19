@@ -1664,6 +1664,9 @@ ui-static assertion now matches updateBannerView restart wording
 
 GET /api/orch/tasks/:id/changes serves taskChanges; tests pass
 
+## 2026-10-19 16:13 — #2249 Save and reuse project prompts from the composer, with tests (ui) [done (check passed)]
+
+Browser-local saved-prompt library in the composer, with passing tests
 ## 2026-10-19 14:21 — #2247 Leaving Orchestrator Mode stops new tasks only; the queue keeps running [done (check passed)]
 
 leaving Orchestrator Mode now stops new tasks; queued and running work continues
@@ -1838,3 +1841,10 @@ tab title prefixes pending approval count; test passes
 ## 2026-10-19 16:30 — #2285 Task drawer: Follow up on a finished task, with tests (ui) [done (check passed)]
 
 Done tasks get Follow up; note lands in chat draft
+## 2026-10-19 16:25 — #2293 Integrate #2249: Save and reuse project prompts from the composer, with tests (ui) [verify failed (1)]
+
+Command: npm test -- test/ui-prompt-library.test.mjs test/ui-static.test.mjs
+
+## 2026-10-19 16:37 — #2293 Integrate #2249: Save and reuse project prompts from the composer, with tests (ui) [done (check passed)]
+
+merge conflict fixed; prompt-library test race fixed; check passes

@@ -13,3 +13,7 @@ Add a small saved-prompt library in new public/prompts.js and public/prompts.css
 ## Done when
 
 `npm test -- test/ui-prompt-library.test.mjs test/ui-static.test.mjs` passes.
+
+## Result — done (check passed) (2026-10-19 16:13)
+
+AGENT-ORCH-STATUS: done — Browser-local saved-prompt library in the composer, with passing tests

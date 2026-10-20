@@ -41,3 +41,4 @@ _What the code doesn't say. Per-area rules (chats, users, files, previews, sched
 - `bin/agent-smoke.mjs` and `bin/orch-e2e.mjs` cost quota; never send Claude logout in tests.
 - Other sessions and orchestrator auto-commits touch the live checkout at once: re-read before editing. A branch failing in files you didn't touch is usually a stale base: fast-forward to main and re-run.
 - Reflections: run the needed tests to a log, check which files queued/running tasks hold, and emit the task block in the final message.
+- Playwright WebKit (iOS Safari's engine) on this VM freezes the app at service worker registration; to test in it, add an init script `delete Navigator.prototype.serviceWorker`. Real iPhones are fine.

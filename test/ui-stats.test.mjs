@@ -290,3 +290,28 @@ test('375×667: a bottom sheet with nothing sticking out sideways on any tab', {
   await ctx.close();
   assert.deepEqual(errors, []);
 });
+
+// A Stats request that never answers (a home-screen app suspended mid-load, a connection that died in sleep) used to
+// pin the sheet on "Loading…": every open and Refresh reused the stuck request until a full page reload.
+test('a Stats request that never answers: Refresh replaces it and the sheet loads', { skip, timeout: 60000 }, async () => {
+  const [name, value] = cookie.split('=');
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  await ctx.addCookies([{ name, value, url: base }]);
+  const page = await ctx.newPage();
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  let calls = 0;
+  await page.route('**/api/stats*', (route) => { if (++calls > 1) route.continue(); }); // the first is never answered
+  await page.goto(`${base}/`);
+  await page.locator('#app:not([inert])').waitFor();
+  await page.locator('#statsBtn').click();
+  await page.waitForFunction(() => document.getElementById('sxSub').textContent === 'Loading…');
+  await page.waitForTimeout(300);
+  assert.equal(calls, 1);
+  await page.locator('#sxRefresh').click();
+  await page.locator('#sxBody .sx-grid').waitFor({ timeout: 10000 });
+  assert.match(await page.locator('#sxSub').textContent(), /^You and the orchestrator · updated /);
+  assert.equal(calls, 2);
+  await ctx.close();
+  assert.deepEqual(errors, []);
+});

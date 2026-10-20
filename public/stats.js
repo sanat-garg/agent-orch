@@ -9,7 +9,7 @@
   const RANGE_MS = { all: 0, '30d': 30 * DAY, '7d': 7 * DAY, '24h': DAY };
   const TABS = ['overview', 'you', 'agents', 'projects', 'machines'];
   const SX = {
-    data: null, err: '', loading: null, lastFocus: null, observers: [],
+    data: null, err: '', loading: null, loadingAt: 0, ctl: null, lastFocus: null, observers: [],
     tab: TABS.includes(store.get('cw.sx.tab')) ? store.get('cw.sx.tab') : 'overview',
     range: store.get('cw.sx.range') in RANGE_MS ? store.get('cw.sx.range') : 'all',
     project: 'all', heatAll: false,
@@ -1098,13 +1098,29 @@
     body.replaceChildren(...(phone.matches ? [$('sxSub')] : []), grid);
     body.scrollTop = y;
   }
+  // A request that never settles (a home-screen app suspended mid-load, a connection that died in sleep) used to pin the
+  // sheet on "Loading…" for good, since every open and Refresh reused it. Now each load gives up after LOAD_MS, Refresh
+  // or an open after STALE_MS replaces a pending one, and coming back to the app restarts a load left pending.
+  const LOAD_MS = 45e3, STALE_MS = 8e3;
   async function load(fresh = false) {
-    if (SX.loading) return SX.loading;
-    SX.loading = api(`/api/stats${fresh ? '?fresh=1' : ''}`).then((d) => { SX.data = d; SX.err = ''; })
-      .catch((e) => { SX.err = e.message; }).finally(() => { SX.loading = null; render(); });
+    if (SX.loading && !fresh && Date.now() - SX.loadingAt < STALE_MS) return SX.loading;
+    SX.ctl?.abort(new Error('replaced'));
+    const ctl = SX.ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(new Error(`no answer after ${LOAD_MS / 1e3} seconds. Press Refresh to try again`)), LOAD_MS);
+    // The race also ends a call parked in apiAfterUpdate, which the signal can't reach.
+    const gaveUp = new Promise((_, reject) => ctl.signal.addEventListener('abort', () => reject(ctl.signal.reason), { once: true }));
+    SX.loadingAt = Date.now();
+    const p = SX.loading = Promise.race([api(`/api/stats${fresh ? '?fresh=1' : ''}`, 'GET', undefined, true, ctl.signal), gaveUp])
+      .then((d) => { if (SX.ctl === ctl) { SX.data = d; SX.err = ''; } })
+      .catch((e) => { if (SX.ctl === ctl) SX.err = e?.message || String(e); })
+      .finally(() => { clearTimeout(timer); if (SX.loading === p) { SX.loading = null; SX.ctl = null; render(); } });
+    if (SX.err && !SX.data) { SX.err = ''; render(); } // back to "Loading…" while retrying
     sxSyncExport();
-    return SX.loading;
+    return p;
   }
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && SX.loading && !$('statsModal').hidden) load(true);
+  });
   function open() {
     closeSidebar();
     if ($('statsModal').hidden) SX.lastFocus = document.activeElement;

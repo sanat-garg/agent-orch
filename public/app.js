@@ -903,11 +903,13 @@ function deleteModal(c) {
   setTimeout(() => input.focus(), 50);
 }
 
-async function api(url, method = 'GET', body, retry = true) {
+// `signal` (optional) aborts the request, e.g. a load that must give up instead of hanging (stats.js).
+async function api(url, method = 'GET', body, retry = true, signal) {
   const r = await fetch(url, {
     method,
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
     body: body ? JSON.stringify(body) : undefined,
+    signal,
   });
   if (r.status === 401) { location.href = '/login'; throw new Error('signed out'); }
   const data = await r.json().catch(() => ({}));

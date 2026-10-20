@@ -7,6 +7,8 @@
 //   failures: [{kind, n, tasks: [id, …newest first, ≤ 5]}], most common kind first
 // Sources: the orchestrator DB (own read-only connection), chat logs (<DATA>/logs/<convo>.jsonl), usage.jsonl,
 // minutes.jsonl and each project's git log (cached per HEAD). Missing sources give empty lists, never an error.
+// collect() answers from the last snapshot and rebuilds behind it (stale-while-revalidate); chat logs are read
+// incrementally (yourMessages), so a warm rebuild costs ~0.3 s instead of re-reading every log.
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
@@ -180,22 +182,37 @@ export function createStats({ dataDir, dbFile = path.join(dataDir, 'orchestrator
     finally { try { db?.close(); } catch {} }
   }
 
-  // Your messages, from every chat log: [{t, cwd, words, text (clipped)}].
+  // Your messages, from every chat log: [{t, cwd, words, text (clipped)}]. Logs only grow (a rewrite renames a new file
+  // in: server.mjs writeLog), so each file's messages are cached with its inode and the bytes read so far, and a later
+  // build reads only what was appended, up to its last newline (a line still being written waits for the next build).
+  const logCache = new Map(); // file name -> { ino, off, msgs: [{t, words, text}] }
   function yourMessages() {
-    const out = [], byId = new Map(convos().map((c) => [c.id, c]));
+    const out = [], byId = new Map(convos().map((c) => [c.id, c])), dir = path.join(dataDir, 'logs');
     let files = [];
-    try { files = fs.readdirSync(path.join(dataDir, 'logs')).filter((f) => f.endsWith('.jsonl')); } catch {}
+    try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')); } catch {}
+    for (const f of logCache.keys()) if (!files.includes(f)) logCache.delete(f);
     for (const f of files) {
-      const id = f.slice(0, -6), cwd = byId.get(id)?.cwd || null;
-      let text = '';
-      try { text = fs.readFileSync(path.join(dataDir, 'logs', f), 'utf8'); } catch { continue; }
-      for (const line of text.split('\n')) {
-        if (!line.includes('"t":"user"')) continue;
-        const e = safeJson(line);
-        if (e?.t !== 'user' || !Number.isFinite(e.ts)) continue;
-        const s = String(e.text || '');
-        out.push({ t: e.ts, cwd, words: s.split(/\s+/).filter(Boolean).length, text: s.slice(0, TEXT_MAX) });
-      }
+      let hit = logCache.get(f), fd;
+      try {
+        const st = fs.statSync(path.join(dir, f));
+        if (!hit || hit.ino !== st.ino || st.size < hit.off) hit = { ino: st.ino, off: 0, msgs: [] };
+        if (st.size > hit.off) {
+          fd = fs.openSync(path.join(dir, f), 'r');
+          const buf = Buffer.alloc(st.size - hit.off), n = fs.readSync(fd, buf, 0, buf.length, hit.off);
+          const end = buf.subarray(0, n).lastIndexOf(10) + 1;
+          for (const line of buf.subarray(0, end).toString('utf8').split('\n')) {
+            if (!line.includes('"t":"user"')) continue;
+            const e = safeJson(line);
+            if (e?.t !== 'user' || !Number.isFinite(e.ts)) continue;
+            const s = String(e.text || '');
+            hit.msgs.push({ t: e.ts, words: s.split(/\s+/).filter(Boolean).length, text: s.slice(0, TEXT_MAX) });
+          }
+          hit.off += end;
+        }
+        logCache.set(f, hit);
+      } catch { continue; } finally { if (fd != null) fs.closeSync(fd); }
+      const cwd = byId.get(f.slice(0, -6))?.cwd || null;
+      for (const m of hit.msgs) out.push({ ...m, cwd });
     }
     return out.sort((a, b) => a.t - b.t);
   }
@@ -288,10 +305,14 @@ export function createStats({ dataDir, dbFile = path.join(dataDir, 'orchestrator
   }
 
   return {
-    // Cached for CACHE_MS; concurrent callers share one build.
+    // Stale-while-revalidate (owner, 2026-10-20: the sheet took too long to show): any snapshot answers at once, and one
+    // older than CACHE_MS starts a rebuild in the background for the next call (the sheet asks again for a stale `at`).
+    // Only the first call, or `fresh` (Refresh), waits for a build; concurrent callers share one.
     async collect({ fresh = false } = {}) {
-      if (!fresh && cached && now() - cachedAt < CACHE_MS) return cached;
-      return (inflight ||= build().then((r) => { cached = r; cachedAt = now(); return r; }).finally(() => { inflight = null; }));
+      const rebuild = () => (inflight ||= build().then((r) => { cached = r; cachedAt = now(); return r; }).finally(() => { inflight = null; }));
+      if (fresh || !cached) return rebuild();
+      if (now() - cachedAt >= CACHE_MS) rebuild().catch((e) => log(`rebuild: ${e.message}`));
+      return cached;
     },
   };
 }

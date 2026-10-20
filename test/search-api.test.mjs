@@ -1,6 +1,7 @@
 // Chat search end to end: GET /api/convos?q= answers search.mjs matches (only the matching chat, with a snippet) while
 // the plain GET /api/convos list is unchanged, and in the UI the sidebar's search field lists the match, opens it on a
-// click and restores the chat list when cleared. Boots server.mjs (CW_NO_ORCHESTRATOR=1, temp data dir) with two seeded
+// click and restores the chat list when cleared; a project's ⋯ → "Search in this project" limits both to its chats
+// (&cwd=). Boots server.mjs (CW_NO_ORCHESTRATOR=1, temp data dir) with two seeded
 // chats; skips the browser part when Playwright's Chromium can't launch.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -31,11 +32,13 @@ before(async () => {
   fs.writeFileSync(path.join(dataDir, 'auth.json'), JSON.stringify({ salt, hash: crypto.scryptSync(PASSWORD, salt, 64).toString('hex') }));
   const now = Date.now(), line = (ev) => JSON.stringify(ev) + '\n';
   const chat = (id, title, at) => ({ id, title, renamed: true, cwd: path.join(dataDir, id), createdAt: at - 60_000, updatedAt: at, mode: 'default', fullAccess: true });
-  fs.writeFileSync(path.join(dataDir, 'convos.json'), JSON.stringify([chat('pelican', 'Bird tracker', now - 3_600_000), chat('ledger', 'Accounts', now - 7_200_000)]));
+  const heron = { ...chat('heron', 'Heron notes', now - 1_800_000), cwd: path.join(dataDir, 'pelican') }; // a second chat in pelican's folder
+  fs.writeFileSync(path.join(dataDir, 'convos.json'), JSON.stringify([chat('pelican', 'Bird tracker', now - 3_600_000), chat('ledger', 'Accounts', now - 7_200_000), heron]));
   fs.mkdirSync(path.join(dataDir, 'logs'));
   fs.writeFileSync(path.join(dataDir, 'logs', 'pelican.jsonl'), line({ t: 'user', text: 'Count the <b>pelicans</b> on the pier', ts: now - 3_700_000 })
     + line({ t: 'text', text: 'I counted 12 pelicans near the lighthouse.', ts: now - 3_650_000 }));
   fs.writeFileSync(path.join(dataDir, 'logs', 'ledger.jsonl'), line({ t: 'user', text: 'Reconcile the March statement', ts: now - 7_300_000 }));
+  fs.writeFileSync(path.join(dataDir, 'logs', 'heron.jsonl'), line({ t: 'user', text: 'Herons migrate in March', ts: now - 1_900_000 }));
   const port = await freePort();
   assert.notEqual(port, 3000);
   base = `http://127.0.0.1:${port}`;
@@ -68,7 +71,9 @@ test('GET /api/convos?q= returns only matching chats with snippets; without q th
   assert.match(hits[0].hits[0].snippet, /12 pelicans near the lighthouse/);
   assert.deepEqual(await (await get('/api/convos?q=zebra')).json(), []);
   const list = await (await get('/api/convos')).json();
-  assert.deepEqual(list.map((c) => c.id).sort(), ['ledger', 'pelican']);
+  assert.deepEqual(list.map((c) => c.id).sort(), ['heron', 'ledger', 'pelican']);
+  assert.deepEqual((await (await get('/api/convos?q=march')).json()).map((h) => h.id).sort(), ['heron', 'ledger']);
+  assert.deepEqual((await (await get(`/api/convos?q=march&cwd=${encodeURIComponent(path.join(dataDir, 'pelican'))}`)).json()).map((h) => h.id), ['heron'], 'cwd keeps one project');
   assert.ok(list.every((c) => 'busy' in c && !('hits' in c)), 'the plain list is the public chat list');
   assert.equal((await get('/api/convos?q=pelican', false)).status, 401);
 });
@@ -111,6 +116,48 @@ test('UI: the sidebar search lists the match, opens it and restores the list whe
   await list.locator('.convo', { hasText: 'Bird tracker' }).waitFor();
   assert.equal(await field.inputValue(), '');
   assert.equal(await list.locator('.search-hit').count(), 0);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test('UI: Search in this project lists and searches only that project\'s chats until cleared', { skip: noBrowser, timeout: 60000 }, async () => {
+  const [name, value] = cookie.split('=');
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  await ctx.addCookies([{ name, value, url: base }]);
+  const page = await ctx.newPage();
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  await page.goto(`${base}/`);
+  const list = page.locator('#convoList'), field = page.locator('#chatSearch');
+  await list.locator('.convo', { hasText: 'Accounts' }).waitFor();
+  await list.locator('.convo', { hasText: 'Bird tracker' }).locator('.more').click();
+  await page.locator('.convo-menu button', { hasText: 'Search in this project' }).click();
+  await page.locator('#chatScope:not([hidden])').waitFor();
+  assert.equal(await page.locator('#chatScopeName').textContent(), 'In Bird tracker');
+  assert.equal(await field.getAttribute('placeholder'), 'Search chats in Bird tracker');
+  assert.equal(await page.evaluate(() => document.activeElement.id), 'chatSearch');
+  await list.locator('.convo', { hasText: 'Heron notes' }).waitFor();
+  assert.equal(await list.locator('.convo', { hasText: 'Accounts' }).count(), 0, 'other projects are hidden');
+
+  await field.fill('march');
+  await list.locator('.search-hit', { hasText: 'Heron notes' }).waitFor();
+  assert.equal(await list.locator('.convo', { hasText: 'Accounts' }).count(), 0, 'and not searched');
+  await field.fill('reconcile');
+  await list.getByText('No chats in Bird tracker match').waitFor();
+
+  await field.press('Escape');
+  assert.equal(await field.inputValue(), '');
+  assert.equal(await page.locator('#chatScope').isHidden(), false, 'the first Escape clears only the words');
+  await field.press('Escape');
+  await page.locator('#chatScope').waitFor({ state: 'hidden' });
+  await list.locator('.convo', { hasText: 'Accounts' }).waitFor();
+  assert.equal(await field.getAttribute('placeholder'), 'Search chats');
+
+  await list.locator('.convo', { hasText: 'Accounts' }).locator('.more').click();
+  await page.locator('.convo-menu button', { hasText: 'Search in this project' }).click();
+  await page.locator('#chatScopeClear').click();
+  await page.locator('#chatScope').waitFor({ state: 'hidden' });
+  await list.locator('.convo', { hasText: 'Bird tracker' }).waitFor();
   assert.deepEqual(errors, []);
   await ctx.close();
 });

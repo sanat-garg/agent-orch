@@ -37,10 +37,15 @@
   const pct = (x) => `${Math.round(x * 100)}%`;
   const hrs = (ms) => (ms >= H ? `${(ms / H).toFixed(ms >= 10 * H ? 0 : 1)} h` : `${Math.round(ms / MIN)} min`);
   const dur = (ms) => fmtDur(ms / 1000);
-  const dayName = (ms) => new Date(ms).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
-  const shortDay = (ms) => new Date(ms).toLocaleDateString([], { month: 'short', day: 'numeric' });
-  const hourName = (h) => new Date(2000, 0, 1, h).toLocaleTimeString([], { hour: 'numeric' });
-  const weekdayName = (i) => new Date(2000, 0, 2 + i).toLocaleDateString([], { weekday: 'short' }); // 2000-01-02 was a Sunday
+  // One formatter each, reused: toLocale*String builds a new Intl formatter per call, which made the sheet slow to draw.
+  const DAY_FMT = new Intl.DateTimeFormat([], { weekday: 'short', month: 'short', day: 'numeric' });
+  const SHORT_FMT = new Intl.DateTimeFormat([], { month: 'short', day: 'numeric' });
+  const HOURS = Array.from({ length: 24 }, (_, h) => new Date(2000, 0, 1, h).toLocaleTimeString([], { hour: 'numeric' }));
+  const WEEKDAYS = Array.from({ length: 7 }, (_, i) => new Date(2000, 0, 2 + i).toLocaleDateString([], { weekday: 'short' })); // 2000-01-02 was a Sunday
+  const dayName = (ms) => DAY_FMT.format(ms);
+  const shortDay = (ms) => SHORT_FMT.format(ms);
+  const hourName = (h) => HOURS[h];
+  const weekdayName = (i) => WEEKDAYS[i];
   const plural = (n, one, many = `${one}s`) => `${num(n)} ${n === 1 ? one : many}`;
   const dayStart = (ms) => { const d = new Date(ms); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); };
   const nextDay = (ms) => { const d = new Date(ms); return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime(); };
@@ -565,8 +570,11 @@
     const inAll = m.tok.in + m.tok.cached;
     if (inAll > 1e6 && m.tok.cached / inAll > 0.5) add(45, 'Tokens', `${pct(m.tok.cached / inAll)} of input tokens were cache reads — ${compact(m.tok.cached)} tokens the agents didn't have to re-read from scratch.`);
     if (m.shipped.length >= 3) {
-      const perTask = median(m.shipped.map((t) => sum(c.runs.filter((r) => r.task === t.id), (r) => r.in + r.out + r.cached)).filter((x) => x > 0));
-      const lines = median(m.shipped.map((t) => sum(c.commits.filter((x) => x.task === t.id), (x) => x.add + x.del)).filter((x) => x > 0));
+      const tokOf = new Map(), linesOf = new Map(); // per task, in one pass (a filter per shipped task was quadratic)
+      for (const r of c.runs) tokOf.set(r.task, (tokOf.get(r.task) || 0) + r.in + r.out + r.cached);
+      for (const x of c.commits) linesOf.set(x.task, (linesOf.get(x.task) || 0) + x.add + x.del);
+      const perTask = median(m.shipped.map((t) => tokOf.get(t.id) || 0).filter((x) => x > 0));
+      const lines = median(m.shipped.map((t) => linesOf.get(t.id) || 0).filter((x) => x > 0));
       if (perTask) add(40, 'Tokens', `A typical shipped task used ${compact(perTask)} tokens${lines ? ` and changed ${num(lines)} lines` : ''}.`);
     }
 
@@ -1076,7 +1084,7 @@
     chip.firstChild.textContent = `${document.querySelector(`#sxRange [data-range="${SX.range}"]`).textContent} `;
     placeSub();
     const d = SX.data, body = $('sxBody');
-    $('sxSub').textContent = SX.err ? `Couldn't load stats: ${SX.err}` : !d ? 'Loading…' : `You and the orchestrator · updated ${fmtWhen(d.at)}`;
+    subtitle();
     if (!d) { body.classList.toggle('busy', !SX.err); sxSyncExport(); return; }
     body.classList.remove('busy');
     const sel = $('sxProject');
@@ -1098,10 +1106,36 @@
     body.replaceChildren(...(phone.matches ? [$('sxSub')] : []), grid);
     body.scrollTop = y;
   }
+  function subtitle() {
+    const d = SX.data;
+    $('sxSub').textContent = SX.err ? `Couldn't load stats: ${SX.err}` : !d ? 'Loading…'
+      : `You and the orchestrator · updated ${fmtWhen(d.at)}${SX.loading ? ' · updating…' : ''}`;
+  }
+  // The last snapshot is kept on this device (IndexedDB, cleared on sign-out: app.js #logout), so opening Stats draws it
+  // at once, even right after the app was reopened, while the new one loads. Any failure just skips it.
+  function snapStore(mode, fn) {
+    return new Promise((resolve) => {
+      let r;
+      try { r = indexedDB.open(SNAP_DB, 1); } catch { return resolve(null); }
+      r.onupgradeneeded = () => r.result.createObjectStore('s');
+      r.onerror = () => resolve(null);
+      r.onsuccess = () => {
+        const db = r.result;
+        try {
+          const tx = db.transaction('s', mode), q = fn(tx.objectStore('s'));
+          tx.oncomplete = () => { db.close(); resolve(q?.result ?? null); };
+          tx.onerror = tx.onabort = () => { db.close(); resolve(null); };
+        } catch { db.close(); resolve(null); }
+      };
+    });
+  }
+  const SNAP_DB = 'agent-orch-stats';
+  const readSnap = () => snapStore('readonly', (st) => st.get('last'));
+  const saveSnap = (d) => snapStore('readwrite', (st) => st.put(d, 'last'));
   // A request that never settles (a home-screen app suspended mid-load, a connection that died in sleep) used to pin the
   // sheet on "Loading…" for good, since every open and Refresh reused it. Now each load gives up after LOAD_MS, Refresh
   // or an open after STALE_MS replaces a pending one, and coming back to the app restarts a load left pending.
-  const LOAD_MS = 45e3, STALE_MS = 8e3;
+  const LOAD_MS = 45e3, STALE_MS = 8e3, STALE_DATA_MS = 30e3;
   async function load(fresh = false) {
     if (SX.loading && !fresh && Date.now() - SX.loadingAt < STALE_MS) return SX.loading;
     SX.ctl?.abort(new Error('replaced'));
@@ -1111,10 +1145,18 @@
     const gaveUp = new Promise((_, reject) => ctl.signal.addEventListener('abort', () => reject(ctl.signal.reason), { once: true }));
     SX.loadingAt = Date.now();
     const p = SX.loading = Promise.race([api(`/api/stats${fresh ? '?fresh=1' : ''}`, 'GET', undefined, true, ctl.signal), gaveUp])
-      .then((d) => { if (SX.ctl === ctl) { SX.data = d; SX.err = ''; } })
+      .then((d) => { if (SX.ctl === ctl) { SX.data = d; SX.err = ''; setTimeout(() => saveSnap(d), 1000); } })
       .catch((e) => { if (SX.ctl === ctl) SX.err = e?.message || String(e); })
-      .finally(() => { clearTimeout(timer); if (SX.loading === p) { SX.loading = null; SX.ctl = null; render(); } });
+      .finally(() => {
+        clearTimeout(timer);
+        if (SX.loading !== p) return;
+        SX.loading = null; SX.ctl = null; render();
+        // The server answers with its last snapshot and rebuilds behind it (stats.mjs collect): an old one is shown
+        // at once, then swapped for the rebuilt one.
+        if (!fresh && SX.data && !SX.err && Date.now() - SX.data.at > STALE_DATA_MS && !$('statsModal').hidden) load(true);
+      });
     if (SX.err && !SX.data) { SX.err = ''; render(); } // back to "Loading…" while retrying
+    else if (!$('statsModal').hidden) subtitle();
     sxSyncExport();
     return p;
   }
@@ -1125,8 +1167,9 @@
     closeSidebar();
     if ($('statsModal').hidden) SX.lastFocus = document.activeElement;
     $('statsModal').hidden = false;
-    render();
     load();
+    render();
+    if (!SX.data) readSnap().then((d) => { if (d?.at && !SX.data) { SX.data = d; render(); } });
     $('statsModal').querySelector('.icon-btn[data-close]').focus();
   }
   function close() {

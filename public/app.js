@@ -523,6 +523,7 @@ $('newChat').addEventListener('click', () => {
 $('logout').addEventListener('click', async () => {
   if (!confirm('Sign out of agent-orch on this device?')) return;
   await fetch('/api/logout', { method: 'POST' });
+  try { indexedDB.deleteDatabase('agent-orch-stats'); } catch {} // Stats' snapshot on this device (stats.js)
   location.href = '/login';
 });
 
@@ -564,8 +565,19 @@ setInterval(() => { for (const a of document.querySelectorAll('#convoList .ago[d
 // folder, live preview address; archived projects too), and from 2 characters also asks GET /api/convos?q= (search.mjs,
 // debounced) for chats whose messages match, listed under "In messages" below the name hits, until the field is cleared
 // or Escape. `seq` drops answers to queries the owner has already typed past. Enter opens the first row, ↓ moves into
-// the list, ⌘K / Ctrl+K focuses the field.
-const chatSearch = { q: '', results: null, timer: 0, seq: 0 };
+// the list, ⌘K / Ctrl+K focuses the field. A project's ⋯ → "Search in this project" sets `scope` (its folder): only that
+// project's chats are listed and searched (&cwd=), shown as a chip under the field until its × or Escape on an empty field.
+const chatSearch = { q: '', results: null, timer: 0, seq: 0, scope: null, scopeName: '' };
+function setChatScope(cwd, name = '') {
+  Object.assign(chatSearch, { scope: cwd || null, scopeName: name });
+  const f = $('chatSearch');
+  $('chatScope').hidden = !cwd;
+  $('chatScopeName').textContent = cwd ? `In ${name}` : '';
+  f.placeholder = cwd ? `Search chats in ${name}` : 'Search chats';
+  f.setAttribute('aria-label', f.placeholder);
+  f.dispatchEvent(new Event('input'));
+}
+$('chatScopeClear').addEventListener('click', () => { setChatScope(null); $('chatSearch').focus(); });
 $('chatSearch').addEventListener('input', () => {
   clearTimeout(chatSearch.timer);
   chatSearch.seq++;
@@ -577,8 +589,9 @@ $('chatSearch').addEventListener('input', () => {
 $('chatSearch').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); $('convoList').querySelector('.convo')?.click(); return; }
   if (e.key === 'ArrowDown') { const first = $('convoList').querySelector('.convo'); if (first) { e.preventDefault(); first.focus(); } return; }
-  if (e.key !== 'Escape' || !$('chatSearch').value) return;
+  if (e.key !== 'Escape' || !($('chatSearch').value || chatSearch.scope)) return;
   e.preventDefault(); e.stopPropagation();
+  if (!$('chatSearch').value) return setChatScope(null);
   $('chatSearch').value = '';
   $('chatSearch').dispatchEvent(new Event('input'));
 });
@@ -591,7 +604,8 @@ document.addEventListener('keydown', (e) => {
 async function runChatSearch(q) {
   const seq = ++chatSearch.seq;
   let results;
-  try { results = await api(`/api/convos?q=${encodeURIComponent(q)}`); } catch (e) {
+  const scope = chatSearch.scope ? `&cwd=${encodeURIComponent(chatSearch.scope)}` : '';
+  try { results = await api(`/api/convos?q=${encodeURIComponent(q)}${scope}`); } catch (e) {
     if (seq === chatSearch.seq) toast(`Search failed: ${e.message}`, { kind: 'error' });
     return;
   }
@@ -601,14 +615,14 @@ async function runChatSearch(q) {
 }
 // Name hits: every word of the query in the title, folder name or preview address. Ranked: the name starts with the
 // query, a word of it does, it's anywhere in the name, only the address matched; then by activity, archived last.
-// A main chat lists the sub chats that match too (all of them when it matched itself).
+// A main chat lists the sub chats that match too (all of them when it matched itself). Only the scoped project's when set.
 function nameMatches(q) {
   const low = q.toLowerCase(), terms = low.split(/\s+/).filter(Boolean);
   const nameOf = (c) => `${(c.title || '').toLowerCase()} ${folderName(c.cwd).toLowerCase()}`.trim();
   const hit = (c) => { const t = `${nameOf(c)} ${(c.preview?.url || '').replace(/^https?:\/\//, '').toLowerCase()}`; return terms.every((x) => t.includes(x)); };
   const rank = (c) => { const n = nameOf(c); return n.startsWith(low) ? 0 : n.split(/[\s_./-]+/).some((w) => w.startsWith(low)) ? 1 : n.includes(low) ? 2 : 3; };
   const out = [];
-  for (const c of state.convos.filter((c) => !isSubChat(c))) {
+  for (const c of state.convos.filter((c) => !isSubChat(c) && (!chatSearch.scope || c.cwd === chatSearch.scope))) {
     const own = hit(c), subs = subChats(c).filter((s) => own || hit(s));
     if (own || subs.length) out.push({ c, subs, rank: own ? rank(c) : Math.min(...subs.map(rank)) });
   }
@@ -642,10 +656,12 @@ function renderChatSearch(nav) {
     nav.append(row); named.add(c.id);
     for (const s of subs) { nav.append(convoItem(s, true)); named.add(s.id); }
   }
-  const hits = (chatSearch.results || []).filter((r) => !named.has(r.id));
+  const inScope = (id) => !chatSearch.scope || state.convos.find((x) => x.id === id)?.cwd === chatSearch.scope;
+  const hits = (chatSearch.results || []).filter((r) => !named.has(r.id) && inScope(r.id));
   if (hits.length) nav.append(el('p', 'group-label', 'In messages'));
   else if (!rows.length) {
-    const p = el('p', 'group-label', chatSearch.results || chatSearch.q.length < 2 ? 'No chats match' : 'Searching messages…');
+    const none = chatSearch.scope ? `No chats in ${chatSearch.scopeName} match` : 'No chats match';
+    const p = el('p', 'group-label', chatSearch.results || chatSearch.q.length < 2 ? none : 'Searching messages…');
     p.style.textTransform = 'none';
     nav.append(p);
   }
@@ -669,7 +685,8 @@ function renderChatSearch(nav) {
 let archFoldedFor = null; // the archived chat that was open when the owner folded Archived
 function renderConvoList() {
   const nav = $('convoList');
-  if (chatSearch.q) return renderChatSearch(nav);
+  if (chatSearch.scope && !state.convos.some((c) => c.cwd === chatSearch.scope)) return setChatScope(null); // the project went
+  if (chatSearch.q || chatSearch.scope) return renderChatSearch(nav);
   const focused = document.activeElement?.closest?.('#convoList .convo')?.dataset.cid;
   nav.textContent = '';
   if (!state.convos.length) {
@@ -777,6 +794,7 @@ function convoMenu(c, anchor) {
   const m = el('div', 'menu convo-menu');
   const sub = isSubChat(c), others = state.convos.filter((x) => x.cwd === c.cwd && x.id !== c.id).length;
   const fresh = el('button', '', 'New chat in this project');
+  const find = el('button', '', 'Search in this project');
   const rename = el('button', '', 'Rename');
   const usage = el('button', '', 'Token usage');
   const exportMd = el('button', '', 'Export as Markdown');
@@ -802,6 +820,12 @@ function convoMenu(c, anchor) {
     } catch (e) { toast(e.message, { kind: 'error' }); }
   };
   fresh.onclick = () => { m.remove(); closeSidebar(); setView('chat'); applyDraft({ type: 'folder', path: c.cwd }); };
+  find.onclick = () => {
+    m.remove();
+    const main = sub ? state.convos.find((x) => x.id === c.mainId) : c;
+    setChatScope(c.cwd, main?.title || folderName(c.cwd));
+    $('chatSearch').focus();
+  };
   rename.onclick = async () => {
     m.remove();
     const title = prompt(sub ? 'Rename chat' : 'Rename project (the folder keeps its name)', c.title);
@@ -821,7 +845,7 @@ function convoMenu(c, anchor) {
     a.remove();
   };
   del.onclick = () => { m.remove(); deleteModal(c); };
-  m.append(fresh, rename, usage, exportMd, ...(others ? [merge] : []), archive, del);
+  m.append(fresh, find, rename, usage, exportMd, ...(others ? [merge] : []), archive, del);
   document.body.append(m);
   const r = anchor.getBoundingClientRect();
   m.style.top = `${Math.min(r.bottom + 4, innerHeight - 100)}px`;

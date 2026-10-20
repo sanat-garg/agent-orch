@@ -2,7 +2,8 @@
 // into the DB, a chat log and the usage log, then opens Stats from the sidebar and checks every tab renders the seeded
 // numbers without page errors, the range buttons re-slice it, it fits a 375×667 phone with nothing sticking out sideways
 // (tabs and a range menu chip on one short pinned row),
-// and Escape closes it. Skips when Playwright's Chromium can't launch.
+// and Escape closes it; a request that never answers is replaced, and a reopened app draws the last snapshot at once.
+// Skips when Playwright's Chromium can't launch.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -312,6 +313,41 @@ test('a Stats request that never answers: Refresh replaces it and the sheet load
   await page.locator('#sxBody .sx-grid').waitFor({ timeout: 10000 });
   assert.match(await page.locator('#sxSub').textContent(), /^You and the orchestrator · updated /);
   assert.equal(calls, 2);
+  await ctx.close();
+  assert.deepEqual(errors, []);
+});
+
+// Owner, 2026-10-20: Stats took too long to show. The last snapshot stays on the device (IndexedDB), so after the app is
+// reopened the sheet draws it at once, marked "updating…", while the new one loads; signing out drops it.
+test('reopened app: Stats draws the last snapshot at once while the new one loads', { skip, timeout: 60000 }, async () => {
+  const [name, value] = cookie.split('=');
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  await ctx.addCookies([{ name, value, url: base }]);
+  const page = await ctx.newPage();
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  await page.goto(`${base}/`);
+  await page.locator('#app:not([inert])').waitFor();
+  await page.locator('#statsBtn').click();
+  await page.locator('#sxBody .sx-grid').waitFor();
+  const saved = () => page.evaluate(() => new Promise((ok) => {
+    const r = indexedDB.open('agent-orch-stats', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('s');
+    r.onsuccess = () => { const q = r.result.transaction('s').objectStore('s').get('last'); q.onsuccess = () => { r.result.close(); ok(!!q.result?.at); }; };
+  }));
+  for (let i = 0; !(await saved()); i++) { assert.ok(i < 50, 'the snapshot is saved on the device'); await page.waitForTimeout(200); }
+
+  let release;
+  const held = new Promise((r) => { release = r; });
+  await page.route('**/api/stats*', async (route) => { await held; await route.continue(); }); // the network is slow now
+  await page.reload();
+  await page.locator('#app:not([inert])').waitFor();
+  await page.locator('#statsBtn').click();
+  await page.locator('#sxBody .sx-grid').waitFor({ timeout: 5000 });
+  assert.match(await page.locator('#sxSub').textContent(), /^You and the orchestrator · updated .* · updating…$/);
+  release();
+  await page.waitForFunction(() => !document.getElementById('sxSub').textContent.includes('updating'));
+  await page.locator('#sxBody .sx-grid').waitFor();
   await ctx.close();
   assert.deepEqual(errors, []);
 });

@@ -141,6 +141,14 @@ code, pre, kbd { font-family: var(--mono); }
 }
 .side-search input:focus-visible { outline: 2px solid var(--focus); border-color: var(--accent); }
 @media (pointer: coarse) { .side-search input { height: 44px; font-size: 16px; } } /* iOS zooms into smaller inputs */
+/* "Search in this project" (app.js setChatScope): the project the search is limited to, with × to search everything. */
+.search-scope { display: flex; align-items: center; gap: 4px; margin-top: 6px; padding: 0 2px 0 10px; height: 28px; max-width: 100%; width: fit-content;
+  border-radius: 999px; background: var(--raised); color: var(--muted); font-size: 12.5px; }
+.search-scope[hidden] { display: none; }
+.search-scope span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.search-scope button { flex: none; width: 24px; height: 24px; border: 0; border-radius: 50%; background: none; color: inherit; font-size: 16px; line-height: 1; cursor: pointer; }
+.search-scope button:hover { background: var(--border); color: var(--text); }
+@media (pointer: coarse) { .search-scope { height: 36px; } .search-scope button { width: 44px; height: 36px; border-radius: 18px; } }
 .convo-list { position: relative; flex: 1; overflow-y: auto; margin: 12px -4px 8px; padding: 0 4px; }
 .group-label { font-size: 12px; font-weight: 600; color: var(--faint); padding: 12px 8px 4px; text-transform: uppercase; letter-spacing: .04em; }
 /* A sidebar card is one compact row (status dot, title, "not pushed"); search hits stack title, snippet and age. */

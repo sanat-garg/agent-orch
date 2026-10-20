@@ -278,6 +278,8 @@ function capRefusal(c) {
   return `You've reached your ${b.cap}% cap of the ${b.label} weekly limit (you've used about ${b.mine}%).${when} Pick another model, or ask your admin to raise the cap.`;
 }
 const stats = createStats({ dataDir: DATA, convos: () => convos, log: (m) => console.log(`[stats] ${m}`) });
+// The first build reads every chat log and git history (~6 s here), so it runs soon after boot, not when Stats opens.
+setTimeout(() => stats.collect().catch((e) => console.error('[stats] warm-up failed', e.message)), 15e3).unref();
 const logPath = (id) => path.join(LOGS, `${id}.jsonl`);
 function appendLog(id, ev) { fs.appendFileSync(logPath(id), JSON.stringify(ev) + '\n'); }
 // How much of a chat's log a browser has drawn: `<boot>.<generation>.<bytes>` (every emitted event and history frame
@@ -2153,9 +2155,9 @@ async function handleRequest(req, res) {
     return json(res, 200, await metrics(Number(url.searchParams.get('since')) || 0));
   }
   if (p === '/api/convos' && req.method === 'GET') {
-    // ?q= searches titles and messages (search.mjs); without it, the plain list.
-    const q = url.searchParams.get('q');
-    const own = convos.filter((c) => chatOwner(c) === me.id || sharedWith(me, c.cwd));
+    // ?q= searches titles and messages (search.mjs), &cwd= only that project's chats; without q, the plain list.
+    const q = url.searchParams.get('q'), cwd = url.searchParams.get('cwd');
+    const own = convos.filter((c) => (chatOwner(c) === me.id || sharedWith(me, c.cwd)) && (!q || !cwd || c.cwd === cwd));
     if (q?.trim()) return json(res, 200, await searchConvos({ logsDir: LOGS, convos: own, q: q.slice(0, 200), limit: 20 }));
     return json(res, 200, own.map(publicConvo));
   }

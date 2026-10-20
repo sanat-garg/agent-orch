@@ -174,9 +174,26 @@ test('createStats: joins every source into one snapshot, cached until asked for 
 
   clock += 1000;
   assert.equal(await stats.collect(), d, 'cached');
-  assert.notEqual(await stats.collect({ fresh: true }), d);
+  const d2 = await stats.collect({ fresh: true });
+  assert.notEqual(d2, d);
+  // Stale: the old snapshot answers at once while a rebuild runs behind it; the next call gets the new one.
   clock += 60e3;
-  assert.notEqual(await stats.collect(), d, 'expired');
+  assert.equal(await stats.collect(), d2, 'a stale snapshot still answers at once');
+  await new Promise((r) => setTimeout(r, 200));
+  assert.notEqual(await stats.collect(), d2, 'rebuilt in the background');
+
+  // Chat logs are read incrementally: appended messages count, a half-written line waits for its newline, and a
+  // rewritten log (renamed in, like server.mjs writeLog) is read again from the top.
+  const chatLog = path.join(data, 'logs', 'c1.jsonl');
+  fs.appendFileSync(chatLog, JSON.stringify({ t: 'user', text: 'one more thing', ts: (T + 700) * 1000 }) + '\n' + '{"t":"user","text":"half');
+  assert.deepEqual((await stats.collect({ fresh: true })).you.map((m) => m.words), [6, 1, 3]);
+  fs.appendFileSync(chatLog, ` done","ts":${(T + 800) * 1000}}\n`);
+  assert.deepEqual((await stats.collect({ fresh: true })).you.map((m) => m.text), ['Please add a to the project', 'x'.repeat(600), 'one more thing', 'half done']);
+  fs.writeFileSync(chatLog + '.tmp', JSON.stringify({ t: 'user', text: 'rewound', ts: (T + 50) * 1000 }) + '\n');
+  fs.renameSync(chatLog + '.tmp', chatLog);
+  assert.deepEqual((await stats.collect({ fresh: true })).you.map((m) => m.text), ['rewound']);
+  fs.rmSync(chatLog);
+  assert.deepEqual((await stats.collect({ fresh: true })).you, []);
 });
 
 test('createStats: a data dir with nothing in it gives empty lists', async () => {

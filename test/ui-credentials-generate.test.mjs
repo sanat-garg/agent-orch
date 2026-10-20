@@ -2,7 +2,8 @@
 // generateSecret / startEdit). Boots server.mjs (CW_NO_ORCHESTRATOR=1, temp data dir), opens the sheet and its editor,
 // and checks: the default choice fills an empty value with 32 [A-Za-z0-9] characters shown in clear (not dots), the hex
 // choice gives 64 [0-9a-f], dismissing the "Replace the current value?" confirm keeps an existing value, and nothing is
-// sent to the server before Save. On a 390×844 touch screen the button and menu options are 44px tall.
+// sent to the server before Save. On a 390×844 touch screen the button and menu options are 44px tall. Also: an
+// "Admin panel" link saved in the editor becomes a new-tab button on the card.
 // Skips when Playwright's Chromium can't launch.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -139,6 +140,22 @@ test('390×844 touch: Generate and its options are 44px targets', { skip, timeou
   assert.ok(m.x >= 0 && m.x + m.width <= 390, `the menu stays on screen: ${JSON.stringify(m)}`);
   await menu.locator('.cm-opt[data-value="password"]').tap();
   assert.match(await rowValue(page, 0).inputValue(), /^.{24}$/);
+  assert.deepEqual(errors, []);
+  await ctx.close();
+});
+
+test('an Admin panel link saves and opens from its card in a new tab', { skip, timeout: 60000 }, async () => {
+  const { ctx, page, errors } = await openEditor({ viewport: { width: 1200, height: 800 } });
+  await page.locator('#crBody input[aria-label="Service"]').fill('Shop');
+  await page.locator('#crBody input[aria-label="Admin panel"]').fill('shop.example.com/wp-admin');
+  await page.locator('#crBody .cr-foot .btn.primary').click();
+  const a = page.locator('#crBody .cr-card a.cr-act');
+  await a.waitFor();
+  assert.equal(await a.getAttribute('href'), 'https://shop.example.com/wp-admin');
+  assert.equal(await a.getAttribute('target'), '_blank');
+  assert.equal((await a.textContent()).trim(), 'Admin');
+  assert.equal(await a.getAttribute('aria-label'), 'Open the Shop admin panel');
+  assert.equal(await page.locator('#crBody .cr-card .cr-acts.three .cr-act').count(), 3, 'Admin, Copy .env and Edit share one row');
   assert.deepEqual(errors, []);
   await ctx.close();
 });

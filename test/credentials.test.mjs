@@ -38,6 +38,9 @@ test('validation: a name, named values, sane sizes and links; blank rows dropped
   assert.throws(() => cleanService({ name: ' ' }), /name/);
   assert.throws(() => cleanService({ name: 'X', fields: [{ label: '', value: 'v' }] }), /needs a name/);
   assert.throws(() => cleanService({ name: 'X', url: 'http://' }), /valid address/);
+  assert.equal(cleanService({ name: 'X', admin: 'example.com/wp-admin' }).admin, 'https://example.com/wp-admin');
+  assert.equal(cleanService({ name: 'X' }).admin, '');
+  assert.throws(() => cleanService({ name: 'X', admin: 'javascript://%0aalert(1)' }), /http/);
   assert.throws(() => cleanService({ name: 'X', fields: [{ label: 'k', value: 'v'.repeat(8001) }] }), /too long/);
   assert.deepEqual(cleanService({ name: 'X', fields: [{ label: '', value: '' }, { label: 'k', value: ' v ' }] }).fields, [{ label: 'k', value: ' v ', secret: false }]);
 });

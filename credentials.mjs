@@ -1,7 +1,7 @@
 // Credentials (owner, 2026-10-08): the owner keeps each service's logins and keys here instead of in .env files and
 // docs, and reads them in the sidebar's Credentials sheet (public/credentials.js). Every user has their own; nobody
 // sees anyone else's, the admin included.
-//   <DATA>/credentials.json: {v: 1, iv, tag, data} = AES-256-GCM of [{id, owner, name, url, notes, fields: [{label,
+//   <DATA>/credentials.json: {v: 1, iv, tag, data} = AES-256-GCM of [{id, owner, name, url, admin, notes, fields: [{label,
 //   value, secret}], createdAt, updatedAt}] under the key in <DATA>/credentials.key (both 0600; data/ is never committed).
 //   The encryption keeps values out of anything that copies the JSON alone (a log, a grep, a backup of one file).
 //   createCredentials({dataDir, now}) → { list(owner), add(owner, body), update(owner, id, body), remove(owner, id), reown(from, to),
@@ -11,7 +11,7 @@
 // row.seen = label → hash of the value last imported). A value is (re)written only when it differs from the last one
 // imported, so the owner's edits and deletions stick until the project's .env changes that key; deleting the card keeps a
 // hidden tombstone (row.deleted) for the same reason. Never in list() or the services limit.
-// Bodies are {name, url?, notes?, fields: [{label, value, secret?}]}; a bad one throws an Error with status 400, a
+// Bodies are {name, url?, admin? (the service's admin panel, http(s) only), notes?, fields: [{label, value, secret?}]}; a bad one throws an Error with status 400, a
 // missing or someone else's id 404.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -74,13 +74,21 @@ const str = (v, max, what) => {
   return s;
 };
 
+// An address as typed: a bare host gets https://.
+const link = (v, what) => {
+  let u = str(v, LIMITS.url, what);
+  if (u && !/^[a-z][a-z0-9+.-]*:\/\//i.test(u)) u = `https://${u}`;
+  if (u) { try { new URL(u); } catch { throw fail(400, `${what} is not a valid address`); } }
+  return u;
+};
+
 // A request body as a stored service (id and timestamps are the caller's).
 export function cleanService(body = {}) {
   const name = str(body.name, LIMITS.name, 'The name');
   if (!name) throw fail(400, 'Give the service a name');
-  let url = str(body.url, LIMITS.url, 'The link');
-  if (url && !/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) url = `https://${url}`;
-  if (url) { try { new URL(url); } catch { throw fail(400, 'The link is not a valid address'); } }
+  const url = link(body.url, 'The link');
+  const admin = link(body.admin, 'The admin panel link');
+  if (admin && !/^https?:/i.test(admin)) throw fail(400, 'The admin panel link must start with http:// or https://');
   const raw = Array.isArray(body.fields) ? body.fields : [];
   if (raw.length > LIMITS.fields) throw fail(400, `At most ${LIMITS.fields} fields per service`);
   const fields = raw
@@ -90,7 +98,7 @@ export function cleanService(body = {}) {
     if (!f.label) throw fail(400, 'Every value needs a name, e.g. "API key"');
     if (f.value.length > LIMITS.value) throw fail(400, `${f.label} is too long (at most ${LIMITS.value} characters)`);
   }
-  return { name, url, notes: str(body.notes, LIMITS.notes, 'The notes'), fields };
+  return { name, url, admin, notes: str(body.notes, LIMITS.notes, 'The notes'), fields };
 }
 
 export function createCredentials({ dataDir, now = Date.now }) {
@@ -169,7 +177,7 @@ export function createCredentials({ dataDir, now = Date.now }) {
       if (!row) {
         if (live(owner).length >= LIMITS.services) return [];
         const name = path.basename(dir).slice(0, LIMITS.name);
-        row = { id: crypto.randomUUID(), owner, name, url: '', notes: '', fields: [], auto: dir, seen: {}, createdAt: now() };
+        row = { id: crypto.randomUUID(), owner, name, url: '', admin: '', notes: '', fields: [], auto: dir, seen: {}, createdAt: now() };
         items.push(row);
       }
       if (row.deleted) row.deleted = false;

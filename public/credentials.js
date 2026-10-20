@@ -17,6 +17,7 @@
     edit: '<path d="M4.5 19.5l1-4L15.8 5.2a2 2 0 0 1 2.8 0l.2.2a2 2 0 0 1 0 2.8L8.5 18.5z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/>',
     env: '<path d="M7 8l-4 4 4 4M17 8l4 4-4 4M13.5 5.5l-3 13" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>',
     x: '<path d="M7 7l10 10M17 7L7 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+    open: '<path d="M13.5 4.5h6v6M19.5 4.5L11 13M17 14v4a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 5 18V8.5A1.5 1.5 0 0 1 6.5 7h4" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>',
     dice: '<rect x="3.5" y="3.5" width="17" height="17" rx="4" fill="none" stroke="currentColor" stroke-width="1.9"/><circle cx="8.5" cy="8.5" r="1.4" fill="currentColor"/><circle cx="15.5" cy="8.5" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="8.5" cy="15.5" r="1.4" fill="currentColor"/><circle cx="15.5" cy="15.5" r="1.4" fill="currentColor"/>',
   };
   const svg = (name, size = 18) => `<svg viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true">${ICON[name]}</svg>`;
@@ -110,7 +111,7 @@
     if (!CR.loaded) return list.replaceChildren(el('p', 'cr-empty', CR.error || 'Loading…'));
     if (!CR.list.length) return list.replaceChildren(el('p', 'cr-empty', 'No credentials yet.'));
     const q = CR.q.trim().toLowerCase();
-    const rows = CR.list.filter((s) => !q || s.name.toLowerCase().includes(q) || s.url.toLowerCase().includes(q) || s.fields.some((f) => f.label.toLowerCase().includes(q)));
+    const rows = CR.list.filter((s) => !q || s.name.toLowerCase().includes(q) || s.url.toLowerCase().includes(q) || (s.admin || '').toLowerCase().includes(q) || s.fields.some((f) => f.label.toLowerCase().includes(q)));
     list.replaceChildren(...(rows.length ? rows.map(card) : [el('p', 'cr-empty', `Nothing matches "${CR.q.trim()}".`)]));
   }
 
@@ -141,6 +142,15 @@
     const edit = btn('cr-act', null, () => startEdit(s));
     edit.innerHTML = `${svg('edit', 17)}<span>Edit</span>`;
     edit.setAttribute('aria-label', `Edit ${s.name}`);
+    // The service's admin panel, one tap away (http(s) only, checked by the server too).
+    if (/^https?:/i.test(s.admin || '')) {
+      const adm = el('a', 'cr-act');
+      adm.href = s.admin; adm.target = '_blank'; adm.rel = 'noopener noreferrer';
+      adm.innerHTML = `${svg('open', 17)}<span>Admin</span>`;
+      adm.setAttribute('aria-label', `Open the ${s.name} admin panel`); adm.title = s.admin;
+      acts.append(adm);
+      acts.classList.add('three');
+    }
     acts.append(env, edit);
     c.append(acts);
     return c;
@@ -194,6 +204,8 @@
     name.maxLength = 80;
     const url = input(s?.url, 'Optional, e.g. dashboard.stripe.com', 'Link');
     url.inputMode = 'url';
+    const admin = input(s?.admin, 'Optional, e.g. example.com/wp-admin', 'Admin panel');
+    admin.inputMode = 'url';
     const rows = el('div', 'cr-rows');
     const addRow = (f = { label: '', value: '', secret: true }) => {
       const r = el('div', 'cr-row');
@@ -277,7 +289,7 @@
       e.preventDefault();
       err.textContent = '';
       if (!name.value.trim()) { err.textContent = 'Give the service a name'; return name.focus(); }
-      const data = { name: name.value, url: url.value, notes: notes.value, fields: [...rows.children].map((r) => r.read()) };
+      const data = { name: name.value, url: url.value, admin: admin.value, notes: notes.value, fields: [...rows.children].map((r) => r.read()) };
       submit.disabled = true;
       try {
         const r = s ? await api(`/api/credentials/${s.id}`, 'PUT', data) : await api('/api/credentials', 'POST', data);
@@ -288,7 +300,7 @@
     };
     const fieldsSec = el('div', 'cr-lf');
     fieldsSec.append(el('span', 'cr-lbl', 'Credentials'), rows, more, pasteBox);
-    form.append(el('h3', 'cr-etitle', s ? `Edit ${s.name}` : 'New service'), labeled('Service', name), labeled('Link', url), fieldsSec,
+    form.append(el('h3', 'cr-etitle', s ? `Edit ${s.name}` : 'New service'), labeled('Service', name), labeled('Link', url), labeled('Admin panel', admin, 'Opens from the card\'s Admin button'), fieldsSec,
       labeled('Notes', notes), err, foot);
     body.replaceChildren(form);
     if (!coarse) name.focus();

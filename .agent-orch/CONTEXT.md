@@ -29,6 +29,7 @@ _What the code doesn't say. Per-area rules (chats, users, files, previews, sched
 - Placement uses every online machine; only sustained CPU saturation gates a node. RAM is only an emergency pause, never a placement gate (BRIEF goal 9).
 - No benchmark ranking of models, ever. No Antigravity/OpenCode/Kiro/Copilot.
 - Design (owner, 2026-10-21): every chat, planner and task run gets server.mjs `DESIGN_RULE` (Apple HIG + Swiss style, neutral and minimal, no gradients or blue/purple, at every rigor level) unless the owner says otherwise or gives references. Edit that constant, not per-prompt copies.
+- Execution Mode (owner, 2026-10-21): admin-only sidebar button → `execution.mjs` intake → a normal orchestrator project with `convo.execution` and EXECUTION_SYSTEM; see AREAS.md. It reuses tasks/fallbacks/checkpoints, never a second scheduler.
 - Agents never give a project a public address: live previews are opt-in, set only by the owner (server.mjs `previewNote` tells every run).
 - Local branch `backup/pre-agent-orch` must never be pushed; local `claude/*` and `agent-orch/task-197/-199/-209` branches are the owner's: never land or delete them unasked.
 - Machines UI: every machine card and detail panel keeps the 'Assign task' button (`renderAssignButton`); the window opens only via `openMachines()`.

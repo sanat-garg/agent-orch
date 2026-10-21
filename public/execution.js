@@ -1,42 +1,72 @@
-'use strict';
 // ---------- Execution Mode (server: execution.mjs, /api/execution; admin only) ----------
-// The sidebar's Execution button opens one sheet: a big box for the idea (plus reference images), then the questions
-// that shape the build (products, app technology, design inspiration, domain plan, what needs the owner's permission,
-// extras, which connected services to use) and "Bring it to life", which starts an orchestrator project and opens its
-// chat. Executions already started are listed at the top with their task counts. The draft survives closing the sheet
-// (localStorage cw.exec.draft), so adding a key in Credentials and coming back loses nothing. Loaded after app.js and
-// uses its helpers ($, el, api, toast, coarse, closeSidebar, openConvo, uploadAttachment).
+// The sidebar's Execution Mode button turns the whole page into Execution Mode (#execView over the app, which goes inert)
+// through a suit-up transition (#exSuit: armour plates close in, the reactor lights, the plates open on the new page);
+// "Exit to Orchestrator" plays it back. The page is the idea (plus reference images), then the questions that shape the
+// build (products, app technology, design inspiration, domain plan, what needs the owner's permission, extras, which
+// connected services to use) and "Bring it to life", which starts an orchestrator project and opens its chat; executions
+// already started are listed beside it with their task counts. The mode survives a reload (localStorage cw.exec.on) and
+// the draft survives leaving it (cw.exec.draft). Loaded after app.js and uses its helpers ($, el, api, toast, coarse,
+// closeSidebar, openConvo, uploadAttachment, state).
 (() => {
-  const KEY = 'cw.exec.draft';
+  const KEY = 'cw.exec.draft', ON = 'cw.exec.on';
   const blank = () => ({ idea: '', name: '', products: { web: true, ios: false, android: false, admin: true }, appTech: 'react-native',
     inspiration: { mobbin: true, refs: '' }, domain: { mode: 'find', name: '', bought: true }, askBefore: ['spend', 'publish'], emails: true, demoData: true, services: null });
-  const EX = { d: blank(), att: [], services: [], executions: [], options: null, github: true, loaded: false, error: '', busy: false, lastFocus: null };
+  const EX = { d: blank(), att: [], services: [], executions: [], options: null, github: true, loaded: false, error: '', busy: false, lastFocus: null, anim: null };
   const btn = (cls, text, onclick) => { const b = el('button', cls, text); b.type = 'button'; if (onclick) b.onclick = onclick; return b; };
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(EX.d)); } catch {} };
   const restore = () => { try { const j = JSON.parse(localStorage.getItem(KEY) || 'null'); if (j && typeof j === 'object') EX.d = { ...blank(), ...j, products: { ...blank().products, ...j.products }, inspiration: { ...blank().inspiration, ...j.inspiration }, domain: { ...blank().domain, ...j.domain } }; } catch {} };
+  const remember = (on) => { try { on ? localStorage.setItem(ON, '1') : localStorage.removeItem(ON); } catch {} };
   const STATUS = { ready: 'Connected', partial: 'Some keys missing', missing: 'Not connected' };
+  const isOn = () => !$('execView').hidden;
+  const still = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // The suit-up: `dir` 'in' or 'out'; `swap` runs once the plates have closed over the screen (shows or hides the page).
+  // Plates close (0-.55 s), the reactor lights (.45-1.1 s), the plates open (1.15-1.7 s). Reduced motion: a plain swap.
+  function suit(dir, swap) {
+    clearTimeout(EX.anim?.mid); clearTimeout(EX.anim?.end);
+    const o = $('exSuit');
+    if (still()) { swap(); o.hidden = true; return; }
+    $('exSuitWord').textContent = dir === 'in' ? 'Execution Mode' : 'Orchestrator Mode';
+    $('exSuitSub').textContent = dir === 'in' ? 'All systems online' : 'Standing down';
+    o.className = `exs ${dir}`;
+    o.hidden = false;
+    void o.offsetWidth; // restart the keyframes
+    o.classList.add('run');
+    EX.anim = { mid: setTimeout(swap, 1100), end: setTimeout(() => { o.hidden = true; o.className = 'exs'; }, 1750) };
+  }
+  function show() {
+    $('execView').hidden = false;
+    $('app').inert = true;
+    document.documentElement.classList.add('exec-on');
+    render();
+    if (!coarse) $('exIdea')?.focus({ preventScroll: true });
+  }
+  function enter({ instant = false } = {}) {
+    if (isOn()) return;
+    closeSidebar();
+    EX.lastFocus = document.activeElement;
+    remember(true);
+    restore();
+    load().then(render);
+    instant ? show() : suit('in', show);
+  }
+  function exit() {
+    if (!isOn()) return;
+    save();
+    remember(false);
+    suit('out', () => {
+      $('execView').hidden = true;
+      $('app').inert = false;
+      document.documentElement.classList.remove('exec-on');
+      (EX.lastFocus?.isConnected ? EX.lastFocus : $('execBtn')).focus?.();
+    });
+  }
 
   async function load() {
     try { Object.assign(EX, await api('/api/execution'), { loaded: true, error: '' }); } catch (e) { EX.error = e.message; }
     // Services default to every connected one until the owner unticks some.
     if (EX.d.services == null) EX.d.services = EX.services.filter((s) => s.status !== 'missing').map((s) => s.id);
   }
-  function open() {
-    closeSidebar();
-    if ($('exModal').hidden) EX.lastFocus = document.activeElement;
-    $('exModal').hidden = false;
-    restore();
-    render();
-    load().then(render);
-    if (!coarse) $('exModal').querySelector('[data-close].icon-btn').focus();
-  }
-  function close() {
-    if ($('exModal').hidden) return;
-    $('exModal').hidden = true;
-    save();
-    EX.lastFocus?.focus?.();
-  }
-
   // ----- building blocks
   const sec = (title, hint) => { const s = el('section', 'ex-sec'); s.append(el('h3', 'ex-h', title)); if (hint) s.append(el('p', 'ex-hint', hint)); return s; };
   function check(label, hint, on, onchange, { type = 'checkbox', name, disabled } = {}) {
@@ -82,8 +112,8 @@
   }
 
   function render() {
-    if ($('exModal').hidden) return;
-    const d = EX.d, body = $('exBody'), frag = document.createDocumentFragment();
+    if (!isOn()) return;
+    const d = EX.d, body = $('exBody'), frag = document.createDocumentFragment(), side = el('aside', 'exv-side');
     if (EX.error) frag.append(el('p', 'ex-err', EX.error));
     if (EX.executions.length) {
       const s = sec('In flight');
@@ -95,12 +125,13 @@
         const t = el('span', 'ex-text');
         t.append(el('strong', null, e.title || e.name), el('small', null, e.needsYou ? `Needs you: ${e.needsYou} waiting for your answer` : e.busy ? 'Planning…' : parts.join(' · ') || 'Starting'));
         if (e.needsYou) row.classList.add('needs');
-        row.append(t, btn('btn small', 'Open', () => { close(); openConvo(e.cid); }));
+        row.append(t, btn('btn small', 'Open', () => { exitTo(e.cid); }));
         list.append(row);
       }
       s.append(list);
-      frag.append(s);
+      side.append(s);
     }
+    side.append(howItWorks());
 
     const form = el('form', 'ex-form');
     form.noValidate = true;
@@ -191,7 +222,7 @@
       st.title = s.mcp ? `MCP server "${s.mcp}"` : `Keys: ${s.env.join(', ')}`;
       row.append(i, t, st);
       if (s.status !== 'ready') {
-        const a = s.mcp ? btn('btn small', 'Add server', () => { close(); $('settingsBtn').click(); }) : btn('btn small', s.status === 'partial' ? 'Add keys' : 'Add key', () => { close(); window.Credentials?.open(); });
+        const a = s.mcp ? btn('btn small', 'Add server', () => { save(); openSettings(); }) : btn('btn small', s.status === 'partial' ? 'Add keys' : 'Add key', () => { save(); window.Credentials?.open(); });
         a.title = s.mcp ? 'Settings → Skills & tools' : `Add a "${s.name}" card with ${s.env.join(', ')}`;
         row.append(a);
       }
@@ -218,24 +249,39 @@
         EX.d = blank(); EX.att = []; save();
         toast(`Execution started: ${r.convo.title}`, { kind: 'success' });
         if (!state.convos.find((x) => x.id === r.convo.id)) state.convos.unshift(r.convo);
-        close();
-        openConvo(r.convo.id);
+        exitTo(r.convo.id);
       } catch (x) {
         err.textContent = x.message;
         if (/github/i.test(x.message)) EX.github = false;
-      } finally { EX.busy = false; if (!$('exModal').hidden) render(); }
+      } finally { EX.busy = false; render(); }
     };
-    frag.append(form);
-    body.replaceChildren(frag);
+    const col = el('div', 'exv-col'); col.append(...frag.childNodes, form);
+    body.replaceChildren(col, side);
   }
 
-  $('execBtn').addEventListener('click', open);
-  $('exModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) close(); });
-  document.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape' || $('exModal').hidden) return;
-    e.stopImmediatePropagation();
-    close();
-  }, true);
+  // The side column's steps: what happens after Go.
+  function howItWorks() {
+    const s = sec('What happens next');
+    const ol = el('ol', 'exv-steps');
+    for (const [h, t] of [['Plan', 'The planner turns the idea into a build plan and asks what it can\'t decide.'], ['Build', 'Website, apps and admin panel are coded in parallel, tested and reviewed.'],
+      ['Connect', 'Domain, hosting, email, payments and store accounts are set up through your services.'], ['Launch', 'It goes live, and you get the links. Anything you ticked under "Ask me before" waits for you.']]) {
+      const li = el('li'); li.append(el('strong', null, h), el('span', null, t)); ol.append(li);
+    }
+    s.append(ol);
+    return s;
+  }
+  // Leave the mode for a chat (an execution's Open, or a new one): the transition plays, then the chat opens.
+  function exitTo(cid) { EX.lastFocus = null; exit(); setTimeout(() => openConvo(cid), still() ? 0 : 1100); }
 
-  window.Execution = { open, close };
+  $('execBtn').addEventListener('click', () => enter());
+  $('exExit').addEventListener('click', exit);
+  // Keys stay in the page: the app's shortcuts (⌘K, Escape handlers, …) don't fire under it.
+  $('execView').addEventListener('keydown', (e) => e.stopPropagation());
+  // Back in the mode after a reload, once /api/me says this is the admin (users.css hides it from everyone else).
+  const resume = () => { if (document.documentElement.dataset.role && document.documentElement.dataset.role !== 'user') { mo.disconnect(); let on = false; try { on = !!localStorage.getItem(ON); } catch {} if (on) enter({ instant: true }); } };
+  const mo = new MutationObserver(resume);
+  mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-role'] });
+  resume();
+
+  window.Execution = { enter, exit, open: enter, close: exit };
 })();

@@ -1,4 +1,4 @@
-/* Execution Mode (execution.js): the sidebar's Execution button and its sheet (idea box, questions, services, Go). */
+/* Execution Mode (execution.js): the sidebar's button, the full-page mode (#execView) and its suit-up transition (#exSuit). */
 .exec-btn {
   display: flex; align-items: center; gap: 8px; width: 100%; height: 40px; margin-top: 8px; padding: 0 12px;
   border: 1px solid var(--text); border-radius: 10px; background: var(--text); color: var(--bg); cursor: pointer; font: inherit; font-weight: 600;
@@ -6,7 +6,97 @@
 .exec-btn svg { flex: none; }
 .exec-btn:hover { opacity: .88; }
 .exec-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.modal-panel.exm { width: min(640px, 100%); }
+
+/* The page: its own dark theme, set through the app's tokens so the form styles below follow it. Red and gold, like the suit. */
+.exv {
+  --bg: #0a0a0b; --panel: #141416; --raised: #1c1c1f; --text: #f3f1ec; --muted: #a29f98; --faint: #6d6a64;
+  --border: #26262a; --border-strong: #3a3a40; --accent: #e0b44c; --accent-strong: #b5161e; --accent-strong-hover: #9b1219;
+  --accent-text: #fff; --focus: rgba(224,180,76,.28); --danger: #ff6b5e; --ok: #5fc48a; --warn: #e0b44c;
+  position: fixed; inset: 0; z-index: 58; display: flex; flex-direction: column; overflow: hidden;
+  background: var(--bg); color: var(--text); color-scheme: dark;
+}
+.exv[hidden] { display: none; }
+html[data-role="user"] .exv { display: none; }
+.exv-bar {
+  flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: calc(10px + env(safe-area-inset-top)) max(20px, env(safe-area-inset-right)) 10px max(20px, env(safe-area-inset-left));
+  border-bottom: 1px solid var(--border);
+}
+.exv-brand { display: flex; white-space: nowrap; align-items: center; gap: 10px; font-size: 12px; font-weight: 700; letter-spacing: .18em; text-transform: uppercase; }
+.exv-dot { width: 10px; height: 10px; border-radius: 50%; background: #f4f1e8; box-shadow: 0 0 0 3px var(--accent-strong), 0 0 14px 2px rgba(240,236,220,.55); }
+.exv-exit {
+  display: inline-flex; align-items: center; gap: 6px; height: 36px; white-space: nowrap; padding: 0 14px 0 10px; border: 1px solid var(--border-strong); border-radius: 999px;
+  background: transparent; color: var(--text); font: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer;
+}
+.exv-exit:hover { background: var(--raised); }
+.exv-exit:focus-visible, .exv .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.exv-main { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 0 max(20px, env(safe-area-inset-right)) calc(40px + env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left)); }
+.exv-hero { max-width: 1080px; margin: 0 auto; padding: 44px 0 30px; }
+.exv-hero h1 { margin: 0 0 10px; font-size: clamp(30px, 5vw, 48px); font-weight: 700; letter-spacing: -0.03em; line-height: 1.05; }
+.exv-hero p { margin: 0; max-width: 620px; font-size: 16px; line-height: 1.5; color: var(--muted); }
+.exv-grid { max-width: 1080px; margin: 0 auto; display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 40px; align-items: start; }
+.exv-col { min-width: 0; }
+.exv-side { position: sticky; top: 0; min-width: 0; }
+.exv .ex-h { font-size: 12px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--accent); margin-bottom: 8px; }
+.exv .btn { background: var(--raised); color: var(--text); border-color: var(--border-strong); }
+.exv .btn.primary { background: var(--accent-strong); border-color: var(--accent-strong); color: var(--accent-text); }
+.exv .btn.primary:hover { background: var(--accent-strong-hover); }
+.exv-steps { margin: 0; padding: 0; list-style: none; counter-reset: st; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
+.exv-steps li { counter-increment: st; display: grid; grid-template-columns: 26px 1fr; column-gap: 10px; padding: 12px; font-size: 13px; line-height: 1.4; color: var(--muted); }
+.exv-steps li + li { border-top: 1px solid var(--border); }
+.exv-steps li::before { content: counter(st); grid-row: span 2; width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--accent); color: var(--accent); font-size: 11.5px; font-weight: 700; display: grid; place-items: center; }
+.exv-steps strong { color: var(--text); font-weight: 600; }
+.exv .ex-go { height: 48px; padding: 0 28px; font-size: 15.5px; letter-spacing: .01em; }
+@media (max-width: 960px) {
+  .exv-grid { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .exv-side { position: static; order: -1; }
+  .exv-side .ex-sec:has(.exv-steps) { display: none; }
+  .exv-hero { padding: 28px 0 22px; }
+}
+@media (max-width: 480px) { .exv-long { display: none; } }
+
+/* The suit-up: four plates close over the screen with gold seams, the reactor lights and the word appears, then they open.
+   .in and .out only swap the words (execution.js); the motion is the same both ways. */
+.exs { position: fixed; inset: 0; z-index: 9000; pointer-events: all; overflow: hidden; }
+.exs[hidden] { display: none; }
+.exs-plate { position: absolute; background: #2a0507; }
+.exs-plate::after { content: ''; position: absolute; background: #e0b44c; box-shadow: 0 0 12px rgba(224,180,76,.7); }
+.exs-l, .exs-r { top: 0; bottom: 0; width: 50.5%; }
+.exs-l { left: 0; background: #3a0709; } .exs-l::after { top: 0; bottom: 0; right: 0; width: 2px; }
+.exs-r { right: 0; background: #33070a; } .exs-r::after { top: 0; bottom: 0; left: 0; width: 2px; }
+.exs-t, .exs-b { left: 0; right: 0; height: 22%; background: #210405; z-index: 1; }
+.exs-t { top: 0; } .exs-t::after { left: 0; right: 0; bottom: 0; height: 2px; }
+.exs-b { bottom: 0; } .exs-b::after { left: 0; right: 0; top: 0; height: 2px; }
+.exs-scan { position: absolute; left: 0; right: 0; top: 0; height: 2px; z-index: 2; background: #f4e4b8; box-shadow: 0 0 18px 4px rgba(244,228,184,.6); opacity: 0; }
+.exs-core { position: absolute; inset: 0; z-index: 3; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; opacity: 0; }
+.exs-ring { fill: none; stroke: #e0b44c; stroke-width: 2; stroke-dasharray: 340; stroke-dashoffset: 340; }
+.exs-ring2 { stroke: #f4f1e8; stroke-width: 1.5; stroke-dasharray: 264; stroke-dashoffset: 264; }
+.exs-tri { fill: none; stroke: #f4f1e8; stroke-width: 2; stroke-linejoin: round; opacity: 0; }
+.exs-glow { fill: #fbf8ef; filter: drop-shadow(0 0 10px #fff) drop-shadow(0 0 22px rgba(255,248,225,.9)); transform-origin: 60px 60px; transform: scale(0); }
+.exs-word { color: #f4f1e8; font-size: clamp(20px, 3.4vw, 30px); font-weight: 700; letter-spacing: .32em; text-transform: uppercase; text-indent: .32em; }
+.exs-sub { color: #e0b44c; font-size: 12px; font-weight: 600; letter-spacing: .28em; text-transform: uppercase; text-indent: .28em; }
+.exs.run .exs-l { animation: exs-l 1.75s cubic-bezier(.7,0,.2,1) both; }
+.exs.run .exs-r { animation: exs-r 1.75s cubic-bezier(.7,0,.2,1) both; }
+.exs.run .exs-t { animation: exs-t 1.75s cubic-bezier(.7,0,.2,1) both; }
+.exs.run .exs-b { animation: exs-b 1.75s cubic-bezier(.7,0,.2,1) both; }
+.exs.run .exs-scan { animation: exs-scan 1.75s linear both; }
+.exs.run .exs-core { animation: exs-core 1.75s ease both; }
+.exs.run .exs-ring1 { animation: exs-draw 1.75s ease-out both; }
+.exs.run .exs-ring2 { animation: exs-draw 1.75s ease-out .08s both; }
+.exs.run .exs-tri { animation: exs-tri 1.75s ease both; }
+.exs.run .exs-glow { animation: exs-glow 1.75s cubic-bezier(.2,1.4,.4,1) both; }
+.exs.run .exs-word { animation: exs-word 1.75s ease both; }
+/* 0-30%: plates close (with a small settle), 30-64%: hold while the core lights, 64-100%: plates open. */
+@keyframes exs-l { 0% { transform: translateX(-101%); } 26% { transform: translateX(1.5%); } 31%, 64% { transform: none; } 100% { transform: translateX(-101%); } }
+@keyframes exs-r { 0% { transform: translateX(101%); } 26% { transform: translateX(-1.5%); } 31%, 64% { transform: none; } 100% { transform: translateX(101%); } }
+@keyframes exs-t { 0%, 8% { transform: translateY(-101%); } 30%, 66% { transform: none; } 100% { transform: translateY(-101%); } }
+@keyframes exs-b { 0%, 8% { transform: translateY(101%); } 30%, 66% { transform: none; } 100% { transform: translateY(101%); } }
+@keyframes exs-scan { 0%, 30% { top: 0; opacity: 0; } 32% { opacity: 1; } 56% { top: 100%; opacity: 1; } 57%, 100% { opacity: 0; } }
+@keyframes exs-core { 0%, 24% { opacity: 0; transform: scale(.94); } 34%, 62% { opacity: 1; transform: none; } 70%, 100% { opacity: 0; transform: scale(1.06); } }
+@keyframes exs-draw { 0%, 26% { stroke-dashoffset: 340; } 50%, 100% { stroke-dashoffset: 0; } }
+@keyframes exs-tri { 0%, 36% { opacity: 0; } 46%, 100% { opacity: 1; } }
+@keyframes exs-glow { 0%, 34% { transform: scale(0); } 46% { transform: scale(1.25); } 54%, 100% { transform: scale(1); } }
+@keyframes exs-word { 0%, 36% { opacity: 0; letter-spacing: .6em; } 50%, 100% { opacity: 1; letter-spacing: .32em; } }
 .ex-sec { margin: 0 0 22px; }
 .ex-sec:first-child { margin-top: 2px; }
 .ex-h { margin: 0 0 4px; font-size: 15px; font-weight: 650; letter-spacing: -0.01em; }
@@ -61,7 +151,7 @@
 .ex-exec.needs .ex-text small { color: var(--warn, #9a6700); font-weight: 600; }
 .ex-exec .btn { flex: none; }
 @media (pointer: coarse) {
-  .exec-btn, .ex-form input[type="text"] { height: 44px; }
+  .exec-btn, .exv-exit, .ex-form input[type="text"] { height: 44px; }
   .ex-form textarea, .ex-form input[type="text"] { font-size: 16px; } /* iOS zooms into smaller inputs */
   .ex-row { min-height: 52px; }
   .ex-row input[type="checkbox"]:not(.st-switch), .ex-row input[type="radio"] { width: 22px; height: 22px; }

@@ -3588,7 +3588,7 @@ function hideSplash() {
   const s = $('splash');
   if (!s || s.classList.contains('done')) return;
   clearTimeout(splash.skipTimer);
-  $('app').inert = false;
+  $('app').inert = !$('execView').hidden; // Execution Mode (execution.js) keeps the app inert under its page
   s.classList.add('done');
   setTimeout(() => s.remove(), 400); // after the fade (instant when reduced motion turns transitions off)
   focusComposer();

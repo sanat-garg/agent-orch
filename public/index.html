@@ -585,36 +585,32 @@
   </div>
 </div>
 
-<!-- Execution Mode (execution.js): a full-page mode over the app, entered and left through the suit-up transition (#exSuit). -->
+<!-- Execution Mode (execution.js): a full-page mode over the app with its own sidebar (#exNav: new execution, its projects,
+     Connections), entered and left through the nanotech transition (#exSuit). -->
 <div class="exv" id="execView" hidden>
-  <header class="exv-bar">
+  <header class="exv-top">
     <div class="exv-brand"><span class="exv-dot" aria-hidden="true"></span><span>Execution Mode</span></div>
     <button type="button" class="exv-exit" id="exExit" title="Back to the orchestrator">
       <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
       Exit<span class="exv-long">&nbsp;to Orchestrator</span>
     </button>
   </header>
-  <main class="exv-main">
-    <div class="exv-hero">
-      <h1 id="exTitle">Ideas in. Products out.</h1>
-      <p>Describe the product. It gets built, published and brought online: domain, website, apps, store listings, with as little of your time as possible.</p>
-    </div>
-    <div class="exv-grid" id="exBody"></div>
-  </main>
+  <div class="exv-body">
+    <nav class="exv-nav" id="exNav" aria-label="Execution Mode"></nav>
+    <main class="exv-main" id="exMain"></main>
+  </div>
 </div>
 <div class="exs" id="exSuit" hidden aria-hidden="true">
-  <div class="exs-plate exs-l"></div><div class="exs-plate exs-r"></div>
-  <div class="exs-plate exs-t"></div><div class="exs-plate exs-b"></div>
-  <div class="exs-scan"></div>
+  <canvas class="exs-nano" id="exNano"></canvas>
   <div class="exs-core">
-    <svg viewBox="0 0 120 120" width="132" height="132">
+    <svg viewBox="0 0 120 120" width="120" height="120">
       <circle class="exs-ring exs-ring1" cx="60" cy="60" r="54"/>
       <circle class="exs-ring exs-ring2" cx="60" cy="60" r="42"/>
-      <path class="exs-tri" d="M60 30 L86 75 L34 75 Z"/>
-      <circle class="exs-glow" cx="60" cy="60" r="16"/>
+      <path class="exs-hex" d="M60 36 L80.8 48 L80.8 72 L60 84 L39.2 72 L39.2 48 Z"/>
+      <circle class="exs-glow" cx="60" cy="60" r="12"/>
     </svg>
     <div class="exs-word" id="exSuitWord">Execution Mode</div>
-    <div class="exs-sub" id="exSuitSub">Systems online</div>
+    <div class="exs-sub" id="exSuitSub">Nanites deployed</div>
   </div>
 </div>
 <!-- Credentials (credentials.js): the signed-in user's services, each with its logins and keys; the body is the list or,

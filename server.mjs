@@ -328,7 +328,9 @@ function executionProgress(c) {
   for (const t of snap.tasks || []) counts[t.status] = (counts[t.status] || 0) + 1;
   const ids = new Set((snap.tasks || []).map((t) => t.id));
   const needsYou = (counts.awaiting_review || 0) + (orch?.pendingApprovals?.() || []).filter((a) => ids.has(a.task)).length;
-  return { counts, total: (snap.tasks || []).length, needsYou, busy: planning.has(c.id), project: snap.project ? { id: snap.project.id, status: snap.project.status } : null };
+  const recent = (snap.tasks || []).filter((t) => t.kind !== 'reflect').slice(0, 8).map((t) => ({ id: t.id, title: t.title, status: t.status }));
+  return { counts, total: (snap.tasks || []).length, needsYou, busy: planning.has(c.id), recent, preview: previews.view(c.cwd)?.url || null,
+    project: snap.project ? { id: snap.project.id, status: snap.project.status } : null };
 }
 const agentTurns = new Map(); // convo id -> AbortController of a running non-Claude chat turn
 const chatAgent = (c) => (c.agent && c.agent !== 'claude' && isAgent(c.agent) ? c.agent : 'claude');
@@ -2041,7 +2043,10 @@ async function handleRequest(req, res) {
   if (p === '/api/execution' && req.method === 'GET') {
     if (!isAdmin(me)) return json(res, 403, { error: ADMIN_ONLY });
     const services = serviceStatus(credentials.list(me.id), ext.list('mcp').mcp);
-    const list = executions.list().map((e) => { const c = findConvo(e.cid); return c && { ...e, intake: undefined, title: c.title, ...executionProgress(c) }; }).filter(Boolean);
+    const list = executions.list().map((e) => { const c = findConvo(e.cid); const i = e.intake || {};
+      // The project page's summary of the intake (execution.js), not the whole of it.
+      const brief = { idea: String(i.idea || '').slice(0, 600), products: i.products || {}, appTech: i.appTech || null, domain: i.domain || null, services: i.services || [] };
+      return c && { ...e, intake: undefined, brief, title: c.title, ...executionProgress(c) }; }).filter(Boolean);
     return json(res, 200, { services, executions: list, options: { products: PRODUCTS, appTech: APP_TECH, askBefore: ASK_BEFORE }, github: (ghUsers.gh(me.id) || gh).status().linked });
   }
   if (p === '/api/execution' && req.method === 'POST') {

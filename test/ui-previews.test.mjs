@@ -192,14 +192,23 @@ test('sidebar manager: live cards, Add address, Edit, domains, and slug changes 
       let put = null;
       await page.route('**/api/convos/c0/preview', (route) => {
         put = route.request().postDataJSON();
-        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true }) });
+        // Caddy hasn't got the new host's certificate yet: the toast says so (the link would show an SSL error).
+        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, preview: { cert: 'pending' } }) });
       });
       await demo.locator('.pv-act', { hasText: 'Edit' }).click();
       await demo.locator('input.pv-slug').fill('demo-two');
       await page.waitForFunction(() => /demo-two\.greygoose\.baby is free/.test(document.querySelector('.pv-row[data-cid="c0"] .pv-check').textContent));
       await demo.locator('button', { hasText: 'Save' }).click();
       await page.waitForFunction(() => document.querySelector('.toast')?.textContent.includes('demo-two'));
+      assert.match(await page.locator('.toast').first().textContent(), /certificate on its way/);
       assert.deepEqual(put, { slug: 'demo-two', domain: 'greygoose.baby' });
+      // A row whose certificate is still pending or failed says so instead of "Live".
+      const pills = await page.evaluate(() => {
+        const row = document.querySelector('.pv-row[data-cid="c0"]'), pill = row.querySelector('.pv-pill'), out = [];
+        for (const cert of ['pending', 'failed', 'ok']) { window.Previews.setStatus(row, { status: 'running', cert, slug: 'demo-site', domain: 'greygoose.baby' }); out.push([pill.className, pill.textContent]); }
+        return out;
+      });
+      assert.deepEqual(pills, [['pv-pill building', 'Getting certificate…'], ['pv-pill error', 'No certificate'], ['pv-pill running', 'Live']]);
       // Nothing sticks out sideways on the phone.
       const overflow = await page.evaluate(() => [...document.querySelectorAll('#pvBody *')].filter((n) => n.getBoundingClientRect().right > innerWidth + 1).map((n) => n.className));
       assert.deepEqual(overflow, [], `overflowing: ${overflow}`);

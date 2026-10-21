@@ -259,12 +259,19 @@
     return box;
   }
   // The status pill's word, and the line under the card that explains an error or what it waits for.
-  const detailOf = (v) => (v.status === 'error' ? v.error || '' : v.status === 'waiting' ? v.error || '' : '');
+  // `cert` (from previews.mjs) is the HTTPS certificate for a newly added address: until Caddy has one the browser shows
+  // an SSL error, so the pill says so instead of "Live".
+  const certDetail = (v) => (v.cert === 'failed' ? `Caddy has no certificate for ${host(v)} yet (browsers show an SSL error). It keeps retrying; see journalctl -u caddy.`
+    : v.cert === 'pending' ? 'Caddy is getting the HTTPS certificate: the address works in a few seconds.' : '');
+  const detailOf = (v) => (v.status === 'error' ? v.error || '' : v.status === 'waiting' ? v.error || '' : certDetail(v));
   function setStatus(row, v) {
     const pill = row.querySelector('.pv-pill');
-    if (pill) { pill.className = `pv-pill ${v.status || 'stopped'}`; pill.textContent = STATUS[v.status] || v.status; }
+    const certState = v.status === 'running' || v.status === 'building' ? v.cert : null;
+    const cls = certState === 'failed' ? 'error' : certState === 'pending' ? 'building' : v.status || 'stopped';
+    const text = certState === 'failed' ? 'No certificate' : certState === 'pending' ? 'Getting certificate…' : STATUS[v.status] || v.status;
+    if (pill) { pill.className = `pv-pill ${cls}`; pill.textContent = text; }
     const det = row.querySelector('.pv-detail');
-    if (det) { det.textContent = detailOf(v); det.hidden = !det.textContent; det.classList.toggle('bad', v.status === 'error'); }
+    if (det) { det.textContent = detailOf(v); det.hidden = !det.textContent; det.classList.toggle('bad', v.status === 'error' || certState === 'failed'); }
   }
 
   // "This project" (the open chat's, unless the owner is typing in the find field), then projects with an address (one
@@ -456,8 +463,9 @@
       if (!slug) return input.focus();
       save.disabled = true;
       try {
-        await api(`/api/convos/${c.id}/preview`, 'PUT', { slug, domain: ed.domain });
-        toast(`Live preview: https://${host({ slug, domain: ed.domain })}`, { kind: 'success' });
+        const r = await api(`/api/convos/${c.id}/preview`, 'PUT', { slug, domain: ed.domain });
+        const pending = r?.preview?.cert === 'pending' ? ' (certificate on its way: open it in a few seconds)' : '';
+        toast(`Live preview: https://${host({ slug, domain: ed.domain })}${pending}`, { kind: 'success' });
         input.blur(); PV.editing.delete(c.id);
         await load(); render();
       } catch (e) { renderCheck(check, { ok: false, error: e.message }); save.disabled = false; }
@@ -647,7 +655,7 @@
   }, true);
 
   window.Previews = {
-    renderDraft, renderHeader, draftPick, resetDraft, open,
+    renderDraft, renderHeader, draftPick, resetDraft, open, setStatus,
     // A chat list push (statuses ride on each chat's `preview`) or {t:'previews'}.
     async changed(full) {
       renderHeader();

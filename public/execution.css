@@ -1,0 +1,74 @@
+/* Execution Mode (execution.js): the sidebar's Execution button and its sheet (idea box, questions, services, Go). */
+.exec-btn {
+  display: flex; align-items: center; gap: 8px; width: 100%; height: 40px; margin-top: 8px; padding: 0 12px;
+  border: 1px solid var(--text); border-radius: 10px; background: var(--text); color: var(--bg); cursor: pointer; font: inherit; font-weight: 600;
+}
+.exec-btn svg { flex: none; }
+.exec-btn:hover { opacity: .88; }
+.exec-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.modal-panel.exm { width: min(640px, 100%); }
+.ex-sec { margin: 0 0 22px; }
+.ex-sec:first-child { margin-top: 2px; }
+.ex-h { margin: 0 0 4px; font-size: 15px; font-weight: 650; letter-spacing: -0.01em; }
+.ex-hint, .ex-sub { margin: 0 0 10px; font-size: 13px; color: var(--muted); line-height: 1.4; }
+.ex-sub { margin: 10px 0 2px; font-weight: 600; color: var(--text); }
+.ex-err { margin: 0 0 8px; min-height: 1.2em; font-size: 13px; color: var(--danger); }
+.ex-err:empty { display: none; }
+.ex-form { display: flex; flex-direction: column; }
+.ex-form textarea, .ex-form input[type="text"] {
+  width: 100%; min-width: 0; padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: 10px;
+  background: var(--panel); color: var(--text); font: inherit; font-size: 14px; line-height: 1.45; resize: vertical;
+}
+.ex-form input[type="text"] { height: 36px; padding: 0 10px; }
+.ex-idea { min-height: 150px; font-size: 15px; }
+.ex-form textarea:focus, .ex-form input[type="text"]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus); }
+.ex-tools { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.ex-tools .btn { flex: none; }
+.ex-tools .ex-name { flex: 1; }
+.ex-thumbs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.ex-thumbs:empty { display: none; }
+.ex-thumb { position: relative; width: 72px; height: 72px; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--raised); }
+.ex-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ex-thumb.error { border-color: var(--danger); }
+.ex-thumb-name { display: block; padding: 6px; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.ex-thumb-state { position: absolute; inset: auto 0 0; padding: 2px 4px; background: rgba(0,0,0,.55); color: #fff; font-size: 10.5px; text-align: center; }
+.ex-thumb-x { position: absolute; top: 2px; right: 2px; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 50%; background: rgba(0,0,0,.6); color: #fff; font-size: 15px; line-height: 1; cursor: pointer; }
+.ex-group { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); padding: 0 12px; }
+.ex-group + .ex-group { margin-top: 10px; }
+.ex-group > .ex-sub { padding-top: 10px; margin: 0 0 2px; }
+.ex-row { display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 8px 0; margin: 0; cursor: pointer; font-weight: 400; }
+.ex-row + .ex-row, .ex-indent + .ex-row, .ex-row + .ex-indent { border-top: 1px solid var(--border); }
+.ex-row input[type="checkbox"]:not(.st-switch), .ex-row input[type="radio"] { flex: none; width: 20px; height: 20px; margin: 0; accent-color: var(--accent-strong); }
+.ex-text { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
+.ex-text strong { font-weight: 550; }
+.ex-text small { font-size: 12.5px; color: var(--muted); line-height: 1.35; }
+.ex-toggle { justify-content: space-between; }
+.ex-indent { display: flex; flex-direction: column; gap: 6px; padding: 6px 0 6px 32px; }
+.ex-indent .ex-row { min-height: 36px; padding: 2px 0; border: 0; }
+.ex-lf { display: flex; flex-direction: column; gap: 6px; padding: 10px 0 12px; cursor: default; }
+.ex-lbl { font-size: 13px; font-weight: 600; }
+.ex-svc .ex-st { flex: none; font-size: 12px; font-weight: 600; }
+.ex-st.ready { color: var(--ok, #2a7d4f); }
+.ex-st.partial { color: var(--warn, #9a6700); }
+.ex-st.missing { color: var(--faint); }
+.ex-svc .btn.small { flex: none; }
+.ex-foot { display: flex; align-items: center; gap: 14px; justify-content: space-between; padding-top: 4px; }
+.ex-foot .ex-hint { margin: 0; }
+.ex-go { flex: none; height: 44px; padding: 0 22px; font-size: 15px; }
+.ex-list { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); padding: 0 12px; }
+.ex-exec { display: flex; align-items: center; gap: 12px; min-height: 52px; padding: 8px 0; }
+.ex-exec + .ex-exec { border-top: 1px solid var(--border); }
+.ex-exec.needs .ex-text small { color: var(--warn, #9a6700); font-weight: 600; }
+.ex-exec .btn { flex: none; }
+@media (pointer: coarse) {
+  .exec-btn, .ex-form input[type="text"] { height: 44px; }
+  .ex-form textarea, .ex-form input[type="text"] { font-size: 16px; } /* iOS zooms into smaller inputs */
+  .ex-row { min-height: 52px; }
+  .ex-row input[type="checkbox"]:not(.st-switch), .ex-row input[type="radio"] { width: 22px; height: 22px; }
+}
+@media (max-width: 767px) {
+  .exec-btn { margin-top: 10px; }
+  .ex-foot { flex-direction: column; align-items: stretch; }
+  .ex-tools { flex-wrap: wrap; }
+  .ex-tools .ex-name { flex-basis: 100%; }
+}

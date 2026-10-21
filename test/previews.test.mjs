@@ -21,11 +21,12 @@ other.example.com {
 `;
 
 // A fake `sudo …` that edits files in the temp dir; caddy validate fails while `bad.fail` is set.
-function setup({ ports = [45100 + Math.floor(Math.random() * 400), 45599] } = {}) {
+// Certificates are "there" at once unless a test passes its own tlsProbe; `bad.reloadFail` makes systemctl fail.
+function setup({ ports = [45100 + Math.floor(Math.random() * 400), 45599], tlsProbe = async () => true, admin = null, certWaitMs = 2000, certTotalMs = 5000 } = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'previews-'));
   const caddyfile = path.join(tmp, 'Caddyfile'), includeFile = path.join(tmp, 'agent-orch-previews.caddy');
   fs.writeFileSync(caddyfile, OWNER_CADDY);
-  const calls = [], bad = { fail: false };
+  const calls = [], bad = { fail: false, reloadFail: false };
   const exec = async (cmd, args) => {
     assert.equal(cmd, 'sudo');
     calls.push(args.join(' '));
@@ -33,13 +34,16 @@ function setup({ ports = [45100 + Math.floor(Math.random() * 400), 45599] } = {}
     if (c === 'install') fs.copyFileSync(a[2], a[3]);
     else if (c === 'cp') fs.copyFileSync(a[1], a[2]);
     else if (c === 'rm') fs.rmSync(a[1], { force: true });
-    else if (c === 'systemctl') bad.savedAtReload = fs.readFileSync(path.join(tmp, 'data', 'previews.json'), 'utf8');
+    else if (c === 'systemctl') {
+      bad.savedAtReload = fs.readFileSync(path.join(tmp, 'data', 'previews.json'), 'utf8');
+      if (bad.reloadFail) return { code: 1, stdout: '', stderr: 'Job for caddy.service failed.' };
+    } else if (c === 'caddy' && a[0] === 'adapt') return { code: 0, stdout: JSON.stringify({ apps: { http: { servers: { srv0: { listen: [':443'] } } } } }), stderr: '' };
     else if (c === 'caddy' && bad.fail) return { code: 1, stdout: '', stderr: 'INFO using config\nError: adapting config: bad thing' };
     return { code: 0, stdout: '', stderr: '' };
   };
   const changes = [];
   const pv = createPreviews({ dataDir: path.join(tmp, 'data'), caddyfile, includeFile, exec, ports, debounceMs: 20, healthMs: 15000,
-    forbid: [path.join(tmp, 'agent-orch')], onChange: (d) => changes.push(d) });
+    forbid: [path.join(tmp, 'agent-orch')], onChange: (d) => changes.push(d), tlsProbe, admin, certWaitMs, certTotalMs });
   return { tmp, caddyfile, includeFile, calls, bad, pv, changes, cleanup: async () => { await pv.stopAll(); fs.rmSync(tmp, { recursive: true, force: true }); } };
 }
 const get = (url) => new Promise((resolve, reject) => http.get(url, (r) => { let b = ''; r.on('data', (d) => (b += d)); r.on('end', () => resolve({ status: r.statusCode, body: b })); }).on('error', reject));
@@ -191,4 +195,48 @@ test('static site is served; empty folder waits; a node app redeploys after a co
     await until(async () => (await get(`http://127.0.0.1:${n.port}/`).catch(() => ({}))).body === 'v2');
     await until(() => pv.view(app).status === 'running');
   } finally { await cleanup(); }
+});
+
+test('caddy: a new address waits for its certificate; a failed systemctl reload falls back to the admin API', async () => {
+  // A certificate "arrives" on the third probe; the admin API is a local server that records the loaded JSON.
+  const probes = [], loads = [];
+  const adminSrv = http.createServer((req, res) => { let b = ''; req.on('data', (d) => (b += d)); req.on('end', () => { loads.push([req.method, req.url, JSON.parse(b)]); res.writeHead(200); res.end(); }); });
+  await new Promise((r) => adminSrv.listen(0, '127.0.0.1', r));
+  const admin = `http://127.0.0.1:${adminSrv.address().port}`;
+  const tlsProbe = async (host) => { probes.push(host); return probes.filter((h) => h === host).length >= 3; };
+  const { pv, tmp, calls, bad, changes, cleanup } = setup({ tlsProbe, admin, certWaitMs: 5000, certTotalMs: 2500 });
+  try {
+    const a = path.join(tmp, 'a'), b = path.join(tmp, 'b');
+    fs.mkdirSync(a); fs.mkdirSync(b);
+    const t = Date.now(), r = await pv.set(a, 'alpha');
+    assert.equal(r.ok, true);
+    assert.equal(r.cert, 'ok', 'set answers once Caddy serves the certificate');
+    assert.ok(Date.now() - t >= 1500, 'waited for the probes (1 s apart)');
+    assert.deepEqual(probes, ['alpha.greygoose.baby', 'alpha.greygoose.baby', 'alpha.greygoose.baby'], 'only the new host is probed, not the redirect-only ones');
+    assert.ok(changes.includes(a), 'the UI is told when the certificate arrives');
+    assert.equal(pv.view(a).cert, 'ok');
+    assert.equal(loads.length, 0, 'systemctl worked: no admin API call');
+
+    // systemctl reload fails (a hung reload, a missing private /tmp): the adapted config goes in through the admin API.
+    bad.reloadFail = true;
+    const r2 = await pv.set(b, 'beta');
+    assert.equal(r2.ok, true);
+    assert.ok(calls.some((c) => c.startsWith('caddy adapt ')), 'adapted the Caddyfile');
+    assert.deepEqual(loads.map(([m, u]) => [m, u]), [['POST', '/load']]);
+    assert.equal(loads[0][2].apps.http.servers.srv0.listen[0], ':443');
+    assert.equal(r2.cert, 'ok');
+    // A host that never gets a certificate within certTotalMs ends 'failed' (Caddy keeps retrying by itself).
+    probes.length = 0;
+    const never = async (host) => (host === 'gamma.greygoose.baby' ? false : true);
+    const g = path.join(tmp, 'g'); fs.mkdirSync(g);
+    const { pv: pv2, cleanup: cleanup2 } = setup({ tlsProbe: never, certWaitMs: 100, certTotalMs: 1500 });
+    try {
+      const r3 = await pv2.set(g, 'gamma');
+      assert.equal(r3.cert, 'pending', 'set answers after certWaitMs with the certificate still pending');
+      await until(() => pv2.view(g).cert === 'failed', 5000);
+    } finally { await cleanup2(); }
+    // Removing the address forgets its certificate state.
+    await pv.remove(a);
+    assert.equal(pv.view(a), null);
+  } finally { await cleanup(); adminSrv.close(); }
 });

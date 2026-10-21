@@ -3,7 +3,11 @@
 // proxies the subdomain to it:
 //   - Caddy: agent-orch owns ONE file, /etc/caddy/agent-orch-previews.caddy, regenerated from previews.json, and adds
 //     `import <that file>` to the owner's Caddyfile once (backed up first). The owner's own site blocks are never edited.
-//     Every change is `caddy validate`d first; a failure restores the previous files and reports the error.
+//     Every change is `caddy validate`d first; a failure restores the previous files and reports the error. When
+//     `systemctl reload caddy` fails (a reload once hung, once hit a missing private /tmp) the adapted JSON is loaded
+//     through Caddy's admin API instead. A new host has no certificate until Caddy's ACME order completes (browsers show
+//     an SSL error meanwhile), so every added host is TLS-probed until Caddy serves a matching certificate: `set` waits up
+//     to certWaitMs before answering and view() reports `cert` ('pending' | 'ok' | 'failed') for the UI's pill.
 //     A removed domain joins previews.json `oldDomains`: <slug>.<old> keeps a cert and 308s to the preview's current address.
 //   - Running (detectKind): package.json with a start script → `npm start` with PORT (built first if it has a build
 //     script); a build script only → static files from dist/, build/ or out/; index.html (or public/index.html) → static,
@@ -20,6 +24,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import net from 'node:net';
+import tls from 'node:tls';
 import dns from 'node:dns/promises';
 import { spawn, execFile } from 'node:child_process';
 
@@ -128,11 +133,32 @@ const probe = (port) => new Promise((resolve) => {
   req.on('error', () => resolve(false)).on('timeout', () => { req.destroy(); resolve(false); });
 });
 const gitHead = (dir) => new Promise((resolve) => execFile('git', ['rev-parse', 'HEAD'], { cwd: dir, timeout: 10000 }, (err, out) => resolve(err ? null : String(out).trim())));
+// Does Caddy (127.0.0.1:443) already serve a certificate naming `host`? Until its ACME order completes a handshake with
+// that server name fails (or, with on-demand issuance off, gets no certificate), which browsers show as an SSL error.
+function defaultTlsProbe(host, port = 443) {
+  return new Promise((resolve) => {
+    const s = tls.connect({ host: '127.0.0.1', port, servername: host, rejectUnauthorized: false, timeout: 4000 }, () => {
+      const names = String(s.getPeerCertificate()?.subjectaltname || '').split(/,\s*/).map((n) => n.replace(/^DNS:/i, '').toLowerCase());
+      s.destroy();
+      resolve(names.includes(host) || names.includes(`*.${host.split('.').slice(1).join('.')}`));
+    });
+    s.on('error', () => resolve(false)).on('timeout', () => { s.destroy(); resolve(false); });
+  });
+}
+// The site addresses in a rendered include (one `host {` per block).
+const hostsIn = (text) => [...String(text || '').matchAll(/^([^\s#{}]+)\s*\{/gm)].map((m) => m[1].toLowerCase());
+// POST adapted JSON to Caddy's admin API; resolves to true when it loaded.
+async function postConfig(admin, json) {
+  try {
+    const r = await fetch(new URL('/load', admin), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: json, signal: AbortSignal.timeout(30000) });
+    return r.ok;
+  } catch { return false; }
+}
 
 export function createPreviews({
   dataDir, domain = 'greygoose.baby', caddyfile = '/etc/caddy/Caddyfile', includeFile = '/etc/caddy/agent-orch-previews.caddy',
   exec = defaultExec, forbid = [], onChange = () => {}, log = () => {}, ports = PORTS, debounceMs = 2000, healthMs = HEALTH_MS,
-  spawnFn = spawn,
+  spawnFn = spawn, tlsProbe = defaultTlsProbe, admin = 'http://127.0.0.1:2019', certWaitMs = 25000, certTotalMs = 180000,
 } = {}) {
   const file = path.join(dataDir, 'previews.json');
   const logDir = path.join(dataDir, 'previews');
@@ -185,10 +211,40 @@ export function createPreviews({
     fs.rmSync(tmp, { force: true });
     if (r.code) throw new Error(`Couldn't write ${dest}: ${r.stderr.trim()}`);
   }
+  // Certificate state per host added by this process's reloads: 'pending' until Caddy serves one, then 'ok' ('failed'
+  // after certTotalMs; Caddy keeps retrying on its own, the probe doesn't).
+  const certs = new Map(), certWaits = new Map();
+  const notifyHost = (host) => { for (const [dir, e] of Object.entries(store)) if (hostOf(e) === host) onChange(dir); };
+  function trackCerts(hosts) {
+    for (const host of hosts) {
+      if (certs.get(host) === 'pending') continue;
+      certs.set(host, 'pending');
+      certWaits.set(host, (async () => {
+        const until = Date.now() + certTotalMs;
+        for (;;) {
+          if (await tlsProbe(host)) { certs.set(host, 'ok'); break; }
+          if (Date.now() > until) { certs.set(host, 'failed'); log(`caddy: no certificate for ${host} after ${Math.round(certTotalMs / 1000)} s`); break; }
+          await sleep(1000);
+        }
+        certWaits.delete(host);
+        notifyHost(host);
+      })());
+    }
+  }
+  const certReady = (host) => certWaits.has(host) ? Promise.race([certWaits.get(host), sleep(certWaitMs)]) : Promise.resolve();
+  const forgetCert = (host) => { certs.delete(host); };
+  // `systemctl reload caddy` failed: load the adapted JSON through the admin API ourselves (no systemd control process,
+  // our own 30 s timeout; the config is the same, so loading it twice is harmless).
+  async function loadViaAdmin() {
+    if (!admin) return false;
+    const a = await exec('sudo', ['caddy', 'adapt', '--config', caddyfile, '--adapter', 'caddyfile']);
+    return !a.code && !!a.stdout.trim() && postConfig(admin, a.stdout);
+  }
   function applyCaddy() {
     const next = caddyChain.then(async () => {
       const prevInclude = readOr(includeFile), prevMain = readOr(caddyfile, '');
       const content = renderCaddy(Object.values(store), { oldDomains, taken: (slug, d) => caddySubdomains(prevMain, d).has(slug) });
+      const before = new Set(hostsIn(prevInclude)), added = hostsIn(content).filter((h) => !before.has(h));
       const importLine = `import ${includeFile}`;
       const needsImport = !prevMain.split('\n').some((l) => l.trim() === importLine);
       if (prevInclude === content && !needsImport) return { ok: true, changed: false };
@@ -209,8 +265,13 @@ export function createPreviews({
         throw new Error(`Caddy rejected the config (rolled back): ${msg.slice(0, 400)}`);
       }
       const r = await exec('sudo', ['systemctl', 'reload', 'caddy']);
-      if (r.code) throw new Error(`Caddy reload failed: ${r.stderr.trim().slice(0, 400)}`);
+      if (r.code) {
+        const why = r.stderr.trim().slice(0, 400);
+        log(`caddy: systemctl reload failed (${why}); loading through the admin API`);
+        if (!(await loadViaAdmin())) throw new Error(`Caddy reload failed: ${why}`);
+      }
       log(`caddy: ${Object.keys(store).length} preview(s) applied`);
+      trackCerts(added);
       return { ok: true, changed: true };
     });
     caddyChain = next.catch(() => {});
@@ -351,7 +412,8 @@ export function createPreviews({
     const e = store[dir];
     if (!e) return null;
     const s = st(dir);
-    return { slug: e.slug, domain: e.domain, url: url(e.slug, e.domain), port: e.port, status: s.status, kind: s.kind ?? null, error: s.error ?? null, updatedAt: s.updatedAt ?? null };
+    return { slug: e.slug, domain: e.domain, url: url(e.slug, e.domain), port: e.port, status: s.status, kind: s.kind ?? null, error: s.error ?? null, updatedAt: s.updatedAt ?? null,
+      cert: certs.get(hostOf(e)) || null };
   }
 
   return {
@@ -405,9 +467,10 @@ export function createPreviews({
         save();
         return { error: err.message };
       }
-      if (prev) fs.rmSync(logFile(prev), { force: true });
+      if (prev) { fs.rmSync(logFile(prev), { force: true }); forgetCert(hostOf(prev)); }
       queueDeploy(dir);
       onChange(dir);
+      await certReady(hostOf(store[dir])); // so the link in the reply works when tapped (up to certWaitMs)
       return { ok: true, ...view(dir) };
     },
     async remove(dir) {
@@ -418,6 +481,7 @@ export function createPreviews({
       save();
       live.delete(dir);
       fs.rmSync(logFile(e), { force: true });
+      forgetCert(hostOf(e));
       try { await applyCaddy(); } catch (err) { log(err.message); }
       onChange(dir);
       return { ok: true };

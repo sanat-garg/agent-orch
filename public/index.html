@@ -17,6 +17,7 @@
 <link rel="stylesheet" href="/previews.css">
 <link rel="stylesheet" href="/schedules.css">
 <link rel="stylesheet" href="/credentials.css">
+<link rel="stylesheet" href="/execution.css">
 <link rel="stylesheet" href="/shots.css">
 <link rel="stylesheet" href="/commits.css">
 <link rel="stylesheet" href="/tokens.css">
@@ -51,6 +52,11 @@
     <button class="new-chat" id="newChat">
       <svg viewBox="0 0 24 24" width="18" height="18"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
       New project
+    </button>
+    <!-- Execution Mode (execution.js, admin only): an idea in, a live product out. -->
+    <button type="button" class="exec-btn admin-only" id="execBtn" aria-haspopup="dialog" title="Execution Mode: describe a product and it gets built, published and brought online, end to end">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z" fill="currentColor"/></svg>
+      Execution Mode
     </button>
     <!-- Phones lay these out as three tiles (phone.css); elsewhere the wrapper is display: contents. -->
     <div class="side-links">
@@ -581,6 +587,23 @@
 
 <!-- Credentials (credentials.js): the signed-in user's services, each with its logins and keys; the body is the list or,
      in place of it, the editor. -->
+<!-- Execution Mode sheet (execution.js): the idea, the questions, the services and Go. -->
+<div class="modal sheet" id="exModal" hidden>
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-panel exm" role="dialog" aria-modal="true" aria-labelledby="exTitle">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <div class="m-head">
+      <div>
+        <h2 id="exTitle">Execution Mode</h2>
+        <p class="m-sub">Describe the product. It gets built, published and brought online, with as little of your time as possible.</p>
+      </div>
+      <button class="icon-btn" data-close aria-label="Close">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="m-body" id="exBody"></div>
+  </div>
+</div>
 <div class="modal sheet" id="credModal" hidden>
   <div class="modal-backdrop" data-close></div>
   <div class="modal-panel crm" role="dialog" aria-modal="true" aria-labelledby="crTitle">
@@ -1165,6 +1188,7 @@
 <script src="/previews.js"></script>
 <script src="/schedules.js"></script>
 <script src="/credentials.js"></script>
+<script src="/execution.js"></script>
 <script src="/shots.js"></script>
 <script src="/commits.js"></script>
 <script src="/tokens.js"></script>

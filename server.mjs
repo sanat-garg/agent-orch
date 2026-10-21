@@ -915,6 +915,9 @@ const previews = createPreviews({ dataDir: DATA, forbid: [ROOT], ...sandboxCaddy
 // address on the new-project screen (or later in Live previews); agents never publish one themselves (owner, 2026-10-19:
 // they had been adding their own Caddy site blocks, e.g. agla-station/pakdo.greygoose.baby).
 const PUBLISH_RULE = 'Never give this project a public address yourself: don\'t add or change domains, subdomains or Caddy site blocks (/etc/caddy), and don\'t start services or tunnels to serve it publicly.';
+// The owner's standing design rule (2026-10-21), sent with every chat, planner and task run at every rigor level: low-rigor
+// runs had been shipping gradient blue/purple UIs.
+const DESIGN_RULE = 'Design (the owner\'s standing rule for every chat, plan and task, at every rigor level): unless the owner says otherwise or gives references, any UI you build or change looks the way Apple would make it, following Apple\'s Human Interface Guidelines with a Swiss (International Typographic Style) sensibility. Keep it minimal and classy: neutral surfaces (white or off-white, near-black in dark mode), greys and hairline separators, with at most one restrained accent colour. No gradients, no blue-purple or neon palettes, no glows, heavy shadows or emoji decoration. Use the system font stack (-apple-system, SF Pro, system-ui) and a clear type scale where size and weight carry the hierarchy, not colour. Lay it out on a strict grid with generous whitespace, left-aligned text, consistent 4/8px spacing and modest corner radii. Support light and dark mode, 44pt touch targets, safe areas and WCAG AA contrast. For detail, read the apple-design skill (~/.claude/skills/apple-design/SKILL.md) when it is installed. Low rigor means less process (fewer tests and edge cases), never weaker visual design. Don\'t restyle a whole existing app unasked, but bring whatever you touch in line.';
 const previewNote = (dir) => {
   const v = previews.view(dir);
   return v ? `Live preview: ${v.url} (served from this project's main branch, redeployed after each commit/merge; web apps must listen on process.env.PORT, static sites need an index.html or a build script that outputs dist/). It is the project's only public address. ${PUBLISH_RULE}`
@@ -988,7 +991,7 @@ const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
   // Read at every task session boundary: tasks follow the chat's live effort, never a snapshot.
   convoEffort: (cid) => findConvo(cid)?.effort ?? null,
   // The chat's persona (extensions.mjs) as a system-prompt block, appended to its project's planner and task runs.
-  convoPersona: (cid) => { const c = findConvo(cid); return [ext.personaPrompt(c?.persona), c && previewNote(c.cwd)].filter(Boolean).join('\n\n') || null; },
+  convoPersona: (cid) => { const c = findConvo(cid); return [ext.personaPrompt(c?.persona), c && previewNote(c.cwd), DESIGN_RULE].filter(Boolean).join('\n\n'); },
   refreshUsage: () => refreshUsage().catch((e) => console.error('[usage] refresh failed', e)),
   onCommit: (dir) => syncGit(dir).catch((e) => console.error('[github] sync failed', dir, e)),
   projectReady: (dir) => gh.status().linked && !!convos.find((c) => c.cwd === dir)?.repo,
@@ -1758,6 +1761,7 @@ This is the owner's disposable server and you have full access: run any command 
 Keep API keys, tokens and passwords in a .env file in this folder (or one folder down), never in committed files: after each reply, agent-orch saves them into the owner's Credentials sheet for this project automatically.
 When the owner asks for something to run on a schedule (every day at 9, hourly, …), log it in .agent-orch/schedules.json and agent-orch's server runs it at those times, even when no chat is open (don't set up crontab, systemd timers or sleep loops yourself). The file is a JSON list of {"title", "cron" (5 fields: minute hour day month weekday), "command" (a bash command run in this folder with its .env loaded; no agent, no plan usage) or "prompt" (an agent task, only for work that needs judgement), "tz" (optional; default ${orch?.ownerTz?.() || 'UTC'}, the owner's), "enabled" (optional)}. After your reply it is applied by title: add, edit or remove an entry to change that schedule.
 ${SHOT_HINT}${live ? `\n${live}` : ''}
+${DESIGN_RULE}
 
 Current .agent-orch/BRIEF.md:
 ${mem.brief || '(empty)'}

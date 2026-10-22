@@ -48,23 +48,30 @@
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     const r = from?.getBoundingClientRect?.(), seen = r && r.width && r.right > 0 && r.left < W && r.bottom > 0 && r.top < H;
     const ox = seen ? r.left + r.width / 2 : W / 2, oy = seen ? r.top + r.height / 2 : H / 2;
-    // Pointy-top hexagons; cell size follows the screen so a phone isn't a few blobs and a desktop isn't dust.
-    const R = Math.max(11, Math.min(24, Math.min(W, H) / 34)), hw = Math.sqrt(3) * R, vh = 1.5 * R, cells = [];
+    // Pointy-top hexagons, fine like a nanite mesh (owner): ~5-9 px radius, following the screen.
+    const R = Math.max(5, Math.min(9, Math.min(W, H) / 95)), hw = Math.sqrt(3) * R, vh = 1.5 * R, cells = [];
     let maxD = 1, maxC = 1;
     for (let row = -1; row * vh < H + R; row++) for (let col = -1; col * hw < W + hw; col++) {
-      const x = col * hw + (row & 1 ? hw / 2 : 0), y = row * vh, d = Math.hypot(x - ox, y - oy), c = Math.hypot(x - W / 2, y - H / 2), tone = Math.random();
+      const x = col * hw + (row & 1 ? hw / 2 : 0), y = row * vh, d = Math.hypot(x - ox, y - oy), c = Math.hypot(x - W / 2, y - H / 2);
       maxD = Math.max(maxD, d); maxC = Math.max(maxC, c);
-      cells.push({ x, y, d, c, j: Math.random(), fill: `rgb(${17 + tone * 12 | 0},${14 + tone * 6 | 0},${16 + tone * 6 | 0})` });
+      cells.push({ x, y, d, c, j: Math.random(), tb: Math.random() * 4 | 0 });
     }
     const parts = Array.from({ length: Math.min(260, cells.length / 4 | 0) }, () => {
       const a = Math.random() * Math.PI * 2;
       return { dx: Math.cos(a), dy: Math.sin(a), v: (maxD / NANO.assemble) * (1.05 + Math.random() * 0.4), s: 0.8 + Math.random() * 1.4 };
     });
-    const hex = (x, y, rad) => {
-      g.moveTo(x, y - rad);
-      for (let k = 1; k < 6; k++) { const a = Math.PI / 3 * k - Math.PI / 2; g.lineTo(x + rad * Math.cos(a), y + rad * Math.sin(a)); }
-      g.closePath();
+    const HX = [0, 1, 2, 3, 4, 5].map((k) => [Math.cos(Math.PI / 3 * k - Math.PI / 2), Math.sin(Math.PI / 3 * k - Math.PI / 2)]);
+    const hex = (ctx, x, y, rad) => {
+      ctx.moveTo(x, y - rad);
+      for (let k = 1; k < 6; k++) ctx.lineTo(x + rad * HX[k][0], y + rad * HX[k][1]);
+      ctx.closePath();
     };
+    // Settled cells are drawn once into an offscreen skin (and cut out of it as they leave); the moving ones are batched
+    // into a few paths by shade and brightness. Thousands of fine cells stay smooth on a phone.
+    const skin = document.createElement('canvas'), sg = skin.getContext('2d');
+    skin.width = cv.width; skin.height = cv.height; sg.setTransform(dpr, 0, 0, dpr, 0, 0); sg.lineWidth = 0.75; sg.strokeStyle = 'rgba(224,180,76,.14)';
+    const TONES = [0, 1, 2, 3].map((i) => `rgb(${17 + i * 4},${14 + i * 2},${16 + i * 2})`), ALPHA = [0.35, 0.7, 1];
+    const SEAM = ['rgba(246,226,170,.95)', 'rgba(246,226,170,.7)', 'rgba(246,226,170,.45)', 'rgba(224,180,76,.55)'];
     const clamp = (v) => (v < 0 ? 0 : v > 1 ? 1 : v), ease = (v) => 1 - (1 - v) ** 3;
     const A = NANO.assemble, B = A + NANO.hold, T = B + NANO.release, t0 = performance.now();
     EX.anim = { swap };
@@ -74,25 +81,36 @@
       if (t >= T) { g.clearRect(0, 0, W, H); o.hidden = true; o.className = 'exs'; EX.anim = null; return; }
       g.clearRect(0, 0, W, H);
       const band = t > A ? ((t - A) / (T - A)) * (W + H) * 1.2 - H * 0.2 : -1e4; // the shimmer, a diagonal x + y = band
+      // fills[tone * 3 + alpha] (moving cells, no seam), seams[just locked bright → faint, shimmer], sparks
+      const fills = [], seams = SEAM.map(() => new Path2D()), sparks = new Path2D(), settle = [];
+      let cut = null; // skin changes this frame: newly settled cells (settle[tone], settle[4] their seams), cells leaving
       for (const c of cells) {
         const lock = (c.d / maxD) * (A - NANO.form - 40) + c.j * 60, k = clamp((t - lock) / NANO.form);
         if (k <= 0) continue;
         const rel = B + (c.c / maxC) * (NANO.release - 210) + c.j * 50, out = t > rel ? clamp((t - rel) / 210) : 0;
         if (out >= 1) continue;
-        const grow = ease(k), shrink = 1 - ease(out), push = out * R * 0.9;
+        const fresh = 1 - clamp((t - lock - NANO.form) / 160), fb = fresh > 0.66 ? 0 : fresh > 0.33 ? 1 : fresh > 0.02 ? 2 : -1;
+        if (!out && k >= 1) { // settled: into the skin once; a white-gold seam while it locks, then the shimmer
+          if (!c.st) { c.st = 1; hex(settle[c.tb] ||= new Path2D(), c.x, c.y, R + 0.6); hex(settle[4] ||= new Path2D(), c.x, c.y, R + 0.6); }
+          if (fb >= 0) hex(seams[fb], c.x, c.y, R + 0.6);
+          else if (Math.abs(c.x + c.y - band) < 40) hex(seams[3], c.x, c.y, R + 0.6);
+          continue;
+        }
+        if (c.st === 1) { c.st = 2; hex(cut ||= new Path2D(), c.x, c.y, R + 1.6); }
+        const grow = ease(k), shrink = 1 - ease(out), push = out * R * 2.4;
         const ux = (c.x - W / 2) / (c.c || 1), uy = (c.y - H / 2) / (c.c || 1);
         const x = c.x + ux * push, y = c.y + uy * push, rad = (R + 0.6) * (0.35 + 0.65 * grow) * shrink;
-        g.beginPath(); hex(x, y, rad);
-        g.globalAlpha = Math.min(1, k * 1.8) * (out ? 1 - out * 0.6 : 1);
-        g.fillStyle = c.fill; g.fill();
-        // The seam: white-gold while a cell locks, then a faint gold line; brighter where the shimmer passes.
-        const fresh = 1 - clamp((t - lock - NANO.form) / 240), near = Math.max(0, 1 - Math.abs(c.x + c.y - band) / 70);
-        g.lineWidth = 1;
-        g.strokeStyle = fresh > 0.02 ? `rgba(246,226,170,${0.25 + 0.7 * fresh})` : `rgba(224,180,76,${0.14 + 0.5 * near})`;
-        g.stroke();
-        if (out > 0 && out < 1 && c.j > 0.7) { g.fillStyle = `rgba(246,226,170,${1 - out})`; g.fillRect(x + ux * push, y + uy * push, 1.6, 1.6); }
+        const a = Math.min(1, k * 1.8) * (out ? 1 - out * 0.6 : 1), key = c.tb * 3 + (a > 0.8 ? 2 : a > 0.45 ? 1 : 0);
+        hex(fills[key] ||= new Path2D(), x, y, rad);
+        if (out > 0 && c.j > 0.7) sparks.rect(x + ux * push, y + uy * push, 1.6, 1.6);
       }
-      g.globalAlpha = 1;
+      settle.forEach((p, i) => { if (i < 4) { sg.fillStyle = TONES[i]; sg.fill(p); } else sg.stroke(p); });
+      if (cut) { sg.globalCompositeOperation = 'destination-out'; sg.fill(cut); sg.globalCompositeOperation = 'source-over'; }
+      g.drawImage(skin, 0, 0, W, H);
+      fills.forEach((f, key) => { if (!f) return; g.globalAlpha = ALPHA[key % 3]; g.fillStyle = TONES[key / 3 | 0]; g.fill(f); });
+      g.globalAlpha = 1; g.lineWidth = 0.75;
+      seams.forEach((p, i) => { g.strokeStyle = SEAM[i]; g.stroke(p); });
+      g.fillStyle = 'rgba(246,226,170,.6)'; g.fill(sparks);
       if (t < A + 160) for (const p of parts) { // the swarm ahead of the wave
         const dist = p.v * t, fade = 1 - clamp((t - A + 60) / 220);
         if (dist > maxD * 1.15) continue;

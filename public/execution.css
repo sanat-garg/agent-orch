@@ -1,5 +1,5 @@
 /* Execution Mode (execution.js): the sidebar's button, the full-page mode (#execView: its own sidebar #exNav beside the
-   page #exMain) and its nanotech transition (#exSuit: a canvas the script draws, plus the core and the word). */
+   page #exMain) and its transition (#exSuit: a hex-mesh veil, plus the core and the word). */
 .exec-btn {
   display: flex; align-items: center; gap: 8px; width: 100%; height: 40px; margin-top: 8px; padding: 0 12px;
   border: 1px solid var(--text); border-radius: 10px; background: var(--text); color: var(--bg); cursor: pointer; font: inherit; font-weight: 600;
@@ -174,29 +174,12 @@ html[data-role="user"] .exv { display: none; }
 .exv-ckeys { min-width: 0; font: 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--faint); white-space: pre-line; overflow-wrap: anywhere; }
 .exv-cacts { display: flex; align-items: center; justify-content: flex-end; gap: 14px; font-size: 13.5px; }
 
-/* The nanotech transition: the script draws the cells and the swarm on the canvas; the core and the word show while the
-   skin covers the screen. Keyed to execution.js NANO (1.52 s in all). */
-.exs { position: fixed; inset: 0; z-index: 9000; pointer-events: all; overflow: hidden; }
+/* The transition: a dark veil with a fine hex mesh; the script spreads it (clip-path), shows the core, then fades it. */
+.exs { position: fixed; inset: 0; z-index: 9000; pointer-events: all; overflow: hidden; background: #0a0a0b url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='49' viewBox='0 0 28 49'%3E%3Cpath fill='%23e0b44c' fill-opacity='.13' d='M13.99 9.25l13 7.5v15l-13 7.5L1 31.75v-15l12.99-7.5zM3 17.9v12.7l10.99 6.34 11-6.35V17.9l-11-6.34L3 17.9zM0 15l12.98-7.5V0h-2v6.35L0 12.69v2.3zm0 18.5L12.98 41v8h-2v-6.85L0 35.81v-2.3zM15 0v7.5L27.99 15H28v-2.31h-.01L17 6.35V0h-2zm0 49v-8l12.99-7.5H28v2.31h-.01L17 42.15V49h-2z'/%3E%3C/svg%3E") 0 0 / 14px 24.5px; will-change: clip-path, opacity; }
 .exs[hidden] { display: none; }
-.exs-nano { position: absolute; inset: 0; width: 100%; height: 100%; }
-.exs-core { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; opacity: 0; pointer-events: none; }
-.exs-ring { fill: none; stroke: #e0b44c; stroke-width: 1.5; stroke-dasharray: 340; stroke-dashoffset: 340; }
-.exs-ring2 { stroke: #f4f1e8; stroke-width: 1; stroke-dasharray: 264; stroke-dashoffset: 264; }
-.exs-hex { fill: none; stroke: #f4f1e8; stroke-width: 1.5; stroke-linejoin: round; opacity: 0; }
-.exs-glow { fill: #fbf8ef; transform-origin: 60px 60px; transform: scale(0); }
-.exs-word { color: #f4f1e8; font-size: clamp(20px, 3.4vw, 30px); font-weight: 700; letter-spacing: .32em; text-transform: uppercase; text-indent: .32em; }
-.exs-sub { color: #e0b44c; font-size: 11.5px; font-weight: 600; letter-spacing: .28em; text-transform: uppercase; text-indent: .28em; }
-.exs.run .exs-core { animation: exs-core 1.52s ease both; }
-.exs.run .exs-ring1 { animation: exs-draw 1.52s ease-out both; }
-.exs.run .exs-ring2 { animation: exs-draw 1.52s ease-out .06s both; }
-.exs.run .exs-hex { animation: exs-hex 1.52s ease both; }
-.exs.run .exs-glow { animation: exs-glow 1.52s cubic-bezier(.2,1.4,.4,1) both; }
-.exs.run .exs-word { animation: exs-word 1.52s ease both; }
-@keyframes exs-core { 0%, 32% { opacity: 0; transform: scale(.96); } 42%, 64% { opacity: 1; transform: none; } 74%, 100% { opacity: 0; transform: scale(1.04); } }
-@keyframes exs-draw { 0%, 30% { stroke-dashoffset: 340; } 52%, 100% { stroke-dashoffset: 0; } }
-@keyframes exs-hex { 0%, 38% { opacity: 0; } 48%, 100% { opacity: 1; } }
-@keyframes exs-glow { 0%, 36% { transform: scale(0); } 46% { transform: scale(1.2); } 54%, 100% { transform: scale(1); } }
-@keyframes exs-word { 0%, 36% { opacity: 0; letter-spacing: .6em; } 50%, 100% { opacity: 1; letter-spacing: .32em; } }
+.exs-core { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; opacity: 0; pointer-events: none; }
+.exs-core path { fill: none; stroke: #e0b44c; stroke-width: 1.5; stroke-linejoin: round; }
+.exs-word { color: #f4f1e8; font-size: clamp(18px, 3vw, 26px); font-weight: 600; letter-spacing: .28em; text-transform: uppercase; text-indent: .28em; }
 
 @media (pointer: coarse) {
   .exec-btn, .exv-exit, .ex-form input[type="text"], .exv-new, .exv-item { min-height: 44px; }

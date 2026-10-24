@@ -1,7 +1,7 @@
 // ---------- Execution Mode (server: execution.mjs, /api/execution; admin only) ----------
 // The sidebar's Execution Mode button turns the whole page into Execution Mode (#execView over the app, which goes inert)
-// through the nanotech transition (#exSuit: hex cells pour out of the pressed control and lock into a skin over the screen,
-// the core lights, then the skin comes apart from the centre to show the new page); "Exit to Orchestrator" plays it back.
+// through the transition (#exSuit: a dark hex-mesh veil spreads from the pressed control, the word shows while the page
+// swaps underneath, then the veil fades); "Exit to Orchestrator" plays it back.
 // The page has its own sidebar (#exNav): New execution, every execution started (its own page: progress, recent work, the
 // brief, Open chat) and Connections (the services an execution can use). New execution is the idea (plus reference images)
 // and labelled sections of chips for what shapes the build (products, app technology, design inspiration, domain plan,
@@ -26,101 +26,46 @@
     askBefore: [['spend', 'Spending money', 'buying a domain, a plan or a subscription'], ['publish', 'Publishing', 'submitting to the App Store or Google Play, going live on the domain'], ['emails', 'Creating email accounts', 'new mailboxes on the domain'], ['send', 'Sending email', 'to anyone but you'], ['delete', 'Deleting', 'domains, apps, data or accounts']] };
   const opts = () => EX.options || OPTS;
 
-  // ----- The nanotech transition. `dir` 'in' or 'out'; `swap` runs while the skin covers the screen (shows or hides the
-  // page); `from` is the control that was pressed, where the cells pour out (else the centre). Canvas 2D on #exNano:
-  // a swarm of particles races ahead of a wave of hexagonal cells that lock into place with a bright seam (0-620 ms), a
-  // shimmer crosses the finished skin while the core and the word show (DOM, execution.css), then the cells shrink and
-  // drift apart from the centre out (1000-1520 ms). Reduced motion: a plain swap.
-  const NANO = { assemble: 620, hold: 380, release: 520, form: 170 };
-  function suit(dir, swap, from) {
-    cancelAnimationFrame(EX.anim?.raf);
-    if (EX.anim?.swap) EX.anim.swap(); // a transition cut short still lands where it was going
-    const o = $('exSuit'), cv = $('exNano'), g = cv.getContext?.('2d');
-    if (still() || !g) { swap(); o.hidden = true; return; }
+  // ----- The transition. `dir` 'in' or 'out'; `swap` shows or hides the page while the veil covers the screen; `from` is
+  // the pressed control the veil spreads from (else the centre); `done` runs once the veil is gone. Three plain steps that
+  // each animate one cheap property: a dark hex-mesh veil spreads from `from` (clip-path), the word shows while the page
+  // swaps underneath (the heavy render lands while nothing moves), then the veil fades (opacity). Reduced motion: a plain swap.
+  const SUIT = { cover: 440, hold: 240, reveal: 380 };
+  function suit(dir, swap, from, done) {
+    EX.anim?.finish(); // a transition cut short still lands where it was going
+    const o = $('exSuit'), core = o.querySelector('.exs-core');
+    if (still() || !o.animate) { swap(); done?.(); return; }
     $('exSuitWord').textContent = dir === 'in' ? 'Execution Mode' : 'Orchestrator Mode';
-    $('exSuitSub').textContent = dir === 'in' ? 'Nanites deployed' : 'Nanites retracting';
-    o.className = `exs ${dir}`;
-    o.hidden = false;
-    void o.offsetWidth; // restart the core's keyframes
-    o.classList.add('run');
-    const W = innerWidth, H = innerHeight, dpr = Math.min(2, devicePixelRatio || 1);
-    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
-    g.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const r = from?.getBoundingClientRect?.(), seen = r && r.width && r.right > 0 && r.left < W && r.bottom > 0 && r.top < H;
+    const W = innerWidth, H = innerHeight, r = from?.getBoundingClientRect?.();
+    const seen = r && r.width && r.right > 0 && r.left < W && r.bottom > 0 && r.top < H;
     const ox = seen ? r.left + r.width / 2 : W / 2, oy = seen ? r.top + r.height / 2 : H / 2;
-    // Pointy-top hexagons, fine like a nanite mesh (owner): ~5-9 px radius, following the screen.
-    const R = Math.max(5, Math.min(9, Math.min(W, H) / 95)), hw = Math.sqrt(3) * R, vh = 1.5 * R, cells = [];
-    let maxD = 1, maxC = 1;
-    for (let row = -1; row * vh < H + R; row++) for (let col = -1; col * hw < W + hw; col++) {
-      const x = col * hw + (row & 1 ? hw / 2 : 0), y = row * vh, d = Math.hypot(x - ox, y - oy), c = Math.hypot(x - W / 2, y - H / 2);
-      maxD = Math.max(maxD, d); maxC = Math.max(maxC, c);
-      cells.push({ x, y, d, c, j: Math.random(), tb: Math.random() * 4 | 0 });
-    }
-    const parts = Array.from({ length: Math.min(260, cells.length / 4 | 0) }, () => {
-      const a = Math.random() * Math.PI * 2;
-      return { dx: Math.cos(a), dy: Math.sin(a), v: (maxD / NANO.assemble) * (1.05 + Math.random() * 0.4), s: 0.8 + Math.random() * 1.4 };
-    });
-    const HX = [0, 1, 2, 3, 4, 5].map((k) => [Math.cos(Math.PI / 3 * k - Math.PI / 2), Math.sin(Math.PI / 3 * k - Math.PI / 2)]);
-    const hex = (ctx, x, y, rad) => {
-      ctx.moveTo(x, y - rad);
-      for (let k = 1; k < 6; k++) ctx.lineTo(x + rad * HX[k][0], y + rad * HX[k][1]);
-      ctx.closePath();
+    const far = Math.ceil(Math.hypot(Math.max(ox, W - ox), Math.max(oy, H - oy))) + 2;
+    const anims = [], quiet = () => {}; // a cancelled animation rejects `finished`
+    let swapped = false, ended = false, timer = 0;
+    const doSwap = () => { if (!swapped) { swapped = true; swap(); } };
+    const end = () => {
+      if (ended) return;
+      ended = true; clearTimeout(timer); doSwap();
+      anims.forEach((x) => x.cancel());
+      o.hidden = true; EX.anim = null; done?.();
     };
-    // Settled cells are drawn once into an offscreen skin (and cut out of it as they leave); the moving ones are batched
-    // into a few paths by shade and brightness. Thousands of fine cells stay smooth on a phone.
-    const skin = document.createElement('canvas'), sg = skin.getContext('2d');
-    skin.width = cv.width; skin.height = cv.height; sg.setTransform(dpr, 0, 0, dpr, 0, 0); sg.lineWidth = 0.75; sg.strokeStyle = 'rgba(224,180,76,.14)';
-    const TONES = [0, 1, 2, 3].map((i) => `rgb(${17 + i * 4},${14 + i * 2},${16 + i * 2})`), ALPHA = [0.35, 0.7, 1];
-    const SEAM = ['rgba(246,226,170,.95)', 'rgba(246,226,170,.7)', 'rgba(246,226,170,.45)', 'rgba(224,180,76,.55)'];
-    const clamp = (v) => (v < 0 ? 0 : v > 1 ? 1 : v), ease = (v) => 1 - (1 - v) ** 3;
-    const A = NANO.assemble, B = A + NANO.hold, T = B + NANO.release, t0 = performance.now();
-    EX.anim = { swap };
-    const frame = (now) => {
-      const t = now - t0;
-      if (t >= B && EX.anim.swap) { EX.anim.swap = null; swap(); }
-      if (t >= T) { g.clearRect(0, 0, W, H); o.hidden = true; o.className = 'exs'; EX.anim = null; return; }
-      g.clearRect(0, 0, W, H);
-      const band = t > A ? ((t - A) / (T - A)) * (W + H) * 1.2 - H * 0.2 : -1e4; // the shimmer, a diagonal x + y = band
-      // fills[tone * 3 + alpha] (moving cells, no seam), seams[just locked bright → faint, shimmer], sparks
-      const fills = [], seams = SEAM.map(() => new Path2D()), sparks = new Path2D(), settle = [];
-      let cut = null; // skin changes this frame: newly settled cells (settle[tone], settle[4] their seams), cells leaving
-      for (const c of cells) {
-        const lock = (c.d / maxD) * (A - NANO.form - 40) + c.j * 60, k = clamp((t - lock) / NANO.form);
-        if (k <= 0) continue;
-        const rel = B + (c.c / maxC) * (NANO.release - 210) + c.j * 50, out = t > rel ? clamp((t - rel) / 210) : 0;
-        if (out >= 1) continue;
-        const fresh = 1 - clamp((t - lock - NANO.form) / 160), fb = fresh > 0.66 ? 0 : fresh > 0.33 ? 1 : fresh > 0.02 ? 2 : -1;
-        if (!out && k >= 1) { // settled: into the skin once; a white-gold seam while it locks, then the shimmer
-          if (!c.st) { c.st = 1; hex(settle[c.tb] ||= new Path2D(), c.x, c.y, R + 0.6); hex(settle[4] ||= new Path2D(), c.x, c.y, R + 0.6); }
-          if (fb >= 0) hex(seams[fb], c.x, c.y, R + 0.6);
-          else if (Math.abs(c.x + c.y - band) < 40) hex(seams[3], c.x, c.y, R + 0.6);
-          continue;
-        }
-        if (c.st === 1) { c.st = 2; hex(cut ||= new Path2D(), c.x, c.y, R + 1.6); }
-        const grow = ease(k), shrink = 1 - ease(out), push = out * R * 2.4;
-        const ux = (c.x - W / 2) / (c.c || 1), uy = (c.y - H / 2) / (c.c || 1);
-        const x = c.x + ux * push, y = c.y + uy * push, rad = (R + 0.6) * (0.35 + 0.65 * grow) * shrink;
-        const a = Math.min(1, k * 1.8) * (out ? 1 - out * 0.6 : 1), key = c.tb * 3 + (a > 0.8 ? 2 : a > 0.45 ? 1 : 0);
-        hex(fills[key] ||= new Path2D(), x, y, rad);
-        if (out > 0 && c.j > 0.7) sparks.rect(x + ux * push, y + uy * push, 1.6, 1.6);
-      }
-      settle.forEach((p, i) => { if (i < 4) { sg.fillStyle = TONES[i]; sg.fill(p); } else sg.stroke(p); });
-      if (cut) { sg.globalCompositeOperation = 'destination-out'; sg.fill(cut); sg.globalCompositeOperation = 'source-over'; }
-      g.drawImage(skin, 0, 0, W, H);
-      fills.forEach((f, key) => { if (!f) return; g.globalAlpha = ALPHA[key % 3]; g.fillStyle = TONES[key / 3 | 0]; g.fill(f); });
-      g.globalAlpha = 1; g.lineWidth = 0.75;
-      seams.forEach((p, i) => { g.strokeStyle = SEAM[i]; g.stroke(p); });
-      g.fillStyle = 'rgba(246,226,170,.6)'; g.fill(sparks);
-      if (t < A + 160) for (const p of parts) { // the swarm ahead of the wave
-        const dist = p.v * t, fade = 1 - clamp((t - A + 60) / 220);
-        if (dist > maxD * 1.15) continue;
-        const x = ox + p.dx * dist, y = oy + p.dy * dist;
-        g.strokeStyle = `rgba(246,226,170,${0.8 * fade})`; g.lineWidth = p.s;
-        g.beginPath(); g.moveTo(x, y); g.lineTo(x - p.dx * 10 * p.s, y - p.dy * 10 * p.s); g.stroke();
-      }
-      EX.anim.raf = requestAnimationFrame(frame);
-    };
-    EX.anim.raf = requestAnimationFrame(frame);
+    EX.anim = { finish: end };
+    o.hidden = false;
+    anims.push(o.animate([{ clipPath: `circle(0px at ${ox}px ${oy}px)` }, { clipPath: `circle(${far}px at ${ox}px ${oy}px)` }],
+      { duration: SUIT.cover, easing: 'cubic-bezier(.55,0,.25,1)', fill: 'both' }));
+    anims.push(core.animate([{ opacity: 0, transform: 'scale(.98)' }, { opacity: 1, transform: 'none' }],
+      { duration: 260, delay: SUIT.cover - 140, easing: 'ease-out', fill: 'both' }));
+    anims[0].finished.then(() => {
+      if (ended) return;
+      doSwap();
+      // Two frames for the new page to lay out and paint before anything moves again.
+      requestAnimationFrame(() => requestAnimationFrame(() => { timer = setTimeout(() => {
+        if (ended) return;
+        const fade = o.animate([{ opacity: 1 }, { opacity: 0 }], { duration: SUIT.reveal, easing: 'ease', fill: 'forwards' });
+        anims.push(fade);
+        fade.finished.then(end, quiet);
+      }, SUIT.hold); }));
+    }, quiet);
   }
   function show() {
     $('execView').hidden = false;
@@ -143,7 +88,7 @@
     load().then(render);
     instant ? show() : suit('in', show, from);
   }
-  function exit(from = $('exExit')) {
+  function exit(from = $('exExit'), done) {
     if (!isOn()) return;
     save();
     remember(false);
@@ -153,10 +98,10 @@
       $('app').inert = false;
       document.documentElement.classList.remove('exec-on');
       (EX.lastFocus?.isConnected ? EX.lastFocus : $('execBtn')).focus?.();
-    }, from);
+    }, from, done);
   }
   // Leave the mode for a chat (a project's Open chat): the transition plays, then the chat opens.
-  function exitTo(cid, from) { EX.lastFocus = null; exit(from); setTimeout(() => openConvo(cid), still() ? 0 : NANO.assemble + NANO.hold); }
+  function exitTo(cid, from) { EX.lastFocus = null; exit(from, () => openConvo(cid)); }
 
   async function load() {
     try { Object.assign(EX, await api('/api/execution'), { loaded: true, error: '' }); } catch (e) { EX.error = e.message; }
@@ -443,7 +388,7 @@
       const status = el('span', `ex-st ${s.status}`, STATUS[s.status]);
       const acts = el('div', 'exv-cacts');
       if (s.url && s.status !== 'ready') { const a = el('a', 'ex-link', s.mcp ? 'Get it' : 'Get keys'); a.href = s.url; a.target = '_blank'; a.rel = 'noopener'; acts.append(a); }
-      const a = s.mcp ? btn('btn small', s.status === 'ready' ? 'Settings' : 'Add server', () => { save(); exit(); setTimeout(openSettings, still() ? 0 : NANO.assemble + NANO.hold); })
+      const a = s.mcp ? btn('btn small', s.status === 'ready' ? 'Settings' : 'Add server', () => { save(); exit(undefined, openSettings); })
         : btn('btn small', s.status === 'ready' ? 'Edit' : s.status === 'partial' ? 'Add keys' : 'Add key', () => { save(); window.Credentials?.open(); });
       a.title = s.mcp ? 'Settings → Skills & tools' : `A "${s.name}" card in Credentials with ${s.env.join(', ')}`;
       acts.append(a);

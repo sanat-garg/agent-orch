@@ -1,4 +1,4 @@
-// Execution Mode's full page (execution.js): the sidebar button plays the nanotech transition and turns the page into
+// Execution Mode's full page (execution.js): the sidebar button plays the transition and turns the page into
 // Execution Mode (the app goes inert under it), its own sidebar lists New execution, the executions (each with its own
 // page) and Connections, a reload comes back on the same page, and "Exit to Orchestrator" plays it back to the app. Boots
 // server.mjs (CW_NO_ORCHESTRATOR=1, temp data dir). Skips when Playwright's Chromium can't launch.
@@ -69,7 +69,7 @@ test('Execution Mode: the button turns the page into it, a reload stays, Exit re
   await page.waitForFunction(() => !document.getElementById('app').inert);
 
   await page.click('#execBtn');
-  await page.waitForSelector('#exSuit:not([hidden])', { timeout: 1000 }); // the nanotech transition plays
+  await page.waitForSelector('#exSuit:not([hidden])', { timeout: 1000 }); // the veil plays
   await page.waitForSelector('#execView:not([hidden])', { timeout: 3000 });
   await page.waitForSelector('#exSuit', { state: 'hidden', timeout: 3000 });
   assert.equal(await page.evaluate(() => document.getElementById('app').inert), true);

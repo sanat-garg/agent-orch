@@ -41,7 +41,7 @@ import { searchConvos } from './search.mjs';
 import { createRollingRestart, preflight, readRestartState, serverFile } from './rolling.mjs';
 import { createSounds, MAX_SOUND_BYTES as MAX_CUSTOM_SOUND_BYTES } from './sounds.mjs';
 import { createVersion, formatVersion } from './version.mjs';
-import { createPreviews } from './previews.mjs';
+import { createPreviews, normalizeSlug } from './previews.mjs';
 import { projectName } from './project-name.mjs';
 import { repoInfo } from './worktrees.mjs';
 import { taskChanges } from './changes.mjs';
@@ -916,6 +916,7 @@ const sandboxCaddy = DATA !== path.join(ROOT, 'data') && !process.env.CW_REAL_CA
     if (cmd === 'sudo' && args[0] === 'install') fs.copyFileSync(args.at(-2), args.at(-1));
     return { code: 0, stdout: '', stderr: '' };
   },
+  tlsProbe: async () => true, // no real Caddy behind a test instance, so no certificate to wait for
 };
 if (sandboxCaddy && !fs.existsSync(sandboxCaddy.caddyfile)) { try { fs.copyFileSync('/etc/caddy/Caddyfile', sandboxCaddy.caddyfile); } catch {} } // the owner's sites stay taken
 const previews = createPreviews({ dataDir: DATA, forbid: [ROOT], ...sandboxCaddy, log: (m) => console.log(`[previews] ${m}`),
@@ -923,20 +924,51 @@ const previews = createPreviews({ dataDir: DATA, forbid: [ROOT], ...sandboxCaddy
     clearTimeout(previewPush);
     previewPush = setTimeout(() => { broadcastConvos(); for (const ws of allClients) send(ws, { t: 'previews' }); }, 150);
   } });
-// The line every agent working on the project gets (chat, planner and task runs). The owner picks a project's public
-// address on the new-project screen (or later in Live previews); agents never publish one themselves (owner, 2026-10-19:
-// they had been adding their own Caddy site blocks, e.g. agla-station/pakdo.greygoose.baby).
-const PUBLISH_RULE = 'Never give this project a public address yourself: don\'t add or change domains, subdomains or Caddy site blocks (/etc/caddy), and don\'t start services or tunnels to serve it publicly.';
+// The line every agent working on the project gets (chat, planner and task runs). Agents publish a project themselves
+// through bin/preview.mjs (owner, 2026-10-24: "give projects the ability to create their own live previews and give me the
+// link directly"), never by hand: before that they had added their own Caddy site blocks (agla-station/pakdo.greygoose.baby).
+const PREVIEW_CMD = `node ${path.join(ROOT, 'bin', 'preview.mjs')}`;
+const PUBLISH_RULE = `Publish only through that command: don't add or change domains, subdomains or Caddy site blocks (/etc/caddy) yourself, and don't start services or tunnels to serve it publicly.`;
 // The owner's standing design rule (2026-10-21), sent with every chat, planner and task run at every rigor level: low-rigor
 // runs had been shipping gradient blue/purple UIs.
 const DESIGN_RULE = 'Design (the owner\'s standing rule for every chat, plan and task, at every rigor level): unless the owner says otherwise or gives references, any UI you build or change looks the way Apple would make it, following Apple\'s Human Interface Guidelines with a Swiss (International Typographic Style) sensibility. Keep it minimal and classy: neutral surfaces (white or off-white, near-black in dark mode), greys and hairline separators, with at most one restrained accent colour. No gradients, no blue-purple or neon palettes, no glows, heavy shadows or emoji decoration. Use the system font stack (-apple-system, SF Pro, system-ui) and a clear type scale where size and weight carry the hierarchy, not colour. Lay it out on a strict grid with generous whitespace, left-aligned text, consistent 4/8px spacing and modest corner radii. Support light and dark mode, 44pt touch targets, safe areas and WCAG AA contrast. For detail, read the apple-design skill (~/.claude/skills/apple-design/SKILL.md) when it is installed. Low rigor means less process (fewer tests and edge cases), never weaker visual design. Don\'t restyle a whole existing app unasked, but bring whatever you touch in line.';
 // An Execution Mode project (its main chat carries execution: true): the executor's standing rules for every run in it.
 const executionNote = (c) => (c && findConvo(mainChatId(c.cwd))?.execution ? EXECUTION_SYSTEM : '');
 const previewNote = (dir) => {
+  if (path.resolve(dir || '/') === ROOT) return "Live preview: none (agent-orch can't preview its own folder: it would boot a second server). Don't add domains, subdomains or Caddy site blocks for it.";
   const v = previews.view(dir);
-  return v ? `Live preview: ${v.url} (served from this project's main branch, redeployed after each commit/merge; web apps must listen on process.env.PORT, static sites need an index.html or a build script that outputs dist/). It is the project's only public address. ${PUBLISH_RULE}`
-    : `Live preview: none. The owner sets a project's address on agent-orch's new-project screen (or later under Live previews in the sidebar). ${PUBLISH_RULE} If the owner wants it online, ask them to add a live preview address; to check it works, run it on localhost.`;
+  return v ? `Live preview: ${v.url} (served from this project's main branch, redeployed after each commit/merge; web apps must listen on process.env.PORT, static sites need an index.html or a build script that outputs dist/). It is the project's public address: give the owner this link whenever they'd want to look at it. \`${PREVIEW_CMD} --logs\` shows its last log lines and \`--restart\` redeploys it. ${PUBLISH_RULE}`
+    : `Live preview: none yet. When the owner wants to see or use the project online, or you've built a website or web app worth showing, publish it yourself instead of asking the owner to deploy it: run \`${PREVIEW_CMD} [name]\` in the project folder (name = the subdomain, default the folder name). It prints the https link: put that link in your reply. It serves the main branch and redeploys after each commit/merge, so commit first; web apps must listen on process.env.PORT, static sites need an index.html or a build script that outputs dist/. ${PUBLISH_RULE}`;
 };
+// bin/preview.mjs → POST /api/agent/preview: the project folder holding `dir` (a task worktree resolves to its main tree
+// in the script) gets an address, `<name or folder>.<default domain>` (-2…-9 when taken); one it already has is kept.
+// action 'logs' | 'restart' work on the existing one.
+const AGENT_KEY = crypto.randomBytes(24).toString('hex'); // this boot's key, in <DATA>/agent-api.json (mode 600)
+async function agentPreview({ dir, name, action } = {}) {
+  const abs = path.resolve(String(dir || '/'));
+  const cwd = [...new Set(convos.map((c) => c.cwd))].filter((c) => c && (abs === c || abs.startsWith(c + path.sep))).sort((a, b) => b.length - a.length)[0];
+  if (!cwd) return [404, { error: `${abs} isn't in an agent-orch project folder.` }];
+  const cur = previews.view(cwd);
+  if (action === 'logs' || action === 'restart') {
+    if (!cur) return [404, { error: "This project has no live preview yet: run the command without --logs/--restart to publish it." }];
+    if (action === 'logs') return [200, { ok: true, preview: cur, text: previews.logs(cwd) || '' }];
+    previews.restart(cwd);
+    return [200, { ok: true, preview: cur }];
+  }
+  if (cur) return [200, { ok: true, preview: cur, existed: true }];
+  const base = normalizeSlug(name || path.basename(cwd));
+  let error = 'No free address.';
+  for (let i = 1; i <= 9; i++) {
+    const slug = i === 1 ? base : `${base.slice(0, 37)}-${i}`, c = previews.check(slug, cwd, null);
+    if (c.ok) {
+      const r = await previews.set(cwd, slug, null);
+      return r.error ? [400, r] : [200, { ok: true, preview: previews.view(cwd) }];
+    }
+    error = c.error;
+    if (!/^Taken by|^Already used|reserved/.test(c.error)) break;
+  }
+  return [400, { error }];
+}
 setMcpSource((agent, run) => ext.mcpRun(agent, run)); // every runAgentCli run (tasks, planner, non-Claude chats) reads the list as it starts
 ext.onChange((kind) => { for (const ws of allClients) send(ws, { t: 'ext', kind }); });
 // A chat's persona as its system-prompt block (null: none, or deleted), and the MCP servers Claude chats get.
@@ -1909,6 +1941,13 @@ async function handleRequest(req, res) {
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'same-origin');
 
+  // An agent publishing its project (bin/preview.mjs): this boot's key, and only from this machine (never through Caddy).
+  if (p === '/api/agent/preview' && req.method === 'POST') {
+    const key = Buffer.from(String(req.headers['x-agent-orch-key'] || ''));
+    if (req.headers['x-forwarded-for'] || key.length !== AGENT_KEY.length || !crypto.timingSafeEqual(key, Buffer.from(AGENT_KEY))) return json(res, 401, { error: 'Not allowed' });
+    const [code, body] = await agentPreview(await readBody(req));
+    return json(res, code, body);
+  }
   // Caddy asks this before letting a request through to the terminal.
   if (p === '/auth/check') {
     if (isAdmin(sessionUser(req))) { res.writeHead(200); return res.end(); }
@@ -3252,7 +3291,11 @@ if (process.argv[2] === 'set-password') {
 } else {
   // Repo links are refreshed from each folder's git origin before serving, so the API never returns a stale one.
   refreshAllRepos().catch((e) => console.error('[github] repo refresh failed', e))
-    .finally(() => server.listen(PORT, '127.0.0.1', () => console.log(`agent-orch on 127.0.0.1:${PORT}`)));
+    .finally(() => server.listen(PORT, '127.0.0.1', () => {
+      console.log(`agent-orch on 127.0.0.1:${PORT}`);
+      try { fs.writeFileSync(path.join(DATA, 'agent-api.json'), JSON.stringify({ url: `http://127.0.0.1:${PORT}`, key: AGENT_KEY }), { mode: 0o600 }); fs.chmodSync(path.join(DATA, 'agent-api.json'), 0o600); }
+      catch (e) { console.error('[previews] agent-api.json not written', e.message); }
+    }));
   // Live previews: Caddy gets every saved one and each restarts (an earlier run's processes are stopped first).
   if (!NO_ORCH) previews.startAll().catch((e) => console.error('[previews] start failed', e));
   // Keys already in projects' .env files (and their schedules.json) show up without waiting for each project's next commit.

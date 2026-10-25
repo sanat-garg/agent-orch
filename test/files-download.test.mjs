@@ -160,6 +160,6 @@ test('download: a client that disconnects stops the zip', async (t) => {
 
 test('server.mjs routes the download behind the sign-in check', () => {
   const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'server.mjs'), 'utf8');
-  const auth = src.indexOf('if (!isAuthed(req)) {'), route = src.indexOf('handleFiles(req, res, url,');
+  const auth = src.indexOf('if (!me) {'), route = src.indexOf('handleFiles(req, res, url,');
   assert.ok(auth > 0 && route > auth);
 });

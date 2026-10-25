@@ -128,6 +128,40 @@ test("a user sees only their own work and none of the admin's tools", async () =
   assert.equal((await fetch(base + '/auth/check', { headers: { cookie: admin } })).status, 200);
 });
 
+test("a user's Files stays inside their project: absolute paths, links out, deletes and moves elsewhere are refused", async () => {
+  fs.writeFileSync(path.join(mine, 'private.txt'), 'admin only');
+  fs.symlinkSync(mine, path.join(theirs, 'out'));
+  fs.symlinkSync(path.join(mine, 'private.txt'), path.join(theirs, 'peek.txt'));
+  const real = fs.realpathSync(theirs), q = encodeURIComponent;
+  try {
+    const root = await call(sam, `/api/files/list?cid=s1&path=${q(real)}`);
+    assert.equal(root.status, 200, 'an absolute path inside the project is fine');
+    assert.equal(root.body.confined, true);
+    assert.equal(root.body.parent, null, 'no climbing above the project');
+    assert.deepEqual(root.body.places.map((p) => p.label), ['Project']);
+    assert.deepEqual(root.body.entries.map((e) => e.name).sort(), ['notes.txt'], 'links out of the project are left out');
+    for (const p of [path.dirname(real), mine, '/', `${real}/out`, 'out'])
+      assert.equal((await call(sam, `/api/files/list?cid=s1&path=${q(p)}`)).status, 403, p);
+    for (const p of ['peek.txt', `${real}/peek.txt`, path.join(mine, 'private.txt')])
+      assert.equal((await call(sam, `/api/files/raw?cid=s1&path=${q(p)}`)).status, 403, p);
+    assert.equal((await call(sam, `/api/files/download?cid=s1&check=1&path=${q(path.join(mine, 'private.txt'))}`)).status, 403);
+    assert.equal((await call(sam, `/api/files/find?cid=s1&q=private&dir=${q(mine)}`)).status, 403);
+    assert.equal((await call(sam, '/api/files/delete', 'POST', { cid: 's1', paths: [path.join(mine, 'private.txt')] })).status, 403);
+    assert.equal((await call(sam, '/api/files/delete', 'POST', { cid: 's1', paths: ['out/private.txt'] })).status, 403);
+    assert.equal((await call(sam, '/api/files/move', 'POST', { cid: 's1', paths: ['notes.txt'], dest: mine })).status, 403);
+    assert.equal((await call(sam, '/api/files/move', 'POST', { cid: 's1', paths: ['notes.txt'], dest: os.tmpdir() })).status, 403);
+    assert.equal((await call(sam, '/api/files/new', 'POST', { cid: 's1', dir: os.homedir(), name: 'x.txt', type: 'file' })).status, 403);
+    assert.equal(fs.readFileSync(path.join(mine, 'private.txt'), 'utf8'), 'admin only');
+    assert.ok(fs.existsSync(path.join(theirs, 'notes.txt')));
+    assert.equal((await call(sam, `/api/folders?path=${q(path.join(theirs, 'out'))}`)).status, 403, "the folder picker doesn't follow a link out");
+    // The admin still sees the whole disk.
+    assert.equal((await call(admin, `/api/files/list?cid=a1&path=${q(real)}`)).body.confined, undefined);
+    assert.equal((await call(admin, `/api/files/list?cid=a1&path=/`)).status, 200);
+  } finally {
+    for (const n of ['out', 'peek.txt']) fs.rmSync(path.join(theirs, n), { force: true });
+  }
+});
+
 test('websocket: a user gets only their chats, and no turn past their cap', async () => {
   const s = socket(sam);
   await s.opened;
@@ -162,6 +196,8 @@ test("the admin controls a user's access: all projects or their own, and Orchest
   await s.next((m) => m.t === 'convos' && m.convos.some((c) => c.id === 'a1'));
   assert.deepEqual((await call(sam, '/api/convos')).body.map((c) => c.id).sort(), ['a1', 's1']);
   assert.equal((await call(sam, '/api/files/list?cid=a1')).status, 200);
+  assert.equal((await call(sam, '/api/convos/a1', 'DELETE', { project: true, files: true })).status, 403, "a shared project isn't theirs to delete");
+  assert.ok(fs.existsSync(mine));
   assert.equal((await call(sam, '/api/convos', 'POST', { folder: mine, mode: 'orchestrator' })).status, 403, 'no Orchestrator Mode');
   s.ws.send(JSON.stringify({ t: 'open', cid: 'a1' }));
   await s.next((m) => m.t === 'history' && m.cid === 'a1');

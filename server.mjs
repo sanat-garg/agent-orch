@@ -222,13 +222,12 @@ function pathOwner(cwd) {
 const ownsPath = (u, cwd) => !!cwd && (isAdmin(u) || pathOwner(cwd) === u.id || sharedWith(u, cwd));
 const NOT_YOURS = 'That belongs to another user', ADMIN_ONLY = 'Only an admin can do that';
 const NO_ORCH_MODE = "Your admin hasn't given you Orchestrator Mode";
-// What a non-admin may use: their own chats, projects, tasks, schedules and files (relative paths inside the project
+// What a non-admin may use: their own chats, projects, tasks, schedules and files (paths inside the project
 // only), the model lists, their own usage and sounds, and their own GitHub (github-users.mjs). Machines, sign-ins,
 // settings, extensions, the terminal, stats, the server's GitHub sign-in, Browser, approvals and everyone else's work stay the admin's. → an error for a 403, or null.
 const USER_PATHS = new Set(['/api/status', '/api/version', '/api/me', '/api/me/github', '/api/me/github/device', '/api/me/github/token',
   '/api/github', '/api/github/repos', '/api/projects/import', '/api/agents', '/api/convos', '/api/projects', '/api/folders', '/api/uploads',
   '/api/orch/rigor-levels', '/api/orch/cron-preview', '/api/orch/schedules', '/api/metrics', '/api/metrics/history', '/api/away', '/api/orch/digest']);
-const absolutePath = (v) => (Array.isArray(v) ? v.some(absolutePath) : typeof v === 'string' && (path.isAbsolute(v) || v.startsWith('~')));
 function userBlocked(req, url, u) {
   const p = url.pathname;
   if (!p.startsWith('/api/')) return null; // the app and its static files
@@ -240,9 +239,8 @@ function userBlocked(req, url, u) {
   if (/^\/api\/convos\/[\w-]+\/export\.md$/.test(p)) return null; // its route answers 404 for a chat that isn't theirs
   if ((m = p.match(/^\/api\/convos\/([\w-]+)(?:\/|$)/))) return ownsConvo(u, findConvo(m[1])) ? null : NOT_YOURS;
   if (p.startsWith('/api/files/')) {
-    const q = url.searchParams;
-    if (absolutePath(q.getAll('path')) || absolutePath(q.getAll('dir'))) return 'Only paths inside your project';
-    return !q.has('cid') || ownsConvo(u, findConvo(q.get('cid'))) ? null : NOT_YOURS; // a POST's body is checked in readBody
+    const q = url.searchParams; // every path is confined to the chat's project in files.mjs; a POST's body cid is checked by rootFor
+    return !q.has('cid') || ownsConvo(u, findConvo(q.get('cid'))) ? null : NOT_YOURS;
   }
   if ((m = p.match(/^\/api\/orch\/tasks?\/(\d+)(\/[\w-]+)?$/))) return ['/assign', '/run-on'].includes(m[2]) ? ADMIN_ONLY : ownsPath(u, orch.pathOf('task', m[1])) ? null : NOT_YOURS;
   if ((m = p.match(/^\/api\/orch\/projects?\/(\d+)(\/[\w-]+)?$/))) return ownsPath(u, orch.pathOf('project', m[1])) ? null : NOT_YOURS;
@@ -2177,13 +2175,9 @@ async function handleRequest(req, res) {
   if (p === '/' || p === '/index.html') return serveFile(res, path.join(PUBLIC, 'index.html'));
   if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css' || p === '/browser.js' || p === '/browser.css' || p === '/previews.js' || p === '/previews.css' || p === '/schedules.js' || p === '/schedules.css' || p === '/users.js' || p === '/users.css' || p === '/credentials.js' || p === '/credentials.css' || p === '/shots.js' || p === '/shots.css' || p === '/commits.js' || p === '/commits.css' || p === '/tokens.js' || p === '/tokens.css' || p === '/prompts.js' || p === '/prompts.css' || p === '/code-download.js' || p === '/code-download.css' || p === '/execution.js' || p === '/execution.css' || p === '/phone.css') return serveFile(res, path.join(PUBLIC, p));
   // The Files view: listing, preview, download (a file, or a zip streamed on the fly), upload, and copy/move/zip/unzip over the whole disk, opening on the chat's project (files.mjs).
-  // A user's requests stay inside their own projects: only their chats' roots, and no absolute paths (userBlocked checks the query).
-  const filesBody = isAdmin(me) ? readBody : async (r) => {
-    const b = await readBody(r);
-    if (['path', 'paths', 'dest', 'dir'].some((k) => absolutePath(b[k]))) throw new HttpError(403, 'Only paths inside your project');
-    return b;
-  };
-  if (handleFiles(req, res, url, { rootFor: (cid) => { const c = findConvo(cid); return c && ownsConvo(me, c) ? c.cwd : null; }, json, readBody: filesBody })) return;
+  // A user's requests stay inside the chat's project: only their chats' roots, and every path (absolute ones and link
+  // targets too) must resolve inside it (files.mjs `confine`).
+  if (handleFiles(req, res, url, { rootFor: (cid) => { const c = findConvo(cid); return c && ownsConvo(me, c) ? c.cwd : null; }, json, readBody, confine: !isAdmin(me) })) return;
 
   if (p === '/api/status') {
     if (!onSubscription() && Date.now() - claudeAuth.checkedAt > 5000) await refreshClaudeAuth();
@@ -2415,6 +2409,8 @@ async function handleRequest(req, res) {
       // No body (or project: false): just this chat. {project: true, files, repo, preview}: the whole project (deleteProject).
       const body = await readBody(req).catch(() => ({}));
       if (body?.project) {
+        // A whole project (its chats, maybe its folder) only by its owner or an admin, never by a user it's shared with.
+        if (!isAdmin(me) && pathOwner(c.cwd) !== me.id) return json(res, 403, { error: NOT_YOURS });
         const r = await deleteProject(c, me, { files: !!body.files, repo: !!body.repo, preview: !!body.preview });
         if (r.error) return json(res, r.status, { error: r.error });
         saveConvos();
@@ -3084,7 +3080,9 @@ async function handleRequest(req, res) {
       const dir = safeCwd(url.searchParams.get('path') || WORKSPACE);
       // A user browses only the workspace's top level (their own projects) and inside those.
       const top = isAdmin(me) ? null : convos.filter((c) => ownsConvo(me, c)).map((c) => c.cwd);
-      if (top && dir !== WORKSPACE && !top.some((d) => dir === d || dir.startsWith(d + path.sep))) return json(res, 403, { error: NOT_YOURS });
+      // By real path, so a link inside a project never lists a folder outside it.
+      const real = (d) => { try { return fs.realpathSync(d); } catch { return null; } }, at = top && real(dir);
+      if (top && dir !== WORKSPACE && !top.map(real).some((d) => d && (at === d || at?.startsWith(d + path.sep)))) return json(res, 403, { error: NOT_YOURS });
       const crumbs = [];
       for (let d = dir; ; d = path.dirname(d)) {
         crumbs.unshift({ name: d === HOME ? '~' : path.basename(d), path: d });

@@ -305,7 +305,7 @@ test('HTTP: POST /api/files/{copy,move,zip,unzip,rename,new,delete} answer JSON 
 
 test('server.mjs routes the file ops only after the sign-in check, with the JSON body reader', () => {
   const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'server.mjs'), 'utf8');
-  const auth = src.indexOf('if (!isAuthed(req)) {'), route = src.indexOf('handleFiles(req, res, url,');
+  const auth = src.indexOf('if (!me) {'), route = src.indexOf('handleFiles(req, res, url,');
   assert.ok(auth > 0 && route > auth, 'handleFiles is behind the login');
   assert.match(src.slice(route, route + 200), /readBody/);
 });

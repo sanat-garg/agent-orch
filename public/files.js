@@ -3,7 +3,8 @@
 // Opens at the project's root (or the last folder, remembered per project for this page load only). Paths are absolute: the
 // path bar runs from '/', ‹ Parent (⌥↑, Backspace) climbs to '/', Places jumps to Project, Home, / and /tmp, and favourite folders
 // (saved per signed-in user and project in this browser's localStorage: fxFavs), and Go to folder
-// (⌘L) takes a typed absolute, ~ or relative path with completion from the listings. Protected entries (secrets) show a lock
+// (⌘L) takes a typed absolute, ~ or relative path with completion from the listings. A non-admin's Files is confined to the
+// project (listings say `confined`; Places is just Project, the path bar starts there and the server refuses anything outside). Protected entries (secrets) show a lock
 // and never open; a read-only location shows a tag and disables the menu's write actions. Icon and list views (list folders
 // open in place with disclosure triangles), back/forward (⌥← ⌥→, ⌘[ ⌘]; no buttons), a name filter,
 // hidden files on request (⌘⇧.), project-wide search by name or inside files (Enter in the search field; Names | Contents), and Quick Look (Space or double-click) for text, Markdown and images.
@@ -429,7 +430,10 @@ const fxRootName = () => (FX.proj && fxBase(FX.proj)) || String(currentConvo()?.
 function fxCrumbs() {
   if (!FX.path.startsWith('/')) return [{ name: fxRootName(), path: '' }];
   const parts = FX.path.split('/').filter(Boolean);
-  return [{ name: '/', path: '/' }, ...parts.map((name, i) => ({ name, path: '/' + parts.slice(0, i + 1).join('/') }))];
+  const all = [{ name: '/', path: '/' }, ...parts.map((name, i) => ({ name, path: '/' + parts.slice(0, i + 1).join('/') }))];
+  // A user's Files stays in the project (the server's `confined`): the path bar starts at it.
+  const top = FX.data?.confined && FX.proj ? all.findIndex((c) => c.path === FX.proj) : -1;
+  return top > 0 ? all.slice(top) : all;
 }
 // No writes here: the listing's own flag when there is one, else writes land only under the project, home and /tmp (Places
 // but '/'): this folder is one of them or inside one, or holds a writable entry that isn't a link or one of them (/private/tmp).
@@ -1235,7 +1239,7 @@ function fxPlacesOpen(x, y) {
   const places = FX.places || [{ label: 'Project', path: FX.proj || '' }, { label: '/', path: '/' }, { label: '/tmp', path: '/tmp' }];
   const { ok, list: favs } = FX.cid ? fxFavs() : { ok: true, list: [] }, here = fxFavHere(), saved = !!here && favs.includes(here);
   const m = fxMenuShow([
-    ...places.map((p) => ['place', p.label, p.label === p.path ? '' : fxTilde(p.path), !!FX.cid, () => fxNav(p.path), p.path]),
+    ...places.map((p) => ['place', p.label, p.label === p.path || FX.data?.confined ? '' : fxTilde(p.path), !!FX.cid, () => fxNav(p.path), p.path]),
     '-',
     ...favs.map((p) => ['fav', fxBase(p), FX.favGone.has(p) ? 'Missing' : fxTilde(fxParent(p)), true, () => fxNav(p), FX.favGone.has(p) ? `${p} (missing)` : p]),
     saved ? ['favdel', `Remove “${fxBase(here)}” from Favourites`, '', ok, () => fxFavRemove(here)]

@@ -30,6 +30,9 @@
 //   POST /api/files/upload?cid=&dir=<abs|rel>&path=<rel in upload>&overwrite=0|1, raw body → {saved} (409 {error: 'exists', path}; rules above uploadFile)
 //   POST /api/files/save?cid=&path=<abs|rel>&mtime=<ms>, raw body → {saved, mtime, size} (409 {error: 'changed', mtime}; rules above saveFile)
 //   (raw's text answers carry X-Mtime, the version the editor saves against; the rules for these seven are above copyPaths; errors are {error} with 400/403/404/409/413)
+// Confined (handleFiles `confine`, a non-admin's request): every path, absolute ones and link targets too, must stay
+// inside the project's real path (403 'Outside your project'); writes land only there, and listings offer no other places.
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -55,6 +58,11 @@ const SANDBOX = "sandbox; default-src 'none'; img-src 'self' data:; style-src 'u
 class FileError extends Error { constructor(status, message) { super(message); this.status = status; } }
 const within = (p, dir) => p === dir || p.startsWith(dir === '/' ? '/' : dir + path.sep);
 const realOr = (p) => { try { return fs.realpathSync(p); } catch { return null; } };
+// The confined request's project (real path), or undefined: handleFiles sets it per request once rootFor has found
+// the chat's project, and it carries through the request's promises. Confined but no project yet: nothing is inside.
+const jail = new AsyncLocalStorage();
+const confined = () => { const b = jail.getStore(); return b ? b.root || '\0none' : undefined; };
+const inJail = (real) => { const j = confined(); if (j && !within(real, j)) throw new FileError(403, 'Outside your project'); };
 const denied = (e) => (e.code === 'EACCES' || e.code === 'EPERM' ? new FileError(403, 'Permission denied') : new FileError(404, 'Not found'));
 
 // Secrets: listed (protected: true) but never previewed, downloaded, searched, copied, zipped or moved. {data} is the
@@ -89,6 +97,7 @@ const holdsSecret = (real) => protectRules().anchors.some((a) => within(a, real)
 
 // Where writes may land: the project, the home dir and /tmp (os.tmpdir() too), by real path.
 export function writeRoots(root) {
+  if (confined()) return [confined()];
   return [...new Set([root, os.homedir(), '/tmp', os.tmpdir()].filter(Boolean).map(realOr).filter(Boolean))];
 }
 function assertWritable(root, real) {
@@ -116,6 +125,7 @@ export function resolvePath(rootDir, p = '') {
   const at = path.resolve(s);
   let real;
   try { real = fs.realpathSync(at); } catch (e) { throw denied(e); }
+  inJail(real);
   return { root: realOr(rootDir), real, rel: real, at, abs: true };
 }
 
@@ -139,7 +149,7 @@ export function listDir(rootDir, p) {
     }
     const link = lst.isSymbolicLink();
     try { target = link ? fs.realpathSync(at) : at; st = link ? fs.statSync(target) : lst; } catch { continue; } // broken link
-    if (!abs && !within(target, root)) continue; // a link out of the project
+    if ((!abs || confined()) && !within(target, root)) continue; // a link out of the project
     if (!st.isDirectory() && !st.isFile()) continue; // sockets, fifos, devices
     const isDir = st.isDirectory(), secret = isSecret(at, target);
     entries.push({ name, path: at, dir: isDir, type: isDir ? 'dir' : 'file', size: st.isFile() ? st.size : null, mtime: Math.round(st.mtimeMs),
@@ -150,6 +160,7 @@ export function listDir(rootDir, p) {
   const segs = rel.split('/').filter(Boolean);
   segs.forEach((s, i) => crumbs.push({ name: s, path: (abs ? '/' : '') + segs.slice(0, i + 1).join('/') }));
   const places = [{ label: 'Project', path: root || path.resolve(rootDir) }, { label: 'Home', path: os.homedir() }, { label: '/', path: '/' }, { label: '/tmp', path: '/tmp' }];
+  if (confined()) return { dir: real, parent: real === root ? null : path.dirname(real), entries, places: places.slice(0, 1), truncated, name: crumbs.at(-1).name, path: rel, crumbs, confined: true };
   return { dir: real, parent: real === '/' ? null : path.dirname(real), entries, places, truncated, name: crumbs.at(-1).name, path: rel, crumbs };
 }
 
@@ -394,7 +405,7 @@ function sourceOf(rootDir, p) {
   const abs = path.join(parent, name), shown = projRel(root, abs) ?? abs;
   let lst, real;
   try { lst = fs.lstatSync(abs); real = fs.realpathSync(abs); } catch (e) { throw e.code === 'EACCES' ? denied(e) : new FileError(404, `Not found: ${shown}`); }
-  if (!s.startsWith('/')) resolveInside(root, relOf(root, abs)); // a link out of the project
+  if (!s.startsWith('/') || confined()) resolveInside(root, relOf(root, abs)); // a link out of the project
   if (isSecret(abs, real)) throw new FileError(403, `${shown} is protected`);
   return { root, abs, real, rel: projRel(root, abs), name, dir: fs.statSync(real).isDirectory(), link: lst.isSymbolicLink(), shown };
 }
@@ -940,7 +951,12 @@ const OPS = { copy: (root, b) => copyPaths(root, b.paths, b.dest), move: (root, 
   delete: (root, b) => deletePaths(root, b.paths) };
 const FS_ERRORS = { EACCES: [403, 'Permission denied'], EPERM: [403, 'Permission denied'], EROFS: [403, 'The disk is read-only'],
   EEXIST: [409, 'Something with that name is already there'], ENOSPC: [507, 'The disk is full'], ENOENT: [404, 'Not found'] };
-export function handleFiles(req, res, url, { rootFor, json, readBody }) {
+export function handleFiles(req, res, url, { rootFor, json, readBody, confine = false }) {
+  if (confine && !jail.getStore()) {
+    const box = { root: null };
+    return jail.run(box, () => handleFiles(req, res, url, { json, readBody, confine,
+      rootFor: (cid) => { const r = rootFor(cid); box.root = (r && realOr(r)) || null; return r; } }));
+  }
   const m = url.pathname.match(/^\/api\/files\/(list|raw|find|grep|changed|diff|download|copy|move|zip|unzip|rename|new|delete|upload|save)$/);
   if (!m || req.method !== (OPS[m[1]] || m[1] === 'upload' || m[1] === 'save' ? 'POST' : 'GET')) return false;
   const fail = (e) => {

@@ -921,6 +921,12 @@ const previews = createPreviews({ dataDir: DATA, forbid: [ROOT], ...sandboxCaddy
   onChange: () => {
     clearTimeout(previewPush);
     previewPush = setTimeout(() => { broadcastConvos(); for (const ws of allClients) send(ws, { t: 'previews' }); }, 150);
+  },
+  // A moved address rewrote the project's own files (previews.mjs rewriteHost): commit and push them, unless a chat there is
+  // mid-turn (its own commit after the reply takes them).
+  onMove: async (dir, { to, files }) => {
+    if (convos.some((x) => x.cwd === dir && chatBusy(x))) return;
+    await syncGit(dir, `Live preview moved to https://${to} (${files.length} file${files.length === 1 ? '' : 's'} updated)`);
   } });
 // The line every agent working on the project gets (chat, planner and task runs). Agents publish a project themselves
 // through bin/preview.mjs (owner, 2026-10-24: "give projects the ability to create their own live previews and give me the
@@ -935,7 +941,7 @@ const executionNote = (c) => (c && findConvo(mainChatId(c.cwd))?.execution ? EXE
 const previewNote = (dir) => {
   if (path.resolve(dir || '/') === ROOT) return "Live preview: none (agent-orch can't preview its own folder: it would boot a second server). Don't add domains, subdomains or Caddy site blocks for it.";
   const v = previews.view(dir);
-  return v ? `Live preview: ${v.url} (served from this project's main branch, redeployed after each commit/merge; web apps must listen on process.env.PORT, static sites need an index.html or a build script that outputs dist/). It is the project's public address: give the owner this link whenever they'd want to look at it. \`${PREVIEW_CMD} --logs\` shows its last log lines and \`--restart\` redeploys it. ${PUBLISH_RULE}`
+  return v ? `Live preview: ${v.url} (served from this project's main branch, redeployed after each commit/merge; web apps must listen on process.env.PORT and should read their own address from process.env.PREVIEW_URL rather than hard-code it, static sites need an index.html or a build script that outputs dist/). It is the project's public address: give the owner this link whenever they'd want to look at it. \`${PREVIEW_CMD} --logs\` shows its last log lines and \`--restart\` redeploys it. ${PUBLISH_RULE}`
     : `Live preview: none yet. When the owner wants to see or use the project online, or you've built a website or web app worth showing, publish it yourself instead of asking the owner to deploy it: run \`${PREVIEW_CMD} [name]\` in the project folder (name = the subdomain, default the folder name). It prints the https link: put that link in your reply. It serves the main branch and redeploys after each commit/merge, so commit first; web apps must listen on process.env.PORT, static sites need an index.html or a build script that outputs dist/. ${PUBLISH_RULE}`;
 };
 // bin/preview.mjs → POST /api/agent/preview: the project folder holding `dir` (a task worktree resolves to its main tree
@@ -2329,7 +2335,7 @@ async function handleRequest(req, res) {
     if (!pvm[2] && req.method === 'PUT') {
       const body = await readBody(req);
       const r = String(body.slug || '').trim() ? await previews.set(c.cwd, String(body.slug), body.domain || null) : await previews.remove(c.cwd);
-      return json(res, r.error ? 400 : 200, r.error ? r : { ok: true, preview: previews.view(c.cwd) });
+      return json(res, r.error ? 400 : 200, r.error ? r : { ok: true, preview: previews.view(c.cwd), ...(r.moved && { moved: r.moved }) });
     }
     if (pvm[2] === 'restart' && req.method === 'POST') {
       if (!previews.view(c.cwd)) return json(res, 404, { error: 'This project has no live preview' });

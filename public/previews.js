@@ -462,13 +462,17 @@
       const slug = slugOf();
       if (!slug) return input.focus();
       save.disabled = true;
+      // A move rewrites the project's files, restarts it and waits for the certificate (server previews.mjs set): up to ~30 s.
+      save.textContent = v ? 'Moving…' : 'Adding…';
       try {
         const r = await api(`/api/convos/${c.id}/preview`, 'PUT', { slug, domain: ed.domain });
-        const pending = r?.preview?.cert === 'pending' ? ' (certificate on its way: open it in a few seconds)' : '';
-        toast(`Live preview: https://${host({ slug, domain: ed.domain })}${pending}`, { kind: 'success' });
+        const pending = r?.preview?.cert === 'pending' ? ' The certificate is on its way: open it in a few seconds.' : '';
+        const n = r?.moved?.files.length || 0;
+        const moved = r?.moved ? ` ${r.moved.from.replace(/^https:\/\//, '')} now forwards here${n ? `; ${n} file${n > 1 ? 's' : ''} in the project updated` : ''}.` : '';
+        toast(`Live preview: https://${host({ slug, domain: ed.domain })}.${moved}${pending}`, { kind: 'success', duration: moved ? 8000 : undefined });
         input.blur(); PV.editing.delete(c.id);
         await load(); render();
-      } catch (e) { renderCheck(check, { ok: false, error: e.message }); save.disabled = false; }
+      } catch (e) { renderCheck(check, { ok: false, error: e.message }); save.disabled = false; save.textContent = v ? 'Save' : 'Add'; }
     };
     const bar = el('div', 'pv-ed-acts');
     if (v) {

@@ -22,7 +22,7 @@ other.example.com {
 
 // A fake `sudo …` that edits files in the temp dir; caddy validate fails while `bad.fail` is set.
 // Certificates are "there" at once unless a test passes its own tlsProbe; `bad.reloadFail` makes systemctl fail.
-function setup({ ports = [45100 + Math.floor(Math.random() * 400), 45599], tlsProbe = async () => true, admin = null, certWaitMs = 2000, certTotalMs = 5000 } = {}) {
+function setup({ ports = [45100 + Math.floor(Math.random() * 400), 45599], tlsProbe = async () => true, admin = null, certWaitMs = 2000, certTotalMs = 5000, onMove } = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'previews-'));
   const caddyfile = path.join(tmp, 'Caddyfile'), includeFile = path.join(tmp, 'agent-orch-previews.caddy');
   fs.writeFileSync(caddyfile, OWNER_CADDY);
@@ -43,7 +43,7 @@ function setup({ ports = [45100 + Math.floor(Math.random() * 400), 45599], tlsPr
   };
   const changes = [];
   const pv = createPreviews({ dataDir: path.join(tmp, 'data'), caddyfile, includeFile, exec, ports, debounceMs: 20, healthMs: 15000,
-    forbid: [path.join(tmp, 'agent-orch')], onChange: (d) => changes.push(d), tlsProbe, admin, certWaitMs, certTotalMs });
+    forbid: [path.join(tmp, 'agent-orch')], onChange: (d) => changes.push(d), tlsProbe, admin, certWaitMs, certTotalMs, onMove });
   return { tmp, caddyfile, includeFile, calls, bad, pv, changes, cleanup: async () => { await pv.stopAll(); fs.rmSync(tmp, { recursive: true, force: true }); } };
 }
 const get = (url) => new Promise((resolve, reject) => http.get(url, (r) => { let b = ''; r.on('data', (d) => (b += d)); r.on('end', () => resolve({ status: r.statusCode, body: b })); }).on('error', reject));
@@ -194,6 +194,52 @@ test('static site is served; empty folder waits; a node app redeploys after a co
     pv.redeploy(app);
     await until(async () => (await get(`http://127.0.0.1:${n.port}/`).catch(() => ({}))).body === 'v2');
     await until(() => pv.view(app).status === 'running');
+  } finally { await cleanup(); }
+});
+
+test('moving an address: old host forwards pages and proxies the rest, files follow, the app restarts on the new URL', async () => {
+  const moves = [];
+  const { pv, tmp, includeFile, cleanup } = setup({ certWaitMs: 15000, onMove: async (dir, m) => { moves.push(m); } });
+  try {
+    await pv.addDomain('example.dev');
+    const app = path.join(tmp, 'app'); fs.mkdirSync(path.join(app, '.agent-orch', 'tasks'), { recursive: true });
+    fs.writeFileSync(path.join(app, 'server.js'),
+      `require('http').createServer((q, r) => r.end(process.env.PREVIEW_URL + ' ' + require('fs').readFileSync('.env', 'utf8'))).listen(process.env.PORT, '127.0.0.1');`);
+    fs.writeFileSync(path.join(app, 'package.json'), '{"name":"app","scripts":{"start":"node server.js"}}');
+    fs.writeFileSync(path.join(app, '.env'), 'PUBLIC_URL=https://alpha.greygoose.baby\n'); // untracked, still rewritten
+    fs.writeFileSync(path.join(app, 'README.md'), 'Live at https://alpha.greygoose.baby/app. Not beta-alpha.greygoose.baby, me@alpha.greygoose.baby or alpha.greygoose.baby.example.\n');
+    fs.writeFileSync(path.join(app, '.agent-orch', 'tasks', '1-x.md'), 'Checked https://alpha.greygoose.baby\n'); // history stays true
+    const git = (...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: app });
+    git('init', '-q'); git('add', 'server.js', 'package.json', 'README.md', '.agent-orch'); git('commit', '-qm', 'v1');
+    const a = await pv.set(app, 'alpha');
+    await until(() => pv.view(app).status === 'running');
+    assert.equal((await get(`http://127.0.0.1:${a.port}/`)).body, 'https://alpha.greygoose.baby PUBLIC_URL=https://alpha.greygoose.baby\n');
+
+    const r = await pv.set(app, 'shop', 'example.dev');
+    assert.equal(r.status, 'running', 'set answers once the app is back up');
+    assert.deepEqual(r.moved, { from: 'https://alpha.greygoose.baby', files: ['README.md', '.env'] });
+    assert.deepEqual(moves, [{ from: 'alpha.greygoose.baby', to: 'shop.example.dev', files: ['README.md', '.env'] }]);
+    assert.equal((await get(`http://127.0.0.1:${r.port}/`)).body, 'https://shop.example.dev PUBLIC_URL=https://shop.example.dev\n');
+    assert.equal(fs.readFileSync(path.join(app, 'README.md'), 'utf8'),
+      'Live at https://shop.example.dev/app. Not beta-alpha.greygoose.baby, me@alpha.greygoose.baby or alpha.greygoose.baby.example.\n');
+    assert.match(fs.readFileSync(path.join(app, '.agent-orch', 'tasks', '1-x.md'), 'utf8'), /alpha\.greygoose\.baby/);
+    const inc = fs.readFileSync(includeFile, 'utf8');
+    assert.match(inc, new RegExp(`\nalpha\\.greygoose\\.baby \\{\n\tencode gzip\n\t@page method GET HEAD\n\tredir @page https://shop\\.example\\.dev\\{uri\\} 308\n\treverse_proxy 127\\.0\\.0\\.1:${r.port}\n\\}`));
+    assert.match(inc, /\nshop\.example\.dev \{/);
+
+    // The old name is free for another project, which then owns that host (no forwarding block any more).
+    const b = path.join(tmp, 'b'); fs.mkdirSync(b);
+    assert.equal(pv.check('alpha', b).ok, true);
+    await pv.set(b, 'alpha');
+    assert.doesNotMatch(fs.readFileSync(includeFile, 'utf8'), /redir @page/);
+    // Moving back to an earlier address drops it from the forwards.
+    await pv.set(app, 'shop-two', 'example.dev');
+    assert.deepEqual(pv.list().find((x) => x.dir === app).slug, 'shop-two');
+    assert.match(fs.readFileSync(includeFile, 'utf8'), /\nshop\.example\.dev \{\n\tencode gzip\n\t@page/);
+    assert.equal(moves.length, 2);
+    await pv.set(app, 'shop', 'example.dev');
+    assert.doesNotMatch(fs.readFileSync(includeFile, 'utf8'), /\nshop\.example\.dev \{\n\tencode gzip\n\t@page/);
+    assert.match(fs.readFileSync(includeFile, 'utf8'), /\nshop-two\.example\.dev \{\n\tencode gzip\n\t@page/);
   } finally { await cleanup(); }
 });
 

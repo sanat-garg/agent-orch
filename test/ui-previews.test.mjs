@@ -192,15 +192,16 @@ test('sidebar manager: live cards, Add address, Edit, domains, and slug changes 
       let put = null;
       await page.route('**/api/convos/c0/preview', (route) => {
         put = route.request().postDataJSON();
-        // Caddy hasn't got the new host's certificate yet: the toast says so (the link would show an SSL error).
-        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, preview: { cert: 'pending' } }) });
+        // Caddy hasn't got the new host's certificate yet: the toast says so (the link would show an SSL error), and what moved.
+        return route.fulfill({ status: 200, contentType: 'application/json',
+          body: JSON.stringify({ ok: true, preview: { cert: 'pending' }, moved: { from: 'https://demo-site.greygoose.baby', files: ['.env', 'README.md'] } }) });
       });
       await demo.locator('.pv-act', { hasText: 'Edit' }).click();
       await demo.locator('input.pv-slug').fill('demo-two');
       await page.waitForFunction(() => /demo-two\.greygoose\.baby is free/.test(document.querySelector('.pv-row[data-cid="c0"] .pv-check').textContent));
       await demo.locator('button', { hasText: 'Save' }).click();
       await page.waitForFunction(() => document.querySelector('.toast')?.textContent.includes('demo-two'));
-      assert.match(await page.locator('.toast').first().textContent(), /certificate on its way/);
+      assert.match(await page.locator('.toast').first().textContent(), /demo-site\.greygoose\.baby now forwards here; 2 files in the project updated\. The certificate is on its way/);
       assert.deepEqual(put, { slug: 'demo-two', domain: 'greygoose.baby' });
       // A row whose certificate is still pending or failed says so instead of "Live".
       const pills = await page.evaluate(() => {

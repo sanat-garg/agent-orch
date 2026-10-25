@@ -9,13 +9,19 @@
 //     an SSL error meanwhile), so every added host is TLS-probed until Caddy serves a matching certificate: `set` waits up
 //     to certWaitMs before answering and view() reports `cert` ('pending' | 'ok' | 'failed') for the UI's pill.
 //     A removed domain joins previews.json `oldDomains`: <slug>.<old> keeps a cert and 308s to the preview's current address.
-//   - Running (detectKind): package.json with a start script → `npm start` with PORT (built first if it has a build
+//   - Moving an address (`set` on a project that has one; owner, 2026-10-25: "shift everything so it is a ready website"):
+//     the old host joins the entry's `aliases` (last 5): page visits (GET/HEAD) 308 to the new address and everything else
+//     is still proxied, so API clients elsewhere (other projects, installed extensions, a CORS preflight that can't follow
+//     a redirect) keep working. `rewriteHost` swaps the old host for the new one in the project's own text files (.env*,
+//     config, README, .agent-orch notes; not task history), `onMove` commits them (server.mjs), then the app redeploys
+//     with the new PREVIEW_URL, and `set` answers once the certificate and the restart are done (or after certWaitMs).
+//   - Running (detectKind): package.json with a start script → `npm start` with PORT and PREVIEW_URL (built first if it has a build
 //     script); a build script only → static files from dist/, build/ or out/; index.html (or public/index.html) → static,
 //     served in-process; index.php → `php -S`. Ports come from PORTS and stay with the project. Processes are detached,
 //     tagged AGENT_ORCH_PREVIEW=<host>, restarted on a crash with backoff, and killed/restarted when the server boots.
 //   - Redeploy: `redeploy(dir)` after every commit/merge to the project's main tree (server.mjs syncGit), debounced, and
 //     skipped when HEAD hasn't moved since the last healthy deploy. `restart(dir)` always redeploys.
-// API: createPreviews({dataDir, domain (the first default), caddyfile, includeFile, exec, forbid, onChange, …}) →
+// API: createPreviews({dataDir, domain (the first default), caddyfile, includeFile, exec, forbid, onChange, onMove, …}) →
 //   {domains(), addDomain(d), removeDomain(d), check(slug, dir, domain), set(dir, slug, domain), remove(dir), view(dir), list(),
 //    redeploy(dir), restart(dir), logs(dir), startAll(), stopAll()}.
 // Tests inject `exec` (no real sudo/caddy) and `caddyfile`/`includeFile` paths in a temp dir.
@@ -68,6 +74,12 @@ export function renderCaddy(entries, { oldDomains = [], taken = () => false } = 
   const head = '# Managed by agent-orch (previews.mjs): live previews. Regenerated on every change; edits here are overwritten.\n';
   const live = new Set(entries.map((e) => hostName(e.slug, e.domain)));
   const blocks = entries.map((e) => [hostName(e.slug, e.domain), `\tencode gzip\n\treverse_proxy 127.0.0.1:${e.port}`]);
+  for (const e of entries) for (const a of e.aliases || []) { // a moved preview's earlier addresses
+    const host = hostName(a.slug, a.domain);
+    if (live.has(host) || taken(a.slug === APEX ? '' : a.slug, a.domain)) continue;
+    live.add(host);
+    blocks.push([host, `\tencode gzip\n\t@page method GET HEAD\n\tredir @page https://${hostName(e.slug, e.domain)}{uri} 308\n\treverse_proxy 127.0.0.1:${e.port}`]);
+  }
   for (const old of oldDomains) for (const e of entries) {
     const host = hostName(e.slug, old);
     if (e.slug === APEX || live.has(host) || taken(e.slug, old)) continue;
@@ -133,6 +145,30 @@ const probe = (port) => new Promise((resolve) => {
   req.on('error', () => resolve(false)).on('timeout', () => { req.destroy(); resolve(false); });
 });
 const gitHead = (dir) => new Promise((resolve) => execFile('git', ['rev-parse', 'HEAD'], { cwd: dir, timeout: 10000 }, (err, out) => resolve(err ? null : String(out).trim())));
+// A moved preview: `from` → `to` in the project's tracked text files and its top-level .env* files (not node_modules, task
+// history or the journal, which record what was true then). Whole host names only: not a longer subdomain, a longer name
+// or an e-mail address. Resolves to the changed paths (relative to dir).
+export async function rewriteHost(dir, from, to) {
+  const tracked = await new Promise((resolve) => execFile('git', ['ls-files', '-z'], { cwd: dir, timeout: 30000, maxBuffer: 64e6 },
+    (err, out) => resolve(err ? [] : String(out).split('\0').filter(Boolean))));
+  let envs = [];
+  try { envs = fs.readdirSync(dir).filter((f) => /^\.env/.test(f)); } catch {}
+  const re = new RegExp(`(?<![\\w.@-])${from.replace(/\./g, '\\.')}(?![\\w-]|\\.\\w)`, 'g');
+  const changed = [];
+  for (const f of new Set([...tracked, ...envs])) {
+    if (/(^|\/)node_modules\//.test(f) || /^\.agent-orch\/(tasks\/|JOURNAL\.md$)/.test(f)) continue;
+    const file = path.join(dir, f);
+    try {
+      const st = fs.lstatSync(file);
+      if (!st.isFile() || st.size > 2e6) continue;
+      const buf = fs.readFileSync(file);
+      if (buf.subarray(0, 8000).includes(0) || !buf.includes(from)) continue;
+      const text = buf.toString('utf8'), next = text.replace(re, to);
+      if (next !== text) { fs.writeFileSync(file, next); changed.push(f); }
+    } catch {}
+  }
+  return changed;
+}
 // Does Caddy (127.0.0.1:443) already serve a certificate naming `host`? Until its ACME order completes a handshake with
 // that server name fails (or, with on-demand issuance off, gets no certificate), which browsers show as an SSL error.
 function defaultTlsProbe(host, port = 443) {
@@ -157,7 +193,7 @@ async function postConfig(admin, json) {
 
 export function createPreviews({
   dataDir, domain = 'greygoose.baby', caddyfile = '/etc/caddy/Caddyfile', includeFile = '/etc/caddy/agent-orch-previews.caddy',
-  exec = defaultExec, forbid = [], onChange = () => {}, log = () => {}, ports = PORTS, debounceMs = 2000, healthMs = HEALTH_MS,
+  exec = defaultExec, forbid = [], onChange = () => {}, onMove = async () => {}, log = () => {}, ports = PORTS, debounceMs = 2000, healthMs = HEALTH_MS,
   spawnFn = spawn, tlsProbe = defaultTlsProbe, admin = 'http://127.0.0.1:2019', certWaitMs = 25000, certTotalMs = 180000,
 } = {}) {
   const file = path.join(dataDir, 'previews.json');
@@ -379,7 +415,7 @@ export function createPreviews({
     const s = st(dir);
     const fd = fs.openSync(logFile(e), 'a');
     const child = spawnFn(cmd, args, { cwd: dir, detached: true, stdio: ['ignore', fd, fd],
-      env: { ...process.env, PORT: String(e.port), AGENT_ORCH_PREVIEW: hostOf(e) } });
+      env: { ...process.env, PORT: String(e.port), PREVIEW_URL: url(e.slug, e.domain), AGENT_ORCH_PREVIEW: hostOf(e) } });
     fs.closeSync(fd);
     s.child = child;
     e.pid = child.pid; save();
@@ -460,18 +496,32 @@ export function createPreviews({
       if (prev?.slug === c.slug && prev.domain === c.domain) return { ok: true, ...view(dir) };
       const port = prev?.port || (await pickPort(dir));
       if (prev) await stop(dir); // while store[dir] still names the old host (its process tag)
-      store[dir] = { slug: c.slug, domain: c.domain, port, pid: null };
+      const aliases = prev ? [...(prev.aliases || []), { slug: prev.slug, domain: prev.domain }]
+        .filter((a, i, all) => !(a.slug === c.slug && a.domain === c.domain) && all.findIndex((b) => b.slug === a.slug && b.domain === a.domain) === i).slice(-5) : [];
+      store[dir] = { slug: c.slug, domain: c.domain, port, pid: null, ...(aliases.length && { aliases }) };
       save(); // before the reload, so the entry survives if this process dies during it
       try { await applyCaddy(); } catch (err) {
         if (prev) { store[dir] = prev; queueDeploy(dir); } else delete store[dir];
         save();
         return { error: err.message };
       }
-      if (prev) { fs.rmSync(logFile(prev), { force: true }); forgetCert(hostOf(prev)); }
-      queueDeploy(dir);
+      let moved = null;
+      if (prev) {
+        fs.rmSync(logFile(prev), { force: true });
+        // The project's own files follow the address, committed before the redeploy so it serves the new one everywhere.
+        const from = hostOf(prev), to = hostOf(store[dir]), s = st(dir);
+        s.moving = true;
+        try {
+          const files = await rewriteHost(dir, from, to);
+          if (files.length) await Promise.race([onMove(dir, { from, to, files }), sleep(15000)]).catch((err) => log(`move ${dir}: ${err.message}`));
+          moved = { from: url(prev.slug, prev.domain), files };
+        } finally { s.moving = false; }
+      }
+      const deployed = queueDeploy(dir);
       onChange(dir);
-      await certReady(hostOf(store[dir])); // so the link in the reply works when tapped (up to certWaitMs)
-      return { ok: true, ...view(dir) };
+      // So the link works when tapped: the certificate (a new host) and, after a move, the restarted app (up to certWaitMs).
+      await Promise.race([Promise.all([certReady(hostOf(store[dir])), prev ? deployed : null]), sleep(certWaitMs)]);
+      return { ok: true, ...view(dir), ...(moved && { moved }) };
     },
     async remove(dir) {
       const e = store[dir];
@@ -492,6 +542,7 @@ export function createPreviews({
       const s = st(dir);
       clearTimeout(s.timer);
       s.timer = setTimeout(async () => {
+        if (s.moving) return; // set() deploys once the move's commit is in
         if (s.status === 'running' && s.healthyHead && s.healthyHead === (await gitHead(dir))) return;
         queueDeploy(dir);
       }, debounceMs);

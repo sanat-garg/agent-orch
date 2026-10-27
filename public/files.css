@@ -81,6 +81,7 @@
 .fx-item .fx-ico.thumb img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 3px; box-shadow: 0 1px 3px rgba(0, 0, 0, .28); background: #fff; }
 .fx-item .fx-name { max-width: 100%; padding: 1px 6px; border-radius: 5px; font-size: 12.5px; line-height: 1.3; text-align: center; overflow-wrap: anywhere;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.fx-item .fx-info { min-height: 1.3em; margin-top: -3px; font-size: 11px; line-height: 1.3; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .fx-item[aria-selected="true"] .fx-ico { background: var(--fx-sel-idle); }
 .fx-item[aria-selected="true"] .fx-name { background: var(--fx-sel-idle); }
 .fx-grid:focus .fx-item[aria-selected="true"] .fx-name { background: var(--fx-sel); color: var(--fx-sel-text); }

@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { changedFiles, findFiles, FIND_VISIT_MAX, grepFiles, handleFiles, listDir, resolveInside, TEXT_MAX } from '../files.mjs';
+import { changedFiles, dirSizes, findFiles, FIND_VISIT_MAX, grepFiles, handleFiles, listDir, resolveInside, TEXT_MAX } from '../files.mjs';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-files-'));
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -92,6 +92,23 @@ test('GET /api/files/*: images as themselves, text capped, binary refused, sandb
   const again = await get('raw', 'README.md', 'c1', { 'If-Modified-Since': readme.headers.get('last-modified') });
   assert.equal(again.status, 304);
   assert.equal((await get('raw', 'src')).status, 400);
+});
+
+test('GET /api/files/sizes: each folder\'s total bytes, linked folders left out, confined users stay inside', async (t) => {
+  const json = (res, status, body) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
+  const server = http.createServer((req, res) => {
+    const confine = new URL(req.url, 'http://x').searchParams.get('as') === 'user';
+    if (!handleFiles(req, res, new URL(req.url, 'http://x'), { rootFor: (cid) => (cid === 'c1' ? root : null), json, confine })) { res.writeHead(404); res.end(); }
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => server.close());
+  const sizes = (dir, as = '') => fetch(`http://127.0.0.1:${server.address().port}/api/files/sizes?cid=c1&dir=${encodeURIComponent(dir)}&as=${as}`);
+  const r = await (await sizes('')).json();
+  assert.deepEqual(r.sizes, { src: 15 }, 'src/app.js; src-link (a link) and the files themselves get none');
+  assert.equal(r.partial, false);
+  assert.deepEqual((await dirSizes(root, 'src')).sizes, { deep: 0 });
+  assert.equal((await sizes(tmp, 'user')).status, 403, 'outside the project');
+  assert.equal((await sizes('README.md')).status, 400);
 });
 
 test('findFiles: matches at any depth, skips node_modules/.git/hidden folders, ignores links out, stops at the cap', () => {

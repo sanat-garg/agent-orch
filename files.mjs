@@ -10,6 +10,7 @@
 //       (`path=` works as well as `dir=`; dir/parent/entry paths are absolute real paths; the top-level `path` and crumbs
 //       are project-relative for a relative request, absolute otherwise; type is 'dir' or 'file', of what a link points to;
 //       at most LIST_MAX entries; an entry it can't stat is kept with readable: false)
+//   GET /api/files/sizes?cid=<chat>&dir=<abs|rel> → {dir, sizes: {name: bytes} (its folders), partial} (rules above dirSizes)
 //   GET /api/files/raw?cid=<chat>&path=<abs|rel>[&edit=1] → the file (images), or text/plain (first TEXT_MAX bytes, SAVE_MAX
 //       with edit=1, the editor's read; 415 for binary)
 //   GET /api/files/find?cid=<chat>&q=<text>[&dir=] → {q, entries: [{name, path, dir, size, mtime}], truncated} (q: 2+ chars)
@@ -162,6 +163,39 @@ export function listDir(rootDir, p) {
   const places = [{ label: 'Project', path: root || path.resolve(rootDir) }, { label: 'Home', path: os.homedir() }, { label: '/', path: '/' }, { label: '/tmp', path: '/tmp' }];
   if (confined()) return { dir: real, parent: real === root ? null : path.dirname(real), entries, places: places.slice(0, 1), truncated, name: crumbs.at(-1).name, path: rel, crumbs, confined: true };
   return { dir: real, parent: real === '/' ? null : path.dirname(real), entries, places, truncated, name: crumbs.at(-1).name, path: rel, crumbs };
+}
+
+// The size of each folder in a listing: `du -sb` per folder, SIZES_JOBS at a time (apparent bytes, like a file's size; one
+// file system; never follows links, so a confined user's sizes stay inside the project). All of it stops after SIZES_MS, so a huge
+// folder only loses its own size (partial: true). Cached SIZES_TTL per folder; linked folders get no size.
+export const SIZES_MS = 4000;
+const SIZES_JOBS = 4, SIZES_TTL = 30e3, sizesCache = new Map(), PSEUDO = new Set(['proc', 'sys']); // their sizes are fiction
+export async function dirSizes(rootDir, p) {
+  const { real } = resolvePath(rootDir, p);
+  if (!fs.statSync(real).isDirectory()) throw new FileError(400, 'Not a folder');
+  const hit = sizesCache.get(real);
+  if (hit && Date.now() - hit.at < SIZES_TTL) return hit.r;
+  const names = [];
+  const d = fs.opendirSync(real);
+  try { for (let e; (e = d.readSync());) { if (names.length >= LIST_MAX) break; if (e.isDirectory() && !(real === '/' && PSEUDO.has(e.name))) names.push(e.name); } }
+  finally { d.closeSync(); }
+  const sizes = {}, end = Date.now() + SIZES_MS;
+  let partial = false;
+  const one = (name) => new Promise((done) => {
+    const left = end - Date.now();
+    if (left <= 0) { partial = true; return done(); }
+    execFile('du', ['-sbxP', '--', path.join(real, name)], { timeout: left }, (e, stdout) => {
+      const n = parseInt(String(stdout), 10); // du exits 1 over an unreadable subfolder but still prints a total
+      if (e?.killed) partial = true; else if (Number.isFinite(n)) sizes[name] = n;
+      done();
+    });
+  });
+  const queue = [...names];
+  await Promise.all(Array.from({ length: SIZES_JOBS }, async () => { while (queue.length) await one(queue.shift()); }));
+  const r = { dir: real, sizes, partial };
+  if (sizesCache.size > 100) sizesCache.clear();
+  sizesCache.set(real, { at: Date.now(), r });
+  return r;
 }
 
 // Breadth-first walk of a folder (the project, or find/grep's dir), shared by find and grep, so shallow entries come
@@ -957,7 +991,7 @@ export function handleFiles(req, res, url, { rootFor, json, readBody, confine = 
     return jail.run(box, () => handleFiles(req, res, url, { json, readBody, confine,
       rootFor: (cid) => { const r = rootFor(cid); box.root = (r && realOr(r)) || null; return r; } }));
   }
-  const m = url.pathname.match(/^\/api\/files\/(list|raw|find|grep|changed|diff|download|copy|move|zip|unzip|rename|new|delete|upload|save)$/);
+  const m = url.pathname.match(/^\/api\/files\/(list|sizes|raw|find|grep|changed|diff|download|copy|move|zip|unzip|rename|new|delete|upload|save)$/);
   if (!m || req.method !== (OPS[m[1]] || m[1] === 'upload' || m[1] === 'save' ? 'POST' : 'GET')) return false;
   const fail = (e) => {
     if (res.headersSent) return res.destroy();
@@ -966,6 +1000,7 @@ export function handleFiles(req, res, url, { rootFor, json, readBody, confine = 
     const [status, error] = e.status ? [e.status, e.message] : FS_ERRORS[e.code] || [500, OPS[m[1]] ? `Could not ${m[1]} it` : 'Could not read it'];
     json(res, status, { error });
   };
+  if (req.method === 'POST') sizesCache.clear(); // a write can change any folder's size
   if (OPS[m[1]]) {
     readBody(req).then((b) => {
       const root = rootFor(b.cid ?? url.searchParams.get('cid'));
@@ -986,6 +1021,7 @@ export function handleFiles(req, res, url, { rootFor, json, readBody, confine = 
       saveFile(root, q.get('path'), req, { mtime: q.get('mtime'), size: req.headers['content-length'] }).then((r) => json(res, 200, r), fail);
     }
     else if (m[1] === 'list') json(res, 200, listDir(root, url.searchParams.get('path') ?? url.searchParams.get('dir')));
+    else if (m[1] === 'sizes') dirSizes(root, url.searchParams.get('dir') ?? '').then((r) => json(res, 200, r), fail);
     else if (m[1] === 'find' || m[1] === 'grep') {
       const q = (url.searchParams.get('q') || '').trim();
       if (q.length < 2) throw new FileError(400, 'Type at least 2 characters');

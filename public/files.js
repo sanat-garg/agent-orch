@@ -77,6 +77,9 @@ function fxSize(n) {
   do { n /= 1000; i++; } while (n >= 1000 && i < u.length - 1);
   return `${n >= 100 ? Math.round(n) : n.toFixed(1).replace(/\.0$/, '')} ${u[i]}`;
 }
+// What a row shows for size: a folder's comes later from fxDu ('--' until then, '' in the icon grid).
+const fxEntrySize = (e, blank = '--') => (e.dir ? (e.du != null ? fxSize(e.du) : blank) : e.size != null ? fxSize(e.size) : blank);
+const fxListSub = (e) => (e.dir ? (e.du != null ? `Folder · ${fxSize(e.du)}` : 'Folder') : `${fxSize(e.size)} · ${fxDate(e.mtime)}`);
 function fxDate(ms) {
   const d = new Date(ms), now = new Date(), t = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
@@ -268,6 +271,25 @@ async function fxLoad(focus = false) {
   } finally { if (seq === FX.seq) $('filesView').classList.remove('loading'); }
   fxRender();
   if (focus) fxFocus();
+  if (FX.data && seq === FX.seq) { fxDu(FX.path, FX.data.entries); for (const rel of FX.expanded) fxDu(rel, FX.kids.get(rel)); }
+}
+// Folder sizes (du on the server, up to 4 s) arrive after the listing: painted in place, re-sorted when sorting by size.
+async function fxDu(rel, entries) {
+  if (!entries?.some((e) => e.dir)) return;
+  const cid = FX.cid;
+  let r;
+  try { r = await api(`/api/files/sizes?cid=${encodeURIComponent(cid)}&dir=${encodeURIComponent(rel)}`); } catch { return; }
+  if (cid !== FX.cid || !r?.sizes) return;
+  for (const e of entries) if (e.dir && r.sizes[e.name] != null) e.du = r.sizes[e.name];
+  if (FX.find || FX.view === 'changed' || FX.edit) return;
+  if (FX.sort.key === 'size') { const had = $('fxMain').contains(document.activeElement); fxRender(); if (had) fxFocus(); return; }
+  for (const o of $('fxMain').querySelectorAll('[data-i]')) {
+    const e = FX.rows[+o.dataset.i]?.e;
+    if (!e?.dir || e.du == null) continue;
+    const size = o.querySelector('.fx-c.size, .fx-info'), sub = o.querySelector('.fx-sub');
+    if (size) size.textContent = fxEntrySize(e, '');
+    if (sub) sub.textContent = fxListSub(e);
+  }
 }
 function fxGo(rel, { push = true } = {}) {
   if (push && rel !== FX.path) { FX.back.push(FX.path); FX.fwd = []; }
@@ -363,7 +385,7 @@ function fxAskAbout(rel, line) {
 }
 function fxSorted(entries) {
   const { key, dir } = FX.sort;
-  const val = (e) => (key === 'size' ? e.size ?? -1 : key === 'date' ? e.mtime : key === 'kind' ? kindOf(e) : e.name);
+  const val = (e) => (key === 'size' ? e.size ?? e.du ?? -1 : key === 'date' ? e.mtime : key === 'kind' ? kindOf(e) : e.name);
   return entries.filter((e) => FX.hidden || !e.hidden).filter((e) => !FX.filter || e.name.toLowerCase().includes(FX.filter))
     .sort((a, b) => (b.dir - a.dir) || dir * (typeof val(a) === 'number' ? val(a) - val(b) : String(val(a)).localeCompare(String(val(b)), undefined, { numeric: true, sensitivity: 'base' })));
 }
@@ -628,7 +650,7 @@ function fxIcons() {
   if (FX.edit?.kind === 'new') g.append(fxNewRow('fx-item'));
   FX.rows.forEach((r, i) => {
     const o = optionFor(r, i, 'fx-item');
-    o.append(iconFor(r.e, r.rel, true), el('span', 'fx-name', r.e.name), fxMoreBtn(r));
+    o.append(iconFor(r.e, r.rel, true), el('span', 'fx-name', r.e.name), el('span', 'fx-info', fxEntrySize(r.e, '')), fxMoreBtn(r));
     g.append(o);
   });
   fxActive(g);
@@ -665,9 +687,9 @@ function fxList() {
       name.append(disc);
     } else name.append(el('span', 'fx-disc-sp'));
     const nm = el('span', 'fx-n');
-    nm.append(el('span', 'fx-nt', r.e.name), el('span', 'fx-sub', r.e.dir ? 'Folder' : `${fxSize(r.e.size)} · ${fxDate(r.e.mtime)}`)); // sub: phones only
+    nm.append(el('span', 'fx-nt', r.e.name), el('span', 'fx-sub', fxListSub(r.e))); // sub: phones only
     name.append(iconFor(r.e, r.rel, false), nm, fxMoreBtn(r));
-    o.append(name, el('span', 'fx-c date', fxDate(r.e.mtime)), el('span', 'fx-c size', r.e.dir ? '--' : fxSize(r.e.size)), el('span', 'fx-c kind', kindOf(r.e)));
+    o.append(name, el('span', 'fx-c date', fxDate(r.e.mtime)), el('span', 'fx-c size', fxEntrySize(r.e)), el('span', 'fx-c kind', kindOf(r.e)));
     t.append(o);
   });
   fxActive(t);
@@ -719,6 +741,7 @@ async function fxExpand(rel, open) {
   }
   fxRender();
   fxFocus();
+  if (FX.kids.get(rel)?.some((e) => e.dir && e.du == null)) fxDu(rel, FX.kids.get(rel));
 }
 
 // ----- selection, keyboard, opening

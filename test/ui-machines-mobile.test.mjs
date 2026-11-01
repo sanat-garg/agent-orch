@@ -129,6 +129,7 @@ after(async () => {
 async function open(width, height, opts = {}) {
   const [name, value] = cookie.split('=');
   const ctx = await browser.newContext({ viewport: { width, height }, isMobile: true, hasTouch: true, deviceScaleFactor: 2, ...opts });
+  await ctx.addInitScript(() => { if (screen.width >= 768) localStorage.setItem('cw.mx.diagram', '1'); }); // desktop opens on the list; this checks its diagram
   await ctx.addCookies([{ name, value, url: base }]);
   const page = await ctx.newPage();
   const errors = [];
@@ -320,7 +321,7 @@ test('live readings repaint only the machine that changed (one frame per burst),
   await ctx.close();
   // Desktop: none of the phone parts show.
   const d = await open(1280, 800, { isMobile: false, hasTouch: false, deviceScaleFactor: 1 });
-  for (const sel of ['#mMachines .mc-open', '#mxSum', '#mxDiagBtn', '#mxMore']) assert.equal(await d.page.locator(sel).first().isVisible(), false, sel);
+  for (const sel of ['#mMachines .mc-open', '#mxSum', '#mxMore']) assert.equal(await d.page.locator(sel).first().isVisible(), false, sel);
   assert.equal(await d.page.locator('#mcSum').isVisible(), true);
   assert.equal(await d.page.locator('.mx-head #addMachine').isVisible(), true);
   assert.equal(await d.page.locator('#caWrap').isVisible(), true);

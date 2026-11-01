@@ -619,6 +619,67 @@ code, pre, kbd { font-family: var(--mono); }
 .mx-lane-s { flex: none; font-variant-numeric: tabular-nums; }
 .mx-lane .mc-idle { padding-left: 16px; }
 .mx-n { margin-left: 2px; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* The fleet list (app.js flRow, from 768px): rows on one grid so the numbers line up, hairlines between them, no boxes. */
+.mx-main { display: flex; flex-direction: column; position: relative; }
+.mx-main > * { flex-shrink: 0; }
+.fl { --fl-cols: minmax(190px, 1.7fr) repeat(3, minmax(74px, .7fr)) minmax(64px, .5fr) 118px 12px; display: none; }
+.fl-head { display: grid; grid-template-columns: var(--fl-cols); column-gap: 18px; padding: 0 8px 8px; border-bottom: 1px solid var(--border); font-size: 12px; font-weight: 600; color: var(--muted); }
+.fl-row { padding: 12px 8px; border-bottom: 1px solid var(--border); cursor: pointer; }
+@media (hover: hover) { .fl-row:hover { background: var(--raised); } }
+.fl-row[aria-current] { background: var(--raised); }
+.fl-main { display: grid; grid-template-columns: var(--fl-cols); column-gap: 18px; align-items: center; }
+.fl-head > :nth-child(5) { grid-column: 5; }
+.fl-open { display: flex; align-items: center; gap: 12px; min-width: 0; min-height: 44px; padding: 0; border: 0; border-radius: 8px; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.fl-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.fl-id { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.fl-name { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.fl-name .dot { width: 7px; height: 7px; }
+.fl-nm { min-width: 0; font-size: 15px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fl-sub { font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.fl-cell { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.fl-v { font-size: 14px; font-weight: 550; color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.fl-cell .bar { margin: 0; height: 4px; }
+.fl-cell .bar i.warn { background: var(--warn); }
+.fl-cell .bar i.crit { background: var(--danger); }
+.fl-act { justify-self: end; }
+.fl-act > * { margin: 0; }
+.fl-chev { width: 7px; height: 7px; border: solid var(--faint); border-width: 0 1.5px 1.5px 0; transform: rotate(-45deg); }
+.fl-row.away .fl-cell { opacity: .55; }
+.fl-note { margin: 6px 0 0 44px; }
+.fl-tasks { display: flex; flex-direction: column; gap: 4px; margin: 8px 0 0 44px; }
+.mx-diag-btn { align-self: flex-start; order: 5; min-height: 32px; margin-top: 12px; padding: 0 4px; border: 0; background: none; color: var(--accent-ink); font: inherit; font-size: 13.5px; cursor: pointer; }
+.mx-diag-btn:hover { color: var(--accent-ink-hover); }
+.mx[data-diagram] .mx-diag-btn { position: absolute; top: 10px; right: 16px; z-index: 2; margin: 0; }
+.nd-tabs { display: flex; align-self: flex-start; margin: 0 20px 14px; }
+.nd-tabs[hidden] { display: none; }
+#ndBody[data-tab="activity"] > [data-ndtab], #ndBody[data-tab="storage"] > :not([data-ndtab="storage"]), #ndBody[data-tab="settings"] > :not([data-ndtab="settings"]), #ndBody[data-tab="log"] > :not([data-ndtab="log"]) { display: none; }
+.m-go-storage { padding: 0; font-size: inherit; color: var(--accent-ink); }
+.m-go-storage:hover { background: none; color: var(--accent-ink-hover); }
+@media (min-width: 768px) {
+  .mx:not([data-diagram]) .fl { display: block; }
+  .mx:not([data-diagram]) #mxLanes { display: none; } /* the fleet list already shows what runs where */
+  .mx:not([data-diagram]) #mMachines .mc-top { display: none; } /* the panel's own title says it */
+  .mx:not([data-diagram]) #ndMachine > h3 { display: none; }
+  .mx:not([data-diagram]) #mMachines { grid-template-columns: minmax(0, 1fr); max-width: 760px; }
+  .mx:not([data-diagram]) #mMachines .mc-set.inline > summary { display: none; }
+  .mx:not([data-diagram]) .nd-back-t { display: inline; font-size: 14px; }
+  .mx:not([data-diagram]) #nodeModal .nd-back { display: inline-flex; width: auto; padding: 0 10px 0 2px; color: var(--accent-ink); }
+  .mx:not([data-diagram]) #nodeModal .nd-back[hidden] { display: none; }
+  .mx:not([data-diagram]) #nodeModal .nd > .m-head { flex-wrap: wrap; row-gap: 8px; }
+  .mx:not([data-diagram]) #nodeModal .nd > .m-head > div { order: 2; flex-basis: 100%; }
+  .mx:not([data-diagram]) #nodeModal .nd > .m-head [data-close] { display: none; }
+}
+@media (min-width: 801px) {
+  /* a machine open: the list narrows to a rail, the detail takes the rest; one hairline, no floating panel */
+  .mx:not([data-diagram]) .mx-body:has(> .mx-side:not([hidden])) { grid-template-columns: 280px minmax(0, 1fr); }
+  .mx:not([data-diagram]) .mx-body:has(> .mx-side:not([hidden])) .mx-main { padding: 8px; }
+  .mx:not([data-diagram]) .mx-side > .modal-panel.nd { box-shadow: none; animation: none; background: var(--bg); }
+  .mx:not([data-diagram]) .mx-body:has(> .mx-side:not([hidden])) :is(.fl-head, .fl-cell, .fl-act, .fl-chev, .fl-note, .fl-tasks, .mx-diag-btn) { display: none; }
+  .mx:not([data-diagram]) .mx-body:has(> .mx-side:not([hidden])) .fl-main { display: block; }
+  .mx:not([data-diagram]) .mx-body:has(> .mx-side:not([hidden])) .fl-row { padding: 6px 8px; border-bottom: 0; border-radius: 10px; }
+  .mx:not([data-diagram]) .mx-body:has(> .mx-side:not([hidden])) .fl-open { width: 100%; }
+}
+@media (pointer: coarse) { .mx-diag-btn { min-height: 44px; } .nd-tabs button { min-height: 44px; } }
 /* a machine's detail: a side panel in the queue's column, widened while it's open (the diagram re-lays itself out beside it) */
 .mx-side { grid-area: 1 / 2; z-index: 3; min-width: 0; min-height: 0; display: flex; }
 .mx-body:has(> .mx-side:not([hidden])) { grid-template-columns: minmax(0, 1fr) min(600px, 45%); }
@@ -645,7 +706,8 @@ code, pre, kbd { font-family: var(--mono); }
 /* Machines on phones (<768px, #433): a large title and summary, the Machines | Queue segment, one tappable card per
    machine (.mc-open: status, CPU/memory rings, one running line; the card's other parts live on its detail page), the
    diagram behind 'Show diagram', the actions under the list. A machine's detail is a pushed page with a back button. */
-.mc-open, .mx-psum, .mx-diag-btn, .mx-more, .nd-back-t, .sline-y { display: none; }
+.mc-open, .mx-psum, .mx-more, .nd-back-t, .sline-y { display: none; }
+.mx:not([data-diagram]) #caWrap { display: none; }
 @media (max-width: 767px) {
   .mx-head { align-items: flex-start; padding: 6px 12px 10px 16px; }
   #mxTitle { font-size: 34px; font-weight: 700; line-height: 1.15; letter-spacing: .01em; }
@@ -661,7 +723,6 @@ code, pre, kbd { font-family: var(--mono); }
   .mx-diag-btn::after { content: ''; width: 8px; height: 8px; border: solid var(--muted); border-width: 0 2px 2px 0; transform: translateY(-2px) rotate(45deg); }
   .mx-diag-btn[aria-expanded="true"]::after { transform: translateY(2px) rotate(-135deg); }
   #caWrap { order: 3; margin: 0; }
-  .mx:not([data-diagram]) #caWrap { display: none; }
   #caWrap :is(.ca-sub, .ca-more, .ca-chip text) { font-size: 12px; }
   .mx-more { order: 4; display: block; }
   .mx-more .mc-acts { display: flex; flex-direction: column; gap: 8px; }
@@ -694,6 +755,7 @@ code, pre, kbd { font-family: var(--mono); }
   #nodeModal .nd-back svg { width: 26px; height: 26px; }
   .nd-back-t { display: inline; max-width: 60vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .nd-body { padding: 8px 16px max(24px, env(safe-area-inset-bottom)); font-size: 16px; }
+  .nd-tabs { margin: 4px 16px 4px; }
   .nd-info { display: flex; flex-direction: column; gap: 10px; }
   .nd-info .mc-health { font-size: 15px; }
   .nd-info > .btn { align-self: flex-start; }

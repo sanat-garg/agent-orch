@@ -23,6 +23,7 @@ import { createUsageLog, createLimitStore, RANGES as USAGE_RANGES } from './usag
 import { chatUsage } from './chat-usage.mjs';
 import { chatMarkdown, exportFileName } from './chat-export.mjs';
 import { handleFiles } from './files.mjs';
+import { createStorage } from './storage.mjs';
 import { createStats } from './stats.mjs';
 import { healthRow } from './health.mjs';
 import { createResources, registerPid, withOwner, readSystem, cpuPercent } from './resources.mjs';
@@ -918,6 +919,7 @@ const sandboxCaddy = DATA !== path.join(ROOT, 'data') && !process.env.CW_REAL_CA
   tlsProbe: async () => true, // no real Caddy behind a test instance, so no certificate to wait for
 };
 if (sandboxCaddy && !fs.existsSync(sandboxCaddy.caddyfile)) { try { fs.copyFileSync('/etc/caddy/Caddyfile', sandboxCaddy.caddyfile); } catch {} } // the owner's sites stay taken
+const storage = createStorage({ appRoot: ROOT, dataDir: DATA, workspace: WORKSPACE, projects: () => convos.map((c) => c.cwd).filter(Boolean), served: () => previews.list().map((v) => v.dir) });
 const previews = createPreviews({ dataDir: DATA, forbid: [ROOT], ...sandboxCaddy, log: (m) => console.log(`[previews] ${m}`),
   onChange: () => {
     clearTimeout(previewPush);
@@ -2222,7 +2224,7 @@ async function handleRequest(req, res) {
     return serveFile(res, file, cache);
   }
   if (p === '/' || p === '/index.html') return serveFile(res, path.join(PUBLIC, 'index.html'));
-  if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css' || p === '/browser.js' || p === '/browser.css' || p === '/previews.js' || p === '/previews.css' || p === '/schedules.js' || p === '/schedules.css' || p === '/users.js' || p === '/users.css' || p === '/credentials.js' || p === '/credentials.css' || p === '/shots.js' || p === '/shots.css' || p === '/commits.js' || p === '/commits.css' || p === '/tokens.js' || p === '/tokens.css' || p === '/prompts.js' || p === '/prompts.css' || p === '/code-download.js' || p === '/code-download.css' || p === '/execution.js' || p === '/execution.css' || p === '/phone.css') return serveFile(res, path.join(PUBLIC, p));
+  if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css' || p === '/browser.js' || p === '/browser.css' || p === '/previews.js' || p === '/previews.css' || p === '/schedules.js' || p === '/schedules.css' || p === '/users.js' || p === '/users.css' || p === '/credentials.js' || p === '/credentials.css' || p === '/shots.js' || p === '/shots.css' || p === '/commits.js' || p === '/commits.css' || p === '/tokens.js' || p === '/tokens.css' || p === '/prompts.js' || p === '/prompts.css' || p === '/code-download.js' || p === '/code-download.css' || p === '/storage.js' || p === '/storage.css' || p === '/execution.js' || p === '/execution.css' || p === '/phone.css') return serveFile(res, path.join(PUBLIC, p));
   // The Files view: listing, preview, download (a file, or a zip streamed on the fly), upload, and copy/move/zip/unzip over the whole disk, opening on the chat's project (files.mjs).
   // A user's requests stay inside the chat's project: only their chats' roots, and every path (absolute ones and link
   // targets too) must resolve inside it (files.mjs `confine`).
@@ -2355,6 +2357,16 @@ async function handleRequest(req, res) {
   if (p === '/api/deploy/tokens' && req.method === 'POST') return json(res, 200, deployApi.tokens.create((await readBody(req)).name));
   const dtm = p.match(/^\/api\/deploy\/tokens\/([a-f0-9]{12})$/);
   if (dtm && req.method === 'DELETE') return deployApi.tokens.revoke(dtm[1]) ? json(res, 200, { ok: true }) : json(res, 404, { error: 'No such token' });
+  // Machines → Storage (storage.mjs; admin only, userBlocked refuses everyone else): where this server's disk went, one folder
+  // measured live, and removing what the owner picks. Everything is on demand: nothing scans on a timer.
+  if (p.startsWith('/api/storage')) {
+    try {
+      if (p === '/api/storage' && req.method === 'GET') return json(res, 200, await storage.overview({ fresh: url.searchParams.get('fresh') === '1' }));
+      if (p === '/api/storage/dir' && req.method === 'GET') return json(res, 200, await storage.dir(url.searchParams.get('path')));
+      if (p === '/api/storage/remove' && req.method === 'POST') return json(res, 200, await storage.remove((await readBody(req)).paths));
+      if (p === '/api/storage/clean' && req.method === 'POST') return json(res, 200, await storage.clean((await readBody(req)).id));
+    } catch (e) { return json(res, e.status || 500, { error: e.message }); }
+  }
   // Live previews: the manager's list (every project's address and status) and the owner's domains.
   if (p === '/api/previews' && req.method === 'GET') {
     const list = previews.list().map((v) => { const c = findConvo(mainChatId(v.dir)); return { ...v, cid: c?.id || null, title: c?.title || path.basename(v.dir) }; });

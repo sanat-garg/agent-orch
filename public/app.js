@@ -4531,7 +4531,7 @@ function renderMetrics() {
   setTile('disk', {
     num: [d.disk.used, fmtBytes], bigSmall: `of ${fmtBytes(d.disk.total)}`,
     status: [dcls, dcls ? (dcls === 'crit' ? 'Almost full' : 'Filling up') : 'Plenty free'], bar: diskPct,
-    detail: `<b>${fmtBytes(d.disk.free)}</b> free · ${fmtPct(diskPct)} used`,
+    detail: `<b>${fmtBytes(d.disk.free)}</b> free · ${fmtPct(diskPct)} used · <button type="button" class="link-btn m-go-storage">Storage</button>`,
   });
   setTile('net', {
     pair: { rx: [now.rx || 0, fmtRate], tx: [now.tx || 0, fmtRate] },
@@ -4901,6 +4901,7 @@ $('rangePicker').addEventListener('click', (e) => {
   renderRangePicker();
   loadHistory(true);
 });
+$('mGrid').addEventListener('click', (e) => { if (e.target.closest('.m-go-storage')) ndTab('storage'); });
 $('miniStats').addEventListener('click', miniClick);
 setInterval(() => { if (M.usage) renderUsage(); }, 30e3); // keep the "in 2h 9m" countdowns current
 
@@ -4972,10 +4973,85 @@ function machineSummary(nodes) {
 }
 function renderMachines() {
   caSync(MC.nodes);
-  $('mxDiagBtn').hidden = $('caWrap').hidden;
+  $('mxDiagBtn').hidden = !mxList() && $('caWrap').hidden;
   if (ND.id) ndRender();
   mxLanesRender();
   mcRender();
+  flRender();
+}
+// From 768px the view opens on the fleet list unless the owner chose the diagram (localStorage cw.mx.diagram, as on phones).
+const mxList = () => CA_WIDE.matches && !$('mxModal').hasAttribute('data-diagram');
+// The fleet list: one row per machine with the numbers side by side so they compare at a glance (CPU, memory, disk, slots),
+// then what runs there. With a machine open it narrows to a rail beside its detail (CSS), like a mail or settings sidebar.
+const FL = { rows: new Map() };
+function flCell(label, value, pct, title, [warn, crit] = [75, 90]) {
+  const c = el('div', 'fl-cell'), v = el('span', 'fl-v', value ?? '–');
+  c.setAttribute('aria-label', `${label}: ${value ?? 'not reported'}`);
+  if (title) c.title = title;
+  c.append(v);
+  if (pct != null) {
+    const bar = el('div', 'bar'), i = el('i', pct >= crit ? 'crit' : pct >= warn ? 'warn' : '');
+    i.style.width = `${Math.max(2, Math.min(100, pct))}%`;
+    bar.append(i);
+    c.append(bar);
+  }
+  return c;
+}
+function flRow(n) {
+  const li = el('div', `fl-row${n.connected && n.enabled ? '' : ' away'}`), st = nodeState(n), inv = n.inventory || {}, res = n.resources || {};
+  li.dataset.node = n.id;
+  if (n.id === ND.id) li.setAttribute('aria-current', 'true');
+  const main = el('div', 'fl-main'), open = el('button', 'fl-open'), id = el('span', 'fl-id');
+  open.type = 'button';
+  open.dataset.act = 'open';
+  const icon = el('span', 'mc-os');
+  icon.innerHTML = OS_ICON[osKind(n)] || OS_ICON.linux;
+  const name = el('span', 'fl-name');
+  name.append(el('span', `dot ${st.dot}`), el('span', 'fl-nm', n.name));
+  const running = n.tasks?.length || 0;
+  id.append(name, el('span', 'fl-sub', [st.label !== 'Online' && st.label, n.local ? 'This server' : OS_NAME[osKind(n)] || n.os, n.build && fmtVersion(n.build), running && `${running} running`].filter(Boolean).join(' · ')));
+  open.append(icon, id);
+  open.addEventListener('click', () => openNode(n.id));
+  main.append(open);
+  const u = nodeUsage(n), d = res.disk, used = d?.total ? Math.max(0, d.total - d.free) : null;
+  main.append(flCell('CPU', u.cpu == null ? null : `${Math.round(u.cpu)}%`, u.cpu, inv.cores && plural(inv.cores, 'core')),
+    flCell('Memory', u.mem == null ? null : `${Math.round(u.mem)}%`, u.mem, inv.mem && res.memAvailable != null ? `${fmtGB(res.memAvailable)} free of ${fmtGB(inv.mem)}` : ''),
+    flCell('Disk free', d?.total ? fmtGB(d.free) : null, d?.total ? (used / d.total) * 100 : null, d?.total ? `${fmtGB(d.free)} free of ${fmtGB(d.total)}` : '', [80, 92]),
+    flCell('Slots', n.connected && n.enabled ? `${n.used ?? running} of ${n.slots ?? 0}` : null, null));
+  const act = el('div', 'fl-act');
+  act.append(renderAssignButton(n));
+  main.append(act, el('span', 'fl-chev'));
+  li.append(main);
+  const note = machineHealth(n).find((p) => p.matches('.warn, .bad') && !p.matches('.mc-decision'));
+  if (note) { note.classList.add('fl-note'); li.append(note); }
+  if (running) {
+    const list = el('div', 'fl-tasks');
+    for (const t of n.tasks) list.append(mcTaskRow(t));
+    li.append(list);
+  }
+  li.addEventListener('click', (e) => { if (!e.target.closest('button, a, input, select, summary')) openNode(n.id); });
+  return li;
+}
+function flRender() {
+  const box = $('mxFleet');
+  if (!mxList()) { if (box.childElementCount) { box.replaceChildren(); FL.rows.clear(); } return; }
+  const f = document.activeElement, fr = f?.closest?.('.fl-row'), was = fr && box.contains(fr) && [fr.dataset.node, f.dataset.act || f.dataset.task || f.textContent];
+  const era = [Math.floor(Date.now() / 60e3), AS.node, ND.id, VER.running?.build].join('|'), rows = new Map();
+  const list = MC.nodes.map((n) => {
+    const key = `${era}|${nodeKey(n)}`, old = FL.rows.get(n.id), li = old?.key === key ? old.li : flRow(n);
+    rows.set(n.id, { key, li });
+    return li;
+  });
+  FL.rows = rows;
+  if (!box.firstElementChild?.matches('.fl-head')) {
+    const h = el('div', 'fl-head');
+    h.setAttribute('aria-hidden', 'true');
+    h.append(el('span', '', 'Machine'), el('span', '', 'CPU'), el('span', '', 'Memory'), el('span', '', 'Disk free'), el('span', '', 'Slots'));
+    box.replaceChildren(h);
+  }
+  const want = [box.firstElementChild, ...list];
+  if (want.length !== box.children.length || want.some((x, i) => box.children[i] !== x)) box.replaceChildren(...want);
+  if (was) [...box.querySelectorAll(`.fl-row[data-node="${CSS.escape(was[0])}"] button`)].find((b) => (b.dataset.act || b.dataset.task || b.textContent) === was[1])?.focus({ preventScroll: true });
 }
 // Where the full machine cards live (#mMachines): on a phone all of them under the diagram; from 768px only the open
 // machine's, in its side panel's Machine section (its settings, health, ping, agents, updates), else parked.
@@ -5004,7 +5080,7 @@ function mcRender() {
   const f = document.activeElement, card = f?.closest?.('#mMachines .mc-node'), key = (b) => b.dataset.act || b.dataset.task || b.textContent;
   const was = card && f.matches('button, summary, input') && [card.dataset.node, key(f)];
   // A card whose machine didn't change keeps its nodes (no relayout under a scrolling finger); relative times refresh each minute.
-  const era = [Math.floor(Date.now() / 60e3), AS.node, CA_WIDE.matches, VER.running?.build, JSON.stringify([MC.target, MC.rollout])].join('|'), cards = new Map();
+  const era = [Math.floor(Date.now() / 60e3), AS.node, CA_WIDE.matches, mxList(), VER.running?.build, JSON.stringify([MC.target, MC.rollout])].join('|'), cards = new Map();
   const cardOf = (n) => {
     const key = MC.pings.has(n.id) || MC.soundAdd === n.id ? null : `${era}|${nodeKey(n)}`, old = MC.cards.get(n.id);
     const li = key && old?.key === key ? old.li : machineCard(n);
@@ -5143,7 +5219,7 @@ function machineCard(n) {
   li.append(ag);
   if (brief) {
     if (canUpdate(n)) li.append(updateButton(n));
-    li.append(machineSettings(n));
+    li.append(machineSettings(n, mxList())); // the list's Settings tab: always open
     return li;
   }
 
@@ -5874,7 +5950,7 @@ function caClear() {
 }
 // A new snapshot of GET /api/cluster/nodes (renderMachines): the machines, their readings and running tasks.
 function caSync(nodes) {
-  if (!mxOpen()) return; // drawn only while the Machines view is open; the next open starts fresh
+  if (!mxOpen() || mxList()) return; // drawn only while the Machines view shows it; the next look starts fresh
   const head = nodes.find((n) => n.local);
   // Alone on a phone: just its card in the list. Wider, the head's card beside its node.
   if (!head || (!nodes.some((n) => !n.local) && !CA_WIDE.matches)) { if (CA.wrap) { CA.wrap.hidden = true; caClear(); } return; }
@@ -6510,7 +6586,11 @@ function mxDiagram(on) {
 $('mxDiagBtn').addEventListener('click', () => {
   const on = !$('mxModal').hasAttribute('data-diagram');
   store.set('cw.mx.diagram', on ? '1' : '0');
+  CA.ready = false;
   mxDiagram(on);
+  if (!on) caFlush();
+  if (ND.id) { ndBuild(); ndRender(); ndMetrics(); }
+  renderMachines();
 });
 PHONE_MQ.addEventListener('change', () => {
   if (!mxOpen()) return;
@@ -6591,7 +6671,7 @@ function openNode(id) {
   if (!mxOpen()) openMachines();
   const open = !$('nodeModal').hidden;
   if (open && id === ND.id) return;
-  const back = open && ndNode()?.local ? ND.id : null; // a worker opened from this server's details
+  const back = open && ndNode()?.local && !mxList() ? ND.id : null; // a worker opened from this server's details (the list's rail just switches)
   Object.assign(ND, { id, back, samples: null, err: '', at: 0, runs: new Map(), taskKey: '', log: null, lastFocus: open ? ND.lastFocus : document.activeElement });
   $('nodeModal').hidden = false;
   ndBuild();
@@ -6600,7 +6680,8 @@ function openNode(id) {
   ndMetrics();
   $('ndBody').scrollTop = 0;
   $('nodeModal').querySelector('.nd').classList.remove('scrolled');
-  (back ? $('ndBack') : $('nodeModal').querySelector('[data-close].icon-btn')).focus();
+  (back || mxList() ? $('ndBack') : $('nodeModal').querySelector('[data-close].icon-btn')).focus();
+  flRender();
 }
 // Back to this server's details when a worker was opened from them; `all` closes the panel.
 function closeNode(all) {
@@ -6617,6 +6698,7 @@ function closeNode(all) {
   parkServerDetails();
   ND.id = ND.back = null;
   if (CA_WIDE.matches) mcRender(); // its machine card goes back to the stash
+  flRender();
   ND.lastFocus?.focus?.({ preventScroll: true });
 }
 $('nodeModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeNode(true); });
@@ -6672,12 +6754,15 @@ document.addEventListener('keydown', (e) => {
   else closeMachines();
 }, true);
 function ndBuild() {
-  const n = ndNode(), body = $('ndBody'), run = section('Running here'), log = section('Log'), machine = section('Machine');
+  const n = ndNode(), body = $('ndBody'), run = section('Running here'), log = section('Log'), machine = section('Machine'), storage = section();
   run.id = 'ndRun';
   log.id = 'ndLog';
   machine.id = 'ndMachine';
+  storage.id = 'ndStorage';
+  storage.dataset.ndtab = 'storage';
+  if (mxList()) { machine.dataset.ndtab = 'settings'; log.dataset.ndtab = 'log'; }
   $('sdStash').append($('mMachines')); // out of the old body; mcHome puts it into this one's Machine section
-  ND.els = { run, log, machine };
+  ND.els = { run, log, machine, storage };
   ndBackLabel();
   const phone = isPhone() && ndPhoneSections();
   if (n.local) {
@@ -6687,9 +6772,10 @@ function ndBuild() {
     $('sdRun').replaceChildren(run);
     renderServerDetails(body);
     if (phone) { body.prepend(phone.info); body.append(phone.hist, phone.set); }
-    body.append(machine, log);
+    body.append(machine, log, storage);
     ndLogRender();
     mcHome();
+    ndTabs(n);
     return;
   }
   parkServerDetails();
@@ -6732,12 +6818,51 @@ function ndBuild() {
   body.replaceChildren(...(phone ? [phone.info, row, grid, run, phone.hist, phone.set] : [row, grid, run]), machine, log);
   ndLogRender();
   mcHome();
+  ndTabs(n);
 }
+// A machine's detail, one subject at a time. The fleet list: Activity, Storage (this server only), Settings, Log. A phone or
+// the diagram keeps its one long page, so this server just gets Overview and Storage there, and a worker no tabs.
+function ndTabs(n) {
+  const tabs = mxList() ? [['activity', 'Activity'], ...(n.local ? [['storage', 'Storage']] : []), ['settings', 'Settings'], ['log', 'Log']]
+    : n.local ? [['activity', 'Overview'], ['storage', 'Storage']] : [];
+  const bar = $('ndTabs');
+  bar.hidden = !tabs.length;
+  bar.replaceChildren(...tabs.map(([id, label]) => {
+    const b = el('button', '', label);
+    b.type = 'button';
+    b.dataset.tab = id;
+    b.setAttribute('role', 'tab');
+    return b;
+  }));
+  ndTab(tabs.some(([id]) => id === ND.tab) ? ND.tab : 'activity');
+}
+function ndTab(tab) {
+  ND.tab = tab;
+  $('ndBody').dataset.tab = tab;
+  $('ndBody').scrollTop = 0;
+  for (const b of $('ndTabs').children) {
+    const on = b.dataset.tab === tab;
+    b.setAttribute('aria-selected', String(on));
+    b.tabIndex = on ? 0 : -1;
+  }
+  if (tab === 'storage') {
+    if (typeof sgOpen === 'function') sgOpen(ND.els.storage);
+    else ND.els.storage.replaceChildren(el('p', 'nd-note', 'Storage arrives with the next restart of agent-orch.')); // applyUpdates 'manual': a server older than this page doesn't serve storage.js yet
+  }
+  else if (tab === 'activity') { M.draws?.forEach((d) => d()); ND.draws.forEach((d) => d()); } // the charts measure themselves once shown
+}
+$('ndTabs').addEventListener('click', (e) => { const b = e.target.closest('[role="tab"]'); if (b) ndTab(b.dataset.tab); });
+$('ndTabs').addEventListener('keydown', (e) => {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  const all = [...$('ndTabs').children], i = all.findIndex((b) => b.dataset.tab === ND.tab), to = all[(i + (e.key === 'ArrowRight' ? 1 : -1) + all.length) % all.length];
+  ndTab(to.dataset.tab);
+  to.focus();
+});
 // The back button: to this server's details (a worker opened from them), or on phones to the list ('‹ Machines').
 function ndBackLabel() {
   const to = ND.back && MC.nodes.find((x) => x.id === ND.back);
-  $('ndBack').hidden = !ND.back && !isPhone();
-  $('ndBackT').textContent = ND.back ? to?.name || 'This server' : 'Machines';
+  $('ndBack').hidden = !ND.back && !isPhone() && !mxList();
+  $('ndBackT').textContent = ND.back ? to?.name || 'This server' : mxList() ? 'All machines' : 'Machines';
   $('ndBack').setAttribute('aria-label', ND.back ? 'Back to this server' : 'Back to Machines');
 }
 // Phones: the card's other parts move to the detail page: status (health, agents, ping, update), recent history, settings.

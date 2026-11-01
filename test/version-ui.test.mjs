@@ -92,6 +92,7 @@ test('About lines from a mocked GET /api/version', () => {
 test('the version tooltip under the logo shows the running build, restart time and the pending build', { skip: noBrowser }, async () => {
   const [name, value] = cookie.split('=');
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  await ctx.addInitScript(() => { if (screen.width >= 768) localStorage.setItem('cw.mx.diagram', '1'); }); // from 768px the view opens on the list; this suite is about the diagram
   await ctx.addCookies([{ name, value, url: base }]);
   await ctx.addInitScript(() => { if (!sessionStorage.getItem('seeded')) { localStorage.setItem('cw.build', '412'); sessionStorage.setItem('seeded', '1'); } });
   const page = await ctx.newPage();
@@ -132,6 +133,7 @@ test('the version tooltip under the logo shows the running build, restart time a
 test('the Machines view shows each machine\'s build and tags an outdated worker', { skip: noBrowser }, async () => {
   const [name, value] = cookie.split('=');
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  await ctx.addInitScript(() => { if (screen.width >= 768) localStorage.setItem('cw.mx.diagram', '1'); }); // from 768px the view opens on the list; this suite is about the diagram
   await ctx.addCookies([{ name, value, url: base }]);
   const page = await ctx.newPage();
   await page.route('**/api/cluster/nodes', async (route) => {

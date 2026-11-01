@@ -94,6 +94,7 @@ test('pairing API: waiting → claimed once → paired with the node', async () 
 test('UI: Add machine shows a command per OS with a fresh code, then the machine that claimed it', { skip: noBrowser, timeout: 60000 }, async () => {
   const [name, value] = cookie.split('=');
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  await ctx.addInitScript(() => { if (screen.width >= 768) localStorage.setItem('cw.mx.diagram', '1'); }); // from 768px the view opens on the list; this suite is about the diagram
   await ctx.addCookies([{ name, value, url: base }]);
   const page = await ctx.newPage();
   const errors = [];
@@ -127,6 +128,7 @@ test('UI: Add machine shows a command per OS with a fresh code, then the machine
 test('UI: Connections shows a machine switcher once workers exist, and a worker tab shows that machine', { skip: noBrowser, timeout: 60000 }, async () => {
   const [name, value] = cookie.split('=');
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await ctx.addInitScript(() => { if (screen.width >= 768) localStorage.setItem('cw.mx.diagram', '1'); }); // from 768px the view opens on the list; this suite is about the diagram
   await ctx.addCookies([{ name, value, url: base }]);
   const page = await ctx.newPage();
   const errors = [];
@@ -185,6 +187,7 @@ test('Machines view: one card per node with its state, capacity, running tasks a
   const nodes = (await call('/api/cluster/nodes')).body.nodes;
   const [name, value] = cookie.split('=');
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  await ctx.addInitScript(() => { if (screen.width >= 768) localStorage.setItem('cw.mx.diagram', '1'); }); // from 768px the view opens on the list; this suite is about the diagram
   await ctx.addCookies([{ name, value, url: base }]);
   const page = await ctx.newPage();
   const errors = [];
@@ -250,6 +253,7 @@ test('Machines view: one card per node with its state, capacity, running tasks a
 test('the controller node opens this server’s details in the node detail: its CPU/RAM charts, then a worker’s tiles in the same order', { skip: noBrowser, timeout: 60000 }, async () => {
   const [name, value] = cookie.split('=');
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  await ctx.addInitScript(() => { if (screen.width >= 768) localStorage.setItem('cw.mx.diagram', '1'); }); // from 768px the view opens on the list; this suite is about the diagram
   await ctx.addCookies([{ name, value, url: base }]);
   const page = await ctx.newPage();
   const errors = [];

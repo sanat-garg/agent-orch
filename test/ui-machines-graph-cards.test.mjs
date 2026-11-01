@@ -111,6 +111,7 @@ after(async () => {
 async function open(viewport, colorScheme = 'light') {
   const [name, value] = cookie.split('=');
   const ctx = await browser.newContext({ viewport, colorScheme, reducedMotion: 'reduce' });
+  await ctx.addInitScript(() => { if (screen.width >= 768) localStorage.setItem('cw.mx.diagram', '1'); }); // from 768px the view opens on the list; this suite is about the diagram
   await ctx.addCookies([{ name, value, url: base }]);
   const page = await ctx.newPage();
   const errors = [];

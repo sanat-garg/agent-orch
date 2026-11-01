@@ -91,6 +91,7 @@ const box = (page, sel) => page.locator(sel).evaluate((e) => { const r = e.getBo
 test('desktop 1440×900: a wide window titled Machines, four cards in a row, the head KPIs only after a click', { skip, timeout: 60000 }, async () => {
   const [name, value] = cookie.split('=');
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  await ctx.addInitScript(() => { if (screen.width >= 768) localStorage.setItem('cw.mx.diagram', '1'); }); // from 768px the view opens on the list; this suite is about the diagram
   await ctx.addCookies([{ name, value, url: base }]);
   const page = await ctx.newPage();
   const errors = [];

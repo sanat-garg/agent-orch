@@ -1,0 +1,68 @@
+/* Machines → Storage (storage.js): one accent bar split by what fills the disk, grouped lists on hairlines. */
+#ndStorage { max-width: 760px; margin: 0; }
+.st-wait { margin: 8px 0; font-size: 14px; color: var(--muted); }
+.st-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; }
+.st-free { font-size: 15px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.st-free b { font-size: 28px; font-weight: 700; letter-spacing: -.01em; color: var(--text); }
+.st-rescan { margin-left: auto; align-self: center; }
+.st-bar { display: flex; gap: 2px; height: 14px; margin: 12px 0 6px; }
+.st-bar i { display: block; flex: 0 1 0; min-width: 2px; border-radius: 2px; background: var(--accent); transition: opacity .12s; }
+.st-bar i:first-child { border-radius: 4px 2px 2px 4px; }
+.st-bar i:last-child { border-radius: 2px 4px 4px 2px; }
+.st-bar i.st-freeseg { background: var(--raised); box-shadow: inset 0 0 0 1px var(--border); }
+.st-bar.hovering i:not(.on):not(.st-freeseg) { opacity: .35; }
+.st-readline { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 12px; margin: 0 0 16px; }
+.st-jump { margin-left: auto; padding: 0; font-size: 13px; color: var(--accent-ink); }
+.st-jump:hover { background: none; color: var(--accent-ink-hover); }
+.st-read { margin: 0; min-height: 18px; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.st-list { border-top: 1px solid var(--border); }
+.st-row { display: flex; align-items: center; gap: 14px; width: 100%; min-height: 48px; padding: 7px 4px; border: 0; border-bottom: 1px solid var(--border); background: none; color: inherit; font: inherit; text-align: left; }
+button.st-row { cursor: pointer; }
+.st-row.on, button.st-row:hover { background: var(--raised); }
+.st-rt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; }
+button.st-rt { cursor: pointer; border-radius: 6px; }
+button.st-rt:hover .st-rl { color: var(--accent-ink); }
+.st-rl { font-size: 14.5px; font-weight: 550; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.st-path { overflow-wrap: anywhere; white-space: normal; }
+.st-rh { font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.st-size { flex: none; min-width: 64px; text-align: right; font-size: 14px; font-weight: 550; color: var(--text); font-variant-numeric: tabular-nums; }
+.st-chev { flex: none; width: 7px; height: 7px; margin-right: 3px; border: solid var(--faint); border-width: 0 1.5px 1.5px 0; transform: rotate(-45deg); }
+.st-nochev { flex: none; width: 10px; }
+.st-rm { flex: none; }
+.st-rel { display: block; height: 3px; border-radius: 2px; background: var(--raised); overflow: hidden; }
+.st-rel i { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
+.st-act { flex: 0 0 170px; }
+.st-lock { flex: 0 0 170px; min-width: 0; font-size: 12px; line-height: 1.3; color: var(--muted); }
+.st-clean { margin-top: 28px; }
+.st-clean > h3 { display: flex; align-items: baseline; gap: 10px; margin: 0 0 4px; font-size: 17px; font-weight: 650; color: var(--text); }
+.st-total { font-size: 13.5px; font-weight: 500; color: var(--muted); font-variant-numeric: tabular-nums; }
+.st-group { margin-top: 16px; }
+.st-ghead { display: flex; align-items: flex-start; gap: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.st-gt { flex: 1; min-width: 0; }
+.st-gt h4 { margin: 0 0 2px; font-size: 14.5px; font-weight: 600; color: var(--text); }
+.st-why { margin: 0; font-size: 13px; line-height: 1.4; color: var(--muted); }
+.st-crumbs { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 6px; margin: 0 0 12px; font-size: 13.5px; }
+.st-sep { color: var(--faint); }
+.st-here { color: var(--muted); }
+.st-lhead { display: flex; align-items: baseline; gap: 12px; margin-bottom: 2px; }
+.st-lhead h3 { flex: 1; min-width: 0; margin: 0; font-size: 20px; font-weight: 650; overflow-wrap: anywhere; color: var(--text); }
+.st-lhead .st-size { font-size: 16px; }
+.st-pathline { margin: 0 0 10px; font-family: var(--mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.st-lhead ~ .st-why { margin-bottom: 10px; }
+.st-lhead ~ .st-list { margin-top: 6px; }
+@media (min-width: 1280px) { /* wide enough: what fills the disk beside what can go, both in view */
+  .mx:not([data-diagram]) #ndStorage:has(.st-cols) { max-width: none; }
+  .mx:not([data-diagram]) .st-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 32px; }
+  .mx:not([data-diagram]) .st-clean { margin-top: 0; }
+  .mx:not([data-diagram]) .st-jump { display: none; }
+}
+@media (pointer: coarse) {
+  .st-rm, .st-rescan, .st-ghead .btn { height: 44px; }
+  .st-crumbs .link-btn { min-height: 44px; }
+}
+@media (max-width: 767px) {
+  .st-row.st-item { flex-wrap: wrap; row-gap: 4px; }
+  .st-item .st-rt { flex-basis: 100%; }
+  .st-item .st-size { text-align: left; min-width: 0; margin-right: auto; }
+  .st-lock, .st-act { flex: 1 1 60%; text-align: right; }
+}

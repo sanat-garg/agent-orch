@@ -25,6 +25,7 @@
 <link rel="stylesheet" href="/users.css">
 <link rel="stylesheet" href="/browser.css">
 <link rel="stylesheet" href="/code-download.css">
+<link rel="stylesheet" href="/storage.css">
 <link rel="stylesheet" href="/phone.css">
 <link rel="preload" href="/mascot.png" as="image">
 </head>
@@ -1035,8 +1036,8 @@
   </div>
 </div>
 
-<!-- Machines (app.js MX): a wide window over a backdrop (a full-height sheet on phones). The cluster summary, diagram and
-     machine cards on the left; the queue (#qBody, borrowed from the Queue sheet while this is open) on the right, a tab
+<!-- Machines (app.js MX): a wide window over a backdrop (a full-height sheet on phones). The cluster summary, the fleet list
+     (or the diagram, behind its toggle) and machine cards on the left; the queue (#qBody, borrowed from the Queue sheet while this is open) on the right, a tab
      of its own on phones; a machine's detail (#nodeModal) slides in as a side panel. -->
 <div class="modal mx" id="mxModal" data-tab="machines" hidden>
   <div class="modal-backdrop" data-close></div>
@@ -1061,6 +1062,7 @@
       <section class="mx-main" id="mxMain" role="tabpanel" aria-labelledby="mxTabMachines">
         <button class="mx-diag-btn" id="mxDiagBtn" type="button" aria-expanded="false" aria-controls="caWrap">Show diagram</button>
         <div class="ca-wrap" id="caWrap" hidden></div>
+        <div class="fl" id="mxFleet"></div>
         <ul class="mc-grid" id="mMachines"></ul>
         <div class="mx-more" id="mxMore"></div>
       </section>
@@ -1081,6 +1083,7 @@
               <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
             </button>
           </div>
+          <div class="seg nd-tabs" id="ndTabs" role="tablist" aria-label="Show" hidden></div>
           <div class="m-body nd-body" id="ndBody"></div>
         </div>
       </div>
@@ -1190,6 +1193,7 @@
 <script src="/ext.js"></script>
 <script src="/browser.js"></script>
 <script src="/previews.js"></script>
+<script src="/storage.js"></script>
 <script src="/schedules.js"></script>
 <script src="/credentials.js"></script>
 <script src="/execution.js"></script>

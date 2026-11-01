@@ -222,13 +222,37 @@ test('sidebar manager: live cards, Add address, Edit, domains, and slug changes 
   }
 });
 
+test('Deploy from your computer: Connect shows the command once, Revoke removes the connection', { skip }, async () => {
+  const { ctx, page, errors } = await open('#c0');
+  try {
+    page.on('dialog', (d) => d.accept());
+    await page.locator('#previewsBtn').click();
+    const input = page.locator('.pv-add input[aria-label^="Name of the computer"]'), connect = page.locator('.pv-add button', { hasText: 'Connect' });
+    await input.waitFor();
+    assert.equal(await connect.isDisabled(), true);
+    await input.fill('MacBook');
+    await connect.click();
+    const cmd = await page.locator('.pv-cmd').textContent();
+    assert.match(cmd, new RegExp(`^claude mcp add --transport http --scope user agent-orch ${base}/mcp --header "Authorization: Bearer aod_[\\w-]+"$`));
+    const row = page.locator('.pv-item', { hasText: 'MacBook' });
+    assert.match(await row.textContent(), /Not used yet/);
+    await page.locator('#previewsModal [data-close]').last().click();
+    await page.locator('#previewsBtn').click();
+    await row.waitFor();
+    assert.equal(await page.locator('.pv-cmd').count(), 0, 'shown once');
+    await row.locator('button', { hasText: 'Revoke' }).click();
+    await row.waitFor({ state: 'detached' });
+    assert.deepEqual(errors, []);
+  } finally { await ctx.close(); }
+});
+
 test('the open project leads, unfolded; the find field keeps matching names and addresses; Escape clears, then closes', { skip }, async () => {
   const { ctx, page, errors } = await open('#c1');
   try {
     await page.locator('#previewsBtn').click();
     await page.locator('#pvBody .pv-row[data-cid="c0"]').waitFor();
     // Opened from Notes (no address): its Add address row leads under "This project"; Demo follows under Live, folded.
-    assert.deepEqual(await page.locator('#pvBody .pv-sec h3').allTextContents(), ['This project', 'Live', 'Domains']);
+    assert.deepEqual(await page.locator('#pvBody .pv-sec h3').allTextContents(), ['This project', 'Live', 'Deploy from your computer', 'Domains']);
     assert.equal(await page.locator('#pvBody .pv-sec').first().locator('.pv-item[data-cid="c1"] .pv-addbtn').count(), 1);
     assert.equal(await page.locator('.pv-row[data-cid="c0"] .pv-act').count(), 0);
     // The find field (focused on desktop) matches names and addresses; "This project" and the domains step aside meanwhile.
@@ -244,7 +268,7 @@ test('the open project leads, unfolded; the find field keeps matching names and 
     await page.locator('#pvSearch').press('Escape');
     assert.equal(await page.locator('#pvSearch').inputValue(), '');
     assert.equal(await page.locator('#previewsModal').isVisible(), true);
-    assert.deepEqual(await page.locator('#pvBody .pv-sec h3').allTextContents(), ['This project', 'Live', 'Domains']);
+    assert.deepEqual(await page.locator('#pvBody .pv-sec h3').allTextContents(), ['This project', 'Live', 'Deploy from your computer', 'Domains']);
     // A tap on a row's head unfolds it; a second folds it again.
     await page.locator('.pv-row[data-cid="c0"] .pv-name').click();
     assert.equal(await page.locator('.pv-row[data-cid="c0"] .pv-act').count(), 5);

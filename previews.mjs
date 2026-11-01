@@ -19,11 +19,14 @@
 //     script); a build script only → static files from dist/, build/ or out/; index.html (or public/index.html) → static,
 //     served in-process; index.php → `php -S`. Ports come from PORTS and stay with the project. Processes are detached,
 //     tagged AGENT_ORCH_PREVIEW=<host>, restarted on a crash with backoff, and killed/restarted when the server boots.
+//     A saved start command (`start`: any shell command that listens on $PORT, set through the deploy API, deploy.mjs) wins over
+//     detection: kind 'command', with npm install/build when there's a package.json and a .venv + pip install when there's a
+//     requirements.txt. Every kind's build and app get the project's .env (PORT, PREVIEW_URL and AGENT_ORCH_PREVIEW stay ours).
 //   - Redeploy: `redeploy(dir)` after every commit/merge to the project's main tree (server.mjs syncGit), debounced, and
 //     skipped when HEAD hasn't moved since the last healthy deploy. `restart(dir)` always redeploys.
 // API: createPreviews({dataDir, domain (the first default), caddyfile, includeFile, exec, forbid, onChange, onMove, …}) →
 //   {domains(), addDomain(d), removeDomain(d), check(slug, dir, domain), set(dir, slug, domain), remove(dir), view(dir), list(),
-//    redeploy(dir), restart(dir), logs(dir), startAll(), stopAll()}.
+//    setStart(dir, cmd), redeploy(dir), restart(dir), deployNow(dir), settled(dir), logs(dir), startAll(), stopAll()}.
 // Tests inject `exec` (no real sudo/caddy) and `caddyfile`/`includeFile` paths in a temp dir.
 
 import fs from 'node:fs';
@@ -95,10 +98,11 @@ export function normalizeDomain(d) {
 }
 
 // What the project folder serves, or null when there's nothing yet.
-export function detectKind(dir) {
+export function detectKind(dir, start = '') {
   let pkg = null;
   try { pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')); } catch {}
   const scripts = pkg?.scripts || {};
+  if (start) return { kind: 'command', install: !!pkg, build: !!scripts.build, python: fs.existsSync(path.join(dir, 'requirements.txt')) };
   if (scripts.start) return { kind: 'node', install: true, build: !!scripts.build };
   if (scripts.build) return { kind: 'static', install: true, build: true, roots: ['dist', 'build', 'out'] };
   for (const r of ['.', 'public']) if (fs.existsSync(path.join(dir, r, 'index.html'))) return { kind: 'static', install: false, build: false, roots: [r] };
@@ -106,6 +110,21 @@ export function detectKind(dir) {
   return null;
 }
 export const NOTHING_TO_SERVE = 'Nothing to serve yet: add an index.html, or a package.json "start" script that listens on $PORT.';
+
+// A project's .env as an object: KEY=value lines, optional `export `, "double" (with \\n, \\", \\\\) or 'single' quotes, # comments.
+export function parseEnv(text) {
+  const out = {};
+  for (const raw of String(text || '').split(/\r?\n/)) {
+    const m = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(raw);
+    if (!m) continue;
+    const v = m[2].trim();
+    if (v.startsWith('"')) out[m[1]] = (/^"((?:[^"\\]|\\.)*)"/.exec(v)?.[1] ?? v.slice(1)).replace(/\\(.)/g, (_, c) => (c === 'n' ? '\n' : c));
+    else if (v.startsWith("'")) out[m[1]] = /^'([^']*)'/.exec(v)?.[1] ?? v.slice(1);
+    else out[m[1]] = v.replace(/\s+#.*$/, '');
+  }
+  return out;
+}
+const envOf = (dir) => { try { return parseEnv(fs.readFileSync(path.join(dir, '.env'), 'utf8')); } catch { return {}; } };
 
 // sudo commands for the real head; tests pass their own.
 function defaultExec(cmd, args) {
@@ -369,7 +388,7 @@ export function createPreviews({
     const s = st(dir), gen = s.gen, port = e.port;
     const stale = () => s.gen !== gen || store[dir] !== e;
     s.head = await gitHead(dir);
-    const kind = fs.existsSync(dir) ? detectKind(dir) : null;
+    const kind = fs.existsSync(dir) ? detectKind(dir, e.start) : null;
     if (!kind) return setStatus(dir, 'waiting', { kind: null, error: NOTHING_TO_SERVE });
     fs.writeFileSync(logFile(e), '');
     setStatus(dir, 'building', { kind: kind.kind });
@@ -379,8 +398,18 @@ export function createPreviews({
         if (await step(dir, e, 'npm', [lock ? 'ci' : 'install', '--no-audit', '--no-fund'], {})) throw new Error('npm install failed');
         if (stale()) return;
       }
+      if (kind.python) {
+        const venv = path.join(dir, '.venv'), mark = path.join(venv, '.installed');
+        if (!fs.existsSync(path.join(venv, 'bin')) && await step(dir, e, 'python3', ['-m', 'venv', '.venv'], {})) throw new Error('Making the Python venv failed');
+        if (stale()) return;
+        if (mtime(path.join(dir, 'requirements.txt')) > mtime(mark)) {
+          if (await step(dir, e, path.join(venv, 'bin', 'pip'), ['install', '-q', '-r', 'requirements.txt'], {})) throw new Error('pip install failed');
+          fs.writeFileSync(mark, '');
+          if (stale()) return;
+        }
+      }
       if (kind.build) {
-        if (await step(dir, e, 'npm', ['run', 'build'], {})) throw new Error('npm run build failed');
+        if (await step(dir, e, 'npm', ['run', 'build'], envOf(dir))) throw new Error('npm run build failed');
         if (stale()) return;
       }
       if (kind.kind === 'static') {
@@ -392,7 +421,7 @@ export function createPreviews({
         s.server = srv;
         appendLog(e, `serving ${path.relative(dir, root) || '.'}/ on port ${port}`);
       } else {
-        const [cmd, args] = kind.kind === 'php' ? ['php', ['-S', `127.0.0.1:${port}`, '-t', dir]] : ['npm', ['start']];
+        const [cmd, args] = kind.kind === 'php' ? ['php', ['-S', `127.0.0.1:${port}`, '-t', dir]] : kind.kind === 'command' ? ['bash', ['-c', e.start]] : ['npm', ['start']];
         launch(dir, e, cmd, args, gen);
       }
       const until = Date.now() + healthMs;
@@ -414,8 +443,9 @@ export function createPreviews({
   function launch(dir, e, cmd, args, gen) {
     const s = st(dir);
     const fd = fs.openSync(logFile(e), 'a');
+    const venv = path.join(dir, '.venv', 'bin'), py = e.start && fs.existsSync(venv) ? { PATH: `${venv}:${process.env.PATH}`, VIRTUAL_ENV: path.dirname(venv) } : {};
     const child = spawnFn(cmd, args, { cwd: dir, detached: true, stdio: ['ignore', fd, fd],
-      env: { ...process.env, PORT: String(e.port), PREVIEW_URL: url(e.slug, e.domain), AGENT_ORCH_PREVIEW: hostOf(e) } });
+      env: { ...process.env, ...envOf(dir), ...py, PORT: String(e.port), PREVIEW_URL: url(e.slug, e.domain), AGENT_ORCH_PREVIEW: hostOf(e) } });
     fs.closeSync(fd);
     s.child = child;
     e.pid = child.pid; save();
@@ -448,7 +478,7 @@ export function createPreviews({
     const e = store[dir];
     if (!e) return null;
     const s = st(dir);
-    return { slug: e.slug, domain: e.domain, url: url(e.slug, e.domain), port: e.port, status: s.status, kind: s.kind ?? null, error: s.error ?? null, updatedAt: s.updatedAt ?? null,
+    return { slug: e.slug, domain: e.domain, url: url(e.slug, e.domain), port: e.port, start: e.start || null, status: s.status, kind: s.kind ?? null, error: s.error ?? null, updatedAt: s.updatedAt ?? null,
       cert: certs.get(hostOf(e)) || null };
   }
 
@@ -489,7 +519,7 @@ export function createPreviews({
     view,
     list: () => Object.keys(store).map((dir) => ({ dir, ...view(dir) })),
     // Give `dir` the address `slug`.`domain` (a new one, or a move). Resolves to {ok, ...view} or {error}.
-    async set(dir, raw, dom = null) {
+    async set(dir, raw, dom = null, { start } = {}) {
       const c = check(raw, dir, dom);
       if (!c.ok) return { error: c.error };
       const prev = store[dir];
@@ -498,7 +528,8 @@ export function createPreviews({
       if (prev) await stop(dir); // while store[dir] still names the old host (its process tag)
       const aliases = prev ? [...(prev.aliases || []), { slug: prev.slug, domain: prev.domain }]
         .filter((a, i, all) => !(a.slug === c.slug && a.domain === c.domain) && all.findIndex((b) => b.slug === a.slug && b.domain === a.domain) === i).slice(-5) : [];
-      store[dir] = { slug: c.slug, domain: c.domain, port, pid: null, ...(aliases.length && { aliases }) };
+      const cmd = start ?? prev?.start;
+      store[dir] = { slug: c.slug, domain: c.domain, port, pid: null, ...(cmd && { start: cmd }), ...(aliases.length && { aliases }) };
       save(); // before the reload, so the entry survives if this process dies during it
       try { await applyCaddy(); } catch (err) {
         if (prev) { store[dir] = prev; queueDeploy(dir); } else delete store[dir];
@@ -548,6 +579,19 @@ export function createPreviews({
       }, debounceMs);
     },
     restart: (dir) => (store[dir] ? (st(dir).crashes = 0, queueDeploy(dir)) : Promise.resolve()),
+    // The saved start command ('' clears it), used from the next deploy on.
+    setStart(dir, cmd) { const e = store[dir]; if (!e) return; if (cmd) e.start = cmd; else delete e.start; save(); },
+    // Deploy what's committed now, without waiting for redeploy's debounce and without a second run when one's already on this
+    // commit. Resolves when it's up or has failed.
+    async deployNow(dir) {
+      if (!store[dir]) return;
+      const s = st(dir);
+      clearTimeout(s.timer);
+      s.crashes = 0;
+      if (s.busy && s.head === await gitHead(dir)) return s.busy;
+      return queueDeploy(dir);
+    },
+    settled: (dir) => st(dir).busy || Promise.resolve(), // the deploy in progress, if any
     logs(dir) {
       const e = store[dir];
       if (!e) return null;

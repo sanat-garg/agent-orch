@@ -42,6 +42,7 @@ import { createRollingRestart, preflight, readRestartState, serverFile } from '.
 import { createSounds, MAX_SOUND_BYTES as MAX_CUSTOM_SOUND_BYTES } from './sounds.mjs';
 import { createVersion, formatVersion } from './version.mjs';
 import { createPreviews, normalizeSlug } from './previews.mjs';
+import { createDeployApi } from './deploy.mjs';
 import { projectName } from './project-name.mjs';
 import { repoInfo } from './worktrees.mjs';
 import { taskChanges } from './changes.mjs';
@@ -960,19 +961,59 @@ async function agentPreview({ dir, name, action } = {}) {
     return [200, { ok: true, preview: cur }];
   }
   if (cur) return [200, { ok: true, preview: cur, existed: true }];
+  const r = await autoAddress(cwd, name, {});
+  return r.error ? [400, r] : [200, { ok: true, preview: previews.view(cwd) }];
+}
+// A first address for a project: `<name or folder>.<default domain>`, -2…-9 when taken.
+async function autoAddress(cwd, name, opts) {
   const base = normalizeSlug(name || path.basename(cwd));
   let error = 'No free address.';
   for (let i = 1; i <= 9; i++) {
     const slug = i === 1 ? base : `${base.slice(0, 37)}-${i}`, c = previews.check(slug, cwd, null);
-    if (c.ok) {
-      const r = await previews.set(cwd, slug, null);
-      return r.error ? [400, r] : [200, { ok: true, preview: previews.view(cwd) }];
-    }
+    if (c.ok) return previews.set(cwd, slug, null, opts);
     error = c.error;
     if (!/^Taken by|^Already used|reserved/.test(c.error)) break;
   }
-  return [400, { error }];
+  return { error };
 }
+// Deploying from another machine (deploy.mjs): what it needs from projects, chats and git. Tokens are the admin's; a project
+// made this way is the admin's too, with its own chat and private GitHub repo like any other. agent-orch's own folder is never a target.
+const deployDirs = () => [...new Set(convos.map((c) => c.cwd))].filter((d) => d && path.resolve(d) !== ROOT);
+function newDeployProject(key, dir) {
+  const c = { id: crypto.randomUUID(), owner: ADMIN_ID, title: path.basename(dir), cwd: dir, mode: 'bypassPermissions', model: '', createdAt: Date.now(), updatedAt: Date.now(), deployName: key, deployed: Date.now() };
+  convos.unshift(c);
+  saveConvos();
+  broadcastConvos();
+  return setupRepo(c);
+}
+const deployApi = createDeployApi({ dataDir: DATA, previews, log: (m) => console.log(`[deploy] ${m}`), ops: {
+  list: deployDirs,
+  // By the name it was deployed under, else its folder's name.
+  find: (key) => convos.find((c) => c.deployName === key && path.resolve(c.cwd) !== ROOT)?.cwd || deployDirs().find((d) => normalizeSlug(path.basename(d)) === key) || null,
+  findRepo(spec) {
+    const r = parseRepoSpec(spec), key = (r?.full || r?.url || '').toLowerCase();
+    return key ? convos.find((c) => c.repo?.full?.toLowerCase() === key && fs.existsSync(c.cwd) && path.resolve(c.cwd) !== ROOT)?.cwd || null : null;
+  },
+  isDeployed: (dir) => convos.some((c) => c.cwd === dir && c.deployed),
+  markDeployed(dir, key) {
+    const c = findConvo(mainChatId(dir));
+    if (c && (!c.deployed || c.deployName !== key)) { c.deployed = Date.now(); c.deployName = key; saveConvos(); }
+  },
+  busy: (dir) => convos.some((c) => c.cwd === dir && chatBusy(c)),
+  async create(key) { const dir = uniqueProjectDir(key); fs.mkdirSync(dir, { recursive: true }); await newDeployProject(key, dir); return dir; },
+  async clone(spec, key) {
+    if (!gh.status().linked && !(await gh.refresh()).linked) throw new Error('GitHub isn\'t linked on this server yet.');
+    const dir = uniqueProjectDir(key);
+    await gh.clone(spec, dir);
+    await newDeployProject(key, dir);
+    return dir;
+  },
+  lock: (dir, fn) => (orch ? orch.withRepo(dir, fn) : fn()),
+  pull: (dir) => gh.pull(dir),
+  commit: (dir, message) => syncGit(dir, message),
+  autoAddress,
+  notify(dir, text) { const id = mainChatId(dir); if (id) emit(id, { t: 'notice', text }); },
+} });
 setMcpSource((agent, run) => ext.mcpRun(agent, run)); // every runAgentCli run (tasks, planner, non-Claude chats) reads the list as it starts
 ext.onChange((kind) => { for (const ws of allClients) send(ws, { t: 'ext', kind }); });
 // A chat's persona as its system-prompt block (null: none, or deleted), and the MCP servers Claude chats get.
@@ -1945,6 +1986,8 @@ async function handleRequest(req, res) {
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'same-origin');
 
+  // Deploys from another machine: bearer token or upload ticket, no session (deploy.mjs).
+  if (deployApi.handle(req, res, url)) return;
   // An agent publishing its project (bin/preview.mjs): this boot's key, and only from this machine (never through Caddy).
   if (p === '/api/agent/preview' && req.method === 'POST') {
     const key = Buffer.from(String(req.headers['x-agent-orch-key'] || ''));
@@ -2307,6 +2350,11 @@ async function handleRequest(req, res) {
       return json(res, 200, { ...publicConvo(c), ...(pv?.error && { previewError: pv.error }) });
     } catch (e) { return json(res, 400, { error: e.message }); }
   }
+  // The tokens other machines deploy with (deploy.mjs); the admin's alone (not in USER_PATHS). A new token is shown once.
+  if (p === '/api/deploy/tokens' && req.method === 'GET') return json(res, 200, { tokens: deployApi.tokens.list() });
+  if (p === '/api/deploy/tokens' && req.method === 'POST') return json(res, 200, deployApi.tokens.create((await readBody(req)).name));
+  const dtm = p.match(/^\/api\/deploy\/tokens\/([a-f0-9]{12})$/);
+  if (dtm && req.method === 'DELETE') return deployApi.tokens.revoke(dtm[1]) ? json(res, 200, { ok: true }) : json(res, 404, { error: 'No such token' });
   // Live previews: the manager's list (every project's address and status) and the owner's domains.
   if (p === '/api/previews' && req.method === 'GET') {
     const list = previews.list().map((v) => { const c = findConvo(mainChatId(v.dir)); return { ...v, cid: c?.id || null, title: c?.title || path.basename(v.dir) }; });

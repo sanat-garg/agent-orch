@@ -6,12 +6,14 @@
 //   - the sidebar's "Live previews" manager lists every project's address and status (set, move, restart, logs, remove)
 //     and the owner's domains (add, remove, make default),
 //   - a card's Inspect opens the inspector: that address in an iframe at a 390, 768 or 1280px CSS viewport width,
-//   - a card (and the inspector bar) has Copy link, and Share where navigator.share exists (phones), to send a preview on.
+//   - a card (and the inspector bar) has Copy link, and Share where navigator.share exists (phones), to send a preview on,
+//   - "Deploy from your computer" makes the tokens another machine's Claude deploys with (server: deploy.mjs); a new token's
+//     connect command shows once, until the sheet next opens.
 // Loaded after app.js and uses its helpers ($, el, api, toast, state, currentConvo, closeSidebar, coarse, copyToClipboard).
 (() => {
   const APEX = '@';
   const PV = { domains: [], list: [], loaded: false, draft: { slug: '', skip: true, domain: null, apex: false, check: null }, timer: 0, seq: 0,
-    lastFocus: null, logsOpen: new Set(), editing: new Set(), q: '', current: null, expanded: new Set() };
+    lastFocus: null, logsOpen: new Set(), editing: new Set(), q: '', current: null, expanded: new Set(), tokens: [], fresh: null };
   const STATUS = { running: 'Live', building: 'Deploying…', waiting: 'Waiting for code', error: 'Error', stopped: 'Stopped' };
   const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '');
   const host = (v) => (v.slug === APEX ? v.domain : `${v.slug}.${v.domain}`);
@@ -22,6 +24,7 @@
     try {
       const r = await api('/api/previews');
       PV.domains = r.domains; PV.list = r.previews; PV.loaded = true;
+      PV.tokens = (await api('/api/deploy/tokens')).tokens;
     } catch { /* an older server: no previews */ }
   }
   const defaultDomain = () => PV.domains[0]?.domain || 'greygoose.baby';
@@ -168,6 +171,7 @@
     closeSidebar();
     if ($('previewsModal').hidden) {
       PV.lastFocus = document.activeElement;
+      PV.fresh = null;
       // The open chat's project comes first, unfolded; the rest fold to one row each until tapped. The find field starts empty.
       const c = currentConvo();
       PV.current = c ? c.mainId || c.id : null;
@@ -200,7 +204,7 @@
     // Never rebuild under the owner's fingers (a status push mid-typing).
     if (body.contains(document.activeElement) && document.activeElement.matches('input, select')) return refreshStatuses();
     const scroll = body.scrollTop;
-    body.replaceChildren(...projectsSection(), ...(PV.q ? [] : [domainsSection()])); // finding is about projects
+    body.replaceChildren(...projectsSection(), ...(PV.q ? [] : [deploySection(), domainsSection()])); // finding is about projects
     for (const i of body.querySelectorAll('.pv-slug')) fit(i);
     body.scrollTop = scroll;
   }
@@ -489,6 +493,55 @@
     box.append(addr, check, bar);
     changed();
     return box;
+  }
+
+  function deploySection() {
+    const sec = el('section', 'pv-sec');
+    sec.append(el('h3', '', 'Deploy from your computer'),
+      el('p', 'pv-hint pv-deploy-hint', 'Connect Claude Code on another computer, then ask it to deploy any folder here. It gets a project, an https address and the logs. A connection can run code on this server, so treat its command like a password.'));
+    if (PV.fresh) {
+      const box = el('div', 'pv-fresh');
+      const copy = el('button', 'btn small primary', 'Copy command');
+      copy.type = 'button';
+      const cmd = `claude mcp add --transport http --scope user agent-orch ${location.origin}/mcp --header "Authorization: Bearer ${PV.fresh.token}"`;
+      copy.onclick = async () => { if (await copyToClipboard(cmd)) toast('Copied'); };
+      box.append(el('div', 'pv-fresh-head', `Run this once on ${PV.fresh.name}. It won't be shown again.`), el('pre', 'pv-cmd', cmd), copy);
+      sec.append(box);
+    }
+    if (PV.tokens.length) {
+      const list = el('div', 'pv-list');
+      for (const t of PV.tokens) {
+        const row = el('div', 'pv-item'), id = el('div', 'pv-id');
+        id.append(el('span', 'pv-name', t.name), el('span', 'pv-sub', t.lastUsedAt ? `Last used ${relTime(t.lastUsedAt)}` : 'Not used yet'));
+        const rm = el('button', 'pv-addbtn danger', 'Revoke');
+        rm.type = 'button';
+        rm.onclick = () => {
+          if (!confirm(`Revoke ${t.name}? It won't be able to deploy any more.`)) return;
+          if (PV.fresh?.id === t.id) PV.fresh = null;
+          domainAction('DELETE', `/api/deploy/tokens/${t.id}`);
+        };
+        row.append(id, rm);
+        list.append(row);
+      }
+      sec.append(list);
+    }
+    const form = el('form', 'pv-add');
+    const input = document.createElement('input');
+    input.placeholder = 'Name this computer, e.g. MacBook'; input.autocomplete = 'off'; input.enterKeyHint = 'done'; input.maxLength = 60;
+    input.setAttribute('aria-label', 'Name of the computer to connect');
+    const add = el('button', 'btn small primary', 'Connect');
+    add.type = 'submit';
+    add.disabled = true;
+    input.addEventListener('input', () => { add.disabled = !input.value.trim(); });
+    form.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      add.disabled = true;
+      try { PV.fresh = await api('/api/deploy/tokens', 'POST', { name: input.value }); await load(); render(); }
+      catch (e) { add.disabled = false; toast(e.message, { kind: 'error' }); }
+    });
+    form.append(input, add);
+    sec.append(form);
+    return sec;
   }
 
   function domainsSection() {

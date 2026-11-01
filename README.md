@@ -217,6 +217,42 @@ signed in, still lists that model, isn't blocked and has no usage window at 90% 
 recorded on the task. With an empty list, the task waits for its own model. Limits are per agent, so one agent's
 limit never blocks another's.
 
+## Deploying from another computer
+
+Any machine can ship code here and get back a live https site. In **Live previews → Deploy from your computer**, name
+the machine and press Connect, then run the command it shows once on that machine:
+
+```sh
+claude mcp add --transport http --scope user agent-orch https://<this server>/mcp --header "Authorization: Bearer aod_…"
+```
+
+After that, ask Claude Code there to "deploy this folder to my server". It uploads the folder and answers with the
+address, the status and, if something failed, the logs. Each deploy is an ordinary project: a folder under `~/workspace`,
+a chat, a private GitHub repo (when GitHub is linked here) and a commit, with Caddy and the certificate handled.
+
+| MCP tool | What it does |
+|---|---|
+| `prepare_upload` | Returns a one-time shell command (15 min) that uploads the current folder, replaces the project's code and waits for the result |
+| `deploy_files` | Sends files inline; only those change unless `replace_all` is set |
+| `deploy_from_github` | Clones a repo the first time, pulls and redeploys after that |
+| `list_projects`, `project_status`, `project_logs` | Addresses, status, build and app logs |
+| `restart_project`, `set_address`, `take_offline` | Rebuild, move to a new address (the old one keeps working), stop the site and keep the code |
+| `set_env` | Sets variables in the project's `.env`, never in git; the build and the app receive them |
+
+**What runs:** `index.html`, a `package.json` with a `start` or `build` script and `index.php` are detected. Anything else
+takes a `start_command` that listens on `$PORT`; a `requirements.txt` gets a `.venv` and `pip install` first.
+
+**What stays safe:** an upload never carries `.git`, `node_modules`, `.env*` or anything in the project's `.gitignore`. Files
+removed locally are removed here only if git tracks them, so an app's database and uploads stay as long as they're ignored.
+Writing over a project a deploy didn't create needs `replace_existing`, and agent-orch's own folder can't be a target.
+
+**Plain HTTP:** the same tools are at `GET /api/deploy/tools` and `POST /api/deploy/tools/<name>` (JSON arguments), and CI can
+send `tar -czf - . | curl -T - -H "Authorization: Bearer $TOKEN" "https://<this server>/api/deploy/upload?name=<project>"`.
+
+**A token can run code as this server's user**, which has passwordless sudo here, so treat it like an SSH key. Tokens are stored
+hashed, and Revoke in the same section stops one at once. Clients that can't send a custom header, such as claude.ai connectors,
+can't connect yet.
+
 ## Skills, MCP servers, subagents and personas
 
 **Settings → Skills & tools** (the sidebar gear) has one tab for each:

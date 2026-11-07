@@ -33,7 +33,7 @@ test('every local <script src> and <link href> is served', () => {
   const server = read('server.mjs');
   const vendor = Object.fromEntries([...server.matchAll(/'(\/vendor\/[^']+)':\s*'([^']+)'/g)].map((m) => [m[1], m[2]]));
   assert.ok(Object.keys(vendor).length, 'VENDOR map not found in server.mjs');
-  for (const page of ['public/index.html', 'public/login.html']) {
+  for (const page of ['public/index.html', 'public/login.html', 'public/chat.html']) {
     const refs = [...read(page).matchAll(/<(?:script\b[^>]*\bsrc|link\b[^>]*\bhref)="([^"]+)"/g)].map((m) => m[1]);
     assert.ok(refs.length, `${page} has no script/link refs`);
     for (const ref of refs) {

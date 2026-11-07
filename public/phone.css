@@ -48,10 +48,10 @@
   .new-chat svg { width: 20px; height: 20px; }
   @media (pointer: coarse) { .new-chat::after { content: ''; position: absolute; inset: -2px; } } /* 44pt */
   .new-chat:active { filter: brightness(.92); }
-  /* Live previews, Schedules, Credentials: three tiles. */
-  .side-links { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 2px 0 0; }
+  /* Live previews, Schedules, Credentials, Chat: four tiles. */
+  .side-links { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 2px 0 0; }
   .side-link, .side-link + .side-link { flex-direction: column; justify-content: flex-start; gap: 6px; height: 78px; margin: 0; padding: 14px 4px 6px;
-    border: 1px solid var(--border); border-radius: 14px; background: var(--panel); color: var(--text); font-size: 13px; font-weight: 600;
+    border: 1px solid var(--border); border-radius: 14px; background: var(--panel); color: var(--text); font-size: 11.5px; font-weight: 600; letter-spacing: -0.01em; min-width: 0;
     text-align: center; line-height: 1.2; }
   .side-link svg { flex: none; width: 22px; height: 22px; color: var(--accent-ink); }
   .side-link:active { background: var(--raised); }

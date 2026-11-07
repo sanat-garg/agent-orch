@@ -4,6 +4,7 @@
   border: 0; border-radius: 10px; background: none; color: var(--muted); cursor: pointer; font: inherit; font-size: 14px; font-weight: 550;
 }
 .side-link:hover { background: var(--raised); color: var(--text); }
+a.side-link { text-decoration: none; box-sizing: border-box; }
 @media (pointer: coarse) { .side-link { min-height: 44px; } }
 .side-links { display: contents; } /* phones make it a row of tiles (phone.css) */
 

@@ -3,11 +3,13 @@
 // Settings → Account: who is signed in, and Sign out. For the admin, Settings → "Users & usage caps" opens a sheet
 // listing every account with its estimated share of each weekly limit the agent CLIs report (Claude's all-models week
 // and per-model weeks such as Fable; codex's weekly) and the cap on it, their access (only their own projects or all of them,
-// and whether they may use Orchestrator Mode), plus add / reset password / role / delete.
+// and whether they may use Orchestrator Mode), plus add / reset password / role / delete. A "Chat only" account (role 'chat')
+// gets only the plain Opus chat at /chat (chat-mode.mjs).
 // A non-admin's sidebar shows "Your usage" instead of the machine and plan cards: their share of each weekly limit
 // against their caps. Loaded after app.js and uses its helpers ($, el, api, toast, coarse, me, loadMe, meAdmin).
 (() => {
   const UM = { list: [], me: null, loaded: false, error: null, lastFocus: null, open: null, adding: false };
+  const ROLE_NAMES = { user: 'User', chat: 'Chat only', admin: 'Admin' };
   const btn = (cls, text, onclick) => { const b = el('button', cls, text); b.type = 'button'; if (onclick) b.onclick = onclick; return b; };
   const pct = (n) => `${Number(n) < 10 && Number(n) % 1 ? Number(n).toFixed(1) : Math.round(Number(n))}%`;
   const resets = (s) => (s ? `resets ${new Date(s * 1000).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })}` : '');
@@ -140,7 +142,7 @@
     const name = input('text', { autocomplete: 'off', spellcheck: false, autocapitalize: 'off', placeholder: 'e.g. sam', maxLength: 32 });
     const pw = input('password', { autocomplete: 'new-password', placeholder: 'At least 8 characters' });
     const role = el('select');
-    role.append(new Option('User', 'user'), new Option('Admin', 'admin'));
+    role.append(new Option('User', 'user'), new Option('Chat only', 'chat'), new Option('Admin', 'admin'));
     const err = el('p', 'um-err');
     const foot = el('div', 'um-foot');
     foot.append(btn('btn small', 'Cancel', () => { UM.adding = false; render(); }), Object.assign(el('button', 'btn small primary', 'Add user'), { type: 'submit' }));
@@ -154,7 +156,7 @@
         await load(); render();
       } catch (x) { err.textContent = x.message; }
     };
-    form.append(el('h3', 'um-etitle', 'New user'), field('Username', name, 'Lowercase letters, digits, . _ or -'), field('Password', pw), field('Role', role, 'Admins manage users, machines and sign-ins, and are never capped'), err, foot);
+    form.append(el('h3', 'um-etitle', 'New user'), field('Username', name, 'Lowercase letters, digits, . _ or -'), field('Password', pw), field('Role', role, 'Chat only: just a private chat with Claude Opus at /chat, no projects or code. Admins manage users, machines and sign-ins, and are never capped'), err, foot);
     setTimeout(() => { if (!coarse) name.focus(); });
     return form;
   }
@@ -164,9 +166,10 @@
     const card = el('section', 'um-user');
     const isMe = u.id === UM.me;
     const head = el('div', 'um-head');
-    head.append(el('span', 'um-name', u.name), el('span', `um-role ${u.role}`, u.role === 'admin' ? 'Admin' : 'User'));
+    head.append(el('span', 'um-name', u.name), el('span', `um-role ${u.role}`, ROLE_NAMES[u.role] || u.role));
     if (isMe) head.append(el('span', 'um-you', 'you'));
-    head.append(el('span', 'um-meta', `${u.chats} chat${u.chats === 1 ? '' : 's'}`));
+    const n = u.role === 'chat' ? u.talks || 0 : u.chats;
+    head.append(el('span', 'um-meta', `${n} chat${n === 1 ? '' : 's'}`));
     card.append(head);
 
     // Every weekly window reported now, plus any capped one with no current reading (so its cap isn't lost).
@@ -203,7 +206,7 @@
       table.append(r);
     }
     card.append(table);
-    if (u.role !== 'admin') card.append(accessBox(u));
+    if (u.role === 'user') card.append(accessBox(u));
 
     const err = el('p', 'um-err');
     const acts = el('div', 'um-acts');
@@ -223,12 +226,17 @@
       catch (x) { err.textContent = x.message; }
     }));
     if (!isMe) {
-      acts.append(btn('btn small', u.role === 'admin' ? 'Make user' : 'Make admin', async () => {
-        try { await api(`/api/users/${u.id}`, 'PATCH', { role: u.role === 'admin' ? 'user' : 'admin' }); await load(); render(); }
-        catch (x) { err.textContent = x.message; }
-      }));
+      const role = el('select', 'um-rolesel');
+      role.setAttribute('aria-label', `${u.name}'s role`);
+      for (const [v, t] of Object.entries(ROLE_NAMES)) role.append(new Option(t, v, false, v === u.role));
+      role.onchange = async () => {
+        try { await api(`/api/users/${u.id}`, 'PATCH', { role: role.value }); toast(`${u.name} is now ${ROLE_NAMES[role.value]}`, { kind: 'success' }); await load(); render(); }
+        catch (x) { err.textContent = x.message; role.value = u.role; }
+      };
+      acts.append(role);
       acts.append(btn('btn small danger', 'Delete', async () => {
-        if (!confirm(`Delete ${u.name}? They are signed out, and their ${u.chats} chat${u.chats === 1 ? '' : 's'} move to you.`)) return;
+        if (!confirm(u.role === 'chat' ? `Delete ${u.name}? They are signed out, and their private chats are deleted.`
+          : `Delete ${u.name}? They are signed out, and their ${u.chats} chat${u.chats === 1 ? '' : 's'} move to you.`)) return;
         try { const r = await api(`/api/users/${u.id}`, 'DELETE'); toast(`Deleted ${u.name}${r.moved ? `; ${r.moved} chat${r.moved === 1 ? '' : 's'} moved to you` : ''}`); await load(); render(); }
         catch (x) { err.textContent = x.message; }
       }));

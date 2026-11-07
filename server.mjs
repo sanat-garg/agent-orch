@@ -51,7 +51,8 @@ import { projectCommits, commitDetail } from './commits.mjs';
 import { createCredentials, projectSecrets } from './credentials.mjs';
 import { createExecutions, serviceStatus, envExport, mergeEnv, validateIntake, executionBrief, kickoffMessage, EXECUTION_SYSTEM, SERVICES, PRODUCTS, APP_TECH, ASK_BEFORE } from './execution.mjs';
 import { describeCron, nextRun, validTz } from './cron.mjs';
-import { createUsers, ADMIN_ID, sharedWith, canOrchestrate } from './users.mjs';
+import { createUsers, ADMIN_ID, sharedWith, canOrchestrate, chatOnly } from './users.mjs';
+import { createChatMode } from './chat-mode.mjs';
 import { digest } from './digest.mjs';
 
 // Backstop: a stray rejected promise is logged instead of killing the server (uncaught exceptions still exit).
@@ -234,6 +235,7 @@ function userBlocked(req, url, u) {
   const p = url.pathname;
   if (!p.startsWith('/api/')) return null; // the app and its static files
   if (USER_PATHS.has(p)) return null;
+  if (p === '/api/chat' || p.startsWith('/api/chat/')) return null; // chat-mode.mjs: only ever their own chats
   if ((p === '/api/settings/sound' || p === '/api/sounds') && req.method === 'GET') return null;
   if (/^\/api\/uploads\/[a-f0-9]{24}$/.test(p) || p.startsWith('/api/media/')) return null;
   if (/^\/api\/credentials(\/[\w-]{1,40})?$/.test(p)) return null; // everyone's own; the routes only touch me.id's
@@ -605,6 +607,13 @@ const RAW_FILE = path.join(METRICS_DIR, 'raw.jsonl');
 const usageLog = createUsageLog(DATA);
 const users = createUsers({ dataDir: DATA, usageLog, agents: () => Object.keys(AGENTS) });
 const credentials = createCredentials({ dataDir: DATA }); // each user's own service logins and keys (credentials.mjs)
+// Chat (chat-mode.mjs): the plain Opus chat at /chat, the only thing a "Chat only" account sees. A capped user's send is refused.
+const chatMode = createChatMode({ dataDir: DATA, claudeBin: CLAUDE_BIN, env: CLAUDE_ENV, usageLog, isApiKey: (s) => API_KEY_SOURCES.has(s),
+  models: () => modelCatalog('claude').models,
+  refuse: (u, model) => {
+    const b = users.capBlock(u.id, 'claude', model);
+    return b && `You've reached your ${b.cap}% share of the ${b.label} weekly limit.${b.resetsAt ? ` It resets ${new Date(b.resetsAt * 1000).toUTCString().replace(/:\d\d GMT$/, ' UTC')}.` : ''} Ask your admin to raise it.`;
+  } });
 const executions = createExecutions({ dataDir: DATA }); // Execution Mode projects (execution.mjs)
 // A project's .env secrets go into its owner's Credentials by themselves (credentials.mjs importProject): after every
 // commit sync and once at boot. Anything new or changed is mentioned in the project's main chat.
@@ -1150,7 +1159,7 @@ const connList = () => (remoteLogins ? remoteLogins.annotate(connections.list())
 const resources = createResources({
   dataDir: DATA,
   mode: process.env.AGENT_ORCH_REAPER || (NO_ORCH || !orch ? 'off' : process.env.CW_DATA_DIR ? 'dry' : 'on'),
-  isActive: (o) => (o.kind === 'task' ? !!orch?.isRunning(o.id) : runtimes.has(o.id) || agentTurns.has(o.id)),
+  isActive: (o) => (o.kind === 'task' ? !!orch?.isRunning(o.id) : runtimes.has(o.id) || agentTurns.has(o.id) || chatMode.isLive(o.id)),
   loginActive: () => connections.active(),
   log: (message, level = 'info') => { if (orch) orch.logEvent(message, { level }); else console.log(`[resources] ${message}`); },
 });
@@ -1964,6 +1973,8 @@ function readBody(req) {
 
 // The sign-in page, the manifest, the push-only service worker (nothing secret; the browser refetches it without the
 // cookie) and the app icons (favicons, home-screen icons, the splash mascot) load without a session.
+// What a "Chat only" account may load (besides /api/chat).
+const CHAT_PAGE = new Set(['/chat', '/chat.js', '/chat.css', '/vendor/marked.js', '/vendor/purify.js']);
 const PUBLIC_PATHS = new Set(['/login', '/login.css', '/manifest.webmanifest', '/sw.js', '/favicon.ico', '/favicon-16.png', '/favicon-32.png', '/apple-touch-icon.png',
   '/icon-192.png', '/icon-512.png', '/icon-maskable-512.png', '/logo.png', '/mascot.png']);
 
@@ -2087,7 +2098,14 @@ async function handleRequest(req, res) {
     if (p.startsWith('/api/')) return json(res, 401, { error: 'Not signed in' });
     res.writeHead(302, { Location: '/login' }); return res.end();
   }
+  // Chat only (users.mjs role 'chat'): the /chat page and its API, nothing else of agent-orch.
+  if (chatOnly(me) && !CHAT_PAGE.has(p) && p !== '/api/chat' && !p.startsWith('/api/chat/')) {
+    if (p.startsWith('/api/')) return json(res, 403, { error: 'Your account can only use Chat' });
+    res.writeHead(302, { Location: '/chat' }); return res.end();
+  }
   if (!isAdmin(me)) { const why = userBlocked(req, url, me); if (why) return json(res, 403, { error: why }); }
+  if (await chatMode.handle(req, res, url, me, { readBody, json })) return;
+  if (p === '/chat') return serveFile(res, path.join(PUBLIC, 'chat.html'));
   // Who is signed in, and their estimated share of each weekly plan window against their caps (users.mjs).
   if (p === '/api/me' && req.method === 'GET') return json(res, 200, { user: users.view(me), usage: users.usage(me.id), ...(!isAdmin(me) && { github: ghUsers.status(me.id) }) });
   // A user's own GitHub (github-users.mjs; admins use the server's sign-in under Connections). GET → its status;
@@ -2167,7 +2185,7 @@ async function handleRequest(req, res) {
     } catch (e) { return json(res, 400, { error: e.message }); }
   }
   if (p === '/api/users' && req.method === 'GET') {
-    return json(res, 200, { me: me.id, users: users.list().map((u) => ({ ...u, usage: users.usage(u.id), chats: convos.filter((c) => (c.owner || ADMIN_ID) === u.id).length })) });
+    return json(res, 200, { me: me.id, users: users.list().map((u) => ({ ...u, usage: users.usage(u.id), chats: convos.filter((c) => (c.owner || ADMIN_ID) === u.id).length, talks: chatMode.countOf(u.id) })) });
   }
   if (p === '/api/users' && req.method === 'POST') {
     try { return json(res, 200, { user: users.add(await readBody(req)) }); } catch (e) { return json(res, e.status || 400, { error: e.message }); }
@@ -2194,6 +2212,7 @@ async function handleRequest(req, res) {
       for (const ws of allClients) {
         if (ws.user?.id !== u.id) continue;
         ws.user = users.get(u.id);
+        if (chatOnly(ws.user)) { ws.close(4001, 'signed out'); continue; } // made Chat only: their app reloads into /chat
         send(ws, { t: 'convos', convos: list });
         send(ws, { t: 'me' });
       }
@@ -2209,6 +2228,7 @@ async function handleRequest(req, res) {
     for (const c of convos) if (c.owner === um[1]) { c.owner = me.id; moved++; }
     if (moved) { saveConvos(); broadcastConvos(); }
     try { credentials.reown(um[1], me.id); } catch (e) { console.error('[credentials] not moved', um[1], e.message); }
+    chatMode.removeUser(um[1]); // their Chat conversations were private: they go with the account
     return json(res, 200, { ok: true, moved });
   }
 
@@ -2224,7 +2244,7 @@ async function handleRequest(req, res) {
     return serveFile(res, file, cache);
   }
   if (p === '/' || p === '/index.html') return serveFile(res, path.join(PUBLIC, 'index.html'));
-  if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css' || p === '/browser.js' || p === '/browser.css' || p === '/previews.js' || p === '/previews.css' || p === '/schedules.js' || p === '/schedules.css' || p === '/users.js' || p === '/users.css' || p === '/credentials.js' || p === '/credentials.css' || p === '/shots.js' || p === '/shots.css' || p === '/commits.js' || p === '/commits.css' || p === '/tokens.js' || p === '/tokens.css' || p === '/prompts.js' || p === '/prompts.css' || p === '/code-download.js' || p === '/code-download.css' || p === '/storage.js' || p === '/storage.css' || p === '/execution.js' || p === '/execution.css' || p === '/phone.css') return serveFile(res, path.join(PUBLIC, p));
+  if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css' || p === '/browser.js' || p === '/browser.css' || p === '/previews.js' || p === '/previews.css' || p === '/schedules.js' || p === '/schedules.css' || p === '/users.js' || p === '/users.css' || p === '/credentials.js' || p === '/credentials.css' || p === '/shots.js' || p === '/shots.css' || p === '/commits.js' || p === '/commits.css' || p === '/tokens.js' || p === '/tokens.css' || p === '/prompts.js' || p === '/prompts.css' || p === '/code-download.js' || p === '/code-download.css' || p === '/storage.js' || p === '/storage.css' || p === '/execution.js' || p === '/execution.css' || p === '/chat.js' || p === '/chat.css' || p === '/phone.css') return serveFile(res, path.join(PUBLIC, p));
   // The Files view: listing, preview, download (a file, or a zip streamed on the fly), upload, and copy/move/zip/unzip over the whole disk, opening on the chat's project (files.mjs).
   // A user's requests stay inside the chat's project: only their chats' roots, and every path (absolute ones and link
   // targets too) must resolve inside it (files.mjs `confine`).
@@ -3184,7 +3204,7 @@ function handleUpgrade(req, socket, head) {
     return;
   }
   if (p === WS_PATH) { if (cluster) return cluster.handleUpgrade(req, socket, head); socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n'); return socket.destroy(); }
-  if (p !== '/ws' || !isAuthed(req) || !sameOrigin(req)) {
+  if (p !== '/ws' || !isAuthed(req) || chatOnly(sessionUser(req)) || !sameOrigin(req)) {
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     return socket.destroy();
   }
@@ -3203,7 +3223,7 @@ wss.on('connection', (ws, req) => {
     syncSessions();
     const s = sessions[token];
     ws.user = s && users.get(s.user || ADMIN_ID);
-    if (!s || s.exp < Date.now() || !ws.user) ws.close(4001, 'signed out');
+    if (!s || s.exp < Date.now() || !ws.user || chatOnly(ws.user)) ws.close(4001, 'signed out');
     else if (ws.readyState === 1) ws.ping();
   }, Number(process.env.CW_WS_KEEPALIVE_MS) || 30e3);
 

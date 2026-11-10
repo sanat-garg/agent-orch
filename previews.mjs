@@ -43,6 +43,7 @@ export const APEX = '@'; // the slug for the bare domain itself (https://<domain
 const LOG_LINES = 200;
 const HEALTH_MS = 30000;
 const INSTALL_MS = 10 * 60000;
+const RETRY_MS = 60000, RETRIES = 6; // a failed start is retried after 1, 2, 4, 8, 16, 30 min
 
 // Lowercase a-z0-9 and single hyphens, 3-40 chars, no leading/trailing hyphen ('' when nothing usable is left).
 export function normalizeSlug(s) {
@@ -212,7 +213,7 @@ async function postConfig(admin, json) {
 
 export function createPreviews({
   dataDir, domain = 'greygoose.baby', caddyfile = '/etc/caddy/Caddyfile', includeFile = '/etc/caddy/agent-orch-previews.caddy',
-  exec = defaultExec, forbid = [], onChange = () => {}, onMove = async () => {}, log = () => {}, ports = PORTS, debounceMs = 2000, healthMs = HEALTH_MS,
+  exec = defaultExec, forbid = [], onChange = () => {}, onMove = async () => {}, log = () => {}, ports = PORTS, debounceMs = 2000, healthMs = HEALTH_MS, retryMs = RETRY_MS,
   spawnFn = spawn, tlsProbe = defaultTlsProbe, admin = 'http://127.0.0.1:2019', certWaitMs = 25000, certTotalMs = 180000,
 } = {}) {
   const file = path.join(dataDir, 'previews.json');
@@ -386,13 +387,15 @@ export function createPreviews({
     if (!e) return;
     await stop(dir);
     const s = st(dir), gen = s.gen, port = e.port;
+    if (!s.retrying) s.fails = 0; // a commit or a Restart starts the retry count afresh
+    s.retrying = false;
     const stale = () => s.gen !== gen || store[dir] !== e;
     s.head = await gitHead(dir);
     const kind = fs.existsSync(dir) ? detectKind(dir, e.start) : null;
     if (!kind) return setStatus(dir, 'waiting', { kind: null, error: NOTHING_TO_SERVE });
-    fs.writeFileSync(logFile(e), '');
     setStatus(dir, 'building', { kind: kind.kind });
     try {
+      fs.writeFileSync(logFile(e), ''); // inside the try: on a full disk this throws, and that must end in a retry, not a silent stop
       if (kind.install && needsInstall(dir)) {
         const lock = fs.existsSync(path.join(dir, 'package-lock.json'));
         if (await step(dir, e, 'npm', [lock ? 'ci' : 'install', '--no-audit', '--no-fund'], {})) throw new Error('npm install failed');
@@ -432,13 +435,26 @@ export function createPreviews({
         await sleep(500);
       }
       if (stale()) return;
-      s.crashes = 0;
+      s.crashes = 0; s.okAt = Date.now();
       setStatus(dir, 'running', { kind: kind.kind, healthyHead: s.head });
     } catch (err) {
       if (stale()) return;
       appendLog(e, err.message);
       setStatus(dir, 'error', { kind: kind.kind, error: err.message });
+      retryLater(dir, gen);
     }
+  }
+  // A start-up that failed (a full disk, a registry outage, a dependency that was down) is tried again with backoff, so
+  // a preview never stays down after the cause has gone. A new commit or Restart retries at once.
+  function retryLater(dir, gen) {
+    const s = st(dir), e = store[dir];
+    if (s.okAt && Date.now() - s.okAt > 60 * retryMs) { s.fails = 0; s.okAt = 0; } // up for an hour: a fresh incident
+    if (++s.fails > RETRIES) return;
+    const ms = Math.min(30 * retryMs, retryMs * 2 ** (s.fails - 1));
+    appendLog(e, `retrying in ${Math.round(ms / 1000)} s (attempt ${s.fails} of ${RETRIES})`);
+    clearTimeout(s.restartTimer);
+    s.restartTimer = setTimeout(() => { if (s.gen === gen && store[dir] === e) { s.retrying = true; queueDeploy(dir); } }, ms);
+    s.restartTimer.unref?.();
   }
   function launch(dir, e, cmd, args, gen) {
     const s = st(dir);
@@ -456,9 +472,9 @@ export function createPreviews({
       appendLog(e, `exited (${sig || code})`);
       if (s.status !== 'running') return; // deploy() reports the start-up failure
       s.crashes++;
-      if (s.crashes > 5) return setStatus(dir, 'error', { error: `Crashed ${s.crashes} times in a row; press Restart after fixing it.` });
+      if (s.crashes > 5) { setStatus(dir, 'error', { error: `Crashed ${s.crashes} times in a row; press Restart after fixing it.` }); return retryLater(dir, gen); }
       setStatus(dir, 'building', { error: `Crashed (${sig || `exit ${code}`}); restarting…` });
-      s.restartTimer = setTimeout(() => { if (s.gen === gen) deploy(dir); }, Math.min(60000, 1000 * 2 ** s.crashes));
+      s.restartTimer = setTimeout(() => { if (s.gen === gen) { s.retrying = true; deploy(dir); } }, Math.min(60000, 1000 * 2 ** s.crashes));
     });
   }
 

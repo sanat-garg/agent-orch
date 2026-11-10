@@ -22,7 +22,7 @@ other.example.com {
 
 // A fake `sudo …` that edits files in the temp dir; caddy validate fails while `bad.fail` is set.
 // Certificates are "there" at once unless a test passes its own tlsProbe; `bad.reloadFail` makes systemctl fail.
-function setup({ ports = [45100 + Math.floor(Math.random() * 400), 45599], tlsProbe = async () => true, admin = null, certWaitMs = 2000, certTotalMs = 5000, onMove } = {}) {
+function setup({ ports = [45100 + Math.floor(Math.random() * 400), 45599], tlsProbe = async () => true, admin = null, certWaitMs = 2000, certTotalMs = 5000, onMove, retryMs } = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'previews-'));
   const caddyfile = path.join(tmp, 'Caddyfile'), includeFile = path.join(tmp, 'agent-orch-previews.caddy');
   fs.writeFileSync(caddyfile, OWNER_CADDY);
@@ -43,7 +43,7 @@ function setup({ ports = [45100 + Math.floor(Math.random() * 400), 45599], tlsPr
   };
   const changes = [];
   const pv = createPreviews({ dataDir: path.join(tmp, 'data'), caddyfile, includeFile, exec, ports, debounceMs: 20, healthMs: 15000,
-    forbid: [path.join(tmp, 'agent-orch')], onChange: (d) => changes.push(d), tlsProbe, admin, certWaitMs, certTotalMs, onMove });
+    forbid: [path.join(tmp, 'agent-orch')], onChange: (d) => changes.push(d), tlsProbe, admin, certWaitMs, certTotalMs, onMove, retryMs });
   return { tmp, caddyfile, includeFile, calls, bad, pv, changes, cleanup: async () => { await pv.stopAll(); fs.rmSync(tmp, { recursive: true, force: true }); } };
 }
 const get = (url) => new Promise((resolve, reject) => http.get(url, (r) => { let b = ''; r.on('data', (d) => (b += d)); r.on('end', () => resolve({ status: r.statusCode, body: b })); }).on('error', reject));
@@ -194,6 +194,22 @@ test('static site is served; empty folder waits; a node app redeploys after a co
     pv.redeploy(app);
     await until(async () => (await get(`http://127.0.0.1:${n.port}/`).catch(() => ({}))).body === 'v2');
     await until(() => pv.view(app).status === 'running');
+  } finally { await cleanup(); }
+});
+
+test('a failed start-up is retried with backoff until it comes up (the disk-full outage of 2026-11-09)', async () => {
+  const { pv, tmp, cleanup } = setup({ retryMs: 300 });
+  try {
+    const app = path.join(tmp, 'flaky'); fs.mkdirSync(app);
+    fs.writeFileSync(path.join(app, 'server.js'), `if (!require('fs').existsSync('ok')) process.exit(1);
+require('http').createServer((q, r) => r.end('up')).listen(process.env.PORT, '127.0.0.1');`);
+    fs.writeFileSync(path.join(app, 'package.json'), '{"name":"flaky","scripts":{"start":"node server.js"}}');
+    const n = await pv.set(app, 'flaky-app');
+    await until(() => pv.view(app).status === 'error');
+    await until(() => /retrying in .*attempt 2 of/.test(pv.logs(app)));
+    fs.writeFileSync(path.join(app, 'ok'), ''); // the cause goes away; nobody presses Restart
+    await until(() => pv.view(app).status === 'running');
+    assert.equal((await get(`http://127.0.0.1:${n.port}/`)).body, 'up');
   } finally { await cleanup(); }
 });
 

@@ -722,7 +722,9 @@ code, pre, kbd { font-family: var(--mono); }
     border-radius: 14px; background: var(--panel); color: var(--text); font: inherit; font-size: 16px; text-align: left; cursor: pointer; }
   .mx-diag-btn::after { content: ''; width: 8px; height: 8px; border: solid var(--muted); border-width: 0 2px 2px 0; transform: translateY(-2px) rotate(45deg); }
   .mx-diag-btn[aria-expanded="true"]::after { transform: translateY(2px) rotate(-135deg); }
-  #caWrap { order: 3; margin: 0; }
+  /* Open, the row and the diagram are one grouped card: the row stays in place (never the wide view's corner button). */
+  .mx[data-diagram] .mx-diag-btn { position: static; margin: 0; border-radius: 14px 14px 0 0; }
+  #caWrap { order: 3; margin: -12px 0 0; border-top: 0; border-radius: 0 0 14px 14px; }
   #caWrap :is(.ca-sub, .ca-more, .ca-chip text) { font-size: 12px; }
   .mx-more { order: 4; display: block; }
   .mx-more .mc-acts { display: flex; flex-direction: column; gap: 8px; }
@@ -1169,7 +1171,9 @@ label.mc-row { cursor: pointer; }
 }
 .ms-refresh:hover, .ms-fold:hover { background: var(--raised); color: var(--text); }
 .ms-refresh:disabled { cursor: default; }
-.ms-refresh.spin svg { animation: spin .9s linear infinite; }
+.ms-refresh.spin svg, .ug-refresh.spin svg { animation: spin .9s linear infinite; }
+/* The phone drawer's footer copy of the limits card and the Usage window's refresh (phone.css shows them). */
+.foot-usage, .ug-refresh { display: none; }
 /* Fold (any window size): each card shrinks to its head line, the numbers moving into .ms-sum (app.js msFold). */
 .ms-fold svg { transition: transform .2s ease; }
 .ms-sum { display: none; flex: none; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }

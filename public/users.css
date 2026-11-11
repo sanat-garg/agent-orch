@@ -2,7 +2,7 @@
 
 /* A non-admin (html[data-role=user]) gets their chats, projects, tasks and files; machines, sign-ins, previews, stats,
    the terminal, the Browser tab, updates and the plan's own usage card are the admin's. */
-html[data-role="user"] :is(.admin-only, #previewsBtn, #statsBtn, #connFoot, #miniMachine, #usageCard, #bannerTerm, #updateBanner, #repoLink, #viewMenuRepo, #previewLink, .preview-line,
+html[data-role="user"] :is(.admin-only, #previewsBtn, #statsBtn, #connFoot, #miniMachine, #usageCard, #footUsage, #bannerTerm, #updateBanner, #repoLink, #viewMenuRepo, #previewLink, .preview-line,
   .seg [data-view="term"], #pkBrowseBtn) { display: none !important; }
 /* Import from GitHub needs the user's own GitHub (data-gh: app.js loadMe); .user-only rows are for non-admins. */
 html[data-role="user"]:not([data-gh="1"]) :is(.gh-import, #pkGhBtn), html:not([data-role="user"]) .user-only { display: none !important; }

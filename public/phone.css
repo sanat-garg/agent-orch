@@ -74,6 +74,28 @@
   .mini-stats { margin-top: auto; border-radius: 14px; }
   .side-foot-row { position: sticky; bottom: 0; z-index: 2; margin: 0 -12px; padding: 6px 12px max(8px, env(safe-area-inset-bottom));
     background: var(--side); }
+  /* Plan limits live in the footer, beside Connected and Settings: two micro rows (5h, Wk) that open Usage, whose
+     header gets the refresh. The machine card stays, unfoldable (the fold button was on the limits card). */
+  #usageCard { display: none; }
+  .ug-refresh { display: grid; }
+  .modal-panel.usage .m-head { flex-wrap: nowrap; gap: 4px; }
+  .modal-panel.usage .m-head > div { flex-basis: auto; }
+  .foot-usage { display: flex; flex-direction: column; justify-content: center; gap: 3px; flex: none; min-height: 44px; padding: 0 10px;
+    border: 0; border-radius: 10px; background: none; color: var(--muted); font: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+  .foot-usage:active { background: var(--raised); }
+  .foot-usage:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+  .fu-row { display: grid; grid-template-columns: 20px 36px 32px; align-items: center; gap: 6px; font-size: 12px; line-height: 1.2; font-variant-numeric: tabular-nums; }
+  .fu-l { text-align: left; }
+  .fu-v { color: var(--text); text-align: right; }
+  .fu-bar { height: 4px; border-radius: 2px; background: var(--raised); overflow: hidden; }
+  .fu-bar i { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+  .fu-bar i.warn { background: var(--warn); }
+  .fu-bar i.crit { background: var(--danger); }
+  .mini-stats.folded #miniMachine .ms-row { display: grid; }
+  .mini-stats.folded #miniMachine .ms-foot { display: flex; }
+  .mini-stats.folded #miniMachine .ms-open { display: inline-flex; }
+  .mini-stats.folded #miniMachine #miniRole { display: inline; }
+  .mini-stats.folded #miniMachine .ms-sum { display: none; }
 }
 @media (max-width: 800px) and (prefers-color-scheme: dark) {
   .convo.active { box-shadow: inset 0 0 0 1px var(--border); }

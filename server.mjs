@@ -49,7 +49,6 @@ import { repoInfo } from './worktrees.mjs';
 import { taskChanges } from './changes.mjs';
 import { projectCommits, commitDetail } from './commits.mjs';
 import { createCredentials, projectSecrets } from './credentials.mjs';
-import { createExecutions, serviceStatus, envExport, mergeEnv, validateIntake, executionBrief, kickoffMessage, EXECUTION_SYSTEM, SERVICES, PRODUCTS, APP_TECH, ASK_BEFORE } from './execution.mjs';
 import { describeCron, nextRun, validTz } from './cron.mjs';
 import { createUsers, ADMIN_ID, sharedWith, canOrchestrate, chatOnly } from './users.mjs';
 import { createChatMode } from './chat-mode.mjs';
@@ -324,16 +323,6 @@ function publicConvo(c) {
     mainId, project, preview: previews.view(c.cwd) };
 }
 const planning = new Set(); // convo ids with an orchestrator planner turn in progress
-// An execution's progress for the sheet: its project's task counts and whether anything waits on the owner.
-function executionProgress(c) {
-  const snap = orch?.convoSnapshot(c) || { tasks: [] }, counts = {};
-  for (const t of snap.tasks || []) counts[t.status] = (counts[t.status] || 0) + 1;
-  const ids = new Set((snap.tasks || []).map((t) => t.id));
-  const needsYou = (counts.awaiting_review || 0) + (orch?.pendingApprovals?.() || []).filter((a) => ids.has(a.task)).length;
-  const recent = (snap.tasks || []).filter((t) => t.kind !== 'reflect').slice(0, 8).map((t) => ({ id: t.id, title: t.title, status: t.status }));
-  return { counts, total: (snap.tasks || []).length, needsYou, busy: planning.has(c.id), recent, preview: previews.view(c.cwd)?.url || null,
-    project: snap.project ? { id: snap.project.id, status: snap.project.status } : null };
-}
 const agentTurns = new Map(); // convo id -> AbortController of a running non-Claude chat turn
 const chatAgent = (c) => (c.agent && c.agent !== 'claude' && isAgent(c.agent) ? c.agent : 'claude');
 const MODES = ['default', 'acceptEdits', 'plan', 'bypassPermissions', 'orchestrator'];
@@ -614,7 +603,6 @@ const chatMode = createChatMode({ dataDir: DATA, claudeBin: CLAUDE_BIN, env: CLA
     const b = users.capBlock(u.id, 'claude', model);
     return b && `You've reached your ${b.cap}% share of the ${b.label} weekly limit.${b.resetsAt ? ` It resets ${new Date(b.resetsAt * 1000).toUTCString().replace(/:\d\d GMT$/, ' UTC')}.` : ''} Ask your admin to raise it.`;
   } });
-const executions = createExecutions({ dataDir: DATA }); // Execution Mode projects (execution.mjs)
 // A project's .env secrets go into its owner's Credentials by themselves (credentials.mjs importProject): after every
 // commit sync and once at boot. Anything new or changed is mentioned in the project's main chat.
 function saveProjectKeys(dir, { quiet = false } = {}) {
@@ -948,8 +936,6 @@ const PUBLISH_RULE = `Publish only through that command: don't add or change dom
 // The owner's standing design rule (2026-10-21), sent with every chat, planner and task run at every rigor level: low-rigor
 // runs had been shipping gradient blue/purple UIs.
 const DESIGN_RULE = 'Design (the owner\'s standing rule for every chat, plan and task, at every rigor level): unless the owner says otherwise or gives references, any UI you build or change looks the way Apple would make it, following Apple\'s Human Interface Guidelines with a Swiss (International Typographic Style) sensibility. Keep it minimal and classy: neutral surfaces (white or off-white, near-black in dark mode), greys and hairline separators, with at most one restrained accent colour. No gradients, no blue-purple or neon palettes, no glows, heavy shadows or emoji decoration. Use the system font stack (-apple-system, SF Pro, system-ui) and a clear type scale where size and weight carry the hierarchy, not colour. Lay it out on a strict grid with generous whitespace, left-aligned text, consistent 4/8px spacing and modest corner radii. Support light and dark mode, 44pt touch targets, safe areas and WCAG AA contrast. For detail, read the apple-design skill (~/.claude/skills/apple-design/SKILL.md) when it is installed. Low rigor means less process (fewer tests and edge cases), never weaker visual design. Don\'t restyle a whole existing app unasked, but bring whatever you touch in line.';
-// An Execution Mode project (its main chat carries execution: true): the executor's standing rules for every run in it.
-const executionNote = (c) => (c && findConvo(mainChatId(c.cwd))?.execution ? EXECUTION_SYSTEM : '');
 const previewNote = (dir) => {
   if (path.resolve(dir || '/') === ROOT) return "Live preview: none (agent-orch can't preview its own folder: it would boot a second server). Don't add domains, subdomains or Caddy site blocks for it.";
   const v = previews.view(dir);
@@ -1093,7 +1079,7 @@ const orch = process.argv[2] === 'set-password' ? null : createOrchestrator({
   // Read at every task session boundary: tasks follow the chat's live effort, never a snapshot.
   convoEffort: (cid) => findConvo(cid)?.effort ?? null,
   // The chat's persona (extensions.mjs) as a system-prompt block, appended to its project's planner and task runs.
-  convoPersona: (cid) => { const c = findConvo(cid); return [ext.personaPrompt(c?.persona), c && previewNote(c.cwd), DESIGN_RULE, executionNote(c)].filter(Boolean).join('\n\n'); },
+  convoPersona: (cid) => { const c = findConvo(cid); return [ext.personaPrompt(c?.persona), c && previewNote(c.cwd), DESIGN_RULE].filter(Boolean).join('\n\n'); },
   refreshUsage: () => refreshUsage().catch((e) => console.error('[usage] refresh failed', e)),
   onCommit: (dir) => syncGit(dir).catch((e) => console.error('[github] sync failed', dir, e)),
   projectReady: (dir) => gh.status().linked && !!convos.find((c) => c.cwd === dir)?.repo,
@@ -1710,7 +1696,6 @@ const chatBusy = (c) => !!runtimes.get(c.id)?.busy || planning.has(c.id) || agen
 // main chat; with none left, its background work pauses (the folder and tasks are kept) and its live preview address is freed.
 function removeConvo(c, { keepPreview = false } = {}) {
   retireRuntime(runtimes, c.id);
-  executions.remove(c.id);
   agentQueue.delete(c.id);
   agentTurns.get(c.id)?.abort();
   planQueue.delete(c.id);
@@ -1863,7 +1848,7 @@ After each of your replies, changes are committed and pushed to the project's Gi
 This is the owner's disposable server and you have full access: run any command without asking, and install whatever you need (passwordless sudo, e.g. \`sudo apt-get install -y …\`, plus npm and pip).
 Keep API keys, tokens and passwords in a .env file in this folder (or one folder down), never in committed files: after each reply, agent-orch saves them into the owner's Credentials sheet for this project automatically.
 When the owner asks for something to run on a schedule (every day at 9, hourly, …), log it in .agent-orch/schedules.json and agent-orch's server runs it at those times, even when no chat is open (don't set up crontab, systemd timers or sleep loops yourself). The file is a JSON list of {"title", "cron" (5 fields: minute hour day month weekday), "command" (a bash command run in this folder with its .env loaded; no agent, no plan usage) or "prompt" (an agent task, only for work that needs judgement), "tz" (optional; default ${orch?.ownerTz?.() || 'UTC'}, the owner's), "enabled" (optional)}. After your reply it is applied by title: add, edit or remove an entry to change that schedule.
-${SHOT_HINT}${live ? `\n${live}` : ''}${executionNote(convo) ? `\n${executionNote(convo)}` : ''}
+${SHOT_HINT}${live ? `\n${live}` : ''}
 ${DESIGN_RULE}
 
 Current .agent-orch/BRIEF.md:
@@ -2142,48 +2127,6 @@ async function handleRequest(req, res) {
   if (crm && req.method === 'DELETE') {
     try { credentials.remove(me.id, crm[1]); return json(res, 200, { ok: true }); } catch (e) { return json(res, e.status || 400, { error: e.message }); }
   }
-  // Execution Mode (execution.mjs; admin only): the sheet's catalogue of services (connected through the admin's Credentials
-  // cards or an MCP server) and the executions so far; POST starts one: a new orchestrator project whose main chat is
-  // marked execution, the intake in .agent-orch/EXECUTION.md, the chosen services' keys in its .env, and the kick-off
-  // message sent to the planner.
-  if (p === '/api/execution' && req.method === 'GET') {
-    if (!isAdmin(me)) return json(res, 403, { error: ADMIN_ONLY });
-    const services = serviceStatus(credentials.list(me.id), ext.list('mcp').mcp);
-    const list = executions.list().map((e) => { const c = findConvo(e.cid); const i = e.intake || {};
-      // The project page's summary of the intake (execution.js), not the whole of it.
-      const brief = { idea: String(i.idea || '').slice(0, 600), products: i.products || {}, appTech: i.appTech || null, domain: i.domain || null, services: i.services || [] };
-      return c && { ...e, intake: undefined, brief, title: c.title, ...executionProgress(c) }; }).filter(Boolean);
-    return json(res, 200, { services, executions: list, options: { products: PRODUCTS, appTech: APP_TECH, askBefore: ASK_BEFORE }, github: (ghUsers.gh(me.id) || gh).status().linked });
-  }
-  if (p === '/api/execution' && req.method === 'POST') {
-    if (!isAdmin(me)) return json(res, 403, { error: ADMIN_ONLY });
-    let intake;
-    try { intake = validateIntake(await readBody(req)); } catch (e) { return json(res, e.status || 400, { error: e.message }); }
-    const g = ghUsers.gh(me.id) || gh;
-    if (!g.status().linked && !(await g.refresh()).linked) return json(res, 409, { error: 'Link GitHub first: every project gets its own GitHub repo.', github: false });
-    try {
-      const cwd = uniqueProjectDir(slugify(intake.name) || await projectName(intake.idea, { taken: takenNames(), bin: CLAUDE_BIN, env: CLAUDE_ENV, cwd: WORKSPACE }) || slugify(intake.idea, true) || 'product');
-      fs.mkdirSync(cwd, { recursive: true });
-      const c = { id: crypto.randomUUID(), owner: me.id, title: path.basename(cwd), cwd, mode: 'orchestrator', model: '', execution: true, createdAt: Date.now(), updatedAt: Date.now() };
-      convos.unshift(c);
-      saveConvos();
-      // The brief, the keys and the images are in place before the planner's first turn; the repo is set up alongside.
-      orch.initMemory(cwd);
-      const files = intake.attachments.length ? placeUploads(DATA, intake.attachments, cwd) : [];
-      const services = serviceStatus(credentials.list(me.id), ext.list('mcp').mcp).filter((x) => intake.services.includes(x.id) && x.status !== 'missing');
-      intake.services = services.map((x) => x.id);
-      const brief = executionBrief(intake, services, { attachments: files });
-      fs.writeFileSync(path.join(cwd, '.agent-orch', 'EXECUTION.md'), brief);
-      fs.writeFileSync(path.join(cwd, '.agent-orch', 'BRIEF.md'), `# Project Brief\n\n_Maintained by the orchestrator's planner from conversations with the owner._\n\n## Vision\n\n${intake.idea.split('\n')[0].slice(0, 400)}\n\nThis is an Execution Mode project: the full intake, stages and permissions are in .agent-orch/EXECUTION.md. Read it first.\n\n## Goals\n\n${PRODUCTS.filter(([k]) => intake.products[k]).map(([, l]) => `- ${l}, live`).join('\n')}\n\n## Constraints & Preferences\n\n## Definition of Done\n\nEverything in EXECUTION.md is live and the owner can use it.\n`);
-      const keys = mergeEnv(cwd, envExport(credentials.list(me.id), intake.services));
-      const ex = executions.add({ cid: c.id, cwd, name: c.title, intake: { ...intake, idea: intake.idea.slice(0, 2000) }, keys });
-      broadcastConvos();
-      setupRepo(c).catch((e) => console.error('[github] setup failed', c.cwd, e));
-      orch.setConvoMode(c, 'orchestrator');
-      sendUserMessage(c, kickoffMessage(intake), files).catch((e) => emit(c.id, { t: 'error', text: String(e?.message || e) }));
-      return json(res, 200, { convo: publicConvo(c), execution: { ...ex, intake: undefined } });
-    } catch (e) { return json(res, 400, { error: e.message }); }
-  }
   if (p === '/api/users' && req.method === 'GET') {
     return json(res, 200, { me: me.id, users: users.list().map((u) => ({ ...u, usage: users.usage(u.id), chats: convos.filter((c) => (c.owner || ADMIN_ID) === u.id).length, talks: chatMode.countOf(u.id) })) });
   }
@@ -2244,7 +2187,7 @@ async function handleRequest(req, res) {
     return serveFile(res, file, cache);
   }
   if (p === '/' || p === '/index.html') return serveFile(res, path.join(PUBLIC, 'index.html'));
-  if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css' || p === '/browser.js' || p === '/browser.css' || p === '/previews.js' || p === '/previews.css' || p === '/schedules.js' || p === '/schedules.css' || p === '/users.js' || p === '/users.css' || p === '/credentials.js' || p === '/credentials.css' || p === '/shots.js' || p === '/shots.css' || p === '/commits.js' || p === '/commits.css' || p === '/tokens.js' || p === '/tokens.css' || p === '/prompts.js' || p === '/prompts.css' || p === '/code-download.js' || p === '/code-download.css' || p === '/storage.js' || p === '/storage.css' || p === '/execution.js' || p === '/execution.css' || p === '/chat.js' || p === '/chat.css' || p === '/phone.css') return serveFile(res, path.join(PUBLIC, p));
+  if (p === '/app.js' || p === '/app.css' || p === '/files.js' || p === '/files.css' || p === '/ext.js' || p === '/ext.css' || p === '/stats.js' || p === '/stats.css' || p === '/browser.js' || p === '/browser.css' || p === '/previews.js' || p === '/previews.css' || p === '/schedules.js' || p === '/schedules.css' || p === '/users.js' || p === '/users.css' || p === '/credentials.js' || p === '/credentials.css' || p === '/shots.js' || p === '/shots.css' || p === '/commits.js' || p === '/commits.css' || p === '/tokens.js' || p === '/tokens.css' || p === '/prompts.js' || p === '/prompts.css' || p === '/code-download.js' || p === '/code-download.css' || p === '/storage.js' || p === '/storage.css' || p === '/chat.js' || p === '/chat.css' || p === '/phone.css') return serveFile(res, path.join(PUBLIC, p));
   // The Files view: listing, preview, download (a file, or a zip streamed on the fly), upload, and copy/move/zip/unzip over the whole disk, opening on the chat's project (files.mjs).
   // A user's requests stay inside the chat's project: only their chats' roots, and every path (absolute ones and link
   // targets too) must resolve inside it (files.mjs `confine`).

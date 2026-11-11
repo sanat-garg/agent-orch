@@ -124,15 +124,19 @@ test('390×844 touch: sidebar glyph buttons get a 44pt hit area without growing'
   await page.tap('#openSidebar');
   await page.locator('.app.side-open').waitFor();
   await page.waitForTimeout(400); // sidebar slide-in
-  for (const sel of ['#usRefresh', '.convo .more']) {
+  // Plan limits sit in the footer there (#footUsage, a 44pt button), not the card with its small refresh glyph.
+  assert.equal(await page.locator('#usageCard').isVisible(), false);
+  const fu = await page.locator('#footUsage').boundingBox();
+  assert.ok(fu.height >= 44 && fu.width >= 44, `#footUsage ${fu.width}×${fu.height}`);
+  for (const sel of ['.convo .more']) {
     const a = await hitArea(page, sel);
     assert.equal(a.inset, 10, `${sel} ::after inset`);
     assert.ok(a.w >= 44 && a.h >= 44, `${sel} hit area ${a.w}×${a.h}`);
     assert.notEqual(a.position, 'static', `${sel} positions its ::after`);
     assert.ok(a.hits.above && a.hits.below && a.hits.left, `${sel} taps just outside the glyph land on it: ${JSON.stringify(a.hits)}`);
   }
-  const glyphs = await page.evaluate(() => ['#usRefresh', '.convo .more'].map((s) => document.querySelector(s).getBoundingClientRect().width));
-  assert.deepEqual(glyphs, [24, 28], 'the visible glyph buttons keep their size');
+  const glyphs = await page.evaluate(() => ['.convo .more'].map((s) => document.querySelector(s).getBoundingClientRect().width));
+  assert.deepEqual(glyphs, [28], 'the visible glyph buttons keep their size');
   await ctx.close();
   assert.deepEqual(errors, []);
 });

@@ -17,7 +17,6 @@
 <link rel="stylesheet" href="/previews.css">
 <link rel="stylesheet" href="/schedules.css">
 <link rel="stylesheet" href="/credentials.css">
-<link rel="stylesheet" href="/execution.css">
 <link rel="stylesheet" href="/shots.css">
 <link rel="stylesheet" href="/commits.css">
 <link rel="stylesheet" href="/tokens.css">
@@ -53,11 +52,6 @@
     <button class="new-chat" id="newChat">
       <svg viewBox="0 0 24 24" width="18" height="18"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
       New project
-    </button>
-    <!-- Execution Mode (execution.js, admin only): an idea in, a live product out. -->
-    <button type="button" class="exec-btn admin-only" id="execBtn" title="Execution Mode: describe a product and it gets built, published and brought online, end to end">
-      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z" fill="currentColor"/></svg>
-      Execution Mode
     </button>
     <!-- Phones lay these out as three tiles (phone.css); elsewhere the wrapper is display: contents. -->
     <div class="side-links">
@@ -127,6 +121,11 @@
       <button type="button" class="side-foot" id="connFoot" aria-haspopup="dialog" title="Open connections">
         <span class="dot" id="connDot"></span>
         <span class="host" id="connText">Connecting…</span>
+      </button>
+      <!-- Phones (phone.css): the plan limits card shrinks to this, two micro rows (app.js renderUsage); opens Usage. -->
+      <button type="button" class="foot-usage" id="footUsage" aria-haspopup="dialog">
+        <span class="fu-row"><span class="fu-l">5h</span><span class="fu-bar"><i></i></span><span class="fu-v">–</span></span>
+        <span class="fu-row"><span class="fu-l">Wk</span><span class="fu-bar"><i></i></span><span class="fu-v">–</span></span>
       </button>
       <button type="button" class="icon-btn side-stats" id="statsBtn" aria-haspopup="dialog" aria-label="Stats" title="Stats">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M5 20V11M12 20V4M19 20v-6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
@@ -591,27 +590,6 @@
   </div>
 </div>
 
-<!-- Execution Mode (execution.js): a full-page mode over the app with its own sidebar (#exNav: new execution, its projects,
-     Connections), entered and left through the hex-mesh veil (#exSuit). -->
-<div class="exv" id="execView" hidden>
-  <header class="exv-top">
-    <div class="exv-brand"><span class="exv-dot" aria-hidden="true"></span><span>Execution Mode</span></div>
-    <button type="button" class="exv-exit" id="exExit" title="Back to the orchestrator">
-      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      Exit<span class="exv-long">to Orchestrator</span>
-    </button>
-  </header>
-  <div class="exv-body">
-    <nav class="exv-nav" id="exNav" aria-label="Execution Mode"></nav>
-    <main class="exv-main" id="exMain"></main>
-  </div>
-</div>
-<div class="exs" id="exSuit" hidden aria-hidden="true">
-  <div class="exs-core">
-    <svg viewBox="0 0 40 40" width="40" height="40"><path d="M20 3 L34.7 11.5 L34.7 28.5 L20 37 L5.3 28.5 L5.3 11.5 Z"/></svg>
-    <div class="exs-word" id="exSuitWord">Execution Mode</div>
-  </div>
-</div>
 <!-- Credentials (credentials.js): the signed-in user's services, each with its logins and keys; the body is the list or,
      in place of it, the editor. -->
 <div class="modal sheet" id="credModal" hidden>
@@ -1120,6 +1098,10 @@
         <h2 id="usageHead">Usage</h2>
         <p class="m-sub" id="usageSub">Loading…</p>
       </div>
+      <!-- Phones only (phone.css): the sidebar card and its refresh button are folded into #footUsage there. -->
+      <button class="icon-btn ug-refresh" id="ugRefresh" type="button" aria-label="Refresh plan limits" title="Refresh plan limits">
+        <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
       <button class="icon-btn" data-close aria-label="Close">
         <svg viewBox="0 0 24 24" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
       </button>
@@ -1201,7 +1183,6 @@
 <script src="/storage.js"></script>
 <script src="/schedules.js"></script>
 <script src="/credentials.js"></script>
-<script src="/execution.js"></script>
 <script src="/shots.js"></script>
 <script src="/commits.js"></script>
 <script src="/tokens.js"></script>

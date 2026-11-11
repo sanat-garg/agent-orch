@@ -3588,7 +3588,7 @@ function hideSplash() {
   const s = $('splash');
   if (!s || s.classList.contains('done')) return;
   clearTimeout(splash.skipTimer);
-  $('app').inert = !$('execView').hidden; // Execution Mode (execution.js) keeps the app inert under its page
+  $('app').inert = false;
   s.classList.add('done');
   setTimeout(() => s.remove(), 400); // after the fade (instant when reduced motion turns transitions off)
   focusComposer();
@@ -4761,6 +4761,14 @@ function renderUsage(fresh = false) {
   // The folded card's one line: the first two windows ("5h 31% · Wk 12%").
   const short = (l) => ({ '5-hour': '5h', Weekly: 'Wk' })[l] || l;
   $('usSum').textContent = windows.slice(0, 2).map((w, i) => `${short(w?.label || (i ? 'Weekly' : '5-hour'))} ${w?.pct != null ? fmtPct(w.pct) : '–'}`).join(' · ');
+  // The phone footer's copy of the same two windows.
+  [...$('footUsage').children].forEach((row, i) => {
+    const w = windows[i], [lab, bar, val] = row.children;
+    lab.textContent = short(w?.label || (i ? 'Weekly' : '5-hour'));
+    val.textContent = w?.pct != null ? fmtPct(w.pct) : '–';
+    setBar(bar.firstElementChild, w?.pct ?? 0);
+  });
+  $('footUsage').setAttribute('aria-label', `${title}: ${$('usSum').textContent}. Open usage`);
   let note;
   if (id === 'claude' && !u?.updatedAt) note = 'Checking plan limits…';
   else if (!u?.available) note = id === 'claude'
@@ -6580,7 +6588,7 @@ function mxPlace() {
 }
 function mxDiagram(on) {
   $('mxModal').toggleAttribute('data-diagram', on);
-  $('mxDiagBtn').textContent = on ? 'Hide diagram' : 'Show diagram';
+  $('mxDiagBtn').textContent = isPhone() ? 'Diagram' : on ? 'Hide diagram' : 'Show diagram'; // phones: a disclosure row
   $('mxDiagBtn').setAttribute('aria-expanded', String(on));
 }
 $('mxDiagBtn').addEventListener('click', () => {
@@ -7570,6 +7578,22 @@ usageCard.addEventListener('keydown', (e) => {
   if (e.target !== usageCard || (e.key !== 'Enter' && e.key !== ' ')) return;
   e.preventDefault();
   openUsage();
+});
+$('footUsage').addEventListener('click', () => openUsage());
+// Phones' refresh (the card's own button lives in the sidebar card they don't show): every running agent's limits.
+$('ugRefresh').addEventListener('click', async () => {
+  const b = $('ugRefresh'), before = M.usage?.updatedAt;
+  b.classList.add('spin');
+  b.disabled = true;
+  await Promise.all(runningUsageAgents().map(async (id) => {
+    if (id !== 'claude') return api(`/api/limits/${id}/refresh`, 'POST').catch(() => {});
+    send({ t: 'usage_refresh' });
+    for (let i = 0; i < 40 && M.usage?.updatedAt === before; i++) await new Promise((r) => setTimeout(r, 500));
+  }));
+  await loadSidebarUsage();
+  await loadUsageHistory();
+  b.classList.remove('spin');
+  b.disabled = false;
 });
 $('usageModal').addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeUsage(); });
 document.addEventListener('keydown', (e) => {

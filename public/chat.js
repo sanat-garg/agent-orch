@@ -1,5 +1,5 @@
 'use strict';
-// Chat (server: chat-mode.mjs): the signed-in account's plain conversations with Claude's Opus models. Replies stream
+// Chat (server: chat-mode.mjs): the signed-in account's plain conversations with Claude (every model the CLI lists). Replies stream
 // as server-sent events over a fetch; a reply keeps going on the server if the page closes, and reopening the chat
 // joins it (GET …/stream). The open chat is the URL's hash. Phones show the chat list as a drawer.
 (() => {
@@ -332,8 +332,22 @@
     if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'o') { e.preventDefault(); newChat(); }
   });
   addEventListener('hashchange', () => { const id = location.hash.slice(1); if (id && id !== S.cur) openChat(id); });
-  // Back from the background: a reply may have finished meanwhile.
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && S.cur && !S.live) openChat(S.cur, { keepScroll: true }); });
+  // The picker: the newest of each family, then 'Older models'. Kept in step with the server's list (rediscovered daily).
+  function fillModels() {
+    const sel = $('model'), keep = sel.value, opt = (m) => { const o = new Option(m.label, m.id); o.title = m.description; return o; };
+    const old = S.models.filter((m) => !m.latest), grp = document.createElement('optgroup');
+    grp.label = 'Older models';
+    grp.append(...old.map(opt));
+    sel.replaceChildren(...S.models.filter((m) => m.latest).map(opt), ...(old.length ? [grp] : []));
+    if (!S.models.length) sel.append(new Option('No model', ''));
+    if (keep && S.models.some((m) => m.id === keep)) sel.value = keep;
+  }
+  // Back from the background: a reply may have finished meanwhile, and a new model may have been listed.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    api('/api/chat').then((r) => { if (JSON.stringify(r.models) !== JSON.stringify(S.models)) { S.models = r.models; S.defaultModel = r.defaultModel; fillModels(); } }).catch(() => {});
+    if (S.cur && !S.live) openChat(S.cur, { keepScroll: true });
+  });
 
   (async () => {
     let r;
@@ -343,8 +357,8 @@
     $('appLink').hidden = r.me.role === 'chat';
     const h = new Date().getHours();
     $('hello').textContent = `${h < 5 ? 'Good evening' : h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'}, ${r.me.name}`;
-    $('model').replaceChildren(...S.models.map((m) => { const o = new Option(m.label, m.id); o.title = m.description; return o; }));
-    if (!S.models.length) { $('model').append(new Option('No Opus model', '')); note('No Opus model is available right now: Claude may be signed out on this server.', true); }
+    fillModels();
+    if (!S.models.length) note('No model is available right now: Claude may be signed out on this server.', true);
     const id = location.hash.slice(1);
     if (id && S.chats.some((c) => c.id === id)) openChat(id); else newChat();
   })();

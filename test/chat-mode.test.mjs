@@ -1,7 +1,7 @@
 // Chat (chat-mode.mjs): a reply streams as server-sent events from a tool-less Claude Code query whose prompt can't run
 // a /command; the next message resumes the session, and a lost session starts over with a recap; chats are private to
 // their owner; a capped user is refused. Server: a "Chat only" account gets /chat and /api/chat and nothing else (no
-// app, no API, no websocket), the model list is Opus only, and deleting the account deletes its chats.
+// app, no API, no websocket), the model list is every model the CLI listed (newest of each family first), and deleting the account deletes its chats.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -13,20 +13,24 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
-import { createChatMode, opusOnly, titleOf } from '../chat-mode.mjs';
+import { createChatMode, chatModels, titleOf } from '../chat-mode.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MODELS = [
   { id: 'opus', label: 'Opus 5.5', description: 'For complex work', default: true },
-  { id: 'fable', label: 'Fable 5.1' }, { id: 'sonnet', label: 'Sonnet 5.5' }, { id: 'claude-opus-4-8', label: 'Opus 4.8' }];
+  { id: 'claude-fable-5-2', label: 'Fable 5.2' }, { id: 'fable', label: 'Fable 5.1' }, { id: 'sonnet', label: 'Sonnet 5.5' },
+  { id: 'claude-opus-4-8', label: 'Opus 4.8' }];
 const freePort = () => new Promise((resolve, reject) => {
   const s = net.createServer().listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); });
   s.on('error', reject);
 });
 const events = (text) => text.split('\n\n').filter((c) => c.startsWith('data: ')).map((c) => JSON.parse(c.slice(6)));
 
-test('opusOnly keeps only the Opus models the CLI listed; titles come from the first line', () => {
-  assert.deepEqual(opusOnly(MODELS).map((m) => m.id), ['opus', 'claude-opus-4-8']);
+test('chatModels lists every model the CLI listed, newest of each family first; titles come from the first line', () => {
+  const l = chatModels(MODELS);
+  assert.deepEqual(l.map((m) => m.id), ['opus', 'claude-fable-5-2', 'sonnet', 'fable', 'claude-opus-4-8']);
+  assert.deepEqual(l.filter((m) => m.latest).map((m) => m.id), ['opus', 'claude-fable-5-2', 'sonnet']);
+  assert.deepEqual(chatModels([{ id: 'x', label: 'Fable 5.10' }, { id: 'y', label: 'Fable 5.9' }]).map((m) => m.latest), [true, false]);
   assert.equal(titleOf('\n  What is a monad?\nMore'), 'What is a monad?');
   assert.ok(titleOf('word '.repeat(30)).length <= 49);
 });
@@ -64,10 +68,10 @@ test('a turn streams, is saved, resumes, recovers a lost session, and stays priv
   };
   try {
     const home = await call('ann', '/api/chat');
-    assert.deepEqual(home.body.models.map((m) => m.id), ['opus', 'claude-opus-4-8']);
+    assert.deepEqual(home.body.models.map((m) => m.id), ['opus', 'claude-fable-5-2', 'sonnet', 'fable', 'claude-opus-4-8']);
     assert.equal(home.body.defaultModel, 'opus');
-    const { chat } = (await call('ann', '/api/chat/chats', 'POST', { model: 'fable' })).body;
-    assert.equal(chat.model, 'opus', 'a non-Opus model falls back to the default');
+    const { chat } = (await call('ann', '/api/chat/chats', 'POST', { model: 'gpt-9' })).body;
+    assert.equal(chat.model, 'opus', 'an unlisted model falls back to the default');
 
     const r1 = await call('ann', `/api/chat/chats/${chat.id}/send`, 'POST', { text: '/logout now', model: 'claude-opus-4-8' });
     assert.match(r1.type, /text\/event-stream/);
@@ -150,7 +154,7 @@ test('a Chat only account gets /chat and nothing else', async () => {
   for (const p of ['/chat', '/chat.js', '/chat.css', '/vendor/marked.js']) assert.equal((await get(cora, p)).status, 200, p);
   for (const p of ['/api/convos', '/api/me', '/api/files/list?path=/', '/api/credentials', '/api/users']) assert.equal((await get(cora, p)).status, 403, p);
   const home = await (await get(cora, '/api/chat')).json();
-  assert.deepEqual([home.me.role, home.models.map((m) => m.id)], ['chat', ['opus', 'claude-opus-4-8']]);
+  assert.deepEqual([home.me.role, home.models.map((m) => m.id)], ['chat', ['opus', 'claude-fable-5-2', 'sonnet', 'fable', 'claude-opus-4-8']]);
   const { chat } = await (await get(cora, '/api/chat/chats', 'POST', {})).json();
   assert.equal(chat.model, 'opus');
   const refused = await new Promise((resolve) => {

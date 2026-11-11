@@ -5,7 +5,7 @@
 //   aliases?, createdAt}]
 // A user sees their own projects, or every project when the admin sets `allProjects` (owner, 2026-10-15: one switch, never
 // a per-project pick), and `orchestrator: false` keeps them out of Orchestrator Mode (missing = allowed). Admins see everything.
-// A 'chat' user ("Chat only", owner 2026-11-07) gets only the plain Opus chat at /chat (chat-mode.mjs): no projects, code or files.
+// A 'chat' user ("Chat only", owner 2026-11-07) gets only the plain chat at /chat (chat-mode.mjs): no projects, code or files.
 // The first run migrates the single-password login (auth.json) into the admin account (id 'admin', name 'admin', alias
 // 'claude': the old login page's hidden username, which saved passwords carry), so nobody is signed out.
 // A user's usage of a window is an estimate: the CLIs only report the whole account's pct, so it is split by each

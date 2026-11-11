@@ -1,4 +1,4 @@
-// Chat (owner, 2026-11-07): a plain conversation with Claude's Opus models at /chat, like claude.ai, for people the
+// Chat (owner, 2026-11-07): a plain conversation with Claude (every model its CLI lists) at /chat, like claude.ai, for people the
 // admin gives "Chat only" access (users.mjs role 'chat': they see nothing else of agent-orch). Admins and users can use
 // it too. Each chat is private to the account that made it.
 //   <DATA>/chat-mode/<id>.json: {id, owner, title, model, sessionId, createdAt, updatedAt, messages: [{role, text, ts,
@@ -26,9 +26,21 @@ export const MAX_TEXT = 100_000;
 const NO_COMMAND = '\u200b'; // zero-width space: the prompt never starts with / or !
 const RECAP_CHARS = 60_000;
 
-// Opus only: the CLI's own list (models.mjs), never a hardcoded one.
-export const opusOnly = (models) => (models || []).filter((m) => /^opus\b/i.test(m.label || '') || /^(opus|claude-opus-[\w.-]+)$/.test(m.id))
-  .map((m) => ({ id: m.id, label: m.label || m.id, description: m.description || '', default: !!m.default }));
+// Every model the CLI lists (models.mjs, rediscovered daily), never a hardcoded list, so a new one shows up by itself
+// (owner, 2026-11-11). The newest of each family (first word of its label: Opus, Fable, …) comes first, flagged
+// `latest`; older versions follow, each group in the CLI's order.
+const ver = (label) => (String(label).match(/\d+(?:\.\d+)*/)?.[0] || '0').split('.').map(Number);
+const newer = (a, b) => { for (let i = 0; i < Math.max(a.length, b.length); i++) if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0); return false; };
+export function chatModels(models) {
+  const list = (models || []).filter((m) => m?.id).map((m) => ({ id: m.id, label: m.label || m.id, description: m.description || '', default: !!m.default }));
+  const best = new Map();
+  for (const m of list) {
+    const fam = m.label.split(/\s+/)[0].toLowerCase(), b = best.get(fam);
+    if (!b || newer(ver(m.label), ver(b.label))) best.set(fam, m);
+  }
+  for (const m of list) m.latest = [...best.values()].includes(m);
+  return [...list.filter((m) => m.latest), ...list.filter((m) => !m.latest)];
+}
 
 // A title from the first message: its first line, cut at a word near 48 characters.
 export function titleOf(text) {
@@ -64,7 +76,7 @@ export function createChatMode({ dataDir, claudeBin, env = process.env, models =
   const save = (c) => { fs.writeFileSync(file(c.id) + '.tmp', JSON.stringify(c), { mode: 0o600 }); fs.renameSync(file(c.id) + '.tmp', file(c.id)); };
   const live = new Map(); // id → the running turn: {text, thinking, model, subs, ac, at}
 
-  const list = () => opusOnly(models());
+  const list = () => chatModels(models());
   const defaultModel = () => { const l = list(); return (l.find((m) => m.default) || l[0])?.id || null; };
   const pickModel = (m) => (m && list().some((x) => x.id === m) ? m : null);
   const summary = (c) => ({ id: c.id, title: c.title, model: c.model, updatedAt: c.updatedAt, busy: live.has(c.id) });
@@ -179,7 +191,7 @@ export function createChatMode({ dataDir, claudeBin, env = process.env, models =
       if (p === '/api/chat/chats' && req.method === 'POST') {
         const body = await readBody(req);
         const model = pickModel(body.model) || defaultModel();
-        if (!model) throw fail(503, 'No Opus model is available: Claude may be signed out on this server.');
+        if (!model) throw fail(503, 'No model is available: Claude may be signed out on this server.');
         const c = { id: crypto.randomBytes(8).toString('hex'), owner: me.id, title: 'New chat', model, createdAt: Date.now(), updatedAt: Date.now(), messages: [] };
         chats.set(c.id, c); save(c);
         return json(res, 200, { chat: summary(c) }), true;
@@ -199,7 +211,7 @@ export function createChatMode({ dataDir, claudeBin, env = process.env, models =
           c.title = t; c.renamed = true;
         }
         if (body.model != null) {
-          if (!pickModel(body.model)) throw fail(400, 'Pick one of the Opus models');
+          if (!pickModel(body.model)) throw fail(400, 'Pick one of the listed models');
           c.model = body.model;
         }
         save(c);
@@ -226,11 +238,11 @@ export function createChatMode({ dataDir, claudeBin, env = process.env, models =
         if (text.length > MAX_TEXT) throw fail(413, `Messages are limited to ${MAX_TEXT.toLocaleString('en')} characters`);
         if (live.has(c.id)) throw fail(409, 'Claude is still answering. Wait for it or press Stop.');
         if (body.model != null && body.model !== c.model) {
-          if (!pickModel(body.model)) throw fail(400, 'Pick one of the Opus models');
+          if (!pickModel(body.model)) throw fail(400, 'Pick one of the listed models');
           c.model = body.model;
         }
         if (!pickModel(c.model)) c.model = defaultModel();
-        if (!c.model) throw fail(503, 'No Opus model is available: Claude may be signed out on this server.');
+        if (!c.model) throw fail(503, 'No model is available: Claude may be signed out on this server.');
         const why = refuse(me, c.model);
         if (why) throw fail(429, why);
         c.messages.push({ role: 'user', text, ts: Date.now() });

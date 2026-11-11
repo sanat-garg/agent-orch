@@ -4,7 +4,7 @@
 // listing every account with its estimated share of each weekly limit the agent CLIs report (Claude's all-models week
 // and per-model weeks such as Fable; codex's weekly) and the cap on it, their access (only their own projects or all of them,
 // and whether they may use Orchestrator Mode), plus add / reset password / role / delete. A "Chat only" account (role 'chat')
-// gets only the plain Opus chat at /chat (chat-mode.mjs).
+// gets only the plain chat at /chat (chat-mode.mjs).
 // A non-admin's sidebar shows "Your usage" instead of the machine and plan cards: their share of each weekly limit
 // against their caps. Loaded after app.js and uses its helpers ($, el, api, toast, coarse, me, loadMe, meAdmin).
 (() => {
@@ -156,7 +156,7 @@
         await load(); render();
       } catch (x) { err.textContent = x.message; }
     };
-    form.append(el('h3', 'um-etitle', 'New user'), field('Username', name, 'Lowercase letters, digits, . _ or -'), field('Password', pw), field('Role', role, 'Chat only: just a private chat with Claude Opus at /chat, no projects or code. Admins manage users, machines and sign-ins, and are never capped'), err, foot);
+    form.append(el('h3', 'um-etitle', 'New user'), field('Username', name, 'Lowercase letters, digits, . _ or -'), field('Password', pw), field('Role', role, 'Chat only: just a private chat with Claude at /chat, no projects or code. Admins manage users, machines and sign-ins, and are never capped'), err, foot);
     setTimeout(() => { if (!coarse) name.focus(); });
     return form;
   }

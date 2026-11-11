@@ -607,7 +607,7 @@ const RAW_FILE = path.join(METRICS_DIR, 'raw.jsonl');
 const usageLog = createUsageLog(DATA);
 const users = createUsers({ dataDir: DATA, usageLog, agents: () => Object.keys(AGENTS) });
 const credentials = createCredentials({ dataDir: DATA }); // each user's own service logins and keys (credentials.mjs)
-// Chat (chat-mode.mjs): the plain Opus chat at /chat, the only thing a "Chat only" account sees. A capped user's send is refused.
+// Chat (chat-mode.mjs): the plain chat at /chat, the only thing a "Chat only" account sees. A capped user's send is refused.
 const chatMode = createChatMode({ dataDir: DATA, claudeBin: CLAUDE_BIN, env: CLAUDE_ENV, usageLog, isApiKey: (s) => API_KEY_SOURCES.has(s),
   models: () => modelCatalog('claude').models,
   refuse: (u, model) => {
